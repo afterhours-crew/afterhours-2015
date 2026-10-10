@@ -889,15 +889,12 @@ impl Listener for PlayerListener {
                                 // The official exit frame carries the car swap and
                                 // the state chain together (E748).
                                 Some(section) => {
-                                    if let ([participant], [record]) =
-                                        (exited.as_slice(), section.records.as_slice())
+                                    if let Err(error) =
+                                        Self::register_world_car(&mut world_cars, &exited, &section)
                                     {
-                                        if world_cars.len() >= MAX_WORLD_CARS {
-                                            self.refused += 1;
-                                            self.last_error = Some(replication::Error::Bound);
-                                            return false;
-                                        }
-                                        world_cars.insert(record.id, (*participant, false));
+                                        self.refused += 1;
+                                        self.last_error = Some(error);
+                                        return false;
                                     }
                                     exit_entries.push((section, chain))
                                 }

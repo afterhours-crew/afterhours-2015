@@ -2,12 +2,18 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! The level's SpawnPoints scene. After creating a participant's car the host
-//! assigns it a spawn on field 1 (method 0 with a u32 id; 1, 2 and 3 for the
-//! three cars of the official session). The client requests (method 2) and
-//! releases (method 3) that spawn on the same field, echoing the id after an
-//! f64 clock, and the host mirrors occupancy on the scene's flag (field 2).
-//! Observed in the decrypted official session E742/E747; modeled for E750.
+//! The level's SpawnPoints scene (`levels/Genesis01/SpawnPoints`). Its game
+//! data holds integer participant properties with client notifications, two
+//! teleport locations by the garage, the garage and club map markers and a
+//! race box trigger at the garage entrance.
+//!
+//! The host sets the participant's integer property on field 1 (method 0,
+//! u32 value). The official session sent 1, 2 and 3 at the prelude, the
+//! starter car and the garage exit. The client notifies the same field with
+//! method 2 and method 3, echoing the value after an f64 clock. The host
+//! mirrors that on the scene's flag (field 2); the timing fits entering and
+//! leaving the garage trigger box. Observed in E742/E747; the value meanings
+//! are inferred from that timing.
 use crate::{
     garage::presence::Notification as Flag,
     participants::{Call, Endpoint, Notification},
@@ -22,13 +28,15 @@ use std::collections::{BTreeMap, BTreeSet};
 const MAX_PARTICIPANTS: usize = 128;
 const ASSIGN_FIELD: usize = 1;
 const OCCUPIED_FIELD: usize = 2;
-/// Client request arguments: f64 clock, u32 spawn id, byte padding (all nine
-/// official requests and releases).
+/// Client notification arguments: f64 clock, u32 value, byte padding (all
+/// nine official notifications).
 const REQUEST_BITS: usize = 103;
 const ID_OFFSET: usize = 64;
 /// Client methods on the assignment endpoint.
 pub const REQUEST: u32 = 2;
 pub const RELEASE: u32 = 3;
+/// Property value the official host set when the player left the garage.
+pub const GARAGE_EXIT: u32 = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Bindings {
@@ -39,7 +47,6 @@ pub struct Bindings {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SpawnPoints {
     bindings: Option<Bindings>,
-    last_id: u32,
     assigned: BTreeMap<u16, u32>,
     occupants: BTreeSet<u16>,
 }
@@ -88,21 +95,19 @@ impl SpawnPoints {
     pub fn assigned(&self, participant: u16) -> Option<u32> {
         self.assigned.get(&participant).copied()
     }
-    /// Assign the next spawn id to `participant`, whose car now exists.
-    pub fn assign(&mut self, participant: u16) -> Result<Notification, Error> {
+    /// Set `participant`'s property to `value`.
+    pub fn assign(&mut self, participant: u16, value: u32) -> Result<Notification, Error> {
         let b = self.bindings.ok_or(Error::Unsupported)?;
         if !self.assigned.contains_key(&participant) && self.assigned.len() == MAX_PARTICIPANTS {
             return Err(Error::Bound);
         }
-        let id = self.last_id.checked_add(1).ok_or(Error::Bound)?;
         let notification = Notification {
             endpoint: b.assign,
             participant,
-            call: Call::Assign(id),
+            call: Call::Assign(value),
         };
         notification.encode()?;
-        self.last_id = id;
-        self.assigned.insert(participant, id);
+        self.assigned.insert(participant, value);
         Ok(notification)
     }
     /// A client request or release on the assignment endpoint. `Ok(None)` is

@@ -84,6 +84,22 @@ impl PlayerListener {
             })?
             .map(HostRpc::GaragePresence))
     }
+    /// Remember the world car of a single exiting participant. The car leads
+    /// the exit section; garage logic records may follow it (E758).
+    pub(super) fn register_world_car(
+        world_cars: &mut BTreeMap<u16, (u16, bool)>,
+        exited: &[u16],
+        section: &Section,
+    ) -> Result<(), replication::Error> {
+        let ([participant], Some(record)) = (exited, section.records.first()) else {
+            return Ok(());
+        };
+        if !world_cars.contains_key(&record.id) && world_cars.len() >= MAX_WORLD_CARS {
+            return Err(replication::Error::Bound);
+        }
+        world_cars.insert(record.id, (*participant, false));
+        Ok(())
+    }
     /// The client's glass condition reports on a world car we created (it
     /// sends three on every new player car; E748/E750/E751). The first one
     /// assigns the participant a spawn point; `Some(None)` is a recognized
@@ -106,7 +122,8 @@ impl PlayerListener {
         if *assigned || spawn_points.bindings().is_none() {
             return Ok(Some(None));
         }
-        let notification = spawn_points.assign(*participant)?;
+        let notification =
+            spawn_points.assign(*participant, nfs_world::spawn_points::GARAGE_EXIT)?;
         *assigned = true;
         Ok(Some(Some(notification)))
     }

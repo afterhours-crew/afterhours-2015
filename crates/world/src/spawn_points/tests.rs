@@ -143,23 +143,23 @@ fn binds_the_scene_layout_and_rejects_absent_duplicate_or_other_shapes() {
 }
 
 #[test]
-fn assignments_count_per_session_and_carry_the_id_then_padding() {
+fn assignments_carry_the_value_then_padding() {
     let mut model = bound();
-    for (participant, id) in [(PLAYER, 1), (PLAYER, 2), (PLAYER, 3)] {
-        let n = model.assign(participant).unwrap();
-        assert_eq!(n.call, Call::Assign(id));
-        assert_eq!(model.assigned(participant), Some(id));
+    for (participant, value) in [(PLAYER, 1), (PLAYER, 2), (PLAYER, GARAGE_EXIT)] {
+        let n = model.assign(participant, value).unwrap();
+        assert_eq!(n.call, Call::Assign(value));
+        assert_eq!(model.assigned(participant), Some(value));
     }
     // Selector, serial, method 0, then the u32 id and five padding bits that
     // complete the byte (11-byte payload).
-    let wire = model.assign(41).unwrap().encode().unwrap();
+    let wire = model.assign(41, 4).unwrap().encode().unwrap();
     host_route(&wire, 2, |references, selector, method, bits| {
         assert_eq!(references, [SCENE, 41]);
         assert_eq!((selector, method), (0, 0));
         assert_eq!(bits, format!("{:032b}00000", 4));
     });
     assert_eq!(
-        SpawnPoints::default().assign(PLAYER),
+        SpawnPoints::default().assign(PLAYER, 1),
         Err(Error::Unsupported)
     );
 }
@@ -167,7 +167,7 @@ fn assignments_count_per_session_and_carry_the_id_then_padding() {
 #[test]
 fn request_and_release_toggle_the_occupied_flag() {
     let mut model = bound();
-    model.assign(PLAYER).unwrap();
+    model.assign(PLAYER, 1).unwrap();
     let owns = |id| id == PLAYER;
     let request = client(SCENE, PLAYER, 0, REQUEST, &with_id(1));
     let release = client(
@@ -208,7 +208,7 @@ fn request_and_release_toggle_the_occupied_flag() {
 #[test]
 fn other_endpoints_stale_ids_foreign_participants_and_bad_shapes_do_not_mutate() {
     let mut model = bound();
-    model.assign(PLAYER).unwrap();
+    model.assign(PLAYER, 1).unwrap();
     let owns = |id| id == PLAYER || id == 41;
     let before = model.clone();
     for other in [
@@ -250,8 +250,8 @@ fn other_endpoints_stale_ids_foreign_participants_and_bad_shapes_do_not_mutate()
 #[test]
 fn participants_are_isolated_and_assignments_are_bounded() {
     let mut model = bound();
-    model.assign(PLAYER).unwrap();
-    model.assign(41).unwrap();
+    model.assign(PLAYER, 1).unwrap();
+    model.assign(41, 2).unwrap();
     let owns = |_| true;
     assert!(matches!(
         model.receive(client(SCENE, PLAYER, 0, REQUEST, &with_id(1)).span(), owns),
@@ -271,13 +271,12 @@ fn participants_are_isolated_and_assignments_are_bounded() {
     ));
     let mut full = bound();
     for participant in 1..=128 {
-        full.assign(participant).unwrap();
+        full.assign(participant, GARAGE_EXIT).unwrap();
     }
     let before = full.clone();
-    assert_eq!(full.assign(129), Err(Error::Bound));
+    assert_eq!(full.assign(129, GARAGE_EXIT), Err(Error::Bound));
     assert_eq!(full, before);
-    assert_eq!(full.assign(1).unwrap().call, Call::Assign(129));
-    let mut last = bound();
-    last.last_id = u32::MAX;
-    assert_eq!(last.assign(PLAYER), Err(Error::Bound));
+    // An assigned participant may be set again.
+    assert_eq!(full.assign(1, 129).unwrap().call, Call::Assign(129));
+    assert_eq!(full.assigned(1), Some(129));
 }

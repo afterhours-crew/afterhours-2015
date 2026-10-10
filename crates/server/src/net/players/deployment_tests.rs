@@ -220,7 +220,10 @@ fn glass_reports_on_a_world_car_assign_one_spawn() {
     };
     assert_eq!(
         (first.participant, first.call),
-        (40, nfs_world::participants::Call::Assign(1))
+        (
+            40,
+            nfs_world::participants::Call::Assign(nfs_world::spawn_points::GARAGE_EXIT)
+        )
     );
     assert_eq!(first.endpoint, spawn.bindings().unwrap().assign);
     // The three reports are glass signals, which the glass model answers
@@ -234,7 +237,10 @@ fn glass_reports_on_a_world_car_assign_one_spawn() {
             Ok(Some(None))
         );
     }
-    assert_eq!(spawn.assigned(40), Some(1));
+    assert_eq!(
+        spawn.assigned(40),
+        Some(nfs_world::spawn_points::GARAGE_EXIT)
+    );
 }
 
 #[test]
@@ -248,4 +254,39 @@ fn level_poll_binds_the_level_root_and_waits_for_a_participant() {
     let queued = listener.pending_rpcs.len();
     listener.advance_level_poll(10_000).unwrap();
     assert_eq!(listener.pending_rpcs.len(), queued);
+}
+
+#[test]
+fn the_world_car_is_registered_when_garage_logic_records_follow_it() {
+    use nfs_world::replication::Record;
+    let content = content();
+    let mut listener = PlayerListener::new(101);
+    listener.initialize_world(&content).unwrap();
+    let scenes: Vec<Record> = listener.pending[0]
+        .records
+        .iter()
+        .take(2)
+        .cloned()
+        .collect();
+    let car = scenes[0].id;
+    let section = Section {
+        float_bits: None,
+        flag: false,
+        deleted: vec![],
+        setup: None,
+        records: scenes,
+    };
+    let mut cars = BTreeMap::new();
+    PlayerListener::register_world_car(&mut cars, &[40], &section).unwrap();
+    assert_eq!(cars.get(&car), Some(&(40, false)));
+    // Several or no exiting participants register nothing.
+    let mut none = BTreeMap::new();
+    PlayerListener::register_world_car(&mut none, &[40, 41], &section).unwrap();
+    PlayerListener::register_world_car(&mut none, &[], &section).unwrap();
+    assert!(none.is_empty());
+    let mut full: BTreeMap<u16, (u16, bool)> = (1..=128).map(|g| (g + 1000, (1, false))).collect();
+    assert_eq!(
+        PlayerListener::register_world_car(&mut full, &[40], &section),
+        Err(replication::Error::Bound)
+    );
 }
