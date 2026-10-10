@@ -261,6 +261,9 @@ impl Players {
                 empty_assets: true,
                 empty_structured: true,
                 asset: Some(EmptyAsset::Implicit),
+                // Created for its own connection: the official host marks the
+                // receiving client's Player this way (E763 analysis).
+                empty_local: true,
                 identity_b: Some(empty_identity),
             }),
             component_present: true,
@@ -405,6 +408,54 @@ mod tests {
         assert_eq!(runtime_index(129, 0), None);
         assert_eq!(runtime_index(1, 8), None);
         assert_eq!(runtime_index(0, 0), None);
+    }
+    #[test]
+    fn own_player_carries_the_empty_local_group_and_entries_stay_unsupported() {
+        let mut world = Players::default();
+        let record = world.create(4, 400, request()).unwrap().unwrap();
+        let Update::Player(PlayerUpdate {
+            base: Some(base), ..
+        }) = &record.update
+        else {
+            panic!()
+        };
+        assert!(base.empty_local);
+        let wire = record.encode().unwrap();
+        assert_eq!(Record::decode(wire.span(), None).unwrap().record, record);
+        // Remote players (E132) carry only the group's absent presence bit.
+        let mut remote = record.clone();
+        let Update::Player(PlayerUpdate {
+            base: Some(base), ..
+        }) = &mut remote.update
+        else {
+            panic!()
+        };
+        base.empty_local = false;
+        let remote_wire = remote.encode().unwrap();
+        assert_eq!(wire.len(), remote_wire.len() + 7);
+        assert_eq!(
+            Record::decode(remote_wire.span(), None).unwrap().record,
+            remote
+        );
+        // The first differing bit is the presence bit; a count of one entry
+        // is not modeled.
+        let (own, other) = (wire.span(), remote_wire.span());
+        let at = (0..other.len())
+            .find(|&i| own.read_u32(i, 1) != other.read_u32(i, 1))
+            .unwrap();
+        let mut entry = crate::bits::BitWriter::new();
+        for i in 0..own.len() {
+            let bit = if i == at + 7 {
+                1
+            } else {
+                own.read_u32(i, 1).unwrap()
+            };
+            entry.put(u64::from(bit), 1);
+        }
+        assert_eq!(
+            Record::decode(entry.span(), None).map(|_| ()),
+            Err(Error::Unsupported)
+        );
     }
     #[test]
     fn runtime_index_follows_the_owning_player_and_ownership() {

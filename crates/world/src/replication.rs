@@ -138,6 +138,11 @@ pub struct PlayerBaseUpdate {
     pub empty_assets: bool,
     pub empty_structured: bool,
     pub asset: Option<EmptyAsset>,
+    /// Ninth base group, a counted collection like `empty_assets`. Official
+    /// hosts send it present and empty only in the receiving client's own
+    /// Player creation (E101 ghost 9, E742 ghost 148); remote players omit it
+    /// (E132 width 1). Entries remain unsupported.
+    pub empty_local: bool,
     pub identity_b: Option<Identity>,
 }
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -357,9 +362,7 @@ impl Reader<'_> {
                     let empty_assets = r.empty_collection()?;
                     let empty_structured = r.empty_collection()?;
                     let asset = r.optional(Self::asset)?;
-                    if r.bit()? {
-                        return Err(Error::Unsupported);
-                    }
+                    let empty_local = r.empty_collection()?;
                     let identity_b = r.optional(Self::identity)?;
                     Ok(PlayerBaseUpdate {
                         value16,
@@ -370,6 +373,7 @@ impl Reader<'_> {
                         empty_assets,
                         empty_structured,
                         asset,
+                        empty_local,
                         identity_b,
                     })
                 })?;
@@ -520,7 +524,10 @@ impl Writer {
                         }
                         _ => Err(Error::Shape),
                     })?;
-                    w.bit(false)?;
+                    w.bit(v.empty_local)?;
+                    if v.empty_local {
+                        w.put(0, 7)?
+                    }
                     w.optional(&v.identity_b, Self::identity)
                 })?;
                 self.bit(v.component_present)?;

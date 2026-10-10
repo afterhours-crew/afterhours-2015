@@ -464,6 +464,7 @@ impl Update {
                     a.empty_assets |= b.empty_assets;
                     a.empty_structured |= b.empty_structured;
                     replace(&mut a.asset, &b.asset);
+                    a.empty_local |= b.empty_local;
                     replace(&mut a.identity_b, &b.identity_b);
                 }
                 a.component_present |= b.component_present;
