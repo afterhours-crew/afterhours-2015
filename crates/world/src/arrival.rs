@@ -16,7 +16,11 @@
 
 use crate::{
     logic::Message,
-    replication::{Error, Record, entity::creation::Content, players::Players},
+    replication::{
+        Error, MAX_OBJECTS, Record,
+        entity::{self, creation::Content},
+        players::Players,
+    },
     sequences::{Completed, Definition, Owner, Stop, profile},
 };
 use nfs_protocol::world::rpc::Serial;
@@ -48,6 +52,12 @@ struct Instance {
 pub struct Arrivals {
     definition: Definition,
     content: Content,
+    /// Channel written instead of the definition's scene component. Both
+    /// official arrive sequences name object 48, selector 8, which is no
+    /// scene in either session (E101: an Actor; E742: a Participant), while
+    /// the garage channel is unloaded after exit; a garage channel crashed
+    /// the client (E768).
+    fixed_channel: Option<(u16, u16)>,
     entries: BTreeMap<u16, Instance>,
     world_ms: u64,
 }
@@ -60,9 +70,18 @@ impl Arrivals {
         Ok(Self {
             definition,
             content,
+            fixed_channel: None,
             entries: BTreeMap::new(),
             world_ms: 0,
         })
+    }
+
+    pub fn with_fixed_channel(mut self, reference: u16, selector: u16) -> Result<Self, Error> {
+        if reference == 0 || usize::from(reference) > MAX_OBJECTS || selector > 511 {
+            return Err(Error::Bound);
+        }
+        self.fixed_channel = Some((reference, selector));
+        Ok(self)
     }
 
     /// Create the participant's arrive sequence. Its number follows the
@@ -82,9 +101,23 @@ impl Arrivals {
             return Err(Error::Bound);
         }
         let fallback_at = self.world_ms.checked_add(FALLBACK_MS).ok_or(Error::Bound)?;
-        let creation = self
+        let mut creation = self
             .definition
             .creation(players.objects(), owner.participant, 1)?;
+        if let Some((reference, selector)) = self.fixed_channel
+            && let Some(Some(entity::Initial::RpcReference {
+                reference: channel,
+                target_selector,
+                ..
+            })) = creation
+                .body
+                .initial
+                .as_mut()
+                .map(|fields| fields.get_mut(2))
+        {
+            *channel = reference;
+            *target_selector = selector;
+        }
         let record = players
             .spawn_entities(vec![creation], &self.content)?
             .remove(0);

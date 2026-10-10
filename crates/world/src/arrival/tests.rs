@@ -167,6 +167,36 @@ fn an_arrive_sequence_starts_once_stops_on_the_event_and_completes_once() {
 }
 
 #[test]
+fn a_fixed_channel_replaces_the_scene_component() {
+    let (mut players, arrivals) = setup();
+    // The reference must name an existing object (here scene 2).
+    let mut arrivals = arrivals.with_fixed_channel(2, 8).unwrap();
+    let owner = join(&mut players);
+    let record = arrivals.start(&mut players, owner).unwrap().unwrap();
+    let Some(Initial::Entity { fields, .. }) = &record.initial else {
+        panic!()
+    };
+    let entity::Initial::RpcReference {
+        reference,
+        target_selector,
+        ..
+    } = &fields[2]
+    else {
+        panic!()
+    };
+    assert_eq!((*reference, *target_selector), (2, 8));
+    let (mut players, arrivals) = setup();
+    let mut dangling = arrivals.with_fixed_channel(48, 8).unwrap();
+    let owner = join(&mut players);
+    assert_eq!(
+        dangling.start(&mut players, owner),
+        Err(Error::UnknownObject)
+    );
+    assert!(setup().1.with_fixed_channel(0, 8).is_err());
+    assert!(setup().1.with_fixed_channel(48, 512).is_err());
+}
+
+#[test]
 fn a_silent_client_is_stopped_after_the_fallback() {
     let (mut players, mut arrivals) = setup();
     let owner = join(&mut players);

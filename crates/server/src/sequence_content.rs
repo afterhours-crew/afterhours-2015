@@ -18,6 +18,8 @@ pub struct SequenceContent {
     pub content: Content,
     /// Optional arrive sequence after garage exit (`nfs_world::arrival`).
     pub arrive: Option<(Definition, Content)>,
+    /// Optional fixed channel `(reference, selector)` of the arrive sequence.
+    pub arrive_channel: Option<(u16, u16)>,
 }
 impl SequenceContent {
     pub fn load(path: &Path) -> Result<Self, Failure> {
@@ -58,15 +60,28 @@ impl SequenceContent {
         }
         let (definition, content) = sequence(v)?;
         Sequences::new(definition, content.clone()).map_err(|_| Failure::ProfileConfig)?;
+        let mut arrive_channel = None;
         let arrive = match v.get("arrive") {
             None => None,
             Some(a) => {
-                keys(
-                    a,
-                    &["asset", "catalog", "manager", "channel", "embedded_bus"],
-                )?;
+                let mut expected = vec!["asset", "catalog", "manager", "channel", "embedded_bus"];
+                if a.get("fixed_channel").is_some() {
+                    expected.push("fixed_channel");
+                    keys(&a["fixed_channel"], &["reference", "selector"])?;
+                    arrive_channel = Some((
+                        uint(&a["fixed_channel"]["reference"])?,
+                        uint(&a["fixed_channel"]["selector"])?,
+                    ));
+                }
+                keys(a, &expected)?;
                 let parsed = sequence(a)?;
-                Arrivals::new(parsed.0, parsed.1.clone()).map_err(|_| Failure::ProfileConfig)?;
+                let arrivals = Arrivals::new(parsed.0, parsed.1.clone())
+                    .map_err(|_| Failure::ProfileConfig)?;
+                if let Some((reference, selector)) = arrive_channel {
+                    arrivals
+                        .with_fixed_channel(reference, selector)
+                        .map_err(|_| Failure::ProfileConfig)?;
+                }
                 Some(parsed)
             }
         };
@@ -74,15 +89,20 @@ impl SequenceContent {
             definition,
             content,
             arrive,
+            arrive_channel,
         })
     }
     pub fn instance(&self) -> Result<Sequences, nfs_world::replication::Error> {
         Sequences::new(self.definition, self.content.clone())
     }
     pub fn arrivals(&self) -> Option<Result<Arrivals, nfs_world::replication::Error>> {
-        self.arrive
-            .as_ref()
-            .map(|(definition, content)| Arrivals::new(*definition, content.clone()))
+        self.arrive.as_ref().map(|(definition, content)| {
+            let arrivals = Arrivals::new(*definition, content.clone())?;
+            match self.arrive_channel {
+                Some((reference, selector)) => arrivals.with_fixed_channel(reference, selector),
+                None => Ok(arrivals),
+            }
+        })
     }
 }
 /// Asset, catalog, manager, channel and bus of a sequence definition.
@@ -207,6 +227,14 @@ mod tests {
             *invalid.pointer_mut(pointer).unwrap() = bad;
             assert!(SequenceContent::from_json(&invalid).is_err(), "{pointer}");
         }
+        let mut fixed = v.clone();
+        fixed["arrive"]["fixed_channel"] = json!({"reference": 48, "selector": 8});
+        assert_eq!(
+            SequenceContent::from_json(&fixed).unwrap().arrive_channel,
+            Some((48, 8))
+        );
+        fixed["arrive"]["fixed_channel"]["selector"] = json!(512);
+        assert!(SequenceContent::from_json(&fixed).is_err());
         let mut invalid = v;
         invalid["arrive"]["blueprint"] = json!("extra");
         assert!(SequenceContent::from_json(&invalid).is_err());
