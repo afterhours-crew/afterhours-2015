@@ -9,6 +9,7 @@
 //! Scene roles are deployment inputs; this crate contains no asset catalogs.
 
 pub mod actors;
+pub mod arrival;
 pub mod frame;
 pub mod garage;
 pub mod launchers;

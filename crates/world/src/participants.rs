@@ -200,6 +200,9 @@ pub enum Stage {
     ExitingGarage,
     /// The client reported the world loaded (startup state 78).
     EnteringWorld,
+    /// The client reported the world ready; the arrive sequence plays
+    /// (startup field 79, wire selector 78).
+    Arriving,
     /// Startup state 2 after the exit chain: driving in the open world.
     FreeRoam,
 }
@@ -304,6 +307,7 @@ pub struct Lifecycle {
     entries: BTreeMap<u16, Entry>,
     exit: Option<ExitBindings>,
     exited: Vec<u16>,
+    arriving: Vec<u16>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Outcome {
@@ -531,6 +535,36 @@ impl Lifecycle {
     pub fn take_exited(&mut self) -> Vec<u16> {
         std::mem::take(&mut self.exited)
     }
+    /// Participants that entered the arrive state since the last call; the
+    /// caller starts their arrive sequence.
+    pub fn take_arriving(&mut self) -> Vec<u16> {
+        std::mem::take(&mut self.arriving)
+    }
+    /// The arrive sequence completed: leave the arrive state and enter free
+    /// roam (startup state 2), as the official host does once the client has
+    /// completed the sequence (E101, E742).
+    pub fn arrived(&mut self, participant: u16) -> Outcome {
+        let Some(x) = self.exit else {
+            return Outcome::Unsupported;
+        };
+        match self.stages.get_mut(&participant) {
+            Some(stage @ Stage::Arriving) => {
+                *stage = Stage::FreeRoam;
+                Outcome::Advanced(
+                    [(x.state_79, Call::Leave), (x.state_2, Call::Enter)]
+                        .into_iter()
+                        .map(|(endpoint, call)| Notification {
+                            endpoint,
+                            participant,
+                            call,
+                        })
+                        .collect(),
+                )
+            }
+            Some(Stage::FreeRoam) => Outcome::Repeated,
+            _ => Outcome::Unsupported,
+        }
+    }
     pub fn in_free_roam(&self) -> Vec<u16> {
         self.stages
             .iter()
@@ -722,18 +756,15 @@ impl Lifecycle {
                     (x.state_78, Call::Enter),
                 ]
             }
+            // The arrive state stays until its sequence completes (`arrived`).
             (ExitRoute::WorldReady, Stage::EnteringWorld) => {
-                *stage = Stage::FreeRoam;
-                vec![
-                    (x.state_78, Call::Leave),
-                    (x.state_79, Call::Enter),
-                    (x.state_79, Call::Leave),
-                    (x.state_2, Call::Enter),
-                ]
+                *stage = Stage::Arriving;
+                self.arriving.push(participant);
+                vec![(x.state_78, Call::Leave), (x.state_79, Call::Enter)]
             }
             (
                 ExitRoute::Exit | ExitRoute::WorldLoaded | ExitRoute::WorldReady,
-                Stage::ExitingGarage | Stage::EnteringWorld | Stage::FreeRoam,
+                Stage::ExitingGarage | Stage::EnteringWorld | Stage::Arriving | Stage::FreeRoam,
             ) => return Ok(Some(Outcome::Repeated)),
             _ => return Ok(Some(Outcome::Unsupported)),
         };

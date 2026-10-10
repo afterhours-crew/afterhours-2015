@@ -60,6 +60,8 @@ pub(super) struct PlayerListener {
     customization: crate::customization_timer::Timers,
     world_ms: u64,
     sequences: Option<nfs_world::sequences::Sequences>,
+    /// Arrive sequences after garage exit (optional sequence content).
+    arrivals: Option<nfs_world::arrival::Arrivals>,
     inventory: Option<Inventory>,
     logic: Option<std::sync::Arc<crate::garage_logic::GarageLogic>>,
     logic_ghosts: BTreeMap<u16, BTreeMap<u16, u16>>,
@@ -439,6 +441,7 @@ impl PlayerListener {
             deferred_deletions: BTreeMap::new(),
             pending_spawns: VecDeque::new(),
             pending_teleports: VecDeque::new(),
+            arrivals: None,
             glass: crate::glass::Glass::default(),
             customization: crate::customization_timer::Timers::default(),
             world_ms: 0,
@@ -467,6 +470,10 @@ impl PlayerListener {
     }
     pub(super) fn with_vehicles(mut self, vehicles: Option<std::sync::Arc<GarageContent>>) -> Self {
         self.vehicles = vehicles;
+        self
+    }
+    pub(super) fn with_arrivals(mut self, arrivals: Option<nfs_world::arrival::Arrivals>) -> Self {
+        self.arrivals = arrivals;
         self
     }
     pub(super) fn with_sequences(
@@ -640,6 +647,7 @@ impl Listener for PlayerListener {
         let mut deferred_deletions = self.deferred_deletions.clone();
         let mut deferred_sections = Vec::new();
         let mut scheduled_spawns = Vec::new();
+        let mut arrivals = self.arrivals.clone();
         let mut scheduled_teleports = Vec::new();
         let mut sequences = self.sequences.clone();
         let mut logic_ghosts = self.logic_ghosts.clone();
@@ -669,6 +677,20 @@ impl Listener for PlayerListener {
                     .transpose()?
                     .unwrap_or(false)
                 {
+                    continue;
+                }
+                // The client played the arrive sequence: stop it (E101, E742).
+                if let Some(stop) = arrivals
+                    .as_mut()
+                    .map(|a| a.arrived(&message))
+                    .transpose()?
+                    .flatten()
+                {
+                    tracing::info!(
+                        sequence = stop.sequence,
+                        "owned arrive sequence played; stopping it"
+                    );
+                    responses.push(nfs_world::participants::HostRpc::SequenceStop(stop));
                     continue;
                 }
                 if crate::customization_timer::Timers::recognizes(&message) {
@@ -805,6 +827,35 @@ impl Listener for PlayerListener {
                 match Self::sequence_completed(sequences, &players, self.persona, body) {
                     Ok(true) => continue,
                     Ok(false) => {}
+                    Err(error) => {
+                        self.refused += 1;
+                        self.last_error = Some(error);
+                        return false;
+                    }
+                }
+            }
+            if let Some(arrivals) = &mut arrivals {
+                match Self::arrival_call(arrivals, &players, &mut participants, self.persona, body)
+                {
+                    Ok(Some(None)) => continue,
+                    Ok(Some(Some((sequence, chain)))) => {
+                        tracing::info!(
+                            sequence,
+                            "owned arrive sequence completed; participant enters FreeRoam"
+                        );
+                        exit_entries.push((
+                            Section {
+                                float_bits: None,
+                                flag: false,
+                                deleted: vec![sequence],
+                                setup: None,
+                                records: Vec::new(),
+                            },
+                            chain,
+                        ));
+                        continue;
+                    }
+                    Ok(None) => {}
                     Err(error) => {
                         self.refused += 1;
                         self.last_error = Some(error);
@@ -967,7 +1018,25 @@ impl Listener for PlayerListener {
                                     }
                                     exit_entries.push((section, chain))
                                 }
-                                None => responses.extend(chain),
+                                None => {
+                                    match Self::start_arrivals(
+                                        &mut players,
+                                        &mut participants,
+                                        arrivals.as_mut(),
+                                        self.persona,
+                                        chain,
+                                    ) {
+                                        Ok((Some(section), chain)) => {
+                                            exit_entries.push((section, chain))
+                                        }
+                                        Ok((None, chain)) => responses.extend(chain),
+                                        Err(error) => {
+                                            self.refused += 1;
+                                            self.last_error = Some(error);
+                                            return false;
+                                        }
+                                    }
+                                }
                             }
                         }
                         Ok(nfs_world::participants::Outcome::Repeated) => {}
@@ -1202,6 +1271,7 @@ impl Listener for PlayerListener {
         self.world_cars = world_cars;
         self.deferred_deletions = deferred_deletions;
         self.pending_spawns.extend(scheduled_spawns);
+        self.arrivals = arrivals;
         self.pending_teleports.extend(scheduled_teleports);
         self.glass = glass;
         self.customization = customization;

@@ -8,6 +8,7 @@ use nfs_protocol::world::{
     rpc::{Envelope, Limits, RouteProfile},
 };
 use nfs_world::{
+    arrival::Arrivals,
     participants::Lifecycle,
     sequences::{Completed, Owner, Sequences},
 };
@@ -19,6 +20,17 @@ impl PlayerListener {
     ) -> Result<(), replication::Error> {
         if world_ms < self.world_ms {
             return Err(replication::Error::Shape);
+        }
+        if let Some(arrivals) = self.arrivals.as_mut() {
+            for stop in arrivals.poll(world_ms)? {
+                tracing::info!(
+                    sequence = stop.sequence,
+                    world_ms,
+                    "owned arrive sequence not reported; Stop queued after the fallback"
+                );
+                self.pending_rpcs
+                    .push_back(nfs_world::participants::HostRpc::SequenceStop(stop));
+            }
         }
         let Some(mut sequences) = self.sequences.clone() else {
             self.world_ms = world_ms;
@@ -145,6 +157,111 @@ impl PlayerListener {
             return Ok(Vec::new());
         }
         split_scenes(records, nfs_world::application::OUTBOUND_FRAME_BITS)
+    }
+    /// Start the arrive sequence of participants that just entered the arrive
+    /// state; it goes out with their state calls (official order). Without
+    /// configured arrive content they go straight on to free roam.
+    pub(super) fn start_arrivals(
+        players: &mut Players,
+        participants: &mut Lifecycle,
+        arrivals: Option<&mut Arrivals>,
+        persona: u64,
+        mut chain: Vec<nfs_world::participants::HostRpc>,
+    ) -> Result<(Option<Section>, Vec<nfs_world::participants::HostRpc>), replication::Error> {
+        let arriving = participants.take_arriving();
+        if arriving.is_empty() {
+            return Ok((None, chain));
+        }
+        let Some(arrivals) = arrivals else {
+            for participant in arriving {
+                if let nfs_world::participants::Outcome::Advanced(calls) =
+                    participants.arrived(participant)
+                {
+                    chain.extend(
+                        calls
+                            .into_iter()
+                            .map(nfs_world::participants::HostRpc::Participant),
+                    );
+                }
+            }
+            return Ok((None, chain));
+        };
+        let mut records = Vec::new();
+        for participant in arriving {
+            records.extend(arrivals.start(
+                players,
+                Owner {
+                    connection: HOST_SELECTOR as u8,
+                    persona,
+                    participant,
+                },
+            )?);
+        }
+        let mut sections = split_scenes(records, nfs_world::application::OUTBOUND_FRAME_BITS)?;
+        if sections.len() > 1 {
+            return Err(replication::Error::Bound);
+        }
+        Ok((sections.pop(), chain))
+    }
+    /// Client calls on an arrive sequence: `Some(None)` for its
+    /// acknowledgements and completion repeats, `Some(Some((sequence,
+    /// chain)))` when it completes (delete the sequence, leave the arrive
+    /// state for free roam), `None` for anything else.
+    #[allow(clippy::type_complexity)]
+    pub(super) fn arrival_call(
+        arrivals: &mut Arrivals,
+        players: &Players,
+        participants: &mut Lifecycle,
+        persona: u64,
+        body: BitSpan<'_>,
+    ) -> Result<Option<Option<(u16, Vec<nfs_world::participants::HostRpc>)>>, replication::Error>
+    {
+        let envelope = Envelope::decode(
+            body,
+            Limits {
+                max_input_bits: 4096,
+                max_references: 32,
+                max_payload_bytes: 256,
+            },
+        )
+        .map_err(|_| replication::Error::Shape)?;
+        let route = envelope
+            .route(RouteProfile::ClientSend)
+            .map_err(|_| replication::Error::Shape)?;
+        let Some(&ghost) = envelope.references().first() else {
+            return Ok(None);
+        };
+        if arrivals.acknowledges(ghost, route.selector(), route.method_index()) {
+            return Ok(Some(None));
+        }
+        if !arrivals.has_completion(ghost, route.selector()) || route.method_index() != 1 {
+            return Ok(None);
+        }
+        let call = Completed::decode(body)?;
+        let Some(sequence) = arrivals.complete(
+            players,
+            Owner {
+                connection: HOST_SELECTOR as u8,
+                persona,
+                participant: call.participant,
+            },
+            call,
+        )?
+        else {
+            return Ok(Some(None));
+        };
+        let nfs_world::participants::Outcome::Advanced(calls) =
+            participants.arrived(call.participant)
+        else {
+            return Err(replication::Error::Unsupported);
+        };
+        Ok(Some(Some((
+            sequence,
+            calls
+                .into_iter()
+                .map(nfs_world::participants::HostRpc::Participant)
+                .collect(),
+        ))))
     }
     pub(super) fn sequence_completed(
         sequences: &mut Sequences,

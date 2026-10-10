@@ -871,6 +871,13 @@ pub async fn world_host(
     let Ok(persona) = u64::try_from(persona) else {
         return;
     };
+    let arrivals = match sequences.as_ref().and_then(|c| c.arrivals()).transpose() {
+        Ok(arrivals) => arrivals,
+        Err(error) => {
+            warn!(connection, ?error, "arrive sequence configuration rejected");
+            return;
+        }
+    };
     let sequences = match sequences.as_ref().map(|c| c.instance()).transpose() {
         Ok(owner) => owner,
         Err(error) => {
@@ -882,6 +889,7 @@ pub async fn world_host(
         .with_progression(progression)
         .with_vehicles(vehicles)
         .with_sequences(sequences)
+        .with_arrivals(arrivals)
         .with_garage_logic(garage_logic);
     let mut items = items::Exchanges::new(inventory, connection);
     if let Some(content) = &content
