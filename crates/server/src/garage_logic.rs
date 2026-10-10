@@ -101,6 +101,8 @@ pub struct Event {
 pub struct Batch {
     pub scene_updates: Vec<SceneUpdate>,
     pub entities: Vec<Definition>,
+    /// Boolean property changes on live entities: (capture, field, value).
+    pub entity_updates: Vec<(u16, usize, bool)>,
     pub delete: Vec<u16>,
     pub events: Vec<Event>,
 }
@@ -354,6 +356,30 @@ fn batch(v: &Json, content: &Content, earlier: &BTreeSet<u16>) -> Result<Batch, 
             roles,
         });
     }
+    let entity_updates = match v.get("entity_updates") {
+        None => Vec::new(),
+        Some(list) => list
+            .as_array()
+            .filter(|a| a.len() <= MAX_UPDATES)
+            .ok_or(Failure::ProfileConfig)?
+            .iter()
+            .map(|u| {
+                keys(u, &["capture_id", "field", "bool"])?;
+                let capture = ghost_id(&u["capture_id"])?;
+                // Only entities that exist before this batch: their kinds are
+                // checked against the content when the batch is produced.
+                if !earlier.contains(&capture) {
+                    return Err(Failure::ProfileConfig);
+                }
+                let field = uint::<usize>(&u["field"])?;
+                if field >= MAX_FIELDS {
+                    return Err(Failure::ProfileConfig);
+                }
+                let value = u["bool"].as_bool().ok_or(Failure::ProfileConfig)?;
+                Ok((capture, field, value))
+            })
+            .collect::<Result<Vec<_>, Failure>>()?,
+    };
     let delete = match v.get("delete_capture_ids") {
         None => Vec::new(),
         Some(list) => list
@@ -401,6 +427,7 @@ fn batch(v: &Json, content: &Content, earlier: &BTreeSet<u16>) -> Result<Batch, 
     Ok(Batch {
         scene_updates,
         entities,
+        entity_updates,
         delete,
         events,
     })
@@ -617,6 +644,29 @@ impl GarageLogic {
             if let Some(record) =
                 players.change(scene, RecordUpdate::SubLevel { profile, fields })?
             {
+                output.records.push(record);
+            }
+        }
+        for &(capture, field, value) in &batch.entity_updates {
+            let ghost = *ghosts
+                .get(&capture)
+                .ok_or(replication::Error::UnknownObject)?;
+            let RecordUpdate::Entity { binding, .. } = &players
+                .objects()
+                .get(ghost)
+                .ok_or(replication::Error::UnknownObject)?
+                .current
+            else {
+                return Err(replication::Error::TypeMismatch);
+            };
+            let binding = binding.clone();
+            let kinds = binding.profile()?.kinds().to_vec();
+            if kinds.get(field) != Some(&Kind::BoolProperty) {
+                return Err(replication::Error::TypeMismatch);
+            }
+            let mut fields = vec![None; kinds.len()];
+            fields[field] = Some(Update::BoolProperty(Some(value)));
+            if let Some(record) = players.change(ghost, RecordUpdate::Entity { binding, fields })? {
                 output.records.push(record);
             }
         }
@@ -1097,6 +1147,59 @@ pub(crate) mod tests {
             {"kind": "channel", "scene_content_key": 101, "scene_serializer": 64},
             {"kind": "reputation", "field": "level"}, {"kind": "variant", "tag": 0, "value": 43}]);
         assert!(GarageLogic::from_json(&with_exit(bad)).is_err());
+    }
+
+    #[test]
+    fn entity_updates_change_bool_properties_of_live_entities() {
+        let exit = json!({"scene_updates": [], "entities": [],
+            "entity_updates": [{"capture_id": 291, "field": 3, "bool": false}]});
+        let logic = GarageLogic::from_json(&with_exit(exit)).unwrap();
+        assert!(logic.has_exit());
+        let (mut players, participant) = world();
+        let mut ghosts = BTreeMap::new();
+        logic
+            .produce(Which::Spawn, &mut players, participant, &mut ghosts)
+            .unwrap();
+        logic
+            .produce(Which::Entry, &mut players, participant, &mut ghosts)
+            .unwrap();
+        let out = logic
+            .produce(Which::Exit, &mut players, participant, &mut ghosts)
+            .unwrap();
+        assert_eq!(out.records.len(), 1);
+        assert_eq!(out.records[0].id, ghosts[&291]);
+        assert!(out.records[0].initial.is_none());
+        let RecordUpdate::Entity { fields, .. } = &out.records[0].update else {
+            panic!()
+        };
+        assert_eq!(fields[3], Some(Update::BoolProperty(Some(false))));
+        assert!(fields[..3].iter().all(Option::is_none));
+        // The same value again changes nothing.
+        let again = logic
+            .produce(Which::Exit, &mut players, participant, &mut ghosts)
+            .unwrap();
+        assert!(again.records.is_empty());
+        // A field that is not a bool property, or an entity that is not alive.
+        let field = with_exit(json!({"scene_updates": [], "entities": [],
+            "entity_updates": [{"capture_id": 291, "field": 2, "bool": false}]}));
+        let logic = GarageLogic::from_json(&field).unwrap();
+        let (mut players, participant) = world();
+        let mut ghosts = BTreeMap::new();
+        logic
+            .produce(Which::Spawn, &mut players, participant, &mut ghosts)
+            .unwrap();
+        logic
+            .produce(Which::Entry, &mut players, participant, &mut ghosts)
+            .unwrap();
+        assert_eq!(
+            logic
+                .produce(Which::Exit, &mut players, participant, &mut ghosts)
+                .err(),
+            Some(replication::Error::TypeMismatch)
+        );
+        let dead = with_exit(json!({"scene_updates": [], "entities": [],
+            "entity_updates": [{"capture_id": 295, "field": 1, "bool": false}]}));
+        assert!(GarageLogic::from_json(&dead).is_err());
     }
 
     #[test]
