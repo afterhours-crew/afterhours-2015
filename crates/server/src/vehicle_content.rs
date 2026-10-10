@@ -17,6 +17,10 @@ pub mod population;
 pub mod registrations;
 
 const MAX_BYTES: u64 = 16 * 1024 * 1024;
+/// Chassis vehicle mode of the official world car (E748).
+pub const WORLD_MODE: u8 = 3;
+/// Mode timer that encodes as the official saturated value (63 of 6 bits).
+pub const WORLD_MODE_TIME: f32 = 3.0;
 #[derive(Clone, Debug)]
 pub struct GarageContent {
     pub vehicles: Content,
@@ -60,6 +64,10 @@ pub struct Request<'a> {
     pub connection: Option<u8>,
     pub owner: Resource,
     pub customization_attached: bool,
+    /// World car: the locator is the exact root position (no resting offset)
+    /// and the chassis is driveable (mode 3, settled mode timer), as the
+    /// official world car (E748).
+    pub world: bool,
     pub authority_group: u64,
     pub authority_components: &'a [u64],
 }
@@ -157,10 +165,13 @@ impl Content {
         if request.customization_attached {
             root.attach_customization();
         }
-        let position = d
-            .resting
-            .position_at(request.locator)?
-            .map(|v| v.map_or(0., f32::from_bits));
+        let position = if request.world {
+            request.locator
+        } else {
+            d.resting
+                .position_at(request.locator)?
+                .map(|v| v.map_or(0., f32::from_bits))
+        };
         let spawn = initialize::Spawn::new(position, request.basis[2], request.speed)?;
         let mut pending = authority.clone();
         let creation = initialize::fresh(
@@ -186,12 +197,17 @@ impl Content {
             &mut pending,
         )?;
         let custom = Customization::from_vehicle(request.items, &self.custom, request.vehicle)?;
-        let chassis = chassis::State::new(
+        let mut chassis = chassis::State::new(
             position,
             orientation::quaternion_from_basis(request.basis)?,
-            d.mode,
+            if request.world { WORLD_MODE } else { d.mode },
             custom,
         )?;
+        if request.world {
+            let mut controls = chassis::Controls::new(WORLD_MODE)?;
+            controls.mode_time = WORLD_MODE_TIME;
+            chassis.set_motion(chassis.motion().clone(), controls)?;
+        }
         let wheels = wheel_customization::State::from_vehicle(
             request.items,
             &self.wheels,

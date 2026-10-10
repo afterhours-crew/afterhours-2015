@@ -12,11 +12,14 @@ pub mod actors;
 pub mod frame;
 pub mod garage;
 pub mod launchers;
+pub mod level_poll;
 pub mod logic;
 pub mod participants;
 pub mod replication;
 pub mod sequences;
 pub mod session;
+pub mod spawn_points;
+pub mod teleport;
 
 pub use nfs_world_core::{
     application, bits, content, crypto, files, handshake, items, link, transport,

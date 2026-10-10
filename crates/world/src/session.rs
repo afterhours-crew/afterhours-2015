@@ -24,7 +24,9 @@ fn rpc_message(rpc: crate::participants::HostRpc) -> frame::Message<'static> {
         HostRpc::Garage(v) => frame::Message::GarageBinding(v),
         HostRpc::Actor(v) => frame::Message::ActorBinding(v),
         HostRpc::Vehicle(v) => frame::Message::VehicleBinding(v),
-        HostRpc::GaragePresence(v) => frame::Message::GaragePresence(v),
+        HostRpc::GaragePresence(v) | HostRpc::SpawnOccupied(v) | HostRpc::LevelPoll(v) => {
+            frame::Message::GaragePresence(v)
+        }
         HostRpc::SequenceStop(v) => frame::Message::SequenceStop(v),
         HostRpc::Event(v) => frame::Message::LogicEvent(v),
     }
@@ -233,6 +235,9 @@ pub const REPORT_QUIET_MS: u64 = 5_000;
 pub const REPORT_TIMEOUT_MS: u64 = 30_000;
 pub const STATE_WAIT_MS: u64 = 1_000;
 pub const REPLICATION_INTERVAL_MS: u64 = 50;
+/// Official hosts repeat the movement grants in every regular frame, about
+/// every 100 ms (E101: 2,030 of 2,061 gaps between 90 and 110 ms).
+pub const MOVEMENT_INTERVAL_MS: u64 = 100;
 pub const MAX_REPLICATION_QUEUE: usize = 32;
 pub const MAX_REPLICATION_QUEUE_BITS: usize = 1024 * 1024;
 pub const MAX_RPC_QUEUE: usize = 2048;
@@ -287,6 +292,12 @@ pub struct Host {
     max_replication_frame_bits: usize,
     rpc_queue: std::collections::VecDeque<crate::participants::HostRpc>,
     files: [Option<files::Outgoing>; 2],
+    /// Objects the client is told to report movement for (selector 0).
+    movement: std::collections::BTreeSet<u16>,
+    movement_sent_ms: Option<u64>,
+    /// Objects whose creation has been sent and not deleted since: grants
+    /// never name an object the client cannot know yet.
+    sent_objects: std::collections::BTreeSet<u16>,
 }
 
 impl fmt::Debug for Host {
@@ -316,6 +327,9 @@ impl Host {
             replication_sent: 0,
             rpc_queue: std::collections::VecDeque::new(),
             files: [None, None],
+            movement: std::collections::BTreeSet::new(),
+            movement_sent_ms: None,
+            sent_objects: std::collections::BTreeSet::new(),
             max_replication_frame_bits: policy
                 .max_frame_bits
                 .min(application::OUTBOUND_FRAME_BITS)
@@ -325,6 +339,18 @@ impl Host {
 
     pub fn queue_replication(&mut self, section: Section) -> Result<(), Error> {
         self.queue_replication_after(section, Vec::new())
+    }
+
+    /// Replace the objects whose movement the client reports. The client only
+    /// streams a car's movement once the host lists it (E101: 13-16 ms after
+    /// each first listing); an empty set stops the grants. Objects are listed
+    /// only once their creation has been sent.
+    pub fn set_movement(&mut self, objects: std::collections::BTreeSet<u16>) -> Result<(), Error> {
+        if objects.len() > frame::MAX_MOVEMENT_RECORDS {
+            return Err(Error::Application(application::Error::Bound));
+        }
+        self.movement = objects;
+        Ok(())
     }
 
     pub fn queue_replication_after(
@@ -410,6 +436,8 @@ impl Host {
             crate::participants::HostRpc::Vehicle(v) => Some(v.participant),
             crate::participants::HostRpc::Launcher(_)
             | crate::participants::HostRpc::GaragePresence(_)
+            | crate::participants::HostRpc::SpawnOccupied(_)
+            | crate::participants::HostRpc::LevelPoll(_)
             | crate::participants::HostRpc::SequenceStop(_)
             | crate::participants::HostRpc::Event(_) => None,
         };
@@ -752,6 +780,27 @@ impl Host {
                 Err(e) => out.events.push(e),
             }
         }
+        let grants: Vec<(u16, Vec<u8>)> = self
+            .movement
+            .intersection(&self.sent_objects)
+            .map(|&id| (id, vec![0]))
+            .collect();
+        if !grants.is_empty()
+            && self
+                .movement_sent_ms
+                .is_none_or(|last| now_ms >= last + MOVEMENT_INTERVAL_MS)
+        {
+            let builder = frame::Builder::new().movement(grants);
+            match Self::send_built(link, application, &builder, now_ms) {
+                Ok(wire) => {
+                    out.send.push(wire);
+                    world.acked_inputs = application.stats().inputs;
+                    self.movement_sent_ms = Some(now_ms);
+                }
+                Err(Event::ApplicationError(application::Error::Window)) => {}
+                Err(e) => out.events.push(e),
+            }
+        }
         let inputs = application.stats().inputs;
         if inputs > world.acked_inputs {
             if let Ok(wire) = Self::send_built(link, application, &frame::Builder::new(), now_ms) {
@@ -882,6 +931,14 @@ impl Host {
                     return;
                 }
             };
+            for id in &section.deleted {
+                self.sent_objects.remove(id);
+            }
+            for record in &section.records {
+                if record.initial.is_some() {
+                    self.sent_objects.insert(record.id);
+                }
+            }
             let records = section.records.len();
             let notifications = before.len();
             let fragments = bodies.len();

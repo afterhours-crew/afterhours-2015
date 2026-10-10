@@ -326,3 +326,169 @@ fn foreign_repeats_stale_ack_and_changed_inventory_do_not_mutate_the_owner() {
     assert_ne!(second.bindings[0].vehicle, output.bindings[0].vehicle);
     assert!(!population.all_loaded(other));
 }
+
+fn world_layout(layout: &Layout) -> Layout {
+    let slots = (0..5).map(|i| {
+        let mut bits=[0u32;16];
+        for j in [0,5,10] {bits[j]=1f32.to_bits()}
+        bits[12]=(i as f32*8.).to_bits();
+        json!({"ordinal":i,"component_index":i+1,"item_component_index":i+8,"transform_bits":bits})
+    }).collect::<Vec<_>>();
+    let mut spawn = [0u32; 16];
+    for j in [0, 5, 10] {
+        spawn[j] = 1f32.to_bits();
+    }
+    spawn[12] = 959.5f32.to_bits();
+    spawn[13] = (-26.75f32).to_bits();
+    spawn[14] = (-506.5f32).to_bits();
+    let world = Layout::from_json(
+        &json!({"format":"nfs-garage-population","version":1,"build_sha256":crate::content::BUILD,
+        "blueprint":"garage/test","item_blueprint":"test/gameplay","main":slots,
+        "world_spawn":{"transform_bits":spawn}}),
+    )
+    .unwrap();
+    assert_eq!(world.scene_key, layout.scene_key);
+    assert_eq!(
+        world.world_spawn().unwrap().locator(),
+        [959.5, -26.75, -506.5]
+    );
+    world
+}
+
+#[test]
+fn garage_exit_swaps_the_garage_car_for_a_driveable_world_car() {
+    let (mut population, mut players, content, layout, items, p) = fixture();
+    let layout = world_layout(&layout);
+    let garage = population
+        .spawn(
+            &mut players,
+            owner(p),
+            inventory(items.clone()),
+            &content,
+            &layout,
+            [0.; 3],
+        )
+        .unwrap();
+    let (scene, garage_car) = (garage.records[0].id, garage.records[1].id);
+    // The client simulates its garage car, then its world car (E101 grants).
+    assert_eq!(
+        players.owned_vehicles(3, 0x100000002),
+        [garage_car].into_iter().collect()
+    );
+    assert!(players.owned_vehicles(7, 0x100000002).is_empty());
+    let objects = players.objects().len();
+    let world = population
+        .spawn_world(
+            &mut players,
+            owner(p),
+            &inventory(items.clone()),
+            &content,
+            &layout,
+        )
+        .unwrap();
+    assert_eq!(world.deleted, vec![garage_car]);
+    assert!(world.messages.is_empty());
+    assert_eq!(world.records.len(), 1);
+    assert_eq!(players.objects().len(), objects);
+    let car = &world.records[0];
+    assert_ne!(car.id, garage_car);
+    assert_eq!(players.owned_vehicle(3, 0x100000002, p, 1), Some(car.id));
+    assert_eq!(
+        players.owned_vehicles(3, 0x100000002),
+        [car.id].into_iter().collect()
+    );
+    let (
+        Some(Initial::Vehicle { prefix, creation }),
+        Some(Initial::Vehicle {
+            prefix: garage_prefix,
+            creation: garage_creation,
+        }),
+    ) = (&car.initial, &garage.records[1].initial)
+    else {
+        panic!("vehicles")
+    };
+    assert_eq!(prefix.sub_id, WORLD_SUB_ID);
+    assert_eq!(garage_prefix.sub_id, 1);
+    assert_eq!(prefix.parent.as_ref().unwrap().reference, Some(scene));
+    assert_eq!(prefix.blueprint, garage_prefix.blueprint);
+    assert_eq!(prefix.asset, garage_prefix.asset);
+    assert_eq!(creation.connection_id, garage_creation.connection_id);
+    let (Some(vehicle::Initial::Root(root)), Some(vehicle::Initial::Root(garage_root))) =
+        (creation.fields.first(), garage_creation.fields.first())
+    else {
+        panic!("roots")
+    };
+    assert!(!root.fine_flag && garage_root.fine_flag);
+    assert_eq!(
+        root.position,
+        vehicle::Vector::from_position([959.5, -26.75, -506.5], [0.; 3], 5).unwrap()
+    );
+    let nfs_world::replication::Update::Vehicle { fields, .. } = &car.update else {
+        panic!("vehicle update")
+    };
+    let controls = fields
+        .iter()
+        .flatten()
+        .find_map(|u| match u {
+            vehicle::Update::Chassis(c) => c.physics.as_ref().map(|p| p.controls.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!((controls.value3, controls.value6), (3, 63));
+    assert!(controls.flag && controls.wheel_pairs.is_some());
+}
+
+#[test]
+fn world_spawn_requires_configuration_a_garage_car_and_the_owner() {
+    let (mut population, mut players, content, layout, items, p) = fixture();
+    let before = (population.clone(), players.clone());
+    assert_eq!(
+        population
+            .spawn_world(
+                &mut players,
+                owner(p),
+                &inventory(items.clone()),
+                &content,
+                &layout
+            )
+            .err(),
+        Some(Error::Unsupported)
+    );
+    let layout = world_layout(&layout);
+    // No garage car yet: nothing to swap, nothing changes.
+    assert_eq!(
+        population
+            .spawn_world(
+                &mut players,
+                owner(p),
+                &inventory(items.clone()),
+                &content,
+                &layout
+            )
+            .err(),
+        Some(Error::UnknownObject)
+    );
+    assert_eq!(players.objects().len(), before.1.objects().len());
+    population
+        .spawn(
+            &mut players,
+            owner(p),
+            inventory(items.clone()),
+            &content,
+            &layout,
+            [0.; 3],
+        )
+        .unwrap();
+    let saved = players.objects().len();
+    let foreign = Owner {
+        connection: 7,
+        persona: 0x100000002,
+        participant: p,
+    };
+    assert!(
+        population
+            .spawn_world(&mut players, foreign, &inventory(items), &content, &layout)
+            .is_err()
+    );
+    assert_eq!(players.objects().len(), saved);
+}

@@ -7,7 +7,7 @@ use nfs_world::items::{DefinitionClass, Item};
 use serde_json::json;
 use std::collections::BTreeMap;
 
-fn fixture() -> Value {
+pub(crate) fn fixture() -> Value {
     let main = (0..5).map(|i| {
         let mut bits = [0u32; 16];
         for j in [0, 5, 10] { bits[j] = 1f32.to_bits() }
@@ -126,5 +126,75 @@ fn content_cannot_override_inventory_or_hide_invalid_pose_and_endpoint_data() {
             _ => unreachable!(),
         }
         assert!(Layout::from_json(&value).is_err(), "mode {mode}");
+    }
+}
+
+#[test]
+fn world_spawn_is_optional_and_validated() {
+    let plain = Layout::from_json(&fixture()).unwrap();
+    assert!(plain.world_spawn().is_none());
+    let mut spawn = [0u32; 16];
+    for j in [0, 5, 10] {
+        spawn[j] = 1f32.to_bits();
+    }
+    spawn[12] = 959.5f32.to_bits();
+    let mut v = fixture();
+    v["world_spawn"] = json!({"transform_bits": spawn});
+    let layout = Layout::from_json(&v).unwrap();
+    assert_eq!(layout.world_spawn().unwrap().locator(), [959.5, 0., 0.]);
+    for broken in 0..4 {
+        let mut v = fixture();
+        let mut bits = spawn;
+        match broken {
+            0 => bits[13] = f32::NAN.to_bits(),
+            1 => bits[15] = 1,
+            2 => bits[0] = 0,
+            _ => {}
+        }
+        v["world_spawn"] = if broken == 3 {
+            json!({"transform_bits": spawn, "extra": 1})
+        } else {
+            json!({"transform_bits": bits})
+        };
+        assert!(Layout::from_json(&v).is_err(), "case {broken}");
+    }
+}
+
+#[test]
+fn exit_teleport_is_optional_validated_and_independent_of_the_spawn() {
+    assert!(
+        Layout::from_json(&fixture())
+            .unwrap()
+            .exit_teleport()
+            .is_none()
+    );
+    // A quarter turn about the vertical axis at a synthetic destination.
+    let mut bits = [0u32; 16];
+    bits[2] = 1f32.to_bits();
+    bits[5] = 1f32.to_bits();
+    bits[8] = (-1f32).to_bits();
+    bits[12] = 12.5f32.to_bits();
+    bits[13] = 3.25f32.to_bits();
+    bits[14] = (-40f32).to_bits();
+    let mut v = fixture();
+    v["exit_teleport"] = json!({"transform_bits": bits});
+    let layout = Layout::from_json(&v).unwrap();
+    let destination = layout.exit_teleport().unwrap();
+    assert_eq!(destination.locator(), [12.5, 3.25, -40.]);
+    assert_eq!(
+        destination.basis(),
+        [[0., 0., 1.], [0., 1., 0.], [-1., 0., 0.]]
+    );
+    assert!(layout.world_spawn().is_none());
+    for broken in 0..3 {
+        let mut v = fixture();
+        let mut b = bits;
+        match broken {
+            0 => b[14] = f32::INFINITY.to_bits(),
+            1 => b[3] = 1,
+            _ => b = [0; 16],
+        }
+        v["exit_teleport"] = json!({"transform_bits": b});
+        assert!(Layout::from_json(&v).is_err(), "case {broken}");
     }
 }

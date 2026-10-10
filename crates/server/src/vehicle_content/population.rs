@@ -36,6 +36,14 @@ pub struct Population {
     pending: Pending,
     next_group: u64,
 }
+/// Sub id of the world car creation (garage display cars use 1; E748).
+pub const WORLD_SUB_ID: u32 = 2;
+#[derive(Clone, Debug, Default)]
+pub struct WorldSpawn {
+    pub deleted: Vec<u16>,
+    pub records: Vec<Record>,
+    pub messages: Vec<Message>,
+}
 #[derive(Clone, Debug, Default)]
 pub struct Output {
     pub messages: Vec<Message>,
@@ -183,6 +191,7 @@ impl Population {
                     connection: Some(owner.connection),
                     owner: resource.clone(),
                     customization_attached: true,
+                    world: false,
                     authority_group: group,
                     authority_components: &components,
                 },
@@ -257,6 +266,132 @@ impl Population {
         *self = next;
         *players = world;
         Ok(output)
+    }
+    /// Garage exit: remove the participant's primary garage car and re-create
+    /// it as a world car at the layout's world spawn (official E748 shape:
+    /// same bundle scene and gameplay blueprint, sub id 2, driveable chassis).
+    pub fn spawn_world(
+        &mut self,
+        players: &mut Players,
+        owner: Owner,
+        inventory: &Inventory,
+        content: &Content,
+        layout: &Layout,
+    ) -> Result<WorldSpawn, Error> {
+        let spawn = layout.world_spawn().ok_or(Error::Unsupported)?;
+        let identity = players
+            .owned_identity(owner.connection, owner.persona, owner.participant)
+            .ok_or(Error::UnknownObject)?;
+        let entry = *layout
+            .occupied(inventory.slots, &inventory.items)?
+            .first()
+            .ok_or(Error::UnknownObject)?;
+        let mut next = self.clone();
+        let mut world = players.clone();
+        let removed = world.remove_vehicle(
+            owner.connection,
+            owner.persona,
+            owner.participant,
+            entry.item,
+        )?;
+        let item = inventory
+            .items
+            .items
+            .get(&entry.item)
+            .ok_or(Error::UnknownObject)?;
+        let definition = content
+            .definition(&item.definition)
+            .ok_or(Error::Unsupported)?;
+        let prepared = next
+            .registrations
+            .prepare(&[&definition.bundle])
+            .map_err(|_| Error::Unsupported)?;
+        let registration = prepared.bindings[0];
+        let parent = world
+            .objects()
+            .scene(registration.content_key)
+            .ok_or(Error::UnknownObject)?;
+        let blueprint = world
+            .objects()
+            .scene(layout.item_scene_key)
+            .ok_or(Error::UnknownObject)?;
+        let resource = vehicle::Resource {
+            words: [
+                identity.identity.persona as u32,
+                (identity.identity.persona >> 32) as u32,
+            ],
+            name: identity.name,
+        };
+        let group = next.next_group;
+        next.next_group = next.next_group.checked_add(1).ok_or(Error::Bound)?;
+        let components = definition
+            .profile
+            .kinds()
+            .iter()
+            .enumerate()
+            .filter(|(_, kind)| matches!(kind, vehicle::Kind::FourBit))
+            .map(|(i, _)| {
+                group
+                    .checked_mul(512)
+                    .and_then(|g| g.checked_add(i as u64 + 1))
+                    .ok_or(Error::Bound)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let body = content.construct(
+            Request {
+                items: &inventory.items,
+                vehicle: entry.item,
+                locator: spawn.locator(),
+                basis: spawn.basis(),
+                origin: [0.; 3],
+                speed: Some(0.),
+                connection: Some(owner.connection),
+                owner: resource,
+                customization_attached: false,
+                world: true,
+                authority_group: group,
+                authority_components: &components,
+            },
+            &mut next.authority,
+            |name| next.registrations.mesh_level(name).ok(),
+        )?;
+        let asset = Asset {
+            bundle: registration.asset_bundle,
+            type_id: definition.asset_type,
+            local_index: definition.asset_index,
+        };
+        let entity_content = EntityContent::new(
+            vec![Catalog::new(asset.bundle, &definition.catalog)?],
+            vec![],
+        )?
+        .with_vehicles(vec![(asset, definition.profile.clone())])?;
+        let creation = vehicle::EntityCreation {
+            prefix: Prefix {
+                parent: Some(Parent {
+                    reference: Some(parent),
+                }),
+                blueprint,
+                sub_id: WORLD_SUB_ID,
+                owner: None,
+                asset,
+            },
+            body,
+        };
+        let record = world.create_vehicle(
+            owner.connection,
+            owner.persona,
+            owner.participant,
+            entry.item,
+            creation,
+            &entity_content,
+        )?;
+        *self = next;
+        *players = world;
+        Ok(WorldSpawn {
+            deleted: vec![removed],
+            records: vec![record],
+            messages: prepared.messages,
+        })
     }
     pub fn acknowledge(
         &mut self,

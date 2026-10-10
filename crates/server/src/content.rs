@@ -85,6 +85,7 @@ impl WorldContent {
         ]
         .into_iter()
         .chain(roles.traffic)
+        .chain(roles.spawn_points)
         {
             profiles.profile(key).map_err(|_| Failure::ProfileConfig)?;
         }
@@ -96,7 +97,10 @@ impl WorldContent {
             roles.startup,
             roles.garage,
             roles.progression,
-        ] {
+        ]
+        .into_iter()
+        .chain(roles.spawn_points)
+        {
             if bindings
                 .hierarchy()
                 .iter()

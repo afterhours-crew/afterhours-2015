@@ -426,3 +426,69 @@ fn state_reports_and_inline_collections_round_trip() {
         vec![42]
     );
 }
+
+#[test]
+fn host_movement_grants_build_in_the_official_layout_and_parse() {
+    // E101 host frame at 37986 ms: cars 293 and 294, one selector 0 each.
+    let w = Builder::new()
+        .movement(vec![(293, vec![0]), (294, vec![0])])
+        .build()
+        .unwrap();
+    assert_eq!(bits(&w, 0, 6), 1 << MOVEMENT);
+    assert_eq!(bits(&w, 6, 8), 2);
+    assert_eq!(
+        (bits(&w, 14, 16), bits(&w, 30, 4), bits(&w, 34, 4)),
+        (293, 1, 0)
+    );
+    assert_eq!(
+        (bits(&w, 38, 16), bits(&w, 54, 4), bits(&w, 58, 4)),
+        (294, 1, 0)
+    );
+    assert_eq!(w.len(), 64);
+    let parsed = parse(w.span(), Direction::FromHost).unwrap();
+    let movement = parsed.movement.unwrap();
+    assert_eq!(movement.header, None);
+    let records: Vec<_> = movement
+        .records
+        .iter()
+        .map(|r| (r.id, r.data.len(), r.data.read_u32(0, 4).unwrap()))
+        .collect();
+    assert_eq!(records, vec![(293, 4, 0), (294, 4, 0)]);
+
+    // Combined with messages, the section follows the message groups.
+    let both = Builder::new()
+        .messages(
+            None,
+            vec![Group {
+                channel: 0,
+                sequence: Some(3),
+                messages: vec![Message::Empty],
+            }],
+        )
+        .movement(vec![(424, vec![0, 2])])
+        .build()
+        .unwrap();
+    let parsed = parse(both.span(), Direction::FromHost).unwrap();
+    assert_eq!(parsed.mask, (1 << MESSAGES) | (1 << MOVEMENT));
+    let record = &parsed.movement.unwrap().records[0];
+    assert_eq!((record.id, record.data.len()), (424, 8));
+    assert_eq!(record.data.read_u32(4, 4).unwrap(), 2);
+
+    for bad in [
+        vec![(1, vec![])],
+        vec![(1, vec![16])],
+        vec![(1, vec![0; 16])],
+    ] {
+        assert_eq!(
+            Builder::new().movement(bad).build().err(),
+            Some(Error::Shape)
+        );
+    }
+    let many = (0..=MAX_MOVEMENT_RECORDS as u16)
+        .map(|i| (i, vec![0]))
+        .collect();
+    assert_eq!(
+        Builder::new().movement(many).build().err(),
+        Some(Error::Bound)
+    );
+}

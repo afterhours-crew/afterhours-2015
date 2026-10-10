@@ -26,6 +26,13 @@ mod deployment_tests;
 mod vehicles;
 
 const MAX_PENDING: usize = 32;
+const MAX_WORLD_CARS: usize = 128;
+/// Delay from a world car's first glass report to its spawn assignment; the
+/// assignment then rides the next level poll (official 777-970 ms).
+const SPAWN_DELAY_MS: u64 = 750;
+/// Delay from the first glass report to the host teleport; official hosts
+/// send it about 100 ms before the assignment (E101 676 ms, E742 870 ms).
+const TELEPORT_DELAY_MS: u64 = 650;
 
 pub(super) struct PlayerListener {
     stats: Accepting,
@@ -39,6 +46,16 @@ pub(super) struct PlayerListener {
     vehicles: Option<std::sync::Arc<GarageContent>>,
     population: Option<Population>,
     garage_presence: nfs_world::garage::presence::Presence,
+    spawn_points: nfs_world::spawn_points::SpawnPoints,
+    level_poll: nfs_world::level_poll::LevelPoll,
+    /// World car ghost -> (participant, spawn assigned).
+    world_cars: BTreeMap<u16, (u16, bool)>,
+    /// World car ghost -> garage car deletions sent once the client reports it.
+    deferred_deletions: BTreeMap<u16, Vec<u16>>,
+    /// Spawn assignments held until due (world ms), sent with a level poll.
+    pending_spawns: VecDeque<(u64, nfs_world::participants::Notification)>,
+    /// Host teleports of world cars, due at world ms (sent as content).
+    pending_teleports: VecDeque<(u64, nfs_world::teleport::Command)>,
     glass: crate::glass::Glass,
     customization: crate::customization_timer::Timers,
     world_ms: u64,
@@ -387,6 +404,22 @@ impl PlayerListener {
     pub(super) fn files_alive(&mut self, now: u64) -> bool {
         self.stats.files_alive(now)
     }
+    /// The next host teleport due by `world_ms`, oldest first.
+    pub(super) fn due_teleport(&self, world_ms: u64) -> Option<nfs_world::teleport::Command> {
+        self.pending_teleports
+            .front()
+            .filter(|(at, _)| *at <= world_ms)
+            .map(|(_, command)| *command)
+    }
+    pub(super) fn teleport_sent(&mut self) {
+        self.pending_teleports.pop_front();
+    }
+    /// Cars this connection's client simulates and reports movement for: the
+    /// garage cars, then the world car (official E101 grants).
+    pub(super) fn movement_objects(&self) -> BTreeSet<u16> {
+        self.players
+            .owned_vehicles(HOST_SELECTOR as u8, self.persona)
+    }
     pub(super) fn new(persona: u64) -> Self {
         Self {
             stats: Accepting::default(),
@@ -400,6 +433,12 @@ impl PlayerListener {
             vehicles: None,
             population: None,
             garage_presence: nfs_world::garage::presence::Presence::default(),
+            spawn_points: nfs_world::spawn_points::SpawnPoints::default(),
+            level_poll: nfs_world::level_poll::LevelPoll::default(),
+            world_cars: BTreeMap::new(),
+            deferred_deletions: BTreeMap::new(),
+            pending_spawns: VecDeque::new(),
+            pending_teleports: VecDeque::new(),
             glass: crate::glass::Glass::default(),
             customization: crate::customization_timer::Timers::default(),
             world_ms: 0,
@@ -490,6 +529,43 @@ impl PlayerListener {
         }
         let mut participants = self.participants.clone();
         participants.bind(&records, roles.gameplay, roles.startup)?;
+        match participants.bind_exit(&records, roles.startup, roles.garage) {
+            Ok(true) => {}
+            Ok(false) => tracing::info!("garage exit scenes absent; garage exit stays unsupported"),
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    "garage exit endpoints unbound; garage exit stays unsupported"
+                )
+            }
+        }
+        let mut spawn_points = nfs_world::spawn_points::SpawnPoints::default();
+        match roles
+            .spawn_points
+            .map(|key| spawn_points.bind(&records, key))
+        {
+            Some(Ok(true)) => {}
+            None | Some(Ok(false)) => {
+                tracing::info!("SpawnPoints scene absent; world spawns stay unsupported")
+            }
+            Some(Err(error)) => {
+                tracing::warn!(
+                    ?error,
+                    "SpawnPoints endpoints unbound; world spawns stay unsupported"
+                )
+            }
+        }
+        let mut level_poll = nfs_world::level_poll::LevelPoll::default();
+        match level_poll.bind(&records, roles.gameplay) {
+            Ok(true) => {}
+            Ok(false) => tracing::info!("level root absent; level poll stays unsupported"),
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    "level poll endpoint unbound; poll stays unsupported"
+                )
+            }
+        }
         let sections = split_scenes(records, nfs_world::application::OUTBOUND_FRAME_BITS)?;
         if sections.len() > MAX_PENDING - self.pending.len() {
             return Err(replication::Error::Bound);
@@ -497,6 +573,8 @@ impl PlayerListener {
         self.players = players;
         self.launchers = launchers;
         self.participants = participants;
+        self.spawn_points = spawn_points;
+        self.level_poll = level_poll;
         self.pending.extend(sections);
         self.population = population;
         self.roles = Some(roles.clone());
@@ -556,6 +634,13 @@ impl Listener for PlayerListener {
         let mut records = Vec::new();
         let mut population = self.population.clone();
         let mut garage_presence = self.garage_presence.clone();
+        let mut spawn_points = self.spawn_points.clone();
+        let mut level_poll = self.level_poll.clone();
+        let mut world_cars = self.world_cars.clone();
+        let mut deferred_deletions = self.deferred_deletions.clone();
+        let mut deferred_sections = Vec::new();
+        let mut scheduled_spawns = Vec::new();
+        let mut scheduled_teleports = Vec::new();
         let mut sequences = self.sequences.clone();
         let mut logic_ghosts = self.logic_ghosts.clone();
         let mut unsupported_logic = 0;
@@ -621,6 +706,37 @@ impl Listener for PlayerListener {
                     responses.push(nfs_world::participants::HostRpc::Event(
                         glass.receive(owner, &message)?,
                     ));
+                    // A world car's first glass report also shows that the
+                    // client has the car: assign its spawn point (E751), sent
+                    // with a level poll once due (`release_spawns`).
+                    if let Some(notification) =
+                        Self::world_car_ready(&message, &mut world_cars, &mut spawn_points)?
+                            .flatten()
+                    {
+                        tracing::info!(
+                            participant = notification.participant,
+                            call = ?notification.call,
+                            "owned world car created; spawn point assignment scheduled"
+                        );
+                        if let Some(command) = Self::exit_teleport(
+                            self.participants.exit_bindings(),
+                            self.vehicles.as_deref().map(|c| &c.layout),
+                            notification.participant,
+                            target.ghost,
+                        ) {
+                            scheduled_teleports.push((self.world_ms + TELEPORT_DELAY_MS, command));
+                        }
+                        scheduled_spawns.push((self.world_ms + SPAWN_DELAY_MS, notification));
+                    }
+                    if let Some(section) =
+                        Self::garage_car_deletion(&message, &mut deferred_deletions)
+                    {
+                        tracing::info!(
+                            deleted = ?section.deleted,
+                            "world car reported; garage car deleted"
+                        );
+                        deferred_sections.push(section);
+                    }
                 } else {
                     unsupported_logic += 1;
                     tracing::debug!(?message, "unsupported client logic event");
@@ -674,6 +790,7 @@ impl Listener for PlayerListener {
         }
         let mut launchers = self.launchers.clone();
         let mut unsupported = 0;
+        let mut exit_entries = Vec::new();
         for body in rpcs {
             match Self::item_builder_begin(self.roles.as_ref(), &players, self.persona, body) {
                 Ok(true) => continue,
@@ -706,6 +823,32 @@ impl Listener for PlayerListener {
                     }
                 }
             }
+            match level_poll.receive(body, |id| {
+                players.owns_participant(HOST_SELECTOR as u8, self.persona, id)
+            }) {
+                Ok(Some(_)) => continue,
+                Ok(None) => {}
+                Err(error) => {
+                    self.refused += 1;
+                    self.last_error = Some(error);
+                    return false;
+                }
+            }
+            match spawn_points.receive(body, |id| {
+                players.owns_participant(HOST_SELECTOR as u8, self.persona, id)
+            }) {
+                Ok(Some(flag)) => {
+                    tracing::info!(?flag, "owned spawn request or release");
+                    responses.extend(flag.map(nfs_world::participants::HostRpc::SpawnOccupied));
+                    continue;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    self.refused += 1;
+                    self.last_error = Some(error);
+                    return false;
+                }
+            }
             match launchers.receive(body, |id| {
                 players.owns(HOST_SELECTOR as u8, self.persona, id)
             }) {
@@ -717,12 +860,116 @@ impl Listener for PlayerListener {
                     match participants.receive(body, |id| {
                         players.owns_participant(HOST_SELECTOR as u8, self.persona, id)
                     }) {
-                        Ok(nfs_world::participants::Outcome::Advanced(replies)) => responses
-                            .extend(
-                                replies
-                                    .into_iter()
-                                    .map(nfs_world::participants::HostRpc::Participant),
-                            ),
+                        Ok(nfs_world::participants::Outcome::Advanced(replies)) => {
+                            let mut chain: Vec<_> = replies
+                                .into_iter()
+                                .map(nfs_world::participants::HostRpc::Participant)
+                                .collect();
+                            let exited = participants.take_exited();
+                            // Official order: presence off follows the leave of
+                            // customization and state 94 (E747).
+                            for &participant in &exited {
+                                match Self::garage_presence_leave(
+                                    self.roles.as_ref(),
+                                    &players,
+                                    &mut garage_presence,
+                                    participant,
+                                    self.persona,
+                                ) {
+                                    Ok(Some(rpc)) => chain.insert(3.min(chain.len()), rpc),
+                                    Ok(None) => {}
+                                    Err(error) => {
+                                        self.refused += 1;
+                                        self.last_error = Some(error);
+                                        return false;
+                                    }
+                                }
+                            }
+                            let mut garage_deletions = Vec::new();
+                            let mut world_car = match exited.as_slice() {
+                                [participant] => match Self::exit_world_car(
+                                    &mut players,
+                                    population.as_mut(),
+                                    self.inventory.as_ref(),
+                                    self.vehicles.as_deref(),
+                                    *participant,
+                                    self.persona,
+                                ) {
+                                    Ok(Some((section, deleted))) => {
+                                        garage_deletions = deleted;
+                                        Some(section)
+                                    }
+                                    Ok(None) => None,
+                                    Err(error) => {
+                                        self.refused += 1;
+                                        self.last_error = Some(error);
+                                        return false;
+                                    }
+                                },
+                                _ => None,
+                            };
+                            // The same exit frame deletes the garage-only logic and
+                            // recreates the loading presentation (E757).
+                            if let (Some(section), Some(logic), [participant]) =
+                                (world_car.as_mut(), self.logic.as_deref(), exited.as_slice())
+                                && logic.has_exit()
+                            {
+                                match logic.produce(
+                                    crate::garage_logic::Which::Exit,
+                                    &mut players,
+                                    *participant,
+                                    logic_ghosts.entry(*participant).or_default(),
+                                ) {
+                                    Ok(out) => {
+                                        section.deleted.extend(out.deleted);
+                                        section.records.extend(out.records);
+                                        chain.extend(
+                                            out.events
+                                                .into_iter()
+                                                .map(nfs_world::participants::HostRpc::Event),
+                                        );
+                                    }
+                                    Err(error) => {
+                                        self.refused += 1;
+                                        self.last_error = Some(error);
+                                        return false;
+                                    }
+                                }
+                            }
+                            for &participant in &exited {
+                                tracing::info!(
+                                    participant,
+                                    world_car = world_car.is_some(),
+                                    "owned garage exit granted; participant loads the world (startup state 77)"
+                                );
+                            }
+                            match world_car {
+                                // The official exit frame carries the car swap and
+                                // the state chain together (E748).
+                                Some(section) => {
+                                    if let Err(error) =
+                                        Self::register_world_car(&mut world_cars, &exited, &section)
+                                    {
+                                        self.refused += 1;
+                                        self.last_error = Some(error);
+                                        return false;
+                                    }
+                                    if let Some(car) = section.records.first()
+                                        && !garage_deletions.is_empty()
+                                    {
+                                        if deferred_deletions.len() >= MAX_WORLD_CARS {
+                                            self.refused += 1;
+                                            self.last_error = Some(replication::Error::Bound);
+                                            return false;
+                                        }
+                                        deferred_deletions
+                                            .insert(car.id, std::mem::take(&mut garage_deletions));
+                                    }
+                                    exit_entries.push((section, chain))
+                                }
+                                None => responses.extend(chain),
+                            }
+                        }
                         Ok(nfs_world::participants::Outcome::Repeated) => {}
                         Ok(nfs_world::participants::Outcome::Unsupported) => unsupported += 1,
                         Err(error) => {
@@ -889,6 +1136,16 @@ impl Listener for PlayerListener {
                 }
             }
         }
+        for (section, replies) in &exit_entries {
+            if !nfs_world::session::replication_frame(section, replies, 0)
+                .is_ok_and(|wire| wire.len() <= nfs_world::application::OUTBOUND_FRAME_BITS)
+            {
+                self.refused += 1;
+                self.last_error = Some(replication::Error::Bound);
+                return false;
+            }
+        }
+        entries.extend(exit_entries);
         if let Err(error) = Self::bind_progression_launchers(
             self.progression.as_deref(),
             &players,
@@ -902,11 +1159,22 @@ impl Listener for PlayerListener {
         }
         if spawned.messages.len() > MAX_PENDING.saturating_sub(self.pending_content.len())
             || responses.len() > nfs_world::session::MAX_RPC_QUEUE - self.pending_rpcs.len()
-            || sections.len() + usize::from(!records.is_empty()) > MAX_PENDING - self.pending.len()
+            || sections.len() + deferred_sections.len() + usize::from(!records.is_empty())
+                > MAX_PENDING - self.pending.len()
             || entries.len() > MAX_PENDING - self.pending_entries.len()
         {
             self.refused += 1;
             return false;
+        }
+        for participant in participants.in_free_roam() {
+            if self.participants.stage(participant)
+                != Some(nfs_world::participants::Stage::FreeRoam)
+            {
+                tracing::info!(
+                    participant,
+                    "owned world entry completed; participant entered FreeRoam state 2 (world vehicle not modeled)"
+                );
+            }
         }
         self.players = players;
         self.launchers = launchers;
@@ -929,6 +1197,12 @@ impl Listener for PlayerListener {
         }
         self.population = population;
         self.garage_presence = garage_presence;
+        self.spawn_points = spawn_points;
+        self.level_poll = level_poll;
+        self.world_cars = world_cars;
+        self.deferred_deletions = deferred_deletions;
+        self.pending_spawns.extend(scheduled_spawns);
+        self.pending_teleports.extend(scheduled_teleports);
         self.glass = glass;
         self.customization = customization;
         for (participant, measurement) in measurements {
@@ -971,6 +1245,7 @@ impl Listener for PlayerListener {
             });
         }
         self.pending.extend(sections);
+        self.pending.extend(deferred_sections);
         self.pending_entries.extend(entries);
         self.stats.record(&parsed, files)
     }

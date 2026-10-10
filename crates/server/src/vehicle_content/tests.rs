@@ -110,6 +110,7 @@ fn request(items: &Collection) -> Request<'_> {
             name: b"Local".to_vec(),
         },
         customization_attached: true,
+        world: false,
         authority_group: 10,
         authority_components: &[100],
     }

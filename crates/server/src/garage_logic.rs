@@ -101,6 +101,8 @@ pub struct Event {
 pub struct Batch {
     pub scene_updates: Vec<SceneUpdate>,
     pub entities: Vec<Definition>,
+    /// Boolean property changes on live entities: (capture, field, value).
+    pub entity_updates: Vec<(u16, usize, bool)>,
     pub delete: Vec<u16>,
     pub events: Vec<Event>,
 }
@@ -110,6 +112,10 @@ pub enum Which {
     Spawn,
     Entry,
     Vehicles,
+    /// Garage exit: the official host deletes the garage-only participant
+    /// logic and recreates the loading presentation for the world load
+    /// (E742 exit frame, decoded for E757).
+    Exit,
 }
 
 #[derive(Clone, Debug)]
@@ -119,6 +125,7 @@ pub struct GarageLogic {
     spawn: Batch,
     vehicles: Batch,
     entry: Batch,
+    exit: Batch,
 }
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Output {
@@ -349,6 +356,30 @@ fn batch(v: &Json, content: &Content, earlier: &BTreeSet<u16>) -> Result<Batch, 
             roles,
         });
     }
+    let entity_updates = match v.get("entity_updates") {
+        None => Vec::new(),
+        Some(list) => list
+            .as_array()
+            .filter(|a| a.len() <= MAX_UPDATES)
+            .ok_or(Failure::ProfileConfig)?
+            .iter()
+            .map(|u| {
+                keys(u, &["capture_id", "field", "bool"])?;
+                let capture = ghost_id(&u["capture_id"])?;
+                // Only entities that exist before this batch: their kinds are
+                // checked against the content when the batch is produced.
+                if !earlier.contains(&capture) {
+                    return Err(Failure::ProfileConfig);
+                }
+                let field = uint::<usize>(&u["field"])?;
+                if field >= MAX_FIELDS {
+                    return Err(Failure::ProfileConfig);
+                }
+                let value = u["bool"].as_bool().ok_or(Failure::ProfileConfig)?;
+                Ok((capture, field, value))
+            })
+            .collect::<Result<Vec<_>, Failure>>()?,
+    };
     let delete = match v.get("delete_capture_ids") {
         None => Vec::new(),
         Some(list) => list
@@ -396,6 +427,7 @@ fn batch(v: &Json, content: &Content, earlier: &BTreeSet<u16>) -> Result<Batch, 
     Ok(Batch {
         scene_updates,
         entities,
+        entity_updates,
         delete,
         events,
     })
@@ -451,6 +483,16 @@ impl GarageLogic {
             }
         };
         let entry = batch(&v["entry"], &content, &spawned)?;
+        let entered: BTreeSet<u16> = spawned
+            .iter()
+            .copied()
+            .chain(entry.entities.iter().map(|e| e.capture_id))
+            .filter(|id| !entry.delete.contains(id))
+            .collect();
+        let exit = match v.get("exit") {
+            None => Batch::default(),
+            Some(b) => batch(b, &content, &entered)?,
+        };
         let reputation = v
             .get("reputation_thresholds")
             .map(|value| {
@@ -472,6 +514,7 @@ impl GarageLogic {
         if entry
             .entities
             .iter()
+            .chain(&exit.entities)
             .flat_map(|d| &d.roles)
             .any(|r| matches!(r, Role::Reputation(_) | Role::ReputationLevelStat))
         {
@@ -519,6 +562,7 @@ impl GarageLogic {
             spawn,
             vehicles,
             entry,
+            exit,
         })
     }
     pub fn content(&self) -> &Content {
@@ -536,7 +580,12 @@ impl GarageLogic {
             Which::Spawn => &self.spawn,
             Which::Vehicles => &self.vehicles,
             Which::Entry => &self.entry,
+            Which::Exit => &self.exit,
         }
+    }
+    /// Whether deployment content describes the garage exit batch.
+    pub fn has_exit(&self) -> bool {
+        self.exit != Batch::default()
     }
     pub fn produce(
         &self,
@@ -595,6 +644,29 @@ impl GarageLogic {
             if let Some(record) =
                 players.change(scene, RecordUpdate::SubLevel { profile, fields })?
             {
+                output.records.push(record);
+            }
+        }
+        for &(capture, field, value) in &batch.entity_updates {
+            let ghost = *ghosts
+                .get(&capture)
+                .ok_or(replication::Error::UnknownObject)?;
+            let RecordUpdate::Entity { binding, .. } = &players
+                .objects()
+                .get(ghost)
+                .ok_or(replication::Error::UnknownObject)?
+                .current
+            else {
+                return Err(replication::Error::TypeMismatch);
+            };
+            let binding = binding.clone();
+            let kinds = binding.profile()?.kinds().to_vec();
+            if kinds.get(field) != Some(&Kind::BoolProperty) {
+                return Err(replication::Error::TypeMismatch);
+            }
+            let mut fields = vec![None; kinds.len()];
+            fields[field] = Some(Update::BoolProperty(Some(value)));
+            if let Some(record) = players.change(ghost, RecordUpdate::Entity { binding, fields })? {
                 output.records.push(record);
             }
         }
@@ -1039,5 +1111,143 @@ pub(crate) mod tests {
                 .is_err()
         );
         assert_ne!(players.objects().snapshot(), before.objects().snapshot());
+    }
+
+    fn with_exit(exit: Json) -> Json {
+        let mut v = content_json();
+        v["exit"] = exit;
+        v
+    }
+
+    #[test]
+    fn exit_batch_is_optional_and_references_live_captures_only() {
+        let logic = GarageLogic::from_json(&content_json()).unwrap();
+        assert!(!logic.has_exit());
+        let exit = json!({"scene_updates": [], "entities": [
+            {"capture_id": 400, "asset": {"bundle": 4, "type_id": 10, "local_index": 2}, "blueprint": {"scene_content_key": 101},
+             "roles": [{"kind": "root", "bus_count": 1}, {"kind": "channel", "scene_content_key": 101, "scene_serializer": 45}]}],
+            "delete_capture_ids": [277, 319]});
+        assert!(
+            GarageLogic::from_json(&with_exit(exit.clone()))
+                .unwrap()
+                .has_exit()
+        );
+        // Entry already deleted 295; an exit may not delete it again.
+        let mut bad = exit.clone();
+        bad["delete_capture_ids"] = json!([295]);
+        assert!(GarageLogic::from_json(&with_exit(bad)).is_err());
+        // Capture ids are unique across phases.
+        let mut bad = exit.clone();
+        bad["entities"][0]["capture_id"] = json!(319);
+        assert!(GarageLogic::from_json(&with_exit(bad)).is_err());
+        // Exit entities may not carry owned reputation roles.
+        let mut bad = exit;
+        bad["entities"][0]["asset"]["local_index"] = json!(0);
+        bad["entities"][0]["roles"] = json!([{"kind": "root", "bus_count": 1},
+            {"kind": "channel", "scene_content_key": 101, "scene_serializer": 64},
+            {"kind": "reputation", "field": "level"}, {"kind": "variant", "tag": 0, "value": 43}]);
+        assert!(GarageLogic::from_json(&with_exit(bad)).is_err());
+    }
+
+    #[test]
+    fn entity_updates_change_bool_properties_of_live_entities() {
+        let exit = json!({"scene_updates": [], "entities": [],
+            "entity_updates": [{"capture_id": 291, "field": 3, "bool": false}]});
+        let logic = GarageLogic::from_json(&with_exit(exit)).unwrap();
+        assert!(logic.has_exit());
+        let (mut players, participant) = world();
+        let mut ghosts = BTreeMap::new();
+        logic
+            .produce(Which::Spawn, &mut players, participant, &mut ghosts)
+            .unwrap();
+        logic
+            .produce(Which::Entry, &mut players, participant, &mut ghosts)
+            .unwrap();
+        let out = logic
+            .produce(Which::Exit, &mut players, participant, &mut ghosts)
+            .unwrap();
+        assert_eq!(out.records.len(), 1);
+        assert_eq!(out.records[0].id, ghosts[&291]);
+        assert!(out.records[0].initial.is_none());
+        let RecordUpdate::Entity { fields, .. } = &out.records[0].update else {
+            panic!()
+        };
+        assert_eq!(fields[3], Some(Update::BoolProperty(Some(false))));
+        assert!(fields[..3].iter().all(Option::is_none));
+        // The same value again changes nothing.
+        let again = logic
+            .produce(Which::Exit, &mut players, participant, &mut ghosts)
+            .unwrap();
+        assert!(again.records.is_empty());
+        // A field that is not a bool property, or an entity that is not alive.
+        let field = with_exit(json!({"scene_updates": [], "entities": [],
+            "entity_updates": [{"capture_id": 291, "field": 2, "bool": false}]}));
+        let logic = GarageLogic::from_json(&field).unwrap();
+        let (mut players, participant) = world();
+        let mut ghosts = BTreeMap::new();
+        logic
+            .produce(Which::Spawn, &mut players, participant, &mut ghosts)
+            .unwrap();
+        logic
+            .produce(Which::Entry, &mut players, participant, &mut ghosts)
+            .unwrap();
+        assert_eq!(
+            logic
+                .produce(Which::Exit, &mut players, participant, &mut ghosts)
+                .err(),
+            Some(replication::Error::TypeMismatch)
+        );
+        let dead = with_exit(json!({"scene_updates": [], "entities": [],
+            "entity_updates": [{"capture_id": 295, "field": 1, "bool": false}]}));
+        assert!(GarageLogic::from_json(&dead).is_err());
+    }
+
+    #[test]
+    fn exit_batch_deletes_garage_logic_and_recreates_presentation() {
+        let exit = json!({"scene_updates": [], "entities": [
+            {"capture_id": 400, "asset": {"bundle": 4, "type_id": 10, "local_index": 2}, "blueprint": {"scene_content_key": 101},
+             "roles": [{"kind": "root", "bus_count": 1}, {"kind": "channel", "scene_content_key": 101, "scene_serializer": 45}]}],
+            "delete_capture_ids": [319]});
+        let logic = GarageLogic::from_json(&with_exit(exit)).unwrap();
+        let (mut players, participant) = world();
+        let mut ghosts = BTreeMap::new();
+        logic
+            .produce(Which::Spawn, &mut players, participant, &mut ghosts)
+            .unwrap();
+        // Exit before entry: the customization presentation does not exist yet.
+        assert!(
+            logic
+                .produce(
+                    Which::Exit,
+                    &mut players.clone(),
+                    participant,
+                    &mut ghosts.clone()
+                )
+                .is_err()
+        );
+        logic
+            .produce(Which::Entry, &mut players, participant, &mut ghosts)
+            .unwrap();
+        let presentation = ghosts[&319];
+        let out = logic
+            .produce(Which::Exit, &mut players, participant, &mut ghosts)
+            .unwrap();
+        assert_eq!(out.deleted, vec![presentation]);
+        assert_eq!(out.records.len(), 1);
+        let Some(RecordInitial::Entity { fields, .. }) = &out.records[0].initial else {
+            panic!()
+        };
+        assert!(
+            matches!(fields[0], Initial::Root { value: 1, reference, .. } if reference == participant)
+        );
+        assert!(players.objects().get(presentation).is_none());
+        assert_eq!(ghosts.get(&400), Some(&out.records[0].id));
+        assert!(!ghosts.contains_key(&319));
+        // A second exit has nothing left to delete.
+        assert!(
+            logic
+                .produce(Which::Exit, &mut players, participant, &mut ghosts)
+                .is_err()
+        );
     }
 }

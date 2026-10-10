@@ -20,11 +20,21 @@ pub struct SceneRoles {
     pub traffic: [u32; 10],
     pub customization_timer: Asset,
     pub streaming_gate: Asset,
+    /// The level's SpawnPoints scene (`levels/Genesis01/SpawnPoints` in the
+    /// official session). Optional: without it, world spawns stay unsupported.
+    pub spawn_points: Option<u32>,
 }
 
 fn fields(v: &Value, expected: &[&str]) -> Result<(), Failure> {
+    fields_with(v, expected, &[])
+}
+fn fields_with(v: &Value, required: &[&str], optional: &[&str]) -> Result<(), Failure> {
     let object = v.as_object().ok_or(Failure::ProfileConfig)?;
-    if object.len() != expected.len() || expected.iter().any(|k| !object.contains_key(*k)) {
+    if required.iter().any(|k| !object.contains_key(*k))
+        || object
+            .keys()
+            .any(|k| !required.contains(&k.as_str()) && !optional.contains(&k.as_str()))
+    {
         return Err(Failure::ProfileConfig);
     }
     Ok(())
@@ -57,6 +67,7 @@ impl SceneRoles {
         for key in [self.gameplay, self.startup, self.garage, self.progression]
             .into_iter()
             .chain(self.traffic)
+            .chain(self.spawn_points)
         {
             if key <= 1 || !seen.insert(key) {
                 return Err(Failure::ProfileConfig);
@@ -73,7 +84,7 @@ impl SceneRoles {
         Ok(())
     }
     pub fn from_json(v: &Value) -> Result<Self, Failure> {
-        fields(
+        fields_with(
             v,
             &[
                 "level",
@@ -85,6 +96,7 @@ impl SceneRoles {
                 "customization_timer",
                 "streaming_gate",
             ],
+            &["spawn_points"],
         )?;
         let level = v["level"]
             .as_str()
@@ -109,12 +121,17 @@ impl SceneRoles {
                 .map_err(|_| Failure::ProfileConfig)?,
             customization_timer: asset(&v["customization_timer"])?,
             streaming_gate: asset(&v["streaming_gate"])?,
+            spawn_points: v.get("spawn_points").map(number).transpose()?,
         };
         result.validate()?;
         Ok(result)
     }
     pub fn to_json(&self) -> Value {
-        json!({"level":String::from_utf8_lossy(&self.level),"gameplay":self.gameplay,"startup":self.startup,"garage":self.garage,"progression":self.progression,"traffic":self.traffic,"customization_timer":asset_json(self.customization_timer),"streaming_gate":asset_json(self.streaming_gate)})
+        let mut v = json!({"level":String::from_utf8_lossy(&self.level),"gameplay":self.gameplay,"startup":self.startup,"garage":self.garage,"progression":self.progression,"traffic":self.traffic,"customization_timer":asset_json(self.customization_timer),"streaming_gate":asset_json(self.streaming_gate)});
+        if let Some(key) = self.spawn_points {
+            v["spawn_points"] = json!(key);
+        }
+        v
     }
 }
 
@@ -139,8 +156,18 @@ mod tests {
             *bad.pointer_mut(pointer).unwrap() = value;
             assert!(SceneRoles::from_json(&bad).is_err(), "{pointer}");
         }
-        let mut bad = v;
+        let mut bad = v.clone();
         bad["runtime_object_id"] = json!(1);
         assert!(SceneRoles::from_json(&bad).is_err());
+        let mut spawn = v;
+        spawn["spawn_points"] = json!(105);
+        let roles = SceneRoles::from_json(&spawn).unwrap();
+        assert_eq!(roles.spawn_points, Some(105));
+        assert_eq!(roles.to_json(), spawn);
+        for value in [json!(101), json!(11), json!(1), json!(-1), json!("105")] {
+            let mut bad = spawn.clone();
+            bad["spawn_points"] = value;
+            assert!(SceneRoles::from_json(&bad).is_err());
+        }
     }
 }

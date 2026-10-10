@@ -901,8 +901,42 @@ pub async fn world_host(
             warn!(connection, ?error, "sequence world clock rejected");
             return;
         }
+        if let Err(error) = listener.advance_level_poll(now_ms()) {
+            warn!(connection, ?error, "level poll rejected");
+            return;
+        }
         if !listener.files_alive(now_ms()) {
             warn!(connection, "incoming File deadline; closing world");
+            return;
+        }
+        while let Some(command) = listener.due_teleport(now_ms()) {
+            let bytes = match command.encode() {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    warn!(connection, ?error, "owned car teleport rejected");
+                    return;
+                }
+            };
+            match host.queue_content(nfs_world::teleport::CONTENT_TARGET, &bytes) {
+                Ok(chunks) => {
+                    info!(
+                        connection,
+                        chunks,
+                        participant = command.participant,
+                        vehicle = command.vehicle,
+                        "owned car teleport queued"
+                    );
+                    listener.teleport_sent();
+                }
+                Err(nfs_world::session::Error::Application(application::Error::Window)) => break,
+                Err(error) => {
+                    warn!(connection, ?error, "owned car teleport rejected");
+                    return;
+                }
+            }
+        }
+        if let Err(error) = host.set_movement(listener.movement_objects()) {
+            warn!(connection, ?error, "movement grants rejected");
             return;
         }
         let output = tokio::select! {

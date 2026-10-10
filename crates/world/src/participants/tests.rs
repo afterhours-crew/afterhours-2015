@@ -435,3 +435,231 @@ fn unmodeled_entry_inputs_block_without_sending_a_partial_chain() {
         );
     }
 }
+
+fn exit_bindings() -> ExitBindings {
+    let e = |scene, selector| Endpoint {
+        scene,
+        selector,
+        serial: Serial::new(0).unwrap(),
+    };
+    ExitBindings {
+        exit_request: e(4, 96),
+        garage_exit_request: e(17, 8),
+        state_94: e(4, 93),
+        state_4: e(4, 3),
+        state_3: e(4, 2),
+        state_77: e(4, 76),
+        state_83: e(4, 82),
+        state_78: e(4, 77),
+        ready_request: e(4, 80),
+        state_79: e(4, 78),
+        state_2: e(4, 1),
+        garage_calls: [0, 3, 4, 5, 6].map(|selector| e(17, selector)),
+    }
+}
+fn request(scene: u16, participant: u16, selector: u16, method: u32, bits: usize) -> BitWriter {
+    let mut payload = BitWriter::new();
+    payload
+        .put(selector.into(), 9)
+        .put(method.into(), 32)
+        .put(0, bits);
+    payload.align();
+    let mut body = BitWriter::new();
+    body.put(0, 32)
+        .put(0, 32)
+        .put(2, 8)
+        .put(scene.into(), 13)
+        .put(participant.into(), 13)
+        .put(payload.bytes().len() as u64, 9)
+        .put_span(payload.span());
+    body
+}
+fn in_customization(participant: u16) -> Lifecycle {
+    let mut model = ready();
+    model.exit = Some(exit_bindings());
+    loading_garage(&mut model, participant);
+    assert!(matches!(
+        model.enter_customization(participant),
+        Outcome::Advanced(_)
+    ));
+    model
+}
+fn calls(outcome: Outcome) -> Vec<(u16, u16, u32, u8)> {
+    let Outcome::Advanced(chain) = outcome else {
+        panic!("advanced: {outcome:?}");
+    };
+    chain
+        .iter()
+        .map(|n| {
+            assert!(n.encode().is_ok());
+            (
+                n.endpoint.scene,
+                n.endpoint.selector,
+                n.call.method(),
+                n.call.tail(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn garage_exit_and_world_entry_follow_the_official_order() {
+    let mut model = in_customization(8);
+    let owns = |p| p == 8;
+    assert_eq!(
+        model.receive(request(17, 8, 8, 0, 7).span(), owns).unwrap(),
+        Outcome::Repeated
+    );
+    assert_eq!(model.stage(8), Some(Stage::Customization));
+    assert_eq!(
+        calls(model.receive(request(4, 8, 96, 0, 7).span(), owns).unwrap()),
+        [
+            (4, 86, 1, 0),
+            (4, 93, 0, 0),
+            (4, 93, 1, 0),
+            (17, 0, 2, 0),
+            (17, 3, 2, 0),
+            (17, 4, 2, 0),
+            (17, 5, 2, 0),
+            (17, 6, 2, 0),
+            (4, 3, 0, 0),
+            (4, 3, 1, 31),
+            (4, 2, 0, 0),
+            (4, 2, 1, 0),
+            (4, 76, 0, 0),
+        ]
+    );
+    assert_eq!(model.stage(8), Some(Stage::ExitingGarage));
+    assert_eq!(model.take_exited(), vec![8]);
+    assert!(model.take_exited().is_empty());
+    for repeat in [request(4, 8, 96, 0, 7), request(17, 8, 8, 0, 7)] {
+        assert_eq!(
+            model.receive(repeat.span(), owns).unwrap(),
+            Outcome::Repeated
+        );
+    }
+    assert!(model.take_exited().is_empty());
+    assert_eq!(
+        calls(model.receive(request(4, 8, 76, 3, 7).span(), owns).unwrap()),
+        [(4, 76, 1, 0), (4, 82, 0, 0), (4, 82, 1, 0), (4, 77, 0, 0)]
+    );
+    assert_eq!(model.stage(8), Some(Stage::EnteringWorld));
+    assert_eq!(
+        calls(model.receive(request(4, 8, 80, 0, 7).span(), owns).unwrap()),
+        [(4, 77, 1, 0), (4, 78, 0, 0), (4, 78, 1, 0), (4, 1, 0, 0)]
+    );
+    assert_eq!(model.stage(8), Some(Stage::FreeRoam));
+    assert_eq!(model.in_free_roam(), vec![8]);
+    for repeat in [
+        request(4, 8, 96, 0, 7),
+        request(4, 8, 76, 3, 7),
+        request(4, 8, 80, 0, 7),
+    ] {
+        assert_eq!(
+            model.receive(repeat.span(), owns).unwrap(),
+            Outcome::Repeated
+        );
+    }
+    assert_eq!(
+        model.receive(ack(8, 3).span(), owns).unwrap(),
+        Outcome::Repeated
+    );
+}
+
+#[test]
+fn exit_requests_out_of_order_foreign_or_malformed_change_nothing() {
+    let model = in_customization(8);
+    for early in [request(4, 8, 76, 3, 7), request(4, 8, 80, 0, 7)] {
+        let mut m = model.clone();
+        assert_eq!(
+            m.receive(early.span(), |p| p == 8).unwrap(),
+            Outcome::Unsupported
+        );
+        assert_eq!(m, model);
+    }
+    let mut m = model.clone();
+    assert_eq!(
+        m.receive(request(4, 8, 96, 0, 7).span(), |_| false),
+        Err(Error::UnknownObject)
+    );
+    assert_eq!(
+        m.receive(request(4, 9, 96, 0, 7).span(), |_| true),
+        Err(Error::UnknownObject)
+    );
+    assert_eq!(
+        m.receive(request(4, 8, 96, 0, 15).span(), |_| true),
+        Err(Error::Shape)
+    );
+    assert_eq!(m, model);
+    // A participant still loading cannot exit; the exit route answers nothing.
+    let mut loading = ready();
+    loading.exit = Some(exit_bindings());
+    loading_garage(&mut loading, 9);
+    let before = loading.clone();
+    assert_eq!(
+        loading
+            .receive(request(4, 9, 96, 0, 7).span(), |p| p == 9)
+            .unwrap(),
+        Outcome::Unsupported
+    );
+    assert_eq!(loading, before);
+    // Without exit bindings the request is not an exit route.
+    let mut unbound = ready();
+    loading_garage(&mut unbound, 8);
+    unbound.enter_customization(8);
+    assert_eq!(
+        unbound
+            .receive(request(4, 8, 96, 0, 7).span(), |p| p == 8)
+            .unwrap(),
+        Outcome::Unsupported
+    );
+    assert_eq!(unbound.stage(8), Some(Stage::Customization));
+}
+
+#[test]
+fn tagged_leave_carries_its_tail_and_plain_calls_keep_zero_padding() {
+    let e = Endpoint {
+        scene: 4,
+        selector: 3,
+        serial: Serial::new(44).unwrap(),
+    };
+    for (call, tail) in [
+        (Call::LeaveTagged(31), 31),
+        (Call::Leave, 0),
+        (Call::Enter, 0),
+        (Call::Notify, 0),
+    ] {
+        let bits = Notification {
+            endpoint: e,
+            participant: 8,
+            call,
+        }
+        .encode()
+        .unwrap();
+        let envelope = Envelope::decode(
+            bits.span(),
+            Limits {
+                max_input_bits: 4096,
+                max_references: 2,
+                max_payload_bytes: 7,
+            },
+        )
+        .unwrap();
+        let route = envelope.route(RouteProfile::ClientReceive).unwrap();
+        assert_eq!(route.method_index(), call.method());
+        assert_eq!(route.arguments().len(), 5);
+        assert_eq!(route.arguments().read_u32(0, 5).unwrap(), tail);
+    }
+    assert_eq!(
+        Notification {
+            endpoint: e,
+            participant: 8,
+            call: Call::LeaveTagged(32),
+        }
+        .encode()
+        .err(),
+        Some(Error::Bound)
+    );
+    assert_eq!(ExitBindings::from_records(&[], 1, 2), Ok(None));
+    assert_eq!(ExitBindings::from_records(&[], 1, 1), Err(Error::Shape));
+}

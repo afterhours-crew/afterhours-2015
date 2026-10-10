@@ -145,7 +145,16 @@ runtime requires version 4 with `roles`. This object names `level`, `gameplay`,
 `local_index`). Scene keys must be distinct, greater than one and present in the
 scene profiles; root key one is reserved. The level must match the level
 registration. These inputs are static roles, never previously allocated ghost
-IDs. No default game asset table is embedded in the server.
+IDs. No default game asset table is embedded in the server. An optional
+`spawn_points` key names the level's SpawnPoints scene.
+
+At garage exit the server answers the leave request with the participant state
+chain and, when the garage layout has a `world_spawn` pose, replaces the garage
+car with a driveable world car in the same frame. When the client reports the
+new car, the server assigns a spawn point (a per-session id). It answers spawn
+requests and releases with the scene's occupied flag. Once a participant has
+joined, the server polls the level root about every 1.1 s, and the client's
+answers are recorded. Later world entry steps are not modeled.
 
 `--redirector-port 0` chooses an ephemeral port (the default).
 `--idle-seconds` accepts 1–3600, and `--qos-seconds` accepts 1–86400.

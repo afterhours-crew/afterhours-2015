@@ -51,6 +51,37 @@ impl PlayerListener {
         self.world_ms = world_ms;
         Ok(())
     }
+    /// Queue the level root poll when due, once a participant has begun
+    /// (its scenes then exist on the client). Official cadence ~1.1 s.
+    pub(in crate::net) fn advance_level_poll(
+        &mut self,
+        world_ms: u64,
+    ) -> Result<(), replication::Error> {
+        if !self.participants.has_participants()
+            || self.pending_rpcs.len() >= nfs_world::session::MAX_RPC_QUEUE
+        {
+            return Ok(());
+        }
+        let poll = self.level_poll.due(world_ms)?;
+        let polled = poll.is_some();
+        if let Some(poll) = poll {
+            self.pending_rpcs
+                .push_back(nfs_world::participants::HostRpc::LevelPoll(poll));
+        }
+        // Official spawn assignments share a frame with a level poll (E755).
+        if polled || self.level_poll.endpoint().is_none() {
+            for notification in Self::release_spawns(&mut self.pending_spawns, world_ms) {
+                tracing::info!(
+                    participant = notification.participant,
+                    call = ?notification.call,
+                    "owned spawn point assigned"
+                );
+                self.pending_rpcs
+                    .push_back(nfs_world::participants::HostRpc::Participant(notification));
+            }
+        }
+        Ok(())
+    }
     pub(super) fn refresh_readiness(
         roles: Option<&crate::scene_roles::SceneRoles>,
         sequences: &mut Sequences,
