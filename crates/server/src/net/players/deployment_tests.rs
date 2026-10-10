@@ -290,3 +290,21 @@ fn the_world_car_is_registered_when_garage_logic_records_follow_it() {
         Err(replication::Error::Bound)
     );
 }
+
+#[test]
+fn the_garage_car_is_deleted_once_the_client_reports_the_world_car() {
+    use nfs_world::logic::{EntityRef, Message};
+    let report = |ghost| Message::Reached {
+        event: 28_404_286,
+        target: EntityRef { ghost, entity: 2 },
+        player: 0,
+    };
+    let mut deferred = BTreeMap::from([(205, vec![203])]);
+    assert!(PlayerListener::garage_car_deletion(&report(204), &mut deferred).is_none());
+    let section = PlayerListener::garage_car_deletion(&report(205), &mut deferred).unwrap();
+    assert_eq!(section.deleted, vec![203]);
+    assert!(section.records.is_empty() && section.setup.is_none());
+    // The later reports of the same car delete nothing more.
+    assert!(PlayerListener::garage_car_deletion(&report(205), &mut deferred).is_none());
+    assert!(deferred.is_empty());
+}

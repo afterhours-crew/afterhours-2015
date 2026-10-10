@@ -44,6 +44,8 @@ pub(super) struct PlayerListener {
     level_poll: nfs_world::level_poll::LevelPoll,
     /// World car ghost -> (participant, spawn assigned).
     world_cars: BTreeMap<u16, (u16, bool)>,
+    /// World car ghost -> garage car deletions sent once the client reports it.
+    deferred_deletions: BTreeMap<u16, Vec<u16>>,
     glass: crate::glass::Glass,
     customization: crate::customization_timer::Timers,
     world_ms: u64,
@@ -408,6 +410,7 @@ impl PlayerListener {
             spawn_points: nfs_world::spawn_points::SpawnPoints::default(),
             level_poll: nfs_world::level_poll::LevelPoll::default(),
             world_cars: BTreeMap::new(),
+            deferred_deletions: BTreeMap::new(),
             glass: crate::glass::Glass::default(),
             customization: crate::customization_timer::Timers::default(),
             world_ms: 0,
@@ -606,6 +609,8 @@ impl Listener for PlayerListener {
         let mut spawn_points = self.spawn_points.clone();
         let mut level_poll = self.level_poll.clone();
         let mut world_cars = self.world_cars.clone();
+        let mut deferred_deletions = self.deferred_deletions.clone();
+        let mut deferred_sections = Vec::new();
         let mut sequences = self.sequences.clone();
         let mut logic_ghosts = self.logic_ghosts.clone();
         let mut unsupported_logic = 0;
@@ -683,6 +688,15 @@ impl Listener for PlayerListener {
                             "owned world car created; spawn point assigned"
                         );
                         responses.push(nfs_world::participants::HostRpc::Participant(notification));
+                    }
+                    if let Some(section) =
+                        Self::garage_car_deletion(&message, &mut deferred_deletions)
+                    {
+                        tracing::info!(
+                            deleted = ?section.deleted,
+                            "world car reported; garage car deleted"
+                        );
+                        deferred_sections.push(section);
                     }
                 } else {
                     unsupported_logic += 1;
@@ -832,6 +846,7 @@ impl Listener for PlayerListener {
                                     }
                                 }
                             }
+                            let mut garage_deletions = Vec::new();
                             let mut world_car = match exited.as_slice() {
                                 [participant] => match Self::exit_world_car(
                                     &mut players,
@@ -841,7 +856,11 @@ impl Listener for PlayerListener {
                                     *participant,
                                     self.persona,
                                 ) {
-                                    Ok(section) => section,
+                                    Ok(Some((section, deleted))) => {
+                                        garage_deletions = deleted;
+                                        Some(section)
+                                    }
+                                    Ok(None) => None,
                                     Err(error) => {
                                         self.refused += 1;
                                         self.last_error = Some(error);
@@ -895,6 +914,17 @@ impl Listener for PlayerListener {
                                         self.refused += 1;
                                         self.last_error = Some(error);
                                         return false;
+                                    }
+                                    if let Some(car) = section.records.first()
+                                        && !garage_deletions.is_empty()
+                                    {
+                                        if deferred_deletions.len() >= MAX_WORLD_CARS {
+                                            self.refused += 1;
+                                            self.last_error = Some(replication::Error::Bound);
+                                            return false;
+                                        }
+                                        deferred_deletions
+                                            .insert(car.id, std::mem::take(&mut garage_deletions));
                                     }
                                     exit_entries.push((section, chain))
                                 }
@@ -1090,7 +1120,8 @@ impl Listener for PlayerListener {
         }
         if spawned.messages.len() > MAX_PENDING.saturating_sub(self.pending_content.len())
             || responses.len() > nfs_world::session::MAX_RPC_QUEUE - self.pending_rpcs.len()
-            || sections.len() + usize::from(!records.is_empty()) > MAX_PENDING - self.pending.len()
+            || sections.len() + deferred_sections.len() + usize::from(!records.is_empty())
+                > MAX_PENDING - self.pending.len()
             || entries.len() > MAX_PENDING - self.pending_entries.len()
         {
             self.refused += 1;
@@ -1130,6 +1161,7 @@ impl Listener for PlayerListener {
         self.spawn_points = spawn_points;
         self.level_poll = level_poll;
         self.world_cars = world_cars;
+        self.deferred_deletions = deferred_deletions;
         self.glass = glass;
         self.customization = customization;
         for (participant, measurement) in measurements {
@@ -1172,6 +1204,7 @@ impl Listener for PlayerListener {
             });
         }
         self.pending.extend(sections);
+        self.pending.extend(deferred_sections);
         self.pending_entries.extend(entries);
         self.stats.record(&parsed, files)
     }

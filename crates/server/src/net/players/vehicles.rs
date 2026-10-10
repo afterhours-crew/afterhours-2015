@@ -137,7 +137,7 @@ impl PlayerListener {
         content: Option<&GarageContent>,
         participant: u16,
         persona: u64,
-    ) -> Result<Option<Section>, replication::Error> {
+    ) -> Result<Option<(Section, Vec<u16>)>, replication::Error> {
         let (Some(population), Some(inventory), Some(content)) = (population, inventory, content)
         else {
             return Ok(None);
@@ -161,13 +161,35 @@ impl PlayerListener {
             // here would need content delivery before the creation.
             return Err(replication::Error::Unsupported);
         }
-        Ok(Some(Section {
+        // The garage car stays on the wire until the client reports the world
+        // car; the official host deletes it in a later frame (E742, E759).
+        Ok(Some((
+            Section {
+                float_bits: None,
+                flag: false,
+                deleted: Vec::new(),
+                setup: Some(Setup::RawEscape([0; 3])),
+                records: spawned.records,
+            },
+            spawned.deleted,
+        )))
+    }
+    /// The deferred garage car deletion for a world car's first report.
+    pub(super) fn garage_car_deletion(
+        message: &nfs_world::logic::Message,
+        deferred: &mut BTreeMap<u16, Vec<u16>>,
+    ) -> Option<Section> {
+        let nfs_world::logic::Message::Reached { target, .. } = message else {
+            return None;
+        };
+        let deleted = deferred.remove(&target.ghost)?;
+        Some(Section {
             float_bits: None,
             flag: false,
-            deleted: spawned.deleted,
-            setup: Some(Setup::RawEscape([0; 3])),
-            records: spawned.records,
-        }))
+            deleted,
+            setup: None,
+            records: Vec::new(),
+        })
     }
     pub(super) fn populate(
         players: &mut Players,
