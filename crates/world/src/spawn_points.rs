@@ -35,8 +35,6 @@ const ID_OFFSET: usize = 64;
 /// Client methods on the assignment endpoint.
 pub const REQUEST: u32 = 2;
 pub const RELEASE: u32 = 3;
-/// Property value the official host set when the player left the garage.
-pub const GARAGE_EXIT: u32 = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Bindings {
@@ -94,6 +92,14 @@ impl SpawnPoints {
     }
     pub fn assigned(&self, participant: u16) -> Option<u32> {
         self.assigned.get(&participant).copied()
+    }
+    /// Official hosts number a participant's world spawns 1, 2, 3, ... within
+    /// a session: E101's first garage exit assigned 1, and E742's garage exit
+    /// assigned 3 after the prelude (1) and starter choice (2).
+    pub fn next_value(&self, participant: u16) -> u32 {
+        self.assigned
+            .get(&participant)
+            .map_or(1, |v| v.saturating_add(1))
     }
     /// Set `participant`'s property to `value`.
     pub fn assign(&mut self, participant: u16, value: u32) -> Result<Notification, Error> {

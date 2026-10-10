@@ -102,9 +102,10 @@ impl PlayerListener {
     }
     /// The client's glass condition reports on a world car we created (it
     /// sends three on every new player car; E748/E750/E751). The first one
-    /// assigns the participant a spawn point; `Some(None)` is a recognized
-    /// report that needs no assignment (repeat, or no SpawnPoints scene bound).
-    /// The glass reply itself is the caller's.
+    /// assigns the participant its next spawn value; `Some(None)` is a
+    /// recognized report that needs no assignment (repeat, or no SpawnPoints
+    /// scene bound). The glass reply and the assignment's delivery (see
+    /// `release_spawns`) are the caller's.
     pub(super) fn world_car_ready(
         message: &nfs_world::logic::Message,
         world_cars: &mut BTreeMap<u16, (u16, bool)>,
@@ -122,10 +123,28 @@ impl PlayerListener {
         if *assigned || spawn_points.bindings().is_none() {
             return Ok(Some(None));
         }
-        let notification =
-            spawn_points.assign(*participant, nfs_world::spawn_points::GARAGE_EXIT)?;
+        let value = spawn_points.next_value(*participant);
+        let notification = spawn_points.assign(*participant, value)?;
         *assigned = true;
         Ok(Some(Some(notification)))
+    }
+    /// Assignments due by `world_ms`, oldest first. Official hosts send the
+    /// spawn assignment 0.8-1 s after the world car's glass reports, in a frame
+    /// with a level poll (E101: 777 ms, E742: 970 ms); E765's assignment 145 ms
+    /// after exit was never requested.
+    pub(super) fn release_spawns(
+        pending: &mut VecDeque<(u64, nfs_world::participants::Notification)>,
+        world_ms: u64,
+    ) -> Vec<nfs_world::participants::Notification> {
+        let mut due = Vec::new();
+        while let Some(&(at, notification)) = pending.front() {
+            if at > world_ms {
+                break;
+            }
+            due.push(notification);
+            pending.pop_front();
+        }
+        due
     }
     /// Garage exit: swap the participant's garage car for its world car in one
     /// section (deletion and creation, absolute origin as for garage cars).

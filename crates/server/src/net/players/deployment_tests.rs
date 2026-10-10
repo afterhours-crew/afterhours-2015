@@ -220,12 +220,23 @@ fn glass_reports_on_a_world_car_assign_one_spawn() {
     };
     assert_eq!(
         (first.participant, first.call),
-        (
-            40,
-            nfs_world::participants::Call::Assign(nfs_world::spawn_points::GARAGE_EXIT)
-        )
+        (40, nfs_world::participants::Call::Assign(1))
     );
     assert_eq!(first.endpoint, spawn.bindings().unwrap().assign);
+    // The assignment waits until due, then leaves in order (E765 regression:
+    // an assignment 145 ms after exit was never requested).
+    let mut pending = std::collections::VecDeque::from([(1_000, first), (1_500, first)]);
+    assert!(PlayerListener::release_spawns(&mut pending, 999).is_empty());
+    assert_eq!(
+        PlayerListener::release_spawns(&mut pending, 1_200),
+        vec![first]
+    );
+    assert_eq!(pending.len(), 1);
+    assert_eq!(
+        PlayerListener::release_spawns(&mut pending, 2_000),
+        vec![first]
+    );
+    assert!(pending.is_empty());
     // The three reports are glass signals, which the glass model answers
     // before the assignment (regression: E751 never reached the assignment).
     for report in [28_404_286, 14_703_462, 21_578_436] {
@@ -237,10 +248,7 @@ fn glass_reports_on_a_world_car_assign_one_spawn() {
             Ok(Some(None))
         );
     }
-    assert_eq!(
-        spawn.assigned(40),
-        Some(nfs_world::spawn_points::GARAGE_EXIT)
-    );
+    assert_eq!(spawn.assigned(40), Some(1));
 }
 
 #[test]

@@ -145,7 +145,7 @@ fn binds_the_scene_layout_and_rejects_absent_duplicate_or_other_shapes() {
 #[test]
 fn assignments_carry_the_value_then_padding() {
     let mut model = bound();
-    for (participant, value) in [(PLAYER, 1), (PLAYER, 2), (PLAYER, GARAGE_EXIT)] {
+    for (participant, value) in [(PLAYER, 1), (PLAYER, 2), (PLAYER, 3)] {
         let n = model.assign(participant, value).unwrap();
         assert_eq!(n.call, Call::Assign(value));
         assert_eq!(model.assigned(participant), Some(value));
@@ -271,10 +271,10 @@ fn participants_are_isolated_and_assignments_are_bounded() {
     ));
     let mut full = bound();
     for participant in 1..=128 {
-        full.assign(participant, GARAGE_EXIT).unwrap();
+        full.assign(participant, 3).unwrap();
     }
     let before = full.clone();
-    assert_eq!(full.assign(129, GARAGE_EXIT), Err(Error::Bound));
+    assert_eq!(full.assign(129, 3), Err(Error::Bound));
     assert_eq!(full, before);
     // An assigned participant may be set again.
     assert_eq!(full.assign(1, 129).unwrap().call, Call::Assign(129));

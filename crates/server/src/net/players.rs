@@ -27,6 +27,9 @@ mod vehicles;
 
 const MAX_PENDING: usize = 32;
 const MAX_WORLD_CARS: usize = 128;
+/// Delay from a world car's first glass report to its spawn assignment; the
+/// assignment then rides the next level poll (official 777-970 ms).
+const SPAWN_DELAY_MS: u64 = 750;
 
 pub(super) struct PlayerListener {
     stats: Accepting,
@@ -46,6 +49,8 @@ pub(super) struct PlayerListener {
     world_cars: BTreeMap<u16, (u16, bool)>,
     /// World car ghost -> garage car deletions sent once the client reports it.
     deferred_deletions: BTreeMap<u16, Vec<u16>>,
+    /// Spawn assignments held until due (world ms), sent with a level poll.
+    pending_spawns: VecDeque<(u64, nfs_world::participants::Notification)>,
     glass: crate::glass::Glass,
     customization: crate::customization_timer::Timers,
     world_ms: u64,
@@ -417,6 +422,7 @@ impl PlayerListener {
             level_poll: nfs_world::level_poll::LevelPoll::default(),
             world_cars: BTreeMap::new(),
             deferred_deletions: BTreeMap::new(),
+            pending_spawns: VecDeque::new(),
             glass: crate::glass::Glass::default(),
             customization: crate::customization_timer::Timers::default(),
             world_ms: 0,
@@ -617,6 +623,7 @@ impl Listener for PlayerListener {
         let mut world_cars = self.world_cars.clone();
         let mut deferred_deletions = self.deferred_deletions.clone();
         let mut deferred_sections = Vec::new();
+        let mut scheduled_spawns = Vec::new();
         let mut sequences = self.sequences.clone();
         let mut logic_ghosts = self.logic_ghosts.clone();
         let mut unsupported_logic = 0;
@@ -683,7 +690,8 @@ impl Listener for PlayerListener {
                         glass.receive(owner, &message)?,
                     ));
                     // A world car's first glass report also shows that the
-                    // client has the car: assign its spawn point (E751).
+                    // client has the car: assign its spawn point (E751), sent
+                    // with a level poll once due (`release_spawns`).
                     if let Some(notification) =
                         Self::world_car_ready(&message, &mut world_cars, &mut spawn_points)?
                             .flatten()
@@ -691,9 +699,9 @@ impl Listener for PlayerListener {
                         tracing::info!(
                             participant = notification.participant,
                             call = ?notification.call,
-                            "owned world car created; spawn point assigned"
+                            "owned world car created; spawn point assignment scheduled"
                         );
-                        responses.push(nfs_world::participants::HostRpc::Participant(notification));
+                        scheduled_spawns.push((self.world_ms + SPAWN_DELAY_MS, notification));
                     }
                     if let Some(section) =
                         Self::garage_car_deletion(&message, &mut deferred_deletions)
@@ -1168,6 +1176,7 @@ impl Listener for PlayerListener {
         self.level_poll = level_poll;
         self.world_cars = world_cars;
         self.deferred_deletions = deferred_deletions;
+        self.pending_spawns.extend(scheduled_spawns);
         self.glass = glass;
         self.customization = customization;
         for (participant, measurement) in measurements {

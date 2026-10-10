@@ -62,9 +62,23 @@ impl PlayerListener {
         {
             return Ok(());
         }
-        if let Some(poll) = self.level_poll.due(world_ms)? {
+        let poll = self.level_poll.due(world_ms)?;
+        let polled = poll.is_some();
+        if let Some(poll) = poll {
             self.pending_rpcs
                 .push_back(nfs_world::participants::HostRpc::LevelPoll(poll));
+        }
+        // Official spawn assignments share a frame with a level poll (E755).
+        if polled || self.level_poll.endpoint().is_none() {
+            for notification in Self::release_spawns(&mut self.pending_spawns, world_ms) {
+                tracing::info!(
+                    participant = notification.participant,
+                    call = ?notification.call,
+                    "owned spawn point assigned"
+                );
+                self.pending_rpcs
+                    .push_back(nfs_world::participants::HostRpc::Participant(notification));
+            }
         }
         Ok(())
     }
