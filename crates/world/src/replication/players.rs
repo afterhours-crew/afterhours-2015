@@ -34,10 +34,21 @@ struct Player {
 pub struct Players {
     objects: state::World,
     players: BTreeMap<(u8, u8), Player>,
-    next_runtime_index: u16,
     participants: BTreeMap<u16, u16>,
     actors: BTreeMap<u16, u16>,
     vehicles: BTreeMap<(u16, u64), u16>,
+}
+
+/// Native runtime index of the player on `connection` and local `slot`.
+/// Official hosts give a connection's player index `connection - 1`: the E742
+/// and E101 rosters map value8 1..6 to 0..5, and the E101 client on connection
+/// 5 was answered as player 4 (E762). Further local slots are not observed;
+/// they take a stride of 16 so sixteen connections fill the 7-bit width.
+fn runtime_index(connection: u8, slot: u8) -> Option<u8> {
+    let index = u16::from(connection)
+        .checked_sub(1)?
+        .checked_add(16 * u16::from(slot))?;
+    u8::try_from(index).ok().filter(|i| *i < 128)
 }
 
 impl Players {
@@ -213,14 +224,22 @@ impl Players {
                 Err(Error::DuplicateObject)
             };
         }
-        if self.next_runtime_index >= 128 {
+        if self.players.len() >= 128 {
             return Err(Error::Bound);
+        }
+        let index = runtime_index(connection, request.slot).ok_or(Error::Bound)?;
+        if self
+            .players
+            .keys()
+            .any(|&(c, s)| runtime_index(c, s) == Some(index))
+        {
+            return Err(Error::DuplicateObject);
         }
         let initial = Initial::Player(PlayerInit {
             value8: connection,
             name: name.clone(),
             value255: request.slot,
-            runtime_index: self.next_runtime_index as u8,
+            runtime_index: index,
             identity: identity.clone(),
             flag_a: false,
             flag_b: false,
@@ -247,7 +266,6 @@ impl Players {
             component_present: true,
         });
         let record = self.objects.spawn(initial, update)?;
-        self.next_runtime_index += 1;
         self.players.insert(key, Player { identity, request });
         Ok(Some(record))
     }
@@ -354,6 +372,40 @@ mod tests {
         assert_eq!(Record::decode(wire.span(), None).unwrap().record, record);
     }
 
+    #[test]
+    fn runtime_index_is_the_connection_less_one_as_on_official_hosts() {
+        let mut world = Players::default();
+        for (connection, persona, expected) in [(5, 500, 4), (4, 400, 3), (1, 100, 0)] {
+            let record = world
+                .create(connection, persona, request())
+                .unwrap()
+                .unwrap();
+            let Some(Initial::Player(p)) = &record.initial else {
+                panic!()
+            };
+            assert_eq!((p.value8, p.runtime_index), (connection, expected));
+        }
+        // A second slot on connection 1 takes index 16; connection 17 would
+        // need the same index and is refused without consuming an id.
+        let slot = Request {
+            slot: 1,
+            ..request()
+        };
+        let second = world.create(1, 101, slot).unwrap().unwrap();
+        let Some(Initial::Player(p)) = &second.initial else {
+            panic!()
+        };
+        assert_eq!(p.runtime_index, 16);
+        let before = world.objects().len();
+        assert_eq!(
+            world.create(17, 1700, request()),
+            Err(Error::DuplicateObject)
+        );
+        assert_eq!(world.objects().len(), before);
+        assert_eq!(runtime_index(129, 0), None);
+        assert_eq!(runtime_index(1, 8), None);
+        assert_eq!(runtime_index(0, 0), None);
+    }
     #[test]
     fn runtime_index_follows_the_owning_player_and_ownership() {
         let mut world = Players::default();
