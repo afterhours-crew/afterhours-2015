@@ -909,6 +909,10 @@ pub async fn world_host(
             warn!(connection, "incoming File deadline; closing world");
             return;
         }
+        if let Err(error) = host.set_movement(listener.movement_objects()) {
+            warn!(connection, ?error, "movement grants rejected");
+            return;
+        }
         let output = tokio::select! {
             success = items.completed(&mut listener), if items.working() => {
                 if !success { return; }

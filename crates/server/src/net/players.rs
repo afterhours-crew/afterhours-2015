@@ -394,6 +394,12 @@ impl PlayerListener {
     pub(super) fn files_alive(&mut self, now: u64) -> bool {
         self.stats.files_alive(now)
     }
+    /// Cars this connection's client simulates and reports movement for: the
+    /// garage cars, then the world car (official E101 grants).
+    pub(super) fn movement_objects(&self) -> BTreeSet<u16> {
+        self.players
+            .owned_vehicles(HOST_SELECTOR as u8, self.persona)
+    }
     pub(super) fn new(persona: u64) -> Self {
         Self {
             stats: Accepting::default(),
