@@ -7,7 +7,7 @@ use nfs_world::items::{DefinitionClass, Item};
 use serde_json::json;
 use std::collections::BTreeMap;
 
-fn fixture() -> Value {
+pub(crate) fn fixture() -> Value {
     let main = (0..5).map(|i| {
         let mut bits = [0u32; 16];
         for j in [0, 5, 10] { bits[j] = 1f32.to_bits() }
@@ -156,6 +156,45 @@ fn world_spawn_is_optional_and_validated() {
         } else {
             json!({"transform_bits": bits})
         };
+        assert!(Layout::from_json(&v).is_err(), "case {broken}");
+    }
+}
+
+#[test]
+fn exit_teleport_is_optional_validated_and_independent_of_the_spawn() {
+    assert!(
+        Layout::from_json(&fixture())
+            .unwrap()
+            .exit_teleport()
+            .is_none()
+    );
+    // A quarter turn about the vertical axis at a synthetic destination.
+    let mut bits = [0u32; 16];
+    bits[2] = 1f32.to_bits();
+    bits[5] = 1f32.to_bits();
+    bits[8] = (-1f32).to_bits();
+    bits[12] = 12.5f32.to_bits();
+    bits[13] = 3.25f32.to_bits();
+    bits[14] = (-40f32).to_bits();
+    let mut v = fixture();
+    v["exit_teleport"] = json!({"transform_bits": bits});
+    let layout = Layout::from_json(&v).unwrap();
+    let destination = layout.exit_teleport().unwrap();
+    assert_eq!(destination.locator(), [12.5, 3.25, -40.]);
+    assert_eq!(
+        destination.basis(),
+        [[0., 0., 1.], [0., 1., 0.], [-1., 0., 0.]]
+    );
+    assert!(layout.world_spawn().is_none());
+    for broken in 0..3 {
+        let mut v = fixture();
+        let mut b = bits;
+        match broken {
+            0 => b[14] = f32::INFINITY.to_bits(),
+            1 => b[3] = 1,
+            _ => b = [0; 16],
+        }
+        v["exit_teleport"] = json!({"transform_bits": b});
         assert!(Layout::from_json(&v).is_err(), "case {broken}");
     }
 }

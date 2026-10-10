@@ -316,3 +316,49 @@ fn the_garage_car_is_deleted_once_the_client_reports_the_world_car() {
     assert!(PlayerListener::garage_car_deletion(&report(205), &mut deferred).is_none());
     assert!(deferred.is_empty());
 }
+
+#[test]
+fn the_exit_teleport_targets_the_teleport_state_with_the_configured_destination() {
+    use nfs_protocol::world::rpc::Serial;
+    use nfs_world::participants::{Endpoint, ExitBindings};
+    let at = |selector| Endpoint {
+        scene: 10,
+        selector,
+        serial: Serial::new(0).unwrap(),
+    };
+    let exit = ExitBindings {
+        exit_request: at(96),
+        garage_exit_request: at(8),
+        state_94: at(93),
+        state_4: at(3),
+        state_3: at(2),
+        state_77: at(76),
+        state_83: at(82),
+        state_78: at(77),
+        ready_request: at(80),
+        state_79: at(78),
+        state_2: at(1),
+        garage_calls: [at(0), at(3), at(4), at(5), at(6)],
+    };
+    let mut bits = [0u32; 16];
+    for j in [0, 5, 10] {
+        bits[j] = 1f32.to_bits();
+    }
+    bits[12] = 12.5f32.to_bits();
+    let mut v = crate::vehicle_content::layout::tests::fixture();
+    v["exit_teleport"] = serde_json::json!({"transform_bits": bits});
+    let layout = crate::vehicle_content::layout::Layout::from_json(&v).unwrap();
+    let command = PlayerListener::exit_teleport(Some(exit), Some(&layout), 178, 205).unwrap();
+    assert_eq!(command.endpoint, exit.state_77);
+    assert_eq!((command.participant, command.vehicle), (178, 205));
+    assert_eq!(command.position, [12.5, 0., 0.]);
+    assert!(command.encode().is_ok());
+    // Without exit bindings or a configured destination there is no teleport.
+    assert!(PlayerListener::exit_teleport(None, Some(&layout), 178, 205).is_none());
+    let plain = crate::vehicle_content::layout::Layout::from_json(
+        &crate::vehicle_content::layout::tests::fixture(),
+    )
+    .unwrap();
+    assert!(PlayerListener::exit_teleport(Some(exit), Some(&plain), 178, 205).is_none());
+    assert!(PlayerListener::exit_teleport(Some(exit), None, 178, 205).is_none());
+}

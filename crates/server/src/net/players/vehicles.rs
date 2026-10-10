@@ -128,6 +128,24 @@ impl PlayerListener {
         *assigned = true;
         Ok(Some(Some(notification)))
     }
+    /// The host teleport of a world car to the configured SpawnPoints
+    /// TeleportLocation, on the startup TeleportingParticipantState endpoint
+    /// (`nfs_world::teleport`). `None` without exit bindings or destination.
+    pub(super) fn exit_teleport(
+        exit: Option<nfs_world::participants::ExitBindings>,
+        layout: Option<&crate::vehicle_content::layout::Layout>,
+        participant: u16,
+        vehicle: u16,
+    ) -> Option<nfs_world::teleport::Command> {
+        let destination = layout?.exit_teleport()?;
+        Some(nfs_world::teleport::Command {
+            endpoint: exit?.state_77,
+            participant,
+            vehicle,
+            position: destination.locator(),
+            basis: destination.basis(),
+        })
+    }
     /// Assignments due by `world_ms`, oldest first. Official hosts send the
     /// spawn assignment 0.8-1 s after the world car's glass reports, in a frame
     /// with a level poll (E101: 777 ms, E742: 970 ms); E765's assignment 145 ms

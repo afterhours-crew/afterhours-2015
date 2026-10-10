@@ -30,6 +30,9 @@ const MAX_WORLD_CARS: usize = 128;
 /// Delay from a world car's first glass report to its spawn assignment; the
 /// assignment then rides the next level poll (official 777-970 ms).
 const SPAWN_DELAY_MS: u64 = 750;
+/// Delay from the first glass report to the host teleport; official hosts
+/// send it about 100 ms before the assignment (E101 676 ms, E742 870 ms).
+const TELEPORT_DELAY_MS: u64 = 650;
 
 pub(super) struct PlayerListener {
     stats: Accepting,
@@ -51,6 +54,8 @@ pub(super) struct PlayerListener {
     deferred_deletions: BTreeMap<u16, Vec<u16>>,
     /// Spawn assignments held until due (world ms), sent with a level poll.
     pending_spawns: VecDeque<(u64, nfs_world::participants::Notification)>,
+    /// Host teleports of world cars, due at world ms (sent as content).
+    pending_teleports: VecDeque<(u64, nfs_world::teleport::Command)>,
     glass: crate::glass::Glass,
     customization: crate::customization_timer::Timers,
     world_ms: u64,
@@ -399,6 +404,16 @@ impl PlayerListener {
     pub(super) fn files_alive(&mut self, now: u64) -> bool {
         self.stats.files_alive(now)
     }
+    /// The next host teleport due by `world_ms`, oldest first.
+    pub(super) fn due_teleport(&self, world_ms: u64) -> Option<nfs_world::teleport::Command> {
+        self.pending_teleports
+            .front()
+            .filter(|(at, _)| *at <= world_ms)
+            .map(|(_, command)| *command)
+    }
+    pub(super) fn teleport_sent(&mut self) {
+        self.pending_teleports.pop_front();
+    }
     /// Cars this connection's client simulates and reports movement for: the
     /// garage cars, then the world car (official E101 grants).
     pub(super) fn movement_objects(&self) -> BTreeSet<u16> {
@@ -423,6 +438,7 @@ impl PlayerListener {
             world_cars: BTreeMap::new(),
             deferred_deletions: BTreeMap::new(),
             pending_spawns: VecDeque::new(),
+            pending_teleports: VecDeque::new(),
             glass: crate::glass::Glass::default(),
             customization: crate::customization_timer::Timers::default(),
             world_ms: 0,
@@ -624,6 +640,7 @@ impl Listener for PlayerListener {
         let mut deferred_deletions = self.deferred_deletions.clone();
         let mut deferred_sections = Vec::new();
         let mut scheduled_spawns = Vec::new();
+        let mut scheduled_teleports = Vec::new();
         let mut sequences = self.sequences.clone();
         let mut logic_ghosts = self.logic_ghosts.clone();
         let mut unsupported_logic = 0;
@@ -701,6 +718,14 @@ impl Listener for PlayerListener {
                             call = ?notification.call,
                             "owned world car created; spawn point assignment scheduled"
                         );
+                        if let Some(command) = Self::exit_teleport(
+                            self.participants.exit_bindings(),
+                            self.vehicles.as_deref().map(|c| &c.layout),
+                            notification.participant,
+                            target.ghost,
+                        ) {
+                            scheduled_teleports.push((self.world_ms + TELEPORT_DELAY_MS, command));
+                        }
                         scheduled_spawns.push((self.world_ms + SPAWN_DELAY_MS, notification));
                     }
                     if let Some(section) =
@@ -1177,6 +1202,7 @@ impl Listener for PlayerListener {
         self.world_cars = world_cars;
         self.deferred_deletions = deferred_deletions;
         self.pending_spawns.extend(scheduled_spawns);
+        self.pending_teleports.extend(scheduled_teleports);
         self.glass = glass;
         self.customization = customization;
         for (participant, measurement) in measurements {

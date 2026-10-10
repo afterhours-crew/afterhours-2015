@@ -19,6 +19,7 @@ pub mod replication;
 pub mod sequences;
 pub mod session;
 pub mod spawn_points;
+pub mod teleport;
 
 pub use nfs_world_core::{
     application, bits, content, crypto, files, handshake, items, link, transport,
