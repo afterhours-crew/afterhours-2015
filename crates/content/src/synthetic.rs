@@ -13,8 +13,11 @@ use std::path::Path;
 
 pub const TEMPLATE_RVA: u32 = 0x1010;
 /// Made-up class IDs for synthetic installations.
-pub const SYNTHETIC_CLASS_IDS: [(&str, u32); 2] =
-    [("LogicPrefabBlueprint", 10), ("RaceVehicleBlueprint", 20)];
+pub const SYNTHETIC_CLASS_IDS: [(&str, u32); 3] = [
+    ("LogicPrefabBlueprint", 10),
+    ("RaceVehicleBlueprint", 20),
+    ("ParticipantLogicBlueprint", 30),
+];
 
 /// A minimal PE image with one `.data` section holding a 64-byte template.
 pub fn executable(template: &[u8; 64]) -> Vec<u8> {
@@ -213,6 +216,7 @@ pub fn assets() -> Vec<Asset> {
     }
     assets.extend(registries());
     assets.extend(level());
+    assets.extend(runtime_world());
     assets.extend(entitlements());
     assets.extend(speedwalls());
     assets.extend(reputation(vec![0, 13, 57]));
@@ -307,6 +311,115 @@ pub fn entitlements() -> Vec<Asset> {
 
 /// `LevelData` asset of the synthetic level.
 pub const LEVEL: &str = "levels/Synth/Synth";
+
+/// Constructed startup with the host's required roles and ten traffic slots.
+pub const RUNTIME_LEVEL: &str = "levels/Runtime/Runtime";
+
+pub fn runtime_world() -> Vec<Asset> {
+    let roles = [
+        "Garage",
+        "SpawnPoints",
+        "Gameplay",
+        "Progression",
+        "ParticipantStateMachine",
+    ];
+    let mut extras: Vec<_> = roles
+        .iter()
+        .map(|role| sub_world(&format!("levels/Runtime/{role}"), true))
+        .collect();
+    extras.push(layer_reference(0x26));
+    let mut result = vec![Asset {
+        name: RUNTIME_LEVEL.to_lowercase(),
+        partition: PartitionWriter::default().build_many(
+            guid(0x20),
+            "LevelData",
+            guid(0x30),
+            vec![
+                ("Name", Field::CString(RUNTIME_LEVEL.into())),
+                ("Objects", Field::RawPointers(vec![7])),
+            ],
+            extras,
+        ),
+    }];
+    for (i, role) in roles.iter().enumerate() {
+        result.push(scene(
+            0x21 + i as u8,
+            &format!("levels/Runtime/{role}"),
+            "SubWorldData",
+            vec![],
+        ));
+    }
+    let mut layer = vec![("SyntheticRpc", vec![])];
+    for i in 0..10 {
+        layer.push((
+            "BlueprintBundleEntityData",
+            vec![(
+                "Bundle",
+                Field::Struct(
+                    "BundleReference",
+                    bundle_ref(&format!("vehicles/runtime/{i}_bundle")),
+                ),
+            )],
+        ));
+        result.push(Asset {
+            name: format!("vehicles/runtime/{i}_bundle"),
+            partition: PartitionWriter::default().build(
+                guid(0x40 + i),
+                "BlueprintBundle",
+                guid(0xC0 + i),
+                vec![("Blueprint", Field::Import(guid(0x61), guid(0x71)))],
+            ),
+        });
+    }
+    layer.push((
+        "BundlePreLoadEntityData",
+        vec![(
+            "BundlesToLoad",
+            Field::Structs(
+                "BundleReference",
+                vec![bundle_ref("vehicles/shared/parts_bundle")],
+            ),
+        )],
+    ));
+    result.push(Asset {
+        name: format!("{}/layer1", RUNTIME_LEVEL.to_lowercase()),
+        partition: PartitionWriter::default().build_many(
+            guid(0x26),
+            "WorldPartData",
+            guid(0x36),
+            // Traffic composition is reversed; startup discovery uses partition order.
+            vec![(
+                "Objects",
+                Field::RawPointers(std::iter::once(2).chain((3..=12).rev()).collect()),
+            )],
+            layer,
+        ),
+    });
+    result.extend([
+        blueprint(
+            0x27,
+            "gameplay/stats/garagestatslogic",
+            "ParticipantLogicBlueprint",
+        ),
+        blueprint(
+            0x28,
+            "gameplay/garageloadlogic",
+            "ParticipantLogicBlueprint",
+        ),
+        blueprint(0x29, "gameplay/unusedlogic", "ParticipantLogicBlueprint"),
+        registry(
+            0x2A,
+            "levels/runtime/gameplay",
+            vec![(guid(0x29), guid(0x39)), (guid(0x27), guid(0x37))],
+        ),
+        registry(
+            0x2B,
+            "levels/runtime/garage",
+            vec![(guid(0x28), guid(0x38))],
+        ),
+    ]);
+    result
+}
 
 fn sub_world(name: &str, auto: bool) -> (&'static str, Vec<(&'static str, Field)>) {
     (
@@ -535,7 +648,7 @@ pub fn write(root: &Path, assets: &[Asset]) -> std::io::Result<(Options, [u8; 64
                 .map(|(c, id)| (c.to_string(), *id))
                 .collect(),
             scenes: crate::scenes::Rules {
-                level: LEVEL.to_owned(),
+                level: RUNTIME_LEVEL.to_owned(),
                 classes: [
                     ("LevelData", None),
                     ("SubWorldData", None),

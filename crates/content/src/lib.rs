@@ -26,6 +26,7 @@ mod licenses;
 mod reputation;
 mod scan;
 pub mod scenes;
+mod startup;
 mod stats;
 #[cfg(any(test, feature = "synthetic"))]
 pub mod synthetic;
@@ -43,7 +44,7 @@ pub const FORMAT: &str = "nfs-install-content";
 pub const VERSION: u64 = 1;
 /// Increment whenever a builder's output for an unchanged installation changes,
 /// so existing cache entries are rebuilt.
-pub const BUILDER_REVISION: u64 = 6;
+pub const BUILDER_REVISION: u64 = 7;
 /// Executable file name relative to the installation root.
 pub const EXECUTABLE: &str = "NFS16.exe";
 
@@ -90,12 +91,14 @@ pub enum Kind {
     ReputationThresholds,
     /// Installed scene serializer profiles and launcher endpoints.
     SceneCatalog,
+    /// Startup descriptor, registrations and role bindings with AllDrive policy.
+    WorldContent,
     /// The 64-byte world MAC template.
     WorldMacTemplate,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 8] = [
+    pub const ALL: [Kind; 9] = [
         Kind::ItemContent,
         Kind::PersistentContent,
         Kind::StatDefinitions,
@@ -103,6 +106,7 @@ impl Kind {
         Kind::ControlCatalogs,
         Kind::ReputationThresholds,
         Kind::SceneCatalog,
+        Kind::WorldContent,
         Kind::WorldMacTemplate,
     ];
     /// Manifest key.
@@ -115,6 +119,7 @@ impl Kind {
             Self::ControlCatalogs => "control_catalogs",
             Self::ReputationThresholds => "reputation_thresholds",
             Self::SceneCatalog => "scene_catalog",
+            Self::WorldContent => "world_content",
             Self::WorldMacTemplate => "world_mac_template",
         }
     }
@@ -128,6 +133,7 @@ impl Kind {
             Self::ControlCatalogs => "control-catalogs.json",
             Self::ReputationThresholds => "reputation-thresholds.json",
             Self::SceneCatalog => "scene-catalog.json",
+            Self::WorldContent => "world-content.json",
             Self::WorldMacTemplate => "world-mac-template.bin",
         }
     }
@@ -245,6 +251,12 @@ pub fn build(
         Kind::SceneCatalog,
         scenes::build(&mut assets, &options.identity.scenes)?,
     );
+    let catalog = scenes::Catalog::from_json(
+        &serde_json::from_slice(&outputs[&Kind::SceneCatalog])
+            .map_err(|_| Error::Content("scene catalog JSON".into()))?,
+    )?;
+    let mut index = assets::AssetIndex::from_assets(assets, options.identity.clone());
+    outputs.insert(Kind::WorldContent, startup::build(&mut index, &catalog)?);
     outputs.insert(
         Kind::WorldMacTemplate,
         executable::mac_template(&game_root.join(EXECUTABLE), &options.identity)?,

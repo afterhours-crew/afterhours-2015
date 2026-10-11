@@ -228,7 +228,7 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
         && !(vehicle_content.is_some()
             && garage_layout.is_some()
             && progression_content.is_some()
-            && world_content.is_some())
+            && (world_content.is_some() || generated))
     {
         return Err("Vehicles require --vehicle-content, --garage-layout, --world-content and --progression-content".into());
     }
@@ -321,6 +321,7 @@ fn resolve_install_content(args: &mut Args, options: &nfs_content::Options) -> R
     args.reputation_thresholds
         .get_or_insert(generated.reputation_thresholds);
     args.scene_catalog.get_or_insert(generated.scene_catalog);
+    args.world_content.get_or_insert(generated.world_content);
     args.world_mac_template = Some(generated.world_mac_template);
     Ok(())
 }
@@ -409,7 +410,7 @@ pub fn main() -> std::process::ExitCode {
         .is_some_and(|a| a == "--help" || a == "-h")
     {
         println!(
-            "nfs-server: owned local NFS 2015 services\n\nUsage: nfs-server --root <data-directory> --output <new-recording-directory> [configuration options]\n\nPrepare game content: nfs-server prepare-content --game-dir <installation>\n[--root <data-directory>] [--content-cache <directory>]\n\nCreate account: nfs-server create-account --name <name> --state-directory <new-directory>\n--account-policy <policy.json> --item-content <items.json> --persistent-content <tables.json>\n\nRequired control configuration: --bootstrap-config, --auth-config,\n--group-policy, --matchmaking-admission, --matchmaking-policy, --world-policy,\n--control-catalogs, --stat-definitions, --challenge-content, --item-licenses,\n--owned-local-social and --owned-menu-awards.\n\nGarage configuration: --world-content (version 4 or 5), --world-mac-template,\n--item-content, --state-directory, --local-account, --persistent-content,\n--progression-content, --vehicle-content, --garage-layout, --sequence-content,\n--garage-logic.\n\nGame content: --game-dir <installation> builds --item-content,\n--persistent-content and --world-mac-template on first start, supplies\n--stat-definitions, --item-licenses, --control-catalogs and\n--reputation-thresholds and --scene-catalog unless explicitly overridden, and caches the outputs\n(--content-cache, default artifacts/content under --root).\n\nAccount state is read from SQLite. Optional one-time imports: --local-identity,\n--entitlement-state, --kickback-state, --speedwall-state, --user-settings.\n\nOptional: --redirector-port, --idle-seconds, --qos-seconds, --stop-file.\nAll listeners are loopback. No manifest, captured reply store or external\nauthentication is used. See crates/server/README.md for schemas and limitations."
+            "nfs-server: owned local NFS 2015 services\n\nUsage: nfs-server --root <data-directory> --output <new-recording-directory> [configuration options]\n\nPrepare game content: nfs-server prepare-content --game-dir <installation>\n[--root <data-directory>] [--content-cache <directory>]\n\nCreate account: nfs-server create-account --name <name> --state-directory <new-directory>\n--account-policy <policy.json> --item-content <items.json> --persistent-content <tables.json>\n\nRequired control configuration: --bootstrap-config, --auth-config,\n--group-policy, --matchmaking-admission, --matchmaking-policy, --world-policy,\n--control-catalogs, --stat-definitions, --challenge-content, --item-licenses,\n--owned-local-social and --owned-menu-awards.\n\nGarage configuration: --world-content (version 4 or 5), --world-mac-template,\n--item-content, --state-directory, --local-account, --persistent-content,\n--progression-content, --vehicle-content, --garage-layout, --sequence-content,\n--garage-logic.\n\nGame content: --game-dir <installation> builds --item-content,\n--persistent-content and --world-mac-template on first start, supplies\n--stat-definitions, --item-licenses, --control-catalogs and\n--reputation-thresholds, --scene-catalog and --world-content unless explicitly overridden, and caches the outputs\n(--content-cache, default artifacts/content under --root).\n\nAccount state is read from SQLite. Optional one-time imports: --local-identity,\n--entitlement-state, --kickback-state, --speedwall-state, --user-settings.\n\nOptional: --redirector-port, --idle-seconds, --qos-seconds, --stop-file.\nAll listeners are loopback. No manifest, captured reply store or external\nauthentication is used. See crates/server/README.md for schemas and limitations."
         );
         return std::process::ExitCode::SUCCESS;
     }
@@ -858,6 +859,7 @@ mod tests {
                 .unwrap();
         let with_game = |game: &str| {
             let mut args = without(configured(), &GENERATED);
+            args = without(args, &["--world-content"]);
             args.extend([
                 "--root".into(),
                 dir.clone().into_os_string(),
@@ -879,7 +881,15 @@ mod tests {
             .unwrap();
         nfs_services::reputation::Thresholds::load(parsed.reputation_thresholds.as_ref().unwrap())
             .unwrap();
-        nfs_content::scenes::Catalog::load(parsed.scene_catalog.as_ref().unwrap()).unwrap();
+        let scenes =
+            nfs_content::scenes::Catalog::load(parsed.scene_catalog.as_ref().unwrap()).unwrap();
+        content::WorldContent::load_with_scenes(
+            parsed.world_content.as_ref().unwrap(),
+            Some(&scenes),
+        )
+        .unwrap()
+        .validate_runtime()
+        .unwrap();
         assert!(parsed.world_mac_template.as_ref().unwrap().exists());
         assert_eq!(parsed.generated.as_ref().unwrap()["built"], true);
         let mut again = with_game("game");
@@ -911,6 +921,10 @@ mod tests {
         assert_eq!(
             explicit.scene_catalog,
             Some(PathBuf::from("authored-scenes.json"))
+        );
+        assert_eq!(
+            explicit.world_content,
+            Some(PathBuf::from("configured-input"))
         );
         assert!(resolve_install_content(&mut with_game("missing"), &options).is_err());
         let _ = std::fs::remove_dir_all(&dir);

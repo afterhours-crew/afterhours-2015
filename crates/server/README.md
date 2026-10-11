@@ -257,5 +257,11 @@ Version 4 and inspection formats 1–3 retain their existing behavior.
 The catalog schema is format: nfs-scene-catalog, version: 1, build_sha256, level,
 and scenes. Each scene has content_key, root, serializers (stable kind names)
 and launchers (serializer indexes). Root key 1 is reserved. It contains static
-wire shapes, not instance state. Registrations and scene roles still require
-world configuration; this change alone does not make a complete deployment.
+wire shapes, not instance state.
+
+`--game-dir` also supplies generated `--world-content` unless explicitly set.
+Its startup registration order comes from the installed level and its role asset
+indexes from the installed registries. Existing vehicle, garage, sequence and
+progression configuration must use the same generated level IDs. To retain an
+older deployment's order, pass its `--world-content` explicitly. Those other
+inputs and service policy are still required for a complete deployment.

@@ -44,15 +44,21 @@ pub struct AssetIndex {
 }
 
 impl AssetIndex {
+    pub(crate) fn from_assets(assets: Assets, identity: BuildIdentity) -> Self {
+        Self {
+            assets,
+            identity,
+            registries: HashMap::new(),
+        }
+    }
     /// Open and index an installation after checking its executable.
     pub fn open(game_root: &Path, options: &Options) -> Result<Self, Error> {
         crate::fingerprint(game_root, options)?;
         let install = nfs_frostbite::install::Installation::open(game_root, options.limits)?;
-        Ok(Self {
-            assets: Assets::scan(&install)?,
-            identity: options.identity.clone(),
-            registries: HashMap::new(),
-        })
+        Ok(Self::from_assets(
+            Assets::scan(&install)?,
+            options.identity.clone(),
+        ))
     }
 
     fn groups(&mut self, bundle: &str) -> Result<&Groups, Error> {

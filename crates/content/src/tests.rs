@@ -71,7 +71,7 @@ fn builds_outputs_the_service_loaders_accept() {
     );
     let items = ItemContent::load(&prepared.path(Kind::ItemContent)).unwrap();
     let scenes = scenes::Catalog::load(&prepared.path(Kind::SceneCatalog)).unwrap();
-    assert_eq!(scenes.profiles.profiles().count(), 8);
+    assert_eq!(scenes.profiles.profiles().count(), 20);
     assert!(scenes.profiles.profile(1).unwrap().is_root());
     assert_eq!(
         scenes
@@ -191,6 +191,69 @@ fn changed_construction_rules_do_not_reuse_an_installation_cache() {
     );
     assert!(prepare(&install.game(), &install.cache(), &options).is_err());
     assert!(!install.prepare().unwrap().built);
+}
+
+#[test]
+fn startup_resolves_roles_by_name_and_traffic_by_construction_order() {
+    let install = install_with(&assets());
+    let prepared = install.prepare().unwrap();
+    let value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(prepared.path(Kind::WorldContent)).unwrap()).unwrap();
+    assert_eq!(value["version"], 5);
+    assert!(value.get("scene_profiles").is_none());
+    assert!(value.get("launchers").is_none());
+    assert_eq!(
+        value["roles"]["customization_timer"],
+        serde_json::json!({"bundle":3,"type_id":30,"local_index":1})
+    );
+    assert_eq!(
+        value["roles"]["streaming_gate"],
+        serde_json::json!({"bundle":1,"type_id":30,"local_index":0})
+    );
+    let expected: Vec<_> = (0..10)
+        .rev()
+        .map(|i| assets::scene_key(&format!("vehicles/runtime/{i}_bundle")))
+        .collect();
+    assert_eq!(value["roles"]["traffic"], serde_json::json!(expected));
+    let names: Vec<_> = value["batches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|b| b["kind"] == "names")
+        .flat_map(|b| b["entries"].as_array().unwrap())
+        .map(|e| {
+            let bytes: Vec<_> = e[1]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|n| n.as_u64().unwrap() as u8)
+                .collect();
+            String::from_utf8(bytes).unwrap()
+        })
+        .collect();
+    assert_eq!(names.len(), 16);
+    assert_eq!(names[6], "vehicles/runtime/0_bundle");
+    assert_eq!(names[15], "vehicles/runtime/9_bundle");
+}
+
+#[test]
+fn startup_rejects_missing_required_roles_and_role_assets() {
+    for name in [
+        "levels/runtime/garage",
+        "gameplay/stats/garagestatslogic",
+        "gameplay/garageloadlogic",
+    ] {
+        let mut incomplete = assets();
+        incomplete.retain(|a| a.name != name);
+        assert!(install_with(&incomplete).prepare().is_err(), "{name}");
+    }
+    let install = install_with(&assets());
+    let mut options = install.options();
+    options
+        .identity
+        .blueprint_class_ids
+        .insert("ParticipantLogicBlueprint".into(), 65536);
+    assert!(prepare(&install.game(), &install.cache(), &options).is_err());
 }
 
 #[test]

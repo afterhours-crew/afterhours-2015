@@ -212,3 +212,47 @@ fn catalog_validates_shapes_roots_launcher_indices_and_bounds() {
         assert!(Catalog::from_json(&bad).is_err(), "{bad}");
     }
 }
+
+#[test]
+fn level_references_follow_graph_order_and_require_valid_bundle_names() {
+    for name in [Some("vehicles/second"), None, Some(""), Some("non-ascii/ö")] {
+        let reference = |name: Option<&str>| {
+            (
+                "BlueprintBundleEntityData",
+                name.map_or_else(Vec::new, |name| {
+                    vec![(
+                        "Bundle",
+                        Field::Struct(
+                            "BundleReference",
+                            vec![("Name", Field::CString(name.into()))],
+                        ),
+                    )]
+                }),
+            )
+        };
+        let root = Asset {
+            name: "level".into(),
+            partition: PartitionWriter::default().build_many(
+                guid(1),
+                "LevelData",
+                guid(0x81),
+                vec![("Objects", Field::RawPointers(vec![3, 2]))],
+                vec![reference(Some("vehicles/first")), reference(name)],
+            ),
+        };
+        let mut f = fixture(vec![root]);
+        if name == Some("vehicles/second") {
+            let scene = f.index.scene("level").unwrap();
+            assert_eq!(
+                scene.level_references,
+                ["vehicles/second", "vehicles/first"]
+            );
+            assert_eq!(
+                scene.profile.kinds(),
+                [Kind::Noop, Kind::LevelReference, Kind::LevelReference]
+            );
+        } else {
+            assert!(f.index.scene("level").is_err());
+        }
+    }
+}

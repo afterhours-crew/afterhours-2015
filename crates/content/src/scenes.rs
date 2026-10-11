@@ -33,6 +33,9 @@ pub struct Rules {
 pub struct Scene {
     pub profile: Profile,
     pub launchers: Vec<usize>,
+    /// Bundle names in level-reference serializer order, independent of the
+    /// startup registration order chosen by the host.
+    pub level_references: Vec<String>,
 }
 
 /// Installed scene shapes and launcher endpoints, without live identities,
@@ -231,6 +234,7 @@ fn bundle(assets: &mut Assets, name: &str) -> Result<Scene, Error> {
         profile: Profile::new(false, &[Kind::Noop])
             .map_err(|_| Error::Content("bundle profile".into()))?,
         launchers: Vec::new(),
+        level_references: Vec::new(),
     })
 }
 
@@ -241,6 +245,7 @@ struct Walk<'a> {
     visited: usize,
     kinds: Vec<Kind>,
     launchers: Vec<usize>,
+    level_references: Vec<String>,
 }
 
 impl Walk<'_> {
@@ -275,6 +280,21 @@ impl Walk<'_> {
             }
             if self.rules.launchers.contains(&object.class) {
                 self.launchers.push(self.kinds.len());
+            }
+            if *kind == Kind::LevelReference {
+                let name = object
+                    .fields
+                    .get("Bundle")
+                    .and_then(Value::as_fields)
+                    .and_then(|fields| fields.get("Name"))
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.is_empty())
+                    .ok_or_else(|| {
+                        Error::Content("level reference without a bundle name".into())
+                    })?;
+                nfs_world::content::bindings::name_key(name.as_bytes())
+                    .map_err(|_| Error::Content("invalid level-reference bundle name".into()))?;
+                self.level_references.push(name.to_owned());
             }
             self.kinds.push(*kind);
         }
@@ -329,12 +349,14 @@ fn profile(assets: &mut Assets, rules: &Rules, name: &str) -> Result<Scene, Erro
         visited: 0,
         kinds: vec![Kind::Noop],
         launchers: Vec::new(),
+        level_references: Vec::new(),
     };
     walk.visit(&name, 0, 0)?;
     Ok(Scene {
         profile: Profile::new(root, &walk.kinds)
             .map_err(|_| Error::Content("invalid scene profile".into()))?,
         launchers: walk.launchers,
+        level_references: walk.level_references,
     })
 }
 

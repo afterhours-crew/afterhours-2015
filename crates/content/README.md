@@ -34,6 +34,7 @@ let items = prepared.path(nfs_content::Kind::ItemContent);
 | `ControlCatalogs` | `control-catalogs.json` | `SpeedWallAsset` categories and their referenced `GameModeId.IdHash` values, plus local AllDrive menu policy |
 | `ReputationThresholds` | `reputation-thresholds.json` | `IntScoreToIntLevelAsset.LevelThresholds`, following the reputation calculator's asset reference |
 | `SceneCatalog` | `scene-catalog.json` | Ordered scene composition, class construction rules and installed vehicle bundles; no instance state |
+| `WorldContent` | `world-content.json` | Installed startup names, parent relationships, traffic slot order and registry-resolved roles, with authored AllDrive host policy |
 | `WorldMacTemplate` | `world-mac-template.bin` | 64 bytes of the executable image at the build's known address, checked by digest |
 
 Derived defaults are the stored 32-bit patterns of each class's same-named
@@ -69,8 +70,8 @@ scene content key (djb2-xor of its lower-cased path), its asset catalog
 (Blueprint objects in `<bundle>_networkregistry_win32`, counted by class ID)
 and asset references (class ID and position in registry order). A Blueprint
 class without a profiled ID is an error, never a guess. These are inputs for
-world, garage and progression content. Registrations, roles, vehicle entity layouts
-and progression definitions are still supplied separately.
+world, garage and progression content. Vehicle entity layouts and progression
+definitions are still supplied separately.
 
 ## Startup sub-levels
 
@@ -79,6 +80,20 @@ registers when the level starts: auto-loaded Win32 sub-levels walked
 breadth-first from the `LevelData` (with parents), then bundle preloads and
 blueprint bundles from those scenes' layers. Sibling order is the server's
 choice; it only has to be used consistently for level IDs.
+
+The generated version-5 world document assigns name IDs from that order and
+uses the owned registration allocator for level and stream IDs. Name batches
+contain at most eight entries and fit the wire byte bound; registrations are
+batched in groups of 64. Parent IDs refer to the generated order. Required scene
+roles resolve by name. Traffic slots instead follow level-reference serializer
+order in the root composition graph. The customization timer and streaming gate
+resolve their class and index from the appropriate scene registry.
+
+The load descriptor selects the authored Game/ConquestLarge policy. Registration
+field values are supported host policy, not extracted session messages. Historical
+player-car names are unnecessary: the vehicle registry registers selected cars
+as they are loaded. Other configuration containing level IDs must use this same
+startup order; an explicit older world document remains supported.
 
 Tests build synthetic installations (`nfs-frostbite` `synthetic` feature) and
 cover loader acceptance, cache reuse, damaged and foreign entries, changed
@@ -105,6 +120,7 @@ The catalog includes launcher indexes derived from class roles and graph order.
 It contains no scene-specific index tables, player identities or captured values.
 
 The server accepts this catalog with version 5 world configuration, allowing
-scene_profiles and launchers to be omitted. It still requires registration
-batches, scene roles and the other garage inputs. Generation and portable tests
-do not establish live game or offline-play acceptance.
+scene_profiles and launchers to be omitted. The generated world document uses
+this form. Vehicle, garage, sequence and progression inputs and service policy
+remain separate. Generation and portable tests do not establish live game or
+offline-play acceptance.
