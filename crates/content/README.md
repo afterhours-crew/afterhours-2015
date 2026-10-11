@@ -239,3 +239,14 @@ to 512 KiB. Default operator settings disable consumer beta and SpeedLists;
 an explicit `--progression-content` keeps precedence. Account values and runtime
 identities remain owned by the server. Floats in progression persistence and
 unrecognized activation expressions are unsupported.
+
+## Participant value inspection
+
+`AssetIndex::participant_integer_values` derives initial integer expressions from
+participant graphs, alongside the layout and Boolean APIs. Accessor inputs identify
+the exact channel occurrence and current participant. Score calculators follow
+their installed threshold asset and share the server's signed-score, boundary and
+cap behavior. Missing state, ambiguous links, wrong types, cycles and excessive
+depth fail. IntEntity defaults apply only to creation; event-driven gates and
+later counter mutations remain unsupported. This API does not yet produce the
+complete garage lifecycle configuration or add another prepared file.
