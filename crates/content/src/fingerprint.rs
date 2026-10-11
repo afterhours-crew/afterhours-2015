@@ -188,6 +188,7 @@ pub fn fingerprint(root: &Path, options: &Options) -> Result<Fingerprint, Error>
         "classes":classes,"launchers":identity.scenes.launchers,
         "garage_links":identity.garage_links.to_json(),
         "vehicles":identity.vehicles.to_json(),
+        "progression":identity.progression.to_json(),
     });
     text.push_str(&format!(
         "profile {}\n",

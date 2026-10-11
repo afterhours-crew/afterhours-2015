@@ -2,73 +2,18 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-use super::{Branch, BranchState};
+use super::{Branch, BranchState, parse_error};
 use crate::Failure;
+use nfs_content::progression::entities as data;
+pub use nfs_content::progression::entities::{Blueprint, Role};
 use nfs_protocol::world::rpc::Serial;
 use nfs_world::replication::entity::{
-    Body, Initial, Kind, MAX_SERIALIZERS, Profile, Rpc, Update,
-    creation::{Asset, Catalog, Content, Creation, MAX_CATALOGS, MAX_PROFILES, MAX_TYPES, Prefix},
+    Body, Initial, Rpc, Update,
+    creation::{Content, Creation, Prefix},
 };
 use serde_json::Value as Json;
-use std::collections::{BTreeMap, BTreeSet};
-
+use std::collections::BTreeSet;
 pub const SUB_ID: u32 = 1;
-const MAX_SELECTORS: usize = 512;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Role {
-    Root,
-    Channel {
-        scene_content_key: u32,
-        scene_serializer: usize,
-    },
-    Objective {
-        id: u64,
-    },
-    Rpc,
-    Launcher,
-    Bool,
-    Int,
-}
-impl Role {
-    fn kind(self) -> Kind {
-        match self {
-            Self::Root => Kind::Root,
-            Self::Channel { .. } => Kind::RpcReference,
-            Self::Objective { .. } => Kind::RpcFlags,
-            Self::Rpc | Self::Launcher => Kind::Rpc,
-            Self::Bool => Kind::BoolProperty,
-            Self::Int => Kind::I32Property,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Blueprint {
-    asset: Asset,
-    bus_count: u16,
-    roles: Vec<Role>,
-}
-impl Blueprint {
-    pub fn asset(&self) -> Asset {
-        self.asset
-    }
-    pub fn bus_count(&self) -> u16 {
-        self.bus_count
-    }
-    pub fn roles(&self) -> &[Role] {
-        &self.roles
-    }
-    pub fn objective_ids(&self) -> BTreeSet<u64> {
-        self.roles
-            .iter()
-            .filter_map(|role| match role {
-                Role::Objective { id } => Some(*id),
-                _ => None,
-            })
-            .collect()
-    }
-}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SceneEndpoint {
     pub ghost: u16,
@@ -77,214 +22,34 @@ pub struct SceneEndpoint {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Construction {
-    content: Content,
-    branches: BTreeMap<Branch, Blueprint>,
-}
-
-fn fields(v: &Json, names: &[&str]) -> Result<(), Failure> {
-    let o = v.as_object().ok_or(Failure::ProfileConfig)?;
-    if o.len() != names.len() || !names.iter().all(|n| o.contains_key(*n)) {
-        return Err(Failure::ProfileConfig);
-    }
-    Ok(())
-}
-fn word(v: &Json) -> Result<u16, Failure> {
-    u16::try_from(v.as_u64().ok_or(Failure::ProfileConfig)?).map_err(|_| Failure::ProfileConfig)
-}
-fn asset(v: &Json) -> Result<Asset, Failure> {
-    fields(v, &["bundle", "type_id", "local_index"])?;
-    Ok(Asset {
-        bundle: word(&v["bundle"])?,
-        type_id: word(&v["type_id"])?,
-        local_index: word(&v["local_index"])?,
-    })
-}
-fn kind(v: &Json) -> Result<Kind, Failure> {
-    match v.as_str() {
-        Some("root") => Ok(Kind::Root),
-        Some("rpc") => Ok(Kind::Rpc),
-        Some("rpc_reference") => Ok(Kind::RpcReference),
-        Some("rpc_flags") => Ok(Kind::RpcFlags),
-        Some("bool_property") => Ok(Kind::BoolProperty),
-        Some("i32_property") => Ok(Kind::I32Property),
-        Some("rpc_variant") => Ok(Kind::RpcVariant),
-        Some("rpc_ghost_reference") => Ok(Kind::RpcGhostReference),
-        _ => Err(Failure::ProfileConfig),
-    }
+    definition: data::Construction,
 }
 pub fn content(v: &Json) -> Result<Content, Failure> {
-    fields(v, &["catalogs", "profiles"])?;
-    let catalogs = v["catalogs"]
-        .as_array()
-        .filter(|a| !a.is_empty() && a.len() <= MAX_CATALOGS)
-        .ok_or(Failure::ProfileConfig)?;
-    let profiles = v["profiles"]
-        .as_array()
-        .filter(|a| a.len() <= MAX_PROFILES)
-        .ok_or(Failure::ProfileConfig)?;
-    let catalogs = catalogs
-        .iter()
-        .map(|c| {
-            fields(c, &["bundle", "entries"])?;
-            let rows = c["entries"]
-                .as_array()
-                .filter(|a| a.len() <= MAX_TYPES)
-                .ok_or(Failure::ProfileConfig)?;
-            let entries = rows
-                .iter()
-                .map(|r| {
-                    let pair = r
-                        .as_array()
-                        .filter(|a| a.len() == 2)
-                        .ok_or(Failure::ProfileConfig)?;
-                    Ok((word(&pair[0])?, word(&pair[1])?))
-                })
-                .collect::<Result<Vec<_>, Failure>>()?;
-            Catalog::new(word(&c["bundle"])?, &entries).map_err(|_| Failure::ProfileConfig)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let profiles = profiles
-        .iter()
-        .map(|p| {
-            fields(p, &["asset", "serializers"])?;
-            let kinds = p["serializers"]
-                .as_array()
-                .filter(|a| a.len() <= MAX_SERIALIZERS)
-                .ok_or(Failure::ProfileConfig)?
-                .iter()
-                .map(kind)
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok((
-                asset(&p["asset"])?,
-                Profile::new(&kinds).map_err(|_| Failure::ProfileConfig)?,
-            ))
-        })
-        .collect::<Result<Vec<_>, Failure>>()?;
-    Content::new(catalogs, profiles).map_err(|_| Failure::ProfileConfig)
+    data::content(v).map_err(parse_error)
 }
-fn role(v: &Json) -> Result<Role, Failure> {
-    let name = v["kind"].as_str().ok_or(Failure::ProfileConfig)?;
-    Ok(match name {
-        "root" => {
-            fields(v, &["kind"])?;
-            Role::Root
-        }
-        "channel" => {
-            fields(v, &["kind", "scene_content_key", "scene_serializer"])?;
-            let key = v["scene_content_key"]
-                .as_u64()
-                .and_then(|k| u32::try_from(k).ok())
-                .filter(|k| *k != 0)
-                .ok_or(Failure::ProfileConfig)?;
-            let index = v["scene_serializer"]
-                .as_u64()
-                .and_then(|i| usize::try_from(i).ok())
-                .filter(|i| (1..MAX_SELECTORS).contains(i))
-                .ok_or(Failure::ProfileConfig)?;
-            Role::Channel {
-                scene_content_key: key,
-                scene_serializer: index,
-            }
-        }
-        "objective" => {
-            fields(v, &["kind", "id"])?;
-            Role::Objective {
-                id: v["id"]
-                    .as_u64()
-                    .filter(|id| *id != 0)
-                    .ok_or(Failure::ProfileConfig)?,
-            }
-        }
-        "rpc" => {
-            fields(v, &["kind"])?;
-            Role::Rpc
-        }
-        "launcher" => {
-            fields(v, &["kind"])?;
-            Role::Launcher
-        }
-        "bool" => {
-            fields(v, &["kind"])?;
-            Role::Bool
-        }
-        "int" => {
-            fields(v, &["kind"])?;
-            Role::Int
-        }
-        _ => return Err(Failure::ProfileConfig),
-    })
-}
-
 impl Construction {
+    pub(crate) fn from_definition(definition: data::Construction) -> Self {
+        Self { definition }
+    }
     pub fn from_json(v: &Json) -> Result<Self, Failure> {
-        fields(v, &["content", "branches"])?;
-        let content = content(&v["content"])?;
-        let raw = v["branches"]
-            .as_array()
-            .filter(|a| a.len() == 2)
-            .ok_or(Failure::ProfileConfig)?;
-        let mut branches = BTreeMap::new();
-        let mut objective_ids = BTreeSet::new();
-        for b in raw {
-            fields(b, &["name", "asset", "bus_count", "roles"])?;
-            let branch = match b["name"].as_str() {
-                Some("main") => Branch::Main,
-                Some("intro") => Branch::Intro,
-                _ => return Err(Failure::ProfileConfig),
-            };
-            let asset = asset(&b["asset"])?;
-            let profile = content.profile(asset).map_err(|_| Failure::ProfileConfig)?;
-            let roles = b["roles"]
-                .as_array()
-                .filter(|a| a.len() == profile.kinds().len())
-                .ok_or(Failure::ProfileConfig)?
-                .iter()
-                .map(role)
-                .collect::<Result<Vec<_>, _>>()?;
-            let mut rpcs = 0;
-            for (role, kind) in roles.iter().zip(profile.kinds()) {
-                if role.kind() != *kind {
-                    return Err(Failure::ProfileConfig);
-                }
-                if !matches!(role, Role::Bool | Role::Int) {
-                    rpcs += 1;
-                }
-                if let Role::Objective { id } = role
-                    && !objective_ids.insert(*id)
-                {
-                    return Err(Failure::ProfileConfig);
-                }
-            }
-            if rpcs > MAX_SELECTORS {
-                return Err(Failure::ProfileConfig);
-            }
-            let blueprint = Blueprint {
-                asset,
-                bus_count: word(&b["bus_count"])?,
-                roles,
-            };
-            if branches.insert(branch, blueprint).is_some() {
-                return Err(Failure::ProfileConfig);
-            }
-        }
-        Ok(Self { content, branches })
+        Ok(Self::from_definition(
+            data::Construction::from_json(v).map_err(parse_error)?,
+        ))
     }
     pub fn content(&self) -> &Content {
-        &self.content
+        self.definition.content()
     }
     pub fn blueprint(&self, branch: Branch) -> Option<&Blueprint> {
-        self.branches.get(&branch)
+        self.definition.blueprint(branch)
     }
     pub fn check_objectives(
         &self,
         branch: Branch,
         expected: &BTreeSet<u64>,
     ) -> Result<(), Failure> {
-        let blueprint = self.branches.get(&branch).ok_or(Failure::ProfileConfig)?;
-        if blueprint.objective_ids() != *expected {
-            return Err(Failure::ProfileConfig);
-        }
-        Ok(())
+        self.definition
+            .check_objectives(branch, expected)
+            .map_err(parse_error)
     }
     pub fn build(
         &self,
@@ -294,7 +59,7 @@ impl Construction {
         blueprint_scene: u16,
         scene: impl Fn(u32, usize) -> Option<SceneEndpoint>,
     ) -> Result<Creation, Failure> {
-        let blueprint = self.branches.get(&branch).ok_or(Failure::ProfileConfig)?;
+        let blueprint = self.blueprint(branch).ok_or(Failure::ProfileConfig)?;
         if participant == 0 || blueprint_scene == 0 {
             return Err(Failure::ProfileConfig);
         }
@@ -302,9 +67,9 @@ impl Construction {
             .ok_or(Failure::ProfileConfig)?
             .next_initialization();
         let mut selector = 0u16;
-        let mut initial = Vec::with_capacity(blueprint.roles.len());
-        let mut updates = Vec::with_capacity(blueprint.roles.len());
-        for role in &blueprint.roles {
+        let mut initial = Vec::with_capacity(blueprint.roles().len());
+        let mut updates = Vec::with_capacity(blueprint.roles().len());
+        for role in blueprint.roles() {
             let mut rpc = || {
                 let current = Rpc { selector, serial };
                 selector = selector.checked_add(1).ok_or(Failure::BodyLimit)?;
@@ -313,7 +78,7 @@ impl Construction {
             let (value, update) = match role {
                 Role::Root => (
                     Initial::Root {
-                        value: blueprint.bus_count,
+                        value: blueprint.bus_count(),
                         rpc: rpc()?,
                         reference: participant,
                     },
@@ -360,7 +125,7 @@ impl Construction {
                 blueprint: blueprint_scene,
                 sub_id: SUB_ID,
                 owner: None,
-                asset: blueprint.asset,
+                asset: blueprint.asset(),
             },
             body: Body {
                 initial: Some(initial),
@@ -368,7 +133,7 @@ impl Construction {
             },
         };
         creation
-            .encode(&self.content)
+            .encode(self.content())
             .map_err(|_| Failure::BodyLimit)?;
         Ok(creation)
     }

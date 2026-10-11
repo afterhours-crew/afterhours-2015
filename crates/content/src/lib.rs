@@ -24,6 +24,7 @@ mod fingerprint;
 pub mod garage;
 mod items;
 mod licenses;
+pub mod progression;
 mod reputation;
 mod scan;
 pub mod scenes;
@@ -47,7 +48,7 @@ pub const FORMAT: &str = "nfs-install-content";
 pub const VERSION: u64 = 1;
 /// Increment whenever a builder's output for an unchanged installation changes,
 /// so existing cache entries are rebuilt.
-pub const BUILDER_REVISION: u64 = 11;
+pub const BUILDER_REVISION: u64 = 12;
 /// Executable file name relative to the installation root.
 pub const EXECUTABLE: &str = "NFS16.exe";
 
@@ -64,6 +65,7 @@ pub struct BuildIdentity {
     pub scenes: scenes::Rules,
     pub garage_links: garage::Links,
     pub vehicles: vehicle_profiles::Rules,
+    pub progression: progression::Rules,
 }
 
 impl BuildIdentity {
@@ -106,10 +108,12 @@ pub enum Kind {
     VehicleParts,
     /// Vehicle composition, static physics, appearance, mesh and health inputs.
     VehicleProfiles,
+    /// Objective defaults, entity shapes and installed scene-channel bindings.
+    ProgressionContent,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 12] = [
+    pub const ALL: [Kind; 13] = [
         Kind::ItemContent,
         Kind::PersistentContent,
         Kind::StatDefinitions,
@@ -122,6 +126,7 @@ impl Kind {
         Kind::WorldMacTemplate,
         Kind::VehicleParts,
         Kind::VehicleProfiles,
+        Kind::ProgressionContent,
     ];
     /// Manifest key.
     pub fn key(self) -> &'static str {
@@ -138,6 +143,7 @@ impl Kind {
             Self::WorldMacTemplate => "world_mac_template",
             Self::VehicleParts => "vehicle_parts",
             Self::VehicleProfiles => "vehicle_profiles",
+            Self::ProgressionContent => "progression_content",
         }
     }
     /// File name inside a cache entry.
@@ -155,6 +161,7 @@ impl Kind {
             Self::WorldMacTemplate => "world-mac-template.bin",
             Self::VehicleParts => "vehicle-parts.json",
             Self::VehicleProfiles => "vehicle-profiles.json",
+            Self::ProgressionContent => "progression-content.json",
         }
     }
 }
@@ -287,6 +294,10 @@ pub fn build(
     let mut index = assets::AssetIndex::from_assets(assets, options.identity.clone());
     outputs.insert(Kind::WorldContent, startup::build(&mut index, &catalog)?);
     outputs.insert(Kind::GarageLayout, garage::build(&mut index)?);
+    outputs.insert(
+        Kind::ProgressionContent,
+        progression::build(&mut index, &fingerprint.digest)?,
+    );
     outputs.insert(
         Kind::VehicleProfiles,
         vehicle_profiles::build(&mut index, &item_content.catalog)?,

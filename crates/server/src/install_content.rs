@@ -31,6 +31,7 @@ pub struct Generated {
     pub garage_layout: PathBuf,
     pub vehicle_parts: PathBuf,
     pub vehicle_profiles: PathBuf,
+    pub progression_content: PathBuf,
     pub world_mac_template: PathBuf,
     pub prepared: Prepared,
 }
@@ -75,6 +76,7 @@ pub fn resolve(
         garage_layout: prepared.path(Kind::GarageLayout),
         vehicle_parts: prepared.path(Kind::VehicleParts),
         vehicle_profiles: prepared.path(Kind::VehicleProfiles),
+        progression_content: prepared.path(Kind::ProgressionContent),
         world_mac_template: prepared.path(Kind::WorldMacTemplate),
         prepared,
     })
@@ -123,6 +125,7 @@ mod tests {
         )
         .unwrap();
         crate::persistent::Catalog::load(&first.persistent_content).unwrap();
+        crate::progression::Content::load(&first.progression_content).unwrap();
         nfs_services::stats::Catalog::load(&first.stat_definitions).unwrap();
         nfs_services::item_licenses::Content::load(&first.item_licenses).unwrap();
         nfs_services::control_catalogs::Catalog::load(&first.control_catalogs).unwrap();

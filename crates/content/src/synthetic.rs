@@ -10,6 +10,7 @@ use crate::{BuildIdentity, Limits, Options, sha256_hex};
 pub use nfs_frostbite::synthetic::{Asset, Field, PartitionWriter};
 use nfs_services::persistent::required_tables;
 use std::path::Path;
+pub mod progression;
 pub mod vehicles;
 
 pub const TEMPLATE_RVA: u32 = 0x1010;
@@ -434,10 +435,12 @@ pub fn runtime_world() -> Vec<Asset> {
             "levels/runtime/garage",
             "levels/runtime/gameplay",
             "levels/runtime/spawnpoints",
+            "levels/runtime/progression",
         ]
         .contains(&a.name.as_str())
     });
     result.extend(garage_layout());
+    result.extend(progression::assets());
     result
 }
 
@@ -877,11 +880,17 @@ pub fn write(root: &Path, assets: &[Asset]) -> std::io::Result<(Options, [u8; 64
                 .collect(),
             garage_links: garage_links(),
             vehicles: vehicles::rules(),
+            progression: progression::rules(),
             scenes: crate::scenes::Rules {
                 level: RUNTIME_LEVEL.to_owned(),
                 classes: [
                     ("LevelData", None),
                     ("SubWorldData", None),
+                    ("ParticipantLogicSpawnerEntityData", None),
+                    (
+                        "LinkedSchematicChannelEntityData",
+                        Some(nfs_world::replication::sublevel::Kind::Rpc),
+                    ),
                     ("WorldPartData", None),
                     ("SubWorldReferenceObjectData", None),
                     ("WorldPartReferenceObjectData", None),

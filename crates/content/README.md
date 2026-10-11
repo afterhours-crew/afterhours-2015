@@ -38,6 +38,7 @@ let items = prepared.path(nfs_content::Kind::ItemContent);
 | `GarageLayout` | `garage-layout.json` | Main garage slot links, locator transforms and persistent inventory-slot bindings, with graph-derived serializer positions |
 | `VehicleParts` | `vehicle-parts.json` | Item-system customization, tuning assets, NOS variants, wheel geometry, wrap/plate identifiers and mesh GUID alternatives |
 | `VehicleProfiles` | `vehicle-profiles.json` | Player vehicle blueprints reached through the item system: component profiles, mesh-link order, bus flags, registry identities, physics, appearance and health defaults |
+| `ProgressionContent` | `progression-content.json` | Main/intro persistence links, stable IDs, activation expressions, entity composition and explicit spawner-to-scene channel bindings |
 | `WorldMacTemplate` | `world-mac-template.bin` | 64 bytes of the executable image at the build's known address, checked by digest |
 
 Derived defaults are the stored 32-bit patterns of each class's same-named
@@ -156,7 +157,7 @@ It contains no scene-specific index tables, player identities or captured values
 
 The server accepts this catalog with version 5 world configuration, allowing
 scene_profiles and launchers to be omitted. The generated world document uses
-this form. Vehicle, garage logic, sequence and progression inputs and service policy
+this form. Garage logic, sequence inputs and service policy
 remain separate. Generation and portable tests do not establish live game or
 offline-play acceptance.
 
@@ -179,3 +180,29 @@ interface's exported location property and its constructed locator. It checks th
 export direction and connection flags, and rejects missing or ambiguous exports.
 The initial world_spawn pose remains separate deployment configuration, pending
 complete world-exit content support; an explicit --garage-layout takes precedence.
+
+## Progression
+
+The generated version-1 document uses the same static parser as the server.
+Persistence links determine ordered objectives and integer values; StableUniqueId
+links supply their IDs. Activation properties support booleans, objective
+completion, negation, conjunction and the consumer-beta setting. Participant
+property aliases resolve by channel asset and port to a unique publisher across
+the two graphs. Missing, ambiguous or unsupported inputs fail preparation.
+
+Entity roles follow construction order and executable class rules. Registered
+blueprint flags supply bus counts; the progression scene's registry supplies
+asset references. Bundle IDs follow generated startup order. Channel references
+bind only to their spawner's ordered target links, following prefab and subworld
+interfaces. Repeated prefab instances keep their own context; WorldPart layers
+share the enclosing scene's connection tables. Scene serializer indexes must
+agree with the scene catalog constructor. No scene-specific binding list is
+embedded in the builder.
+
+The builder bounds composition and connection traversal to depth 32 and 50,000
+steps per traversal, 500,000 cached connections, expression depth 16 and 8,192
+expression nodes. The existing parser bounds objectives/values and the output
+to 512 KiB. Default operator settings disable consumer beta and SpeedLists;
+an explicit `--progression-content` keeps precedence. Account values and runtime
+identities remain owned by the server. Floats in progression persistence and
+unrecognized activation expressions are unsupported.
