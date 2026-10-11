@@ -420,8 +420,11 @@ impl PlayerListener {
     /// Cars this connection's client simulates and reports movement for: the
     /// garage cars, then the world car (official E101 grants).
     pub(super) fn movement_objects(&self) -> BTreeSet<u16> {
-        self.players
-            .owned_vehicles(HOST_SELECTOR as u8, self.persona)
+        Self::ready_movement(
+            self.players
+                .owned_vehicles(HOST_SELECTOR as u8, self.persona),
+            &self.world_cars,
+        )
     }
     pub(super) fn new(persona: u64) -> Self {
         Self {
@@ -773,6 +776,20 @@ impl Listener for PlayerListener {
                             call = ?notification.call,
                             "owned world car created; spawn point assignment scheduled"
                         );
+                        if let Some(binding) = players.bind_player_vehicle(
+                            HOST_SELECTOR as u8,
+                            self.persona,
+                            notification.participant,
+                            Some(target.ghost),
+                        )? {
+                            deferred_sections.push(Section {
+                                float_bits: None,
+                                flag: false,
+                                deleted: Vec::new(),
+                                setup: None,
+                                records: vec![binding],
+                            });
+                        }
                         if let Some(command) = Self::exit_teleport(
                             self.participants.exit_bindings(),
                             self.vehicles.as_deref().map(|c| &c.layout),

@@ -378,3 +378,48 @@ fn the_arrive_frame_carries_the_arrive_logic_deletions() {
     assert_eq!(section.deleted, vec![421, 422]);
     assert!(section.records.is_empty() && section.setup.is_none() && !section.flag);
 }
+
+#[test]
+fn movement_grant_waits_for_world_car_report_and_keeps_garage_authority() {
+    use nfs_world::logic::{EntityRef, Message};
+    let mut cars = BTreeMap::from([(300, (40, false)), (301, (41, false))]);
+    let owned = BTreeSet::from([299, 300]);
+    assert_eq!(
+        PlayerListener::ready_movement(owned.clone(), &cars),
+        BTreeSet::from([299])
+    );
+    let mut spawn = nfs_world::spawn_points::SpawnPoints::default();
+    let mut listener = PlayerListener::new(101);
+    listener
+        .initialize_world(&content_with(Some(&SPAWN_LAYOUT)))
+        .unwrap();
+    // Readiness cannot grant a car when no SpawnPoints endpoint is configured.
+    let report = Message::Reached {
+        event: 28_404_286,
+        target: EntityRef {
+            ghost: 300,
+            entity: 2,
+        },
+        player: 0,
+    };
+    assert_eq!(
+        PlayerListener::world_car_ready(&report, &mut cars, &mut spawn),
+        Ok(Some(None))
+    );
+    assert_eq!(
+        PlayerListener::ready_movement(owned.clone(), &cars),
+        BTreeSet::from([299])
+    );
+    // The existing readiness transition marks precisely the reported car.
+    spawn = listener.spawn_points.clone();
+    assert!(
+        PlayerListener::world_car_ready(&report, &mut cars, &mut spawn)
+            .unwrap()
+            .is_some_and(|v| v.is_some())
+    );
+    assert_eq!(
+        PlayerListener::ready_movement(owned, &cars),
+        BTreeSet::from([299, 300])
+    );
+    assert!(!PlayerListener::ready_movement(BTreeSet::from([301]), &cars).contains(&301));
+}
