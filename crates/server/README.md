@@ -267,7 +267,7 @@ older deployment's order, pass its `--world-content` explicitly. Those other
 inputs and service policy are still required for a complete deployment.
 
 `--game-dir` supplies a generated `--garage-layout` for the five main parking
-slots and their inventory bindings. It does not supply the optional world_spawn
-or exit_teleport poses. Deployments using those poses should keep their explicit
-layout while world-exit content generation is completed. Explicit layout files
-take precedence; no existing file is rewritten.
+slots, their inventory bindings and the installed exit_teleport destination. The
+initial world_spawn pose remains separate. Deployments using that pose should keep
+their explicit layout while world-exit content generation is completed. Explicit
+layout files take precedence; no existing file is rewritten.

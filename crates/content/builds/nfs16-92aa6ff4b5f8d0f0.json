@@ -1,6 +1,6 @@
 {
   "format": "nfs-build-profile",
-  "version": 3,
+  "version": 4,
   "description": "Need for Speed (2015) PC, NFS16.exe with the SHA-256 below. Every value in this file belongs to that executable only; another build needs its own profile.",
   "executable": "NFS16.exe",
   "executable_sha256": "92aa6ff4b5f8d0f033ca7e88cb86cc64b42b1d2412c4294905eb22950616e4df",
@@ -23,6 +23,7 @@
     "secondary_slots": 2295786586,
     "slot_location": 1975932280,
     "locator_transform": 1925266716,
+    "exit_location": 1399825718,
     "items": [952766660, 2417237398, 2417237397, 2417237396, 2417237395]
   },
   "scenes": {

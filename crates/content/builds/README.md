@@ -10,12 +10,12 @@ for example `nfs16-92aa6ff4b5f8d0f0.json`.
 
 | Field | Meaning |
 | --- | --- |
-| `format`, `version` | `nfs-build-profile`, `3` |
+| `format`, `version` | `nfs-build-profile`, `4` |
 | `description` | Human-readable identification of the build |
 | `executable`, `executable_sha256` | File name in the installation root and its exact digest |
 | `world_mac_template.rva`, `.sha256` | Relative virtual address (hex) of the 64-byte world MAC template inside the executable image, and the digest the bytes must have. The bytes themselves are read from the player's executable, never stored here |
 | `blueprint_class_ids` | Runtime class IDs the client assigns to Blueprint classes. Asset catalogs and asset references sent to the client use them; they are not stored in the content containers |
-| `garage_links` | Class-level port IDs for the primary/secondary garage slots, location/transform property and five persistent inventory-slot roles. These select installed connections, not fixed scene indexes or transforms |
+| `garage_links` | Port IDs for the primary/secondary garage slots, location/transform property, five persistent inventory-slot roles and the SpawnPoints exit-location export. These select installed connections, not fixed scene indexes or transforms |
 
 Only the classes whose IDs are known are listed; building content that needs
 another class fails with an explicit error rather than guessing.

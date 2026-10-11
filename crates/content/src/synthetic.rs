@@ -419,7 +419,12 @@ pub fn runtime_world() -> Vec<Asset> {
         ),
     ]);
     result.retain(|a| {
-        !["levels/runtime/garage", "levels/runtime/gameplay"].contains(&a.name.as_str())
+        ![
+            "levels/runtime/garage",
+            "levels/runtime/gameplay",
+            "levels/runtime/spawnpoints",
+        ]
+        .contains(&a.name.as_str())
     });
     result.extend(garage_layout());
     result
@@ -432,6 +437,7 @@ pub fn garage_links() -> crate::garage::Links {
         secondary_slots: 101,
         slot_location: 102,
         locator_transform: 103,
+        exit_location: 104,
         items: [200, 201, 202, 203, 204],
     }
 }
@@ -563,7 +569,73 @@ pub(crate) fn garage_layout_with(
                 gameplay_objects,
             ),
         },
+        exit_layout_with(|_, _| {}),
     ]
+}
+
+pub(crate) fn exit_layout_with(edit: impl FnOnce(&mut ObjectFields, &mut SceneObjects)) -> Asset {
+    let ports = garage_links();
+    let locator = |x| {
+        (
+            "LocatorEntityData",
+            vec![(
+                "Transform",
+                Field::Struct(
+                    "LinearTransform",
+                    vec![
+                        ("right", vector(1.0, 0.0, 0.0)),
+                        ("up", vector(0.0, 1.0, 0.0)),
+                        ("forward", vector(0.0, 0.0, 1.0)),
+                        ("trans", vector(x, 5.0, -7.0)),
+                    ],
+                ),
+            )],
+        )
+    };
+    // The destination is the second locator. The first is a decoy, and the
+    // interface descriptor is metadata rather than a constructed scene object.
+    let mut objects = vec![
+        locator(10.0),
+        locator(20.0),
+        (
+            "InterfaceDescriptorData",
+            vec![(
+                "Fields",
+                Field::Structs(
+                    "FieldDescriptor",
+                    vec![vec![
+                        ("Id", Field::Int(ports.exit_location as i32)),
+                        (
+                            "AccessType",
+                            Field::Enum("FieldAccessType", "FieldAccessType_Source", 0),
+                        ),
+                    ]],
+                ),
+            )],
+        ),
+    ];
+    let mut property = connection(3, ports.locator_transform, 4, ports.exit_location);
+    property.push(("Flags", Field::UInt(17)));
+    let mut fields = vec![
+        ("Name", Field::CString("levels/Runtime/SpawnPoints".into())),
+        ("Objects", Field::RawPointers(vec![2, 3])),
+        ("Interface", Field::RawPointer(4)),
+        (
+            "PropertyConnections",
+            Field::Structs("PropertyConnection", vec![property]),
+        ),
+    ];
+    edit(&mut fields, &mut objects);
+    Asset {
+        name: "levels/runtime/spawnpoints".into(),
+        partition: PartitionWriter::default().build_many(
+            guid(0x22),
+            "SubWorldData",
+            guid(0x32),
+            fields,
+            objects,
+        ),
+    }
 }
 
 fn sub_world(name: &str, auto: bool) -> (&'static str, Vec<(&'static str, Field)>) {

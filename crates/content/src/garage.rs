@@ -3,20 +3,21 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! Static garage slot topology and transforms. Inventory occupancy belongs to
-//! the account; only the supported main garage's five named roles are built here.
+//! the account. Parking roles and the exported exit destination come from assets.
 use crate::{Error, assets::AssetIndex, scan::Assets, scenes};
 use nfs_frostbite::ebx::{Fields, Value};
 use serde_json::json;
 use std::collections::BTreeSet;
 
-/// Port identifiers understood by this executable's garage and persistence code.
-/// These identify class-level links, never particular scene instances.
+/// Port identifiers understood by this build's garage, persistence and exit code.
+/// These identify link/property contracts, never particular scene instances.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Links {
     pub primary_slot: u32,
     pub secondary_slots: u32,
     pub slot_location: u32,
     pub locator_transform: u32,
+    pub exit_location: u32,
     pub items: [u32; 5],
 }
 impl Links {
@@ -26,6 +27,7 @@ impl Links {
             "secondary_slots",
             "slot_location",
             "locator_transform",
+            "exit_location",
             "items",
         ];
         let object = value.as_object().ok_or_else(|| bad("link profile"))?;
@@ -53,6 +55,7 @@ impl Links {
             secondary_slots: number(&value["secondary_slots"])?,
             slot_location: number(&value["slot_location"])?,
             locator_transform: number(&value["locator_transform"])?,
+            exit_location: number(&value["exit_location"])?,
             items: items.try_into().map_err(|_| bad("item link count"))?,
         };
         if result.primary_slot == result.secondary_slots {
@@ -62,7 +65,8 @@ impl Links {
     }
     pub fn to_json(&self) -> serde_json::Value {
         json!({"primary_slot":self.primary_slot,"secondary_slots":self.secondary_slots,
-            "slot_location":self.slot_location,"locator_transform":self.locator_transform,"items":self.items})
+            "slot_location":self.slot_location,"locator_transform":self.locator_transform,
+            "exit_location":self.exit_location,"items":self.items})
     }
 }
 
@@ -219,6 +223,7 @@ pub(crate) fn build(index: &mut AssetIndex) -> Result<Vec<u8>, Error> {
         .0;
     let garage = format!("{directory}/garage").to_lowercase();
     let gameplay = format!("{directory}/gameplay").to_lowercase();
+    let spawnpoints = format!("{directory}/spawnpoints").to_lowercase();
     let rules = index.identity.garage_links.clone();
     // Caller-supplied profiles are checked just as embedded profiles are.
     Links::from_json(&rules.to_json())?;
@@ -226,7 +231,14 @@ pub(crate) fn build(index: &mut AssetIndex) -> Result<Vec<u8>, Error> {
         scenes::construct(&mut index.assets, &index.identity.scenes, &garage, true)?;
     let (_, gameplay_instances) =
         scenes::construct(&mut index.assets, &index.identity.scenes, &gameplay, true)?;
+    let (_, spawn_instances) = scenes::construct(
+        &mut index.assets,
+        &index.identity.scenes,
+        &spawnpoints,
+        true,
+    )?;
     let assets = &mut index.assets;
+    let exit = exit_location(assets, &spawnpoints, &spawn_instances, &rules)?;
     let garage_links = connection_rows(assets, &garage, "LinkConnections")?;
     let garage_properties = connection_rows(assets, &garage, "PropertyConnections")?;
     let mut candidates = Vec::new();
@@ -294,8 +306,61 @@ pub(crate) fn build(index: &mut AssetIndex) -> Result<Vec<u8>, Error> {
         main.push(json!({"ordinal":ordinal,"component_index":component,"item_component_index":item_component,"transform_bits":bits}));
     }
     serde_json::to_vec(&json!({"format":"nfs-garage-population","version":1,
-        "build_sha256":nfs_services::SUPPORTED_BUILD_SHA256,"blueprint":garage,"item_blueprint":gameplay,"main":main}))
+        "build_sha256":nfs_services::SUPPORTED_BUILD_SHA256,"blueprint":garage,"item_blueprint":gameplay,
+        "main":main,"exit_teleport":{"transform_bits":exit}}))
         .map_err(|_|bad("JSON encoding"))
+}
+
+/// Follow the scene's exported destination, rather than choosing an arbitrary
+/// TeleportLocation entity or a locator by its position in the partition.
+fn exit_location(
+    assets: &mut Assets,
+    scene: &str,
+    instances: &[scenes::Instance],
+    rules: &Links,
+) -> Result<[u32; 16], Error> {
+    let root = assets.objects(scene)?[0].fields.clone();
+    let interface = target(assets, scene, &root, "Interface")?;
+    let descriptor = assets.objects(&interface.0)?[interface.1].clone();
+    if descriptor.class != "InterfaceDescriptorData" {
+        return Err(bad("exit interface class"));
+    }
+    let fields = descriptor
+        .fields
+        .get("Fields")
+        .and_then(Value::as_array)
+        .filter(|rows| rows.len() <= scenes::MAX_GRAPH_OBJECTS)
+        .ok_or_else(|| bad("exit interface fields"))?;
+    let mut exports = Vec::new();
+    for field in fields {
+        let field = field
+            .as_fields()
+            .ok_or_else(|| bad("exit interface field"))?;
+        if id(field, "Id")? == rules.exit_location {
+            exports.push(field);
+        }
+    }
+    let export = only(exports, "missing or ambiguous exit export")?;
+    if !matches!(export.get("AccessType"), Some(Value::Enum { value: 0, .. })) {
+        return Err(bad("exit field is not a source export"));
+    }
+    let properties = connection_rows(assets, scene, "PropertyConnections")?;
+    let mut sources = Vec::new();
+    for property in properties {
+        if id(&property, "TargetFieldId")? == rules.exit_location
+            && target(assets, scene, &property, "Target")? == interface
+        {
+            if id(&property, "SourceFieldId")? != rules.locator_transform
+                || id(&property, "Flags")? != 17
+            {
+                return Err(bad("unsupported exit location property"));
+            }
+            sources.push(target(assets, scene, &property, "Source")?);
+        }
+    }
+    let locator = only(sources, "missing or ambiguous exit locator")?;
+    occurrence(instances, &locator)?;
+    transform(assets, &locator)
 }
 
 #[cfg(test)]

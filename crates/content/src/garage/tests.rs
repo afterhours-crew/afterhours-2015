@@ -168,6 +168,7 @@ fn link_profile_is_strict_and_signed_content_ids_preserve_their_bits() {
         ("primary_slot", json!(101)),
         ("slot_location", json!(-1)),
         ("locator_transform", json!(u64::from(u32::MAX) + 1)),
+        ("exit_location", json!(0)),
         ("extra", json!(7)),
     ] {
         let mut bad = base.clone();
@@ -179,4 +180,78 @@ fn link_profile_is_strict_and_signed_content_ids_preserve_their_bits() {
         u32::MAX
     );
     assert!(id(&Fields(vec![("x".into(), Value::Float32(1.0))]), "x").is_err());
+}
+
+fn build_exit(
+    edit: impl FnOnce(
+        &mut Vec<(&'static str, Field)>,
+        &mut Vec<(&'static str, Vec<(&'static str, Field)>)>,
+    ),
+) -> Result<serde_json::Value, Error> {
+    let mut assets = synthetic::garage_layout();
+    *assets
+        .iter_mut()
+        .find(|a| a.name.ends_with("/spawnpoints"))
+        .unwrap() = synthetic::exit_layout_with(edit);
+    build_assets(assets)
+}
+
+#[test]
+fn exit_destination_follows_the_exported_property_not_locator_order() {
+    let original = build_assets(synthetic::garage_layout()).unwrap();
+    assert_eq!(
+        original["exit_teleport"]["transform_bits"][12],
+        20.0f32.to_bits()
+    );
+    assert_eq!(
+        original["exit_teleport"]["transform_bits"][13],
+        5.0f32.to_bits()
+    );
+    let redirected = build_exit(|root, _| {
+        *field(&mut rows(root, "PropertyConnections")[0], "Source") = Field::RawPointer(2);
+    })
+    .unwrap();
+    assert_eq!(
+        redirected["exit_teleport"]["transform_bits"][12],
+        10.0f32.to_bits()
+    );
+    assert_eq!(original["main"], redirected["main"]);
+    assert!(original.get("world_spawn").is_none());
+}
+
+#[test]
+fn missing_or_ambiguous_exit_exports_and_unconstructed_locators_are_rejected() {
+    for case in 0..12 {
+        assert!(
+            build_exit(|root, objects| match case {
+                0 => *field(root, "Interface") = Field::RawPointer(0),
+                1 => *field(root, "Interface") = Field::RawPointer(50),
+                2 => *field(root, "Interface") = Field::RawPointer(2),
+                3 => *field(&mut rows(&mut objects[2].1, "Fields")[0], "Id") = Field::Int(999),
+                4 => {
+                    let fields = rows(&mut objects[2].1, "Fields");
+                    fields.push(fields[0].clone());
+                }
+                5 =>
+                    *field(&mut rows(&mut objects[2].1, "Fields")[0], "AccessType") =
+                        Field::Enum("FieldAccessType", "FieldAccessType_Target", 1),
+                6 =>
+                    *field(&mut rows(root, "PropertyConnections")[0], "TargetFieldId") =
+                        Field::Int(999),
+                7 => {
+                    let properties = rows(root, "PropertyConnections");
+                    properties.push(properties[0].clone());
+                }
+                8 => *field(&mut rows(root, "PropertyConnections")[0], "Flags") = Field::UInt(1),
+                9 =>
+                    *field(&mut rows(root, "PropertyConnections")[0], "Source") =
+                        Field::RawPointer(0),
+                10 => *field(root, "Objects") = Field::RawPointers(vec![2]),
+                11 => *field(root, "Objects") = Field::RawPointers(vec![2, 3, 3]),
+                _ => unreachable!(),
+            })
+            .is_err(),
+            "case {case}"
+        );
+    }
 }

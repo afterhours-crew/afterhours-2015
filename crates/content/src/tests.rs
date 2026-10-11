@@ -197,6 +197,13 @@ fn changed_construction_rules_do_not_reuse_an_installation_cache() {
         fingerprint(&install.game(), &changed_links).unwrap()
     );
     assert!(prepare(&install.game(), &install.cache(), &changed_links).is_err());
+    let mut changed_exit = install.options();
+    changed_exit.identity.garage_links.exit_location = 999;
+    assert_ne!(
+        first.fingerprint,
+        fingerprint(&install.game(), &changed_exit).unwrap()
+    );
+    assert!(prepare(&install.game(), &install.cache(), &changed_exit).is_err());
     assert!(!install.prepare().unwrap().built);
 }
 

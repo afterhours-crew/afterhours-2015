@@ -120,7 +120,9 @@ mod tests {
             crate::content::WorldContent::load_with_scenes(&first.world_content, Some(&scenes))
                 .unwrap();
         world.validate_runtime().unwrap();
-        crate::vehicle_content::layout::Layout::load(&first.garage_layout).unwrap();
+        let layout = crate::vehicle_content::layout::Layout::load(&first.garage_layout).unwrap();
+        assert_eq!(layout.exit_teleport().unwrap().locator(), [20.0, 5.0, -7.0]);
+        assert!(layout.world_spawn().is_none());
         assert_eq!(std::fs::read(&first.world_mac_template).unwrap().len(), 64);
         let second = resolve(&dir.0, Path::new("game"), None, &options).unwrap();
         assert!(!second.prepared.built);

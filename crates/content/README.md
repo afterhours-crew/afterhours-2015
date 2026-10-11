@@ -140,6 +140,8 @@ Build profiles select port identifiers; installed connection arrays supply all
 scene-specific targets, indexes and transforms. Null/dangling links, duplicate
 slots, ambiguous occurrences, unsupported property flags and nonfinite or invalid
 transforms fail preparation. No account inventory or runtime identity is read.
-The generated layout contains garage parking slots. Optional world_spawn and
-exit_teleport overrides are still separate deployment configuration, pending
+The generated layout includes exit_teleport, resolved from the SpawnPoints
+interface's exported location property and its constructed locator. It checks the
+export direction and connection flags, and rejects missing or ambiguous exports.
+The initial world_spawn pose remains separate deployment configuration, pending
 complete world-exit content support; an explicit --garage-layout takes precedence.
