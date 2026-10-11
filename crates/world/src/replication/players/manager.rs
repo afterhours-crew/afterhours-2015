@@ -113,9 +113,9 @@ impl Players {
             },
         ])
     }
-    /// Bind both the player seats and the participant entity to its own vehicle.
+    /// Bind the manager seats, participant entity and player view to its own vehicle.
     /// The participant reference is used by teleport and scripted vehicle control.
-    /// Clear both relations before removing a bound vehicle.
+    /// Clear all three relations before removing a bound vehicle.
     /// Ownership and every index are checked before any state changes.
     pub fn bind_player_vehicle(
         &mut self,
@@ -159,7 +159,7 @@ impl Players {
             None => Entry::unbound(player),
         }));
         let mut next = self.objects.clone();
-        let mut records = Vec::with_capacity(2);
+        let mut records = Vec::with_capacity(3);
         records.extend(next.change(id, Update::PlayerManager(delta))?);
         records.extend(next.change(
             participant,
@@ -168,6 +168,9 @@ impl Players {
                 ..ParticipantUpdate::default()
             }),
         )?);
+        if let Some(&view) = self.views.get(&player) {
+            records.extend(next.change(view, super::views::seat_update(vehicle))?);
+        }
         self.objects = next;
         Ok(records)
     }

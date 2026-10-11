@@ -77,6 +77,7 @@ impl World {
             update: current.clone(),
         };
         record.encode()?;
+        self.validate_view(&initial, &current, None)?;
         self.objects.insert(record.id, Object { initial, current });
         self.next += 1;
         Ok(record)
@@ -172,6 +173,7 @@ impl World {
         }
         let mut current = object.current.clone();
         current.merge(&record.update)?;
+        self.validate_view(&object.initial, &current, None)?;
         if current == object.current {
             return Ok(None);
         }
@@ -187,7 +189,36 @@ impl World {
         }
         self.validate_scenes(Some(id), None)?;
         self.validate_entities(Some(id))?;
+        for (other, object) in &self.objects {
+            if *other != id {
+                self.validate_view(&object.initial, &object.current, Some(id))?;
+            }
+        }
         self.objects.remove(&id).ok_or(Error::UnknownObject)
+    }
+    fn validate_view(
+        &self,
+        initial: &Initial,
+        current: &Update,
+        removed: Option<u16>,
+    ) -> Result<(), Error> {
+        if let Initial::PlayerView(view) = initial {
+            let kind = |id| {
+                if removed == Some(id) {
+                    None
+                } else {
+                    self.objects.get(&id).map(|o| o.initial.kind())
+                }
+            };
+            if kind(view.player) != Some(Kind::Player) {
+                return Err(Error::UnknownObject);
+            }
+            let Update::PlayerView(current) = current else {
+                return Err(Error::TypeMismatch);
+            };
+            current.validate_references(kind)?;
+        }
+        Ok(())
     }
     pub fn snapshot(&self) -> Vec<Record> {
         self.objects
@@ -441,6 +472,7 @@ impl Update {
     fn merge(&mut self, new: &Self) -> Result<(), Error> {
         match (self, new) {
             (Self::PlayerManager(a), Self::PlayerManager(b)) => a.merge(b)?,
+            (Self::PlayerView(a), Self::PlayerView(b)) => a.merge(b),
             (Self::ScriptedSplineGoal, Self::ScriptedSplineGoal) => {}
             (Self::Participant(a), Self::Participant(b)) => {
                 replace(&mut a.player, &b.player);

@@ -45,7 +45,7 @@ pub enum Vector {
     Packed { mode: u8, values: [i32; 3] },
 }
 impl Vector {
-    pub(super) fn read(r: &mut Reader<'_>, fractional: u8) -> Result<Self, Error> {
+    pub(in crate::replication) fn read(r: &mut Reader<'_>, fractional: u8) -> Result<Self, Error> {
         let mode = r.take(3)? as u8;
         Ok(if mode == 0 {
             Self::FloatBits(array(|| r.take(32))?)
@@ -56,7 +56,11 @@ impl Vector {
             }
         })
     }
-    pub(super) fn write(&self, w: &mut Writer, fractional: u8) -> Result<(), Error> {
+    pub(in crate::replication) fn write(
+        &self,
+        w: &mut Writer,
+        fractional: u8,
+    ) -> Result<(), Error> {
         match self {
             Self::FloatBits(values) => {
                 w.put(0, 3)?;
@@ -88,7 +92,7 @@ pub enum SparseVector {
     },
 }
 impl SparseVector {
-    pub(super) fn read(r: &mut Reader<'_>, fractional: u8) -> Result<Self, Error> {
+    pub(in crate::replication) fn read(r: &mut Reader<'_>, fractional: u8) -> Result<Self, Error> {
         let mut mode = None;
         let mut values = [None; 3];
         for (i, value) in values.iter_mut().enumerate() {
@@ -110,7 +114,11 @@ impl SparseVector {
         }
         Ok(Self::Packed { mode, values })
     }
-    pub(super) fn write(&self, w: &mut Writer, fractional: u8) -> Result<(), Error> {
+    pub(in crate::replication) fn write(
+        &self,
+        w: &mut Writer,
+        fractional: u8,
+    ) -> Result<(), Error> {
         match self {
             Self::FloatBits(values) => {
                 w.bit(true)?;
@@ -154,7 +162,7 @@ pub struct Quaternion25 {
     pub axes: [Axis25; 3],
 }
 impl Quaternion25 {
-    pub(super) fn read(r: &mut Reader<'_>) -> Result<Self, Error> {
+    pub(in crate::replication) fn read(r: &mut Reader<'_>) -> Result<Self, Error> {
         Ok(Self {
             negative_w: r.bit()?,
             axes: array(|| {
@@ -165,7 +173,7 @@ impl Quaternion25 {
             })?,
         })
     }
-    pub(super) fn write(&self, w: &mut Writer) -> Result<(), Error> {
+    pub(in crate::replication) fn write(&self, w: &mut Writer) -> Result<(), Error> {
         w.bit(self.negative_w)?;
         for a in &self.axes {
             w.bit(a.negative)?;
@@ -183,13 +191,13 @@ pub struct Quaternion14 {
     pub axes: [Option<i16>; 3],
 }
 impl Quaternion14 {
-    pub(super) fn read(r: &mut Reader<'_>) -> Result<Self, Error> {
+    pub(in crate::replication) fn read(r: &mut Reader<'_>) -> Result<Self, Error> {
         Ok(Self {
             negative_w: r.bit()?,
             axes: array(|| r.optional(|r| Ok(signed(r, 14)? as i16)))?,
         })
     }
-    pub(super) fn write(&self, w: &mut Writer) -> Result<(), Error> {
+    pub(in crate::replication) fn write(&self, w: &mut Writer) -> Result<(), Error> {
         w.bit(self.negative_w)?;
         for a in &self.axes {
             w.optional(a, |w, v| put_signed(w, i32::from(*v), 14))?;
@@ -220,13 +228,13 @@ impl std::fmt::Debug for Resource {
     }
 }
 impl Resource {
-    pub(super) fn read(r: &mut Reader<'_>) -> Result<Self, Error> {
+    pub(in crate::replication) fn read(r: &mut Reader<'_>) -> Result<Self, Error> {
         Ok(Self {
             words: array(|| r.take(32))?,
             name: r.string(5, 16)?,
         })
     }
-    pub(super) fn write(&self, w: &mut Writer) -> Result<(), Error> {
+    pub(in crate::replication) fn write(&self, w: &mut Writer) -> Result<(), Error> {
         for v in self.words {
             w.put(u64::from(v), 32)?;
         }
