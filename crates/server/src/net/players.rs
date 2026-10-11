@@ -33,6 +33,7 @@ const SPAWN_DELAY_MS: u64 = 750;
 /// Delay from the first glass report to the host teleport; official hosts
 /// send it about 100 ms before the assignment (E101 676 ms, E742 870 ms).
 const TELEPORT_DELAY_MS: u64 = 650;
+const BINDING_REFRESH_DELAY_MS: u64 = 100;
 
 pub(super) struct PlayerListener {
     stats: Accepting,
@@ -56,6 +57,8 @@ pub(super) struct PlayerListener {
     pending_spawns: VecDeque<(u64, nfs_world::participants::Notification)>,
     /// Host teleports of world cars, due at world ms (sent as content).
     pending_teleports: VecDeque<(u64, nfs_world::teleport::Command)>,
+    /// Completion handoffs awaiting a current owned binding snapshot.
+    pending_binding_refreshes: VecDeque<(u64, u16)>,
     glass: crate::glass::Glass,
     customization: crate::customization_timer::Timers,
     world_ms: u64,
@@ -446,6 +449,7 @@ impl PlayerListener {
             deferred_deletions: BTreeMap::new(),
             pending_spawns: VecDeque::new(),
             pending_teleports: VecDeque::new(),
+            pending_binding_refreshes: VecDeque::new(),
             arrivals: None,
             glass: crate::glass::Glass::default(),
             customization: crate::customization_timer::Timers::default(),
@@ -691,6 +695,7 @@ impl Listener for PlayerListener {
         let mut scheduled_spawns = Vec::new();
         let mut arrivals = self.arrivals.clone();
         let mut scheduled_teleports = Vec::new();
+        let mut scheduled_binding_refreshes = Vec::new();
         let mut sequences = self.sequences.clone();
         let mut logic_ghosts = self.logic_ghosts.clone();
         let mut unsupported_logic = 0;
@@ -944,6 +949,10 @@ impl Listener for PlayerListener {
                                 .map(nfs_world::participants::HostRpc::Event),
                         );
                         rollout_records.extend(logic.records);
+                        scheduled_binding_refreshes.push((
+                            self.world_ms.saturating_add(BINDING_REFRESH_DELAY_MS),
+                            participant,
+                        ));
                         exit_entries.push((
                             Section {
                                 float_bits: None,
@@ -1366,6 +1375,8 @@ impl Listener for PlayerListener {
             || sections.len() + deferred_sections.len() + usize::from(!records.is_empty())
                 > MAX_PENDING - self.pending.len()
             || entries.len() > MAX_PENDING - self.pending_entries.len()
+            || scheduled_binding_refreshes.len()
+                > MAX_PENDING.saturating_sub(self.pending_binding_refreshes.len())
         {
             self.refused += 1;
             return false;
@@ -1411,6 +1422,8 @@ impl Listener for PlayerListener {
         self.pending_spawns.extend(scheduled_spawns);
         self.arrivals = arrivals;
         self.pending_teleports.extend(scheduled_teleports);
+        self.pending_binding_refreshes
+            .extend(scheduled_binding_refreshes);
         self.glass = glass;
         self.customization = customization;
         for (participant, measurement) in measurements {

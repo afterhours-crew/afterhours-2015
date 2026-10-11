@@ -28,6 +28,33 @@ impl PlayerListener {
         // the complete frame before the listener commits the readiness transition.
         split_scenes(bindings, nfs_world::application::OUTBOUND_FRAME_BITS)
     }
+    /// Keep completion refreshes behind their presentation creation, including
+    /// under reliable-window backpressure. A due item is consumed only after
+    /// its complete generated section is validated and queued.
+    pub(super) fn advance_binding_refreshes(
+        &mut self,
+        world_ms: u64,
+    ) -> Result<(), replication::Error> {
+        while let Some(&(due, participant)) = self.pending_binding_refreshes.front() {
+            if due > world_ms {
+                break;
+            }
+            let records = self.players.vehicle_binding_snapshot(
+                HOST_SELECTOR as u8,
+                self.persona,
+                participant,
+            )?;
+            let sections = Self::binding_sections(records)?;
+            if sections.len() > MAX_PENDING.saturating_sub(self.pending_entries.len()) {
+                break;
+            }
+            self.pending_entries
+                .extend(sections.into_iter().map(|section| (section, Vec::new())));
+            self.pending_binding_refreshes.pop_front();
+            tracing::info!(participant, "owned driving handoff bindings refreshed");
+        }
+        Ok(())
+    }
     /// Grant simulation only after a newly created world car reports readiness.
     /// Existing garage cars retain their usual authority.
     pub(super) fn ready_movement(

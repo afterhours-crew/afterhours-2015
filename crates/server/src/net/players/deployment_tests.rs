@@ -512,3 +512,99 @@ fn generated_trigger_is_enabled_and_bound_without_changing_boolean_defaults() {
     );
     assert_eq!(listener.trigger_volumes, before);
 }
+
+fn binding_refresh_listener() -> (PlayerListener, u16) {
+    let mut listener = PlayerListener::new(101);
+    let player = listener
+        .players
+        .create(
+            HOST_SELECTOR as u8,
+            101,
+            nfs_world::replication::players::Request {
+                name: b"Driver".to_vec(),
+                flag: false,
+                slot: 0,
+            },
+        )
+        .unwrap()
+        .unwrap()
+        .id;
+    let participant = listener
+        .players
+        .join(HOST_SELECTOR as u8, 101, player)
+        .unwrap()
+        .unwrap()
+        .id;
+    listener.players.enable_player_manager().unwrap().unwrap();
+    (listener, participant)
+}
+
+#[test]
+fn completion_binding_refresh_waits_for_deadline_and_preserves_presentation_order_once() {
+    let (mut listener, participant) = binding_refresh_listener();
+    let expected = listener
+        .players
+        .vehicle_binding_snapshot(HOST_SELECTOR as u8, 101, participant)
+        .unwrap();
+    let before = listener.players.objects().snapshot();
+    let presentation = Section {
+        float_bits: None,
+        flag: false,
+        deleted: vec![321],
+        setup: None,
+        records: vec![],
+    };
+    listener
+        .pending_entries
+        .push_back((presentation.clone(), vec![]));
+    listener
+        .pending_binding_refreshes
+        .push_back((100, participant));
+    listener.advance_sequences(99).unwrap();
+    assert_eq!(listener.pending_entries.len(), 1);
+    assert_eq!(listener.pending_binding_refreshes.len(), 1);
+    listener.advance_sequences(100).unwrap();
+    assert_eq!(
+        listener.pending_entries.pop_front().unwrap().0,
+        presentation
+    );
+    let published = listener.pending_entries.pop_front().unwrap();
+    assert_eq!(published.0.records, expected);
+    assert!(published.1.is_empty());
+    assert!(listener.pending_binding_refreshes.is_empty());
+    listener.advance_sequences(200).unwrap();
+    assert!(listener.pending_entries.is_empty());
+    assert_eq!(listener.players.objects().snapshot(), before);
+}
+
+#[test]
+fn completion_binding_refresh_retains_due_work_under_backpressure_and_is_session_local() {
+    let (mut listener, participant) = binding_refresh_listener();
+    let (mut other, _) = binding_refresh_listener();
+    let occupied = Section {
+        float_bits: None,
+        flag: false,
+        deleted: vec![],
+        setup: None,
+        records: vec![],
+    };
+    listener
+        .pending_entries
+        .resize(MAX_PENDING, (occupied, vec![]));
+    listener
+        .pending_binding_refreshes
+        .push_back((100, participant));
+    listener.advance_sequences(100).unwrap();
+    assert_eq!(listener.pending_entries.len(), MAX_PENDING);
+    assert_eq!(listener.pending_binding_refreshes.len(), 1);
+    other.advance_sequences(100).unwrap();
+    assert!(other.pending_entries.is_empty());
+    assert!(other.pending_binding_refreshes.is_empty());
+    listener.pending_entries.pop_front();
+    listener.advance_sequences(101).unwrap();
+    assert_eq!(listener.pending_entries.len(), MAX_PENDING);
+    assert_eq!(listener.pending_entries.back().unwrap().0.records.len(), 2);
+    assert!(listener.pending_binding_refreshes.is_empty());
+    assert!(listener.advance_sequences(100).is_err());
+    assert_eq!(listener.pending_entries.len(), MAX_PENDING);
+}
