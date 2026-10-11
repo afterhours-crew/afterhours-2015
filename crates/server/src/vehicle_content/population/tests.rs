@@ -687,6 +687,20 @@ fn manager_and_participant_bind_the_owned_car_and_clear_repeatedly() {
         );
     }
     let bound = players.objects().snapshot();
+    assert_eq!(
+        players.vehicle_binding_snapshot(3, 0x100000002, p).unwrap(),
+        binding
+    );
+    for (connection, persona, participant) in
+        [(4, 0x100000002, p), (3, 1, p), (3, 0x100000002, car)]
+    {
+        assert!(
+            players
+                .vehicle_binding_snapshot(connection, persona, participant)
+                .is_err()
+        );
+    }
+    assert_eq!(players.objects().snapshot(), bound);
     assert!(players.remove_vehicle(3, 0x100000002, p, 1).is_err());
     assert_eq!(players.objects().snapshot(), bound);
     let binding = binding[0].clone();
@@ -714,6 +728,24 @@ fn manager_and_participant_bind_the_owned_car_and_clear_repeatedly() {
         panic!()
     };
     assert_eq!(current.entries[2], delta.entries[2]);
+    let isolated = players.vehicle_binding_snapshot(3, 0x100000002, p).unwrap();
+    let Update::PlayerManager(isolated) = &isolated[0].update else {
+        panic!()
+    };
+    assert_eq!(isolated.entries[2], delta.entries[2]);
+    assert_eq!(
+        isolated
+            .entries
+            .iter()
+            .filter(|entry| entry.is_some())
+            .count(),
+        1
+    );
+    assert!(
+        players
+            .vehicle_binding_snapshot(3, 0x100000002, other)
+            .is_err()
+    );
     assert!(
         current.entries[6]
             .as_ref()
@@ -743,6 +775,19 @@ fn manager_and_participant_bind_the_owned_car_and_clear_repeatedly() {
         players
             .bind_player_vehicle(3, 0x100000002, p, Some(car))
             .is_err()
+    );
+    let detached = players.vehicle_binding_snapshot(3, 0x100000002, p).unwrap();
+    assert!(matches!(&detached[1].update, Update::Participant(v) if v.entity == Some(0)));
+    let Update::PlayerManager(detached) = &detached[0].update else {
+        panic!()
+    };
+    assert!(
+        detached.entries[2]
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .detached
     );
     let mut separate = Players::default();
     assert_eq!(separate.enable_player_manager().unwrap().unwrap().id, 1);

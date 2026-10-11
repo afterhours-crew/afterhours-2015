@@ -57,6 +57,62 @@ impl Players {
         }
         self.objects.change(id, Update::PlayerManager(delta))
     }
+    /// Re-publish only one owned player's current manager and participant links.
+    /// A completion handoff can require these records even when their values
+    /// have not changed. Read at publication time so a pending refresh never
+    /// resurrects an earlier vehicle binding.
+    pub fn vehicle_binding_snapshot(
+        &self,
+        connection: u8,
+        persona: u64,
+        participant: u16,
+    ) -> Result<Vec<Record>, Error> {
+        let slot = usize::from(
+            self.runtime_index(connection, persona, participant)
+                .ok_or(Error::UnknownObject)?,
+        );
+        let manager = self.manager.ok_or(Error::Unsupported)?;
+        let Some(state::Object {
+            current: Update::PlayerManager(current),
+            ..
+        }) = self.objects.get(manager)
+        else {
+            return Err(Error::TypeMismatch);
+        };
+        let entry = current
+            .entries
+            .get(slot)
+            .and_then(Option::as_ref)
+            .and_then(Option::as_ref)
+            .ok_or(Error::UnknownObject)?;
+        if !self.owns(connection, persona, entry.player) {
+            return Err(Error::UnknownObject);
+        }
+        let Some(state::Object {
+            current: Update::Participant(current),
+            ..
+        }) = self.objects.get(participant)
+        else {
+            return Err(Error::TypeMismatch);
+        };
+        let mut delta = player_manager::Update::default();
+        delta.entries[slot] = Some(Some(entry.clone()));
+        Ok(vec![
+            Record {
+                id: manager,
+                initial: None,
+                update: Update::PlayerManager(delta),
+            },
+            Record {
+                id: participant,
+                initial: None,
+                update: Update::Participant(ParticipantUpdate {
+                    entity: Some(current.entity.unwrap_or(0)),
+                    ..ParticipantUpdate::default()
+                }),
+            },
+        ])
+    }
     /// Bind both the player seats and the participant entity to its own vehicle.
     /// The participant reference is used by teleport and scripted vehicle control.
     /// Clear both relations before removing a bound vehicle.
