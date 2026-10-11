@@ -18,3 +18,9 @@ Portable tests construct their inputs. They cover connection ownership, retries,
 disconnect cleanup, object allocation, transactional updates, resource limits,
 replication pacing, files and vehicle initialization. These tests establish the
 covered protocol/state behavior, not a complete game or launcher independence.
+
+Scene profiles distinguish trigger-volume endpoints from ordinary Boolean RPCs.
+A trigger volume starts enabled so its client collision listener exists; ordinary
+Boolean endpoints retain their inactive default. The world session accepts bounded,
+ordered enter/leave reports only for its owned world cars and drops observations
+when those cars are removed. Reports do not synthesize cinematic completion.

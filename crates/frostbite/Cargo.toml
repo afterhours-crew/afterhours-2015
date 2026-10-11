@@ -1,0 +1,19 @@
+[package]
+name = "nfs-frostbite"
+version = "0.1.0"
+description = "Read-only reader for installed Frostbite 2014.4 content containers"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# Synthetic container writers for tests in this and dependent crates.
+synthetic = []
+
+[dependencies]
+lz4_flex = { version = "=0.14.0", default-features = false, features = ["std", "safe-decode", "safe-encode", "checked-decode"] }
+miniz_oxide = { version = "=0.9.1", default-features = false, features = ["with-alloc"] }

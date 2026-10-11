@@ -195,6 +195,11 @@ impl PlayerListener {
         match arrivals {
             None => {
                 for participant in arriving {
+                    records.extend(players.actor_arriving(
+                        HOST_SELECTOR as u8,
+                        persona,
+                        participant,
+                    )?);
                     if let nfs_world::participants::Outcome::Advanced(calls) =
                         participants.arrived(participant)
                     {
@@ -211,7 +216,7 @@ impl PlayerListener {
             }
             Some(arrivals) => {
                 for participant in arriving {
-                    let started = arrivals.start(
+                    let started = arrivals.start_rollout(
                         players,
                         Owner {
                             connection: HOST_SELECTOR as u8,
@@ -219,12 +224,18 @@ impl PlayerListener {
                             participant,
                         },
                     )?;
-                    let logic = match started {
-                        Some(_) => apply(players, participant, Which::Arrive, &mut chain)?,
-                        None => Vec::new(),
+                    let logic = if started.is_empty() {
+                        Vec::new()
+                    } else {
+                        apply(players, participant, Which::Arrive, &mut chain)?
                     };
                     records.extend(started);
                     records.extend(logic);
+                    records.extend(players.actor_arriving(
+                        HOST_SELECTOR as u8,
+                        persona,
+                        participant,
+                    )?);
                 }
             }
         }

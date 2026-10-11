@@ -4,17 +4,16 @@
 
 //! Item-system inventory assurance (`2052/19`, `ensurePlayerInventory`): the
 //! client declares its item system and the licenses it holds; the service
-//! acknowledges an exact, configured declaration with an empty response (no
-//! new awards). A declaration of the configured item system without any
-//! license (a new account holding only the base game) is acknowledged the same
-//! way: it names nothing to award. Any other item system or license set is
-//! unsupported (no reply): awarding items for licenses is inventory policy,
-//! not this route.
+//! acknowledges a configured declaration with an empty response (no new
+//! awards). Version 1 accepts the exact configured list or no licenses.
+//! Version 2 accepts a duplicate-free subset of known license/source pairs,
+//! in any order. This validates vocabulary, never ownership or entitlement:
+//! awarding items for licenses remains separate inventory policy.
 use crate::{ContentError, SUPPORTED_BUILD_SHA256};
 use nfs_fire2::{Fields, Frame};
 use nfs_protocol::items::{COMPONENT, ENSURE_PLAYER_INVENTORY, EnsurePlayerInventoryRequest};
 use serde_json::Value as Json;
-use std::{fs::File, io::Read, path::Path};
+use std::{collections::BTreeSet, fs::File, io::Read, path::Path};
 
 pub const MAX_CONTENT_BYTES: usize = 16 * 1024;
 pub const MAX_LICENSES: usize = 32;
@@ -56,11 +55,12 @@ pub struct License {
     pub source: String,
 }
 
-/// The configured item system and the exact license declaration it accepts.
+/// The configured item system and accepted license vocabulary/declaration.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Content {
     item_system: String,
     licenses: Vec<License>,
+    known_subsets: bool,
 }
 
 fn fields(v: &Json, names: &[&str]) -> Result<(), ContentError> {
@@ -97,7 +97,23 @@ impl Content {
         Ok(Self {
             item_system,
             licenses,
+            known_subsets: false,
         })
+    }
+    /// Recognize any duplicate-free subset without awarding items or changing
+    /// account state. The known pairs are definitions, not player grants.
+    pub fn known(item_system: String, licenses: Vec<License>) -> Result<Self, ContentError> {
+        let mut content = Self::new(item_system, licenses)?;
+        let unique: BTreeSet<_> = content
+            .licenses
+            .iter()
+            .map(|l| (&l.license, &l.source))
+            .collect();
+        if unique.len() != content.licenses.len() {
+            return Err(ContentError::Invalid);
+        }
+        content.known_subsets = true;
+        Ok(content)
     }
     /// File I/O must run on a blocking worker at an async edge.
     pub fn load(path: &Path) -> Result<Self, ContentError> {
@@ -124,7 +140,7 @@ impl Content {
             ],
         )?;
         if v["format"] != "nfs-item-licenses"
-            || v["version"] != 1
+            || !matches!(v["version"].as_u64(), Some(1 | 2))
             || v["build_sha256"] != SUPPORTED_BUILD_SHA256
         {
             return Err(ContentError::Invalid);
@@ -142,7 +158,12 @@ impl Content {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Self::new(text(&v["item_system"], MAX_SYSTEM_BYTES)?, licenses)
+        let system = text(&v["item_system"], MAX_SYSTEM_BYTES)?;
+        if v["version"] == 2 {
+            Self::known(system, licenses)
+        } else {
+            Self::new(system, licenses)
+        }
     }
     pub fn item_system(&self) -> &str {
         &self.item_system
@@ -181,12 +202,23 @@ impl Content {
         // A declaration without licenses (list absent or empty) names nothing a
         // license could award, so it is acknowledged like the configured set.
         let declared = q.available_licenses.as_ref().map_or(&[][..], |d| &d.0[..]);
-        let same = declared.is_empty()
-            || (declared.len() == self.licenses.len()
-                && declared.iter().zip(&self.licenses).all(|(row, l)| {
-                    row.license == Some(l.license.as_bytes())
-                        && row.source == Some(l.source.as_bytes())
-                }));
+        let matches = |row: &nfs_protocol::items::LicenseSourceData<'_>, l: &License| {
+            row.license == Some(l.license.as_bytes()) && row.source == Some(l.source.as_bytes())
+        };
+        let same = if self.known_subsets {
+            let mut seen = BTreeSet::new();
+            declared.iter().all(|row| {
+                seen.insert((row.license, row.source))
+                    && self.licenses.iter().any(|l| matches(row, l))
+            })
+        } else {
+            declared.is_empty()
+                || (declared.len() == self.licenses.len()
+                    && declared
+                        .iter()
+                        .zip(&self.licenses)
+                        .all(|(row, l)| matches(row, l)))
+        };
         if !same {
             return Err(Error::Unsupported);
         }

@@ -444,6 +444,14 @@ fn batch(v: &Json, content: &Content, earlier: &BTreeSet<u16>) -> Result<Batch, 
 
 impl GarageLogic {
     pub fn load(path: &Path) -> Result<Self, Failure> {
+        Self::load_with_reputation(path, None)
+    }
+    /// Supply installation-derived thresholds when the document omits them.
+    /// Embedded thresholds remain explicit operator policy and take precedence.
+    pub fn load_with_reputation(
+        path: &Path,
+        default: Option<reputation::Thresholds>,
+    ) -> Result<Self, Failure> {
         let mut bytes = Vec::new();
         File::open(path)
             .map_err(|_| Failure::Output)?
@@ -453,9 +461,18 @@ impl GarageLogic {
         if bytes.len() > 262_144 {
             return Err(Failure::BodyLimit);
         }
-        Self::from_json(&serde_json::from_slice(&bytes).map_err(|_| Failure::ProfileConfig)?)
+        Self::from_json_with_reputation(
+            &serde_json::from_slice(&bytes).map_err(|_| Failure::ProfileConfig)?,
+            default,
+        )
     }
     pub fn from_json(v: &Json) -> Result<Self, Failure> {
+        Self::from_json_with_reputation(v, None)
+    }
+    pub fn from_json_with_reputation(
+        v: &Json,
+        default: Option<reputation::Thresholds>,
+    ) -> Result<Self, Failure> {
         let o = v.as_object().ok_or(Failure::ProfileConfig)?;
         for k in [
             "format",
@@ -538,7 +555,8 @@ impl GarageLogic {
                     .collect::<Result<Vec<_>, _>>()?;
                 reputation::Thresholds::new(values).map_err(|_| Failure::ProfileConfig)
             })
-            .transpose()?;
+            .transpose()?
+            .or(default);
         if entry
             .entities
             .iter()
@@ -1006,6 +1024,34 @@ pub(crate) mod tests {
         let mut bad = v;
         bad["reputation_thresholds"] = json!([0, 1, 1]);
         assert!(GarageLogic::from_json(&bad).is_err());
+    }
+
+    #[test]
+    fn installed_thresholds_fill_missing_policy_without_masking_invalid_policy() {
+        let mut v = reputation_json();
+        let fallback = || Some(reputation::Thresholds::new(vec![0, 100]).unwrap());
+        let total = ReputationScores {
+            total: 25,
+            build: 0,
+            crew: 0,
+            outlaw: 0,
+            speed: 0,
+            style: 0,
+        };
+        let level = |v: &Json| {
+            GarageLogic::from_json_with_reputation(v, fallback())
+                .unwrap()
+                .reputation_thresholds()
+                .unwrap()
+                .evaluate(total)
+                .get(ReputationField::Level)
+        };
+        assert_eq!(level(&v), 3); // Embedded operator policy wins.
+        v.as_object_mut().unwrap().remove("reputation_thresholds");
+        assert!(GarageLogic::from_json(&v).is_err());
+        assert_eq!(level(&v), 1); // Installed thresholds supply the missing policy.
+        v["reputation_thresholds"] = json!([0, 1, 1]);
+        assert!(GarageLogic::from_json_with_reputation(&v, fallback()).is_err());
     }
 
     #[test]

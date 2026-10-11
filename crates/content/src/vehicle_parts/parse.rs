@@ -2,8 +2,9 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-use super::{parse::*, *};
-use nfs_world::items::MAX_DEFINITIONS;
+use super::*;
+use nfs_world::items::{Guid, MAX_DEFINITIONS};
+use nfs_world::replication::Error;
 
 type Parsed = (
     customization::Definitions,
@@ -12,7 +13,7 @@ type Parsed = (
     appearance::Definitions,
     mesh::Definitions,
 );
-pub(super) fn parse(p: &Value, classes: &Catalog) -> Result<Parsed, Failure> {
+pub(super) fn parse(p: &Value, classes: &ItemCatalog) -> Result<Parsed, ParseError> {
     let mut tune = Vec::new();
     let mut custom = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
@@ -21,10 +22,10 @@ pub(super) fn parse(p: &Value, classes: &Catalog) -> Result<Parsed, Failure> {
         let id = guid(&row["guid"])?;
         check_class(row, classes, id)?;
         if !seen.insert(id) {
-            return Err(Failure::ProfileConfig);
+            return Err(ParseError::Invalid);
         }
         let t = &row["tuning"];
-        let obj = t.as_object().ok_or(Failure::ProfileConfig)?;
+        let obj = t.as_object().ok_or(ParseError::Invalid)?;
         if !obj.is_empty() {
             keys(t, &["asset_present"], &["transmission_values"])?;
             let transmission_values = if let Some(v) = t.get("transmission_values") {
@@ -34,7 +35,7 @@ pub(super) fn parse(p: &Value, classes: &Catalog) -> Result<Parsed, Failure> {
                         .map(uint)
                         .collect::<Result<Vec<u8>, _>>()?
                         .try_into()
-                        .map_err(|_| Failure::ProfileConfig)?,
+                        .map_err(|_| ParseError::Invalid)?,
                 )
             } else {
                 None
@@ -79,7 +80,7 @@ pub(super) fn parse(p: &Value, classes: &Catalog) -> Result<Parsed, Failure> {
                     })
                 } else {
                     if d.get("rear").is_some() {
-                        return Err(Failure::ProfileConfig);
+                        return Err(ParseError::Invalid);
                     }
                     None
                 };
@@ -90,7 +91,7 @@ pub(super) fn parse(p: &Value, classes: &Catalog) -> Result<Parsed, Failure> {
                     rim,
                 }
             }
-            _ => return Err(Failure::ProfileConfig),
+            _ => return Err(ParseError::Invalid),
         };
         custom.push((id, input));
     }
@@ -104,7 +105,7 @@ pub(super) fn parse(p: &Value, classes: &Catalog) -> Result<Parsed, Failure> {
             keys(r, &["guid", "variant"], &[])?;
             Ok((guid(&r["guid"])?, uint(&r["variant"])?))
         })
-        .collect::<Result<Vec<_>, Failure>>()?;
+        .collect::<Result<Vec<_>, ParseError>>()?;
     let nos = model(nos::Definitions::new(classes.clone(), ns))?;
     let wheels = array(&p["wheels"], MAX_DEFINITIONS)?
         .iter()
@@ -155,7 +156,7 @@ pub(super) fn parse(p: &Value, classes: &Catalog) -> Result<Parsed, Failure> {
                         enabled: boolean(&r["enabled"])?,
                     }
                 }
-                _ => return Err(Failure::ProfileConfig),
+                _ => return Err(ParseError::Invalid),
             };
             Ok((
                 id,
@@ -165,7 +166,7 @@ pub(super) fn parse(p: &Value, classes: &Catalog) -> Result<Parsed, Failure> {
                 },
             ))
         })
-        .collect::<Result<Vec<_>, Failure>>()?;
+        .collect::<Result<Vec<_>, ParseError>>()?;
     let wheels = model(wheel_customization::Definitions::new(
         classes.clone(),
         wheels,
@@ -177,8 +178,8 @@ pub(super) fn parse(p: &Value, classes: &Catalog) -> Result<Parsed, Failure> {
             let id = guid(&r["guid"])?;
             check_class(r, classes, id)?;
             let signed = |v: &Value| {
-                i32::try_from(v.as_i64().ok_or(Failure::ProfileConfig)?)
-                    .map_err(|_| Failure::ProfileConfig)
+                i32::try_from(v.as_i64().ok_or(ParseError::Invalid)?)
+                    .map_err(|_| ParseError::Invalid)
             };
             let input = match r["class_name"].as_str() {
                 Some("RimsItemData") => {
@@ -190,21 +191,21 @@ pub(super) fn parse(p: &Value, classes: &Catalog) -> Result<Parsed, Failure> {
                 Some("LicensePlateBackgroundItemData") => {
                     keys(r, &["guid", "class_name", "indices"], &[])?;
                     let [n] = array(&r["indices"], 1)? else {
-                        return Err(Failure::ProfileConfig);
+                        return Err(ParseError::Invalid);
                     };
                     Input::Plate(signed(n)?)
                 }
                 Some("LicensePlateFrameItemData") => {
                     keys(r, &["guid", "class_name", "indices"], &[])?;
                     let [a, b] = array(&r["indices"], 2)? else {
-                        return Err(Failure::ProfileConfig);
+                        return Err(ParseError::Invalid);
                     };
                     Input::Frame([signed(a)?, signed(b)?])
                 }
                 Some("StaticLiveryCustomizationItemData") => {
                     keys(r, &["guid", "class_name", "indices"], &[])?;
                     let [a, b] = array(&r["indices"], 2)? else {
-                        return Err(Failure::ProfileConfig);
+                        return Err(ParseError::Invalid);
                     };
                     Input::StaticWrap([uint(a)?, uint(b)?])
                 }
@@ -213,15 +214,15 @@ pub(super) fn parse(p: &Value, classes: &Catalog) -> Result<Parsed, Failure> {
                     Input::DynamicWrap {
                         data_id: text(&r["data_id"])?
                             .parse()
-                            .map_err(|_| Failure::ProfileConfig)?,
+                            .map_err(|_| ParseError::Invalid)?,
                         version: signed(&r["version"])?,
                     }
                 }
-                _ => return Err(Failure::ProfileConfig),
+                _ => return Err(ParseError::Invalid),
             };
             Ok((id, input))
         })
-        .collect::<Result<Vec<_>, Failure>>()?;
+        .collect::<Result<Vec<_>, ParseError>>()?;
     let appearance = model(appearance::Definitions::new(classes.clone(), appearance))?;
     let meshes = array(&p["mesh"], MAX_DEFINITIONS)?
         .iter()
@@ -258,11 +259,11 @@ pub(super) fn parse(p: &Value, classes: &Catalog) -> Result<Parsed, Failure> {
                             .collect::<Result<_, _>>()?,
                     }
                 }
-                _ => return Err(Failure::ProfileConfig),
+                _ => return Err(ParseError::Invalid),
             };
             Ok((id, input))
         })
-        .collect::<Result<Vec<_>, Failure>>()?;
+        .collect::<Result<Vec<_>, ParseError>>()?;
     Ok((
         custom,
         nos,
@@ -271,55 +272,73 @@ pub(super) fn parse(p: &Value, classes: &Catalog) -> Result<Parsed, Failure> {
         model(mesh::Definitions::new(classes.clone(), meshes))?,
     ))
 }
-fn optional_byte(v: &Value, k: &str) -> Result<Option<u8>, Failure> {
+fn optional_byte(v: &Value, k: &str) -> Result<Option<u8>, ParseError> {
     v.get(k).map(uint).transpose()
 }
-fn check_class(row: &Value, catalog: &Catalog, id: Guid) -> Result<(), Failure> {
+fn check_class(row: &Value, catalog: &ItemCatalog, id: Guid) -> Result<(), ParseError> {
     if row["class_name"].as_str()
-        != Some(
-            catalog
-                .class(&id)
-                .map_err(|_| Failure::ProfileConfig)?
-                .name(),
-        )
+        != Some(catalog.class(&id).map_err(|_| ParseError::Invalid)?.name())
     {
-        return Err(Failure::ProfileConfig);
+        return Err(ParseError::Invalid);
     }
     Ok(())
 }
-fn guids(v: &Value) -> Result<Vec<Guid>, Failure> {
+fn guids(v: &Value) -> Result<Vec<Guid>, ParseError> {
     array(v, 256)?.iter().map(guid).collect()
 }
-pub(super) fn components(v: &Value) -> Result<Vec<mesh::Component>, Failure> {
-    array(v, MAX_MESHES)?
+
+pub(super) fn keys(v: &Value, required: &[&str], optional: &[&str]) -> Result<(), ParseError> {
+    let obj = v.as_object().ok_or(ParseError::Invalid)?;
+    if required.iter().any(|k| !obj.contains_key(*k))
+        || obj
+            .keys()
+            .any(|k| !required.contains(&k.as_str()) && !optional.contains(&k.as_str()))
+    {
+        return Err(ParseError::Invalid);
+    }
+    Ok(())
+}
+pub(super) fn array(v: &Value, max: usize) -> Result<&[Value], ParseError> {
+    let a = v.as_array().ok_or(ParseError::Invalid)?;
+    if a.len() > max {
+        return Err(ParseError::Limit);
+    }
+    Ok(a)
+}
+pub(super) fn uint<T: TryFrom<u64>>(v: &Value) -> Result<T, ParseError> {
+    T::try_from(v.as_u64().ok_or(ParseError::Invalid)?).map_err(|_| ParseError::Invalid)
+}
+pub(super) fn boolean(v: &Value) -> Result<bool, ParseError> {
+    v.as_bool().ok_or(ParseError::Invalid)
+}
+pub(super) fn float(v: &Value) -> Result<f32, ParseError> {
+    let n = v.as_f64().ok_or(ParseError::Invalid)? as f32;
+    n.is_finite().then_some(n).ok_or(ParseError::Invalid)
+}
+pub(super) fn floats<const N: usize>(v: &Value) -> Result<[f32; N], ParseError> {
+    array(v, N)?
         .iter()
-        .map(|c| {
-            keys(c, &["index_bits", "extra", "variants"], &[])?;
-            let kind = mesh_kind(c)?;
-            let variants = array(&c["variants"], 256)?
-                .iter()
-                .map(|v| {
-                    keys(v, &["guid", "bundle"], &[])?;
-                    Ok(mesh::Variant {
-                        guid: if v["guid"].is_null() {
-                            None
-                        } else {
-                            Some(guid(&v["guid"])?)
-                        },
-                        bundle: if v["bundle"].is_null() {
-                            None
-                        } else {
-                            Some(text(&v["bundle"])?.to_owned())
-                        },
-                    })
-                })
-                .collect::<Result<Vec<_>, Failure>>()?;
-            if !(1..=16).contains(&kind.index_bits)
-                || variants.len() > ((1usize << kind.index_bits) - 1)
-            {
-                return Err(Failure::ProfileConfig);
-            }
-            Ok(mesh::Component { kind, variants })
-        })
-        .collect()
+        .map(float)
+        .collect::<Result<Vec<_>, _>>()?
+        .try_into()
+        .map_err(|_| ParseError::Invalid)
+}
+pub(super) fn text(v: &Value) -> Result<&str, ParseError> {
+    v.as_str()
+        .filter(|s| !s.is_empty() && s.len() <= 512 && !s.contains('\0'))
+        .ok_or(ParseError::Invalid)
+}
+pub(super) fn guid(v: &Value) -> Result<Guid, ParseError> {
+    let s = text(v)?;
+    if s.len() != 32 || !s.is_ascii() {
+        return Err(ParseError::Invalid);
+    }
+    let mut bytes = [0; 16];
+    for (i, b) in bytes.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).map_err(|_| ParseError::Invalid)?;
+    }
+    Ok(bytes)
+}
+pub(super) fn model<T>(r: Result<T, Error>) -> Result<T, ParseError> {
+    r.map_err(|_| ParseError::Invalid)
 }

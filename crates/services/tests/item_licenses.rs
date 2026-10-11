@@ -202,7 +202,7 @@ fn a_declaration_without_licenses_is_acknowledged_for_the_configured_system() {
 fn content_is_validated_and_bounded() {
     assert!(Content::from_json(&document()).is_ok());
     let mut v = document();
-    v["version"] = json!(2);
+    v["version"] = json!(3);
     assert_eq!(Content::from_json(&v), Err(ContentError::Invalid));
     let mut v = document();
     v["licenses"][0]["license"] = json!("x".repeat(17));
@@ -224,4 +224,42 @@ fn content_is_validated_and_bounded() {
         Some(ContentError::Invalid)
     );
     assert!(Content::new("Items/GameItemSystem".into(), vec![]).is_ok());
+}
+
+#[test]
+fn known_vocabulary_accepts_subsets_and_reordering_without_grants() {
+    let mut v = document();
+    v["version"] = json!(2);
+    let content = Content::from_json(&v).unwrap();
+    for licenses in [
+        vec![],
+        LICENSES.to_vec(),
+        LICENSES[..1].to_vec(),
+        vec![LICENSES[1], LICENSES[0]],
+    ] {
+        let reply = content
+            .reply(&declaration(b"Items/GameItemSystem", &licenses, 81))
+            .unwrap();
+        let d = nfs_fire2::decode(&reply, frame_limits()).unwrap().unwrap();
+        assert_eq!(d.frame.fields.correlation, 81);
+        assert_eq!(d.frame.fields.category, 1);
+        assert!(d.frame.body.is_empty());
+    }
+    for licenses in [
+        vec![LICENSES[0], LICENSES[0]],
+        vec![(b"Unknown".as_slice(), b"Entitlement".as_slice())],
+        vec![(b"NFS12".as_slice(), b"Store".as_slice())],
+    ] {
+        assert_eq!(
+            content.reply(&declaration(b"Items/GameItemSystem", &licenses, 82)),
+            Err(Error::Unsupported)
+        );
+    }
+    assert_eq!(
+        content.reply(&declaration(b"Other", &[], 83)),
+        Err(Error::Unsupported)
+    );
+    // Repeated known entries in the definition are rejected as well.
+    v["licenses"][1] = v["licenses"][0].clone();
+    assert_eq!(Content::from_json(&v), Err(ContentError::Invalid));
 }

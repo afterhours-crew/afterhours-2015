@@ -17,6 +17,44 @@ use nfs_world::{
 fn content() -> WorldContent {
     content_with(None)
 }
+
+#[test]
+fn installed_scenes_fill_version_five_without_masking_invalid_overrides() {
+    let content = content();
+    let catalog = nfs_content::scenes::Catalog {
+        level: String::from_utf8(content.level.level.clone()).unwrap(),
+        profiles: content.scene_profiles.clone().unwrap(),
+        launchers: content.launchers.clone().unwrap(),
+    };
+    let mut document = content.to_json();
+    document["version"] = serde_json::json!(5);
+    document.as_object_mut().unwrap().remove("scene_profiles");
+    document.as_object_mut().unwrap().remove("launchers");
+    assert!(WorldContent::from_json(&document).is_err());
+    let loaded = WorldContent::from_json_with_scenes(&document, Some(&catalog)).unwrap();
+    assert_eq!(loaded, content);
+    loaded.validate_runtime().unwrap();
+    let mut invalid = document.clone();
+    invalid["scene_profiles"] = serde_json::json!(null);
+    assert!(WorldContent::from_json_with_scenes(&invalid, Some(&catalog)).is_err());
+    let mut invalid = document.clone();
+    invalid["launchers"] = serde_json::json!([{"content_key":1,"serializers":[999]}]);
+    assert!(WorldContent::from_json_with_scenes(&invalid, Some(&catalog)).is_err());
+    let mut other = catalog.clone();
+    other.level = "different/level".into();
+    assert!(WorldContent::from_json_with_scenes(&document, Some(&other)).is_err());
+    // Existing complete v4 and explicit v5 documents remain authoritative.
+    let mut complete = content.to_json();
+    assert_eq!(
+        WorldContent::from_json_with_scenes(&complete, Some(&other)).unwrap(),
+        content
+    );
+    complete["version"] = serde_json::json!(5);
+    assert_eq!(
+        WorldContent::from_json_with_scenes(&complete, Some(&other)).unwrap(),
+        content
+    );
+}
 /// `spawn` adds a fifteenth scene with this field layout and names it as the
 /// SpawnPoints role.
 fn content_with(spawn: Option<&[Kind]>) -> WorldContent {
@@ -133,7 +171,11 @@ fn explicit_scene_roles_bind_atomically_and_reject_incomplete_or_changed_content
     assert!(listener.players.objects().is_empty());
     assert!(listener.pending.is_empty());
     listener.initialize_world(&content).unwrap();
-    assert_eq!(listener.players.objects().len(), 15);
+    assert_eq!(listener.players.objects().len(), 16);
+    assert!(matches!(
+        listener.players.objects().get(16).unwrap().initial,
+        nfs_world::replication::Initial::PlayerManager
+    ));
     assert_eq!(listener.roles, content.roles);
     let before = listener.players.objects().snapshot();
     let queued = listener.pending.len();
@@ -373,4 +415,100 @@ fn the_arrive_frame_carries_the_arrive_logic_deletions() {
         .unwrap();
     assert_eq!(section.deleted, vec![421, 422]);
     assert!(section.records.is_empty() && section.setup.is_none() && !section.flag);
+}
+
+#[test]
+fn movement_grant_waits_for_world_car_report_and_keeps_garage_authority() {
+    use nfs_world::logic::{EntityRef, Message};
+    let mut cars = BTreeMap::from([(300, (40, false)), (301, (41, false))]);
+    let owned = BTreeSet::from([299, 300]);
+    assert_eq!(
+        PlayerListener::ready_movement(owned.clone(), &cars),
+        BTreeSet::from([299])
+    );
+    let mut spawn = nfs_world::spawn_points::SpawnPoints::default();
+    let mut listener = PlayerListener::new(101);
+    listener
+        .initialize_world(&content_with(Some(&SPAWN_LAYOUT)))
+        .unwrap();
+    // Readiness cannot grant a car when no SpawnPoints endpoint is configured.
+    let report = Message::Reached {
+        event: 28_404_286,
+        target: EntityRef {
+            ghost: 300,
+            entity: 2,
+        },
+        player: 0,
+    };
+    assert_eq!(
+        PlayerListener::world_car_ready(&report, &mut cars, &mut spawn),
+        Ok(Some(None))
+    );
+    assert_eq!(
+        PlayerListener::ready_movement(owned.clone(), &cars),
+        BTreeSet::from([299])
+    );
+    // The existing readiness transition marks precisely the reported car.
+    spawn = listener.spawn_points.clone();
+    assert!(
+        PlayerListener::world_car_ready(&report, &mut cars, &mut spawn)
+            .unwrap()
+            .is_some_and(|v| v.is_some())
+    );
+    assert_eq!(
+        PlayerListener::ready_movement(owned, &cars),
+        BTreeSet::from([299, 300])
+    );
+    assert!(!PlayerListener::ready_movement(BTreeSet::from([301]), &cars).contains(&301));
+}
+
+#[test]
+fn ready_binding_has_a_complete_encodable_replication_section() {
+    use nfs_world::replication::{
+        Record, Update as Delta,
+        player_manager::{Entry, Update},
+    };
+    let mut update = Update::default();
+    update.entries[0] = Some(Some(Entry::driving(2, 300)));
+    let mut record = Record {
+        id: 16,
+        initial: None,
+        update: Delta::PlayerManager(update),
+    };
+    let sections = PlayerListener::binding_sections(vec![record.clone()]).unwrap();
+    assert_eq!(sections.len(), 1);
+    assert!(sections[0].setup.is_some());
+    assert_eq!(sections[0].records, vec![record.clone()]);
+    assert!(sections[0].frame().is_ok());
+    // A bad record is rejected while readiness state is still transactional.
+    record.id = 0;
+    assert!(PlayerListener::binding_sections(vec![record]).is_err());
+}
+
+#[test]
+fn generated_trigger_is_enabled_and_bound_without_changing_boolean_defaults() {
+    use nfs_world::replication::{Initial, sublevel};
+    let content = content_with(Some(&[Kind::Noop, Kind::RpcTriggerVolume, Kind::RpcBool]));
+    let mut listener = PlayerListener::new(101);
+    listener.initialize_world(&content).unwrap();
+    let key = content.roles.as_ref().unwrap().spawn_points.unwrap();
+    let scene = listener.pending.iter().flat_map(|s| &s.records).find(|r|
+        matches!(&r.initial, Some(Initial::SubLevel { prefix, .. }) if prefix.content_key == key)).unwrap();
+    let Some(Initial::SubLevel { fields, .. }) = &scene.initial else {
+        panic!()
+    };
+    assert!(matches!(
+        fields[1],
+        sublevel::Initial::RpcBool { value: true, .. }
+    ));
+    assert!(matches!(
+        fields[2],
+        sublevel::Initial::RpcBool { value: false, .. }
+    ));
+    let before = listener.trigger_volumes.clone();
+    assert_eq!(
+        listener.trigger_volumes.bind(std::slice::from_ref(scene)),
+        Err(replication::Error::DuplicateObject)
+    );
+    assert_eq!(listener.trigger_volumes, before);
 }

@@ -50,6 +50,13 @@ const REQUIRED: [(&str, Option<&str>, usize); 16] = [
     ("PrestigeMedalTable", None, 6),
 ];
 
+/// Name, secondary-key column (if any) and column count of every required
+/// table, in canonical order. Content builders select and describe tables
+/// with it; the loader accepts exactly this set.
+pub fn required_tables() -> &'static [(&'static str, Option<&'static str>, usize)] {
+    &REQUIRED
+}
+
 /// Case-sensitive djb2-xor, unlike the content-name hash.
 pub fn key(name: &str) -> u32 {
     name.bytes().fold(5381u32, |hash, byte| {

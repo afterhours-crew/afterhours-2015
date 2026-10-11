@@ -6,6 +6,7 @@ use super::*;
 use std::collections::BTreeMap;
 
 mod actors;
+mod manager;
 mod vehicles;
 
 #[derive(Clone, Eq, PartialEq)]
@@ -33,10 +34,12 @@ struct Player {
 #[derive(Clone, Debug, Default)]
 pub struct Players {
     objects: state::World,
+    manager: Option<u16>,
     players: BTreeMap<(u8, u8), Player>,
     participants: BTreeMap<u16, u16>,
     actors: BTreeMap<u16, u16>,
     vehicles: BTreeMap<(u16, u64), u16>,
+    goal_allocation_serial: u8,
 }
 
 /// Native runtime index of the player on `connection` and local `slot`.

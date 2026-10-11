@@ -117,6 +117,42 @@ fn request(items: &Collection) -> Request<'_> {
 }
 
 #[test]
+fn separate_parts_construct_identical_bodies_and_reject_mixed_or_foreign_inputs() {
+    let (legacy, classes, items) = fixture();
+    let expected = Content::from_json(&legacy, &classes)
+        .unwrap()
+        .construct(request(&items), &mut authority::Registry::default(), |_| {
+            Some(7)
+        })
+        .unwrap();
+    let parts = nfs_content::vehicle_parts::Catalog::from_rows(&legacy["parts"], &classes).unwrap();
+    let mut split = legacy.clone();
+    split["version"] = json!(2);
+    split.as_object_mut().unwrap().remove("parts");
+    assert!(Content::from_json(&split, &classes).is_err());
+    let actual = Content::from_json_with_parts(&split, &classes, Some(&parts))
+        .unwrap()
+        .construct(request(&items), &mut authority::Registry::default(), |_| {
+            Some(7)
+        })
+        .unwrap();
+    assert_eq!(actual, expected);
+    // A version-2 document cannot silently shadow embedded definitions.
+    let mut mixed = split.clone();
+    mixed["parts"] = legacy["parts"].clone();
+    assert!(Content::from_json_with_parts(&mixed, &classes, Some(&parts)).is_err());
+    let foreign = Catalog::new(
+        classes
+            .definitions()
+            .map(|(id, class)| (if *id == [2; 16] { [12; 16] } else { *id }, class)),
+    )
+    .unwrap();
+    assert!(Content::from_json_with_parts(&split, &foreign, Some(&parts)).is_err());
+    // Legacy documents retain their old meaning even when generated parts exist.
+    assert!(Content::from_json_with_parts(&legacy, &classes, Some(&parts)).is_ok());
+}
+
+#[test]
 fn fresh_parked_construction_uses_current_owner_and_keeps_independent_worlds() {
     let (json, catalog, items) = fixture();
     let content = Content::from_json(&json, &catalog).unwrap();
