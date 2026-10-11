@@ -44,6 +44,51 @@ pub struct AssetIndex {
 }
 
 impl AssetIndex {
+    /// Exact object identities of a non-blueprint class in registry order.
+    /// Embedded objects may share a partition and have no asset name of their own.
+    pub(crate) fn registered_objects(
+        &mut self,
+        bundle: &str,
+        class: &str,
+    ) -> Result<Vec<(String, usize)>, Error> {
+        let registry = format!(
+            "{}{REGISTRY_SUFFIX}",
+            bundle.to_lowercase().trim_start_matches("win32/")
+        );
+        let object = self
+            .assets
+            .objects(&registry)?
+            .first()
+            .cloned()
+            .filter(|o| o.class == REGISTRY_CLASS)
+            .ok_or_else(|| Error::Content("invalid object registry".into()))?;
+        let entries = object
+            .fields
+            .get("Objects")
+            .and_then(Value::as_array)
+            .filter(|a| a.len() <= crate::scenes::MAX_GRAPH_OBJECTS)
+            .ok_or_else(|| Error::Content("object registry bound".into()))?;
+        let mut out = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        for value in entries {
+            let key = self
+                .assets
+                .target(
+                    &registry,
+                    value
+                        .as_pointer()
+                        .ok_or_else(|| Error::Content("registry pointer".into()))?,
+                )?
+                .ok_or_else(|| Error::Content("null registry object".into()))?;
+            if self.assets.objects(&key.0)?[key.1].class == class {
+                if !seen.insert(key.clone()) {
+                    return Err(Error::Content("duplicate registered object".into()));
+                }
+                out.push(key);
+            }
+        }
+        Ok(out)
+    }
     pub(crate) fn from_assets(assets: Assets, identity: BuildIdentity) -> Self {
         Self {
             assets,

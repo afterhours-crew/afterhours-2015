@@ -39,6 +39,7 @@ let items = prepared.path(nfs_content::Kind::ItemContent);
 | `VehicleParts` | `vehicle-parts.json` | Item-system customization, tuning assets, NOS variants, wheel geometry, wrap/plate identifiers and mesh GUID alternatives |
 | `VehicleProfiles` | `vehicle-profiles.json` | Player vehicle blueprints reached through the item system: component profiles, mesh-link order, bus flags, registry identities, physics, appearance and health defaults |
 | `ProgressionContent` | `progression-content.json` | Main/intro persistence links, stable IDs, activation expressions, entity composition and explicit spawner-to-scene channel bindings |
+| `SequenceContent` | `sequence-content.json` | Waiting/exit sequence registries, manager bus and serializer, spawner channel links and the exit command's registered spline definition |
 | `WorldMacTemplate` | `world-mac-template.bin` | 64 bytes of the executable image at the build's known address, checked by digest |
 
 Derived defaults are the stored 32-bit patterns of each class's same-named
@@ -74,8 +75,16 @@ scene content key (djb2-xor of its lower-cased path), its asset catalog
 (Blueprint objects in `<bundle>_networkregistry_win32`, counted by class ID)
 and asset references (class ID and position in registry order). A Blueprint
 class without a profiled ID is an error, never a guess. These are inputs for
-world, garage, vehicle and progression content. Progression construction
-definitions are still supplied separately.
+world, garage, vehicle, sequence and progression content.
+
+Sequence extraction checks the waiting and garage-exit serializer layouts and
+resolves channels from each scene's particular sequence referer, through prefab
+and scene interfaces. The manager's scene determines the one-based embedded bus.
+The spline command selects a channel port; that target selects the exact registered
+`ScriptedAISplineEntityData` object and its loop default. Speed-segment assets and
+unrelated channels are not interchangeable with these identities. Missing,
+ambiguous or unsupported graphs fail preparation. Version 2 contains no goal
+allocation counter; that value belongs to owned runtime state.
 
 ## Vehicle parts
 

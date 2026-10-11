@@ -11,14 +11,16 @@ pub use nfs_frostbite::synthetic::{Asset, Field, PartitionWriter};
 use nfs_services::persistent::required_tables;
 use std::path::Path;
 pub mod progression;
+pub mod sequences;
 pub mod vehicles;
 
 pub const TEMPLATE_RVA: u32 = 0x1010;
 /// Made-up class IDs for synthetic installations.
-pub const SYNTHETIC_CLASS_IDS: [(&str, u32); 3] = [
+pub const SYNTHETIC_CLASS_IDS: [(&str, u32); 4] = [
     ("LogicPrefabBlueprint", 10),
     ("RaceVehicleBlueprint", 20),
     ("ParticipantLogicBlueprint", 30),
+    ("ParticipantStateSequenceBlueprint", 40),
 ];
 
 /// A minimal PE image with one `.data` section holding a 64-byte template.
@@ -441,6 +443,7 @@ pub fn runtime_world() -> Vec<Asset> {
     });
     result.extend(garage_layout());
     result.extend(progression::assets());
+    sequences::install(&mut result);
     result
 }
 
@@ -881,10 +884,19 @@ pub fn write(root: &Path, assets: &[Asset]) -> std::io::Result<(Options, [u8; 64
             garage_links: garage_links(),
             vehicles: vehicles::rules(),
             progression: progression::rules(),
+            sequences: sequences::rules(),
             scenes: crate::scenes::Rules {
                 level: RUNTIME_LEVEL.to_owned(),
                 classes: [
                     ("LevelData", None),
+                    ("StateSequenceRefererEntityData", None),
+                    ("LogicPrefabReferenceObjectData", None),
+                    ("LogicPrefabBlueprint", None),
+                    ("ScriptedAISplineEntityData", None),
+                    (
+                        "StateSequenceManagerEntityData",
+                        Some(nfs_world::replication::sublevel::Kind::Rpc),
+                    ),
                     ("SubWorldData", None),
                     ("ParticipantLogicSpawnerEntityData", None),
                     (

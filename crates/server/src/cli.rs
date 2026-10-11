@@ -243,7 +243,7 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
             "--sequence-content requires the owned vehicle/progression configuration".into(),
         );
     }
-    if garage_logic.is_some() && sequence_content.is_none() {
+    if garage_logic.is_some() && sequence_content.is_none() && !generated {
         return Err("--garage-logic requires --sequence-content".into());
     }
     if (has_stats || owned_menu_awards) && (!has_persistent || garage_logic.is_none()) {
@@ -335,6 +335,8 @@ fn resolve_install_content(args: &mut Args, options: &nfs_content::Options) -> R
         .get_or_insert(generated.vehicle_profiles);
     args.progression_content
         .get_or_insert(generated.progression_content);
+    args.sequence_content
+        .get_or_insert(generated.sequence_content);
     args.world_mac_template = Some(generated.world_mac_template);
     Ok(())
 }
@@ -423,7 +425,7 @@ pub fn main() -> std::process::ExitCode {
         .is_some_and(|a| a == "--help" || a == "-h")
     {
         println!(
-            "nfs-server: owned local NFS 2015 services\n\nUsage: nfs-server --root <data-directory> --output <new-recording-directory> [configuration options]\n\nPrepare game content: nfs-server prepare-content --game-dir <installation>\n[--root <data-directory>] [--content-cache <directory>]\n\nCreate account: nfs-server create-account --name <name> --state-directory <new-directory>\n--account-policy <policy.json> --item-content <items.json> --persistent-content <tables.json>\n\nRequired control configuration: --bootstrap-config, --auth-config,\n--group-policy, --matchmaking-admission, --matchmaking-policy, --world-policy,\n--control-catalogs, --stat-definitions, --challenge-content, --item-licenses,\n--owned-local-social and --owned-menu-awards.\n\nGarage configuration: --world-content (version 4 or 5), --world-mac-template,\n--item-content, --state-directory, --local-account, --persistent-content,\n--progression-content, --vehicle-content, --garage-layout, --sequence-content,\n--garage-logic.\n\nGame content: --game-dir <installation> builds --item-content,\n--persistent-content and --world-mac-template on first start, supplies\n--stat-definitions, --item-licenses, --control-catalogs and\n--reputation-thresholds, --scene-catalog, --world-content and --garage-layout unless explicitly overridden, and caches the outputs\n(--content-cache, default artifacts/content under --root).\n\nAccount state is read from SQLite. Optional one-time imports: --local-identity,\n--entitlement-state, --kickback-state, --speedwall-state, --user-settings.\n\nOptional: --redirector-port, --idle-seconds, --qos-seconds, --stop-file.\nAll listeners are loopback. No manifest, captured reply store or external\nauthentication is used. See crates/server/README.md for schemas and limitations."
+            "nfs-server: owned local NFS 2015 services\n\nUsage: nfs-server --root <data-directory> --output <new-recording-directory> [configuration options]\n\nPrepare game content: nfs-server prepare-content --game-dir <installation>\n[--root <data-directory>] [--content-cache <directory>]\n\nCreate account: nfs-server create-account --name <name> --state-directory <new-directory>\n--account-policy <policy.json> --item-content <items.json> --persistent-content <tables.json>\n\nRequired control configuration: --bootstrap-config, --auth-config,\n--group-policy, --matchmaking-admission, --matchmaking-policy, --world-policy,\n--control-catalogs, --stat-definitions, --challenge-content, --item-licenses,\n--owned-local-social and --owned-menu-awards.\n\nGarage configuration: --world-content (version 4 or 5), --world-mac-template,\n--item-content, --state-directory, --local-account, --persistent-content,\n--progression-content, --vehicle-content, --garage-layout, --sequence-content,\n--garage-logic.\n\nGame content: --game-dir <installation> builds --item-content,\n--persistent-content and --world-mac-template on first start, supplies\n--stat-definitions, --item-licenses, --control-catalogs and\n--reputation-thresholds, --scene-catalog, --world-content, --garage-layout,\n--vehicle-content, --vehicle-parts, --progression-content and --sequence-content unless explicitly overridden, and caches the outputs\n(--content-cache, default artifacts/content under --root).\n\nAccount state is read from SQLite. Optional one-time imports: --local-identity,\n--entitlement-state, --kickback-state, --speedwall-state, --user-settings.\n\nOptional: --redirector-port, --idle-seconds, --qos-seconds, --stop-file.\nAll listeners are loopback. No manifest, captured reply store or external\nauthentication is used. See crates/server/README.md for schemas and limitations."
         );
         return std::process::ExitCode::SUCCESS;
     }
@@ -892,6 +894,7 @@ mod tests {
                     "--garage-layout",
                     "--vehicle-content",
                     "--progression-content",
+                    "--sequence-content",
                 ],
             );
             args.extend([
@@ -912,6 +915,13 @@ mod tests {
         assert!(parsed.vehicle_content.as_ref().unwrap().exists());
         nfs_server::progression::Content::load(parsed.progression_content.as_ref().unwrap())
             .unwrap();
+        nfs_server::sequence_content::SequenceContent::load(
+            parsed.sequence_content.as_ref().unwrap(),
+        )
+        .unwrap()
+        .arrivals()
+        .unwrap()
+        .unwrap();
         let stats = parsed.stat_definitions.as_ref().unwrap();
         nfs_services::stats::Catalog::load(stats).unwrap();
         nfs_services::item_licenses::Content::load(parsed.item_licenses.as_ref().unwrap()).unwrap();
@@ -981,6 +991,10 @@ mod tests {
         );
         assert_eq!(
             explicit.progression_content,
+            Some(PathBuf::from("configured-input"))
+        );
+        assert_eq!(
+            explicit.sequence_content,
             Some(PathBuf::from("configured-input"))
         );
         assert!(resolve_install_content(&mut with_game("missing"), &options).is_err());

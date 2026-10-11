@@ -22,12 +22,14 @@ mod control;
 mod executable;
 mod fingerprint;
 pub mod garage;
+mod graph;
 mod items;
 mod licenses;
 pub mod progression;
 mod reputation;
 mod scan;
 pub mod scenes;
+pub mod sequences;
 mod startup;
 mod stats;
 #[cfg(any(test, feature = "synthetic"))]
@@ -48,7 +50,7 @@ pub const FORMAT: &str = "nfs-install-content";
 pub const VERSION: u64 = 1;
 /// Increment whenever a builder's output for an unchanged installation changes,
 /// so existing cache entries are rebuilt.
-pub const BUILDER_REVISION: u64 = 13;
+pub const BUILDER_REVISION: u64 = 14;
 /// Executable file name relative to the installation root.
 pub const EXECUTABLE: &str = "NFS16.exe";
 
@@ -66,6 +68,7 @@ pub struct BuildIdentity {
     pub garage_links: garage::Links,
     pub vehicles: vehicle_profiles::Rules,
     pub progression: progression::Rules,
+    pub sequences: sequences::Rules,
 }
 
 impl BuildIdentity {
@@ -110,10 +113,11 @@ pub enum Kind {
     VehicleProfiles,
     /// Objective defaults, entity shapes and installed scene-channel bindings.
     ProgressionContent,
+    SequenceContent,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 13] = [
+    pub const ALL: [Kind; 14] = [
         Kind::ItemContent,
         Kind::PersistentContent,
         Kind::StatDefinitions,
@@ -127,6 +131,7 @@ impl Kind {
         Kind::VehicleParts,
         Kind::VehicleProfiles,
         Kind::ProgressionContent,
+        Kind::SequenceContent,
     ];
     /// Manifest key.
     pub fn key(self) -> &'static str {
@@ -144,6 +149,7 @@ impl Kind {
             Self::VehicleParts => "vehicle_parts",
             Self::VehicleProfiles => "vehicle_profiles",
             Self::ProgressionContent => "progression_content",
+            Self::SequenceContent => "sequence_content",
         }
     }
     /// File name inside a cache entry.
@@ -162,6 +168,7 @@ impl Kind {
             Self::VehicleParts => "vehicle-parts.json",
             Self::VehicleProfiles => "vehicle-profiles.json",
             Self::ProgressionContent => "progression-content.json",
+            Self::SequenceContent => "sequence-content.json",
         }
     }
 }
@@ -306,6 +313,7 @@ pub fn build(
         Kind::WorldMacTemplate,
         executable::mac_template(&game_root.join(EXECUTABLE), &options.identity)?,
     );
+    outputs.insert(Kind::SequenceContent, sequences::build(&mut index)?);
     Ok(outputs)
 }
 

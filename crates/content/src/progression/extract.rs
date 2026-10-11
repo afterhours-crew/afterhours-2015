@@ -3,13 +3,8 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 use super::{Content, Rules, graph::*};
-use crate::{
-    Error,
-    assets::AssetIndex,
-    scan::Assets,
-    scenes,
-    world::{StartupEntry, StartupKind},
-};
+use crate::graph::scenes::{SceneLookup, scene_roots};
+use crate::{Error, assets::AssetIndex, scan::Assets, world::StartupKind};
 use nfs_frostbite::ebx::Value;
 use serde_json::{Value as Json, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -229,96 +224,6 @@ fn restoration<S: Source>(
     Ok(out)
 }
 
-/// Parent references preserve the instance context when a channel link leaves
-/// a subworld through its interface and enters a sibling or ancestor scene.
-fn scene_roots(
-    graph: &mut Graph<Assets>,
-    level: &str,
-    startup: &[StartupEntry],
-) -> Result<BTreeMap<String, Site>, Error> {
-    let level = level.to_lowercase();
-    let mut roots = BTreeMap::from([(level.clone(), Site::root(&level))]);
-    for entry in startup.iter().filter(|e| e.kind == StartupKind::SubLevel) {
-        let parent = entry
-            .parent
-            .map(|i| startup[i].name.to_lowercase())
-            .unwrap_or_else(|| level.clone());
-        let parent_site = roots
-            .get(&parent)
-            .ok_or_else(|| bad("startup parent order"))?
-            .clone();
-        let objects = graph.source.objects(&parent)?.to_vec();
-        let mut found = objects.iter().enumerate().filter(|(_, o)| {
-            o.class == "SubWorldReferenceObjectData"
-                && o.fields
-                    .get("BundleName")
-                    .and_then(Value::as_str)
-                    .is_some_and(|n| n.eq_ignore_ascii_case(&entry.name))
-                && o.fields.get("AutoLoad").and_then(Value::as_bool) == Some(true)
-                && o.fields.get("IsWin32SubLevel").and_then(Value::as_bool) == Some(true)
-        });
-        let (index, _) = found
-            .next()
-            .ok_or_else(|| bad("startup parent reference missing"))?;
-        if found.next().is_some() {
-            return Err(bad("ambiguous startup parent reference"));
-        }
-        let mut site = Site::root(&entry.name);
-        site.parents = parent_site.parents;
-        site.parents.push(Frame {
-            bus: parent_site.bus,
-            reference: (parent, index),
-        });
-        if roots.insert(entry.name.to_lowercase(), site).is_some() {
-            return Err(bad("duplicate startup scene"));
-        }
-    }
-    Ok(roots)
-}
-struct SceneLookup<'a> {
-    roots: BTreeMap<String, Site>,
-    rules: &'a scenes::Rules,
-    endpoints: BTreeMap<Site, (u32, usize)>,
-    loaded: BTreeSet<String>,
-}
-impl SceneLookup<'_> {
-    fn endpoint(&mut self, graph: &mut Graph<Assets>, site: &Site) -> Result<(u32, usize), Error> {
-        let scene = std::iter::once(&site.bus)
-            .chain(site.parents.iter().rev().map(|f| &f.bus))
-            .find_map(|bus| self.roots.contains_key(&bus.0).then(|| bus.0.clone()))
-            .ok_or_else(|| bad("channel outside startup scenes"))?;
-        if self.loaded.insert(scene.clone()) {
-            let nodes = graph.read(self.roots[&scene].clone())?;
-            // Compare both builders' occurrence order before using an index.
-            let (_, instances) = scenes::construct(graph.source, self.rules, &scene, true)?;
-            if nodes.len() != instances.len() {
-                return Err(bad("scene occurrence count differs"));
-            }
-            let key = if scene == self.rules.level.to_lowercase() {
-                1
-            } else {
-                crate::assets::scene_key(&scene)
-            };
-            for (node, instance) in nodes.into_iter().zip(instances) {
-                if node.site.key != (instance.asset, instance.index) {
-                    return Err(bad("scene occurrence order differs"));
-                }
-                if let Some(serializer) = instance.serializer
-                    && self
-                        .endpoints
-                        .insert(node.site, (key, serializer))
-                        .is_some()
-                {
-                    return Err(bad("ambiguous scene occurrence"));
-                }
-            }
-        }
-        self.endpoints
-            .get(site)
-            .copied()
-            .ok_or_else(|| bad("channel is not a scene serializer"))
-    }
-}
 type SceneBindings = BTreeMap<Site, (u32, usize)>;
 fn bindings(
     graph: &mut Graph<Assets>,

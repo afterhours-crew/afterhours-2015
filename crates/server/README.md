@@ -143,8 +143,8 @@ This opens no listeners and prints JSON with `prepared`, the `install_content`
 cache identity and a `files` map of absolute paths. `--content-cache` selects a
 different cache; both it and a relative game path follow `--root` (default `.`).
 Only the installation-derived files listed in [nfs-content](../content/README.md)
-are prepared. Sequence content, garage logic, challenges and service policy
-are still supplied separately. Account state is created separately.
+and waiting/exit sequence definitions are prepared. Garage logic, challenges and
+service policy are still supplied separately. Account state is created separately.
 
 `--game-dir <installation>` replaces `--item-content`, `--persistent-content` and
 `--world-mac-template` (passing both forms is an error). On the first start the
@@ -190,7 +190,7 @@ For world/garage operation also supply:
 | `--progression-content` | Progression restoration and entity construction; defaults to installed content with `--game-dir`, including channel bindings and generated bundle IDs ([progression](src/progression.rs)) |
 | `--vehicle-content`, `--garage-layout` | Vehicle assets and parking layout; both default to installed content with `--game-dir` ([vehicles](src/vehicle_content.rs), [layout](src/vehicle_content/layout.rs)) |
 | `--vehicle-parts` | Part definitions for version-2 vehicle content; defaults to installed content with `--game-dir`. Explicit profiles, parts and layouts retain precedence |
-| `--sequence-content`, `--garage-logic` | Sequence definitions and garage logic graph ([sequences](src/sequence_content.rs), [garage](src/garage_logic.rs)) |
+| `--sequence-content`, `--garage-logic` | Sequence definitions default to installed content with `--game-dir`; explicit definitions override them. Garage logic remains separately supplied ([sequences](src/sequence_content.rs), [garage](src/garage_logic.rs)) |
 
 Sequence content version 2 omits `arrive.spline.base_value`: the six-bit goal
 allocation counter belongs to the current world and wraps after 63. It advances

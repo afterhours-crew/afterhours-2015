@@ -12,7 +12,7 @@ use std::{
 };
 pub mod entities;
 mod extract;
-mod graph;
+use crate::graph;
 mod rules;
 #[cfg(test)]
 mod tests;

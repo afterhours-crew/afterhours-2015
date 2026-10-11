@@ -12,7 +12,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 pub const FORMAT: &str = "nfs-build-profile";
-pub const VERSION: u64 = 6;
+pub const VERSION: u64 = 7;
 
 /// `(file name, contents)` of every profile.
 const PROFILES: &[(&str, &str)] = &[(
@@ -33,7 +33,7 @@ pub fn parse(file_name: &str, text: &str) -> Result<BuildIdentity, Error> {
     let bad = |what: &str| Error::Content(format!("build profile {file_name}: {what}"));
     let value: Value = serde_json::from_str(text).map_err(|_| bad("not JSON"))?;
     let object = value.as_object().ok_or_else(|| bad("not an object"))?;
-    const FIELDS: [&str; 11] = [
+    const FIELDS: [&str; 12] = [
         "format",
         "version",
         "description",
@@ -45,6 +45,7 @@ pub fn parse(file_name: &str, text: &str) -> Result<BuildIdentity, Error> {
         "garage_links",
         "vehicles",
         "progression",
+        "sequences",
     ];
     if object.len() != FIELDS.len() || FIELDS.iter().any(|f| !object.contains_key(*f)) {
         return Err(bad("unexpected or missing fields"));
@@ -108,6 +109,7 @@ pub fn parse(file_name: &str, text: &str) -> Result<BuildIdentity, Error> {
         garage_links: crate::garage::Links::from_json(&value["garage_links"])?,
         vehicles: crate::vehicle_profiles::Rules::from_json(&value["vehicles"])?,
         progression: crate::progression::Rules::from_json(&value["progression"])?,
+        sequences: crate::sequences::Rules::from_json(&value["sequences"])?,
     })
 }
 

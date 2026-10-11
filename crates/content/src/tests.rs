@@ -71,6 +71,7 @@ fn builds_outputs_the_service_loaders_accept() {
     );
     let items = ItemContent::load(&prepared.path(Kind::ItemContent)).unwrap();
     progression::Content::load(&prepared.path(Kind::ProgressionContent)).unwrap();
+    sequences::SequenceContent::load(&prepared.path(Kind::SequenceContent)).unwrap();
     vehicle_parts::Catalog::load(&prepared.path(Kind::VehicleParts), &items.catalog).unwrap();
     let parts: serde_json::Value =
         serde_json::from_slice(&std::fs::read(prepared.path(Kind::VehicleParts)).unwrap()).unwrap();

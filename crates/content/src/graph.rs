@@ -10,11 +10,11 @@ use crate::{
 use nfs_frostbite::ebx::{Object, Pointer, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub(super) type Key = (String, usize);
-pub(super) fn bad(message: &str) -> Error {
-    Error::Content(format!("progression: {message}"))
+pub(crate) type Key = (String, usize);
+pub(crate) fn bad(message: &str) -> Error {
+    Error::Content(format!("content graph: {message}"))
 }
-pub(super) trait Source {
+pub(crate) trait Source {
     fn object(&mut self, key: &Key) -> Result<Object, Error>;
     fn target(&mut self, source: &str, pointer: Pointer) -> Result<Option<Key>, Error>;
 }
@@ -30,12 +30,12 @@ impl Source for Assets {
     }
 }
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
-pub(super) struct Frame {
+pub(crate) struct Frame {
     pub bus: Key,
     pub reference: Key,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
-pub(super) struct Site {
+pub(crate) struct Site {
     pub key: Key,
     pub bus: Key,
     pub parents: Vec<Frame>,
@@ -51,17 +51,17 @@ impl Site {
     }
 }
 #[derive(Clone, Debug)]
-pub(super) struct Node {
+pub(crate) struct Node {
     pub site: Site,
     pub object: Object,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
-pub(super) struct Endpoint {
+pub(crate) struct Endpoint {
     pub site: Site,
     pub port: u32,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
-pub(super) enum Connections {
+pub(crate) enum Connections {
     Link,
     Property,
 }
@@ -73,7 +73,7 @@ struct Edge {
     target_port: u32,
 }
 
-pub(super) struct Graph<'a, S: Source> {
+pub(crate) struct Graph<'a, S: Source> {
     pub source: &'a mut S,
     edges: BTreeMap<(Key, Connections), Vec<Edge>>,
     edge_count: usize,
@@ -347,7 +347,7 @@ impl<'a, S: Source> Graph<'a, S> {
         Ok(())
     }
 }
-pub(super) fn bits32(value: &Value) -> Result<u32, Error> {
+pub(crate) fn bits32(value: &Value) -> Result<u32, Error> {
     match value {
         Value::Int32(n) => Ok(*n as u32),
         Value::UInt32(n) => Ok(*n),
@@ -356,5 +356,7 @@ pub(super) fn bits32(value: &Value) -> Result<u32, Error> {
 }
 
 #[cfg(test)]
-#[path = "graph_tests.rs"]
-pub(super) mod tests;
+#[path = "progression/graph_tests.rs"]
+pub(crate) mod tests;
+
+pub(crate) mod scenes;
