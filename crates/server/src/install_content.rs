@@ -9,7 +9,7 @@
 //! caches (by default under `artifacts/content`). Later starts reuse the
 //! verified cache entry; a patched installation gets a new one. Resolution
 //! blocks and runs before the async runtime starts.
-//! It also builds Stats definitions, license vocabulary and menu catalogs;
+//! It also builds Stats definitions, license vocabulary, menu catalogs and reputation thresholds;
 //! the CLI uses those unless overridden by operator configuration.
 use nfs_content::{Kind, Options, Prepared};
 use std::path::{Path, PathBuf};
@@ -25,6 +25,7 @@ pub struct Generated {
     pub stat_definitions: PathBuf,
     pub item_licenses: PathBuf,
     pub control_catalogs: PathBuf,
+    pub reputation_thresholds: PathBuf,
     pub world_mac_template: PathBuf,
     pub prepared: Prepared,
 }
@@ -63,6 +64,7 @@ pub fn resolve(
         stat_definitions: prepared.path(Kind::StatDefinitions),
         item_licenses: prepared.path(Kind::ItemLicenses),
         control_catalogs: prepared.path(Kind::ControlCatalogs),
+        reputation_thresholds: prepared.path(Kind::ReputationThresholds),
         world_mac_template: prepared.path(Kind::WorldMacTemplate),
         prepared,
     })

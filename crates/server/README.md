@@ -164,6 +164,16 @@ without awarding items; they contain no account grants. Generated menu catalogs
 derive Stats scopes from the installed game modes and use local AllDrive policy:
 time-limited features and recent-player listing are disabled, and no SpeedList
 types are offered. Explicit catalogs retain their configured policies.
+
+It also supplies `--reputation-thresholds`, a versioned threshold document built
+from the installed reputation calculator. The garage-logic document can omit its
+`reputation_thresholds` array; this file then supplies the same thresholds to the
+garage, Stats and awards models. An embedded array remains explicit operator
+policy and takes precedence (an invalid embedded array still fails startup).
+Without `--game-dir`, pass `--reputation-thresholds` explicitly to use the prepared
+file. Its schema is `format: "nfs-reputation-thresholds"`, `version: 1`,
+`build_sha256`, and `thresholds` (strictly increasing signed integers starting at
+zero, at most 256). No account scores are included.
 An unsupported executable or unreadable installation stops startup.
 No game data is distributed with the server, and other content is still
 supplied through the options below.

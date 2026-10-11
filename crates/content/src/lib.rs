@@ -23,6 +23,7 @@ mod executable;
 mod fingerprint;
 mod items;
 mod licenses;
+mod reputation;
 mod scan;
 mod stats;
 #[cfg(any(test, feature = "synthetic"))]
@@ -41,7 +42,7 @@ pub const FORMAT: &str = "nfs-install-content";
 pub const VERSION: u64 = 1;
 /// Increment whenever a builder's output for an unchanged installation changes,
 /// so existing cache entries are rebuilt.
-pub const BUILDER_REVISION: u64 = 4;
+pub const BUILDER_REVISION: u64 = 5;
 /// Executable file name relative to the installation root.
 pub const EXECUTABLE: &str = "NFS16.exe";
 
@@ -82,17 +83,20 @@ pub enum Kind {
     ItemLicenses,
     /// Installed Stats scopes and default AllDrive-only menu policy.
     ControlCatalogs,
+    /// Level thresholds used by reputation, Stats and awards.
+    ReputationThresholds,
     /// The 64-byte world MAC template.
     WorldMacTemplate,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 6] = [
+    pub const ALL: [Kind; 7] = [
         Kind::ItemContent,
         Kind::PersistentContent,
         Kind::StatDefinitions,
         Kind::ItemLicenses,
         Kind::ControlCatalogs,
+        Kind::ReputationThresholds,
         Kind::WorldMacTemplate,
     ];
     /// Manifest key.
@@ -103,6 +107,7 @@ impl Kind {
             Self::StatDefinitions => "stat_definitions",
             Self::ItemLicenses => "item_licenses",
             Self::ControlCatalogs => "control_catalogs",
+            Self::ReputationThresholds => "reputation_thresholds",
             Self::WorldMacTemplate => "world_mac_template",
         }
     }
@@ -114,6 +119,7 @@ impl Kind {
             Self::StatDefinitions => "stat-definitions.json",
             Self::ItemLicenses => "item-licenses.json",
             Self::ControlCatalogs => "control-catalogs.json",
+            Self::ReputationThresholds => "reputation-thresholds.json",
             Self::WorldMacTemplate => "world-mac-template.bin",
         }
     }
@@ -226,6 +232,7 @@ pub fn build(
     outputs.insert(Kind::PersistentContent, tables);
     outputs.insert(Kind::ItemLicenses, licenses::build(&mut assets)?);
     outputs.insert(Kind::ControlCatalogs, control::build(&mut assets)?);
+    outputs.insert(Kind::ReputationThresholds, reputation::build(&mut assets)?);
     outputs.insert(
         Kind::WorldMacTemplate,
         executable::mac_template(&game_root.join(EXECUTABLE), &options.identity)?,

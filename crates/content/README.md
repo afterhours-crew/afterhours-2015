@@ -31,6 +31,7 @@ let items = prepared.path(nfs_content::Kind::ItemContent);
 | `StatDefinitions` | `stat-definitions.json` | Installed columns and integer defaults of `ProgressionStats` and `RepValuesTable`, with the local service's group selection and display policy |
 | `ItemLicenses` | `item-licenses.json` | License names from the client's active Win32 `EntitlementQuery` assets; version 2 recognizes subsets without granting items |
 | `ControlCatalogs` | `control-catalogs.json` | `SpeedWallAsset` categories and their referenced `GameModeId.IdHash` values, plus local AllDrive menu policy |
+| `ReputationThresholds` | `reputation-thresholds.json` | `IntScoreToIntLevelAsset.LevelThresholds`, following the reputation calculator's asset reference |
 | `WorldMacTemplate` | `world-mac-template.bin` | 64 bytes of the executable image at the build's known address, checked by digest |
 
 Derived defaults are the stored 32-bit patterns of each class's same-named
@@ -46,6 +47,10 @@ policy; an explicit server catalog overrides this default. Stats scopes use
 sorted unique mode hashes, merging adjacent values into inclusive ranges.
 License vocabulary follows only the active client entitlement service's Win32
 queries and deduplicates names; it contains no ownership claims or player grants.
+
+Reputation thresholds must be signed integers, start at zero and increase strictly,
+with at most 256 levels. The generated versioned document contains no account
+scores. It can supply thresholds omitted from the server's garage-logic document.
 
 ## Build profiles
 

@@ -200,6 +200,46 @@ fn license_builder_rejects_missing_active_queries_and_bad_names() {
 }
 
 #[test]
+fn reputation_follows_the_calculator_reference_and_checks_values() {
+    let install = install_with(&assets());
+    let prepared = install.prepare().unwrap();
+    let path = prepared.path(Kind::ReputationThresholds);
+    let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(value["thresholds"], serde_json::json!([0, 13, 57]));
+    nfs_services::reputation::Thresholds::load(&path).unwrap();
+    for (values, valid) in [
+        (vec![0, 8, 51, 100], true),
+        (vec![], false),
+        (vec![1, 8], false),
+        (vec![0, 8, 8], false),
+        ((0..257).collect(), false),
+    ] {
+        let mut changed = assets();
+        changed.retain(|a| {
+            a.name != crate::reputation::CALCULATOR && a.name != "synthetic/scoring/levels"
+        });
+        changed.extend(synthetic::reputation(values.clone()));
+        let prepared = install_with(&changed).prepare();
+        assert_eq!(prepared.is_ok(), valid, "{values:?}");
+    }
+    let mut missing = assets();
+    missing.retain(|a| a.name != "synthetic/scoring/levels");
+    assert!(install_with(&missing).prepare().is_err());
+    let mut wrong = assets();
+    let asset = wrong
+        .iter_mut()
+        .find(|a| a.name == "synthetic/scoring/levels")
+        .unwrap();
+    asset.partition = synthetic::PartitionWriter::default().build(
+        synthetic::reference(0x78).0,
+        "IntScoreToIntLevelAsset",
+        synthetic::reference(0x78).1,
+        vec![("LevelThresholds", synthetic::Field::Float(5.0))],
+    );
+    assert!(install_with(&wrong).prepare().is_err());
+}
+
+#[test]
 fn scope_builder_rejects_missing_modes_and_wrong_id_types() {
     let mut missing = assets();
     missing.retain(|a| a.name != "modes/synthetic116");

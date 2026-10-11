@@ -122,6 +122,8 @@ pub enum Field {
     Import([u8; 16], [u8; 16]),
     /// Array of imports.
     Imports(Vec<([u8; 16], [u8; 16])>),
+    /// Array of signed 32-bit integers.
+    Ints(Vec<i32>),
     /// Array of structs, each a list of `Float`/`Int`/`CString` members.
     Structs(&'static str, Vec<Vec<(&'static str, Field)>>),
     /// Inline struct of scalar members.
@@ -272,6 +274,18 @@ impl PartitionWriter {
                     rows.push((name.to_string(), 0x03, 0, offset));
                     let value = self.import(*file, *inst);
                     payload.extend_from_slice(&value.to_le_bytes());
+                }
+                Field::Ints(list) => {
+                    let array_class =
+                        self.class("array", 4, vec![("member".to_string(), 0x0F, 0, 0)]);
+                    let at = self.array_data.len() as u32;
+                    for value in list {
+                        self.array_data.extend_from_slice(&value.to_le_bytes());
+                    }
+                    self.arrays
+                        .push((at, list.len() as u32, i32::from(array_class)));
+                    rows.push((name.to_string(), 0x04, array_class, offset));
+                    payload.extend_from_slice(&((self.arrays.len() - 1) as u32).to_le_bytes());
                 }
                 Field::Imports(list) => {
                     let array_class =

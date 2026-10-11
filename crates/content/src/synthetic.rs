@@ -215,6 +215,7 @@ pub fn assets() -> Vec<Asset> {
     assets.extend(level());
     assets.extend(entitlements());
     assets.extend(speedwalls());
+    assets.extend(reputation(vec![0, 13, 57]));
     assets
 }
 
@@ -411,6 +412,43 @@ pub fn level() -> Vec<Asset> {
 
 /// Bundle whose registry lists two prefabs, a vehicle and a non-Blueprint object.
 pub const REGISTRY_BUNDLE: &str = "levels/synthetic/gameplay";
+
+/// Synthetic calculator and a threshold asset under a deliberately different name.
+pub fn reputation(values: Vec<i32>) -> Vec<Asset> {
+    let (partition, instance) = reference(0x77);
+    let calculator = crate::reputation::CALCULATOR;
+    let thresholds = "synthetic/scoring/levels";
+    vec![
+        Asset {
+            name: calculator.into(),
+            partition: PartitionWriter::default().build_many(
+                partition,
+                "ParticipantLogicBlueprint",
+                instance,
+                vec![("Name", Field::CString(calculator.into()))],
+                vec![(
+                    "IntScoreToIntLevelEntityData",
+                    vec![(
+                        "LevelThresholdsAsset",
+                        Field::Import(reference(0x78).0, reference(0x78).1),
+                    )],
+                )],
+            ),
+        },
+        Asset {
+            name: thresholds.into(),
+            partition: PartitionWriter::default().build(
+                reference(0x78).0,
+                "IntScoreToIntLevelAsset",
+                reference(0x78).1,
+                vec![
+                    ("Name", Field::CString(thresholds.into())),
+                    ("LevelThresholds", Field::Ints(values)),
+                ],
+            ),
+        },
+    ]
+}
 /// Bundle whose registry lists a Blueprint class with no profiled class ID.
 pub const UNPROFILED_BUNDLE: &str = "levels/synthetic/unprofiled";
 

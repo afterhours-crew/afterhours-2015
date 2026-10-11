@@ -5,6 +5,8 @@
 //! Reputation presentation from the connection's committed tables and authored
 //! score thresholds. No captured account values belong to this model.
 use crate::persistent::{Loaded, key};
+mod content;
+pub const MAX_THRESHOLDS: usize = 256;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
     Shape,
@@ -63,7 +65,7 @@ pub struct Thresholds(Vec<i32>);
 impl Thresholds {
     pub fn new(values: Vec<i32>) -> Result<Self, Error> {
         if values.is_empty()
-            || values.len() > 256
+            || values.len() > MAX_THRESHOLDS
             || values[0] != 0
             || values.windows(2).any(|w| w[0] >= w[1])
         {

@@ -21,6 +21,7 @@ struct Args {
     garage_layout: Option<PathBuf>,
     sequence_content: Option<PathBuf>,
     garage_logic: Option<PathBuf>,
+    reputation_thresholds: Option<PathBuf>,
     control_catalogs: Option<PathBuf>,
     entitlement_state: Option<PathBuf>,
     user_settings: Option<PathBuf>,
@@ -64,6 +65,7 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
     let (mut vehicle_content, mut garage_layout) = (None, None);
     let mut sequence_content = None;
     let mut garage_logic = None;
+    let mut reputation_thresholds = None;
     let mut control_catalogs = None;
     let mut entitlement_state = None;
     let (mut kickback_state, mut speedwall_state, mut item_licenses) = (None, None, None);
@@ -101,6 +103,9 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
             Some("--garage-layout") => garage_layout = Some(PathBuf::from(value()?)),
             Some("--sequence-content") => sequence_content = Some(PathBuf::from(value()?)),
             Some("--garage-logic") => garage_logic = Some(PathBuf::from(value()?)),
+            Some("--reputation-thresholds") => {
+                reputation_thresholds = Some(PathBuf::from(value()?))
+            }
             Some("--control-catalogs") => control_catalogs = Some(PathBuf::from(value()?)),
             Some("--entitlement-state") => entitlement_state = Some(PathBuf::from(value()?)),
             Some("--kickback-state") => kickback_state = Some(PathBuf::from(value()?)),
@@ -259,6 +264,7 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
         garage_layout,
         sequence_content,
         garage_logic,
+        reputation_thresholds,
         control_catalogs,
         entitlement_state,
         kickback_state,
@@ -308,6 +314,8 @@ fn resolve_install_content(args: &mut Args, options: &nfs_content::Options) -> R
     args.item_licenses.get_or_insert(generated.item_licenses);
     args.control_catalogs
         .get_or_insert(generated.control_catalogs);
+    args.reputation_thresholds
+        .get_or_insert(generated.reputation_thresholds);
     args.world_mac_template = Some(generated.world_mac_template);
     Ok(())
 }
@@ -396,7 +404,7 @@ pub fn main() -> std::process::ExitCode {
         .is_some_and(|a| a == "--help" || a == "-h")
     {
         println!(
-            "nfs-server: owned local NFS 2015 services\n\nUsage: nfs-server --root <data-directory> --output <new-recording-directory> [configuration options]\n\nPrepare game content: nfs-server prepare-content --game-dir <installation>\n[--root <data-directory>] [--content-cache <directory>]\n\nCreate account: nfs-server create-account --name <name> --state-directory <new-directory>\n--account-policy <policy.json> --item-content <items.json> --persistent-content <tables.json>\n\nRequired control configuration: --bootstrap-config, --auth-config,\n--group-policy, --matchmaking-admission, --matchmaking-policy, --world-policy,\n--control-catalogs, --stat-definitions, --challenge-content, --item-licenses,\n--owned-local-social and --owned-menu-awards.\n\nGarage configuration: --world-content (version 4), --world-mac-template,\n--item-content, --state-directory, --local-account, --persistent-content,\n--progression-content, --vehicle-content, --garage-layout, --sequence-content,\n--garage-logic.\n\nGame content: --game-dir <installation> builds --item-content,\n--persistent-content and --world-mac-template on first start, supplies\n--stat-definitions, --item-licenses and --control-catalogs unless explicitly\noverridden, and caches the outputs\n(--content-cache, default artifacts/content under --root).\n\nAccount state is read from SQLite. Optional one-time imports: --local-identity,\n--entitlement-state, --kickback-state, --speedwall-state, --user-settings.\n\nOptional: --redirector-port, --idle-seconds, --qos-seconds, --stop-file.\nAll listeners are loopback. No manifest, captured reply store or external\nauthentication is used. See crates/server/README.md for schemas and limitations."
+            "nfs-server: owned local NFS 2015 services\n\nUsage: nfs-server --root <data-directory> --output <new-recording-directory> [configuration options]\n\nPrepare game content: nfs-server prepare-content --game-dir <installation>\n[--root <data-directory>] [--content-cache <directory>]\n\nCreate account: nfs-server create-account --name <name> --state-directory <new-directory>\n--account-policy <policy.json> --item-content <items.json> --persistent-content <tables.json>\n\nRequired control configuration: --bootstrap-config, --auth-config,\n--group-policy, --matchmaking-admission, --matchmaking-policy, --world-policy,\n--control-catalogs, --stat-definitions, --challenge-content, --item-licenses,\n--owned-local-social and --owned-menu-awards.\n\nGarage configuration: --world-content (version 4), --world-mac-template,\n--item-content, --state-directory, --local-account, --persistent-content,\n--progression-content, --vehicle-content, --garage-layout, --sequence-content,\n--garage-logic.\n\nGame content: --game-dir <installation> builds --item-content,\n--persistent-content and --world-mac-template on first start, supplies\n--stat-definitions, --item-licenses, --control-catalogs and\n--reputation-thresholds unless explicitly overridden, and caches the outputs\n(--content-cache, default artifacts/content under --root).\n\nAccount state is read from SQLite. Optional one-time imports: --local-identity,\n--entitlement-state, --kickback-state, --speedwall-state, --user-settings.\n\nOptional: --redirector-port, --idle-seconds, --qos-seconds, --stop-file.\nAll listeners are loopback. No manifest, captured reply store or external\nauthentication is used. See crates/server/README.md for schemas and limitations."
         );
         return std::process::ExitCode::SUCCESS;
     }
@@ -530,10 +538,23 @@ async fn run(args: Args) -> Result<(), Failure> {
         .map(|path| nfs_server::sequence_content::SequenceContent::load(&args.root.join(path)))
         .transpose()?
         .map(Arc::new);
+    let default_reputation = args
+        .reputation_thresholds
+        .as_ref()
+        .map(|path| {
+            nfs_services::reputation::Thresholds::load(&args.root.join(path))
+                .map_err(|_| Failure::ProfileConfig)
+        })
+        .transpose()?;
     let garage_logic = args
         .garage_logic
         .as_ref()
-        .map(|path| nfs_server::garage_logic::GarageLogic::load(&args.root.join(path)))
+        .map(|path| {
+            nfs_server::garage_logic::GarageLogic::load_with_reputation(
+                &args.root.join(path),
+                default_reputation,
+            )
+        })
         .transpose()?
         .map(Arc::new);
     let entitlements = Some((account, Arc::new(owned.entitlements)));
@@ -839,6 +860,8 @@ mod tests {
         nfs_services::stats::Catalog::load(stats).unwrap();
         nfs_services::item_licenses::Content::load(parsed.item_licenses.as_ref().unwrap()).unwrap();
         nfs_services::control_catalogs::Catalog::load(parsed.control_catalogs.as_ref().unwrap())
+            .unwrap();
+        nfs_services::reputation::Thresholds::load(parsed.reputation_thresholds.as_ref().unwrap())
             .unwrap();
         assert!(parsed.world_mac_template.as_ref().unwrap().exists());
         assert_eq!(parsed.generated.as_ref().unwrap()["built"], true);
