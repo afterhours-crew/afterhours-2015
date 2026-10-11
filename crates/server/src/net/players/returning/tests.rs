@@ -31,6 +31,39 @@ fn request(scene: u16, participant: u16, selector: u16, method: u32) -> BitWrite
     out
 }
 
+fn transport_with_snapshot(players: &Players) -> nfs_world::session::Host {
+    use nfs_world::{
+        application::{Fixed, Policy},
+        session::{Host, Ids},
+        transport::Codec,
+    };
+    let key = nfs_world::crypto::session_key(
+        "11111111-2222-3333-4444-555555555555",
+        "66666666-7777-8888-9999-aaaaaaaaaaaa",
+    )
+    .unwrap();
+    let mut host = Host::new(
+        Codec::new(key, [5; 64]).unwrap(),
+        Ids {
+            client: 1,
+            host: 2,
+            host_index: 0,
+        },
+        Policy::default(),
+        Box::new(Fixed::new([1, 2, 3])),
+    )
+    .unwrap();
+    for section in split_scenes(
+        players.objects().snapshot(),
+        nfs_world::application::OUTBOUND_FRAME_BITS,
+    )
+    .unwrap()
+    {
+        host.queue_replication(section).unwrap();
+    }
+    host
+}
+
 #[test]
 fn return_handlers_publish_valid_frames_restore_loading_and_allow_three_exits() {
     let (mut population, mut players, vehicles, layout, items, _) =
@@ -250,6 +283,9 @@ fn return_handlers_publish_valid_frames_restore_loading_and_allow_three_exits() 
         };
         lifecycle.take_returning();
         returns.poll(cycle * 8000).unwrap();
+        // Exercise the production queue's reference validation, not only wire
+        // encoding: a slot binding must follow its replacement car's creation.
+        let mut transport = transport_with_snapshot(&players);
         let entries = PlayerListener::begin_return(
             &mut players,
             &mut returns,
@@ -264,6 +300,9 @@ fn return_handlers_publish_valid_frames_restore_loading_and_allow_three_exits() 
         )
         .unwrap();
         for (section, rpcs) in &entries {
+            transport
+                .queue_replication_after(section.clone(), rpcs.clone())
+                .unwrap();
             assert!(
                 nfs_world::session::replication_frame(section, rpcs, 0)
                     .is_ok_and(|wire| wire.len() <= nfs_world::application::OUTBOUND_FRAME_BITS)
@@ -303,6 +342,9 @@ fn return_handlers_publish_valid_frames_restore_loading_and_allow_three_exits() 
         .unwrap()
         .unwrap();
         assert_eq!(removed, car);
+        transport
+            .queue_replication_after(section.clone(), rpcs.clone())
+            .unwrap();
         assert!(
             nfs_world::session::replication_frame(&section, &rpcs, 0)
                 .is_ok_and(|wire| wire.len() <= nfs_world::application::OUTBOUND_FRAME_BITS)

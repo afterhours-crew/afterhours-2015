@@ -85,12 +85,20 @@ impl PlayerListener {
         records.extend(players.actor_arriving(owner.connection, persona, participant)?);
         records.extend(returns.start_rollout(players, owner)?);
         chain.extend(produced.events.into_iter().map(HostRpc::Event));
-        chain.extend(staged.bindings.into_iter().map(HostRpc::Vehicle));
         let mut section = empty_section();
         section.setup = Some(Setup::RawEscape([0; 3]));
         section.records = records;
         section.deleted = produced.deleted;
         out.push((section, chain));
+        // A frame's messages precede its replication records. Announce the
+        // replacement slot only after its car creation has been published;
+        // the transport deliberately rejects references to unknown vehicles.
+        if !staged.bindings.is_empty() {
+            out.push((
+                empty_section(),
+                staged.bindings.into_iter().map(HostRpc::Vehicle).collect(),
+            ));
+        }
         Ok(out)
     }
 
