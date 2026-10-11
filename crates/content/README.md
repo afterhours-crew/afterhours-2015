@@ -250,3 +250,13 @@ cap behavior. Missing state, ambiguous links, wrong types, cycles and excessive
 depth fail. IntEntity defaults apply only to creation; event-driven gates and
 later counter mutations remain unsupported. This API does not yet produce the
 complete garage lifecycle configuration or add another prepared file.
+
+`AssetIndex::network_events` enumerates client-networked event bindings from a
+scene or participant blueprint. Registered bus occurrences follow composition
+order; event ordinals retain their position in the complete connection table,
+including local-only rows. Endpoints retain their class, port, referenced prefab
+and any named presentation context. Endpoints must belong to that exact bus
+occurrence or its own interface. Unknown delivery types, ambiguous occurrences,
+unregistered network buses and excessive table sizes fail extraction. The caller
+still owns event timing, lifecycle policy and live identities; this API fires no
+events and adds no prepared runtime file.

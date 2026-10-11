@@ -25,6 +25,7 @@ pub mod garage;
 mod graph;
 mod items;
 mod licenses;
+pub mod logic_events;
 pub mod participant_logic;
 pub mod progression;
 mod reputation;
