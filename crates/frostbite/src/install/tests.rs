@@ -218,6 +218,36 @@ fn patch_layer_replaces_bundle_list_and_applies_deltas() {
     assert_eq!(value(&patched), Some(&Ebx::Int32(11)));
     let fresh = store.objects(&index["c/three"][0].entry).unwrap();
     assert_eq!(value(&fresh), Some(&Ebx::Int32(30)));
+    let ranges = install.source_ranges().unwrap();
+    // Two manifests and four distinct records. The base record shared by the
+    // unpatched and delta entries is included only once.
+    assert_eq!(ranges.len(), 6);
+    for relative in [
+        "Data/Win32/synthetic.sb",
+        "Update/Patch/Data/Win32/synthetic.sb",
+    ] {
+        assert_eq!(
+            ranges
+                .iter()
+                .filter(|r| r.path == dir.0.join(relative))
+                .count(),
+            1
+        );
+    }
+    for relative in ["Data/cas_01.cas", "Update/Patch/Data/cas_01.cas"] {
+        assert_eq!(
+            ranges
+                .iter()
+                .filter(|r| r.path == dir.0.join(relative))
+                .count(),
+            2
+        );
+    }
+    for source in ranges {
+        assert!(
+            source.offset + source.size as u64 <= std::fs::metadata(source.path).unwrap().len()
+        );
+    }
 }
 
 #[test]

@@ -20,7 +20,9 @@ fn manifest(fingerprint: &Fingerprint, outputs: &BTreeMap<Kind, Vec<u8>>) -> Val
     let inputs: Vec<_> = fingerprint
         .inputs
         .iter()
-        .map(|i| json!({"path": i.path, "sha256": i.sha256, "bytes": i.bytes}))
+        .map(
+            |i| json!({"path": i.path, "kind": i.kind.key(), "sha256": i.sha256, "bytes": i.bytes}),
+        )
         .collect();
     let files: serde_json::Map<String, Value> = outputs
         .iter()
@@ -72,7 +74,9 @@ pub fn verify(dir: &Path, fingerprint: &Fingerprint) -> Result<(), Error> {
         return Err(Error::Cache("manifest output set"));
     }
     for kind in Kind::ALL {
-        let entry = &outputs[kind.key()];
+        let entry = outputs
+            .get(kind.key())
+            .ok_or(Error::Cache("manifest output set"))?;
         if entry["file"] != kind.file_name() {
             return Err(Error::Cache("manifest output name"));
         }

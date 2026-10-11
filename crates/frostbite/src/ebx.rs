@@ -483,6 +483,9 @@ impl Decoder<'_, '_> {
         pos: usize,
         depth: usize,
     ) -> Result<Value, Error> {
+        if depth > self.limits.max_depth {
+            return Err(Error::Bound("EBX nesting depth"));
+        }
         self.values += 1;
         if self.values > self.limits.max_values {
             return Err(Error::Bound("EBX decoded values"));
@@ -538,7 +541,7 @@ impl Decoder<'_, '_> {
                         member.code,
                         member.class_ref,
                         base + i * stride,
-                        depth,
+                        depth + 1,
                     )?);
                 }
                 Value::Array(items)

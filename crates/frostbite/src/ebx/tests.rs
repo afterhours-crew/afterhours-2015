@@ -183,3 +183,32 @@ fn instance_layout_mismatch_fails() {
         Err(Error::Malformed("EBX instance layout"))
     ));
 }
+
+#[test]
+fn cyclic_array_members_hit_the_depth_bound() {
+    let mut data = PartitionWriter::default().build(
+        PART,
+        "Root",
+        INST,
+        vec![("Children", Field::Imports(vec![OTHER]))],
+    );
+    let imports = u32::from_le_bytes(data[12..16].try_into().unwrap()) as usize;
+    let names = u16::from_le_bytes(data[26..28].try_into().unwrap()) as usize;
+    let member = 64 + imports * 32 + names;
+    // Array 0's member is itself another reference to array 0.
+    data[member + 4..member + 6].copy_from_slice(&0x40u16.to_le_bytes());
+    let arrays_at = u32::from_le_bytes(data[4..8].try_into().unwrap()) as usize
+        + u32::from_le_bytes(data[28..32].try_into().unwrap()) as usize
+        + u32::from_le_bytes(data[36..40].try_into().unwrap()) as usize;
+    data[arrays_at..arrays_at + 4].copy_from_slice(&0u32.to_le_bytes());
+    for max_depth in [0, 1, 8, Limits::default().max_depth] {
+        let limits = Limits {
+            max_depth,
+            ..Limits::default()
+        };
+        assert!(matches!(
+            Partition::parse(&data, &limits).unwrap().objects(&limits),
+            Err(Error::Bound("EBX nesting depth"))
+        ));
+    }
+}

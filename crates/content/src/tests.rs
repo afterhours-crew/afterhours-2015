@@ -153,6 +153,69 @@ fn second_prepare_reuses_and_a_damaged_entry_is_rebuilt() {
 }
 
 #[test]
+fn same_size_wrong_output_key_is_rebuilt_without_panicking() {
+    let install = install_with(&assets());
+    let first = install.prepare().unwrap();
+    let path = first.directory.join("manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let outputs = manifest["outputs"].as_object_mut().unwrap();
+    let item = outputs.remove("item_content").unwrap();
+    outputs.insert("unknown".into(), item);
+    std::fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    assert!(install.prepare().unwrap().built);
+    assert!(!install.prepare().unwrap().built);
+}
+
+#[test]
+fn bundle_manifest_changes_cannot_reuse_a_stale_entry() {
+    let install = install_with(&assets());
+    let first = install.prepare().unwrap();
+    let path = install.game().join("Data/Win32/synthetic.sb");
+    let mut bytes = std::fs::read(&path).unwrap();
+    let name = b"items/gameitemsystem";
+    let offset = bytes.windows(name.len()).position(|b| b == name).unwrap();
+    // Keep all offsets, sizes and catalogue digests intact.
+    bytes[offset + name.len() - 1] = b'x';
+    std::fs::write(path, bytes).unwrap();
+    assert_ne!(
+        first.fingerprint,
+        fingerprint(&install.game(), &install.options()).unwrap()
+    );
+    assert!(matches!(install.prepare(), Err(Error::Content(_))));
+    assert!(first.directory.exists());
+}
+
+#[test]
+fn record_changes_cannot_reuse_a_stale_entry_but_unconsumed_bytes_can() {
+    use std::io::{Seek, SeekFrom, Write};
+    let install = install_with(&assets());
+    let first = install.prepare().unwrap();
+    let path = install.game().join("Data/cas_01.cas");
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    file.write_all(b"unreferenced archive bytes").unwrap();
+    drop(file);
+    assert_eq!(
+        first.fingerprint,
+        fingerprint(&install.game(), &install.options()).unwrap()
+    );
+    assert!(!install.prepare().unwrap().built);
+    // Alter the first record's codec without changing any index or file size.
+    let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    file.seek(SeekFrom::Start(4)).unwrap();
+    file.write_all(&[127]).unwrap();
+    drop(file);
+    assert_ne!(
+        first.fingerprint,
+        fingerprint(&install.game(), &install.options()).unwrap()
+    );
+    assert!(matches!(install.prepare(), Err(Error::Container(_))));
+}
+
+#[test]
 fn an_entry_with_unexpected_files_is_not_deleted() {
     let install = install_with(&assets());
     let prepared = install.prepare().unwrap();
@@ -272,7 +335,9 @@ fn fingerprint_lists_inputs_and_is_stable() {
             EXECUTABLE,
             "Data/layout.toc",
             "Data/cas.cat",
-            "Data/Win32/synthetic.toc"
+            "Data/Win32/synthetic.toc",
+            "Data/Win32/synthetic.sb",
+            "Data/cas_01.cas"
         ]
     );
 }

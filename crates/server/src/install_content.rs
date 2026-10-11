@@ -43,6 +43,13 @@ pub fn resolve(
     cache: Option<&Path>,
     options: &Options,
 ) -> Result<Generated, nfs_content::Error> {
+    // The CLI resolves content paths against its root again when loading them.
+    // Make generated paths absolute so relative deployment roots are applied once.
+    let base = std::path::absolute(if base.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        base
+    })?;
     let cache = base.join(cache.unwrap_or(Path::new(DEFAULT_CACHE)));
     let prepared = nfs_content::prepare(&base.join(game_dir), &cache, options)?;
     Ok(Generated {
@@ -129,5 +136,30 @@ mod tests {
             resolve(&dir.0, Path::new("game"), None, &Options::default()),
             Err(nfs_content::Error::UnsupportedExecutable { .. })
         ));
+    }
+
+    #[test]
+    fn generated_paths_load_when_the_cli_applies_a_relative_root() {
+        let dir = TempDir(PathBuf::from(format!(
+            "target/install-relative-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )));
+        let (options, _) = synthetic::write(&dir.0.join("game"), &synthetic::assets()).unwrap();
+        for cache in [None, Some(Path::new("custom-cache"))] {
+            let generated = resolve(&dir.0, Path::new("game"), cache, &options).unwrap();
+            assert!(generated.item_content.is_absolute());
+            crate::item_content::ItemContent::load(&dir.0.join(generated.item_content)).unwrap();
+            crate::persistent::Catalog::load(&dir.0.join(generated.persistent_content)).unwrap();
+            assert_eq!(
+                std::fs::read(dir.0.join(generated.world_mac_template))
+                    .unwrap()
+                    .len(),
+                64
+            );
+        }
     }
 }

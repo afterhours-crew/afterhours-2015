@@ -12,7 +12,10 @@ let items = prepared.path(nfs_content::Kind::ItemContent);
 `prepare` is synchronous; async callers run it on a blocking worker. It:
 
 1. Checks that `NFS16.exe` is the supported build (SHA-256) and fingerprints
-   the executable, both layouts, both catalogues and every superbundle TOC.
+   the executable, both layouts, both catalogues and every superbundle TOC,
+   plus consumed bundle-manifest and EBX record ranges (including delta bases).
+   Warm starts rehash these ranges; unrelated texture/audio records are skipped.
+   Manifest inputs identify whole-file digests or domain-separated range digests.
 2. Returns `<cache>/<fingerprint>/` when its `manifest.json` names the same
    fingerprint and builder revision and every output digest matches.
 3. Otherwise reads the installation with `nfs-frostbite`, builds every output

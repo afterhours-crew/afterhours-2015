@@ -13,7 +13,7 @@ use crate::cas::{self, Record};
 use crate::dbobject::{self, Value};
 use crate::ebx::{Object, Partition};
 use crate::{Error, Limits};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -34,6 +34,15 @@ pub struct EbxLocation {
     pub superbundle: String,
     pub bundle: String,
     pub entry: EbxEntry,
+}
+
+/// File bytes used to read installed content. Large archives are represented
+/// by their consumed record ranges, not by the entire archive.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct SourceRange {
+    pub path: PathBuf,
+    pub offset: u64,
+    pub size: usize,
 }
 
 /// Opened installation with its superbundle list.
@@ -103,8 +112,7 @@ impl Installation {
         &self.superbundles
     }
 
-    /// Every bundle manifest of a cas superbundle as `(bundle id, manifest)`.
-    pub fn bundles(&self, superbundle: &str) -> Result<Vec<(String, Value)>, Error> {
+    fn bundle_sources(&self, superbundle: &str) -> Result<Vec<(String, SourceRange)>, Error> {
         if superbundle.contains("..") {
             return Err(Error::Malformed("superbundle path"));
         }
@@ -140,8 +148,6 @@ impl Installation {
         if list.len() > self.limits.max_bundles {
             return Err(Error::Bound("bundles per superbundle"));
         }
-        let mut base_sb = None;
-        let mut patch_sb = None;
         let mut out = Vec::with_capacity(list.len());
         for entry in list {
             let id = entry
@@ -163,19 +169,34 @@ impl Installation {
             }
             let from_base =
                 patch.is_none() || entry.get("base").and_then(Value::as_bool) == Some(true);
-            let (slot, path) = if from_base {
-                (&mut base_sb, base_toc.with_extension("sb"))
+            let path = if from_base {
+                base_toc.with_extension("sb")
             } else {
-                (&mut patch_sb, patch_toc.with_extension("sb"))
+                patch_toc.with_extension("sb")
             };
-            if slot.is_none() {
-                *slot = Some(File::open(&path)?);
+            out.push((id.to_owned(), SourceRange { path, offset, size }));
+        }
+        Ok(out)
+    }
+
+    /// Every bundle manifest of a cas superbundle as `(bundle id, manifest)`.
+    pub fn bundles(&self, superbundle: &str) -> Result<Vec<(String, Value)>, Error> {
+        let sources = self.bundle_sources(superbundle)?;
+        let mut handles = HashMap::new();
+        let mut out = Vec::with_capacity(sources.len());
+        for (id, source) in sources {
+            if !handles.contains_key(&source.path) {
+                handles.insert(source.path.clone(), File::open(&source.path)?);
             }
-            let bytes = read_range(slot.as_mut().unwrap(), offset, size)?;
+            let bytes = read_range(
+                handles.get_mut(&source.path).unwrap(),
+                source.offset,
+                source.size,
+            )?;
             let manifest = dbobject::parse(&bytes, &self.limits)?
                 .0
                 .ok_or(Error::Malformed("empty bundle manifest"))?;
-            out.push((id.to_owned(), manifest));
+            out.push((id, manifest));
         }
         Ok(out)
     }
@@ -221,6 +242,40 @@ impl Installation {
             out.extend(self.bundles(superbundle)?.into_iter().map(|(id, _)| id));
         }
         Ok(out)
+    }
+
+    /// Sorted, deduplicated bundle-manifest and EBX record ranges used by this
+    /// installation, including both base and delta records of patched assets.
+    /// Layout, TOC and catalogue files must be fingerprinted separately.
+    pub fn source_ranges(&self) -> Result<Vec<SourceRange>, Error> {
+        let index = self.ebx_index()?;
+        let store = Store::open(self)?;
+        let mut ranges = BTreeSet::new();
+        let mut bundles = 0usize;
+        for superbundle in &self.superbundles {
+            for (_, source) in self.bundle_sources(superbundle)? {
+                bundles += 1;
+                if bundles > self.limits.max_bundles {
+                    return Err(Error::Bound("bundles"));
+                }
+                ranges.insert(source);
+            }
+        }
+        for locations in index.values() {
+            for location in locations {
+                let entry = &location.entry;
+                match entry.delta {
+                    Some((base, delta)) => {
+                        ranges.insert(store.source(&base)?);
+                        ranges.insert(store.source(&delta)?);
+                    }
+                    None => {
+                        ranges.insert(store.source(&entry.sha1)?);
+                    }
+                }
+            }
+        }
+        Ok(ranges.into_iter().collect())
     }
 }
 
@@ -300,21 +355,29 @@ impl Store {
             .find_map(|(dir, entries)| entries.get(sha1).map(|r| (dir.clone(), *r)))
     }
 
-    fn raw(&mut self, sha1: &[u8; 20]) -> Result<Vec<u8>, Error> {
+    fn source(&self, sha1: &[u8; 20]) -> Result<SourceRange, Error> {
         let (dir, record) = self
             .locate(sha1)
             .ok_or_else(|| Error::Missing(format!("cas record {}", crate::hex(sha1))))?;
         if record.size as usize > self.limits.max_asset_bytes {
             return Err(Error::Bound("cas record size"));
         }
-        let path = dir.join(format!("cas_{:02}.cas", record.archive));
+        Ok(SourceRange {
+            path: dir.join(format!("cas_{:02}.cas", record.archive)),
+            offset: u64::from(record.offset),
+            size: record.size as usize,
+        })
+    }
+
+    fn raw(&mut self, sha1: &[u8; 20]) -> Result<Vec<u8>, Error> {
+        let SourceRange { path, offset, size } = self.source(sha1)?;
         if !self.handles.contains_key(&path) {
             let file = File::open(&path)
                 .map_err(|_| Error::Missing(format!("archive {}", path.display())))?;
             self.handles.insert(path.clone(), file);
         }
         let file = self.handles.get_mut(&path).unwrap();
-        read_range(file, u64::from(record.offset), record.size as usize)
+        read_range(file, offset, size)
     }
 
     /// Decompressed bytes of an entry, applying its delta when present.
