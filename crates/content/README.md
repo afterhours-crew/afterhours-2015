@@ -86,6 +86,19 @@ unrelated channels are not interchangeable with these identities. Missing,
 ambiguous or unsupported graphs fail preparation. Version 2 contains no goal
 allocation counter; that value belongs to owned runtime state.
 
+## Participant logic layouts
+
+`AssetIndex::participant_layout(scene, blueprint, owner)` derives a registered
+participant blueprint's asset reference, catalog, bus count, serializer profile
+and contextual channel bindings. Scene-owned logic uses the blueprint's unique
+installed spawner. Participant-owned children bind only to compatible channels
+inside the explicitly supplied parent. Repeated prefab instances retain separate
+contexts; missing, ambiguous and unsupported composition fails.
+
+This extraction API supplies static layout only. It does not choose which logic
+to activate, initialize account-dependent values or publish another prepared file.
+The server's remaining garage lifecycle policy still needs those integrations.
+
 ## Vehicle parts
 
 The version-1 `nfs-vehicle-parts` document holds five definition catalogs, validated

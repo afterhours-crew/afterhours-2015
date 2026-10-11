@@ -10,7 +10,7 @@ for example `nfs16-92aa6ff4b5f8d0f0.json`.
 
 | Field | Meaning |
 | --- | --- |
-| `format`, `version` | `nfs-build-profile`, `7` |
+| `format`, `version` | `nfs-build-profile`, `8` |
 | `description` | Human-readable identification of the build |
 | `executable`, `executable_sha256` | File name in the installation root and its exact digest |
 | `world_mac_template.rva`, `.sha256` | Relative virtual address (hex) of the 64-byte world MAC template inside the executable image, and the digest the bytes must have. The bytes themselves are read from the player's executable, never stored here |
@@ -19,6 +19,7 @@ for example `nfs16-92aa6ff4b5f8d0f0.json`.
 | `vehicles` | Vehicle class-to-serializer rules, bus and mesh-extra classes, mesh-link port, and player-bundle namespace. Profiles, mesh lists and defaults are read from installed assets |
 | `progression` | Main/intro capability roots and scene name, class-to-role rules and named persistence/property/channel port IDs. Stable IDs, expressions, bindings and serializer arrays come from installed graphs |
 | `sequences` | Waiting/exit capability roots and owning scenes, class-to-role rules, channel/spline port IDs and spline runtime class ID. Registry ordinals, manager and channel indexes, embedded manager bus and loop flag come from installed graphs |
+| `participant_logic` | Constructor kinds, allowed spawner classes and root/spawner channel ports. No blueprint membership, instance indexes, lifecycle decisions or account values |
 
 Only the classes whose IDs are known are listed; building content that needs
 another class fails with an explicit error rather than guessing.

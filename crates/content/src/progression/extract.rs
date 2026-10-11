@@ -260,40 +260,10 @@ fn bindings(
         let root = unique(nodes, "ParticipantLogicEntityData")?;
         let references = graph.links(root, rules.ports["root_channels"])?;
         let targets = graph.links(spawner, rules.ports["spawner_channels"])?;
-        let mut refs = Vec::new();
-        for endpoint in references {
-            if endpoint.port != 0
-                || graph.object(&endpoint.site)?.class
-                    != "LinkedSchematicChannelReferenceEntityData"
-            {
-                return Err(bad("root channel reference endpoint"));
-            }
-            refs.push((channel(graph, &endpoint.site)?, endpoint.site));
-        }
-        let mut bound = BTreeMap::new();
-        // Match in connection order: each target binds the first compatible,
-        // still-unbound reference. Unrelated occurrences of an asset are not candidates.
-        for endpoint in targets {
-            if endpoint.port != 0
-                || graph.object(&endpoint.site)?.class != "LinkedSchematicChannelEntityData"
-            {
-                return Err(bad("spawner channel endpoint"));
-            }
-            let asset = channel(graph, &endpoint.site)?;
-            let reference = refs
-                .iter()
-                .find(|(a, site)| *a == asset && !bound.contains_key(site))
-                .ok_or_else(|| bad("unmatched spawner channel"))?;
-            bound.insert(reference.1.clone(), scenes.endpoint(graph, &endpoint.site)?);
-        }
-        let all: BTreeSet<_> = nodes
-            .iter()
-            .filter(|n| n.object.class == "LinkedSchematicChannelReferenceEntityData")
-            .map(|n| n.site.clone())
-            .collect();
-        if bound.keys().cloned().collect::<BTreeSet<_>>() != all || bound.len() != refs.len() {
-            return Err(bad("unbound or duplicate progression channel reference"));
-        }
+        let bound = crate::participant_logic::bind(graph, nodes, references, targets)?
+            .into_iter()
+            .map(|(reference, target)| Ok((reference, scenes.endpoint(graph, &target)?)))
+            .collect::<Result<_, Error>>()?;
         result.push(bound);
     }
     Ok(result)

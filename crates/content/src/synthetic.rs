@@ -459,7 +459,7 @@ pub fn garage_links() -> crate::garage::Links {
     }
 }
 
-fn connection(
+pub(crate) fn connection(
     source: u32,
     source_field: u32,
     target: u32,
@@ -885,6 +885,7 @@ pub fn write(root: &Path, assets: &[Asset]) -> std::io::Result<(Options, [u8; 64
             vehicles: vehicles::rules(),
             progression: progression::rules(),
             sequences: sequences::rules(),
+            participant_logic: crate::BuildIdentity::supported().participant_logic,
             scenes: crate::scenes::Rules {
                 level: RUNTIME_LEVEL.to_owned(),
                 classes: [

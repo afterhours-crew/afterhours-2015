@@ -25,6 +25,7 @@ pub mod garage;
 mod graph;
 mod items;
 mod licenses;
+pub mod participant_logic;
 pub mod progression;
 mod reputation;
 mod scan;
@@ -69,6 +70,7 @@ pub struct BuildIdentity {
     pub vehicles: vehicle_profiles::Rules,
     pub progression: progression::Rules,
     pub sequences: sequences::Rules,
+    pub participant_logic: participant_logic::Rules,
 }
 
 impl BuildIdentity {
