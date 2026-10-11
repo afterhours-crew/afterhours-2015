@@ -440,6 +440,7 @@ fn replace<T: Clone>(old: &mut Option<T>, new: &Option<T>) {
 impl Update {
     fn merge(&mut self, new: &Self) -> Result<(), Error> {
         match (self, new) {
+            (Self::ScriptedSplineGoal, Self::ScriptedSplineGoal) => {}
             (Self::Participant(a), Self::Participant(b)) => {
                 replace(&mut a.player, &b.player);
                 replace(&mut a.entity, &b.entity);

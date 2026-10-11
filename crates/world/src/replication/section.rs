@@ -53,6 +53,7 @@ pub struct Partial {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Bindings {
     objects: BTreeMap<u16, Kind>,
+    splines: Option<super::spline::Content>,
     scenes: BTreeMap<u16, sublevel::Profile>,
     content: Option<std::sync::Arc<sublevel::Content>>,
     entities: BTreeMap<u16, std::sync::Arc<entity::creation::Binding>>,
@@ -68,6 +69,34 @@ fn id_valid(id: u16) -> Result<(), Error> {
 }
 
 impl Bindings {
+    pub fn with_splines(mut self, content: super::spline::Content) -> Self {
+        self.splines = Some(content);
+        self
+    }
+    fn decode_record(
+        &self,
+        span: BitSpan<'_>,
+        id: u16,
+        bound: Option<Kind>,
+    ) -> Result<Decoded_, Error> {
+        let create = span.read_u32(13, 1).map_err(|_| Error::Truncated)? != 0;
+        let kind = if create {
+            Kind::from_index(span.read_u32(14, 5).map_err(|_| Error::Truncated)? as u8)?
+        } else {
+            bound.ok_or(Error::UnknownObject)?
+        };
+        if kind == Kind::ScriptedSplineGoal {
+            return Record::decode_spline(span, bound, self.splines.as_ref());
+        }
+        Record::decode_context(
+            span,
+            bound,
+            self.content.as_deref(),
+            self.scenes.get(&id),
+            self.entity_content.as_deref(),
+            self.entities.get(&id),
+        )
+    }
     pub fn with_sublevels(content: sublevel::Content) -> Self {
         Self {
             content: Some(std::sync::Arc::new(content)),
@@ -158,14 +187,7 @@ impl Bindings {
             if create && bound.is_some() {
                 return Err(Error::DuplicateObject);
             }
-            let decoded = Record::decode_context(
-                span,
-                bound,
-                next.content.as_deref(),
-                next.scenes.get(&id),
-                next.entity_content.as_deref(),
-                next.entities.get(&id),
-            )?;
+            let decoded = next.decode_record(span, id, bound)?;
             let kind = decoded.record.update.kind();
             if create {
                 next.objects.insert(id, kind);
@@ -241,14 +263,7 @@ impl Bindings {
                 if create && bound.is_some() {
                     return Err(Error::DuplicateObject);
                 }
-                let decoded = Record::decode_context(
-                    span,
-                    bound,
-                    next.content.as_deref(),
-                    next.scenes.get(&id),
-                    next.entity_content.as_deref(),
-                    next.entities.get(&id),
-                )?;
+                let decoded = next.decode_record(span, id, bound)?;
                 Ok((decoded, cursor))
             })();
             match result {

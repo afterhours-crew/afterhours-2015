@@ -20,6 +20,7 @@ use crate::{
         Error, Record,
         entity::{self, creation::Content},
         players::Players,
+        spline,
     },
     sequences::{Completed, Definition, Layout, Owner, Stop},
 };
@@ -50,17 +51,103 @@ struct Instance {
     owner: Owner,
     ghost: u16,
     phase: Phase,
+    goal: Option<u16>,
+    cleaned: bool,
 }
 
 #[derive(Clone, Debug)]
 pub struct Arrivals {
     definition: Definition,
+    spline: Option<spline::Definition>,
     content: Content,
     entries: BTreeMap<u16, Instance>,
     world_ms: u64,
 }
 
 impl Arrivals {
+    pub fn with_spline(mut self, definition: spline::Definition) -> Result<Self, Error> {
+        if !self.entries.is_empty() {
+            return Err(Error::Shape);
+        }
+        definition.validate()?;
+        self.spline = Some(definition);
+        Ok(self)
+    }
+    /// Start the sequence and its owned path atomically. The path assignment
+    /// precedes the sequence on the wire so the cinematic sees its vehicle goal.
+    pub fn start_rollout(
+        &mut self,
+        players: &mut Players,
+        owner: Owner,
+    ) -> Result<Vec<Record>, Error> {
+        let mut next_players = players.clone();
+        let mut next = self.clone();
+        let Some(sequence) = next.start(&mut next_players, owner)? else {
+            return Ok(Vec::new());
+        };
+        let mut records = Vec::new();
+        if let Some(definition) = &self.spline {
+            let (goal, actor) = next_players.start_spline(
+                owner.connection,
+                owner.persona,
+                owner.participant,
+                definition,
+            )?;
+            next.entries
+                .get_mut(&owner.participant)
+                .ok_or(Error::UnknownObject)?
+                .goal = Some(goal.id);
+            records.extend([goal, actor]);
+        }
+        records.push(sequence);
+        *players = next_players;
+        *self = next;
+        Ok(records)
+    }
+    /// Final cleanup after a validated completion. Return Actor changes and
+    /// object deletions for the same outbound replication section.
+    pub fn finish_rollout(
+        &mut self,
+        players: &mut Players,
+        owner: Owner,
+    ) -> Result<(Vec<Record>, Vec<u16>), Error> {
+        if !players.owns_participant(owner.connection, owner.persona, owner.participant) {
+            return Err(Error::UnknownObject);
+        }
+        let instance = self
+            .entries
+            .get(&owner.participant)
+            .ok_or(Error::UnknownObject)?;
+        if instance.owner != owner {
+            return Err(Error::UnknownObject);
+        }
+        if instance.phase != Phase::Complete {
+            return Err(Error::Shape);
+        }
+        if instance.cleaned {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        let mut next = players.clone();
+        let mut records = Vec::new();
+        let mut deleted = vec![instance.ghost];
+        if let Some(goal) = instance.goal {
+            records.push(next.finish_spline(
+                owner.connection,
+                owner.persona,
+                owner.participant,
+                goal,
+            )?);
+            deleted.push(goal);
+        }
+        next.remove_entities(&[instance.ghost])?;
+        *players = next;
+        self.entries
+            .get_mut(&owner.participant)
+            .ok_or(Error::UnknownObject)?
+            .cleaned = true;
+        Ok((records, deleted))
+    }
+
     pub fn new(definition: Definition, content: Content) -> Result<Self, Error> {
         if definition.layout != Layout::GarageExit
             || definition.embedded_bus == 0
@@ -70,6 +157,7 @@ impl Arrivals {
         }
         Ok(Self {
             definition,
+            spline: None,
             content,
             entries: BTreeMap::new(),
             world_ms: 0,
@@ -105,6 +193,8 @@ impl Arrivals {
                 owner,
                 ghost: record.id,
                 phase: Phase::Running { fallback_at },
+                goal: None,
+                cleaned: false,
             },
         );
         Ok(Some(record))

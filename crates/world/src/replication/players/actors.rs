@@ -5,6 +5,86 @@
 use super::*;
 
 impl Players {
+    /// Allocate a fresh scripted path and assign it to this participant's Actor.
+    /// Allocation and assignment commit together; an existing goal is not replaced.
+    pub fn start_spline(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        participant: u16,
+        definition: &spline::Definition,
+    ) -> Result<(Record, Record), Error> {
+        let actor = self
+            .owned_actor(connection, persona, participant)
+            .ok_or(Error::UnknownObject)?;
+        let Some(state::Object {
+            current: Update::Actor(current),
+            ..
+        }) = self.objects.get(actor)
+        else {
+            return Err(Error::TypeMismatch);
+        };
+        if current.references_a.as_ref().is_some_and(|v| !v.is_empty()) {
+            return Err(Error::Shape);
+        }
+        let mut next = self.objects.clone();
+        let goal = next.spawn(
+            Initial::ScriptedSplineGoal(definition.initial()?),
+            Update::ScriptedSplineGoal,
+        )?;
+        let assigned = next
+            .change(
+                actor,
+                Update::Actor(ActorUpdate {
+                    references_a: Some(vec![goal.id]),
+                    ..ActorUpdate::default()
+                }),
+            )?
+            .ok_or(Error::Shape)?;
+        self.objects = next;
+        Ok((goal, assigned))
+    }
+    /// Clear the owned Actor association before deleting the path object.
+    pub fn finish_spline(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        participant: u16,
+        goal: u16,
+    ) -> Result<Record, Error> {
+        let actor = self
+            .owned_actor(connection, persona, participant)
+            .ok_or(Error::UnknownObject)?;
+        let Some(state::Object {
+            current: Update::Actor(current),
+            ..
+        }) = self.objects.get(actor)
+        else {
+            return Err(Error::TypeMismatch);
+        };
+        if current.references_a.as_deref() != Some(&[goal])
+            || !self
+                .objects
+                .get(goal)
+                .is_some_and(|o| matches!(o.initial, Initial::ScriptedSplineGoal(_)))
+        {
+            return Err(Error::UnknownObject);
+        }
+        let mut next = self.objects.clone();
+        let cleared = next
+            .change(
+                actor,
+                Update::Actor(ActorUpdate {
+                    references_a: Some(Vec::new()),
+                    ..ActorUpdate::default()
+                }),
+            )?
+            .ok_or(Error::Shape)?;
+        next.remove(goal)?;
+        self.objects = next;
+        Ok(cleared)
+    }
+
     pub fn create_actor(
         &mut self,
         connection: u8,

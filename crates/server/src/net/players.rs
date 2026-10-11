@@ -839,6 +839,21 @@ impl Listener for PlayerListener {
                 {
                     Ok(Some(None)) => continue,
                     Ok(Some(Some((sequence, participant, mut chain)))) => {
+                        let (mut rollout_records, rollout_deleted) = match arrivals.finish_rollout(
+                            &mut players,
+                            nfs_world::sequences::Owner {
+                                connection: HOST_SELECTOR as u8,
+                                persona: self.persona,
+                                participant,
+                            },
+                        ) {
+                            Ok(output) => output,
+                            Err(error) => {
+                                self.refused += 1;
+                                self.last_error = Some(error);
+                                return false;
+                            }
+                        };
                         // The exit presentation's last logic leaves with the
                         // sequence (E101 115,292 ms).
                         let logic = match Self::arrive_logic(
@@ -866,13 +881,20 @@ impl Listener for PlayerListener {
                                 .into_iter()
                                 .map(nfs_world::participants::HostRpc::Event),
                         );
+                        rollout_records.extend(logic.records);
                         exit_entries.push((
                             Section {
                                 float_bits: None,
                                 flag: false,
-                                deleted: std::iter::once(sequence).chain(logic.deleted).collect(),
-                                setup: None,
-                                records: logic.records,
+                                deleted: rollout_deleted.into_iter().chain(logic.deleted).collect(),
+                                setup: (!rollout_records.is_empty()).then_some(
+                                    nfs_world::replication::section::Setup::Packed {
+                                        tag: None,
+                                        width: None,
+                                        axes: [None; 3],
+                                    },
+                                ),
+                                records: rollout_records,
                             },
                             chain,
                         ));

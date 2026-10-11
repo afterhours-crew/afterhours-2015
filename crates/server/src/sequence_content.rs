@@ -18,6 +18,7 @@ pub struct SequenceContent {
     pub content: Content,
     /// Optional arrive sequence after garage exit (`nfs_world::arrival`).
     pub arrive: Option<(Definition, Content)>,
+    pub spline: Option<nfs_world::replication::spline::Definition>,
 }
 impl SequenceContent {
     pub fn load(path: &Path) -> Result<Self, Failure> {
@@ -58,20 +59,34 @@ impl SequenceContent {
         }
         let (definition, content) = sequence(v, Layout::Waiting)?;
         Sequences::new(definition, content.clone()).map_err(|_| Failure::ProfileConfig)?;
+        let mut spline = None;
         let arrive = match v.get("arrive") {
             None => None,
             Some(a) => {
-                keys(
-                    a,
-                    &[
-                        "blueprint",
-                        "asset",
-                        "catalog",
-                        "manager",
-                        "channel",
-                        "embedded_bus",
-                    ],
-                )?;
+                let mut arrive_keys = vec![
+                    "blueprint",
+                    "asset",
+                    "catalog",
+                    "manager",
+                    "channel",
+                    "embedded_bus",
+                ];
+                if a.get("spline").is_some() {
+                    arrive_keys.push("spline");
+                }
+                keys(a, &arrive_keys)?;
+                if let Some(value) = a.get("spline") {
+                    keys(value, &["asset", "catalog", "base_value", "flag"])?;
+                    let (asset, catalog) = asset_catalog(value)?;
+                    let definition = nfs_world::replication::spline::Definition {
+                        asset,
+                        catalog,
+                        base_value: uint(&value["base_value"])?,
+                        flag: value["flag"].as_bool().ok_or(Failure::ProfileConfig)?,
+                    };
+                    definition.validate().map_err(|_| Failure::ProfileConfig)?;
+                    spline = Some(definition);
+                }
                 if a["blueprint"] != "Gameplay/Tests/GarageExitSequence" {
                     return Err(Failure::ProfileConfig);
                 }
@@ -84,19 +99,24 @@ impl SequenceContent {
             definition,
             content,
             arrive,
+            spline,
         })
     }
     pub fn instance(&self) -> Result<Sequences, nfs_world::replication::Error> {
         Sequences::new(self.definition, self.content.clone())
     }
     pub fn arrivals(&self) -> Option<Result<Arrivals, nfs_world::replication::Error>> {
-        self.arrive
-            .as_ref()
-            .map(|(definition, content)| Arrivals::new(*definition, content.clone()))
+        self.arrive.as_ref().map(|(definition, content)| {
+            let arrivals = Arrivals::new(*definition, content.clone())?;
+            match &self.spline {
+                Some(spline) => arrivals.with_spline(spline.clone()),
+                None => Ok(arrivals),
+            }
+        })
     }
 }
 /// Asset, catalog, manager, channel and bus of a sequence definition.
-fn sequence(v: &Value, layout: Layout) -> Result<(Definition, Content), Failure> {
+fn asset_catalog(v: &Value) -> Result<(Asset, Catalog), Failure> {
     keys(&v["asset"], &["bundle", "type_id", "local_index"])?;
     let asset = Asset {
         bundle: uint(&v["asset"]["bundle"])?,
@@ -117,11 +137,15 @@ fn sequence(v: &Value, layout: Layout) -> Result<(Definition, Content), Failure>
             Ok((uint(&a[0])?, uint(&a[1])?))
         })
         .collect::<Result<Vec<_>, Failure>>()?;
-    let content = Content::new(
-        vec![Catalog::new(asset.bundle, &entries).map_err(|_| Failure::ProfileConfig)?],
-        vec![(asset, layout.profile())],
-    )
-    .map_err(|_| Failure::ProfileConfig)?;
+    Ok((
+        asset,
+        Catalog::new(asset.bundle, &entries).map_err(|_| Failure::ProfileConfig)?,
+    ))
+}
+fn sequence(v: &Value, layout: Layout) -> Result<(Definition, Content), Failure> {
+    let (asset, catalog) = asset_catalog(v)?;
+    let content = Content::new(vec![catalog], vec![(asset, layout.profile())])
+        .map_err(|_| Failure::ProfileConfig)?;
     let definition = Definition {
         layout,
         asset,
@@ -218,6 +242,26 @@ mod tests {
             *invalid.pointer_mut(pointer).unwrap() = bad;
             assert!(SequenceContent::from_json(&invalid).is_err(), "{pointer}");
         }
+        v["arrive"]["spline"] = json!({"asset":{"bundle":23,"type_id":5100,"local_index":1},"catalog":[[5100,3]],"base_value":37,"flag":false});
+        assert!(
+            SequenceContent::from_json(&v)
+                .unwrap()
+                .arrivals()
+                .unwrap()
+                .is_ok()
+        );
+        for (pointer, bad) in [
+            ("/arrive/spline/asset/local_index", json!(3)),
+            ("/arrive/spline/base_value", json!(64)),
+            ("/arrive/spline/flag", json!(0)),
+        ] {
+            let mut invalid = v.clone();
+            *invalid.pointer_mut(pointer).unwrap() = bad;
+            assert!(SequenceContent::from_json(&invalid).is_err());
+        }
+        let mut foreign = v.clone();
+        foreign["arrive"]["spline"]["actor"] = json!(27);
+        assert!(SequenceContent::from_json(&foreign).is_err());
         let mut fixed = v.clone();
         fixed["arrive"]["fixed_channel"] = json!({"reference": 48, "selector": 8});
         assert!(SequenceContent::from_json(&fixed).is_err());

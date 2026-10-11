@@ -104,6 +104,113 @@ fn reached(event: u32, ghost: u16, entity: u32) -> Message {
 }
 
 #[test]
+fn rollout_goal_is_owned_atomic_ordered_and_cleaned_once() {
+    let (mut players, arrivals) = setup();
+    let mut arrivals = arrivals
+        .with_spline(spline::Definition {
+            asset: Asset {
+                bundle: 23,
+                type_id: 5100,
+                local_index: 2,
+            },
+            catalog: Catalog::new(23, &[(5100, 3)]).unwrap(),
+            base_value: 37,
+            flag: false,
+        })
+        .unwrap();
+    let owner = join(&mut players);
+    let before = players.objects().snapshot();
+    // Missing Actor must not consume either the sequence or goal identity.
+    assert_eq!(
+        arrivals.start_rollout(&mut players, owner),
+        Err(Error::UnknownObject)
+    );
+    assert_eq!(players.objects().snapshot(), before);
+    assert_eq!(arrivals.ghost(owner.participant), None);
+    let actor = players
+        .create_actor(owner.connection, owner.persona, owner.participant)
+        .unwrap()
+        .unwrap()
+        .id;
+    let records = arrivals.start_rollout(&mut players, owner).unwrap();
+    assert_eq!(records.len(), 3);
+    let goal = records[0].id;
+    assert!(matches!(
+        records[0].initial,
+        Some(Initial::ScriptedSplineGoal(_))
+    ));
+    assert_eq!(records[1].id, actor);
+    assert!(
+        matches!(&records[1].update,crate::replication::Update::Actor(a) if a.references_a.as_deref()==Some(&[goal]))
+    );
+    let sequence = records[2].id;
+    assert_eq!(sequence + 1, goal);
+    assert!(
+        arrivals
+            .start_rollout(&mut players, owner)
+            .unwrap()
+            .is_empty()
+    );
+    let second_player = players
+        .create(
+            5,
+            500,
+            Request {
+                name: b"Second".to_vec(),
+                flag: false,
+                slot: 0,
+            },
+        )
+        .unwrap()
+        .unwrap()
+        .id;
+    let second = Owner {
+        connection: 5,
+        persona: 500,
+        participant: players.join(5, 500, second_player).unwrap().unwrap().id,
+    };
+    players.create_actor(5, 500, second.participant).unwrap();
+    let other = arrivals.start_rollout(&mut players, second).unwrap();
+    let snapshot = players.objects().snapshot();
+    assert_eq!(
+        players.finish_spline(5, 500, second.participant, goal),
+        Err(Error::UnknownObject)
+    );
+    assert_eq!(
+        arrivals.finish_rollout(&mut players, owner),
+        Err(Error::Shape)
+    );
+    assert_eq!(players.objects().snapshot(), snapshot);
+    arrivals
+        .arrived(&reached(ARRIVED, sequence, 1))
+        .unwrap()
+        .unwrap();
+    let call = Completed {
+        sequence,
+        participant: owner.participant,
+    };
+    arrivals.complete(&players, owner, call).unwrap().unwrap();
+    let (cleared, deleted) = arrivals.finish_rollout(&mut players, owner).unwrap();
+    assert_eq!(deleted, vec![sequence, goal]);
+    assert!(
+        matches!(&cleared[0].update,crate::replication::Update::Actor(a) if a.references_a.as_deref()==Some(&[]))
+    );
+    assert!(players.objects().get(goal).is_none() && players.objects().get(sequence).is_none());
+    assert!(players.objects().get(other[0].id).is_some());
+    assert_eq!(arrivals.complete(&players, owner, call), Ok(None));
+    assert_eq!(
+        arrivals.finish_rollout(&mut players, owner),
+        Ok((vec![], vec![]))
+    );
+    assert_eq!(
+        Arrivals::new(arrivals.definition, arrivals.content.clone())
+            .unwrap()
+            .ghost(owner.participant),
+        None
+    );
+}
+
+#[test]
 fn an_arrive_sequence_starts_once_stops_on_the_event_and_completes_once() {
     let (mut players, mut arrivals) = setup();
     let owner = join(&mut players);
