@@ -216,7 +216,18 @@ catalog; race/event filters require progression eligibility. The loader validate
 all sites against registered scene profiles before startup. Activation follows
 the owned FreeRoam lifecycle after completion creations and binding refreshes;
 without this catalog the additional subscriptions remain unsupported. Installed
-content preparation does not yet derive this optional catalog.
+content preparation does not yet derive this optional catalog. Owned participants
+already in FreeRoam may report their location before the activation queue drains;
+this records readiness without bypassing subscription ordering.
+
+Garage logic may supply event-only `world_ready`, `world_spawn` and `free_roam`
+batches. They run once at the first new-car readiness report, release of its spawn
+assignment, and completion of the queued world handoff, respectively. These
+batches use the existing `events` format and may not create/delete objects or
+change properties. They complement `exit`, `arrive` and `arrived` presentation
+batches. Event targets resolve to current per-participant objects; queue pressure
+retains the entire phase for retry. Installed preparation does not yet derive
+these optional event phases. Live driving acceptance remains open.
 
 At garage exit the server answers the leave request with the participant state
 chain and, when the garage layout has a `world_spawn` pose, replaces the garage
@@ -224,7 +235,8 @@ car with a driveable world car in the same frame. When the client reports the
 new car, the server assigns a spawn point (a per-session id). It answers spawn
 requests and releases with the scene's occupied flag. Once a participant has
 joined, the server polls the level root about every 1.1 s, and the client's
-answers are recorded. Later world entry steps are not modeled.
+answers are recorded. Configured arrival sequences, vehicle bindings and world
+membership then complete the handoff; this does not yet establish drivable play.
 
 `--redirector-port 0` chooses an ephemeral port (the default).
 `--idle-seconds` accepts 1–3600, and `--qos-seconds` accepts 1–86400.

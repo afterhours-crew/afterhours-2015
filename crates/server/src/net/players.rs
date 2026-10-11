@@ -73,6 +73,7 @@ pub(super) struct PlayerListener {
     logic: Option<std::sync::Arc<crate::garage_logic::GarageLogic>>,
     logic_ghosts: BTreeMap<u16, BTreeMap<u16, u16>>,
     logic_vehicles_fired: BTreeSet<u16>,
+    free_roam_presented: BTreeSet<u16>,
     pub(super) pending_content: VecDeque<nfs_world::content::Message>,
     pub(super) pending_rpcs: VecDeque<nfs_world::participants::HostRpc>,
     unsupported_rpcs: usize,
@@ -464,6 +465,7 @@ impl PlayerListener {
             logic: None,
             logic_ghosts: BTreeMap::new(),
             logic_vehicles_fired: BTreeSet::new(),
+            free_roam_presented: BTreeSet::new(),
             pending_content: VecDeque::new(),
             pending_rpcs: VecDeque::new(),
             unsupported_rpcs: 0,
@@ -809,6 +811,14 @@ impl Listener for PlayerListener {
                             notification.participant,
                         )?);
                         deferred_sections.extend(Self::binding_sections(bindings)?);
+                        responses.extend(Self::presentation_events(
+                            self.logic.as_deref(),
+                            crate::garage_logic::Which::WorldReady,
+                            &players,
+                            &logic_ghosts,
+                            self.persona,
+                            notification.participant,
+                        )?);
                         if let Some(command) = Self::exit_teleport(
                             self.participants.exit_bindings(),
                             self.vehicles.as_deref().map(|c| &c.layout),
@@ -1001,9 +1011,11 @@ impl Listener for PlayerListener {
                 }
             }
             if let Some(activation) = &mut world_activation {
-                match activation.receive(body, |id| {
-                    players.owns_participant(HOST_SELECTOR as u8, self.persona, id)
-                }) {
+                match activation.receive_ready(
+                    body,
+                    |id| players.owns_participant(HOST_SELECTOR as u8, self.persona, id),
+                    |id| participants.stage(id) == Some(nfs_world::participants::Stage::FreeRoam),
+                ) {
                     Ok(Some(report)) => {
                         tracing::debug!(?report, "owned world volume or location report");
                         continue;

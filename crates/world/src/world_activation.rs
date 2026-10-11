@@ -163,6 +163,7 @@ pub struct Activation {
     streamed: Endpoint,
     location: Endpoint,
     members: BTreeMap<u16, Member>,
+    located_before_activation: std::collections::BTreeSet<u16>,
 }
 impl Activation {
     pub fn bind(records: &[Record], catalog: &Catalog) -> Result<Self, Error> {
@@ -213,6 +214,7 @@ impl Activation {
             streamed: endpoint(catalog.streamed, sublevel::Kind::Rpc)?,
             location: endpoint(catalog.location, sublevel::Kind::RpcFourReferences)?,
             members: BTreeMap::new(),
+            located_before_activation: Default::default(),
         })
     }
     pub fn participants(&self) -> impl Iterator<Item = u16> + '_ {
@@ -234,6 +236,9 @@ impl Activation {
             return Err(Error::UnknownObject);
         }
         if self.members.contains_key(&participant) == active {
+            if !active {
+                self.located_before_activation.remove(&participant);
+            }
             return Ok(Vec::new());
         }
         if active && self.members.len() >= MAX_PARTICIPANTS {
@@ -276,7 +281,13 @@ impl Activation {
             notification.encode()?;
         }
         if active {
-            self.members.insert(participant, Member::default());
+            self.members.insert(
+                participant,
+                Member {
+                    located: self.located_before_activation.remove(&participant),
+                    ..Member::default()
+                },
+            );
         } else {
             self.members.remove(&participant);
         }
@@ -286,6 +297,17 @@ impl Activation {
         &mut self,
         body: BitSpan<'_>,
         owns: impl Fn(u16) -> bool,
+    ) -> Result<Option<Report>, Error> {
+        self.receive_ready(body, owns, |_| false)
+    }
+    /// A location report can precede queued activation output. The caller must
+    /// independently establish that this owned participant has reached free roam.
+    /// Volume reports still require delivered/queued membership and its token.
+    pub fn receive_ready(
+        &mut self,
+        body: BitSpan<'_>,
+        owns: impl Fn(u16) -> bool,
+        ready: impl Fn(u16) -> bool,
     ) -> Result<Option<Report>, Error> {
         let envelope = Envelope::decode(
             body,
@@ -319,18 +341,35 @@ impl Activation {
         if !owns(participant) {
             return Err(Error::UnknownObject);
         }
-        let member = self
-            .members
-            .get_mut(&participant)
-            .ok_or(Error::UnknownObject)?;
         if location {
             if route.arguments().len() != 7 {
                 return Err(Error::Shape);
             }
-            let first = !member.located;
-            member.located = true;
+            let first = match self.members.get_mut(&participant) {
+                Some(member) => {
+                    let first = !member.located;
+                    member.located = true;
+                    first
+                }
+                None if ready(participant) => {
+                    if participant == 0 || participant > 8191 {
+                        return Err(Error::Bound);
+                    }
+                    if !self.located_before_activation.contains(&participant)
+                        && self.located_before_activation.len() >= MAX_PARTICIPANTS
+                    {
+                        return Err(Error::Bound);
+                    }
+                    self.located_before_activation.insert(participant)
+                }
+                None => return Err(Error::UnknownObject),
+            };
             return Ok(Some(Report::Location { participant, first }));
         }
+        let member = self
+            .members
+            .get_mut(&participant)
+            .ok_or(Error::UnknownObject)?;
         if route.arguments().len() != 103 {
             return Err(Error::Shape);
         }

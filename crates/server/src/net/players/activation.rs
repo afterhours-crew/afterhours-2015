@@ -13,22 +13,59 @@ impl PlayerListener {
         {
             return Ok(());
         }
-        let Some(activation) = &mut self.world_activation else {
-            return Ok(());
-        };
         let active: BTreeSet<_> = self.participants.in_free_roam().into_iter().collect();
-        let targets: BTreeSet<_> = activation
-            .participants()
+        let targets: BTreeSet<_> = self
+            .world_activation
+            .as_ref()
+            .into_iter()
+            .flat_map(|a| a.participants())
             .chain(active.iter().copied())
             .collect();
         for participant in targets {
             let capacity =
                 nfs_world::session::MAX_RPC_QUEUE.saturating_sub(self.pending_rpcs.len());
-            let replies =
-                activation.set(participant, active.contains(&participant), capacity, |id| {
-                    self.players
-                        .owns_participant(HOST_SELECTOR as u8, self.persona, id)
-                })?;
+            let presenting =
+                active.contains(&participant) && !self.free_roam_presented.contains(&participant);
+            if presenting && self.free_roam_presented.len() >= MAX_WORLD_CARS {
+                return Err(replication::Error::Bound);
+            }
+            let events = if presenting {
+                Self::presentation_events(
+                    self.logic.as_deref(),
+                    crate::garage_logic::Which::FreeRoam,
+                    &self.players,
+                    &self.logic_ghosts,
+                    self.persona,
+                    participant,
+                )?
+            } else {
+                Vec::new()
+            };
+            if events.len() > capacity {
+                break;
+            }
+            let replies = match self.world_activation.as_mut() {
+                Some(activation) => activation.set(
+                    participant,
+                    active.contains(&participant),
+                    capacity - events.len(),
+                    |id| {
+                        self.players
+                            .owns_participant(HOST_SELECTOR as u8, self.persona, id)
+                    },
+                )?,
+                None => Vec::new(),
+            };
+            if presenting
+                && self
+                    .world_activation
+                    .as_ref()
+                    .is_some_and(|a| !a.participants().any(|id| id == participant))
+            {
+                // Activation could not reserve its complete output. Do not send
+                // the presentation release or consume its once-only marker.
+                continue;
+            }
             if !replies.is_empty() {
                 tracing::info!(
                     participant,
@@ -42,7 +79,12 @@ impl PlayerListener {
                         .map(nfs_world::participants::HostRpc::WorldActivation),
                 );
             }
+            if presenting {
+                self.pending_rpcs.extend(events);
+                self.free_roam_presented.insert(participant);
+            }
         }
+        self.free_roam_presented.retain(|p| active.contains(p));
         Ok(())
     }
 }
@@ -131,6 +173,12 @@ mod tests {
             .unwrap()
             .unwrap()
             .id;
+        let mut presentation = crate::garage_logic::tests::presentation_json();
+        presentation["free_roam"]["events"][0]["target"] =
+            serde_json::json!({"scene_content_key":501});
+        listener.logic = Some(std::sync::Arc::new(
+            crate::garage_logic::GarageLogic::from_json(&presentation).unwrap(),
+        ));
         let bindings = Bindings::from_records(&records, 501, 502).unwrap().unwrap();
         let request = |endpoint: nfs_world::participants::Endpoint, method: u64| {
             let mut payload = BitWriter::new();
@@ -215,21 +263,29 @@ mod tests {
             });
         listener
             .pending_rpcs
-            .resize(nfs_world::session::MAX_RPC_QUEUE - 2, occupied);
+            .resize(nfs_world::session::MAX_RPC_QUEUE - 3, occupied);
         let before = listener.world_activation.clone();
         listener.advance_world_activation().unwrap();
         assert_eq!(listener.world_activation, before);
+        assert!(listener.free_roam_presented.is_empty());
         listener.pending_rpcs.clear();
         listener.advance_world_activation().unwrap();
-        assert_eq!(listener.pending_rpcs.len(), 3);
+        assert_eq!(listener.pending_rpcs.len(), 4);
         assert!(
             listener
                 .pending_rpcs
                 .iter()
+                .take(3)
                 .all(|r| matches!(r, nfs_world::participants::HostRpc::WorldActivation(_)))
         );
+        assert!(
+            matches!(listener.pending_rpcs.back(),Some(nfs_world::participants::HostRpc::Event(e)) if e.event == 17)
+        );
         listener.advance_world_activation().unwrap();
-        assert_eq!(listener.pending_rpcs.len(), 3);
+        assert_eq!(listener.pending_rpcs.len(), 4);
+        listener.pending_rpcs.clear();
+        listener.advance_world_activation().unwrap();
+        assert!(listener.pending_rpcs.is_empty());
         assert_eq!(
             listener
                 .world_activation

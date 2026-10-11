@@ -21,6 +21,27 @@ pub(super) struct Output {
     pub replies: Vec<HostRpc>,
 }
 impl PlayerListener {
+    pub(super) fn presentation_events(
+        logic: Option<&crate::garage_logic::GarageLogic>,
+        which: crate::garage_logic::Which,
+        players: &Players,
+        ghosts: &BTreeMap<u16, BTreeMap<u16, u16>>,
+        persona: u64,
+        participant: u16,
+    ) -> Result<Vec<HostRpc>, replication::Error> {
+        let Some(logic) = logic.filter(|l| l.has(which)) else {
+            return Ok(Vec::new());
+        };
+        if !players.owns_participant(HOST_SELECTOR as u8, persona, participant) {
+            return Err(replication::Error::UnknownObject);
+        }
+        let empty = BTreeMap::new();
+        Ok(logic
+            .events(which, players, ghosts.get(&participant).unwrap_or(&empty))?
+            .into_iter()
+            .map(HostRpc::Event)
+            .collect())
+    }
     pub(super) fn binding_sections(
         bindings: Vec<replication::Record>,
     ) -> Result<Vec<Section>, replication::Error> {

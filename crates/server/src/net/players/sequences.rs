@@ -76,24 +76,48 @@ impl PlayerListener {
         {
             return Ok(());
         }
-        let poll = self.level_poll.due(world_ms)?;
+        let mut level_poll = self.level_poll.clone();
+        let poll = level_poll.due(world_ms)?;
         let polled = poll.is_some();
+        let mut replies = Vec::new();
         if let Some(poll) = poll {
-            self.pending_rpcs
-                .push_back(nfs_world::participants::HostRpc::LevelPoll(poll));
+            replies.push(nfs_world::participants::HostRpc::LevelPoll(poll));
         }
         // Official spawn assignments share a frame with a level poll (E755).
-        if polled || self.level_poll.endpoint().is_none() {
-            for notification in Self::release_spawns(&mut self.pending_spawns, world_ms) {
+        if polled || level_poll.endpoint().is_none() {
+            for &(_, notification) in self
+                .pending_spawns
+                .iter()
+                .take_while(|(due, _)| *due <= world_ms)
+            {
+                let events = Self::presentation_events(
+                    self.logic.as_deref(),
+                    crate::garage_logic::Which::WorldSpawn,
+                    &self.players,
+                    &self.logic_ghosts,
+                    self.persona,
+                    notification.participant,
+                )?;
+                if replies.len() + 1 + events.len()
+                    > nfs_world::session::MAX_RPC_QUEUE.saturating_sub(self.pending_rpcs.len())
+                {
+                    // Keep the due poll and assignment together for the retry.
+                    return Ok(());
+                }
                 tracing::info!(
                     participant = notification.participant,
                     call = ?notification.call,
                     "owned spawn point assigned"
                 );
-                self.pending_rpcs
-                    .push_back(nfs_world::participants::HostRpc::Participant(notification));
+                replies.push(nfs_world::participants::HostRpc::Participant(notification));
+                replies.extend(events);
             }
         }
+        self.level_poll = level_poll;
+        if polled || self.level_poll.endpoint().is_none() {
+            let _ = Self::release_spawns(&mut self.pending_spawns, world_ms);
+        }
+        self.pending_rpcs.extend(replies);
         Ok(())
     }
     pub(super) fn refresh_readiness(

@@ -123,6 +123,12 @@ pub enum Which {
     /// Arrive sequence completion: the remaining exit presentation logic goes
     /// with the sequence (E101 115,292 ms: ghost 423, 3404/18).
     Arrived,
+    /// First readiness report from the participant's newly created world car.
+    WorldReady,
+    /// Spawn assignment released after the world car is ready.
+    WorldSpawn,
+    /// Completion presentation and world membership have been queued.
+    FreeRoam,
 }
 
 #[derive(Clone, Debug)]
@@ -135,6 +141,9 @@ pub struct GarageLogic {
     exit: Batch,
     arrive: Batch,
     arrived: Batch,
+    world_ready: Batch,
+    world_spawn: Batch,
+    free_roam: Batch,
 }
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Output {
@@ -538,6 +547,25 @@ impl GarageLogic {
             Some(b) if exit != Batch::default() => batch(b, &content, &after(&exited, &arrive))?,
             Some(_) => return Err(Failure::ProfileConfig),
         };
+        // These callback phases only notify existing objects. They cannot
+        // create/delete objects or mutate properties while reserving queue space.
+        let event_phase = |name: &str, live: &BTreeSet<u16>| {
+            let Some(value) = v.get(name) else {
+                return Ok(Batch::default());
+            };
+            let b = batch(value, &content, live)?;
+            if !b.entities.is_empty()
+                || !b.scene_updates.is_empty()
+                || !b.entity_updates.is_empty()
+                || !b.delete.is_empty()
+            {
+                return Err(Failure::ProfileConfig);
+            }
+            Ok(b)
+        };
+        let world_ready = event_phase("world_ready", &exited)?;
+        let world_spawn = event_phase("world_spawn", &exited)?;
+        let free_roam = event_phase("free_roam", &after(&after(&exited, &arrive), &arrived))?;
         let reputation = v
             .get("reputation_thresholds")
             .map(|value| {
@@ -613,6 +641,9 @@ impl GarageLogic {
             exit,
             arrive,
             arrived,
+            world_ready,
+            world_spawn,
+            free_roam,
         })
     }
     pub fn content(&self) -> &Content {
@@ -633,6 +664,9 @@ impl GarageLogic {
             Which::Exit => &self.exit,
             Which::Arrive => &self.arrive,
             Which::Arrived => &self.arrived,
+            Which::WorldReady => &self.world_ready,
+            Which::WorldSpawn => &self.world_spawn,
+            Which::FreeRoam => &self.free_roam,
         }
     }
     /// Whether deployment content describes a batch for this point.
@@ -751,7 +785,19 @@ impl GarageLogic {
             }
             output.deleted = ids;
         }
-        for event in &batch.events {
+        output.events = self.events(which, players, ghosts)?;
+        Ok(output)
+    }
+    /// Resolve authored event targets from current owned objects without
+    /// allocating identities or changing the lifecycle.
+    pub fn events(
+        &self,
+        which: Which,
+        players: &Players,
+        ghosts: &BTreeMap<u16, u16>,
+    ) -> Result<Vec<Fire>, replication::Error> {
+        let mut events = Vec::new();
+        for event in &self.batch(which).events {
             let ghost = match event.target {
                 EventTarget::Capture(id) => {
                     *ghosts.get(&id).ok_or(replication::Error::UnknownObject)?
@@ -761,6 +807,9 @@ impl GarageLogic {
                     .scene(key)
                     .ok_or(replication::Error::UnknownObject)?,
             };
+            if players.objects().get(ghost).is_none() {
+                return Err(replication::Error::UnknownObject);
+            }
             let fire = Fire {
                 event: event.event,
                 player: None,
@@ -770,9 +819,9 @@ impl GarageLogic {
                 },
             };
             fire.encode().map_err(|_| replication::Error::Shape)?;
-            output.events.push(fire);
+            events.push(fire);
         }
-        Ok(output)
+        Ok(events)
     }
     fn creation(
         &self,
@@ -934,6 +983,56 @@ pub(crate) mod tests {
                 "events": [{"target": {"capture_id": 277}, "entity": 1, "event": 2}],
                 "player_events": [11, 9, 7], "player_entity": 2}
         })
+    }
+    pub(crate) fn presentation_json() -> Json {
+        let mut v = content_json();
+        let phase = |events: &[u32]| {
+            json!({"scene_updates":[],"entities":[],
+            "events":events.iter().map(|event| json!({"target":{"capture_id":277},
+                "entity":1,"event":event})).collect::<Vec<_>>()})
+        };
+        v["exit"] = phase(&[10]);
+        v["world_ready"] = phase(&[11, 12, 13]);
+        v["world_spawn"] = phase(&[14]);
+        v["arrive"] = phase(&[15]);
+        v["arrived"] = phase(&[16]);
+        v["free_roam"] = phase(&[17]);
+        v
+    }
+
+    #[test]
+    fn presentation_phases_resolve_current_objects_and_reject_mutations_or_dead_targets() {
+        let v = presentation_json();
+        let logic = GarageLogic::from_json(&v).unwrap();
+        let (mut players, participant) = world();
+        let mut ghosts = BTreeMap::new();
+        for phase in [Which::Spawn, Which::Entry, Which::Exit] {
+            logic
+                .produce(phase, &mut players, participant, &mut ghosts)
+                .unwrap();
+        }
+        let before = players.objects().snapshot();
+        let target = ghosts[&277];
+        for (phase, expected) in [
+            (Which::WorldReady, vec![11, 12, 13]),
+            (Which::WorldSpawn, vec![14]),
+            (Which::FreeRoam, vec![17]),
+        ] {
+            let events = logic.events(phase, &players, &ghosts).unwrap();
+            assert_eq!(events.iter().map(|e| e.event).collect::<Vec<_>>(), expected);
+            assert!(events.iter().all(|e| e.target.ghost == target));
+        }
+        assert_eq!(players.objects().snapshot(), before);
+        players.remove_entities(&[target]).unwrap();
+        assert!(logic.events(Which::WorldReady, &players, &ghosts).is_err());
+        for phase in ["world_ready", "world_spawn", "free_roam"] {
+            let mut bad = v.clone();
+            bad[phase]["entity_updates"] = json!([{"capture_id":291,"field":3,"bool":false}]);
+            assert!(GarageLogic::from_json(&bad).is_err());
+            bad = v.clone();
+            bad[phase]["events"][0]["target"] = json!({"capture_id":295});
+            assert!(GarageLogic::from_json(&bad).is_err());
+        }
     }
     pub(crate) fn world() -> (Players, u16) {
         use nfs_world::replication::sublevel::{Content, gameplay};
