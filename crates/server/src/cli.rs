@@ -381,6 +381,12 @@ fn inventory_config(args: &Args) -> Result<Option<net::InventoryProfile>, Failur
 pub fn main() -> std::process::ExitCode {
     if std::env::args_os()
         .nth(1)
+        .is_some_and(|a| a == "prepare-content")
+    {
+        return nfs_server::prepare_content::main(std::env::args_os().skip(2));
+    }
+    if std::env::args_os()
+        .nth(1)
         .is_some_and(|a| a == "create-account")
     {
         return nfs_server::fresh_account::main(std::env::args_os().skip(2));
@@ -390,7 +396,7 @@ pub fn main() -> std::process::ExitCode {
         .is_some_and(|a| a == "--help" || a == "-h")
     {
         println!(
-            "nfs-server: owned local NFS 2015 services\n\nUsage: nfs-server --root <data-directory> --output <new-recording-directory> [configuration options]\n\nCreate account: nfs-server create-account --name <name> --state-directory <new-directory>\n--account-policy <policy.json> --item-content <items.json> --persistent-content <tables.json>\n\nRequired control configuration: --bootstrap-config, --auth-config,\n--group-policy, --matchmaking-admission, --matchmaking-policy, --world-policy,\n--control-catalogs, --stat-definitions, --challenge-content, --item-licenses,\n--owned-local-social and --owned-menu-awards.\n\nGarage configuration: --world-content (version 4), --world-mac-template,\n--item-content, --state-directory, --local-account, --persistent-content,\n--progression-content, --vehicle-content, --garage-layout, --sequence-content,\n--garage-logic.\n\nGame content: --game-dir <installation> builds --item-content,\n--persistent-content and --world-mac-template on first start, supplies\n--stat-definitions, --item-licenses and --control-catalogs unless explicitly\noverridden, and caches the outputs\n(--content-cache, default artifacts/content under --root).\n\nAccount state is read from SQLite. Optional one-time imports: --local-identity,\n--entitlement-state, --kickback-state, --speedwall-state, --user-settings.\n\nOptional: --redirector-port, --idle-seconds, --qos-seconds, --stop-file.\nAll listeners are loopback. No manifest, captured reply store or external\nauthentication is used. See crates/server/README.md for schemas and limitations."
+            "nfs-server: owned local NFS 2015 services\n\nUsage: nfs-server --root <data-directory> --output <new-recording-directory> [configuration options]\n\nPrepare game content: nfs-server prepare-content --game-dir <installation>\n[--root <data-directory>] [--content-cache <directory>]\n\nCreate account: nfs-server create-account --name <name> --state-directory <new-directory>\n--account-policy <policy.json> --item-content <items.json> --persistent-content <tables.json>\n\nRequired control configuration: --bootstrap-config, --auth-config,\n--group-policy, --matchmaking-admission, --matchmaking-policy, --world-policy,\n--control-catalogs, --stat-definitions, --challenge-content, --item-licenses,\n--owned-local-social and --owned-menu-awards.\n\nGarage configuration: --world-content (version 4), --world-mac-template,\n--item-content, --state-directory, --local-account, --persistent-content,\n--progression-content, --vehicle-content, --garage-layout, --sequence-content,\n--garage-logic.\n\nGame content: --game-dir <installation> builds --item-content,\n--persistent-content and --world-mac-template on first start, supplies\n--stat-definitions, --item-licenses and --control-catalogs unless explicitly\noverridden, and caches the outputs\n(--content-cache, default artifacts/content under --root).\n\nAccount state is read from SQLite. Optional one-time imports: --local-identity,\n--entitlement-state, --kickback-state, --speedwall-state, --user-settings.\n\nOptional: --redirector-port, --idle-seconds, --qos-seconds, --stop-file.\nAll listeners are loopback. No manifest, captured reply store or external\nauthentication is used. See crates/server/README.md for schemas and limitations."
         );
         return std::process::ExitCode::SUCCESS;
     }

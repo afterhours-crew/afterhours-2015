@@ -133,6 +133,19 @@ The linked loaders define the exact versioned field schemas.
 
 ## Game content
 
+Prepare the supported files independently, before configuring a server or account:
+
+```sh
+nfs-server prepare-content --game-dir "F:/EA Games/Need for Speed" --root data
+```
+
+This opens no listeners and prints JSON with `prepared`, the `install_content`
+cache identity and a `files` map of absolute paths. `--content-cache` selects a
+different cache; both it and a relative game path follow `--root` (default `.`).
+Only the installation-derived files listed in [nfs-content](../content/README.md)
+are prepared. The world/vehicle files and service policy below are still needed
+to run the server. Account state is created separately.
+
 `--game-dir <installation>` replaces `--item-content`, `--persistent-content` and
 `--world-mac-template` (passing both forms is an error). On the first start the
 server reads the installation with [nfs-content](../content/README.md) before it

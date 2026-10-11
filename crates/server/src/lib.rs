@@ -25,6 +25,7 @@ pub mod matchmaking_status;
 pub mod menu_news;
 pub mod net;
 pub mod persistent;
+pub mod prepare_content;
 pub mod progression;
 pub mod recommendations;
 pub mod record;
