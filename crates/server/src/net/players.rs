@@ -59,6 +59,7 @@ pub(super) struct PlayerListener {
     glass: crate::glass::Glass,
     customization: crate::customization_timer::Timers,
     world_ms: u64,
+    vehicle_reports: nfs_world::vehicle_reports::Reports,
     sequences: Option<nfs_world::sequences::Sequences>,
     /// Arrive sequences after garage exit (optional sequence content).
     arrivals: Option<nfs_world::arrival::Arrivals>,
@@ -445,6 +446,7 @@ impl PlayerListener {
             glass: crate::glass::Glass::default(),
             customization: crate::customization_timer::Timers::default(),
             world_ms: 0,
+            vehicle_reports: nfs_world::vehicle_reports::Reports::default(),
             sequences: None,
             inventory: None,
             logic: None,
@@ -633,7 +635,11 @@ impl Listener for PlayerListener {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        if requests.is_empty() && rpcs.is_empty() && logic_events.is_empty() {
+        if requests.is_empty()
+            && rpcs.is_empty()
+            && logic_events.is_empty()
+            && parsed.movement.is_none()
+        {
             return self.stats.record(&parsed, files);
         }
         let mut players = self.players.clone();
@@ -646,6 +652,32 @@ impl Listener for PlayerListener {
         let mut world_cars = self.world_cars.clone();
         let mut deferred_deletions = self.deferred_deletions.clone();
         let mut deferred_sections = Vec::new();
+        let mut vehicle_reports = self.vehicle_reports.clone();
+        if let Some(movement) = &parsed.movement {
+            let cars = world_cars.keys().copied().collect();
+            match vehicle_reports.receive(
+                &mut players,
+                HOST_SELECTOR as u8,
+                self.persona,
+                movement,
+                &cars,
+                self.world_ms,
+            ) {
+                Ok(reports) if !reports.is_empty() => deferred_sections.push(Section {
+                    float_bits: None,
+                    flag: false,
+                    deleted: Vec::new(),
+                    setup: Some(Setup::RawEscape([0; 3])),
+                    records: reports,
+                }),
+                Ok(_) => {}
+                Err(error) => {
+                    self.refused += 1;
+                    self.last_error = Some(error);
+                    return false;
+                }
+            }
+        }
         let mut scheduled_spawns = Vec::new();
         let mut arrivals = self.arrivals.clone();
         let mut scheduled_teleports = Vec::new();
@@ -1316,6 +1348,7 @@ impl Listener for PlayerListener {
         self.spawn_points = spawn_points;
         self.level_poll = level_poll;
         self.world_cars = world_cars;
+        self.vehicle_reports = vehicle_reports;
         self.deferred_deletions = deferred_deletions;
         self.pending_spawns.extend(scheduled_spawns);
         self.arrivals = arrivals;

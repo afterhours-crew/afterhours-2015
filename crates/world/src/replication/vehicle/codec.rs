@@ -61,6 +61,12 @@ fn custom_write(w: &mut Writer, c: &Customization) -> Result<(), Error> {
 const CONTROL_WIDTHS: [u8; 11] = [4, 4, 10, 4, 2, 4, 1, 6, 4, 4, 1];
 fn physics_read(r: &mut Reader<'_>) -> Result<Physics, Error> {
     let identity_words = array(|| r.take(32))?;
+    movement_read(r, identity_words)
+}
+pub(super) fn movement_read(
+    r: &mut Reader<'_>,
+    identity_words: [u32; 3],
+) -> Result<Physics, Error> {
     let position = Vector::read(r, 7)?;
     let rotation = Quaternion14::read(r)?;
     let velocity = SparseVector::read(r, 5)?;
@@ -98,6 +104,9 @@ fn physics_read(r: &mut Reader<'_>) -> Result<Physics, Error> {
 }
 fn physics_write(w: &mut Writer, p: &Physics) -> Result<(), Error> {
     put_dwords(w, &p.identity_words)?;
+    movement_write(w, p)
+}
+pub(super) fn movement_write(w: &mut Writer, p: &Physics) -> Result<(), Error> {
     p.position.write(w, 7)?;
     p.rotation.write(w)?;
     p.velocity.write(w, 5)?;

@@ -492,3 +492,138 @@ fn world_spawn_requires_configuration_a_garage_car_and_the_owner() {
     );
     assert_eq!(players.objects().len(), saved);
 }
+
+#[test]
+fn client_physics_handoff_is_owned_ordered_bounded_and_preserves_other_components() {
+    use nfs_world::{
+        frame::{Movement, MovementRecord},
+        replication::{Update, vehicle::movement::Sample},
+        vehicle_reports::Reports,
+    };
+    let (mut population, mut players, content, layout, items, p) = fixture();
+    let layout = world_layout(&layout);
+    population
+        .spawn(
+            &mut players,
+            owner(p),
+            inventory(items.clone()),
+            &content,
+            &layout,
+            [0.; 3],
+        )
+        .unwrap();
+    let car = population
+        .spawn_world(&mut players, owner(p), &inventory(items), &content, &layout)
+        .unwrap()
+        .records[0]
+        .id;
+    let cars = [car].into_iter().collect();
+    let original = players.objects().get(car).unwrap().clone();
+    let mut sample = Sample {
+        physics: players.vehicle_physics(3, 0x100000002, car).unwrap(),
+        flag: true,
+    };
+    sample.physics.identity_words = [(5f64.to_bits() >> 32) as u32, 0, 150];
+    sample.physics.controls.value3 = 0;
+    sample.physics.controls.value6 = 0;
+    let (header, body) = sample.encode().unwrap();
+    let movement = Movement {
+        header: Some(header.span()),
+        records: vec![MovementRecord {
+            id: car,
+            component: 0,
+            data: body.span(),
+        }],
+    };
+    let mut reports = Reports::default();
+    for (c, p) in [(4, 0x100000002), (3, 1)] {
+        assert_eq!(
+            reports.receive(&mut players, c, p, &movement, &cars, 5000),
+            Err(Error::UnknownObject)
+        );
+        assert_eq!(players.objects().get(car), Some(&original));
+    }
+    let out = reports
+        .receive(&mut players, 3, 0x100000002, &movement, &cars, 5000)
+        .unwrap();
+    assert_eq!(out.len(), 1);
+    let handoff = players.vehicle_physics(3, 0x100000002, car).unwrap();
+    assert_eq!(handoff.identity_words, sample.physics.identity_words);
+    assert_eq!(handoff.controls.value3, 3);
+    assert!(
+        reports
+            .receive(&mut players, 3, 0x100000002, &movement, &cars, 5100)
+            .unwrap()
+            .is_empty()
+    );
+    sample.physics.identity_words[2] = 151;
+    sample.physics.controls.value3 = 3;
+    sample.physics.controls.value6 = 61;
+    sample.physics.position = vehicle::Vector::from_position([30., 40., 50.], [0.; 3], 7).unwrap();
+    let (header, body) = sample.encode().unwrap();
+    let movement = Movement {
+        header: Some(header.span()),
+        records: vec![MovementRecord {
+            id: car,
+            component: 0,
+            data: body.span(),
+        }],
+    };
+    assert_eq!(
+        reports
+            .receive(&mut players, 3, 0x100000002, &movement, &cars, 5100)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        players.vehicle_physics(3, 0x100000002, car).unwrap(),
+        sample.physics
+    );
+    let updated = players.objects().get(car).unwrap();
+    assert_eq!(updated.initial, original.initial);
+    let (Update::Vehicle { fields: before, .. }, Update::Vehicle { fields: after, .. }) =
+        (&original.current, &updated.current)
+    else {
+        panic!()
+    };
+    for (a, b) in before.iter().zip(after) {
+        if !matches!(a, Some(vehicle::Update::Chassis(_))) {
+            assert_eq!(a, b);
+        }
+    }
+    let saved = players.objects().snapshot();
+    let mut bad = movement.clone();
+    bad.records.push(MovementRecord {
+        id: car,
+        component: 0,
+        data: body.span(),
+    });
+    assert!(
+        reports
+            .receive(&mut players, 3, 0x100000002, &bad, &cars, 5200)
+            .is_err()
+    );
+    assert_eq!(players.objects().snapshot(), saved);
+    assert!(
+        reports
+            .receive(&mut players, 3, 0x100000002, &movement, &cars, 5099)
+            .is_err()
+    );
+    // A disconnected/replaced car no longer has authority, and retained report
+    // bookkeeping is retired without accepting a late old-object update.
+    players.remove_vehicle(3, 0x100000002, p, 1).unwrap();
+    assert!(
+        reports
+            .receive(
+                &mut players,
+                3,
+                0x100000002,
+                &movement,
+                &Default::default(),
+                5200
+            )
+            .unwrap()
+            .is_empty()
+    );
+}
