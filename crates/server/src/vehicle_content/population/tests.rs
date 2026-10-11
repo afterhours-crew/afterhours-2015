@@ -787,13 +787,21 @@ fn exit_handoff_keeps_car_relations_through_teleport_rollout_and_completion() {
     assert_ne!(car, garage_car);
     assert!(world.deleted.contains(&garage_car));
     assert!(players.objects().get(garage_car).is_none());
-    let binding = players
+    let actor = players.owned_actor(3, 0x100000002, p).unwrap();
+    let departing = players.actor_departing(3, 0x100000002, p).unwrap().unwrap();
+    assert_eq!(departing.id, actor);
+    assert!(matches!(&departing.update, Update::Actor(a)
+        if a.flag_b == Some(true) && a.references_a.as_deref() == Some(&[])
+        && a.references_b.as_deref() == Some(&[])));
+    let mut binding = players
         .bind_player_vehicle(3, 0x100000002, p, Some(car))
         .unwrap();
     assert_eq!(
         binding.iter().map(|r| r.id).collect::<Vec<_>>(),
         [manager, p]
     );
+    binding.extend(players.actor_vehicle_ready(3, 0x100000002, p).unwrap());
+    assert!(matches!(&binding.last().unwrap().update, Update::Actor(a) if a.flag_b == Some(false)));
     let sections = nfs_world::replication::section::split_timed_records(
         binding,
         nfs_world::application::OUTBOUND_FRAME_BITS,
@@ -921,7 +929,7 @@ fn exit_handoff_keeps_car_relations_through_teleport_rollout_and_completion() {
     assert_eq!(deleted, [sequence, goal]);
     assert_eq!(cleared[0].id, actor);
     assert!(
-        matches!(&cleared[0].update, Update::Actor(a) if a.references_a.as_deref() == Some(&[]))
+        matches!(&cleared[0].update, Update::Actor(a) if a.flag_a == Some(false) && a.references_a.as_deref() == Some(&[]) && a.references_b.as_deref() == Some(&[]))
     );
     relations(&players);
     assert!(players.objects().get(car).is_some());

@@ -193,7 +193,7 @@ fn rollout_goal_is_owned_atomic_ordered_and_cleaned_once() {
     let (cleared, deleted) = arrivals.finish_rollout(&mut players, owner).unwrap();
     assert_eq!(deleted, vec![sequence, goal]);
     assert!(
-        matches!(&cleared[0].update,crate::replication::Update::Actor(a) if a.references_a.as_deref()==Some(&[]))
+        matches!(&cleared[0].update,crate::replication::Update::Actor(a) if a.flag_a == Some(false) && a.references_a.as_deref()==Some(&[]) && a.references_b.as_deref()==Some(&[]))
     );
     assert!(players.objects().get(goal).is_none() && players.objects().get(sequence).is_none());
     assert!(players.objects().get(other[0].id).is_some());

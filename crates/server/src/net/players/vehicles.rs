@@ -200,7 +200,7 @@ impl PlayerListener {
         if content.layout.world_spawn().is_none() {
             return Ok(None);
         }
-        let spawned = population.spawn_world(
+        let mut spawned = population.spawn_world(
             players,
             Owner {
                 connection: HOST_SELECTOR as u8,
@@ -216,6 +216,11 @@ impl PlayerListener {
             // here would need content delivery before the creation.
             return Err(replication::Error::Unsupported);
         }
+        spawned.records.extend(players.actor_departing(
+            HOST_SELECTOR as u8,
+            persona,
+            participant,
+        )?);
         // The garage car stays on the wire until the client reports the world
         // car; the official host deletes it in a later frame (E742, E759).
         Ok(Some((

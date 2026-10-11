@@ -44,7 +44,8 @@ impl Players {
         self.objects = next;
         Ok((goal, assigned))
     }
-    /// Clear the owned Actor association before deleting the path object.
+    /// Release the arrive flag and both owned Actor goal lists before deleting
+    /// the completed rollout path object.
     pub fn finish_spline(
         &mut self,
         connection: u8,
@@ -75,7 +76,9 @@ impl Players {
             .change(
                 actor,
                 Update::Actor(ActorUpdate {
+                    flag_a: Some(false),
                     references_a: Some(Vec::new()),
+                    references_b: Some(Vec::new()),
                     ..ActorUpdate::default()
                 }),
             )?
@@ -83,6 +86,61 @@ impl Players {
         next.remove(goal)?;
         self.objects = next;
         Ok(cleared)
+    }
+
+    /// Begin the car replacement phase of garage exit. Both goal lists must be
+    /// idle: an active goal must finish through its owning lifecycle first.
+    pub fn actor_departing(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        participant: u16,
+    ) -> Result<Option<Record>, Error> {
+        let actor = self
+            .owned_actor(connection, persona, participant)
+            .ok_or(Error::UnknownObject)?;
+        let Some(state::Object {
+            current: Update::Actor(current),
+            ..
+        }) = self.objects.get(actor)
+        else {
+            return Err(Error::TypeMismatch);
+        };
+        if [current.references_a.as_ref(), current.references_b.as_ref()]
+            .into_iter()
+            .flatten()
+            .any(|goals| !goals.is_empty())
+        {
+            return Err(Error::Shape);
+        }
+        self.objects.change(
+            actor,
+            Update::Actor(ActorUpdate {
+                flag_b: Some(true),
+                references_a: Some(Vec::new()),
+                references_b: Some(Vec::new()),
+                ..ActorUpdate::default()
+            }),
+        )
+    }
+
+    /// End the replacement phase once the world car reports readiness.
+    pub fn actor_vehicle_ready(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        participant: u16,
+    ) -> Result<Option<Record>, Error> {
+        let actor = self
+            .owned_actor(connection, persona, participant)
+            .ok_or(Error::UnknownObject)?;
+        self.objects.change(
+            actor,
+            Update::Actor(ActorUpdate {
+                flag_b: Some(false),
+                ..ActorUpdate::default()
+            }),
+        )
     }
 
     pub fn create_actor(
@@ -163,6 +221,64 @@ impl Players {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replacement_flags_are_owned_repeat_safe_and_do_not_abandon_goals() {
+        let mut world = Players::default();
+        let a = join(&mut world, 3, 101, 0);
+        let b = join(&mut world, 7, 202, 0);
+        let actor = world.create_actor(3, 101, a).unwrap().unwrap().id;
+        world.create_actor(7, 202, b).unwrap();
+        let before = world.objects.snapshot();
+        for (connection, persona, participant) in [(7, 202, a), (3, 202, a), (3, 101, b)] {
+            assert_eq!(
+                world.actor_departing(connection, persona, participant),
+                Err(Error::UnknownObject)
+            );
+            assert_eq!(
+                world.actor_vehicle_ready(connection, persona, participant),
+                Err(Error::UnknownObject)
+            );
+        }
+        assert_eq!(world.objects.snapshot(), before);
+        let departing = world.actor_departing(3, 101, a).unwrap().unwrap();
+        assert_eq!(departing.id, actor);
+        assert_eq!(world.actor_departing(3, 101, a), Ok(None));
+        assert_eq!(
+            Record::decode(departing.encode().unwrap().span(), Some(Kind::Actor))
+                .unwrap()
+                .record,
+            departing
+        );
+        let ready = world.actor_vehicle_ready(3, 101, a).unwrap().unwrap();
+        assert!(matches!(
+            ready.update,
+            Update::Actor(ActorUpdate {
+                flag_b: Some(false),
+                ..
+            })
+        ));
+        assert_eq!(world.actor_vehicle_ready(3, 101, a), Ok(None));
+        // Either list can contain a goal owned by another lifecycle. Do not clear it.
+        for second in [false, true] {
+            let mut guarded = world.clone();
+            guarded
+                .objects
+                .change(
+                    actor,
+                    Update::Actor(ActorUpdate {
+                        references_a: (!second).then_some(vec![71]),
+                        references_b: second.then_some(vec![72]),
+                        ..Default::default()
+                    }),
+                )
+                .unwrap();
+            let before = guarded.objects.snapshot();
+            assert_eq!(guarded.actor_departing(3, 101, a), Err(Error::Shape));
+            assert_eq!(guarded.objects.snapshot(), before);
+        }
+        assert_eq!(world.objects.snapshot().last(), before.last());
+    }
 
     #[test]
     fn arrival_flag_is_owned_repeat_safe_and_keeps_other_actor_fields() {
