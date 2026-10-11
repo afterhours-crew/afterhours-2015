@@ -235,6 +235,11 @@ pub const REPORT_QUIET_MS: u64 = 5_000;
 pub const REPORT_TIMEOUT_MS: u64 = 30_000;
 pub const STATE_WAIT_MS: u64 = 1_000;
 pub const REPLICATION_INTERVAL_MS: u64 = 50;
+pub const REPLICATION_CLOCK_INTERVAL_MS: u64 = 100;
+
+fn replication_time(application: &Application, now_ms: u64) -> f32 {
+    now_ms.saturating_sub(application.origin_ms().unwrap_or(now_ms)) as f32 / 1000.0
+}
 /// Official hosts repeat the movement grants in every regular frame, about
 /// every 100 ms (E101: 2,030 of 2,061 gaps between 90 and 110 ms).
 pub const MOVEMENT_INTERVAL_MS: u64 = 100;
@@ -295,6 +300,7 @@ pub struct Host {
     /// Objects the client is told to report movement for (selector 0).
     movement: std::collections::BTreeSet<u16>,
     movement_sent_ms: Option<u64>,
+    replication_clock_ms: Option<u64>,
     /// Objects whose creation has been sent and not deleted since: grants
     /// never name an object the client cannot know yet.
     sent_objects: std::collections::BTreeSet<u16>,
@@ -329,6 +335,7 @@ impl Host {
             files: [None, None],
             movement: std::collections::BTreeSet::new(),
             movement_sent_ms: None,
+            replication_clock_ms: None,
             sent_objects: std::collections::BTreeSet::new(),
             max_replication_frame_bits: policy
                 .max_frame_bits
@@ -355,7 +362,7 @@ impl Host {
 
     pub fn queue_replication_after(
         &mut self,
-        section: Section,
+        mut section: Section,
         before: Vec<crate::participants::HostRpc>,
     ) -> Result<(), Error> {
         if self.stage() == StageName::Closed {
@@ -366,6 +373,9 @@ impl Host {
         {
             return Err(Error::Application(application::Error::Window));
         }
+        // Reserve the host-owned timestamp before checking frame/queue bounds.
+        section.float_bits = Some(0);
+        section.flag = true;
         let bits = replication_frame(&section, &before, 0)?.len();
         if bits > self.max_replication_frame_bits {
             return Err(Error::Application(application::Error::Bound));
@@ -758,6 +768,7 @@ impl Host {
             }
         }
         self.replication(now_ms, &mut out);
+        self.replication_clock(now_ms, &mut out);
         let Stage::Running {
             link,
             application,
@@ -904,7 +915,9 @@ impl Host {
                 return;
             }
             world.blocked_level = None;
-            let bits = match replication_frame(section, before, world.next_ex_sequence) {
+            let mut timed = section.clone();
+            timed.float_bits = Some(replication_time(application, now_ms).to_bits());
+            let bits = match replication_frame(&timed, before, world.next_ex_sequence) {
                 Ok(bits) => bits,
                 Err(_) => {
                     out.events
@@ -951,6 +964,7 @@ impl Host {
             self.replication_bits -= size;
             self.replication_queue.pop_front();
             self.replication_sent += 1;
+            self.replication_clock_ms = Some(now_ms);
             world.next_ex_sequence = (world.next_ex_sequence + notifications as u8) & 0x7f;
             world.acked_inputs = application.stats().inputs;
             world.last_replication_ms = Some(now_ms);
@@ -1009,6 +1023,52 @@ impl Host {
                     });
                 }
                 Err(e) => out.events.push(e),
+            }
+        }
+    }
+
+    fn replication_clock(&mut self, now_ms: u64, out: &mut Output) {
+        let Stage::Running {
+            link,
+            application,
+            world,
+        } = &mut self.stage
+        else {
+            return;
+        };
+        // Advancing the receive clock also releases temporal updates when no
+        // object changed. Start only after the first replication publication.
+        if self
+            .replication_clock_ms
+            .is_some_and(|last| now_ms.saturating_sub(last) >= REPLICATION_CLOCK_INTERVAL_MS)
+        {
+            let clock = Section {
+                float_bits: Some(replication_time(application, now_ms).to_bits()),
+                flag: true,
+                deleted: Vec::new(),
+                setup: None,
+                records: Vec::new(),
+            };
+            let sent = clock
+                .frame()
+                .map_err(Error::Replication)
+                .and_then(|bits| {
+                    application
+                        .send_frame(bits.span())
+                        .map_err(Error::Application)
+                })
+                .and_then(|body| link.send_application(&body, now_ms).map_err(Error::Link));
+            match sent {
+                Ok(wire) => {
+                    out.send.push(wire);
+                    self.replication_clock_ms = Some(now_ms);
+                    world.acked_inputs = application.stats().inputs;
+                }
+                Err(Error::Application(application::Error::Window)) => {}
+                Err(error) => out.events.push(match error {
+                    Error::Link(e) => Event::Link(e),
+                    _ => Event::ApplicationError(application::Error::Shape),
+                }),
             }
         }
     }

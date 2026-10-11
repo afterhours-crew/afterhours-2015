@@ -505,15 +505,22 @@ fn typed_scene_queue_tracks_lifecycle_and_preserves_failed_queue_state() {
 fn typed_sections_wait_for_state_time_then_fragment_without_template_inputs() {
     let (mut host, client, _, now) = established_with_content();
     let section = owned_section(16);
-    let expected = section.frame().unwrap();
-    assert!(expected.len() > DEFAULT_FRAGMENT_BITS);
-    host.queue_replication(section).unwrap();
+    assert!(section.frame().unwrap().len() > DEFAULT_FRAGMENT_BITS);
+    host.queue_replication(section.clone()).unwrap();
     assert_eq!(host.replication_progress(), (0, 1));
     assert!(host.poll(now + REPORT_TIMEOUT_MS - 1).events.is_empty());
     let t = now + REPORT_TIMEOUT_MS;
     assert!(matches!(host.poll(t).events[..], [Event::StateSent { .. }]));
     assert_eq!(host.poll(t + STATE_WAIT_MS).events, vec![Event::TimeSent]);
     assert!(host.poll(t + 2 * STATE_WAIT_MS - 1).events.is_empty());
+    let mut expected_section = section;
+    expected_section.float_bits = Some(
+        ((t + 2 * STATE_WAIT_MS - host.application().unwrap().origin_ms().unwrap()) as f32
+            / 1000.0)
+            .to_bits(),
+    );
+    expected_section.flag = true;
+    let expected = expected_section.frame().unwrap();
     let out = host.poll(t + 2 * STATE_WAIT_MS);
     assert_eq!(
         out.events,
@@ -649,9 +656,8 @@ fn scene_dependencies_wait_for_exact_observer_reports_without_timeout_bypass() {
         )
         .unwrap(),
     ];
-    let expected = section.frame().unwrap();
     host.queue_replication(section.clone()).unwrap();
-    other.queue_replication(section).unwrap();
+    other.queue_replication(section.clone()).unwrap();
     let mut player = owned_section(1);
     player.records[0].id = 3;
     host.queue_replication(player).unwrap();
@@ -681,6 +687,11 @@ fn scene_dependencies_wait_for_exact_observer_reports_without_timeout_bypass() {
         vec![Event::ReplicationWaiting { level: 176 }]
     );
     host.receive(&client.app(&report_frame(7, 176)), later + 8, &mut listener);
+    section.float_bits = Some(
+        ((later + 9 - host.application().unwrap().origin_ms().unwrap()) as f32 / 1000.0).to_bits(),
+    );
+    section.flag = true;
+    let expected = section.frame().unwrap();
     let out = host.poll(later + 9);
     assert_eq!(
         out.events,
@@ -932,7 +943,15 @@ fn entry_messages_precede_deletion_in_one_frame_with_atomic_backpressure() {
         panic!()
     };
     let sequence = world.next_ex_sequence;
-    let expected = replication_frame(&section, &before, sequence).unwrap();
+    let mut expected_section = section.clone();
+    expected_section.float_bits = Some(
+        ((t + 2 * REPLICATION_INTERVAL_MS - host.application().unwrap().origin_ms().unwrap())
+            as f32
+            / 1000.0)
+            .to_bits(),
+    );
+    expected_section.flag = true;
+    let expected = replication_frame(&expected_section, &before, sequence).unwrap();
     let parsed = frame::parse(expected.span(), frame::Direction::FromHost).unwrap();
     assert_eq!(parsed.mask, (1 << frame::MESSAGES) | (1 << frame::GHOST));
     let messages = &parsed.messages.as_ref().unwrap().groups[0];
@@ -1936,4 +1955,86 @@ fn movement_grants_repeat_at_the_official_cadence_for_sent_objects() {
         host.set_movement((0..=crate::frame::MAX_MOVEMENT_RECORDS as u16).collect()),
         Err(Error::Application(application::Error::Bound))
     );
+}
+
+#[test]
+fn replication_clock_advances_without_object_changes_and_is_session_owned() {
+    let (mut host, client, _, now, initial) = entry_setup();
+    let (mut other, mut other_client, mut other_listener, _, _) = entry_setup();
+    let origin = host.application().unwrap().origin_ms().unwrap();
+    let clock = |out: &Output| {
+        host_frames(&client, &out.send)
+            .into_iter()
+            .filter_map(|(bytes, bits)| {
+                let parsed = frame::parse(
+                    BitSpan::new(&bytes, 0, bits).unwrap(),
+                    frame::Direction::FromHost,
+                )
+                .unwrap();
+                parsed.ghost.map(|g| {
+                    (
+                        f32::from_bits(g.prefix.float_bits().unwrap()),
+                        g.prefix.remaining_records(),
+                        g.prefix.flag(),
+                    )
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        clock(&initial),
+        vec![((now - origin) as f32 / 1000.0, 1, true)]
+    );
+    assert!(clock(&host.poll(now + 99)).is_empty());
+    let heartbeat = host.poll(now + 100);
+    assert_eq!(
+        clock(&heartbeat),
+        vec![((now + 100 - origin) as f32 / 1000.0, 0, true)]
+    );
+    assert_eq!(host.replication_progress(), (1, 0));
+    assert_eq!(other.replication_clock_ms, Some(now));
+    assert!(clock(&host.poll(now + 101)).is_empty());
+    assert_eq!(
+        clock(&host.poll(now + 200)),
+        vec![((now + 200 - origin) as f32 / 1000.0, 0, true)]
+    );
+    // Caller timestamps cannot leak another session's clock or bypass bounds.
+    let mut delta = owned_section(1);
+    delta.records[0].initial = None;
+    delta.float_bits = Some(1_000_000.0f32.to_bits());
+    host.queue_replication(delta).unwrap();
+    assert_eq!(
+        clock(&host.poll(now + 250)),
+        vec![((now + 250 - origin) as f32 / 1000.0, 1, true)]
+    );
+    other.receive(&other_client.close(), now + 300, &mut other_listener);
+    assert!(other.poll(now + 300).send.is_empty());
+}
+
+#[test]
+fn clock_header_reservation_and_backpressure_leave_state_unchanged() {
+    let (mut host, _, _, _) = established_with_content();
+    let section = owned_section(1);
+    host.max_replication_frame_bits = section.frame().unwrap().len();
+    assert_eq!(
+        host.queue_replication(section),
+        Err(Error::Application(application::Error::Bound))
+    );
+    assert_eq!(host.replication_progress(), (0, 0));
+    assert!(host.replication_bindings.is_empty());
+    let (mut host, _, _, now, _) = entry_setup();
+    let Stage::Running { application, .. } = &mut host.stage else {
+        panic!()
+    };
+    let empty = frame::Builder::new().build().unwrap();
+    for _ in 0..64 {
+        if application.send_frame(empty.span()) == Err(application::Error::Window) {
+            break;
+        }
+    }
+    let mut out = Output::default();
+    host.replication_clock(now + 100, &mut out);
+    assert!(out.send.is_empty());
+    assert!(out.events.is_empty());
+    assert_eq!(host.replication_clock_ms, Some(now));
 }
