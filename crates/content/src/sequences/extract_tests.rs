@@ -45,6 +45,57 @@ fn generated_sequences_follow_registry_manager_and_explicit_channel_links() {
     assert_eq!(spline.asset.local_index, 1); // Selected via the command/channel link.
     assert!(spline.flag);
     assert!(value["arrive"]["spline"].get("base_value").is_none());
+    let returning = content.returning.unwrap();
+    assert_eq!(returning.duration_ms, 7500);
+    assert_eq!(
+        returning.definition.layout,
+        nfs_world::sequences::Layout::GarageEntry
+    );
+    assert_ne!(returning.definition.asset, content.arrive.unwrap().0.asset);
+    assert_ne!(returning.definition.channel.index, 8);
+}
+
+#[test]
+fn return_timer_must_be_server_world_time_and_have_both_event_edges() {
+    for case in 0..5 {
+        let extra = synthetic::sequences::assets_with(|name, fields, objects| {
+            if name != synthetic::sequences::ENTRY {
+                return;
+            }
+            let timer = &mut objects
+                .iter_mut()
+                .find(|(k, _)| *k == "DelayEntityData")
+                .unwrap()
+                .1;
+            match case {
+                0 => {
+                    timer.iter_mut().find(|(k, _)| *k == "Delay").unwrap().1 =
+                        Field::Float(f32::NAN)
+                }
+                1 => timer.iter_mut().find(|(k, _)| *k == "Delay").unwrap().1 = Field::Float(31.),
+                2 => {
+                    timer.iter_mut().find(|(k, _)| *k == "Realm").unwrap().1 =
+                        Field::Enum("Realm", "Realm_Client", 2)
+                }
+                3 => {
+                    timer.iter_mut().find(|(k, _)| *k == "AutoStart").unwrap().1 = Field::Bool(true)
+                }
+                _ => {
+                    let Field::Structs(_, rows) = &mut fields
+                        .iter_mut()
+                        .find(|(k, _)| *k == "EventConnections")
+                        .unwrap()
+                        .1
+                    else {
+                        panic!()
+                    };
+                    rows.pop();
+                }
+            }
+        });
+        let (_dir, mut index) = index(extra);
+        assert!(build(&mut index).is_err(), "case {case}");
+    }
 }
 #[test]
 fn unsupported_composition_missing_links_and_wrong_defaults_fail_closed() {
@@ -193,4 +244,21 @@ fn build_rules_reject_unknown_roles_paths_and_runtime_fields() {
     let mut invalid = value;
     invalid["embedded_bus"] = serde_json::json!(2);
     assert!(Rules::from_json(&invalid).is_err());
+}
+
+#[test]
+fn nested_presentation_channel_requires_the_matching_scene_endpoint() {
+    let (_dir, mut valid) = index(vec![]);
+    let content =
+        SequenceContent::from_json(&serde_json::from_slice(&build(&mut valid).unwrap()).unwrap())
+            .unwrap();
+    assert!(content.returning.unwrap().definition.presentation.is_some());
+    let extra = synthetic::sequences::assets_with(|name, fields, _| {
+        if name == "synthetic/sequences/client_presentation" {
+            fields.iter_mut().find(|(k, _)| *k == "Objects").unwrap().1 =
+                Field::RawPointers(vec![]);
+        }
+    });
+    let (_dir, mut unknown) = index(extra);
+    assert!(build(&mut unknown).is_err());
 }

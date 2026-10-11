@@ -35,6 +35,7 @@ pub struct Population {
     spawned: BTreeMap<u16, Spawned>,
     pending: Pending,
     next_group: u64,
+    groups: BTreeMap<u16, u64>,
 }
 /// Sub id of the world car creation (garage display cars use 1; E748).
 pub const WORLD_SUB_ID: u32 = 2;
@@ -69,6 +70,7 @@ impl Population {
             spawned: BTreeMap::new(),
             pending: Pending::default(),
             next_group: 1,
+            groups: BTreeMap::new(),
         })
     }
     pub fn spawn(
@@ -79,6 +81,36 @@ impl Population {
         content: &Content,
         layout: &Layout,
         origin: [f32; 3],
+    ) -> Result<Output, Error> {
+        self.spawn_mode(players, owner, inventory, content, layout, origin, false)
+    }
+    /// Prepare the selected car in its garage slot while its world lifetime runs.
+    pub fn prepare_return(
+        &mut self,
+        players: &mut Players,
+        owner: Owner,
+        inventory: Inventory,
+        content: &Content,
+        layout: &Layout,
+    ) -> Result<Output, Error> {
+        let origin = self
+            .spawned
+            .get(&owner.participant)
+            .ok_or(Error::UnknownObject)?
+            .origin
+            .map(f32::from_bits);
+        self.spawn_mode(players, owner, inventory, content, layout, origin, true)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_mode(
+        &mut self,
+        players: &mut Players,
+        owner: Owner,
+        inventory: Inventory,
+        content: &Content,
+        layout: &Layout,
+        origin: [f32; 3],
+        returning: bool,
     ) -> Result<Output, Error> {
         let identity = players
             .owned_identity(owner.connection, owner.persona, owner.participant)
@@ -93,22 +125,41 @@ impl Population {
             return Err(Error::Shape);
         }
         if let Some(old) = self.spawned.get(&owner.participant) {
-            return if old.slots == inventory.slots
+            if old.slots == inventory.slots
                 && old.items == inventory.items
                 && old.origin == origin.map(f32::to_bits)
             {
-                Ok(Output::default())
+                if !returning {
+                    return Ok(Output::default());
+                }
             } else {
-                Err(Error::Unsupported)
-            };
+                return Err(Error::Unsupported);
+            }
+        } else if returning {
+            return Err(Error::UnknownObject);
         }
-        if self.spawned.len() >= 128 {
+        if !returning && self.spawned.len() >= 128 {
             return Err(Error::Bound);
         }
         let mut next = self.clone();
         let mut world = players.clone();
         let mut output = Output::default();
-        let occupied = layout.occupied(inventory.slots, &inventory.items)?;
+        let mut occupied = layout.occupied(inventory.slots, &inventory.items)?;
+        if returning {
+            occupied.truncate(1);
+            let entry = occupied.first().ok_or(Error::UnknownObject)?;
+            if players
+                .staged_vehicle(
+                    owner.connection,
+                    owner.persona,
+                    owner.participant,
+                    entry.item,
+                )
+                .is_some()
+            {
+                return Ok(Output::default());
+            }
+        }
         let blueprint = world
             .objects()
             .scene(layout.item_scene_key)
@@ -220,7 +271,13 @@ impl Population {
                 },
                 body,
             };
-            let record = world.create_vehicle(
+            let create = if returning {
+                Players::stage_vehicle
+            } else {
+                Players::create_vehicle
+            };
+            let record = create(
+                &mut world,
                 owner.connection,
                 owner.persona,
                 owner.participant,
@@ -229,6 +286,7 @@ impl Population {
                 &entity_content,
             )?;
             let vehicle = record.id;
+            next.groups.insert(vehicle, group);
             output.records.push(record);
             let (scene, _) = world
                 .objects()
@@ -251,7 +309,14 @@ impl Population {
                 participant: owner.participant,
                 vehicle,
             };
-            if let Some(binding) = next.pending.offer(binding)? {
+            let offered = if returning {
+                // The slot still names the pre-exit garage car; replace that
+                // exact slot, not a foreign participant's pending load.
+                next.pending.replace_slot(binding)?
+            } else {
+                next.pending.offer(binding)?
+            };
+            if let Some(binding) = offered {
                 output.bindings.push(binding)
             }
         }
@@ -266,6 +331,28 @@ impl Population {
         *self = next;
         *players = world;
         Ok(output)
+    }
+    pub fn finish_return(
+        &mut self,
+        players: &mut Players,
+        owner: Owner,
+        inventory: &Inventory,
+        layout: &Layout,
+    ) -> Result<u16, Error> {
+        let entry = *layout
+            .occupied(inventory.slots, &inventory.items)?
+            .first()
+            .ok_or(Error::UnknownObject)?;
+        let removed = players.promote_staged_vehicle(
+            owner.connection,
+            owner.persona,
+            owner.participant,
+            entry.item,
+        )?;
+        if let Some(group) = self.groups.remove(&removed) {
+            self.authority.remove_group(group);
+        }
+        Ok(removed)
     }
     /// Garage exit: remove the participant's primary garage car and re-create
     /// it as a world car at the layout's world spawn (official E748 shape:
@@ -294,6 +381,9 @@ impl Population {
             owner.participant,
             entry.item,
         )?;
+        if let Some(group) = next.groups.remove(&removed) {
+            next.authority.remove_group(group);
+        }
         let item = inventory
             .items
             .items
@@ -385,6 +475,7 @@ impl Population {
             creation,
             &entity_content,
         )?;
+        next.groups.insert(record.id, group);
         *self = next;
         *players = world;
         Ok(WorldSpawn {
@@ -431,6 +522,8 @@ impl Population {
         for (&participant, spawned) in &self.spawned {
             if spawned.slots.values().iter().flatten().any(|item| {
                 players.owned_vehicle(connection, persona, participant, *item) == Some(vehicle)
+                    || players.staged_vehicle(connection, persona, participant, *item)
+                        == Some(vehicle)
             }) {
                 return Some(crate::glass::Owner {
                     vehicle,

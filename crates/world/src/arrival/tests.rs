@@ -59,6 +59,7 @@ fn setup() -> (Players, Arrivals) {
     )
     .unwrap();
     let definition = Definition {
+        presentation: None,
         layout: crate::sequences::Layout::GarageExit,
         asset,
         manager: Component {
@@ -100,6 +101,72 @@ fn reached(event: u32, ghost: u16, entity: u32) -> Message {
         event,
         target: EntityRef { ghost, entity },
         player: 0,
+    }
+}
+
+#[test]
+fn timed_entry_repeats_with_new_ids_and_preserves_due_stop_under_backpressure() {
+    let (mut players, original) = setup();
+    let mut definition = original.definition;
+    definition.layout = Layout::GarageEntry;
+    definition.presentation = Some(definition.channel);
+    let content = Content::new(
+        vec![Catalog::new(16, &[(3404, 1), (3424, 11)]).unwrap()],
+        vec![(definition.asset, definition.layout.profile())],
+    )
+    .unwrap();
+    let mut returns = Arrivals::returning(definition, content, 7500).unwrap();
+    let owner = join(&mut players);
+    let mut previous = None;
+    for i in 0..3 {
+        returns.poll(i * 8000).unwrap();
+        let record = returns.start(&mut players, owner).unwrap().unwrap();
+        if let Some(id) = previous {
+            assert_ne!(record.id, id);
+        }
+        assert!(returns.reset(&players, owner).is_err());
+        assert!(
+            returns
+                .arrived(&reached(ARRIVED, record.id, 1))
+                .unwrap()
+                .is_none()
+        );
+        assert!(returns.poll(i * 8000 + 7499).unwrap().is_empty());
+        assert!(
+            returns
+                .poll_capacity(i * 8000 + 7500, 0)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            returns.poll_capacity(i * 8000 + 7500, 1).unwrap()[0].sequence,
+            record.id
+        );
+        let call = Completed {
+            sequence: record.id,
+            participant: owner.participant,
+        };
+        assert!(
+            returns
+                .complete(
+                    &players,
+                    Owner {
+                        persona: owner.persona + 1,
+                        ..owner
+                    },
+                    call
+                )
+                .is_err()
+        );
+        assert_eq!(
+            returns.complete(&players, owner, call).unwrap(),
+            Some(record.id)
+        );
+        assert!(returns.reset(&players, owner).is_err());
+        returns.finish_rollout(&mut players, owner).unwrap();
+        returns.reset(&players, owner).unwrap();
+        assert!(returns.complete(&players, owner, call).is_err());
+        previous = Some(record.id);
     }
 }
 
@@ -371,6 +438,7 @@ fn foreign_participants_and_wrong_profiles_are_refused() {
     )
     .unwrap();
     let definition = Definition {
+        presentation: None,
         layout: crate::sequences::Layout::GarageExit,
         asset,
         manager: Component {

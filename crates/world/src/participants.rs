@@ -205,6 +205,8 @@ pub enum Stage {
     Arriving,
     /// Startup state 2 after the exit chain: driving in the open world.
     FreeRoam,
+    /// The garage-entry sequence is running while the garage is prepared.
+    ReturningToGarage,
 }
 /// Garage-exit endpoints of the startup and garage sublevels, by field index:
 /// startup 97 and garage 9 are the client's exit requests, startup 81 its
@@ -225,6 +227,51 @@ pub struct ExitBindings {
     pub garage_calls: [Endpoint; 5],
 }
 type Scene<'a> = (u16, &'a [sublevel::Initial]);
+/// Startup state endpoints for an owned return from free roam.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReturnBindings {
+    pub request: Endpoint,
+    pub free_roam: Endpoint,
+    pub preparing: [Endpoint; 4],
+    pub sequence: Endpoint,
+    pub finishing: [Endpoint; 3],
+}
+impl ReturnBindings {
+    pub fn from_records(records: &[Record], startup_key: u32) -> Result<Option<Self>, Error> {
+        let mut scenes = records.iter().filter_map(|r| match &r.initial {
+            Some(Initial::SubLevel { prefix, fields }) if prefix.content_key == startup_key => {
+                Some((r.id, fields))
+            }
+            _ => None,
+        });
+        let Some((scene, fields)) = scenes.next() else {
+            return Ok(None);
+        };
+        if scenes.next().is_some() {
+            return Err(Error::DuplicateObject);
+        }
+        let endpoint = |index| {
+            let rpc = match fields.get(index) {
+                Some(
+                    sublevel::Initial::Rpc(rpc) | sublevel::Initial::RpcReferences { rpc, .. },
+                ) => rpc,
+                _ => return Err(Error::TypeMismatch),
+            };
+            Ok(Endpoint {
+                scene,
+                selector: rpc.selector,
+                serial: rpc.serial,
+            })
+        };
+        Ok(Some(Self {
+            request: endpoint(101)?,
+            free_roam: endpoint(2)?,
+            preparing: [endpoint(62)?, endpoint(64)?, endpoint(66)?, endpoint(74)?],
+            sequence: endpoint(68)?,
+            finishing: [endpoint(69)?, endpoint(71)?, endpoint(61)?],
+        }))
+    }
+}
 impl ExitBindings {
     pub fn from_records(
         records: &[Record],
@@ -308,6 +355,8 @@ pub struct Lifecycle {
     exit: Option<ExitBindings>,
     exited: Vec<u16>,
     arriving: Vec<u16>,
+    returning: Option<ReturnBindings>,
+    returned_requests: Vec<u16>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Outcome {
@@ -316,6 +365,48 @@ pub enum Outcome {
     Advanced(Vec<Notification>),
 }
 impl Lifecycle {
+    pub fn bind_return(&mut self, records: &[Record], startup_key: u32) -> Result<bool, Error> {
+        if self.returning.is_some() {
+            return Err(Error::DuplicateObject);
+        }
+        self.returning = ReturnBindings::from_records(records, startup_key)?;
+        Ok(self.returning.is_some())
+    }
+    pub fn take_returning(&mut self) -> Vec<u16> {
+        std::mem::take(&mut self.returned_requests)
+    }
+    /// Called only after validating and completing this owner's entry sequence.
+    pub fn returned_to_garage(&mut self, participant: u16) -> Outcome {
+        let (Some(b), Some(r)) = (self.bindings, self.returning) else {
+            return Outcome::Unsupported;
+        };
+        let Some(stage) = self.stages.get_mut(&participant) else {
+            return Outcome::Unsupported;
+        };
+        if *stage != Stage::ReturningToGarage {
+            return Outcome::Repeated;
+        }
+        *stage = Stage::LoadingGarage;
+        let mut chain = vec![(r.sequence, Call::Leave)];
+        for endpoint in r.finishing {
+            chain.extend([(endpoint, Call::Enter), (endpoint, Call::LeaveTagged(31))]);
+        }
+        chain.extend([
+            (b.begin_garage, Call::Enter),
+            (b.begin_garage, Call::Leave),
+            (b.loading_garage, Call::Enter),
+        ]);
+        Outcome::Advanced(
+            chain
+                .into_iter()
+                .map(|(endpoint, call)| Notification {
+                    endpoint,
+                    participant,
+                    call,
+                })
+                .collect(),
+        )
+    }
     pub fn waiting_garage(&self) -> Vec<u16> {
         self.stages
             .iter()
@@ -628,6 +719,9 @@ impl Lifecycle {
         let route = envelope
             .route(RouteProfile::ClientSend)
             .map_err(|_| Error::Shape)?;
+        if let Some(outcome) = self.return_route(&envelope, &route, &owns)? {
+            return Ok(outcome);
+        }
         if let Some(outcome) = self.exit_route(&envelope, &route, &owns)? {
             return Ok(outcome);
         }
@@ -685,6 +779,71 @@ impl Lifecycle {
 }
 
 impl Lifecycle {
+    fn return_route(
+        &mut self,
+        envelope: &Envelope<'_>,
+        route: &nfs_protocol::world::rpc::Route<'_>,
+        owns: &impl Fn(u16) -> bool,
+    ) -> Result<Option<Outcome>, Error> {
+        let Some(r) = self.returning else {
+            return Ok(None);
+        };
+        if envelope.references().first() != Some(&r.request.scene)
+            || route.selector() != r.request.selector
+            || route.method_index() != 0
+        {
+            return Ok(None);
+        }
+        let &[_, participant] = envelope.references() else {
+            return Err(Error::Shape);
+        };
+        if envelope.words() != [0, 0]
+            || !envelope.remaining().is_empty()
+            || route.arguments().len() != 7
+            || route.arguments().read_u32(0, 7) != Ok(0)
+        {
+            return Err(Error::Shape);
+        }
+        if !owns(participant) {
+            return Err(Error::UnknownObject);
+        }
+        let stage = self
+            .stages
+            .get_mut(&participant)
+            .ok_or(Error::UnknownObject)?;
+        match *stage {
+            Stage::ReturningToGarage => return Ok(Some(Outcome::Repeated)),
+            Stage::FreeRoam => {}
+            _ => return Ok(Some(Outcome::Unsupported)),
+        }
+        *stage = Stage::ReturningToGarage;
+        self.returned_requests.push(participant);
+        let mut chain = vec![(r.free_roam, Call::Leave)];
+        for (i, endpoint) in r.preparing.into_iter().enumerate() {
+            chain.extend([
+                (endpoint, Call::Enter),
+                (
+                    endpoint,
+                    if i == 1 || i == 2 {
+                        Call::LeaveTagged(31)
+                    } else {
+                        Call::Leave
+                    },
+                ),
+            ]);
+        }
+        chain.push((r.sequence, Call::Enter));
+        Ok(Some(Outcome::Advanced(
+            chain
+                .into_iter()
+                .map(|(endpoint, call)| Notification {
+                    endpoint,
+                    participant,
+                    call,
+                })
+                .collect(),
+        )))
+    }
     /// Garage exit and world entry (E747). `Ok(None)` is "not an exit route".
     fn exit_route(
         &mut self,

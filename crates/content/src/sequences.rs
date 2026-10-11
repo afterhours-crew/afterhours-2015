@@ -31,6 +31,14 @@ pub struct SequenceContent {
     /// Optional arrive sequence after garage exit (`nfs_world::arrival`).
     pub arrive: Option<(Definition, Content)>,
     pub spline: Option<nfs_world::replication::spline::Definition>,
+    pub returning: Option<ReturnSequence>,
+}
+#[derive(Clone, Debug)]
+pub struct ReturnSequence {
+    pub definition: Definition,
+    pub content: Content,
+    pub spline: nfs_world::replication::spline::Definition,
+    pub duration_ms: u64,
 }
 impl SequenceContent {
     pub fn load(path: &Path) -> Result<Self, ParseError> {
@@ -59,6 +67,9 @@ impl SequenceContent {
         ];
         if v.get("arrive").is_some() {
             expected.push("arrive");
+        }
+        if v.get("returning").is_some() {
+            expected.push("returning");
         }
         keys(v, &expected)?;
         if v["format"] != "nfs-waiting-sequence"
@@ -115,11 +126,53 @@ impl SequenceContent {
                 Some(parsed)
             }
         };
+        let returning = v
+            .get("returning")
+            .map(|r| {
+                keys(
+                    r,
+                    &[
+                        "blueprint",
+                        "asset",
+                        "catalog",
+                        "manager",
+                        "channel",
+                        "embedded_bus",
+                        "spline",
+                        "duration_ms",
+                        "presentation",
+                    ],
+                )?;
+                if r["blueprint"] != "Gameplay/Tests/GarageEntrySequence" {
+                    return Err(ParseError::Invalid);
+                }
+                let (definition, content) = sequence(r, Layout::GarageEntry)?;
+                let duration_ms = uint(&r["duration_ms"])?;
+                let s = &r["spline"];
+                keys(s, &["asset", "catalog", "flag"])?;
+                let (asset, catalog) = asset_catalog(s)?;
+                let spline = nfs_world::replication::spline::Definition {
+                    asset,
+                    catalog,
+                    flag: s["flag"].as_bool().ok_or(ParseError::Invalid)?,
+                };
+                Arrivals::returning(definition, content.clone(), duration_ms)
+                    .and_then(|a| a.with_spline(spline.clone()))
+                    .map_err(|_| ParseError::Invalid)?;
+                Ok(ReturnSequence {
+                    definition,
+                    content,
+                    spline,
+                    duration_ms,
+                })
+            })
+            .transpose()?;
         Ok(Self {
             definition,
             content,
             arrive,
             spline,
+            returning,
         })
     }
 }
@@ -155,6 +208,9 @@ fn sequence(v: &Value, layout: Layout) -> Result<(Definition, Content), ParseErr
     let content = Content::new(vec![catalog], vec![(asset, layout.profile())])
         .map_err(|_| ParseError::Invalid)?;
     let definition = Definition {
+        presentation: (layout == Layout::GarageEntry)
+            .then(|| component(&v["presentation"]))
+            .transpose()?,
         layout,
         asset,
         manager: component(&v["manager"])?,

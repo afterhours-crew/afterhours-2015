@@ -9,6 +9,87 @@ use nfs_world::{
 };
 use serde_json::json;
 
+#[test]
+fn repeated_return_prepares_a_second_lifetime_and_swaps_only_after_detach() {
+    let (mut population, mut players, content, layout, items, p) = fixture();
+    let layout = world_layout(&layout);
+    let inventory = inventory(items);
+    players.enable_player_manager().unwrap();
+    let initial = population
+        .spawn(
+            &mut players,
+            owner(p),
+            inventory.clone(),
+            &content,
+            &layout,
+            [0.; 3],
+        )
+        .unwrap();
+    for b in &initial.bindings {
+        population
+            .acknowledge(&players, owner(p), b.expected())
+            .unwrap();
+    }
+    let stable_count = players.objects().len();
+    for _ in 0..3 {
+        let world = population
+            .spawn_world(&mut players, owner(p), &inventory, &content, &layout)
+            .unwrap();
+        let car = world.records[0].id;
+        players
+            .bind_player_vehicle(3, 0x100000002, p, Some(car))
+            .unwrap();
+        let prepared = population
+            .prepare_return(&mut players, owner(p), inventory.clone(), &content, &layout)
+            .unwrap();
+        assert_eq!(prepared.bindings.len(), 1);
+        let binding = prepared.bindings[0];
+        let garage = binding.vehicle;
+        assert_ne!(car, garage);
+        assert_eq!(players.owned_vehicle(3, 0x100000002, p, 1), Some(car));
+        assert_eq!(players.staged_vehicle(3, 0x100000002, p, 1), Some(garage));
+        assert!(
+            population
+                .signal_owner(&players, 3, 0x100000002, garage)
+                .is_some()
+        );
+        assert_eq!(players.objects().len(), stable_count + 1);
+        assert!(!population.all_loaded(p));
+        assert!(
+            population
+                .prepare_return(&mut players, owner(p), inventory.clone(), &content, &layout)
+                .unwrap()
+                .records
+                .is_empty()
+        );
+        let before = players.objects().snapshot();
+        assert!(
+            population
+                .finish_return(&mut players, owner(p), &inventory, &layout)
+                .is_err()
+        );
+        assert_eq!(players.objects().snapshot(), before);
+        population
+            .acknowledge(&players, owner(p), binding.expected())
+            .unwrap();
+        players
+            .bind_player_vehicle(3, 0x100000002, p, None)
+            .unwrap();
+        assert_eq!(
+            population
+                .finish_return(&mut players, owner(p), &inventory, &layout)
+                .unwrap(),
+            car
+        );
+        assert!(players.objects().get(car).is_none());
+        assert_eq!(players.owned_vehicle(3, 0x100000002, p, 1), Some(garage));
+        assert!(players.staged_vehicle(3, 0x100000002, p, 1).is_none());
+        assert!(population.all_loaded(p));
+        assert_eq!(players.objects().len(), stable_count);
+        assert_eq!(population.groups.len(), initial.bindings.len());
+    }
+}
+
 pub(crate) fn fixture() -> (Population, Players, Content, Layout, Arc<Collection>, u16) {
     let (value, classes, items) = crate::vehicle_content::tests::fixture();
     let content = Content::from_json(&value, &classes).unwrap();
@@ -129,7 +210,7 @@ fn owner(participant: u16) -> Owner {
         participant,
     }
 }
-fn inventory(items: Arc<Collection>) -> Inventory {
+pub(crate) fn inventory(items: Arc<Collection>) -> Inventory {
     Inventory {
         slots: Slots::new([None, None, Some(1), None, None]).unwrap(),
         items,
@@ -327,7 +408,7 @@ fn foreign_repeats_stale_ack_and_changed_inventory_do_not_mutate_the_owner() {
     assert!(!population.all_loaded(other));
 }
 
-fn world_layout(layout: &Layout) -> Layout {
+pub(crate) fn world_layout(layout: &Layout) -> Layout {
     let slots = (0..5).map(|i| {
         let mut bits=[0u32;16];
         for j in [0,5,10] {bits[j]=1f32.to_bits()}
@@ -895,6 +976,7 @@ fn exit_handoff_keeps_car_relations_through_teleport_rollout_and_completion() {
         local_index: 1,
     };
     let definition = Definition {
+        presentation: None,
         layout: SequenceLayout::GarageExit,
         asset,
         manager: Component {

@@ -129,6 +129,11 @@ pub enum Which {
     WorldSpawn,
     /// Completion presentation and world membership have been queued.
     FreeRoam,
+    /// Prepare the return cinematic and retire driving-only presentation.
+    Returning,
+    ReturnRequested,
+    /// Replace return presentation with the ordinary garage loading context.
+    Returned,
 }
 
 #[derive(Clone, Debug)]
@@ -144,6 +149,9 @@ pub struct GarageLogic {
     world_ready: Batch,
     world_spawn: Batch,
     free_roam: Batch,
+    returning: Batch,
+    return_requested: Batch,
+    returned: Batch,
 }
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Output {
@@ -566,6 +574,26 @@ impl GarageLogic {
         let world_ready = event_phase("world_ready", &exited)?;
         let world_spawn = event_phase("world_spawn", &exited)?;
         let free_roam = event_phase("free_roam", &after(&after(&exited, &arrive), &arrived))?;
+        let driving = after(&after(&exited, &arrive), &arrived);
+        let return_requested = event_phase("return_requested", &driving)?;
+        let returning = v
+            .get("returning")
+            .map(|b| batch(b, &content, &driving))
+            .transpose()?
+            .unwrap_or_default();
+        let returned = v
+            .get("returned")
+            .map(|b| batch(b, &content, &after(&driving, &returning)))
+            .transpose()?
+            .unwrap_or_default();
+        if v.get("returned").is_some() {
+            // Every cycle must restore the same live roles as the first load;
+            // the usual entry/exit phases must never refer to stale lifetimes.
+            let loading = after(&after(&driving, &returning), &returned);
+            if after(&loading, &entry) != entered {
+                return Err(Failure::ProfileConfig);
+            }
+        }
         let reputation = v
             .get("reputation_thresholds")
             .map(|value| {
@@ -591,6 +619,8 @@ impl GarageLogic {
             .chain(&exit.entities)
             .chain(&arrive.entities)
             .chain(&arrived.entities)
+            .chain(&returning.entities)
+            .chain(&returned.entities)
             .flat_map(|d| &d.roles)
             .any(|r| matches!(r, Role::Reputation(_) | Role::ReputationLevelStat))
         {
@@ -644,6 +674,9 @@ impl GarageLogic {
             world_ready,
             world_spawn,
             free_roam,
+            returning,
+            return_requested,
+            returned,
         })
     }
     pub fn content(&self) -> &Content {
@@ -667,6 +700,9 @@ impl GarageLogic {
             Which::WorldReady => &self.world_ready,
             Which::WorldSpawn => &self.world_spawn,
             Which::FreeRoam => &self.free_roam,
+            Which::Returning => &self.returning,
+            Which::ReturnRequested => &self.return_requested,
+            Which::Returned => &self.returned,
         }
     }
     /// Whether deployment content describes a batch for this point.
@@ -998,6 +1034,51 @@ pub(crate) mod tests {
         v["arrived"] = phase(&[16]);
         v["free_roam"] = phase(&[17]);
         v
+    }
+
+    #[test]
+    fn repeated_return_restores_live_roles_and_allocates_new_presentation() {
+        let mut v = presentation_json();
+        v["exit"]["delete_capture_ids"] = json!([319]);
+        v["return_requested"] = json!({"scene_updates":[],"entities":[],"events":[{"target":{"capture_id":277},"entity":1,"event":18}]});
+        v["returning"] = json!({"scene_updates":[],"entities":[v["spawn"]["entities"][3].clone()]});
+        v["returned"] = json!({"scene_updates":[],"entities":[],"events":[{"target":{"capture_id":277},"entity":1,"event":19}]});
+        let logic = GarageLogic::from_json(&v).unwrap();
+        let (mut players, participant) = world();
+        let mut ghosts = BTreeMap::new();
+        for phase in [Which::Spawn, Which::Entry] {
+            logic
+                .produce(phase, &mut players, participant, &mut ghosts)
+                .unwrap();
+        }
+        let count = players.objects().snapshot().len();
+        let roles: Vec<_> = ghosts.keys().copied().collect();
+        for _ in 0..3 {
+            let old = ghosts[&319];
+            for phase in [
+                Which::Exit,
+                Which::Arrive,
+                Which::Arrived,
+                Which::ReturnRequested,
+                Which::Returning,
+                Which::Returned,
+                Which::Entry,
+            ] {
+                logic
+                    .produce(phase, &mut players, participant, &mut ghosts)
+                    .unwrap();
+            }
+            assert_ne!(ghosts[&319], old);
+            assert!(players.objects().get(old).is_none());
+            assert_eq!(players.objects().snapshot().len(), count);
+            assert_eq!(ghosts.keys().copied().collect::<Vec<_>>(), roles);
+        }
+        let mut bad = v.clone();
+        bad["returned"]["delete_capture_ids"] = json!([277]);
+        assert!(GarageLogic::from_json(&bad).is_err());
+        bad = v;
+        bad["return_requested"]["delete_capture_ids"] = json!([277]);
+        assert!(GarageLogic::from_json(&bad).is_err());
     }
 
     #[test]

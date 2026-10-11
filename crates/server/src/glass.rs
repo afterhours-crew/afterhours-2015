@@ -39,6 +39,9 @@ fn signal(event: u32) -> Option<(usize, Condition, u32)> {
 }
 
 impl Glass {
+    pub fn retain_vehicles(&mut self, mut keep: impl FnMut(u16) -> bool) {
+        self.vehicles.retain(|id, _| keep(*id));
+    }
     pub fn recognizes(message: &Message) -> bool {
         matches!(message, Message::Reached { event, .. } if signal(*event).is_some())
     }

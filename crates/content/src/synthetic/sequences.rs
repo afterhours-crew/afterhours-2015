@@ -8,6 +8,7 @@ use crate::sequences::Rules;
 
 pub const WAITING: &str = "synthetic/sequences/waiting";
 pub const EXIT: &str = "synthetic/sequences/exit";
+pub const ENTRY: &str = "synthetic/sequences/entry";
 const GAMEPLAY: &str = "levels/runtime/gameplay";
 const GARAGE: &str = "levels/runtime/garage";
 fn guid(seed: u8) -> [u8; 16] {
@@ -34,6 +35,8 @@ pub fn rules() -> Rules {
     Rules {
         waiting: WAITING.into(),
         exit: EXIT.into(),
+        entry: ENTRY.into(),
+        entry_timer_events: [9005, 9006, 9007, 9008],
         waiting_scene: GAMEPLAY.into(),
         exit_scene: GARAGE.into(),
         manager_scene: GAMEPLAY.into(),
@@ -51,6 +54,9 @@ pub fn rules() -> Rules {
             ("LocalParticipantEventEntityData", Some("event")),
             ("LinkedSchematicChannelReferenceEntityData", Some("channel")),
             ("ScriptedSplineCommandEntityData", None),
+            ("DelayEntityData", None),
+            ("LogicPrefabReferenceObjectData", None),
+            ("LogicPrefabBlueprint", None),
         ]
         .into_iter()
         .map(|(k, v)| (k.into(), v.map(str::to_owned)))
@@ -63,6 +69,7 @@ pub fn assets_with(mut edit: impl FnMut(&str, &mut ObjectFields, &mut SceneObjec
     for (seed, name, label, exit) in [
         (1, WAITING, "Gameplay/WaitingForGarageSequence", false),
         (2, EXIT, "Gameplay/Tests/GarageExitSequence", true),
+        (7, ENTRY, "Gameplay/Tests/GarageEntrySequence", true),
     ] {
         let mut objects = vec![
             ("ParticipantStateSequenceEntityData", vec![]),
@@ -87,6 +94,60 @@ pub fn assets_with(mut edit: impl FnMut(&str, &mut ObjectFields, &mut SceneObjec
             ));
             links.push(connection(channel + 1, rules.spline_link, channel, 9004));
         }
+        let mut timer_events = Vec::new();
+        if name == ENTRY {
+            let delay = objects.len() as u32 + 2;
+            objects.push((
+                "DelayEntityData",
+                vec![
+                    ("Delay", Field::Float(7.5)),
+                    ("Realm", Field::Enum("Realm", "Realm_Server", 1)),
+                    (
+                        "TimeDeltaType",
+                        Field::Enum("TimeDeltaType", "TimeDeltaType_World", 2),
+                    ),
+                    ("AutoStart", Field::Bool(false)),
+                ],
+            ));
+            let [started, start, elapsed, stop] = rules.entry_timer_events;
+            for (source, target, out_event, in_event) in
+                [(2, delay, started, start), (delay, 2, elapsed, stop)]
+            {
+                let mut c = connection(source, 0, target, 0);
+                c.retain(|(k, _)| ["Source", "Target"].contains(k));
+                c.extend([
+                    (
+                        "SourceEvent",
+                        Field::Struct("EventSpec", vec![("Id", Field::UInt(out_event))]),
+                    ),
+                    (
+                        "TargetEvent",
+                        Field::Struct("EventSpec", vec![("Id", Field::UInt(in_event))]),
+                    ),
+                    (
+                        "TargetType",
+                        Field::Enum(
+                            "EventConnectionTargetType",
+                            "EventConnectionTargetType_Server",
+                            1,
+                        ),
+                    ),
+                ]);
+                timer_events.push(c);
+            }
+        }
+        if name == ENTRY {
+            links.push(connection(
+                2,
+                rules.root_channels,
+                objects.len() as u32 + 2,
+                9009,
+            ));
+            objects.push((
+                "LogicPrefabReferenceObjectData",
+                vec![("Blueprint", import(8))],
+            ));
+        }
         let mut fields = vec![
             ("Name", Field::CString(label.into())),
             ("Flags", Field::UInt(1)),
@@ -95,6 +156,10 @@ pub fn assets_with(mut edit: impl FnMut(&str, &mut ObjectFields, &mut SceneObjec
                 Field::RawPointers((2..=objects.len() as u32 + 1).collect()),
             ),
             ("LinkConnections", Field::Structs("LinkConnection", links)),
+            (
+                "EventConnections",
+                Field::Structs("EventConnection", timer_events),
+            ),
         ];
         edit(name, &mut fields, &mut objects);
         out.push(asset(
@@ -105,6 +170,39 @@ pub fn assets_with(mut edit: impl FnMut(&str, &mut ObjectFields, &mut SceneObjec
             objects,
         ));
     }
+    let mut client_fields = vec![
+        ("Flags", Field::UInt(14)),
+        ("Interface", Field::RawPointer(3)),
+        (
+            "LinkConnections",
+            Field::Structs("LinkConnection", vec![connection(3, 9009, 2, 0)]),
+        ),
+        ("Objects", Field::RawPointers(vec![2])),
+    ];
+    let mut client_objects = vec![(
+        "LinkedSchematicChannelReferenceEntityData",
+        vec![("ChannelAsset", import(9))],
+    )];
+    client_objects.push(("InterfaceDescriptorData", vec![]));
+    edit(
+        "synthetic/sequences/client_presentation",
+        &mut client_fields,
+        &mut client_objects,
+    );
+    out.push(asset(
+        8,
+        "synthetic/sequences/client_presentation",
+        "LogicPrefabBlueprint",
+        client_fields,
+        client_objects,
+    ));
+    out.push(asset(
+        9,
+        "synthetic/sequences/presentation_channel",
+        "SchematicChannelAsset",
+        vec![],
+        vec![],
+    ));
     out.push(asset(
         3,
         "synthetic/sequences/channel",
@@ -136,14 +234,17 @@ pub fn assets_with(mut edit: impl FnMut(&str, &mut ObjectFields, &mut SceneObjec
     }
     out
 }
-fn append(fields: &mut ObjectFields, objects: &mut SceneObjects, exit: bool) {
+fn append(fields: &mut ObjectFields, objects: &mut SceneObjects, seed: u8) {
+    let exit = seed != 1;
     let rules = rules();
-    fields.push(("Flags", Field::UInt(1)));
+    if !fields.iter().any(|(k, _)| *k == "Flags") {
+        fields.push(("Flags", Field::UInt(1)));
+    }
     let start = objects.len() as u32 + 2;
     let mut added = vec![
         (
             "StateSequenceRefererEntityData",
-            vec![("Sequence", import(if exit { 2 } else { 1 }))],
+            vec![("Sequence", import(seed))],
         ),
         (
             "LinkedSchematicChannelEntityData",
@@ -154,6 +255,12 @@ fn append(fields: &mut ObjectFields, objects: &mut SceneObjects, exit: bool) {
             vec![("ChannelAsset", import(3))],
         ),
     ];
+    if seed == 7 {
+        added.push((
+            "LinkedSchematicChannelEntityData",
+            vec![("ChannelAsset", import(9))],
+        ));
+    }
     if !exit {
         added.push((
             "LogicPrefabReferenceObjectData",
@@ -172,6 +279,9 @@ fn append(fields: &mut ObjectFields, objects: &mut SceneObjects, exit: bool) {
                 panic!()
             };
             values.push(connection(start, rules.spawner_channels, start + 2, 0));
+            if seed == 7 {
+                values.push(connection(start, rules.spawner_channels, start + 3, 0));
+            }
             if exit {
                 let mut row = connection(start + 2, 9004, 0, 0);
                 row.iter_mut().find(|(k, _)| *k == "Target").unwrap().1 = import(5);
@@ -185,8 +295,9 @@ pub fn scene_assets_with(
     mut edit: impl FnMut(&str, &mut ObjectFields, &mut SceneObjects),
 ) -> Vec<Asset> {
     super::garage_layout_with(|gf, go, pf, po| {
-        append(gf, go, true);
-        append(pf, po, false);
+        append(gf, go, 2);
+        append(gf, go, 7);
+        append(pf, po, 1);
         edit(GARAGE, gf, go);
         edit(GAMEPLAY, pf, po);
     })
@@ -218,6 +329,7 @@ pub fn install(assets: &mut Vec<Asset>) {
         let sequence = if scene == GAMEPLAY { 1 } else { 2 };
         pointers.push((guid(sequence), guid(sequence ^ 0x80)));
         if scene == GARAGE {
+            pointers.push((guid(7), guid(7 ^ 0x80)));
             for spline in [6, 5] {
                 pointers.push((guid(spline), guid(spline ^ 0x80)));
             }

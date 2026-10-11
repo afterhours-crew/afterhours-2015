@@ -503,6 +503,93 @@ fn calls(outcome: Outcome) -> Vec<(u16, u16, u32, u8)> {
 }
 
 #[test]
+fn three_round_trips_keep_return_order_retries_and_foreign_owners_isolated() {
+    let mut model = in_customization(8);
+    let ep = |selector| Endpoint {
+        scene: 4,
+        selector,
+        serial: Serial::new(2).unwrap(),
+    };
+    model.returning = Some(ReturnBindings {
+        request: ep(100),
+        free_roam: ep(1),
+        preparing: [61, 63, 65, 73].map(ep),
+        sequence: ep(67),
+        finishing: [68, 70, 60].map(ep),
+    });
+    model.stages.insert(9, Stage::Customization);
+    for _ in 0..3 {
+        assert!(matches!(
+            model
+                .receive(request(4, 8, 96, 0, 7).span(), |p| p == 8)
+                .unwrap(),
+            Outcome::Advanced(_)
+        ));
+        model.take_exited();
+        model
+            .receive(request(4, 8, 76, 3, 7).span(), |p| p == 8)
+            .unwrap();
+        model
+            .receive(request(4, 8, 80, 0, 7).span(), |p| p == 8)
+            .unwrap();
+        model.take_arriving();
+        model.arrived(8);
+        let before = model.clone();
+        assert!(
+            model
+                .receive(request(4, 8, 100, 0, 7).span(), |_| false)
+                .is_err()
+        );
+        assert!(
+            model
+                .receive(request(4, 8, 100, 0, 15).span(), |_| true)
+                .is_err()
+        );
+        assert_eq!(model, before);
+        let route = request(4, 8, 100, 0, 7);
+        assert_eq!(
+            calls(model.receive(route.span(), |p| p == 8).unwrap()),
+            [
+                (4, 1, 1, 0),
+                (4, 61, 0, 0),
+                (4, 61, 1, 0),
+                (4, 63, 0, 0),
+                (4, 63, 1, 31),
+                (4, 65, 0, 0),
+                (4, 65, 1, 31),
+                (4, 73, 0, 0),
+                (4, 73, 1, 0),
+                (4, 67, 0, 0)
+            ]
+        );
+        assert_eq!(model.take_returning(), [8]);
+        assert_eq!(
+            model.receive(route.span(), |p| p == 8).unwrap(),
+            Outcome::Repeated
+        );
+        assert!(model.take_returning().is_empty());
+        assert_eq!(
+            calls(model.returned_to_garage(8)),
+            [
+                (4, 67, 1, 0),
+                (4, 68, 0, 0),
+                (4, 68, 1, 31),
+                (4, 70, 0, 0),
+                (4, 70, 1, 31),
+                (4, 60, 0, 0),
+                (4, 60, 1, 31),
+                (4, 94, 0, 0),
+                (4, 94, 1, 0),
+                (4, 89, 0, 0)
+            ]
+        );
+        assert_eq!(model.returned_to_garage(8), Outcome::Repeated);
+        assert!(matches!(model.enter_customization(8), Outcome::Advanced(_)));
+        assert_eq!(model.stage(9), Some(Stage::Customization));
+    }
+}
+
+#[test]
 fn garage_exit_and_world_entry_follow_the_official_order() {
     let mut model = in_customization(8);
     let owns = |p| p == 8;
