@@ -84,6 +84,22 @@ impl AssetIndex {
         Ok(&self.registries[&key])
     }
 
+    /// Decoded objects of an asset (owned, so callers may keep querying).
+    pub(crate) fn objects(
+        &mut self,
+        asset: &str,
+    ) -> Result<Vec<nfs_frostbite::ebx::Object>, Error> {
+        Ok(self.assets.objects(asset)?.to_vec())
+    }
+
+    /// Asset name and object an import pointer value names.
+    pub(crate) fn resolve_import(
+        &mut self,
+        value: Option<&Value>,
+    ) -> Result<(String, nfs_frostbite::ebx::Object), Error> {
+        self.assets.resolve(value.and_then(Value::as_pointer))
+    }
+
     fn class_id(&self, class: &str) -> Result<u32, Error> {
         self.identity
             .blueprint_class_ids

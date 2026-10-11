@@ -50,6 +50,15 @@ and asset references (class ID and position in registry order). A Blueprint
 class without a profiled ID is an error, never a guess. These are inputs for
 world, garage and progression content, which are not generated yet.
 
+## Startup sub-levels
+
+`AssetIndex::startup_entries(level)` lists what a world host names and
+registers when the level starts: auto-loaded Win32 sub-levels walked
+breadth-first from the `LevelData` (with parents), then bundle preloads and
+blueprint bundles from those scenes' layers. Sibling order is the server's
+choice; it only has to be used consistently for level IDs. Scene profiles
+and launcher serializer lists are not derived yet.
+
 Tests build synthetic installations (`nfs-frostbite` `synthetic` feature) and
 cover loader acceptance, cache reuse, damaged and foreign entries, changed
 installations, unsupported executables, wrong template location or digest,

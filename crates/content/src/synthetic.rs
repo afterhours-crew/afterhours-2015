@@ -212,7 +212,113 @@ pub fn assets() -> Vec<Asset> {
         assets.push(table(i as u8, name, secondary.is_some(), *count));
     }
     assets.extend(registries());
+    assets.extend(level());
     assets
+}
+
+/// `LevelData` asset of the synthetic level.
+pub const LEVEL: &str = "levels/Synth/Synth";
+
+fn sub_world(name: &str, auto: bool) -> (&'static str, Vec<(&'static str, Field)>) {
+    (
+        "SubWorldReferenceObjectData",
+        vec![
+            ("BundleName", Field::CString(name.into())),
+            ("AutoLoad", Field::Bool(auto)),
+            ("IsWin32SubLevel", Field::Bool(true)),
+        ],
+    )
+}
+
+fn layer_reference(seed: u8) -> (&'static str, Vec<(&'static str, Field)>) {
+    (
+        "WorldPartReferenceObjectData",
+        vec![("Blueprint", Field::Import(guid(seed), guid(seed | 0x10)))],
+    )
+}
+
+fn bundle_ref(name: &str) -> Vec<(&'static str, Field)> {
+    vec![("Name", Field::CString(name.into()))]
+}
+
+fn scene(
+    seed: u8,
+    name: &str,
+    class: &str,
+    extras: Vec<(&'static str, Vec<(&'static str, Field)>)>,
+) -> Asset {
+    Asset {
+        name: name.to_lowercase(),
+        partition: PartitionWriter::default().build_many(
+            guid(seed),
+            class,
+            guid(seed | 0x10),
+            vec![("Name", Field::CString(name.into()))],
+            extras,
+        ),
+    }
+}
+
+/// A level with sub-levels Alpha (child Gamma), Off (not auto-loaded) and
+/// Beta; the root layer has two blueprint bundles, Alpha's layer a preload.
+pub fn level() -> Vec<Asset> {
+    vec![
+        scene(
+            0xC0,
+            LEVEL,
+            "LevelData",
+            vec![
+                sub_world("Levels/Synth/Alpha", true),
+                sub_world("levels/Synth/Off", false),
+                sub_world("levels/Synth/Beta", true),
+                layer_reference(0xC5),
+            ],
+        ),
+        scene(
+            0xC1,
+            "Levels/Synth/Alpha",
+            "SubWorldData",
+            vec![sub_world("Levels/Synth/Gamma", true), layer_reference(0xC6)],
+        ),
+        scene(0xC2, "levels/Synth/Beta", "SubWorldData", vec![]),
+        scene(0xC3, "Levels/Synth/Gamma", "SubWorldData", vec![]),
+        scene(
+            0xC5,
+            "levels/Synth/Synth/layer1",
+            "WorldPartData",
+            vec![
+                (
+                    "BlueprintBundleEntityData",
+                    vec![(
+                        "Bundle",
+                        Field::Struct("BundleReference", bundle_ref("Vehicles/Traffic/One_Bundle")),
+                    )],
+                ),
+                (
+                    "BlueprintBundleEntityData",
+                    vec![(
+                        "Bundle",
+                        Field::Struct("BundleReference", bundle_ref("Vehicles/Traffic/Two_Bundle")),
+                    )],
+                ),
+            ],
+        ),
+        scene(
+            0xC6,
+            "levels/Synth/Alpha/layer1",
+            "WorldPartData",
+            vec![(
+                "BundlePreLoadEntityData",
+                vec![(
+                    "BundlesToLoad",
+                    Field::Structs(
+                        "BundleReference",
+                        vec![bundle_ref("vehicles/Shared/Parts_Bundle")],
+                    ),
+                )],
+            )],
+        ),
+    ]
 }
 
 /// Bundle whose registry lists two prefabs, a vehicle and a non-Blueprint object.

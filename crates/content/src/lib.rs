@@ -25,6 +25,7 @@ mod scan;
 #[cfg(any(test, feature = "synthetic"))]
 pub mod synthetic;
 mod tables;
+pub mod world;
 
 pub use fingerprint::{Fingerprint, Input, fingerprint};
 pub use nfs_frostbite::Limits;

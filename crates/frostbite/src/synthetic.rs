@@ -239,15 +239,24 @@ impl PartitionWriter {
     /// Encode a partition with GUID `partition` whose single exported instance
     /// of `class` (GUID `instance`) has the given fields in order.
     pub fn build(
-        mut self,
+        self,
         partition: [u8; 16],
         class: &str,
         instance: [u8; 16],
         fields: Vec<(&'static str, Field)>,
     ) -> Vec<u8> {
+        self.build_many(partition, class, instance, fields, Vec::new())
+    }
+
+    /// Field rows and payload of one object.
+    #[allow(clippy::type_complexity)]
+    fn object(
+        &mut self,
+        fields: &[(&'static str, Field)],
+    ) -> (Vec<(String, u8, u16, u32)>, Vec<u8>) {
         let mut rows = Vec::new();
         let mut payload = Vec::new();
-        for (name, field) in &fields {
+        for (name, field) in fields {
             let offset = 8 + payload.len() as u32;
             match field {
                 Field::Enum(type_name, enumerator, value) => {
@@ -313,8 +322,29 @@ impl PartitionWriter {
                 }
             }
         }
-        let size = (8 + payload.len()) as u16;
-        let primary = self.class(class, size, rows);
+        (rows, payload)
+    }
+
+    /// Like [`Self::build`], followed by unexported instances of other classes
+    /// (one instance each, in order).
+    pub fn build_many(
+        mut self,
+        partition: [u8; 16],
+        class: &str,
+        instance: [u8; 16],
+        fields: Vec<(&'static str, Field)>,
+        extras: Vec<(&str, Vec<(&'static str, Field)>)>,
+    ) -> Vec<u8> {
+        let (rows, payload) = self.object(&fields);
+        let primary = self.class(class, (8 + payload.len()) as u16, rows);
+        let mut instances = vec![primary];
+        let mut data = instance.to_vec();
+        data.extend_from_slice(&payload);
+        for (extra_class, extra_fields) in &extras {
+            let (rows, payload) = self.object(extra_fields);
+            instances.push(self.class(extra_class, (8 + payload.len()) as u16, rows));
+            data.extend_from_slice(&payload);
+        }
         let mut out = vec![0u8; 64];
         out[..4].copy_from_slice(&[0xCE, 0xD1, 0xB2, 0x0F]);
         for (file, inst) in &self.imports {
@@ -338,8 +368,10 @@ impl PartitionWriter {
             out.extend_from_slice(&c.size.to_le_bytes());
             out.extend_from_slice(&0u16.to_le_bytes());
         }
-        out.extend_from_slice(&primary.to_le_bytes());
-        out.extend_from_slice(&1u16.to_le_bytes());
+        for class_index in &instances {
+            out.extend_from_slice(&class_index.to_le_bytes());
+            out.extend_from_slice(&1u16.to_le_bytes());
+        }
         pad16(&mut out);
         for (at, count, class_ref) in &self.arrays {
             out.extend_from_slice(&at.to_le_bytes());
@@ -352,8 +384,6 @@ impl PartitionWriter {
         while !self.strings.len().is_multiple_of(16) {
             self.strings.push(0);
         }
-        let mut data = instance.to_vec();
-        data.extend_from_slice(&payload);
         while !data.len().is_multiple_of(16) {
             data.push(0);
         }
@@ -369,9 +399,9 @@ impl PartitionWriter {
             out[4 + i * 4..8 + i * 4].copy_from_slice(&word.to_le_bytes());
         }
         let counts = [
-            1u16,
+            instances.len() as u16,
             1,
-            1,
+            instances.len() as u16,
             self.classes.len() as u16,
             self.fields.len() as u16,
             self.names.len() as u16,
