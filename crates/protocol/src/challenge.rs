@@ -15,6 +15,9 @@ pub const COMPONENT: u16 = 2054;
 pub const GET_DAILY_CHALLENGES: u16 = 1;
 const BLID: [u8; 3] = [0x8a, 0xca, 0x64];
 
+mod generated;
+pub use generated::*;
+
 schema!(GetDailyChallengesRequest {
     blaze_id: i64 => BLID,
     // Native TimeValue, tagged integer. Units/epoch are deliberately unassigned.

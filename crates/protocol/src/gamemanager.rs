@@ -19,6 +19,8 @@ mod status;
 pub use status::*;
 mod attributes;
 pub use attributes::*;
+mod departure;
+pub use departure::*;
 
 pub const COMPONENT: u16 = 4;
 pub const ADVANCE_GAME_STATE: u16 = 3;

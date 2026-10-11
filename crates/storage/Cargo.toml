@@ -1,4 +1,5 @@
 [package]
+workspace = "../.."
 name = "nfs-storage"
 version = "0.1.0"
 description = "NFS 2015 local persistence port: per-account owned inventory with an in-memory adapter and a pinned SQLite adapter (sync, no Tokio)"

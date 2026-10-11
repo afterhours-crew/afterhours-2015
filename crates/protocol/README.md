@@ -11,3 +11,7 @@ unverified variants remain identified in API documentation.
 
 Tests here use independently constructed inputs. Private capture comparisons
 belong to external reference tooling, which consumes these same libraries.
+
+Daily challenges support typed response construction, including the nested award
+map/list layout. The retained-byte view remains available for inspection. Neither
+codec selects a catalog, rotates challenges or grants account progress/rewards.

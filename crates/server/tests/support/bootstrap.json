@@ -1,0 +1,342 @@
+{
+  "version": 1,
+  "build_sha256": "92aa6ff4b5f8d0f033ca7e88cb86cc64b42b1d2412c4294905eb22950616e4df",
+  "metadata": {
+    "authentication_source": "local",
+    "client_id": "local",
+    "entitlement_source": "local",
+    "service_name": "local",
+    "persona_namespace": "local",
+    "legal_doc_game_identifier": "local",
+    "platform": "local",
+    "registration_source": "local",
+    "server_version": "local\nserver",
+    "identity_display": "local"
+  },
+  "components": [
+    9,
+    1
+  ],
+  "underage_supported": false,
+  "settings": [
+    {
+      "name": "AchievementsStats_PendingChanges",
+      "value": "12"
+    },
+    {
+      "name": "AchievementsStats_Time",
+      "value": "12"
+    },
+    {
+      "name": "CollectiblesTable_PendingChanges",
+      "value": "12"
+    },
+    {
+      "name": "CollectiblesTable_Time",
+      "value": "12"
+    },
+    {
+      "name": "DynamicMessage_PendingChanges",
+      "value": "12"
+    },
+    {
+      "name": "DynamicMessage_Time",
+      "value": "12"
+    },
+    {
+      "name": "GameplayStatsTable_PendingChanges",
+      "value": "12"
+    },
+    {
+      "name": "GameplayStatsTable_Time",
+      "value": "12"
+    },
+    {
+      "name": "GarageItemsTable_PendingChanges",
+      "value": "12"
+    },
+    {
+      "name": "GarageItemsTable_Time",
+      "value": "12"
+    },
+    {
+      "name": "NPSSurveySessionDays",
+      "value": "12"
+    },
+    {
+      "name": "NPSSurveyTargetPercentage",
+      "value": "12"
+    },
+    {
+      "name": "NPSSurveyURL",
+      "value": null
+    },
+    {
+      "name": "NPSSurveyURL_br",
+      "value": null
+    },
+    {
+      "name": "NPSSurveyURL_de",
+      "value": null
+    },
+    {
+      "name": "NPSSurveyURL_en",
+      "value": null
+    },
+    {
+      "name": "NPSSurveyURL_es",
+      "value": null
+    },
+    {
+      "name": "NPSSurveyURL_fr",
+      "value": null
+    },
+    {
+      "name": "NPSSurveyURL_it",
+      "value": null
+    },
+    {
+      "name": "NPSSurveyURL_ja",
+      "value": null
+    },
+    {
+      "name": "NPSSurveyURL_pl",
+      "value": null
+    },
+    {
+      "name": "NPSSurveyURL_ru",
+      "value": null
+    },
+    {
+      "name": "NPSSurveyURL_zh",
+      "value": null
+    },
+    {
+      "name": "PersistentDataTable_PendingChanges",
+      "value": "12"
+    },
+    {
+      "name": "PersistentDataTable_Time",
+      "value": "12"
+    },
+    {
+      "name": "PoiIdTable_PendingChanges",
+      "value": "12"
+    },
+    {
+      "name": "PoiIdTable_Time",
+      "value": "12"
+    },
+    {
+      "name": "ProgressionObjective_PendingChanges",
+      "value": "12"
+    },
+    {
+      "name": "ProgressionObjective_Time",
+      "value": "12"
+    },
+    {
+      "name": "ProgressionStats_PendingChanges",
+      "value": "12"
+    },
+    {
+      "name": "ProgressionStats_Time",
+      "value": "12"
+    },
+    {
+      "name": "RepValuesTable_PendingChanges",
+      "value": "12"
+    },
+    {
+      "name": "RepValuesTable_Time",
+      "value": "12"
+    },
+    {
+      "name": "SpeedListStatsTable_PendingChanges",
+      "value": "12"
+    },
+    {
+      "name": "SpeedListStatsTable_Time",
+      "value": "12"
+    },
+    {
+      "name": "StaticMessage_PendingChanges",
+      "value": "12"
+    },
+    {
+      "name": "StaticMessage_Time",
+      "value": "12"
+    },
+    {
+      "name": "TicketTable_PendingChanges",
+      "value": "12"
+    },
+    {
+      "name": "TicketTable_Time",
+      "value": "12"
+    },
+    {
+      "name": "TutorialTable_PendingChanges",
+      "value": "12"
+    },
+    {
+      "name": "TutorialTable_Time",
+      "value": "12"
+    },
+    {
+      "name": "UgStaticMessages_PendingChanges",
+      "value": "12"
+    },
+    {
+      "name": "UgStaticMessages_Time",
+      "value": "12"
+    },
+    {
+      "name": "associationListSkipInitialSet",
+      "value": "12"
+    },
+    {
+      "name": "autoReconnectEnabled",
+      "value": "12"
+    },
+    {
+      "name": "bytevaultHostname",
+      "value": null
+    },
+    {
+      "name": "bytevaultPort",
+      "value": null
+    },
+    {
+      "name": "bytevaultSecure",
+      "value": null
+    },
+    {
+      "name": "cashToBeAwardedForBeatingARecommendation",
+      "value": "12"
+    },
+    {
+      "name": "connIdleTimeout",
+      "value": "12"
+    },
+    {
+      "name": "defaultRequestTimeout",
+      "value": "12"
+    },
+    {
+      "name": "gameManagerPreventMultipleGameMembership",
+      "value": "12"
+    },
+    {
+      "name": "kickbackRewardLevelRep",
+      "value": "12"
+    },
+    {
+      "name": "kickbackRewardLevels",
+      "value": "12"
+    },
+    {
+      "name": "maximumNumberOfVehiclesInWarehouse",
+      "value": "12"
+    },
+    {
+      "name": "minimalDownstreamBitsPerSecondForNewsImages",
+      "value": "12"
+    },
+    {
+      "name": "minimalDownstreamKBPerSecondForNewsImages",
+      "value": "12"
+    },
+    {
+      "name": "minimalUploadStreamKBForSnapShotUpload",
+      "value": "12"
+    },
+    {
+      "name": "nucleusConnect",
+      "value": null
+    },
+    {
+      "name": "nucleusConnectTrusted",
+      "value": null
+    },
+    {
+      "name": "nucleusPortal",
+      "value": null
+    },
+    {
+      "name": "nucleusProxy",
+      "value": null
+    },
+    {
+      "name": "pingPeriod",
+      "value": "12"
+    },
+    {
+      "name": "playersYouMayKnowScreenUpdateRate",
+      "value": "12"
+    },
+    {
+      "name": "providerOnlineUserRefresh",
+      "value": "12"
+    },
+    {
+      "name": "recommendationsUpdateRate",
+      "value": "12"
+    },
+    {
+      "name": "snapshotLoadTimeDelay",
+      "value": "12"
+    },
+    {
+      "name": "snapshotMostLikedREPAmount",
+      "value": "12"
+    },
+    {
+      "name": "statsAndAwardsCacheSecondsEveryoneElse",
+      "value": "12"
+    },
+    {
+      "name": "statsAndAwardsCacheSecondsLocalPlayer",
+      "value": "12"
+    },
+    {
+      "name": "telemetryPinServerAddress",
+      "value": null
+    },
+    {
+      "name": "telemetryPinServerPort",
+      "value": null
+    },
+    {
+      "name": "userManagerMaxCachedUsers",
+      "value": "12"
+    },
+    {
+      "name": "voipHeadsetUpdateRate",
+      "value": "12"
+    },
+    {
+      "name": "xblTokenUrn",
+      "value": null
+    },
+    {
+      "name": "xboxOneStringValidationUri",
+      "value": null
+    },
+    {
+      "name": "xlspConnectionIdleTimeout",
+      "value": "12"
+    }
+  ],
+  "qos": {
+    "probes": 3,
+    "service_id": 8,
+    "timeout": 17,
+    "sites": [
+      {
+        "alias": "local",
+        "name": "loopback"
+      }
+    ]
+  }
+}

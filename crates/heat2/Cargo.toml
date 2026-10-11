@@ -1,4 +1,5 @@
 [package]
+workspace = "../.."
 name = "nfs-heat2"
 version = "0.1.0"
 description = "Bounded structural heat2 decoding from NFS 2015 observations"

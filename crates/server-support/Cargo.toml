@@ -1,0 +1,15 @@
+[package]
+workspace = "../.."
+name = "nfs-server-support"
+version = "0.1.0"
+description = "Bounded local discovery and latency socket services"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+[lints]
+workspace = true
+[dependencies]
+nfs-protocol = { path = "../protocol" }
+httparse = "=1.10.1"
+openssl = { version = "=0.10.81", features = ["vendored"] }

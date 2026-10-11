@@ -4,9 +4,12 @@ members = [
     "crates/heat2",
     "crates/protocol",
     "crates/world-core",
+    "crates/world",
     "crates/lsx-codec",
     "crates/storage",
     "crates/services",
+    "crates/server-support",
+    "crates/server",
 ]
 resolver = "3"
 

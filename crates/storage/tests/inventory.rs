@@ -157,7 +157,7 @@ fn v1_migration_preserves_inventory_and_rejects_wrong_account_before_writing() {
     let saved = repo.snapshot(a).unwrap();
     let conn = rusqlite::Connection::open(repo.path(a)).unwrap();
     conn.execute_batch(
-        "DROP TABLE persistent; ALTER TABLE meta DROP COLUMN garage; PRAGMA user_version=1;",
+        "DROP TABLE identity_state; DROP TABLE entitlement_state; DROP TABLE kickback_state; DROP TABLE speedwall_state; DROP TABLE user_settings; DROP TABLE persistent; ALTER TABLE meta DROP COLUMN garage; PRAGMA user_version=1;",
     )
     .unwrap();
     conn.execute(
@@ -291,7 +291,7 @@ fn v2_migration_checks_identity_and_preserves_committed_garage() {
     .unwrap();
     let saved = repo.snapshot(a).unwrap();
     let conn = rusqlite::Connection::open(repo.path(a)).unwrap();
-    conn.execute_batch("DROP TABLE persistent; PRAGMA user_version=2;")
+    conn.execute_batch("DROP TABLE identity_state; DROP TABLE entitlement_state; DROP TABLE kickback_state; DROP TABLE speedwall_state; DROP TABLE user_settings; DROP TABLE persistent; PRAGMA user_version=2;")
         .unwrap();
     conn.execute(
         "UPDATE meta SET account=?1",
@@ -347,6 +347,39 @@ fn sqlite_rejects_corrupt_persistent_rows_before_other_writes() {
             .unwrap(),
         0
     );
+}
+
+#[test]
+fn v3_migration_preserves_inventory_tables_slots_and_retry_history() {
+    let dir = TempDir::new("account-migrate");
+    let repo = SqliteRepository::open_owned_directory(&dir.0).unwrap();
+    table_contract(&repo);
+    let a = account(71);
+    let saved = repo.snapshot(a).unwrap();
+    let conn = rusqlite::Connection::open(repo.path(a)).unwrap();
+    conn.execute_batch("DROP TABLE identity_state; DROP TABLE entitlement_state; DROP TABLE kickback_state; DROP TABLE speedwall_state; DROP TABLE user_settings; PRAGMA user_version=3;").unwrap();
+    drop(conn);
+    assert_eq!(repo.open(a).unwrap(), saved);
+    assert!(
+        repo.apply(
+            a,
+            &batch(
+                2,
+                1,
+                vec![Op::SetTable(
+                    u32::MAX,
+                    nfs_storage::tables::Table::default()
+                )]
+            ),
+            now(4)
+        )
+        .unwrap()
+        .replayed
+    );
+    let services = nfs_storage::account::Repository::open_owned_directory(&dir.0).unwrap();
+    for kind in nfs_storage::account::Kind::ALL {
+        assert!(services.read(a, kind).unwrap().is_none());
+    }
 }
 
 fn owner_graph(repo: &dyn InventoryRepository) {

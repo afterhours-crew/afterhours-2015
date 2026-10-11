@@ -1,4 +1,5 @@
 [package]
+workspace = "../.."
 name = "nfs-services"
 version = "0.1.0"
 description = "State-owned local control, inventory and persistent-table services"
