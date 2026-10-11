@@ -315,7 +315,14 @@ fn return_handlers_publish_valid_frames_restore_loading_and_allow_three_exits() 
                 }
             }
         }
-        returns.poll(cycle * 8000 + 7500).unwrap();
+        let stops = returns.poll(cycle * 8000 + 7500).unwrap();
+        assert_eq!(stops.len(), 1);
+        // The timed Stop must pass the same endpoint validation as creation.
+        for stop in &stops {
+            transport
+                .queue_replication_after(empty_section(), vec![HostRpc::SequenceStop(*stop)])
+                .unwrap();
+        }
         let completion = Completed {
             sequence: returns.ghost(participant).unwrap(),
             participant,
@@ -348,6 +355,12 @@ fn return_handlers_publish_valid_frames_restore_loading_and_allow_three_exits() 
         assert!(
             nfs_world::session::replication_frame(&section, &rpcs, 0)
                 .is_ok_and(|wire| wire.len() <= nfs_world::application::OUTBOUND_FRAME_BITS)
+        );
+        assert_eq!(
+            transport.queue_rpc(HostRpc::SequenceStop(stops[0])),
+            Err(nfs_world::session::Error::Replication(
+                replication::Error::UnknownObject
+            ))
         );
         assert_eq!(lifecycle.stage(participant), Some(Stage::LoadingGarage));
         assert_eq!(players.objects().len(), count);
