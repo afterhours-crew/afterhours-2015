@@ -37,6 +37,7 @@ let items = prepared.path(nfs_content::Kind::ItemContent);
 | `WorldContent` | `world-content.json` | Installed startup names, parent relationships, traffic slot order and registry-resolved roles, with authored AllDrive host policy |
 | `GarageLayout` | `garage-layout.json` | Main garage slot links, locator transforms and persistent inventory-slot bindings, with graph-derived serializer positions |
 | `VehicleParts` | `vehicle-parts.json` | Item-system customization, tuning assets, NOS variants, wheel geometry, wrap/plate identifiers and mesh GUID alternatives |
+| `VehicleProfiles` | `vehicle-profiles.json` | Player vehicle blueprints reached through the item system: component profiles, mesh-link order, bus flags, registry identities, physics, appearance and health defaults |
 | `WorldMacTemplate` | `world-mac-template.bin` | 64 bytes of the executable image at the build's known address, checked by digest |
 
 Derived defaults are the stored 32-bit patterns of each class's same-named
@@ -72,7 +73,7 @@ scene content key (djb2-xor of its lower-cased path), its asset catalog
 (Blueprint objects in `<bundle>_networkregistry_win32`, counted by class ID)
 and asset references (class ID and position in registry order). A Blueprint
 class without a profiled ID is an error, never a guess. These are inputs for
-world, garage and progression content. Vehicle entity layouts and progression
+world, garage, vehicle and progression content. Progression construction
 definitions are still supplied separately.
 
 ## Vehicle parts
@@ -88,8 +89,24 @@ Unknown classes, missing or mistyped required fields, unresolved transmission
 assets, duplicate definitions, nonfinite geometry and model bounds fail preparation.
 The catalogs have at most 16,384 definitions, individual alternatives at most 256,
 and the document at most 16 MiB. The installed item system, rather than a list of
-known cars or parts, determines membership. Vehicle entity profiles are a separate
-input until their construction order can be generated.
+known cars or parts, determines membership.
+
+## Vehicle profiles
+
+The builder follows each player vehicle item's reference to its blueprint bundle.
+Traffic vehicles use a separate constructor and are outside this catalog. Entity
+serializers follow component preorder under the selected build's class rules;
+mesh components follow explicit blueprint links from the mesh-network component.
+Sound graphs are outside the entity-bus traversal. Unknown classes, cycles,
+duplicate mesh targets, unresolved references and invalid defaults fail preparation.
+
+Generated version-2 profiles use the same parser as the server. Part definitions
+remain in `vehicle-parts.json`. There are at most 512 profiles, 512 serializers and
+128 mesh components per profile, with a 16 MiB document limit. No car-specific
+profile array, mesh list, tuning value or account identity is embedded in code.
+The codec preserves spoiler values, but initial state for spoiler and light
+extras remains unsupported. Generating a profile does not establish live support
+for every vehicle or customization combination.
 
 ## Startup sub-levels
 

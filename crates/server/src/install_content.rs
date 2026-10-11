@@ -30,6 +30,7 @@ pub struct Generated {
     pub world_content: PathBuf,
     pub garage_layout: PathBuf,
     pub vehicle_parts: PathBuf,
+    pub vehicle_profiles: PathBuf,
     pub world_mac_template: PathBuf,
     pub prepared: Prepared,
 }
@@ -73,6 +74,7 @@ pub fn resolve(
         world_content: prepared.path(Kind::WorldContent),
         garage_layout: prepared.path(Kind::GarageLayout),
         vehicle_parts: prepared.path(Kind::VehicleParts),
+        vehicle_profiles: prepared.path(Kind::VehicleProfiles),
         world_mac_template: prepared.path(Kind::WorldMacTemplate),
         prepared,
     })
@@ -114,6 +116,12 @@ mod tests {
         let items = crate::item_content::ItemContent::load(&first.item_content).unwrap();
         assert!(items.inventory().is_some());
         nfs_content::vehicle_parts::Catalog::load(&first.vehicle_parts, &items.catalog).unwrap();
+        crate::vehicle_content::Content::load_with_parts(
+            &first.vehicle_profiles,
+            &items.catalog,
+            Some(&first.vehicle_parts),
+        )
+        .unwrap();
         crate::persistent::Catalog::load(&first.persistent_content).unwrap();
         nfs_services::stats::Catalog::load(&first.stat_definitions).unwrap();
         nfs_services::item_licenses::Content::load(&first.item_licenses).unwrap();

@@ -80,7 +80,7 @@ fn builds_outputs_the_service_loaders_accept() {
     );
     assert_eq!(parts["parts"]["appearance"][0]["version"], 2);
     let scenes = scenes::Catalog::load(&prepared.path(Kind::SceneCatalog)).unwrap();
-    assert_eq!(scenes.profiles.profiles().count(), 20);
+    assert_eq!(scenes.profiles.profiles().count(), 21);
     assert!(scenes.profiles.profile(1).unwrap().is_root());
     assert_eq!(
         scenes
@@ -213,7 +213,116 @@ fn changed_construction_rules_do_not_reuse_an_installation_cache() {
         fingerprint(&install.game(), &changed_exit).unwrap()
     );
     assert!(prepare(&install.game(), &install.cache(), &changed_exit).is_err());
+    let mut changed_vehicles = install.options();
+    changed_vehicles.identity.vehicles.mesh_link ^= 1;
+    assert_ne!(
+        first.fingerprint,
+        fingerprint(&install.game(), &changed_vehicles).unwrap()
+    );
+    assert!(prepare(&install.game(), &install.cache(), &changed_vehicles).is_err());
     assert!(!install.prepare().unwrap().built);
+}
+
+#[test]
+fn vehicle_profiles_follow_components_links_and_installed_defaults() {
+    let install = install_with(&assets());
+    let prepared = install.prepare().unwrap();
+    let json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(prepared.path(Kind::VehicleProfiles)).unwrap())
+            .unwrap();
+    let rows = json["vehicles"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    let definition = vehicle_profiles::Definition::from_json(row).unwrap();
+    assert_eq!(definition.blueprint, synthetic::vehicles::BLUEPRINT);
+    assert_eq!(definition.asset_type, 20);
+    assert_eq!(definition.asset_index, 0);
+    assert_eq!(
+        row["definitions"],
+        serde_json::json!([nfs_frostbite::hex(&guid(0x83))])
+    );
+    assert_eq!(
+        row["parts"],
+        serde_json::json!([{"ordinal":2,"variants":2,"networkable":true}])
+    );
+    assert_eq!(
+        row["profile"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["kind"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "root",
+            "chassis",
+            "part",
+            "triple_nibbles",
+            "bool",
+            "wheel",
+            "wheel",
+            "wheel",
+            "wheel",
+            "index",
+            "tuning",
+            "appearance",
+            "four_bit",
+            "tagged",
+            "nibbles_guid",
+            "mesh",
+            "guid_float"
+        ]
+    );
+    // Link order is rim, base; the component graph has base before rim.
+    assert_eq!(row["meshes"][0]["extra"], "rim");
+    assert_eq!(
+        row["meshes"][0]["variants"][0]["bundle"],
+        "parts/synthetic/rims"
+    );
+    assert_eq!(row["meshes"][1]["extra"], "none");
+    assert!(row["meshes"][1]["variants"][0]["bundle"].is_null());
+    assert_eq!(row["meshes"][1]["variants"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        row["buses"],
+        serde_json::json!([{"path":[],"flags":1},{"path":[0,17],"flags":0}])
+    );
+    assert_eq!((definition.team, definition.mode), (1, 2));
+    assert_eq!(definition.resting.mass, 1000.);
+    assert_eq!(definition.resting.front.spring_rate, 120.);
+    assert_eq!(definition.resting.rear.spring_progression, 1.5);
+    assert_eq!(definition.wheel_baseline, [0.5, 0.625]);
+    assert_eq!(definition.appearance.palettes[1][2], [0.75, 0.25, 0.75]);
+    assert_eq!(definition.appearance.static_wrap_counts, Some([2, 3]));
+    assert_eq!(
+        row["health"]["profile"]["points"],
+        serde_json::json!([70, 30])
+    );
+}
+
+#[test]
+fn vehicle_profiles_reject_ambiguous_missing_and_cyclic_graphs() {
+    use synthetic::{Field, vehicles};
+    for case in 0..7 {
+        let replacement = vehicles::assets_with(|fields, objects| match case {
+            0 => objects[3].0 = "UnrecognizedComponentData",
+            1 => objects[1].1.push(("Object", Field::RawPointer(2))),
+            2 => objects[0].1[1].1 = Field::RawPointers(vec![0, 3]),
+            3 => {
+                let Field::Structs(_, links) = &mut fields[3].1 else {
+                    panic!()
+                };
+                links.push(links[0].clone());
+            }
+            4 => fields[3].1 = Field::Structs("LinkConnection", vec![]),
+            5 => objects[18].1[0].1 = Field::Int(0),
+            6 => objects[1].1.push(("Excluded", Field::Bool(true))),
+            _ => unreachable!(),
+        });
+        let mut fixture = assets();
+        fixture.retain(|a| !replacement.iter().any(|b| a.name == b.name));
+        fixture.extend(replacement);
+        let error = install_with(&fixture).prepare().unwrap_err();
+        assert!(matches!(error, Error::Content(_)), "case {case}: {error:?}");
+    }
 }
 
 #[test]

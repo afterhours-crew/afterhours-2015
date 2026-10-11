@@ -191,6 +191,10 @@ fn mesh_read(r: &mut Reader<'_>, profile: &[MeshKind]) -> Result<MeshCustomizati
         let extra = match k.extra {
             MeshExtra::None => MeshValue::None,
             MeshExtra::Light => MeshValue::Light(r.take(32)?),
+            MeshExtra::Spoiler => MeshValue::Spoiler {
+                normalized: r.take(16)? as u16,
+                selector: r.take(8)? as u8,
+            },
             MeshExtra::Rim => MeshValue::Rim {
                 first: signed(r, 9)? as i16,
                 middle: r.take(9)? as u16,
@@ -220,6 +224,16 @@ fn mesh_write(w: &mut Writer, profile: &[MeshKind], v: &MeshCustomization) -> Re
         match (&m.extra, k.extra) {
             (MeshValue::None, MeshExtra::None) => (),
             (MeshValue::Light(value), MeshExtra::Light) => w.put(u64::from(*value), 32)?,
+            (
+                MeshValue::Spoiler {
+                    normalized,
+                    selector,
+                },
+                MeshExtra::Spoiler,
+            ) => {
+                w.put(u64::from(*normalized), 16)?;
+                w.put(u64::from(*selector), 8)?;
+            }
             (
                 MeshValue::Rim {
                     first,
@@ -448,4 +462,66 @@ pub(super) fn update_write(w: &mut Writer, k: &Kind, v: &Update) -> Result<(), E
         _ => return Err(Error::TypeMismatch),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod mesh_tests {
+    use super::*;
+    #[test]
+    fn spoiler_packed_value_preserves_alignment_and_rejects_truncation() {
+        // Five unrelated bits, signed 3-bit index -1, normalized u16 0x1234,
+        // selector 0x56, signed 2-bit index 1, one asset reference 0x2345.
+        let bytes = [0xaf, 0x12, 0x34, 0x56, 0x40, 0, 0x48, 0xd1, 0x40];
+        let profile = [
+            MeshKind {
+                index_bits: 3,
+                extra: MeshExtra::Spoiler,
+            },
+            MeshKind {
+                index_bits: 2,
+                extra: MeshExtra::None,
+            },
+        ];
+        let span = BitSpan::new(&bytes, 5, 61).unwrap();
+        let mut reader = Reader { span, pos: 0 };
+        let value = mesh_read(&mut reader, &profile).unwrap();
+        assert_eq!(reader.pos, 61);
+        assert_eq!(
+            value,
+            MeshCustomization {
+                meshes: vec![
+                    Mesh {
+                        index: -1,
+                        extra: MeshValue::Spoiler {
+                            normalized: 0x1234,
+                            selector: 0x56
+                        }
+                    },
+                    Mesh {
+                        index: 1,
+                        extra: MeshValue::None
+                    }
+                ],
+                assets: vec![0x2345]
+            }
+        );
+        let mut writer = Writer(BitWriter::new());
+        writer.put(0b10101, 5).unwrap();
+        mesh_write(&mut writer, &profile, &value).unwrap();
+        assert_eq!(writer.0.len(), 66);
+        assert_eq!(writer.0.bytes(), bytes);
+        for bits in 0..61 {
+            let mut reader = Reader {
+                span: BitSpan::new(&bytes, 5, bits).unwrap(),
+                pos: 0,
+            };
+            assert_eq!(mesh_read(&mut reader, &profile), Err(Error::Truncated));
+        }
+        let mut wrong = value;
+        wrong.meshes[0].extra = MeshValue::Light(0);
+        assert_eq!(
+            mesh_write(&mut Writer(BitWriter::new()), &profile, &wrong),
+            Err(Error::TypeMismatch)
+        );
+    }
 }

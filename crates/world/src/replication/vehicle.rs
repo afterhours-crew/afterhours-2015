@@ -40,6 +40,7 @@ pub enum MeshExtra {
     None,
     Rim,
     Light,
+    Spoiler,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MeshKind {
@@ -227,8 +228,17 @@ pub struct Appearance {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MeshValue {
     None,
-    Rim { first: i16, middle: u16, last: i16 },
+    Rim {
+        first: i16,
+        middle: u16,
+        last: i16,
+    },
     Light(u32),
+    /// Normalized 16-bit value followed by an 8-bit selector, kept losslessly.
+    Spoiler {
+        normalized: u16,
+        selector: u8,
+    },
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Mesh {

@@ -10,6 +10,7 @@ use crate::{BuildIdentity, Limits, Options, sha256_hex};
 pub use nfs_frostbite::synthetic::{Asset, Field, PartitionWriter};
 use nfs_services::persistent::required_tables;
 use std::path::Path;
+pub mod vehicles;
 
 pub const TEMPLATE_RVA: u32 = 0x1010;
 /// Made-up class IDs for synthetic installations.
@@ -156,6 +157,7 @@ pub fn vehicle(plate: &str) -> Asset {
         vec![2],
         vec![
             ("DefaultPaint", vector(0.025, 0.11, 0.6)),
+            ("RaceVehicle", vehicles::import(1)),
             ("Material", vector(0.76, 0.73, 1.0)),
             ("TopSpeedMPH", Field::Int(155)),
             ("WindowTint", Field::Float(0.9)),
@@ -228,6 +230,7 @@ pub fn assets() -> Vec<Asset> {
     assets.extend(entitlements());
     assets.extend(speedwalls());
     assets.extend(reputation(vec![0, 13, 57]));
+    assets.extend(vehicles::assets());
     assets
 }
 
@@ -873,6 +876,7 @@ pub fn write(root: &Path, assets: &[Asset]) -> std::io::Result<(Options, [u8; 64
                 .map(|(c, id)| (c.to_string(), *id))
                 .collect(),
             garage_links: garage_links(),
+            vehicles: vehicles::rules(),
             scenes: crate::scenes::Rules {
                 level: RUNTIME_LEVEL.to_owned(),
                 classes: [

@@ -33,6 +33,7 @@ mod stats;
 pub mod synthetic;
 mod tables;
 pub mod vehicle_parts;
+pub mod vehicle_profiles;
 pub mod world;
 
 pub use fingerprint::{Fingerprint, Input, InputKind, fingerprint};
@@ -46,7 +47,7 @@ pub const FORMAT: &str = "nfs-install-content";
 pub const VERSION: u64 = 1;
 /// Increment whenever a builder's output for an unchanged installation changes,
 /// so existing cache entries are rebuilt.
-pub const BUILDER_REVISION: u64 = 10;
+pub const BUILDER_REVISION: u64 = 11;
 /// Executable file name relative to the installation root.
 pub const EXECUTABLE: &str = "NFS16.exe";
 
@@ -62,6 +63,7 @@ pub struct BuildIdentity {
     /// Server scene construction rules tied to this executable.
     pub scenes: scenes::Rules,
     pub garage_links: garage::Links,
+    pub vehicles: vehicle_profiles::Rules,
 }
 
 impl BuildIdentity {
@@ -102,10 +104,12 @@ pub enum Kind {
     WorldMacTemplate,
     /// Vehicle customization, wheel, wrap, NOS and mesh item definitions.
     VehicleParts,
+    /// Vehicle composition, static physics, appearance, mesh and health inputs.
+    VehicleProfiles,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 11] = [
+    pub const ALL: [Kind; 12] = [
         Kind::ItemContent,
         Kind::PersistentContent,
         Kind::StatDefinitions,
@@ -117,6 +121,7 @@ impl Kind {
         Kind::GarageLayout,
         Kind::WorldMacTemplate,
         Kind::VehicleParts,
+        Kind::VehicleProfiles,
     ];
     /// Manifest key.
     pub fn key(self) -> &'static str {
@@ -132,6 +137,7 @@ impl Kind {
             Self::GarageLayout => "garage_layout",
             Self::WorldMacTemplate => "world_mac_template",
             Self::VehicleParts => "vehicle_parts",
+            Self::VehicleProfiles => "vehicle_profiles",
         }
     }
     /// File name inside a cache entry.
@@ -148,6 +154,7 @@ impl Kind {
             Self::GarageLayout => "garage-layout.json",
             Self::WorldMacTemplate => "world-mac-template.bin",
             Self::VehicleParts => "vehicle-parts.json",
+            Self::VehicleProfiles => "vehicle-profiles.json",
         }
     }
 }
@@ -280,6 +287,10 @@ pub fn build(
     let mut index = assets::AssetIndex::from_assets(assets, options.identity.clone());
     outputs.insert(Kind::WorldContent, startup::build(&mut index, &catalog)?);
     outputs.insert(Kind::GarageLayout, garage::build(&mut index)?);
+    outputs.insert(
+        Kind::VehicleProfiles,
+        vehicle_profiles::build(&mut index, &item_content.catalog)?,
+    );
     outputs.insert(
         Kind::WorldMacTemplate,
         executable::mac_template(&game_root.join(EXECUTABLE), &options.identity)?,

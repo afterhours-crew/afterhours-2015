@@ -12,7 +12,7 @@ use std::{collections::BTreeMap, fs::File, io::Read, path::Path, sync::Arc};
 
 pub mod layout;
 mod parse;
-mod parts;
+
 pub mod population;
 pub mod registrations;
 
@@ -26,24 +26,7 @@ pub struct GarageContent {
     pub vehicles: Content,
     pub layout: layout::Layout,
 }
-#[derive(Clone, Debug)]
-pub struct Definition {
-    pub blueprint: String,
-    pub bundle: String,
-    pub asset_type: u16,
-    pub asset_index: u16,
-    pub catalog: Vec<(u16, u16)>,
-    pub profile: Profile,
-    root: root::Blueprint,
-    resting: placement::RestingConfig,
-    team: u8,
-    mode: u8,
-    parts: BTreeMap<usize, bool>,
-    wheel_baseline: [f32; 2],
-    appearance: appearance::Defaults,
-    meshes: Vec<mesh::Component>,
-    health: health::State,
-}
+pub use nfs_content::vehicle_profiles::Definition;
 
 #[derive(Clone, Debug)]
 pub struct Content {

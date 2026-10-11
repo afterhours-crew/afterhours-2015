@@ -227,18 +227,18 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
     if progression_content.is_some() && !has_persistent {
         return Err("--progression-content requires --persistent-content".into());
     }
-    if (vehicle_content.is_some() || garage_layout.is_some())
-        && !(vehicle_content.is_some()
+    if (vehicle_content.is_some() || garage_layout.is_some() || generated)
+        && !((vehicle_content.is_some() || generated)
             && (garage_layout.is_some() || generated)
             && progression_content.is_some()
             && (world_content.is_some() || generated))
     {
         return Err("Vehicles require --vehicle-content, --garage-layout, --world-content and --progression-content".into());
     }
-    if vehicle_parts.is_some() && vehicle_content.is_none() {
+    if vehicle_parts.is_some() && vehicle_content.is_none() && !generated {
         return Err("--vehicle-parts requires --vehicle-content".into());
     }
-    if sequence_content.is_some() && vehicle_content.is_none() {
+    if sequence_content.is_some() && vehicle_content.is_none() && !generated {
         return Err(
             "--sequence-content requires the owned vehicle/progression configuration".into(),
         );
@@ -331,6 +331,8 @@ fn resolve_install_content(args: &mut Args, options: &nfs_content::Options) -> R
     args.world_content.get_or_insert(generated.world_content);
     args.garage_layout.get_or_insert(generated.garage_layout);
     args.vehicle_parts.get_or_insert(generated.vehicle_parts);
+    args.vehicle_content
+        .get_or_insert(generated.vehicle_profiles);
     args.world_mac_template = Some(generated.world_mac_template);
     Ok(())
 }
@@ -847,6 +849,15 @@ mod tests {
         let mut cached = args.clone();
         cached.extend(["--content-cache".into(), "cache".into()]);
         assert!(parse_from(cached.into_iter()).is_ok());
+        let missing_progression = without(
+            args.clone(),
+            &[
+                "--vehicle-content",
+                "--garage-layout",
+                "--progression-content",
+            ],
+        );
+        assert!(parse_from(missing_progression.into_iter()).is_err());
         for flag in [
             "--item-content",
             "--persistent-content",
@@ -872,7 +883,10 @@ mod tests {
                 .unwrap();
         let with_game = |game: &str| {
             let mut args = without(configured(), &GENERATED);
-            args = without(args, &["--world-content", "--garage-layout"]);
+            args = without(
+                args,
+                &["--world-content", "--garage-layout", "--vehicle-content"],
+            );
             args.extend([
                 "--root".into(),
                 dir.clone().into_os_string(),
@@ -888,6 +902,7 @@ mod tests {
         assert!(items.exists());
         assert!(parsed.persistent_content.as_ref().unwrap().exists());
         assert!(parsed.vehicle_parts.as_ref().unwrap().exists());
+        assert!(parsed.vehicle_content.as_ref().unwrap().exists());
         let stats = parsed.stat_definitions.as_ref().unwrap();
         nfs_services::stats::Catalog::load(stats).unwrap();
         nfs_services::item_licenses::Content::load(parsed.item_licenses.as_ref().unwrap()).unwrap();
@@ -942,6 +957,10 @@ mod tests {
         assert_eq!(
             explicit.vehicle_parts,
             Some(PathBuf::from("authored-parts.json"))
+        );
+        assert_eq!(
+            explicit.vehicle_content,
+            Some(PathBuf::from("configured-input"))
         );
         assert_eq!(
             explicit.world_content,
