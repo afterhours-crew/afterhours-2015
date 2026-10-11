@@ -58,89 +58,98 @@ fn names_of(value: Option<&Value>) -> Vec<String> {
 }
 
 impl AssetIndex {
-    /// Startup entries of the level whose `LevelData` asset is `level`
-    /// (for example `levels/Genesis01/Genesis01`).
+    /// Installed startup order under the selected level.
     pub fn startup_entries(&mut self, level: &str) -> Result<Vec<StartupEntry>, Error> {
-        let root = level.to_lowercase();
-        let root_class = self.objects(&root)?.first().map(|o| o.class.clone());
-        if root_class.as_deref() != Some("LevelData") {
-            return Err(Error::Content(format!("{level} is not a level")));
+        startup_entries(&mut self.assets, level)
+    }
+}
+
+/// Startup entries of the level whose `LevelData` asset is `level`
+/// (for example `levels/Genesis01/Genesis01`).
+pub(crate) fn startup_entries(
+    assets: &mut crate::scan::Assets,
+    level: &str,
+) -> Result<Vec<StartupEntry>, Error> {
+    let root = level.to_lowercase();
+    let root_class = assets.objects(&root)?.first().map(|o| o.class.clone());
+    if root_class.as_deref() != Some("LevelData") {
+        return Err(Error::Content(format!("{level} is not a level")));
+    }
+    let mut entries: Vec<StartupEntry> = Vec::new();
+    let mut scenes = Vec::new();
+    let mut visited = BTreeSet::from([root.clone()]);
+    let mut queue = VecDeque::from([(root, None)]);
+    while let Some((asset, me)) = queue.pop_front() {
+        scenes.push(asset.clone());
+        for object in assets.objects(&asset)?.to_vec() {
+            if object.class != "SubWorldReferenceObjectData"
+                || !flag(&object, "AutoLoad")
+                || !flag(&object, "IsWin32SubLevel")
+            {
+                continue;
+            }
+            let name = object
+                .fields
+                .get("BundleName")
+                .and_then(Value::as_str)
+                .filter(|n| !n.is_empty())
+                .ok_or_else(|| Error::Content(format!("{asset}: sub-level without a name")))?
+                .to_owned();
+            let key = name.to_lowercase();
+            if !visited.insert(key.clone()) {
+                return Err(Error::Content(format!("{name} is referenced twice")));
+            }
+            entries.push(StartupEntry {
+                name,
+                parent: me,
+                kind: StartupKind::SubLevel,
+            });
+            if entries.len() > MAX_STARTUP_ENTRIES {
+                return Err(Error::Content("too many startup entries".into()));
+            }
+            queue.push_back((key, Some(entries.len() - 1)));
         }
-        let mut entries: Vec<StartupEntry> = Vec::new();
-        let mut scenes = Vec::new();
-        let mut visited = BTreeSet::from([root.clone()]);
-        let mut queue = VecDeque::from([(root, None)]);
-        while let Some((asset, me)) = queue.pop_front() {
-            scenes.push(asset.clone());
-            for object in self.objects(&asset)? {
-                if object.class != "SubWorldReferenceObjectData"
-                    || !flag(&object, "AutoLoad")
-                    || !flag(&object, "IsWin32SubLevel")
-                {
-                    continue;
+    }
+    let (mut preloads, mut blueprints) = (Vec::new(), Vec::new());
+    for scene in &scenes {
+        for object in assets.objects(scene)?.to_vec() {
+            if object.class != "WorldPartReferenceObjectData" {
+                continue;
+            }
+            let (layer, _) =
+                assets.resolve(object.fields.get("Blueprint").and_then(Value::as_pointer))?;
+            for item in assets.objects(&layer)? {
+                match item.class.as_str() {
+                    "BundlePreLoadEntityData" => {
+                        preloads.extend(names_of(item.fields.get("BundlesToLoad")))
+                    }
+                    "BlueprintBundleEntityData" => {
+                        blueprints.extend(names_of(item.fields.get("Bundle")))
+                    }
+                    _ => {}
                 }
-                let name = object
-                    .fields
-                    .get("BundleName")
-                    .and_then(Value::as_str)
-                    .filter(|n| !n.is_empty())
-                    .ok_or_else(|| Error::Content(format!("{asset}: sub-level without a name")))?
-                    .to_owned();
-                let key = name.to_lowercase();
-                if !visited.insert(key.clone()) {
-                    return Err(Error::Content(format!("{name} is referenced twice")));
-                }
+            }
+        }
+    }
+    let mut seen: BTreeSet<String> = entries.iter().map(|e| e.name.to_lowercase()).collect();
+    for (names, kind) in [
+        (preloads, StartupKind::PreloadBundle),
+        (blueprints, StartupKind::BlueprintBundle),
+    ] {
+        for name in names {
+            if seen.insert(name.to_lowercase()) {
                 entries.push(StartupEntry {
                     name,
-                    parent: me,
-                    kind: StartupKind::SubLevel,
+                    parent: None,
+                    kind,
                 });
-                if entries.len() > MAX_STARTUP_ENTRIES {
-                    return Err(Error::Content("too many startup entries".into()));
-                }
-                queue.push_back((key, Some(entries.len() - 1)));
             }
         }
-        let (mut preloads, mut blueprints) = (Vec::new(), Vec::new());
-        for scene in &scenes {
-            for object in self.objects(scene)? {
-                if object.class != "WorldPartReferenceObjectData" {
-                    continue;
-                }
-                let (layer, _) = self.resolve_import(object.fields.get("Blueprint"))?;
-                for item in self.objects(&layer)? {
-                    match item.class.as_str() {
-                        "BundlePreLoadEntityData" => {
-                            preloads.extend(names_of(item.fields.get("BundlesToLoad")))
-                        }
-                        "BlueprintBundleEntityData" => {
-                            blueprints.extend(names_of(item.fields.get("Bundle")))
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-        let mut seen: BTreeSet<String> = entries.iter().map(|e| e.name.to_lowercase()).collect();
-        for (names, kind) in [
-            (preloads, StartupKind::PreloadBundle),
-            (blueprints, StartupKind::BlueprintBundle),
-        ] {
-            for name in names {
-                if seen.insert(name.to_lowercase()) {
-                    entries.push(StartupEntry {
-                        name,
-                        parent: None,
-                        kind,
-                    });
-                }
-            }
-        }
-        if entries.len() > MAX_STARTUP_ENTRIES {
-            return Err(Error::Content("too many startup entries".into()));
-        }
-        Ok(entries)
     }
+    if entries.len() > MAX_STARTUP_ENTRIES {
+        return Err(Error::Content("too many startup entries".into()));
+    }
+    Ok(entries)
 }
 
 #[cfg(test)]

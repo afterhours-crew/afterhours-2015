@@ -198,6 +198,7 @@ version = "0.1.0"
 dependencies = [
  "nfs-frostbite",
  "nfs-services",
+ "nfs-world",
  "nfs-world-core",
  "serde_json",
  "sha2",

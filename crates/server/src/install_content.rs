@@ -26,6 +26,7 @@ pub struct Generated {
     pub item_licenses: PathBuf,
     pub control_catalogs: PathBuf,
     pub reputation_thresholds: PathBuf,
+    pub scene_catalog: PathBuf,
     pub world_mac_template: PathBuf,
     pub prepared: Prepared,
 }
@@ -65,6 +66,7 @@ pub fn resolve(
         item_licenses: prepared.path(Kind::ItemLicenses),
         control_catalogs: prepared.path(Kind::ControlCatalogs),
         reputation_thresholds: prepared.path(Kind::ReputationThresholds),
+        scene_catalog: prepared.path(Kind::SceneCatalog),
         world_mac_template: prepared.path(Kind::WorldMacTemplate),
         prepared,
     })
@@ -109,6 +111,7 @@ mod tests {
         nfs_services::stats::Catalog::load(&first.stat_definitions).unwrap();
         nfs_services::item_licenses::Content::load(&first.item_licenses).unwrap();
         nfs_services::control_catalogs::Catalog::load(&first.control_catalogs).unwrap();
+        nfs_content::scenes::Catalog::load(&first.scene_catalog).unwrap();
         assert_eq!(std::fs::read(&first.world_mac_template).unwrap().len(), 64);
         let second = resolve(&dir.0, Path::new("game"), None, &options).unwrap();
         assert!(!second.prepared.built);

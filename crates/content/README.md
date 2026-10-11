@@ -16,6 +16,7 @@ let items = prepared.path(nfs_content::Kind::ItemContent);
    plus consumed bundle-manifest and EBX record ranges (including delta bases).
    Warm starts rehash these ranges; unrelated texture/audio records are skipped.
    Manifest inputs identify whole-file digests or domain-separated range digests.
+   The fingerprint also covers the selected build profile and construction rules.
 2. Returns `<cache>/<fingerprint>/` when its `manifest.json` names the same
    fingerprint and builder revision and every output digest matches.
 3. Otherwise reads the installation with `nfs-frostbite`, builds every output
@@ -32,6 +33,7 @@ let items = prepared.path(nfs_content::Kind::ItemContent);
 | `ItemLicenses` | `item-licenses.json` | License names from the client's active Win32 `EntitlementQuery` assets; version 2 recognizes subsets without granting items |
 | `ControlCatalogs` | `control-catalogs.json` | `SpeedWallAsset` categories and their referenced `GameModeId.IdHash` values, plus local AllDrive menu policy |
 | `ReputationThresholds` | `reputation-thresholds.json` | `IntScoreToIntLevelAsset.LevelThresholds`, following the reputation calculator's asset reference |
+| `SceneCatalog` | `scene-catalog.json` | Ordered scene composition, class construction rules and installed vehicle bundles; no instance state |
 | `WorldMacTemplate` | `world-mac-template.bin` | 64 bytes of the executable image at the build's known address, checked by digest |
 
 Derived defaults are the stored 32-bit patterns of each class's same-named
@@ -57,7 +59,7 @@ scores. It can supply thresholds omitted from the server's garage-logic document
 Identifiers that belong to one executable build and cannot be read from the
 installed data files live in [`builds/`](builds/README.md), one JSON file per
 build: the executable digest, the MAC template's address and digest, and the
-runtime class IDs of Blueprint classes. `BuildIdentity::supported()` loads the
+runtime class IDs of Blueprint classes, and server scene construction rules. `BuildIdentity::supported()` loads the
 profile of the build the loaders accept; adding a build means adding its file.
 
 ## Asset identities
@@ -67,7 +69,8 @@ scene content key (djb2-xor of its lower-cased path), its asset catalog
 (Blueprint objects in `<bundle>_networkregistry_win32`, counted by class ID)
 and asset references (class ID and position in registry order). A Blueprint
 class without a profiled ID is an error, never a guess. These are inputs for
-world, garage and progression content, which are not generated yet.
+world, garage and progression content. Registrations, roles, vehicle entity layouts
+and progression definitions are still supplied separately.
 
 ## Startup sub-levels
 
@@ -75,8 +78,7 @@ world, garage and progression content, which are not generated yet.
 registers when the level starts: auto-loaded Win32 sub-levels walked
 breadth-first from the `LevelData` (with parents), then bundle preloads and
 blueprint bundles from those scenes' layers. Sibling order is the server's
-choice; it only has to be used consistently for level IDs. Scene profiles
-and launcher serializer lists are not derived yet.
+choice; it only has to be used consistently for level IDs.
 
 Tests build synthetic installations (`nfs-frostbite` `synthetic` feature) and
 cover loader acceptance, cache reuse, damaged and foreign entries, changed
@@ -84,3 +86,25 @@ installations, unsupported executables, wrong template location or digest,
 missing assets and tables, dangling references and invalid field values. They
 do not establish that a client accepts content built from a real installation;
 that comparison and live validation happen outside this repository.
+
+## Scene catalog
+
+The builder starts at the build profile's level, follows its startup sub-levels,
+and visits construction edges in order: Objects, Object, Components, Blueprint.
+Internal and imported pointers retain their instance identity. Repeated prefab
+occurrences contribute separately; an active-path cycle is an error. Limits are
+32 edges of depth, 50,000 visited objects per scene, 512 serializers per scene,
+256 profiles, and a 2 MiB catalog. Unknown classes and malformed graph fields
+fail preparation; known classes without a server serializer are explicit null
+rules in the build profile.
+
+Blueprint bundles have a common no-op scene owner. Their blueprint instances
+belong to separate entity replication. Startup bundle references and every
+installed bundle targeting a RaceVehicleBlueprint are discovered from assets.
+The catalog includes launcher indexes derived from class roles and graph order.
+It contains no scene-specific index tables, player identities or captured values.
+
+The server accepts this catalog with version 5 world configuration, allowing
+scene_profiles and launchers to be omitted. It still requires registration
+batches, scene roles and the other garage inputs. Generation and portable tests
+do not establish live game or offline-play acceptance.

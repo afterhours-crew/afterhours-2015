@@ -351,7 +351,7 @@ fn scene(
 /// A level with sub-levels Alpha (child Gamma), Off (not auto-loaded) and
 /// Beta; the root layer has two blueprint bundles, Alpha's layer a preload.
 pub fn level() -> Vec<Asset> {
-    vec![
+    let mut assets = vec![
         scene(
             0xC0,
             LEVEL,
@@ -407,7 +407,24 @@ pub fn level() -> Vec<Asset> {
                 )],
             )],
         ),
-    ]
+    ];
+    for (seed, name) in [
+        (0xD7, "vehicles/shared/parts_bundle"),
+        (0xD8, "vehicles/traffic/one_bundle"),
+        (0xD9, "vehicles/traffic/two_bundle"),
+        (0xDA, "vehicles/synthetic_bundle"),
+    ] {
+        assets.push(Asset {
+            name: name.into(),
+            partition: PartitionWriter::default().build(
+                guid(seed),
+                "BlueprintBundle",
+                guid(seed ^ 0x80),
+                vec![("Blueprint", Field::Import(guid(0x61), guid(0x71)))],
+            ),
+        });
+    }
+    assets
 }
 
 /// Bundle whose registry lists two prefabs, a vehicle and a non-Blueprint object.
@@ -517,6 +534,33 @@ pub fn write(root: &Path, assets: &[Asset]) -> std::io::Result<(Options, [u8; 64
                 .iter()
                 .map(|(c, id)| (c.to_string(), *id))
                 .collect(),
+            scenes: crate::scenes::Rules {
+                level: LEVEL.to_owned(),
+                classes: [
+                    ("LevelData", None),
+                    ("SubWorldData", None),
+                    ("WorldPartData", None),
+                    ("SubWorldReferenceObjectData", None),
+                    ("WorldPartReferenceObjectData", None),
+                    (
+                        "BlueprintBundleEntityData",
+                        Some(nfs_world::replication::sublevel::Kind::LevelReference),
+                    ),
+                    ("BundlePreLoadEntityData", None),
+                    (
+                        "SyntheticRpc",
+                        Some(nfs_world::replication::sublevel::Kind::Rpc),
+                    ),
+                    (
+                        "SyntheticBool",
+                        Some(nfs_world::replication::sublevel::Kind::BoolProperty),
+                    ),
+                ]
+                .into_iter()
+                .map(|(n, k)| (n.to_owned(), k))
+                .collect(),
+                launchers: ["SyntheticRpc".to_owned()].into(),
+            },
         },
         limits: Limits::default(),
     };

@@ -20,6 +20,40 @@ pub struct Assets {
 }
 
 impl Assets {
+    /// Resolve either kind of graph edge, retaining object identity for cycle checks.
+    pub fn target(
+        &mut self,
+        source: &str,
+        pointer: Pointer,
+    ) -> Result<Option<(String, usize)>, Error> {
+        match pointer {
+            Pointer::Null => Ok(None),
+            Pointer::Internal(index) => {
+                if index >= self.objects(source)?.len() {
+                    return Err(Error::Content(format!(
+                        "object index out of range in {source}"
+                    )));
+                }
+                Ok(Some((source.to_owned(), index)))
+            }
+            Pointer::Import {
+                partition,
+                instance,
+            } => {
+                let name =
+                    self.by_guid.get(&partition).cloned().ok_or_else(|| {
+                        Error::Content("graph reference to unknown partition".into())
+                    })?;
+                let index = self
+                    .objects(&name)?
+                    .iter()
+                    .position(|o| o.guid == Some(instance))
+                    .ok_or_else(|| Error::Content(format!("instance missing from {name}")))?;
+                Ok(Some((name, index)))
+            }
+        }
+    }
+
     pub fn scan(install: &Installation) -> Result<Self, Error> {
         let limits = *install.limits();
         let index = install.ebx_index()?;

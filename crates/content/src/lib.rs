@@ -25,6 +25,7 @@ mod items;
 mod licenses;
 mod reputation;
 mod scan;
+pub mod scenes;
 mod stats;
 #[cfg(any(test, feature = "synthetic"))]
 pub mod synthetic;
@@ -42,7 +43,7 @@ pub const FORMAT: &str = "nfs-install-content";
 pub const VERSION: u64 = 1;
 /// Increment whenever a builder's output for an unchanged installation changes,
 /// so existing cache entries are rebuilt.
-pub const BUILDER_REVISION: u64 = 5;
+pub const BUILDER_REVISION: u64 = 6;
 /// Executable file name relative to the installation root.
 pub const EXECUTABLE: &str = "NFS16.exe";
 
@@ -55,6 +56,8 @@ pub struct BuildIdentity {
     pub mac_template_sha256: String,
     /// Runtime class IDs of Blueprint classes, by class name.
     pub blueprint_class_ids: BTreeMap<String, u32>,
+    /// Server scene construction rules tied to this executable.
+    pub scenes: scenes::Rules,
 }
 
 impl BuildIdentity {
@@ -85,18 +88,21 @@ pub enum Kind {
     ControlCatalogs,
     /// Level thresholds used by reputation, Stats and awards.
     ReputationThresholds,
+    /// Installed scene serializer profiles and launcher endpoints.
+    SceneCatalog,
     /// The 64-byte world MAC template.
     WorldMacTemplate,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 7] = [
+    pub const ALL: [Kind; 8] = [
         Kind::ItemContent,
         Kind::PersistentContent,
         Kind::StatDefinitions,
         Kind::ItemLicenses,
         Kind::ControlCatalogs,
         Kind::ReputationThresholds,
+        Kind::SceneCatalog,
         Kind::WorldMacTemplate,
     ];
     /// Manifest key.
@@ -108,6 +114,7 @@ impl Kind {
             Self::ItemLicenses => "item_licenses",
             Self::ControlCatalogs => "control_catalogs",
             Self::ReputationThresholds => "reputation_thresholds",
+            Self::SceneCatalog => "scene_catalog",
             Self::WorldMacTemplate => "world_mac_template",
         }
     }
@@ -120,6 +127,7 @@ impl Kind {
             Self::ItemLicenses => "item-licenses.json",
             Self::ControlCatalogs => "control-catalogs.json",
             Self::ReputationThresholds => "reputation-thresholds.json",
+            Self::SceneCatalog => "scene-catalog.json",
             Self::WorldMacTemplate => "world-mac-template.bin",
         }
     }
@@ -233,6 +241,10 @@ pub fn build(
     outputs.insert(Kind::ItemLicenses, licenses::build(&mut assets)?);
     outputs.insert(Kind::ControlCatalogs, control::build(&mut assets)?);
     outputs.insert(Kind::ReputationThresholds, reputation::build(&mut assets)?);
+    outputs.insert(
+        Kind::SceneCatalog,
+        scenes::build(&mut assets, &options.identity.scenes)?,
+    );
     outputs.insert(
         Kind::WorldMacTemplate,
         executable::mac_template(&game_root.join(EXECUTABLE), &options.identity)?,

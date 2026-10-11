@@ -17,6 +17,44 @@ use nfs_world::{
 fn content() -> WorldContent {
     content_with(None)
 }
+
+#[test]
+fn installed_scenes_fill_version_five_without_masking_invalid_overrides() {
+    let content = content();
+    let catalog = nfs_content::scenes::Catalog {
+        level: String::from_utf8(content.level.level.clone()).unwrap(),
+        profiles: content.scene_profiles.clone().unwrap(),
+        launchers: content.launchers.clone().unwrap(),
+    };
+    let mut document = content.to_json();
+    document["version"] = serde_json::json!(5);
+    document.as_object_mut().unwrap().remove("scene_profiles");
+    document.as_object_mut().unwrap().remove("launchers");
+    assert!(WorldContent::from_json(&document).is_err());
+    let loaded = WorldContent::from_json_with_scenes(&document, Some(&catalog)).unwrap();
+    assert_eq!(loaded, content);
+    loaded.validate_runtime().unwrap();
+    let mut invalid = document.clone();
+    invalid["scene_profiles"] = serde_json::json!(null);
+    assert!(WorldContent::from_json_with_scenes(&invalid, Some(&catalog)).is_err());
+    let mut invalid = document.clone();
+    invalid["launchers"] = serde_json::json!([{"content_key":1,"serializers":[999]}]);
+    assert!(WorldContent::from_json_with_scenes(&invalid, Some(&catalog)).is_err());
+    let mut other = catalog.clone();
+    other.level = "different/level".into();
+    assert!(WorldContent::from_json_with_scenes(&document, Some(&other)).is_err());
+    // Existing complete v4 and explicit v5 documents remain authoritative.
+    let mut complete = content.to_json();
+    assert_eq!(
+        WorldContent::from_json_with_scenes(&complete, Some(&other)).unwrap(),
+        content
+    );
+    complete["version"] = serde_json::json!(5);
+    assert_eq!(
+        WorldContent::from_json_with_scenes(&complete, Some(&other)).unwrap(),
+        content
+    );
+}
 /// `spawn` adds a fifteenth scene with this field layout and names it as the
 /// SpawnPoints role.
 fn content_with(spawn: Option<&[Kind]>) -> WorldContent {

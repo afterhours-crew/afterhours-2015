@@ -70,6 +70,17 @@ fn builds_outputs_the_service_loaders_accept() {
         install.cache().join(&prepared.fingerprint.digest)
     );
     let items = ItemContent::load(&prepared.path(Kind::ItemContent)).unwrap();
+    let scenes = scenes::Catalog::load(&prepared.path(Kind::SceneCatalog)).unwrap();
+    assert_eq!(scenes.profiles.profiles().count(), 8);
+    assert!(scenes.profiles.profile(1).unwrap().is_root());
+    assert_eq!(
+        scenes
+            .profiles
+            .profile(assets::scene_key("vehicles/synthetic_bundle"))
+            .unwrap()
+            .kinds(),
+        [nfs_world::replication::sublevel::Kind::Noop]
+    );
     let json = items.to_json();
     let definitions = json["definitions"].as_array().unwrap();
     assert_eq!(definitions.len(), 5);
@@ -166,6 +177,20 @@ fn builds_outputs_the_service_loaders_accept() {
         std::fs::read(prepared.path(Kind::WorldMacTemplate)).unwrap(),
         install.template
     );
+}
+
+#[test]
+fn changed_construction_rules_do_not_reuse_an_installation_cache() {
+    let install = install_with(&assets());
+    let first = install.prepare().unwrap();
+    let mut options = install.options();
+    options.identity.scenes.level = "levels/absent".into();
+    assert_ne!(
+        first.fingerprint,
+        fingerprint(&install.game(), &options).unwrap()
+    );
+    assert!(prepare(&install.game(), &install.cache(), &options).is_err());
+    assert!(!install.prepare().unwrap().built);
 }
 
 #[test]

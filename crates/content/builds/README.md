@@ -10,7 +10,7 @@ for example `nfs16-92aa6ff4b5f8d0f0.json`.
 
 | Field | Meaning |
 | --- | --- |
-| `format`, `version` | `nfs-build-profile`, `1` |
+| `format`, `version` | `nfs-build-profile`, `2` |
 | `description` | Human-readable identification of the build |
 | `executable`, `executable_sha256` | File name in the installation root and its exact digest |
 | `world_mac_template.rva`, `.sha256` | Relative virtual address (hex) of the 64-byte world MAC template inside the executable image, and the digest the bytes must have. The bytes themselves are read from the player's executable, never stored here |
@@ -22,3 +22,11 @@ another class fails with an explicit error rather than guessing.
 To add a build: create its file with every field, add it to `PROFILES` in
 `src/builds.rs`, and keep the tests passing (they validate every profile).
 Content documents for that build also need the loaders to accept its hash.
+
+The scenes object selects the level asset and lists executable-specific class
+construction rules. classes maps a class name to a stable serializer kind or
+null (a known class with no server scene serializer). Missing classes fail
+preparation. launchers lists classes whose emitted serializer is a launcher
+endpoint; each must have an RPC-compatible kind. These are type-level protocol
+rules, not scene instances, per-scene serializer arrays or game asset content.
+The cache fingerprint includes all profile fields.
