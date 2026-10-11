@@ -437,12 +437,12 @@ fn ready_binding_has_a_complete_encodable_replication_section() {
         initial: None,
         update: Delta::PlayerManager(update),
     };
-    let sections = PlayerListener::binding_sections(record.clone()).unwrap();
+    let sections = PlayerListener::binding_sections(vec![record.clone()]).unwrap();
     assert_eq!(sections.len(), 1);
     assert!(sections[0].setup.is_some());
     assert_eq!(sections[0].records, vec![record.clone()]);
     assert!(sections[0].frame().is_ok());
     // A bad record is rejected while readiness state is still transactional.
     record.id = 0;
-    assert!(PlayerListener::binding_sections(record).is_err());
+    assert!(PlayerListener::binding_sections(vec![record]).is_err());
 }

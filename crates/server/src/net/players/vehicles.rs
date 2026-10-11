@@ -22,11 +22,11 @@ pub(super) struct Output {
 }
 impl PlayerListener {
     pub(super) fn binding_sections(
-        binding: replication::Record,
+        bindings: Vec<replication::Record>,
     ) -> Result<Vec<Section>, replication::Error> {
         // The standard section encoder supplies the required setup and validates
         // the complete frame before the listener commits the readiness transition.
-        split_scenes(vec![binding], nfs_world::application::OUTBOUND_FRAME_BITS)
+        split_scenes(bindings, nfs_world::application::OUTBOUND_FRAME_BITS)
     }
     /// Grant simulation only after a newly created world car reports readiness.
     /// Existing garage cars retain their usual authority.

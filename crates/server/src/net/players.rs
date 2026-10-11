@@ -776,14 +776,13 @@ impl Listener for PlayerListener {
                             call = ?notification.call,
                             "owned world car created; spawn point assignment scheduled"
                         );
-                        if let Some(binding) = players.bind_player_vehicle(
+                        let bindings = players.bind_player_vehicle(
                             HOST_SELECTOR as u8,
                             self.persona,
                             notification.participant,
                             Some(target.ghost),
-                        )? {
-                            deferred_sections.extend(Self::binding_sections(binding)?);
-                        }
+                        )?;
+                        deferred_sections.extend(Self::binding_sections(bindings)?);
                         if let Some(command) = Self::exit_teleport(
                             self.participants.exit_bindings(),
                             self.vehicles.as_deref().map(|c| &c.layout),

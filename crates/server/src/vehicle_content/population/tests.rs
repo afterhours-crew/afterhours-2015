@@ -629,7 +629,7 @@ fn client_physics_handoff_is_owned_ordered_bounded_and_preserves_other_component
 }
 
 #[test]
-fn manager_seats_only_the_owned_player_in_its_own_car_and_clears_repeatedly() {
+fn manager_and_participant_bind_the_owned_car_and_clear_repeatedly() {
     use nfs_world::replication::{Update, player_manager::Entry};
     let (mut population, mut players, content, layout, items, p) = fixture();
     let manager = players.enable_player_manager().unwrap().unwrap();
@@ -672,8 +672,24 @@ fn manager_seats_only_the_owned_player_in_its_own_car_and_clears_repeatedly() {
     }
     let binding = players
         .bind_player_vehicle(3, 0x100000002, p, Some(car))
-        .unwrap()
         .unwrap();
+    assert_eq!(binding.len(), 2);
+    let participant_binding = &binding[1];
+    assert_eq!(participant_binding.id, p);
+    assert!(matches!(&participant_binding.update, Update::Participant(v) if v.entity == Some(car)));
+    for record in &binding {
+        let wire = record.encode().unwrap();
+        assert_eq!(
+            nfs_world::replication::Record::decode(wire.span(), Some(record.update.kind()))
+                .unwrap()
+                .record,
+            *record
+        );
+    }
+    let bound = players.objects().snapshot();
+    assert!(players.remove_vehicle(3, 0x100000002, p, 1).is_err());
+    assert_eq!(players.objects().snapshot(), bound);
+    let binding = binding[0].clone();
     assert_eq!(binding.id, manager.id);
     let Update::PlayerManager(delta) = binding.update else {
         panic!()
@@ -684,7 +700,7 @@ fn manager_seats_only_the_owned_player_in_its_own_car_and_clears_repeatedly() {
         players
             .bind_player_vehicle(3, 0x100000002, p, Some(car))
             .unwrap()
-            .is_none()
+            .is_empty()
     );
     assert!(players.sync_player_manager().unwrap().is_none());
     let other = join(&mut players, 7, 77);
@@ -710,13 +726,23 @@ fn manager_seats_only_the_owned_player_in_its_own_car_and_clears_repeatedly() {
         players
             .bind_player_vehicle(3, 0x100000002, p, None)
             .unwrap()
-            .is_some()
+            .len()
+            == 2
     );
     assert!(
         players
             .bind_player_vehicle(3, 0x100000002, p, None)
             .unwrap()
-            .is_none()
+            .is_empty()
+    );
+    assert!(
+        matches!(&players.objects().get(p).unwrap().current, Update::Participant(v) if v.entity == Some(0))
+    );
+    assert_eq!(players.remove_vehicle(3, 0x100000002, p, 1).unwrap(), car);
+    assert!(
+        players
+            .bind_player_vehicle(3, 0x100000002, p, Some(car))
+            .is_err()
     );
     let mut separate = Players::default();
     assert_eq!(separate.enable_player_manager().unwrap().unwrap().id, 1);
@@ -724,4 +750,184 @@ fn manager_seats_only_the_owned_player_in_its_own_car_and_clears_repeatedly() {
         panic!()
     };
     assert!(empty.entries.iter().all(|s| *s == Some(None)));
+}
+
+#[test]
+fn exit_handoff_keeps_car_relations_through_teleport_rollout_and_completion() {
+    use nfs_world::{
+        arrival::{ARRIVED, Arrivals},
+        logic::{EntityRef, Message as Logic},
+        replication::{
+            Update,
+            entity::creation::{Asset, Catalog, Content as EntityContent},
+            spline,
+        },
+        sequences::{
+            Completed, Component, Definition, Layout as SequenceLayout, Owner as SequenceOwner,
+        },
+    };
+    let (mut population, mut players, content, layout, items, p) = fixture();
+    let manager = players.enable_player_manager().unwrap().unwrap().id;
+    let layout = world_layout(&layout);
+    let _garage = population
+        .spawn(
+            &mut players,
+            owner(p),
+            inventory(items.clone()),
+            &content,
+            &layout,
+            [0.; 3],
+        )
+        .unwrap();
+    let garage_car = players.owned_vehicle(3, 0x100000002, p, 1).unwrap();
+    let world = population
+        .spawn_world(&mut players, owner(p), &inventory(items), &content, &layout)
+        .unwrap();
+    let car = world.records[0].id;
+    assert_ne!(car, garage_car);
+    assert!(world.deleted.contains(&garage_car));
+    assert!(players.objects().get(garage_car).is_none());
+    let binding = players
+        .bind_player_vehicle(3, 0x100000002, p, Some(car))
+        .unwrap();
+    assert_eq!(
+        binding.iter().map(|r| r.id).collect::<Vec<_>>(),
+        [manager, p]
+    );
+    let sections = nfs_world::replication::section::split_timed_records(
+        binding,
+        nfs_world::application::OUTBOUND_FRAME_BITS,
+    )
+    .unwrap();
+    assert!(sections.iter().all(|s| s.frame().is_ok()));
+    let relations = |players: &Players| {
+        assert!(
+            matches!(&players.objects().get(p).unwrap().current, Update::Participant(v) if v.entity == Some(car))
+        );
+        let Update::PlayerManager(m) = &players.objects().get(manager).unwrap().current else {
+            panic!()
+        };
+        let entry = m.entries[2].as_ref().unwrap().as_ref().unwrap();
+        assert_eq!(entry.primary.as_ref().unwrap().controllable, car);
+        assert_eq!(entry.secondary.as_ref().unwrap().controllable, car);
+    };
+    relations(&players);
+    // The teleport envelope and all later actor operations refer to this same car/participant.
+    let teleport = nfs_world::teleport::Command {
+        endpoint: nfs_world::participants::Endpoint {
+            scene: players.objects().scene(layout.item_scene_key).unwrap(),
+            selector: 12,
+            serial: Serial::new(0).unwrap(),
+        },
+        participant: p,
+        vehicle: car,
+        position: [12., 3., 40.],
+        basis: [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]],
+    }
+    .encode()
+    .unwrap();
+    let envelope = nfs_protocol::world::rpc::Envelope::decode(
+        nfs_protocol::world::BitSpan::new(&teleport, 0, teleport.len() * 8).unwrap(),
+        nfs_protocol::world::rpc::Limits {
+            max_input_bits: 4096,
+            max_references: 32,
+            max_payload_bytes: 256,
+        },
+    )
+    .unwrap();
+    assert_eq!(&envelope.references()[1..], &[p, car]);
+    let asset = Asset {
+        bundle: 24,
+        type_id: 3424,
+        local_index: 1,
+    };
+    let definition = Definition {
+        layout: SequenceLayout::GarageExit,
+        asset,
+        manager: Component {
+            scene_key: layout.item_scene_key,
+            index: 3,
+        },
+        embedded_bus: 2,
+        channel: Component {
+            scene_key: layout.scene_key,
+            index: 1,
+        },
+    };
+    let entities = EntityContent::new(
+        vec![Catalog::new(24, &[(3424, 2)]).unwrap()],
+        vec![(asset, nfs_world::arrival::profile())],
+    )
+    .unwrap();
+    let mut arrivals = Arrivals::new(definition, entities)
+        .unwrap()
+        .with_spline(spline::Definition {
+            asset: Asset {
+                bundle: 24,
+                type_id: 5100,
+                local_index: 2,
+            },
+            catalog: Catalog::new(24, &[(5100, 3)]).unwrap(),
+            base_value: 37,
+            flag: false,
+        })
+        .unwrap();
+    let owner = SequenceOwner {
+        connection: 3,
+        persona: 0x100000002,
+        participant: p,
+    };
+    let rollout = arrivals.start_rollout(&mut players, owner).unwrap();
+    assert_eq!(rollout.len(), 3);
+    let (goal, actor, sequence) = (rollout[0].id, rollout[1].id, rollout[2].id);
+    assert!(
+        matches!(&rollout[1].update, Update::Actor(a) if a.references_a.as_deref() == Some(&[goal]))
+    );
+    assert!(players.actor_arriving(3, 0x100000002, p).unwrap().is_some());
+    assert!(
+        arrivals
+            .start_rollout(&mut players, owner)
+            .unwrap()
+            .is_empty()
+    );
+    relations(&players);
+    assert!(arrivals.poll(6_000).unwrap().is_empty());
+    let stop = arrivals
+        .arrived(&Logic::Reached {
+            event: ARRIVED,
+            target: EntityRef {
+                ghost: sequence,
+                entity: 1,
+            },
+            player: 2,
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(stop.sequence, sequence);
+    assert!(
+        arrivals
+            .complete(
+                &players,
+                owner,
+                Completed {
+                    sequence,
+                    participant: p
+                }
+            )
+            .unwrap()
+            .is_some()
+    );
+    let (cleared, deleted) = arrivals.finish_rollout(&mut players, owner).unwrap();
+    assert_eq!(deleted, [sequence, goal]);
+    assert_eq!(cleared[0].id, actor);
+    assert!(
+        matches!(&cleared[0].update, Update::Actor(a) if a.references_a.as_deref() == Some(&[]))
+    );
+    relations(&players);
+    assert!(players.objects().get(car).is_some());
+    assert!(arrivals.poll(60_000).unwrap().is_empty());
+    assert_eq!(
+        arrivals.finish_rollout(&mut players, owner).unwrap(),
+        (vec![], vec![])
+    );
 }

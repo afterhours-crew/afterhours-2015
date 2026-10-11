@@ -57,7 +57,9 @@ impl Players {
         }
         self.objects.change(id, Update::PlayerManager(delta))
     }
-    /// Bind a participant to its own world vehicle, or clear its seat on leave.
+    /// Bind both the player seats and the participant entity to its own vehicle.
+    /// The participant reference is used by teleport and scripted vehicle control.
+    /// Clear both relations before removing a bound vehicle.
     /// Ownership and every index are checked before any state changes.
     pub fn bind_player_vehicle(
         &mut self,
@@ -65,7 +67,7 @@ impl Players {
         persona: u64,
         participant: u16,
         vehicle: Option<u16>,
-    ) -> Result<Option<Record>, Error> {
+    ) -> Result<Vec<Record>, Error> {
         if !self.owns_participant(connection, persona, participant) {
             return Err(Error::UnknownObject);
         }
@@ -100,6 +102,17 @@ impl Players {
             Some(car) => Entry::driving(player, car),
             None => Entry::unbound(player),
         }));
-        self.objects.change(id, Update::PlayerManager(delta))
+        let mut next = self.objects.clone();
+        let mut records = Vec::with_capacity(2);
+        records.extend(next.change(id, Update::PlayerManager(delta))?);
+        records.extend(next.change(
+            participant,
+            Update::Participant(ParticipantUpdate {
+                entity: Some(vehicle.unwrap_or(0)),
+                ..ParticipantUpdate::default()
+            }),
+        )?);
+        self.objects = next;
+        Ok(records)
     }
 }

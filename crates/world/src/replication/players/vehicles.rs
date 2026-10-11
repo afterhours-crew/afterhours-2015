@@ -127,6 +127,12 @@ impl Players {
             .vehicles
             .get(&(participant, item))
             .ok_or(Error::UnknownObject)?;
+        // A caller must publish the detach before deleting a referenced car.
+        if matches!(self.objects.get(participant).map(|o| &o.current),
+            Some(Update::Participant(p)) if p.entity == Some(id))
+        {
+            return Err(Error::Shape);
+        }
         let mut next = self.objects.clone();
         let object = next.remove(id)?;
         if !matches!(object.initial, Initial::Vehicle { .. }) {
