@@ -32,4 +32,5 @@ mod test_data {
     pub const TRAFFIC_KEYS: [u32; 10] = [11, 12, 13, 14, 15, 16, 17, 18, 19, 20];
 }
 
+pub mod trigger_volumes;
 pub mod vehicle_reports;

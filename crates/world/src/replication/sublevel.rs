@@ -33,6 +33,8 @@ pub enum Kind {
     RpcOptional64,
     RpcGuid,
     RpcBool,
+    /// Trigger volume RPC with an enabled initial collision listener.
+    RpcTriggerVolume,
     RpcMap,
     RpcFourReferences,
     RpcSet64,

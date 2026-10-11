@@ -446,3 +446,31 @@ fn ready_binding_has_a_complete_encodable_replication_section() {
     record.id = 0;
     assert!(PlayerListener::binding_sections(vec![record]).is_err());
 }
+
+#[test]
+fn generated_trigger_is_enabled_and_bound_without_changing_boolean_defaults() {
+    use nfs_world::replication::{Initial, sublevel};
+    let content = content_with(Some(&[Kind::Noop, Kind::RpcTriggerVolume, Kind::RpcBool]));
+    let mut listener = PlayerListener::new(101);
+    listener.initialize_world(&content).unwrap();
+    let key = content.roles.as_ref().unwrap().spawn_points.unwrap();
+    let scene = listener.pending.iter().flat_map(|s| &s.records).find(|r|
+        matches!(&r.initial, Some(Initial::SubLevel { prefix, .. }) if prefix.content_key == key)).unwrap();
+    let Some(Initial::SubLevel { fields, .. }) = &scene.initial else {
+        panic!()
+    };
+    assert!(matches!(
+        fields[1],
+        sublevel::Initial::RpcBool { value: true, .. }
+    ));
+    assert!(matches!(
+        fields[2],
+        sublevel::Initial::RpcBool { value: false, .. }
+    ));
+    let before = listener.trigger_volumes.clone();
+    assert_eq!(
+        listener.trigger_volumes.bind(std::slice::from_ref(scene)),
+        Err(replication::Error::DuplicateObject)
+    );
+    assert_eq!(listener.trigger_volumes, before);
+}

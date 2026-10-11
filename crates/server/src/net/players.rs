@@ -60,6 +60,7 @@ pub(super) struct PlayerListener {
     customization: crate::customization_timer::Timers,
     world_ms: u64,
     vehicle_reports: nfs_world::vehicle_reports::Reports,
+    trigger_volumes: nfs_world::trigger_volumes::Volumes,
     sequences: Option<nfs_world::sequences::Sequences>,
     /// Arrive sequences after garage exit (optional sequence content).
     arrivals: Option<nfs_world::arrival::Arrivals>,
@@ -450,6 +451,7 @@ impl PlayerListener {
             customization: crate::customization_timer::Timers::default(),
             world_ms: 0,
             vehicle_reports: nfs_world::vehicle_reports::Reports::default(),
+            trigger_volumes: nfs_world::trigger_volumes::Volumes::default(),
             sequences: None,
             inventory: None,
             logic: None,
@@ -579,6 +581,8 @@ impl PlayerListener {
                 )
             }
         }
+        let mut trigger_volumes = self.trigger_volumes.clone();
+        trigger_volumes.bind(&records)?;
         let sections = split_scenes(records, nfs_world::application::OUTBOUND_FRAME_BITS)?;
         if sections.len() > MAX_PENDING - self.pending.len() {
             return Err(replication::Error::Bound);
@@ -588,6 +592,7 @@ impl PlayerListener {
         self.participants = participants;
         self.spawn_points = spawn_points;
         self.level_poll = level_poll;
+        self.trigger_volumes = trigger_volumes;
         self.pending.extend(sections);
         self.population = population;
         self.roles = Some(roles.clone());
@@ -657,6 +662,7 @@ impl Listener for PlayerListener {
         let mut deferred_deletions = self.deferred_deletions.clone();
         let mut deferred_sections = Vec::new();
         let mut vehicle_reports = self.vehicle_reports.clone();
+        let mut trigger_volumes = self.trigger_volumes.clone();
         if let Some(movement) = &parsed.movement {
             let cars = world_cars.keys().copied().collect();
             match vehicle_reports.receive(
@@ -973,6 +979,32 @@ impl Listener for PlayerListener {
                         self.last_error = Some(error);
                         return false;
                     }
+                }
+            }
+            match trigger_volumes.receive(body, |id| {
+                world_cars.contains_key(&id)
+                    && players
+                        .owned_vehicles(HOST_SELECTOR as u8, self.persona)
+                        .contains(&id)
+            }) {
+                Ok(Some(report)) => {
+                    if report.changed {
+                        tracing::info!(
+                            scene = report.scene,
+                            selector = report.selector,
+                            vehicle = report.vehicle,
+                            entered = report.entered,
+                            seconds = report.seconds,
+                            "owned trigger volume crossing"
+                        );
+                    }
+                    continue;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    self.refused += 1;
+                    self.last_error = Some(error);
+                    return false;
                 }
             }
             match level_poll.receive(body, |id| {
@@ -1371,7 +1403,9 @@ impl Listener for PlayerListener {
         self.garage_presence = garage_presence;
         self.spawn_points = spawn_points;
         self.level_poll = level_poll;
+        trigger_volumes.retain_vehicles(|id| world_cars.contains_key(&id));
         self.world_cars = world_cars;
+        self.trigger_volumes = trigger_volumes;
         self.vehicle_reports = vehicle_reports;
         self.deferred_deletions = deferred_deletions;
         self.pending_spawns.extend(scheduled_spawns);
