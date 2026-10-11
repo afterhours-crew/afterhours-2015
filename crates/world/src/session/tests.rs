@@ -2038,3 +2038,41 @@ fn clock_header_reservation_and_backpressure_leave_state_unchanged() {
     assert!(out.events.is_empty());
     assert_eq!(host.replication_clock_ms, Some(now));
 }
+
+#[test]
+fn timed_split_keeps_full_record_batches_inside_session_frame_bound() {
+    use crate::replication::section::{split_records, split_timed_records};
+    let records = owned_section(2).records;
+    let plain = split_records(records.clone(), application::OUTBOUND_FRAME_BITS).unwrap();
+    assert_eq!(plain.len(), 1);
+    let bound = plain[0].frame().unwrap().len();
+    let (mut host, _, _, _) = established_with_content();
+    host.max_replication_frame_bits = bound;
+    // This previously passed the splitter, then failed during live startup.
+    assert_eq!(
+        host.queue_replication(plain[0].clone()),
+        Err(Error::Application(application::Error::Bound))
+    );
+    let timed = split_timed_records(records.clone(), bound).unwrap();
+    assert_eq!(timed.len(), 2);
+    assert_eq!(
+        timed
+            .iter()
+            .flat_map(|s| s.records.clone())
+            .collect::<Vec<_>>(),
+        records
+    );
+    for section in timed {
+        assert!(section.frame().unwrap().len() <= bound);
+        assert_eq!(section.float_bits, Some(0));
+        assert!(section.flag);
+        host.queue_replication(section).unwrap();
+    }
+    assert_eq!(host.replication_progress(), (0, 2));
+    let one = owned_section(1);
+    let too_small = one.frame().unwrap().len();
+    assert_eq!(
+        split_timed_records(one.records, too_small),
+        Err(crate::replication::Error::Bound)
+    );
+}

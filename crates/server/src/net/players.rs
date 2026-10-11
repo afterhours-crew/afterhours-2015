@@ -13,7 +13,7 @@ use nfs_world::{
     replication::{
         self,
         players::{Players, Request},
-        section::{Section, Setup, split_records as split_scenes},
+        section::{Section, Setup, split_timed_records as split_scenes},
     },
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};

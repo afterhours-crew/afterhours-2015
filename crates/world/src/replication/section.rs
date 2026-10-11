@@ -405,12 +405,25 @@ impl Section {
 }
 
 pub fn split_records(records: Vec<Record>, max_frame_bits: usize) -> Result<Vec<Section>, Error> {
+    split(records, max_frame_bits, false)
+}
+
+/// Split host-owned records with space for the clock filled by the session.
+/// Including the clock before splitting preserves the aligned frame bound.
+pub fn split_timed_records(
+    records: Vec<Record>,
+    max_frame_bits: usize,
+) -> Result<Vec<Section>, Error> {
+    split(records, max_frame_bits, true)
+}
+
+fn split(records: Vec<Record>, max_frame_bits: usize, timed: bool) -> Result<Vec<Section>, Error> {
     if records.len() > MAX_SECTION_RECORDS || max_frame_bits > MAX_SECTION_BITS {
         return Err(Error::Bound);
     }
     let empty = || Section {
-        float_bits: None,
-        flag: false,
+        float_bits: timed.then_some(0),
+        flag: timed,
         deleted: Vec::new(),
         setup: Some(Setup::Packed {
             tag: None,
