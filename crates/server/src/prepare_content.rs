@@ -6,7 +6,7 @@
 use nfs_content::{Kind, Options};
 use std::{ffi::OsString, path::PathBuf};
 
-const HELP: &str = "Usage: nfs-server prepare-content --game-dir <installation> [--root <data-directory>] [--content-cache <directory>]\n\nChecks the supported executable and prepares verified cached content without\nopening listeners. Relative paths follow --root (default current directory).\nThe default cache is artifacts/content. Prints the cache identity and file paths\nas JSON. World/vehicle composition and service policy are still separate inputs.";
+const HELP: &str = "Usage: nfs-server prepare-content --game-dir <installation> [--root <data-directory>] [--content-cache <directory>]\n\nChecks the supported executable and prepares verified cached content without\nopening listeners. Relative paths follow --root (default current directory).\nThe default cache is artifacts/content. Prints the cache identity and file paths\nas JSON. Garage logic, sequence content, challenges, initial world pose and service policy remain separate inputs.";
 
 struct Args {
     root: PathBuf,

@@ -172,6 +172,30 @@ pub fn fingerprint(root: &Path, options: &Options) -> Result<Fingerprint, Error>
     }
     inputs.extend(hash_content_ranges(root, &install)?);
     let mut text = format!("{FORMAT}\nversion {VERSION}\nbuilder {BUILDER_REVISION}\n");
+    // Custom profiles (including another level or class rule) must not reuse a
+    // cache prepared under different construction rules for the same files.
+    let identity = &options.identity;
+    let classes: BTreeMap<_, _> = identity
+        .scenes
+        .classes
+        .iter()
+        .map(|(name, kind)| (name, kind.map(|k| k.name())))
+        .collect();
+    let profile = serde_json::json!({
+        "executable":identity.executable_sha256,
+        "template_rva":identity.mac_template_rva,"template_sha256":identity.mac_template_sha256,
+        "blueprints":identity.blueprint_class_ids,"level":identity.scenes.level,
+        "classes":classes,"launchers":identity.scenes.launchers,
+        "garage_links":identity.garage_links.to_json(),
+        "vehicles":identity.vehicles.to_json(),
+        "progression":identity.progression.to_json(),
+        "sequences":identity.sequences.to_json(),
+        "participant_logic":identity.participant_logic.to_json(),
+    });
+    text.push_str(&format!(
+        "profile {}\n",
+        sha256_hex(profile.to_string().as_bytes())
+    ));
     for input in &inputs {
         text.push_str(&format!(
             "{}\t{}\t{}\t{}\n",

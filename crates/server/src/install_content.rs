@@ -26,6 +26,13 @@ pub struct Generated {
     pub item_licenses: PathBuf,
     pub control_catalogs: PathBuf,
     pub reputation_thresholds: PathBuf,
+    pub scene_catalog: PathBuf,
+    pub world_content: PathBuf,
+    pub garage_layout: PathBuf,
+    pub vehicle_parts: PathBuf,
+    pub vehicle_profiles: PathBuf,
+    pub progression_content: PathBuf,
+    pub sequence_content: PathBuf,
     pub world_mac_template: PathBuf,
     pub prepared: Prepared,
 }
@@ -65,6 +72,13 @@ pub fn resolve(
         item_licenses: prepared.path(Kind::ItemLicenses),
         control_catalogs: prepared.path(Kind::ControlCatalogs),
         reputation_thresholds: prepared.path(Kind::ReputationThresholds),
+        scene_catalog: prepared.path(Kind::SceneCatalog),
+        world_content: prepared.path(Kind::WorldContent),
+        garage_layout: prepared.path(Kind::GarageLayout),
+        vehicle_parts: prepared.path(Kind::VehicleParts),
+        vehicle_profiles: prepared.path(Kind::VehicleProfiles),
+        progression_content: prepared.path(Kind::ProgressionContent),
+        sequence_content: prepared.path(Kind::SequenceContent),
         world_mac_template: prepared.path(Kind::WorldMacTemplate),
         prepared,
     })
@@ -105,10 +119,30 @@ mod tests {
         assert!(first.item_content.starts_with(dir.0.join(DEFAULT_CACHE)));
         let items = crate::item_content::ItemContent::load(&first.item_content).unwrap();
         assert!(items.inventory().is_some());
+        nfs_content::vehicle_parts::Catalog::load(&first.vehicle_parts, &items.catalog).unwrap();
+        crate::vehicle_content::Content::load_with_parts(
+            &first.vehicle_profiles,
+            &items.catalog,
+            Some(&first.vehicle_parts),
+        )
+        .unwrap();
         crate::persistent::Catalog::load(&first.persistent_content).unwrap();
+        crate::progression::Content::load(&first.progression_content).unwrap();
+        let sequences =
+            crate::sequence_content::SequenceContent::load(&first.sequence_content).unwrap();
+        sequences.instance().unwrap();
+        sequences.arrivals().unwrap().unwrap();
         nfs_services::stats::Catalog::load(&first.stat_definitions).unwrap();
         nfs_services::item_licenses::Content::load(&first.item_licenses).unwrap();
         nfs_services::control_catalogs::Catalog::load(&first.control_catalogs).unwrap();
+        let scenes = nfs_content::scenes::Catalog::load(&first.scene_catalog).unwrap();
+        let world =
+            crate::content::WorldContent::load_with_scenes(&first.world_content, Some(&scenes))
+                .unwrap();
+        world.validate_runtime().unwrap();
+        let layout = crate::vehicle_content::layout::Layout::load(&first.garage_layout).unwrap();
+        assert_eq!(layout.exit_teleport().unwrap().locator(), [20.0, 5.0, -7.0]);
+        assert!(layout.world_spawn().is_none());
         assert_eq!(std::fs::read(&first.world_mac_template).unwrap().len(), 64);
         let second = resolve(&dir.0, Path::new("game"), None, &options).unwrap();
         assert!(!second.prepared.built);

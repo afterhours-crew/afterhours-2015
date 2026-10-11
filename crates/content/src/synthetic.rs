@@ -10,11 +10,18 @@ use crate::{BuildIdentity, Limits, Options, sha256_hex};
 pub use nfs_frostbite::synthetic::{Asset, Field, PartitionWriter};
 use nfs_services::persistent::required_tables;
 use std::path::Path;
+pub mod progression;
+pub mod sequences;
+pub mod vehicles;
 
 pub const TEMPLATE_RVA: u32 = 0x1010;
 /// Made-up class IDs for synthetic installations.
-pub const SYNTHETIC_CLASS_IDS: [(&str, u32); 2] =
-    [("LogicPrefabBlueprint", 10), ("RaceVehicleBlueprint", 20)];
+pub const SYNTHETIC_CLASS_IDS: [(&str, u32); 4] = [
+    ("LogicPrefabBlueprint", 10),
+    ("RaceVehicleBlueprint", 20),
+    ("ParticipantLogicBlueprint", 30),
+    ("ParticipantStateSequenceBlueprint", 40),
+];
 
 /// A minimal PE image with one `.data` section holding a 64-byte template.
 pub fn executable(template: &[u8; 64]) -> Vec<u8> {
@@ -153,6 +160,7 @@ pub fn vehicle(plate: &str) -> Asset {
         vec![2],
         vec![
             ("DefaultPaint", vector(0.025, 0.11, 0.6)),
+            ("RaceVehicle", vehicles::import(1)),
             ("Material", vector(0.76, 0.73, 1.0)),
             ("TopSpeedMPH", Field::Int(155)),
             ("WindowTint", Field::Float(0.9)),
@@ -175,7 +183,13 @@ pub fn assets() -> Vec<Asset> {
             "SpoilerItemData",
             vec![],
             vec![],
-            vec![("DownforceSetting", Field::Int(5))],
+            vec![
+                ("DownforceSetting", Field::Int(5)),
+                ("SpoilerTuning", Field::RawPointer(0)),
+                ("WideCollision", Field::Bool(false)),
+                ("PerformanceModifier", Field::RawPointer(0)),
+                ("MeshGuids", Field::Guids(vec![])),
+            ],
         ),
         item(2, "BodyKitItemData", vec![1], vec![], vec![]),
         vehicle("GHOST"),
@@ -187,6 +201,8 @@ pub fn assets() -> Vec<Asset> {
             vec![],
             vec![
                 ("ByteVaultDataId", Field::Int(0)),
+                ("ByteVaultHash", Field::Long(-13)),
+                ("StaticLiveryIndex", Field::Int(2)),
                 ("LibraryPresetId", Field::Int(-1)),
                 ("DynamicFlags", Field::Int(0)),
             ],
@@ -213,9 +229,11 @@ pub fn assets() -> Vec<Asset> {
     }
     assets.extend(registries());
     assets.extend(level());
+    assets.extend(runtime_world());
     assets.extend(entitlements());
     assets.extend(speedwalls());
     assets.extend(reputation(vec![0, 13, 57]));
+    assets.extend(vehicles::assets());
     assets
 }
 
@@ -308,6 +326,335 @@ pub fn entitlements() -> Vec<Asset> {
 /// `LevelData` asset of the synthetic level.
 pub const LEVEL: &str = "levels/Synth/Synth";
 
+/// Constructed startup with the host's required roles and ten traffic slots.
+pub const RUNTIME_LEVEL: &str = "levels/Runtime/Runtime";
+
+pub fn runtime_world() -> Vec<Asset> {
+    let roles = [
+        "Garage",
+        "SpawnPoints",
+        "Gameplay",
+        "Progression",
+        "ParticipantStateMachine",
+    ];
+    let mut extras: Vec<_> = roles
+        .iter()
+        .map(|role| sub_world(&format!("levels/Runtime/{role}"), true))
+        .collect();
+    extras.push(layer_reference(0x26));
+    let mut result = vec![Asset {
+        name: RUNTIME_LEVEL.to_lowercase(),
+        partition: PartitionWriter::default().build_many(
+            guid(0x20),
+            "LevelData",
+            guid(0x30),
+            vec![
+                ("Name", Field::CString(RUNTIME_LEVEL.into())),
+                ("Objects", Field::RawPointers(vec![7])),
+            ],
+            extras,
+        ),
+    }];
+    for (i, role) in roles.iter().enumerate() {
+        result.push(scene(
+            0x21 + i as u8,
+            &format!("levels/Runtime/{role}"),
+            "SubWorldData",
+            vec![],
+        ));
+    }
+    let mut layer = vec![("SyntheticRpc", vec![])];
+    for i in 0..10 {
+        layer.push((
+            "BlueprintBundleEntityData",
+            vec![(
+                "Bundle",
+                Field::Struct(
+                    "BundleReference",
+                    bundle_ref(&format!("vehicles/runtime/{i}_bundle")),
+                ),
+            )],
+        ));
+        result.push(Asset {
+            name: format!("vehicles/runtime/{i}_bundle"),
+            partition: PartitionWriter::default().build(
+                guid(0x40 + i),
+                "BlueprintBundle",
+                guid(0xC0 + i),
+                vec![("Blueprint", Field::Import(guid(0x61), guid(0x71)))],
+            ),
+        });
+    }
+    layer.push((
+        "BundlePreLoadEntityData",
+        vec![(
+            "BundlesToLoad",
+            Field::Structs(
+                "BundleReference",
+                vec![bundle_ref("vehicles/shared/parts_bundle")],
+            ),
+        )],
+    ));
+    result.push(Asset {
+        name: format!("{}/layer1", RUNTIME_LEVEL.to_lowercase()),
+        partition: PartitionWriter::default().build_many(
+            guid(0x26),
+            "WorldPartData",
+            guid(0x36),
+            // Traffic composition is reversed; startup discovery uses partition order.
+            vec![(
+                "Objects",
+                Field::RawPointers(std::iter::once(2).chain((3..=12).rev()).collect()),
+            )],
+            layer,
+        ),
+    });
+    result.extend([
+        blueprint(
+            0x27,
+            "gameplay/stats/garagestatslogic",
+            "ParticipantLogicBlueprint",
+        ),
+        blueprint(
+            0x28,
+            "gameplay/garageloadlogic",
+            "ParticipantLogicBlueprint",
+        ),
+        blueprint(0x29, "gameplay/unusedlogic", "ParticipantLogicBlueprint"),
+        registry(
+            0x2A,
+            "levels/runtime/gameplay",
+            vec![(guid(0x29), guid(0x39)), (guid(0x27), guid(0x37))],
+        ),
+        registry(
+            0x2B,
+            "levels/runtime/garage",
+            vec![(guid(0x28), guid(0x38))],
+        ),
+    ]);
+    result.retain(|a| {
+        ![
+            "levels/runtime/garage",
+            "levels/runtime/gameplay",
+            "levels/runtime/spawnpoints",
+            "levels/runtime/progression",
+        ]
+        .contains(&a.name.as_str())
+    });
+    result.extend(garage_layout());
+    result.extend(progression::assets());
+    sequences::install(&mut result);
+    result
+}
+
+/// Deliberately unrelated to the supported executable's port identifiers.
+pub fn garage_links() -> crate::garage::Links {
+    crate::garage::Links {
+        primary_slot: 100,
+        secondary_slots: 101,
+        slot_location: 102,
+        locator_transform: 103,
+        exit_location: 104,
+        items: [200, 201, 202, 203, 204],
+    }
+}
+
+pub(crate) fn connection(
+    source: u32,
+    source_field: u32,
+    target: u32,
+    target_field: u32,
+) -> Vec<(&'static str, Field)> {
+    vec![
+        ("Source", Field::RawPointer(source)),
+        ("SourceFieldId", Field::Int(source_field as i32)),
+        ("Target", Field::RawPointer(target)),
+        ("TargetFieldId", Field::Int(target_field as i32)),
+    ]
+}
+
+type ObjectFields = Vec<(&'static str, Field)>;
+type SceneObjects = Vec<(&'static str, ObjectFields)>;
+
+pub fn garage_layout() -> Vec<Asset> {
+    garage_layout_with(|_, _, _, _| {})
+}
+
+pub(crate) fn garage_layout_with(
+    edit: impl FnOnce(&mut ObjectFields, &mut SceneObjects, &mut ObjectFields, &mut SceneObjects),
+) -> Vec<Asset> {
+    let ports = garage_links();
+    let mut garage_objects = vec![("GarageEntityData", vec![])];
+    garage_objects.extend((0..5).map(|_| ("VehicleSlotEntityData", vec![])));
+    garage_objects.extend((0..5).map(|i| {
+        (
+            "LocatorEntityData",
+            vec![(
+                "Transform",
+                Field::Struct(
+                    "LinearTransform",
+                    vec![
+                        ("right", vector(1.0, 0.0, 0.0)),
+                        ("up", vector(0.0, 1.0, 0.0)),
+                        ("forward", vector(0.0, 0.0, 1.0)),
+                        ("trans", vector(i as f32 * 7.0, 2.0, -3.0)),
+                    ],
+                ),
+            )],
+        )
+    }));
+    let links = (0..5)
+        .map(|i| {
+            connection(
+                2,
+                if i == 0 {
+                    ports.primary_slot
+                } else {
+                    ports.secondary_slots
+                },
+                i + 3,
+                0,
+            )
+        })
+        .collect();
+    let properties = (0..5)
+        .map(|i| {
+            let mut row = connection(i + 8, ports.locator_transform, i + 3, ports.slot_location);
+            row.push(("Flags", Field::UInt(1)));
+            row
+        })
+        .collect();
+    let mut gameplay_objects = vec![("PersistentGarageVehiclesEntityData", vec![])];
+    gameplay_objects.extend((0..5).map(|_| ("ItemEntityData", vec![])));
+    let mut garage_fields = vec![
+        ("Name", Field::CString("levels/Runtime/Garage".into())),
+        (
+            "Objects",
+            Field::RawPointers(
+                std::iter::once(2)
+                    .chain((3..=7).rev())
+                    .chain(8..=12)
+                    .collect(),
+            ),
+        ),
+        ("LinkConnections", Field::Structs("LinkConnection", links)),
+        (
+            "PropertyConnections",
+            Field::Structs("PropertyConnection", properties),
+        ),
+    ];
+    let mut gameplay_fields = vec![
+        ("Name", Field::CString("levels/Runtime/Gameplay".into())),
+        (
+            "Objects",
+            Field::RawPointers(std::iter::once(2).chain((3..=7).rev()).collect()),
+        ),
+        (
+            "LinkConnections",
+            Field::Structs(
+                "LinkConnection",
+                (0..5)
+                    .map(|i| connection(2, ports.items[i], i as u32 + 3, 0))
+                    .collect(),
+            ),
+        ),
+    ];
+    edit(
+        &mut garage_fields,
+        &mut garage_objects,
+        &mut gameplay_fields,
+        &mut gameplay_objects,
+    );
+    vec![
+        Asset {
+            name: "levels/runtime/garage".into(),
+            partition: PartitionWriter::default().build_many(
+                guid(0x21),
+                "SubWorldData",
+                guid(0x31),
+                garage_fields,
+                garage_objects,
+            ),
+        },
+        Asset {
+            name: "levels/runtime/gameplay".into(),
+            partition: PartitionWriter::default().build_many(
+                guid(0x23),
+                "SubWorldData",
+                guid(0x33),
+                gameplay_fields,
+                gameplay_objects,
+            ),
+        },
+        exit_layout_with(|_, _| {}),
+    ]
+}
+
+pub(crate) fn exit_layout_with(edit: impl FnOnce(&mut ObjectFields, &mut SceneObjects)) -> Asset {
+    let ports = garage_links();
+    let locator = |x| {
+        (
+            "LocatorEntityData",
+            vec![(
+                "Transform",
+                Field::Struct(
+                    "LinearTransform",
+                    vec![
+                        ("right", vector(1.0, 0.0, 0.0)),
+                        ("up", vector(0.0, 1.0, 0.0)),
+                        ("forward", vector(0.0, 0.0, 1.0)),
+                        ("trans", vector(x, 5.0, -7.0)),
+                    ],
+                ),
+            )],
+        )
+    };
+    // The destination is the second locator. The first is a decoy, and the
+    // interface descriptor is metadata rather than a constructed scene object.
+    let mut objects = vec![
+        locator(10.0),
+        locator(20.0),
+        (
+            "InterfaceDescriptorData",
+            vec![(
+                "Fields",
+                Field::Structs(
+                    "FieldDescriptor",
+                    vec![vec![
+                        ("Id", Field::Int(ports.exit_location as i32)),
+                        (
+                            "AccessType",
+                            Field::Enum("FieldAccessType", "FieldAccessType_Source", 0),
+                        ),
+                    ]],
+                ),
+            )],
+        ),
+    ];
+    let mut property = connection(3, ports.locator_transform, 4, ports.exit_location);
+    property.push(("Flags", Field::UInt(17)));
+    let mut fields = vec![
+        ("Name", Field::CString("levels/Runtime/SpawnPoints".into())),
+        ("Objects", Field::RawPointers(vec![2, 3])),
+        ("Interface", Field::RawPointer(4)),
+        (
+            "PropertyConnections",
+            Field::Structs("PropertyConnection", vec![property]),
+        ),
+    ];
+    edit(&mut fields, &mut objects);
+    Asset {
+        name: "levels/runtime/spawnpoints".into(),
+        partition: PartitionWriter::default().build_many(
+            guid(0x22),
+            "SubWorldData",
+            guid(0x32),
+            fields,
+            objects,
+        ),
+    }
+}
+
 fn sub_world(name: &str, auto: bool) -> (&'static str, Vec<(&'static str, Field)>) {
     (
         "SubWorldReferenceObjectData",
@@ -351,7 +698,7 @@ fn scene(
 /// A level with sub-levels Alpha (child Gamma), Off (not auto-loaded) and
 /// Beta; the root layer has two blueprint bundles, Alpha's layer a preload.
 pub fn level() -> Vec<Asset> {
-    vec![
+    let mut assets = vec![
         scene(
             0xC0,
             LEVEL,
@@ -407,7 +754,24 @@ pub fn level() -> Vec<Asset> {
                 )],
             )],
         ),
-    ]
+    ];
+    for (seed, name) in [
+        (0xD7, "vehicles/shared/parts_bundle"),
+        (0xD8, "vehicles/traffic/one_bundle"),
+        (0xD9, "vehicles/traffic/two_bundle"),
+        (0xDA, "vehicles/synthetic_bundle"),
+    ] {
+        assets.push(Asset {
+            name: name.into(),
+            partition: PartitionWriter::default().build(
+                guid(seed),
+                "BlueprintBundle",
+                guid(seed ^ 0x80),
+                vec![("Blueprint", Field::Import(guid(0x61), guid(0x71)))],
+            ),
+        });
+    }
+    assets
 }
 
 /// Bundle whose registry lists two prefabs, a vehicle and a non-Blueprint object.
@@ -517,6 +881,65 @@ pub fn write(root: &Path, assets: &[Asset]) -> std::io::Result<(Options, [u8; 64
                 .iter()
                 .map(|(c, id)| (c.to_string(), *id))
                 .collect(),
+            garage_links: garage_links(),
+            vehicles: vehicles::rules(),
+            progression: progression::rules(),
+            sequences: sequences::rules(),
+            participant_logic: crate::BuildIdentity::supported().participant_logic,
+            scenes: crate::scenes::Rules {
+                level: RUNTIME_LEVEL.to_owned(),
+                classes: [
+                    ("LevelData", None),
+                    ("StateSequenceRefererEntityData", None),
+                    ("LogicPrefabReferenceObjectData", None),
+                    ("LogicPrefabBlueprint", None),
+                    ("ScriptedAISplineEntityData", None),
+                    (
+                        "StateSequenceManagerEntityData",
+                        Some(nfs_world::replication::sublevel::Kind::Rpc),
+                    ),
+                    ("SubWorldData", None),
+                    ("ParticipantLogicSpawnerEntityData", None),
+                    (
+                        "LinkedSchematicChannelEntityData",
+                        Some(nfs_world::replication::sublevel::Kind::Rpc),
+                    ),
+                    ("WorldPartData", None),
+                    ("SubWorldReferenceObjectData", None),
+                    ("WorldPartReferenceObjectData", None),
+                    (
+                        "BlueprintBundleEntityData",
+                        Some(nfs_world::replication::sublevel::Kind::LevelReference),
+                    ),
+                    ("BundlePreLoadEntityData", None),
+                    (
+                        "GarageEntityData",
+                        Some(nfs_world::replication::sublevel::Kind::Rpc),
+                    ),
+                    (
+                        "VehicleSlotEntityData",
+                        Some(nfs_world::replication::sublevel::Kind::Rpc),
+                    ),
+                    (
+                        "ItemEntityData",
+                        Some(nfs_world::replication::sublevel::Kind::Rpc),
+                    ),
+                    ("PersistentGarageVehiclesEntityData", None),
+                    ("LocatorEntityData", None),
+                    (
+                        "SyntheticRpc",
+                        Some(nfs_world::replication::sublevel::Kind::Rpc),
+                    ),
+                    (
+                        "SyntheticBool",
+                        Some(nfs_world::replication::sublevel::Kind::BoolProperty),
+                    ),
+                ]
+                .into_iter()
+                .map(|(n, k)| (n.to_owned(), k))
+                .collect(),
+                launchers: ["SyntheticRpc".to_owned()].into(),
+            },
         },
         limits: Limits::default(),
     };

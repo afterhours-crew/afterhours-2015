@@ -38,21 +38,72 @@ type Groups = BTreeMap<String, Vec<String>>;
 
 /// Read access to an installation's bundle registries.
 pub struct AssetIndex {
-    assets: Assets,
-    identity: BuildIdentity,
+    pub(crate) assets: Assets,
+    pub(crate) identity: BuildIdentity,
     registries: HashMap<String, Groups>,
 }
 
 impl AssetIndex {
+    /// Exact object identities of a non-blueprint class in registry order.
+    /// Embedded objects may share a partition and have no asset name of their own.
+    pub(crate) fn registered_objects(
+        &mut self,
+        bundle: &str,
+        class: &str,
+    ) -> Result<Vec<(String, usize)>, Error> {
+        let registry = format!(
+            "{}{REGISTRY_SUFFIX}",
+            bundle.to_lowercase().trim_start_matches("win32/")
+        );
+        let object = self
+            .assets
+            .objects(&registry)?
+            .first()
+            .cloned()
+            .filter(|o| o.class == REGISTRY_CLASS)
+            .ok_or_else(|| Error::Content("invalid object registry".into()))?;
+        let entries = object
+            .fields
+            .get("Objects")
+            .and_then(Value::as_array)
+            .filter(|a| a.len() <= crate::scenes::MAX_GRAPH_OBJECTS)
+            .ok_or_else(|| Error::Content("object registry bound".into()))?;
+        let mut out = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        for value in entries {
+            let key = self
+                .assets
+                .target(
+                    &registry,
+                    value
+                        .as_pointer()
+                        .ok_or_else(|| Error::Content("registry pointer".into()))?,
+                )?
+                .ok_or_else(|| Error::Content("null registry object".into()))?;
+            if self.assets.objects(&key.0)?[key.1].class == class {
+                if !seen.insert(key.clone()) {
+                    return Err(Error::Content("duplicate registered object".into()));
+                }
+                out.push(key);
+            }
+        }
+        Ok(out)
+    }
+    pub(crate) fn from_assets(assets: Assets, identity: BuildIdentity) -> Self {
+        Self {
+            assets,
+            identity,
+            registries: HashMap::new(),
+        }
+    }
     /// Open and index an installation after checking its executable.
     pub fn open(game_root: &Path, options: &Options) -> Result<Self, Error> {
         crate::fingerprint(game_root, options)?;
         let install = nfs_frostbite::install::Installation::open(game_root, options.limits)?;
-        Ok(Self {
-            assets: Assets::scan(&install)?,
-            identity: options.identity.clone(),
-            registries: HashMap::new(),
-        })
+        Ok(Self::from_assets(
+            Assets::scan(&install)?,
+            options.identity.clone(),
+        ))
     }
 
     fn groups(&mut self, bundle: &str) -> Result<&Groups, Error> {
@@ -82,22 +133,6 @@ impl AssetIndex {
             self.registries.insert(key.clone(), groups);
         }
         Ok(&self.registries[&key])
-    }
-
-    /// Decoded objects of an asset (owned, so callers may keep querying).
-    pub(crate) fn objects(
-        &mut self,
-        asset: &str,
-    ) -> Result<Vec<nfs_frostbite::ebx::Object>, Error> {
-        Ok(self.assets.objects(asset)?.to_vec())
-    }
-
-    /// Asset name and object an import pointer value names.
-    pub(crate) fn resolve_import(
-        &mut self,
-        value: Option<&Value>,
-    ) -> Result<(String, nfs_frostbite::ebx::Object), Error> {
-        self.assets.resolve(value.and_then(Value::as_pointer))
     }
 
     fn class_id(&self, class: &str) -> Result<u32, Error> {

@@ -120,6 +120,15 @@ impl WorldContent {
     }
 
     pub fn load(path: &Path) -> Result<Self, Failure> {
+        Self::load_with_scenes(path, None)
+    }
+
+    /// Version 5 may omit installed scene profiles and launcher indexes.
+    /// Explicit embedded values take precedence; malformed values never fall back.
+    pub fn load_with_scenes(
+        path: &Path,
+        scenes: Option<&nfs_content::scenes::Catalog>,
+    ) -> Result<Self, Failure> {
         let f = File::open(path).map_err(|_| Failure::Output)?;
         let mut raw = Vec::new();
         f.take(MAX_STORE_BYTES + 1)
@@ -128,11 +137,57 @@ impl WorldContent {
         if raw.len() as u64 > MAX_STORE_BYTES {
             return Err(Failure::BodyLimit);
         }
-        Self::from_json(&serde_json::from_slice(&raw).map_err(|_| Failure::ProfileConfig)?)
+        Self::from_json_with_scenes(
+            &serde_json::from_slice(&raw).map_err(|_| Failure::ProfileConfig)?,
+            scenes,
+        )
     }
 
     pub fn from_json(v: &Value) -> Result<Self, Failure> {
+        Self::from_json_with_scenes(v, None)
+    }
+
+    pub fn from_json_with_scenes(
+        v: &Value,
+        installed: Option<&nfs_content::scenes::Catalog>,
+    ) -> Result<Self, Failure> {
         let version = uint::<u8>(&v["version"])?;
+        if version == 5 {
+            let object = v.as_object().ok_or(Failure::ProfileConfig)?;
+            let required = [
+                "format",
+                "version",
+                "build_sha256",
+                "level",
+                "batches",
+                "roles",
+            ];
+            if required.iter().any(|k| !object.contains_key(*k))
+                || object.keys().any(|k| {
+                    !required.contains(&k.as_str())
+                        && !["scene_profiles", "launchers"].contains(&k.as_str())
+                })
+            {
+                return Err(Failure::ProfileConfig);
+            }
+            let mut expanded = v.clone();
+            expanded["version"] = json!(4);
+            if !object.contains_key("scene_profiles") || !object.contains_key("launchers") {
+                let catalog = installed.ok_or(Failure::ProfileConfig)?;
+                if !bytes(&v["level"]["level"])?.eq_ignore_ascii_case(catalog.level.as_bytes()) {
+                    return Err(Failure::ProfileConfig);
+                }
+                if !object.contains_key("scene_profiles") {
+                    expanded["scene_profiles"] = scenes::json(&catalog.profiles);
+                }
+                if !object.contains_key("launchers") {
+                    expanded["launchers"] =
+                        json!(catalog.launchers.entries().map(|(key,indices)|
+                        json!({"content_key":key,"serializers":indices})).collect::<Vec<_>>());
+                }
+            }
+            return Self::from_json(&expanded);
+        }
         let names: &[&str] = match version {
             1 => &["format", "version", "build_sha256", "level", "batches"],
             2 => &[

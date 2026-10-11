@@ -53,6 +53,7 @@ pub struct Partial {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Bindings {
     objects: BTreeMap<u16, Kind>,
+    splines: Option<super::spline::Content>,
     scenes: BTreeMap<u16, sublevel::Profile>,
     content: Option<std::sync::Arc<sublevel::Content>>,
     entities: BTreeMap<u16, std::sync::Arc<entity::creation::Binding>>,
@@ -68,6 +69,34 @@ fn id_valid(id: u16) -> Result<(), Error> {
 }
 
 impl Bindings {
+    pub fn with_splines(mut self, content: super::spline::Content) -> Self {
+        self.splines = Some(content);
+        self
+    }
+    fn decode_record(
+        &self,
+        span: BitSpan<'_>,
+        id: u16,
+        bound: Option<Kind>,
+    ) -> Result<Decoded_, Error> {
+        let create = span.read_u32(13, 1).map_err(|_| Error::Truncated)? != 0;
+        let kind = if create {
+            Kind::from_index(span.read_u32(14, 5).map_err(|_| Error::Truncated)? as u8)?
+        } else {
+            bound.ok_or(Error::UnknownObject)?
+        };
+        if kind == Kind::ScriptedSplineGoal {
+            return Record::decode_spline(span, bound, self.splines.as_ref());
+        }
+        Record::decode_context(
+            span,
+            bound,
+            self.content.as_deref(),
+            self.scenes.get(&id),
+            self.entity_content.as_deref(),
+            self.entities.get(&id),
+        )
+    }
     pub fn with_sublevels(content: sublevel::Content) -> Self {
         Self {
             content: Some(std::sync::Arc::new(content)),
@@ -104,9 +133,9 @@ impl Bindings {
     }
     pub fn is_sequence(&self, id: u16) -> bool {
         self.entities.get(&id).is_some_and(|binding| {
-            binding
-                .profile()
-                .is_ok_and(|profile| profile == &crate::sequences::profile())
+            binding.profile().is_ok_and(|profile| {
+                profile == &crate::sequences::profile() || profile == &crate::arrival::profile()
+            })
         })
     }
     pub fn reset(&mut self) {
@@ -158,14 +187,7 @@ impl Bindings {
             if create && bound.is_some() {
                 return Err(Error::DuplicateObject);
             }
-            let decoded = Record::decode_context(
-                span,
-                bound,
-                next.content.as_deref(),
-                next.scenes.get(&id),
-                next.entity_content.as_deref(),
-                next.entities.get(&id),
-            )?;
+            let decoded = next.decode_record(span, id, bound)?;
             let kind = decoded.record.update.kind();
             if create {
                 next.objects.insert(id, kind);
@@ -241,14 +263,7 @@ impl Bindings {
                 if create && bound.is_some() {
                     return Err(Error::DuplicateObject);
                 }
-                let decoded = Record::decode_context(
-                    span,
-                    bound,
-                    next.content.as_deref(),
-                    next.scenes.get(&id),
-                    next.entity_content.as_deref(),
-                    next.entities.get(&id),
-                )?;
+                let decoded = next.decode_record(span, id, bound)?;
                 Ok((decoded, cursor))
             })();
             match result {
@@ -390,12 +405,25 @@ impl Section {
 }
 
 pub fn split_records(records: Vec<Record>, max_frame_bits: usize) -> Result<Vec<Section>, Error> {
+    split(records, max_frame_bits, false)
+}
+
+/// Split host-owned records with space for the clock filled by the session.
+/// Including the clock before splitting preserves the aligned frame bound.
+pub fn split_timed_records(
+    records: Vec<Record>,
+    max_frame_bits: usize,
+) -> Result<Vec<Section>, Error> {
+    split(records, max_frame_bits, true)
+}
+
+fn split(records: Vec<Record>, max_frame_bits: usize, timed: bool) -> Result<Vec<Section>, Error> {
     if records.len() > MAX_SECTION_RECORDS || max_frame_bits > MAX_SECTION_BITS {
         return Err(Error::Bound);
     }
     let empty = || Section {
-        float_bits: None,
-        flag: false,
+        float_bits: timed.then_some(0),
+        flag: timed,
         deleted: Vec::new(),
         setup: Some(Setup::Packed {
             tag: None,

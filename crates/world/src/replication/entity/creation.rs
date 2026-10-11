@@ -26,6 +26,9 @@ pub struct Catalog {
     count: u16,
 }
 impl Catalog {
+    pub(crate) fn bundle(&self) -> u16 {
+        self.bundle
+    }
     pub fn new(bundle: u16, entries: &[(u16, u16)]) -> Result<Self, Error> {
         if bundle >= 2048 || bundle == 2003 {
             return Err(Error::Unsupported);
@@ -51,10 +54,10 @@ impl Catalog {
             count,
         })
     }
-    fn width(&self) -> u8 {
+    pub(crate) fn width(&self) -> u8 {
         (16 - self.count.leading_zeros()) as u8
     }
-    fn resolve(&self, mut flat: u16) -> Result<Asset, Error> {
+    pub(crate) fn resolve(&self, mut flat: u16) -> Result<Asset, Error> {
         if flat >= self.count {
             return Err(Error::Shape);
         }
@@ -70,7 +73,7 @@ impl Catalog {
         }
         Err(Error::Shape)
     }
-    fn flatten(&self, asset: Asset) -> Result<u16, Error> {
+    pub(crate) fn flatten(&self, asset: Asset) -> Result<u16, Error> {
         if asset.bundle != self.bundle {
             return Err(Error::Shape);
         }

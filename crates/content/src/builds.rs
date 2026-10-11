@@ -12,7 +12,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 pub const FORMAT: &str = "nfs-build-profile";
-pub const VERSION: u64 = 1;
+pub const VERSION: u64 = 9;
 
 /// `(file name, contents)` of every profile.
 const PROFILES: &[(&str, &str)] = &[(
@@ -33,7 +33,7 @@ pub fn parse(file_name: &str, text: &str) -> Result<BuildIdentity, Error> {
     let bad = |what: &str| Error::Content(format!("build profile {file_name}: {what}"));
     let value: Value = serde_json::from_str(text).map_err(|_| bad("not JSON"))?;
     let object = value.as_object().ok_or_else(|| bad("not an object"))?;
-    const FIELDS: [&str; 7] = [
+    const FIELDS: [&str; 13] = [
         "format",
         "version",
         "description",
@@ -41,6 +41,12 @@ pub fn parse(file_name: &str, text: &str) -> Result<BuildIdentity, Error> {
         "executable_sha256",
         "world_mac_template",
         "blueprint_class_ids",
+        "scenes",
+        "garage_links",
+        "vehicles",
+        "progression",
+        "sequences",
+        "participant_logic",
     ];
     if object.len() != FIELDS.len() || FIELDS.iter().any(|f| !object.contains_key(*f)) {
         return Err(bad("unexpected or missing fields"));
@@ -100,6 +106,70 @@ pub fn parse(file_name: &str, text: &str) -> Result<BuildIdentity, Error> {
         mac_template_rva: rva,
         mac_template_sha256: template_sha256,
         blueprint_class_ids: class_ids,
+        scenes: scene_rules(&value["scenes"])?,
+        garage_links: crate::garage::Links::from_json(&value["garage_links"])?,
+        vehicles: crate::vehicle_profiles::Rules::from_json(&value["vehicles"])?,
+        progression: crate::progression::Rules::from_json(&value["progression"])?,
+        sequences: crate::sequences::Rules::from_json(&value["sequences"])?,
+        participant_logic: crate::participant_logic::Rules::from_json(&value["participant_logic"])?,
+    })
+}
+
+fn scene_rules(value: &Value) -> Result<crate::scenes::Rules, Error> {
+    use nfs_world::replication::sublevel::Kind;
+    let bad = || Error::Content("invalid scene construction rules in build profile".into());
+    let object = value.as_object().filter(|o| o.len() == 3).ok_or_else(bad)?;
+    if !["level", "classes", "launchers"]
+        .iter()
+        .all(|k| object.contains_key(*k))
+    {
+        return Err(bad());
+    }
+    let level = value["level"]
+        .as_str()
+        .filter(|s| !s.is_empty() && s.len() <= 512 && !s.contains("..") && !s.starts_with('/'))
+        .ok_or_else(bad)?
+        .to_owned();
+    let entries = value["classes"]
+        .as_object()
+        .filter(|o| !o.is_empty() && o.len() <= 2048)
+        .ok_or_else(bad)?;
+    let mut classes = BTreeMap::new();
+    for (class, value) in entries {
+        if class.is_empty()
+            || class.len() > 128
+            || !class
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'_')
+        {
+            return Err(bad());
+        }
+        let kind = if value.is_null() {
+            None
+        } else {
+            Some(Kind::from_name(value.as_str().ok_or_else(bad)?).ok_or_else(bad)?)
+        };
+        classes.insert(class.clone(), kind);
+    }
+    let entries = value["launchers"]
+        .as_array()
+        .filter(|a| a.len() <= classes.len())
+        .ok_or_else(bad)?;
+    let mut launchers = std::collections::BTreeSet::new();
+    for entry in entries {
+        let name = entry.as_str().ok_or_else(bad)?;
+        if !matches!(
+            classes.get(name),
+            Some(Some(Kind::Rpc | Kind::RpcPursuitMaps))
+        ) || !launchers.insert(name.to_owned())
+        {
+            return Err(bad());
+        }
+    }
+    Ok(crate::scenes::Rules {
+        level,
+        classes,
+        launchers,
     })
 }
 
@@ -151,7 +221,7 @@ mod tests {
         extra["unexpected"] = Value::Bool(true);
         cases.push((name, extra));
         let mut version = base.clone();
-        version["version"] = 2.into();
+        version["version"] = (VERSION + 1).into();
         cases.push((name, version));
         let mut digest = base.clone();
         digest["executable_sha256"] = "ABC".into();
@@ -170,5 +240,32 @@ mod tests {
             assert!(parse(file, &value.to_string()).is_err(), "{file}: {value}");
         }
         assert!(parse(name, &base.to_string()).is_ok());
+    }
+
+    #[test]
+    fn scene_rules_reject_unknown_kinds_and_invalid_launcher_roles() {
+        let base = serde_json::json!({"level":"levels/synthetic","classes":{
+            "SubWorldData":null,"SyntheticRpc":"rpc","SyntheticBool":"bool_property"},
+            "launchers":["SyntheticRpc"]});
+        assert!(scene_rules(&base).is_ok());
+        for names in [
+            serde_json::json!(["Absent"]),
+            serde_json::json!(["SubWorldData"]),
+            serde_json::json!(["SyntheticBool"]),
+            serde_json::json!(["SyntheticRpc", "SyntheticRpc"]),
+        ] {
+            let mut bad = base.clone();
+            bad["launchers"] = names;
+            assert!(scene_rules(&bad).is_err());
+        }
+        let mut bad = base.clone();
+        bad["classes"]["SyntheticRpc"] = serde_json::json!("future");
+        assert!(scene_rules(&bad).is_err());
+        let mut bad = base.clone();
+        bad["classes"]["Bad/Class"] = serde_json::Value::Null;
+        assert!(scene_rules(&bad).is_err());
+        let mut bad = base;
+        bad["level"] = serde_json::json!("../other");
+        assert!(scene_rules(&bad).is_err());
     }
 }

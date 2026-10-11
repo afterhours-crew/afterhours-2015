@@ -21,14 +21,23 @@ mod cache;
 mod control;
 mod executable;
 mod fingerprint;
+pub mod garage;
+mod graph;
 mod items;
 mod licenses;
+pub mod participant_logic;
+pub mod progression;
 mod reputation;
 mod scan;
+pub mod scenes;
+pub mod sequences;
+mod startup;
 mod stats;
 #[cfg(any(test, feature = "synthetic"))]
 pub mod synthetic;
 mod tables;
+pub mod vehicle_parts;
+pub mod vehicle_profiles;
 pub mod world;
 
 pub use fingerprint::{Fingerprint, Input, InputKind, fingerprint};
@@ -42,7 +51,7 @@ pub const FORMAT: &str = "nfs-install-content";
 pub const VERSION: u64 = 1;
 /// Increment whenever a builder's output for an unchanged installation changes,
 /// so existing cache entries are rebuilt.
-pub const BUILDER_REVISION: u64 = 5;
+pub const BUILDER_REVISION: u64 = 14;
 /// Executable file name relative to the installation root.
 pub const EXECUTABLE: &str = "NFS16.exe";
 
@@ -55,6 +64,13 @@ pub struct BuildIdentity {
     pub mac_template_sha256: String,
     /// Runtime class IDs of Blueprint classes, by class name.
     pub blueprint_class_ids: BTreeMap<String, u32>,
+    /// Server scene construction rules tied to this executable.
+    pub scenes: scenes::Rules,
+    pub garage_links: garage::Links,
+    pub vehicles: vehicle_profiles::Rules,
+    pub progression: progression::Rules,
+    pub sequences: sequences::Rules,
+    pub participant_logic: participant_logic::Rules,
 }
 
 impl BuildIdentity {
@@ -85,19 +101,39 @@ pub enum Kind {
     ControlCatalogs,
     /// Level thresholds used by reputation, Stats and awards.
     ReputationThresholds,
+    /// Installed scene serializer profiles and launcher endpoints.
+    SceneCatalog,
+    /// Startup descriptor, registrations and role bindings with AllDrive policy.
+    WorldContent,
+    /// Garage slots, parking transforms and inventory slot bindings.
+    GarageLayout,
     /// The 64-byte world MAC template.
     WorldMacTemplate,
+    /// Vehicle customization, wheel, wrap, NOS and mesh item definitions.
+    VehicleParts,
+    /// Vehicle composition, static physics, appearance, mesh and health inputs.
+    VehicleProfiles,
+    /// Objective defaults, entity shapes and installed scene-channel bindings.
+    ProgressionContent,
+    SequenceContent,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 7] = [
+    pub const ALL: [Kind; 14] = [
         Kind::ItemContent,
         Kind::PersistentContent,
         Kind::StatDefinitions,
         Kind::ItemLicenses,
         Kind::ControlCatalogs,
         Kind::ReputationThresholds,
+        Kind::SceneCatalog,
+        Kind::WorldContent,
+        Kind::GarageLayout,
         Kind::WorldMacTemplate,
+        Kind::VehicleParts,
+        Kind::VehicleProfiles,
+        Kind::ProgressionContent,
+        Kind::SequenceContent,
     ];
     /// Manifest key.
     pub fn key(self) -> &'static str {
@@ -108,7 +144,14 @@ impl Kind {
             Self::ItemLicenses => "item_licenses",
             Self::ControlCatalogs => "control_catalogs",
             Self::ReputationThresholds => "reputation_thresholds",
+            Self::SceneCatalog => "scene_catalog",
+            Self::WorldContent => "world_content",
+            Self::GarageLayout => "garage_layout",
             Self::WorldMacTemplate => "world_mac_template",
+            Self::VehicleParts => "vehicle_parts",
+            Self::VehicleProfiles => "vehicle_profiles",
+            Self::ProgressionContent => "progression_content",
+            Self::SequenceContent => "sequence_content",
         }
     }
     /// File name inside a cache entry.
@@ -120,7 +163,14 @@ impl Kind {
             Self::ItemLicenses => "item-licenses.json",
             Self::ControlCatalogs => "control-catalogs.json",
             Self::ReputationThresholds => "reputation-thresholds.json",
+            Self::SceneCatalog => "scene-catalog.json",
+            Self::WorldContent => "world-content.json",
+            Self::GarageLayout => "garage-layout.json",
             Self::WorldMacTemplate => "world-mac-template.bin",
+            Self::VehicleParts => "vehicle-parts.json",
+            Self::VehicleProfiles => "vehicle-profiles.json",
+            Self::ProgressionContent => "progression-content.json",
+            Self::SequenceContent => "sequence-content.json",
         }
     }
 }
@@ -227,6 +277,15 @@ pub fn build(
     let mut assets = scan::Assets::scan(&install)?;
     let mut outputs = BTreeMap::new();
     outputs.insert(Kind::ItemContent, items::build(&mut assets)?);
+    let item_content = nfs_services::item_content::ItemContent::from_json(
+        &serde_json::from_slice(&outputs[&Kind::ItemContent])
+            .map_err(|_| Error::Content("item JSON".into()))?,
+    )
+    .map_err(|_| Error::Content("item catalog".into()))?;
+    outputs.insert(
+        Kind::VehicleParts,
+        vehicle_parts::build(&mut assets, &item_content.catalog)?,
+    );
     let tables = tables::build(&mut assets, &fingerprint.digest)?;
     outputs.insert(Kind::StatDefinitions, stats::build(&tables)?);
     outputs.insert(Kind::PersistentContent, tables);
@@ -234,9 +293,29 @@ pub fn build(
     outputs.insert(Kind::ControlCatalogs, control::build(&mut assets)?);
     outputs.insert(Kind::ReputationThresholds, reputation::build(&mut assets)?);
     outputs.insert(
+        Kind::SceneCatalog,
+        scenes::build(&mut assets, &options.identity.scenes)?,
+    );
+    let catalog = scenes::Catalog::from_json(
+        &serde_json::from_slice(&outputs[&Kind::SceneCatalog])
+            .map_err(|_| Error::Content("scene catalog JSON".into()))?,
+    )?;
+    let mut index = assets::AssetIndex::from_assets(assets, options.identity.clone());
+    outputs.insert(Kind::WorldContent, startup::build(&mut index, &catalog)?);
+    outputs.insert(Kind::GarageLayout, garage::build(&mut index)?);
+    outputs.insert(
+        Kind::ProgressionContent,
+        progression::build(&mut index, &fingerprint.digest)?,
+    );
+    outputs.insert(
+        Kind::VehicleProfiles,
+        vehicle_profiles::build(&mut index, &item_content.catalog)?,
+    );
+    outputs.insert(
         Kind::WorldMacTemplate,
         executable::mac_template(&game_root.join(EXECUTABLE), &options.identity)?,
     );
+    outputs.insert(Kind::SequenceContent, sequences::build(&mut index)?);
     Ok(outputs)
 }
 

@@ -6,26 +6,6 @@ use super::{Failure, array, boolean, fields, uint};
 use nfs_world::replication::sublevel::{Content, Kind, MAX_PROFILES, MAX_SERIALIZERS, Profile};
 use serde_json::{Value, json};
 
-const KINDS: &[(&str, Kind)] = &[
-    ("noop", Kind::Noop),
-    ("rpc", Kind::Rpc),
-    ("level_reference", Kind::LevelReference),
-    ("bool_property", Kind::BoolProperty),
-    ("float_property", Kind::FloatProperty),
-    ("i32_property", Kind::I32Property),
-    ("rpc_references", Kind::RpcReferences),
-    ("rpc_pairs", Kind::RpcPairs),
-    ("rpc_tagged", Kind::RpcTagged),
-    ("rpc_optional64", Kind::RpcOptional64),
-    ("rpc_guid", Kind::RpcGuid),
-    ("rpc_bool", Kind::RpcBool),
-    ("rpc_map", Kind::RpcMap),
-    ("rpc_four_references", Kind::RpcFourReferences),
-    ("rpc_set64", Kind::RpcSet64),
-    ("rpc_pursuit_maps", Kind::RpcPursuitMaps),
-    ("rpc_spawn", Kind::RpcSpawn),
-];
-
 pub(super) fn parse(value: &Value) -> Result<Content, Failure> {
     let profiles = array(value, MAX_PROFILES)?
         .iter()
@@ -35,10 +15,7 @@ pub(super) fn parse(value: &Value) -> Result<Content, Failure> {
                 .iter()
                 .map(|v| {
                     let name = v.as_str().ok_or(Failure::ProfileConfig)?;
-                    KINDS
-                        .iter()
-                        .find_map(|(n, k)| (*n == name).then_some(*k))
-                        .ok_or(Failure::ProfileConfig)
+                    Kind::from_name(name).ok_or(Failure::ProfileConfig)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             Ok((
@@ -52,8 +29,15 @@ pub(super) fn parse(value: &Value) -> Result<Content, Failure> {
 }
 
 pub(super) fn json(content: &Content) -> Value {
-    json!(content.profiles().map(|(key,profile)|json!({"content_key":key,"root":profile.is_root(),
-        "serializers":profile.kinds().iter().map(|kind| KINDS.iter().find(|(_,k)| k==kind).expect("all enum kinds mapped").0).collect::<Vec<_>>() })).collect::<Vec<_>>())
+    json!(
+        content
+            .profiles()
+            .map(
+                |(key, profile)| json!({"content_key":key,"root":profile.is_root(),
+        "serializers":profile.kinds().iter().map(|kind| kind.name()).collect::<Vec<_>>() })
+            )
+            .collect::<Vec<_>>()
+    )
 }
 
 pub(super) fn launchers(
@@ -81,7 +65,7 @@ mod tests {
     use super::*;
     #[test]
     fn static_store_rejects_unknown_shapes_and_instance_data() {
-        let value = json!([{"content_key":7,"root":false,"serializers":["noop","rpc_bool"]}]);
+        let value = json!([{"content_key":7,"root":false,"serializers":["noop","rpc_bool","rpc_trigger_volume"]}]);
         assert_eq!(json(&parse(&value).unwrap()), value);
         let mut altered = value.clone();
         altered[0]["values"] = json!([false]);

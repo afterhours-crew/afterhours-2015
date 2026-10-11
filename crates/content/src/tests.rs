@@ -70,6 +70,28 @@ fn builds_outputs_the_service_loaders_accept() {
         install.cache().join(&prepared.fingerprint.digest)
     );
     let items = ItemContent::load(&prepared.path(Kind::ItemContent)).unwrap();
+    progression::Content::load(&prepared.path(Kind::ProgressionContent)).unwrap();
+    sequences::SequenceContent::load(&prepared.path(Kind::SequenceContent)).unwrap();
+    vehicle_parts::Catalog::load(&prepared.path(Kind::VehicleParts), &items.catalog).unwrap();
+    let parts: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(prepared.path(Kind::VehicleParts)).unwrap()).unwrap();
+    assert_eq!(parts["parts"]["customization"].as_array().unwrap().len(), 5);
+    assert_eq!(
+        parts["parts"]["appearance"][0]["data_id"],
+        "18446744073709551603"
+    );
+    assert_eq!(parts["parts"]["appearance"][0]["version"], 2);
+    let scenes = scenes::Catalog::load(&prepared.path(Kind::SceneCatalog)).unwrap();
+    assert_eq!(scenes.profiles.profiles().count(), 21);
+    assert!(scenes.profiles.profile(1).unwrap().is_root());
+    assert_eq!(
+        scenes
+            .profiles
+            .profile(assets::scene_key("vehicles/synthetic_bundle"))
+            .unwrap()
+            .kinds(),
+        [nfs_world::replication::sublevel::Kind::Noop]
+    );
     let json = items.to_json();
     let definitions = json["definitions"].as_array().unwrap();
     assert_eq!(definitions.len(), 5);
@@ -166,6 +188,206 @@ fn builds_outputs_the_service_loaders_accept() {
         std::fs::read(prepared.path(Kind::WorldMacTemplate)).unwrap(),
         install.template
     );
+}
+
+#[test]
+fn changed_construction_rules_do_not_reuse_an_installation_cache() {
+    let install = install_with(&assets());
+    let first = install.prepare().unwrap();
+    let mut options = install.options();
+    options.identity.scenes.level = "levels/absent".into();
+    assert_ne!(
+        first.fingerprint,
+        fingerprint(&install.game(), &options).unwrap()
+    );
+    assert!(prepare(&install.game(), &install.cache(), &options).is_err());
+    let mut changed_links = install.options();
+    changed_links.identity.garage_links.primary_slot = 999;
+    assert_ne!(
+        first.fingerprint,
+        fingerprint(&install.game(), &changed_links).unwrap()
+    );
+    assert!(prepare(&install.game(), &install.cache(), &changed_links).is_err());
+    let mut changed_exit = install.options();
+    changed_exit.identity.garage_links.exit_location = 999;
+    assert_ne!(
+        first.fingerprint,
+        fingerprint(&install.game(), &changed_exit).unwrap()
+    );
+    assert!(prepare(&install.game(), &install.cache(), &changed_exit).is_err());
+    let mut changed_vehicles = install.options();
+    changed_vehicles.identity.vehicles.mesh_link ^= 1;
+    assert_ne!(
+        first.fingerprint,
+        fingerprint(&install.game(), &changed_vehicles).unwrap()
+    );
+    assert!(prepare(&install.game(), &install.cache(), &changed_vehicles).is_err());
+    assert!(!install.prepare().unwrap().built);
+}
+
+#[test]
+fn vehicle_profiles_follow_components_links_and_installed_defaults() {
+    let install = install_with(&assets());
+    let prepared = install.prepare().unwrap();
+    let json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(prepared.path(Kind::VehicleProfiles)).unwrap())
+            .unwrap();
+    let rows = json["vehicles"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    let definition = vehicle_profiles::Definition::from_json(row).unwrap();
+    assert_eq!(definition.blueprint, synthetic::vehicles::BLUEPRINT);
+    assert_eq!(definition.asset_type, 20);
+    assert_eq!(definition.asset_index, 0);
+    assert_eq!(
+        row["definitions"],
+        serde_json::json!([nfs_frostbite::hex(&guid(0x83))])
+    );
+    assert_eq!(
+        row["parts"],
+        serde_json::json!([{"ordinal":2,"variants":2,"networkable":true}])
+    );
+    assert_eq!(
+        row["profile"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["kind"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "root",
+            "chassis",
+            "part",
+            "triple_nibbles",
+            "bool",
+            "wheel",
+            "wheel",
+            "wheel",
+            "wheel",
+            "index",
+            "tuning",
+            "appearance",
+            "four_bit",
+            "tagged",
+            "nibbles_guid",
+            "mesh",
+            "guid_float"
+        ]
+    );
+    // Link order is rim, base; the component graph has base before rim.
+    assert_eq!(row["meshes"][0]["extra"], "rim");
+    assert_eq!(
+        row["meshes"][0]["variants"][0]["bundle"],
+        "parts/synthetic/rims"
+    );
+    assert_eq!(row["meshes"][1]["extra"], "none");
+    assert!(row["meshes"][1]["variants"][0]["bundle"].is_null());
+    assert_eq!(row["meshes"][1]["variants"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        row["buses"],
+        serde_json::json!([{"path":[],"flags":1},{"path":[0,17],"flags":0}])
+    );
+    assert_eq!((definition.team, definition.mode), (1, 2));
+    assert_eq!(definition.resting.mass, 1000.);
+    assert_eq!(definition.resting.front.spring_rate, 120.);
+    assert_eq!(definition.resting.rear.spring_progression, 1.5);
+    assert_eq!(definition.wheel_baseline, [0.5, 0.625]);
+    assert_eq!(definition.appearance.palettes[1][2], [0.75, 0.25, 0.75]);
+    assert_eq!(definition.appearance.static_wrap_counts, Some([2, 3]));
+    assert_eq!(
+        row["health"]["profile"]["points"],
+        serde_json::json!([70, 30])
+    );
+}
+
+#[test]
+fn vehicle_profiles_reject_ambiguous_missing_and_cyclic_graphs() {
+    use synthetic::{Field, vehicles};
+    for case in 0..7 {
+        let replacement = vehicles::assets_with(|fields, objects| match case {
+            0 => objects[3].0 = "UnrecognizedComponentData",
+            1 => objects[1].1.push(("Object", Field::RawPointer(2))),
+            2 => objects[0].1[1].1 = Field::RawPointers(vec![0, 3]),
+            3 => {
+                let Field::Structs(_, links) = &mut fields[3].1 else {
+                    panic!()
+                };
+                links.push(links[0].clone());
+            }
+            4 => fields[3].1 = Field::Structs("LinkConnection", vec![]),
+            5 => objects[18].1[0].1 = Field::Int(0),
+            6 => objects[1].1.push(("Excluded", Field::Bool(true))),
+            _ => unreachable!(),
+        });
+        let mut fixture = assets();
+        fixture.retain(|a| !replacement.iter().any(|b| a.name == b.name));
+        fixture.extend(replacement);
+        let error = install_with(&fixture).prepare().unwrap_err();
+        assert!(matches!(error, Error::Content(_)), "case {case}: {error:?}");
+    }
+}
+
+#[test]
+fn startup_resolves_roles_by_name_and_traffic_by_construction_order() {
+    let install = install_with(&assets());
+    let prepared = install.prepare().unwrap();
+    let value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(prepared.path(Kind::WorldContent)).unwrap()).unwrap();
+    assert_eq!(value["version"], 5);
+    assert!(value.get("scene_profiles").is_none());
+    assert!(value.get("launchers").is_none());
+    assert_eq!(
+        value["roles"]["customization_timer"],
+        serde_json::json!({"bundle":3,"type_id":30,"local_index":1})
+    );
+    assert_eq!(
+        value["roles"]["streaming_gate"],
+        serde_json::json!({"bundle":1,"type_id":30,"local_index":0})
+    );
+    let expected: Vec<_> = (0..10)
+        .rev()
+        .map(|i| assets::scene_key(&format!("vehicles/runtime/{i}_bundle")))
+        .collect();
+    assert_eq!(value["roles"]["traffic"], serde_json::json!(expected));
+    let names: Vec<_> = value["batches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|b| b["kind"] == "names")
+        .flat_map(|b| b["entries"].as_array().unwrap())
+        .map(|e| {
+            let bytes: Vec<_> = e[1]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|n| n.as_u64().unwrap() as u8)
+                .collect();
+            String::from_utf8(bytes).unwrap()
+        })
+        .collect();
+    assert_eq!(names.len(), 16);
+    assert_eq!(names[6], "vehicles/runtime/0_bundle");
+    assert_eq!(names[15], "vehicles/runtime/9_bundle");
+}
+
+#[test]
+fn startup_rejects_missing_required_roles_and_role_assets() {
+    for name in [
+        "levels/runtime/garage",
+        "gameplay/stats/garagestatslogic",
+        "gameplay/garageloadlogic",
+    ] {
+        let mut incomplete = assets();
+        incomplete.retain(|a| a.name != name);
+        assert!(install_with(&incomplete).prepare().is_err(), "{name}");
+    }
+    let install = install_with(&assets());
+    let mut options = install.options();
+    options
+        .identity
+        .blueprint_class_ids
+        .insert("ParticipantLogicBlueprint".into(), 65536);
+    assert!(prepare(&install.game(), &install.cache(), &options).is_err());
 }
 
 #[test]
