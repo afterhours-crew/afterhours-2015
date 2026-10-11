@@ -45,6 +45,27 @@ impl Players {
             .flatten()
     }
 
+    /// Set the Actor's first replicated flag when its participant arrives in
+    /// the world. The wire field's full meaning is not established; keep its
+    /// neutral codec name instead of conflating it with movement authority.
+    pub fn actor_arriving(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        participant: u16,
+    ) -> Result<Option<Record>, Error> {
+        let actor = self
+            .owned_actor(connection, persona, participant)
+            .ok_or(Error::UnknownObject)?;
+        self.objects.change(
+            actor,
+            Update::Actor(ActorUpdate {
+                flag_a: Some(true),
+                ..ActorUpdate::default()
+            }),
+        )
+    }
+
     pub fn bind_actor(
         &mut self,
         gameplay_key: u32,
@@ -62,6 +83,53 @@ impl Players {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn arrival_flag_is_owned_repeat_safe_and_keeps_other_actor_fields() {
+        let mut world = Players::default();
+        let a = join(&mut world, 3, 101, 0);
+        let b = join(&mut world, 7, 202, 0);
+        let actor = world.create_actor(3, 101, a).unwrap().unwrap().id;
+        world.create_actor(7, 202, b).unwrap();
+        let before = world.objects.snapshot();
+        for (connection, persona, participant) in [(7, 202, a), (3, 202, a), (3, 101, b)] {
+            assert_eq!(
+                world.actor_arriving(connection, persona, participant),
+                Err(Error::UnknownObject)
+            );
+        }
+        assert_eq!(world.objects.snapshot(), before);
+        let record = world.actor_arriving(3, 101, a).unwrap().unwrap();
+        assert_eq!(record.id, actor);
+        assert!(record.initial.is_none());
+        assert_eq!(
+            record.update,
+            Update::Actor(ActorUpdate {
+                flag_a: Some(true),
+                ..ActorUpdate::default()
+            })
+        );
+        let bytes = record.encode().unwrap();
+        assert_eq!(
+            Record::decode(bytes.span(), Some(Kind::Actor))
+                .unwrap()
+                .record,
+            record
+        );
+        assert_eq!(world.actor_arriving(3, 101, a), Ok(None));
+        let mut expected = before;
+        let Update::Actor(update) =
+            &mut expected.iter_mut().find(|r| r.id == actor).unwrap().update
+        else {
+            panic!()
+        };
+        update.flag_a = Some(true);
+        assert_eq!(world.objects.snapshot(), expected);
+        assert_eq!(
+            world.actor_arriving(7, 202, b).unwrap().unwrap().id,
+            world.owned_actor(7, 202, b).unwrap()
+        );
+    }
 
     fn gameplay(world: &mut Players) -> u16 {
         use sublevel::{gameplay, ordinary};

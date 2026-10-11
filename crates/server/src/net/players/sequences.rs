@@ -195,6 +195,11 @@ impl PlayerListener {
         match arrivals {
             None => {
                 for participant in arriving {
+                    records.extend(players.actor_arriving(
+                        HOST_SELECTOR as u8,
+                        persona,
+                        participant,
+                    )?);
                     if let nfs_world::participants::Outcome::Advanced(calls) =
                         participants.arrived(participant)
                     {
@@ -225,6 +230,11 @@ impl PlayerListener {
                     };
                     records.extend(started);
                     records.extend(logic);
+                    records.extend(players.actor_arriving(
+                        HOST_SELECTOR as u8,
+                        persona,
+                        participant,
+                    )?);
                 }
             }
         }
