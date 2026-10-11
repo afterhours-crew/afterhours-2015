@@ -114,6 +114,7 @@ pub enum Message<'a> {
     GaragePresence(crate::garage::presence::Notification),
     SequenceStop(crate::sequences::Stop),
     LogicEvent(crate::logic::Fire),
+    WorldActivation(crate::world_activation::Notification),
     Opaque {
         index: u8,
         body: BitSpan<'a>,
@@ -135,7 +136,8 @@ impl Message<'_> {
             | Self::ActorBinding(_)
             | Self::VehicleBinding(_)
             | Self::GaragePresence(_)
-            | Self::SequenceStop(_) => 47,
+            | Self::SequenceStop(_)
+            | Self::WorldActivation(_) => 47,
             Self::LogicEvent(v) => v.index(),
             Self::Opaque { index, .. } => *index,
         }
@@ -748,6 +750,9 @@ impl Builder {
                 w.put_span(value.encode().map_err(|_| Error::Shape)?.span());
             }
             Message::GaragePresence(value) => {
+                w.put_span(value.encode().map_err(|_| Error::Shape)?.span());
+            }
+            Message::WorldActivation(value) => {
                 w.put_span(value.encode().map_err(|_| Error::Shape)?.span());
             }
             Message::SequenceStop(value) => {

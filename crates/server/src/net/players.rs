@@ -17,6 +17,7 @@ use nfs_world::{
     },
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+mod activation;
 mod customization;
 mod launchers;
 mod sequences;
@@ -64,6 +65,7 @@ pub(super) struct PlayerListener {
     world_ms: u64,
     vehicle_reports: nfs_world::vehicle_reports::Reports,
     trigger_volumes: nfs_world::trigger_volumes::Volumes,
+    world_activation: Option<nfs_world::world_activation::Activation>,
     sequences: Option<nfs_world::sequences::Sequences>,
     /// Arrive sequences after garage exit (optional sequence content).
     arrivals: Option<nfs_world::arrival::Arrivals>,
@@ -456,6 +458,7 @@ impl PlayerListener {
             world_ms: 0,
             vehicle_reports: nfs_world::vehicle_reports::Reports::default(),
             trigger_volumes: nfs_world::trigger_volumes::Volumes::default(),
+            world_activation: None,
             sequences: None,
             inventory: None,
             logic: None,
@@ -587,6 +590,11 @@ impl PlayerListener {
         }
         let mut trigger_volumes = self.trigger_volumes.clone();
         trigger_volumes.bind(&records)?;
+        let world_activation = roles
+            .free_roam
+            .as_ref()
+            .map(|catalog| nfs_world::world_activation::Activation::bind(&records, catalog))
+            .transpose()?;
         let sections = split_scenes(records, nfs_world::application::OUTBOUND_FRAME_BITS)?;
         if sections.len() > MAX_PENDING - self.pending.len() {
             return Err(replication::Error::Bound);
@@ -597,6 +605,7 @@ impl PlayerListener {
         self.spawn_points = spawn_points;
         self.level_poll = level_poll;
         self.trigger_volumes = trigger_volumes;
+        self.world_activation = world_activation;
         self.pending.extend(sections);
         self.population = population;
         self.roles = Some(roles.clone());
@@ -667,6 +676,7 @@ impl Listener for PlayerListener {
         let mut deferred_sections = Vec::new();
         let mut vehicle_reports = self.vehicle_reports.clone();
         let mut trigger_volumes = self.trigger_volumes.clone();
+        let mut world_activation = self.world_activation.clone();
         if let Some(movement) = &parsed.movement {
             let cars = world_cars.keys().copied().collect();
             match vehicle_reports.receive(
@@ -983,6 +993,22 @@ impl Listener for PlayerListener {
                 match Self::vehicle_loaded(population, &players, self.persona, body) {
                     Ok(true) => continue,
                     Ok(false) => {}
+                    Err(error) => {
+                        self.refused += 1;
+                        self.last_error = Some(error);
+                        return false;
+                    }
+                }
+            }
+            if let Some(activation) = &mut world_activation {
+                match activation.receive(body, |id| {
+                    players.owns_participant(HOST_SELECTOR as u8, self.persona, id)
+                }) {
+                    Ok(Some(report)) => {
+                        tracing::debug!(?report, "owned world volume or location report");
+                        continue;
+                    }
+                    Ok(None) => {}
                     Err(error) => {
                         self.refused += 1;
                         self.last_error = Some(error);
@@ -1418,6 +1444,7 @@ impl Listener for PlayerListener {
         self.world_cars = world_cars;
         self.trigger_volumes = trigger_volumes;
         self.vehicle_reports = vehicle_reports;
+        self.world_activation = world_activation;
         self.deferred_deletions = deferred_deletions;
         self.pending_spawns.extend(scheduled_spawns);
         self.arrivals = arrivals;

@@ -29,6 +29,7 @@ fn rpc_message(rpc: crate::participants::HostRpc) -> frame::Message<'static> {
         }
         HostRpc::SequenceStop(v) => frame::Message::SequenceStop(v),
         HostRpc::Event(v) => frame::Message::LogicEvent(v),
+        HostRpc::WorldActivation(v) => frame::Message::WorldActivation(v),
     }
 }
 
@@ -440,6 +441,7 @@ impl Host {
             return Err(Error::Replication(crate::replication::Error::UnknownObject));
         }
         let participant = match reply {
+            crate::participants::HostRpc::WorldActivation(v) => v.participant,
             crate::participants::HostRpc::Participant(v) => Some(v.participant),
             crate::participants::HostRpc::Garage(v) => Some(v.participant),
             crate::participants::HostRpc::Actor(v) => Some(v.participant),

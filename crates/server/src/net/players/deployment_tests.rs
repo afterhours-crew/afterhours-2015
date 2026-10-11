@@ -76,6 +76,7 @@ fn content_with(spawn: Option<&[Kind]>) -> WorldContent {
             local_index: 0,
         },
         spawn_points: spawn.map(|_| keys[14]),
+        free_roam: None,
         streaming_gate: Asset {
             bundle: 2,
             type_id: 3,

@@ -209,6 +209,15 @@ registration. These inputs are static roles, never previously allocated ghost
 IDs. No default game asset table is embedded in the server. An optional
 `spawn_points` key names the level's SpawnPoints scene.
 
+The optional `roles.free_roam` catalog supplies `volumes`, `presence`, `streamed`
+and `location` bindings. Each binding contains a static `scene_key` and one-based
+`serializer` index. Only unconditional world-volume subscriptions belong in this
+catalog; race/event filters require progression eligibility. The loader validates
+all sites against registered scene profiles before startup. Activation follows
+the owned FreeRoam lifecycle after completion creations and binding refreshes;
+without this catalog the additional subscriptions remain unsupported. Installed
+content preparation does not yet derive this optional catalog.
+
 At garage exit the server answers the leave request with the participant state
 chain and, when the garage layout has a `world_spawn` pose, replaces the garage
 car with a driveable world car in the same frame. When the client reports the
