@@ -116,6 +116,13 @@ pub enum Which {
     /// logic and recreates the loading presentation for the world load
     /// (E742 exit frame, decoded for E757).
     Exit,
+    /// Arrive sequence start: the official host deletes the lock-vehicle-input
+    /// and loading-screen presentation logic in the frame that creates the
+    /// sequence (E101 109,092 ms: ghosts 421 and 422, 3404/65 and 3404/35).
+    Arrive,
+    /// Arrive sequence completion: the remaining exit presentation logic goes
+    /// with the sequence (E101 115,292 ms: ghost 423, 3404/18).
+    Arrived,
 }
 
 #[derive(Clone, Debug)]
@@ -126,6 +133,8 @@ pub struct GarageLogic {
     vehicles: Batch,
     entry: Batch,
     exit: Batch,
+    arrive: Batch,
+    arrived: Batch,
 }
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Output {
@@ -493,6 +502,25 @@ impl GarageLogic {
             None => Batch::default(),
             Some(b) => batch(b, &content, &entered)?,
         };
+        // Arrive batches run after exit; they only see what exit left live.
+        let after = |live: &BTreeSet<u16>, b: &Batch| -> BTreeSet<u16> {
+            live.iter()
+                .copied()
+                .chain(b.entities.iter().map(|e| e.capture_id))
+                .filter(|id| !b.delete.contains(id))
+                .collect()
+        };
+        let exited = after(&entered, &exit);
+        let arrive = match v.get("arrive") {
+            None => Batch::default(),
+            Some(b) if exit != Batch::default() => batch(b, &content, &exited)?,
+            Some(_) => return Err(Failure::ProfileConfig),
+        };
+        let arrived = match v.get("arrived") {
+            None => Batch::default(),
+            Some(b) if exit != Batch::default() => batch(b, &content, &after(&exited, &arrive))?,
+            Some(_) => return Err(Failure::ProfileConfig),
+        };
         let reputation = v
             .get("reputation_thresholds")
             .map(|value| {
@@ -515,6 +543,8 @@ impl GarageLogic {
             .entities
             .iter()
             .chain(&exit.entities)
+            .chain(&arrive.entities)
+            .chain(&arrived.entities)
             .flat_map(|d| &d.roles)
             .any(|r| matches!(r, Role::Reputation(_) | Role::ReputationLevelStat))
         {
@@ -563,6 +593,8 @@ impl GarageLogic {
             vehicles,
             entry,
             exit,
+            arrive,
+            arrived,
         })
     }
     pub fn content(&self) -> &Content {
@@ -581,7 +613,13 @@ impl GarageLogic {
             Which::Vehicles => &self.vehicles,
             Which::Entry => &self.entry,
             Which::Exit => &self.exit,
+            Which::Arrive => &self.arrive,
+            Which::Arrived => &self.arrived,
         }
+    }
+    /// Whether deployment content describes a batch for this point.
+    pub fn has(&self, which: Which) -> bool {
+        *self.batch(which) != Batch::default()
     }
     /// Whether deployment content describes the garage exit batch.
     pub fn has_exit(&self) -> bool {
@@ -1249,5 +1287,81 @@ pub(crate) mod tests {
                 .produce(Which::Exit, &mut players, participant, &mut ghosts)
                 .is_err()
         );
+    }
+
+    fn presentation_exit() -> Json {
+        json!({"scene_updates": [], "entities": [
+            {"capture_id": 400, "asset": {"bundle": 4, "type_id": 10, "local_index": 2}, "blueprint": {"scene_content_key": 101},
+             "roles": [{"kind": "root", "bus_count": 1}, {"kind": "channel", "scene_content_key": 101, "scene_serializer": 45}]},
+            {"capture_id": 401, "asset": {"bundle": 4, "type_id": 10, "local_index": 2}, "blueprint": {"scene_content_key": 101},
+             "roles": [{"kind": "root", "bus_count": 1}, {"kind": "channel", "scene_content_key": 101, "scene_serializer": 45}]}],
+            "delete_capture_ids": [319]})
+    }
+    fn deletes(ids: &[u16]) -> Json {
+        json!({"scene_updates": [], "entities": [], "delete_capture_ids": ids})
+    }
+
+    #[test]
+    fn arrive_batches_delete_the_exit_presentation_in_two_steps() {
+        let mut v = with_exit(presentation_exit());
+        v["arrive"] = deletes(&[400]);
+        v["arrived"] = deletes(&[401]);
+        let logic = GarageLogic::from_json(&v).unwrap();
+        assert!(logic.has(Which::Arrive) && logic.has(Which::Arrived));
+        let (mut players, participant) = world();
+        let mut ghosts = BTreeMap::new();
+        for which in [Which::Spawn, Which::Entry, Which::Exit] {
+            logic
+                .produce(which, &mut players, participant, &mut ghosts)
+                .unwrap();
+        }
+        let (lock, voice) = (ghosts[&400], ghosts[&401]);
+        let out = logic
+            .produce(Which::Arrive, &mut players, participant, &mut ghosts)
+            .unwrap();
+        assert_eq!((out.deleted, out.records.len()), (vec![lock], 0));
+        assert!(players.objects().get(lock).is_none() && players.objects().get(voice).is_some());
+        let out = logic
+            .produce(Which::Arrived, &mut players, participant, &mut ghosts)
+            .unwrap();
+        assert_eq!(out.deleted, vec![voice]);
+        assert!(players.objects().get(voice).is_none());
+        // Repeats have nothing left to delete.
+        assert!(
+            logic
+                .produce(Which::Arrived, &mut players, participant, &mut ghosts)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn arrive_batches_see_only_what_exit_left_live() {
+        let base = with_exit(presentation_exit());
+        assert!(!GarageLogic::from_json(&base).unwrap().has(Which::Arrive));
+        for (arrive, arrived) in [
+            // Exit already deleted the customization presentation.
+            (deletes(&[319]), None),
+            // Never created.
+            (deletes(&[999]), None),
+            // Arrive deleted it first.
+            (deletes(&[400]), Some(deletes(&[400]))),
+            // Duplicates within one batch.
+            (deletes(&[400, 400]), None),
+        ] {
+            let mut v = base.clone();
+            v["arrive"] = arrive;
+            if let Some(arrived) = arrived {
+                v["arrived"] = arrived;
+            }
+            assert!(GarageLogic::from_json(&v).is_err(), "{v}");
+        }
+        // Arrive batches need an exit batch to follow.
+        let mut v = content_json();
+        v["arrived"] = deletes(&[277]);
+        assert!(GarageLogic::from_json(&v).is_err());
+        // Entities spawned by entry and kept by exit may go at arrive.
+        let mut v = base;
+        v["arrive"] = deletes(&[277]);
+        assert!(GarageLogic::from_json(&v).is_ok());
     }
 }

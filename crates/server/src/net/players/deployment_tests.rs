@@ -362,3 +362,15 @@ fn the_exit_teleport_targets_the_teleport_state_with_the_configured_destination(
     assert!(PlayerListener::exit_teleport(Some(exit), Some(&plain), 178, 205).is_none());
     assert!(PlayerListener::exit_teleport(Some(exit), None, 178, 205).is_none());
 }
+
+#[test]
+fn the_arrive_frame_carries_the_arrive_logic_deletions() {
+    use super::sequences::arrival_section;
+    assert_eq!(arrival_section(Vec::new(), Vec::new()), Ok(None));
+    // Deletions alone (no arrive sequence configured) still get a section.
+    let section = arrival_section(Vec::new(), vec![421, 422])
+        .unwrap()
+        .unwrap();
+    assert_eq!(section.deleted, vec![421, 422]);
+    assert!(section.records.is_empty() && section.setup.is_none() && !section.flag);
+}

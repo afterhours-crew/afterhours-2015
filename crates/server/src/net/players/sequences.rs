@@ -159,54 +159,100 @@ impl PlayerListener {
         split_scenes(records, nfs_world::application::OUTBOUND_FRAME_BITS)
     }
     /// Start the arrive sequence of participants that just entered the arrive
-    /// state; it goes out with their state calls (official order). Without
-    /// configured arrive content they go straight on to free roam.
+    /// state; it goes out with their state calls and the arrive garage logic
+    /// batch (official order). Without configured arrive content they go
+    /// straight on to free roam, and both arrive batches apply at once.
     pub(super) fn start_arrivals(
         players: &mut Players,
         participants: &mut Lifecycle,
         arrivals: Option<&mut Arrivals>,
+        logic: Option<&crate::garage_logic::GarageLogic>,
+        logic_ghosts: &mut BTreeMap<u16, BTreeMap<u16, u16>>,
         persona: u64,
         mut chain: Vec<nfs_world::participants::HostRpc>,
     ) -> Result<(Option<Section>, Vec<nfs_world::participants::HostRpc>), replication::Error> {
+        use crate::garage_logic::Which;
         let arriving = participants.take_arriving();
         if arriving.is_empty() {
             return Ok((None, chain));
         }
-        let Some(arrivals) = arrivals else {
-            for participant in arriving {
-                if let nfs_world::participants::Outcome::Advanced(calls) =
-                    participants.arrived(participant)
-                {
-                    chain.extend(
-                        calls
-                            .into_iter()
-                            .map(nfs_world::participants::HostRpc::Participant),
-                    );
+        let mut records = Vec::new();
+        let mut deleted = Vec::new();
+        let mut apply = |players: &mut Players,
+                         participant: u16,
+                         which: Which,
+                         chain: &mut Vec<nfs_world::participants::HostRpc>|
+         -> Result<Vec<replication::Record>, replication::Error> {
+            let out = Self::arrive_logic(logic, which, players, participant, logic_ghosts)?;
+            deleted.extend(out.deleted);
+            chain.extend(
+                out.events
+                    .into_iter()
+                    .map(nfs_world::participants::HostRpc::Event),
+            );
+            Ok(out.records)
+        };
+        match arrivals {
+            None => {
+                for participant in arriving {
+                    if let nfs_world::participants::Outcome::Advanced(calls) =
+                        participants.arrived(participant)
+                    {
+                        chain.extend(
+                            calls
+                                .into_iter()
+                                .map(nfs_world::participants::HostRpc::Participant),
+                        );
+                    }
+                    for which in [Which::Arrive, Which::Arrived] {
+                        records.extend(apply(players, participant, which, &mut chain)?);
+                    }
                 }
             }
-            return Ok((None, chain));
-        };
-        let mut records = Vec::new();
-        for participant in arriving {
-            records.extend(arrivals.start(
+            Some(arrivals) => {
+                for participant in arriving {
+                    let started = arrivals.start(
+                        players,
+                        Owner {
+                            connection: HOST_SELECTOR as u8,
+                            persona,
+                            participant,
+                        },
+                    )?;
+                    let logic = match started {
+                        Some(_) => apply(players, participant, Which::Arrive, &mut chain)?,
+                        None => Vec::new(),
+                    };
+                    records.extend(started);
+                    records.extend(logic);
+                }
+            }
+        }
+        Ok((arrival_section(records, deleted)?, chain))
+    }
+    /// The garage logic batch for an arrive point (empty when the deployment
+    /// describes none).
+    pub(super) fn arrive_logic(
+        logic: Option<&crate::garage_logic::GarageLogic>,
+        which: crate::garage_logic::Which,
+        players: &mut Players,
+        participant: u16,
+        logic_ghosts: &mut BTreeMap<u16, BTreeMap<u16, u16>>,
+    ) -> Result<crate::garage_logic::Output, replication::Error> {
+        match logic.filter(|l| l.has(which)) {
+            None => Ok(crate::garage_logic::Output::default()),
+            Some(logic) => logic.produce(
+                which,
                 players,
-                Owner {
-                    connection: HOST_SELECTOR as u8,
-                    persona,
-                    participant,
-                },
-            )?);
+                participant,
+                logic_ghosts.entry(participant).or_default(),
+            ),
         }
-        let mut sections = split_scenes(records, nfs_world::application::OUTBOUND_FRAME_BITS)?;
-        if sections.len() > 1 {
-            return Err(replication::Error::Bound);
-        }
-        Ok((sections.pop(), chain))
     }
     /// Client calls on an arrive sequence: `Some(None)` for its
     /// acknowledgements and completion repeats, `Some(Some((sequence,
-    /// chain)))` when it completes (delete the sequence, leave the arrive
-    /// state for free roam), `None` for anything else.
+    /// participant, chain)))` when it completes (delete the sequence, leave
+    /// the arrive state for free roam), `None` for anything else.
     #[allow(clippy::type_complexity)]
     pub(super) fn arrival_call(
         arrivals: &mut Arrivals,
@@ -214,7 +260,7 @@ impl PlayerListener {
         participants: &mut Lifecycle,
         persona: u64,
         body: BitSpan<'_>,
-    ) -> Result<Option<Option<(u16, Vec<nfs_world::participants::HostRpc>)>>, replication::Error>
+    ) -> Result<Option<Option<(u16, u16, Vec<nfs_world::participants::HostRpc>)>>, replication::Error>
     {
         let envelope = Envelope::decode(
             body,
@@ -257,6 +303,7 @@ impl PlayerListener {
         };
         Ok(Some(Some((
             sequence,
+            call.participant,
             calls
                 .into_iter()
                 .map(nfs_world::participants::HostRpc::Participant)
@@ -299,4 +346,30 @@ impl PlayerListener {
         )?;
         Ok(true)
     }
+}
+
+/// One replication section for the arrive frame: the sequence creations plus
+/// the deletions of the arrive garage logic batch, or `None` when empty.
+pub(super) fn arrival_section(
+    records: Vec<replication::Record>,
+    deleted: Vec<u16>,
+) -> Result<Option<Section>, replication::Error> {
+    let mut sections = split_scenes(records, nfs_world::application::OUTBOUND_FRAME_BITS)?;
+    if sections.len() > 1 {
+        return Err(replication::Error::Bound);
+    }
+    Ok(match (sections.pop(), deleted.is_empty()) {
+        (section, true) => section,
+        (Some(mut section), false) => {
+            section.deleted.extend(deleted);
+            Some(section)
+        }
+        (None, false) => Some(Section {
+            float_bits: None,
+            flag: false,
+            deleted,
+            setup: None,
+            records: Vec::new(),
+        }),
+    })
 }

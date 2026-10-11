@@ -838,18 +838,41 @@ impl Listener for PlayerListener {
                 match Self::arrival_call(arrivals, &players, &mut participants, self.persona, body)
                 {
                     Ok(Some(None)) => continue,
-                    Ok(Some(Some((sequence, chain)))) => {
+                    Ok(Some(Some((sequence, participant, mut chain)))) => {
+                        // The exit presentation's last logic leaves with the
+                        // sequence (E101 115,292 ms).
+                        let logic = match Self::arrive_logic(
+                            self.logic.as_deref(),
+                            crate::garage_logic::Which::Arrived,
+                            &mut players,
+                            participant,
+                            &mut logic_ghosts,
+                        ) {
+                            Ok(logic) => logic,
+                            Err(error) => {
+                                self.refused += 1;
+                                self.last_error = Some(error);
+                                return false;
+                            }
+                        };
                         tracing::info!(
                             sequence,
+                            deleted = ?logic.deleted,
                             "owned arrive sequence completed; participant enters FreeRoam"
+                        );
+                        chain.extend(
+                            logic
+                                .events
+                                .into_iter()
+                                .map(nfs_world::participants::HostRpc::Event),
                         );
                         exit_entries.push((
                             Section {
                                 float_bits: None,
                                 flag: false,
-                                deleted: vec![sequence],
+                                deleted: std::iter::once(sequence).chain(logic.deleted).collect(),
                                 setup: None,
-                                records: Vec::new(),
+                                records: logic.records,
                             },
                             chain,
                         ));
@@ -1023,6 +1046,8 @@ impl Listener for PlayerListener {
                                         &mut players,
                                         &mut participants,
                                         arrivals.as_mut(),
+                                        self.logic.as_deref(),
+                                        &mut logic_ghosts,
                                         self.persona,
                                         chain,
                                     ) {
