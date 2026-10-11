@@ -213,6 +213,94 @@ pub fn assets() -> Vec<Asset> {
     }
     assets.extend(registries());
     assets.extend(level());
+    assets.extend(entitlements());
+    assets.extend(speedwalls());
+    assets
+}
+
+/// One SpeedWall references three modes, including adjacent and repeated hashes.
+pub fn speedwalls() -> Vec<Asset> {
+    let mut assets = vec![Asset {
+        name: "gameplay/syntheticspeedwall".into(),
+        partition: PartitionWriter::default().build(
+            guid(0x73),
+            "SpeedWallAsset",
+            guid(0xF3),
+            vec![
+                ("CategoryName", Field::CString("SpeedWall_Synthetic".into())),
+                (
+                    "GameModeIds",
+                    Field::Imports(vec![
+                        reference(0x75),
+                        reference(0x74),
+                        reference(0x76),
+                        reference(0x74),
+                    ]),
+                ),
+            ],
+        ),
+    }];
+    for (seed, id) in [(0x74, 10), (0x75, 11), (0x76, 99)] {
+        assets.push(Asset {
+            name: format!("modes/synthetic{seed}"),
+            partition: PartitionWriter::default().build(
+                guid(seed),
+                "GameModeId",
+                guid(seed ^ 0x80),
+                vec![("IdHash", Field::UInt(id))],
+            ),
+        });
+    }
+    assets
+}
+
+/// An active client service with repeated licenses and a foreign-platform query.
+pub fn entitlements() -> Vec<Asset> {
+    let mut assets = vec![Asset {
+        name: crate::licenses::SERVICE.into(),
+        partition: PartitionWriter::default().build(
+            guid(0x70),
+            "PresenceEntitlementServiceData",
+            guid(0xF0),
+            vec![(
+                "EntitlementQueries",
+                Field::Imports(vec![reference(0x71), reference(0x72)]),
+            )],
+        ),
+    }];
+    for (seed, platform, names) in [
+        (
+            0x71,
+            "GamePlatform_Win32",
+            vec!["SyntheticA", "SyntheticB", "SyntheticA"],
+        ),
+        (0x72, "GamePlatform_Xenon", vec!["Foreign"]),
+    ] {
+        assets.push(Asset {
+            name: format!("queries/synthetic{seed}"),
+            partition: PartitionWriter::default().build(
+                guid(seed),
+                "EntitlementQuery",
+                guid(seed ^ 0x80),
+                vec![
+                    (
+                        "Platform",
+                        Field::Enum("GamePlatform", platform, if seed == 0x71 { 1 } else { 2 }),
+                    ),
+                    (
+                        "EntitlementsData",
+                        Field::Structs(
+                            "EntitlementData",
+                            names
+                                .into_iter()
+                                .map(|name| vec![("License", Field::CString(name.into()))])
+                                .collect(),
+                        ),
+                    ),
+                ],
+            ),
+        });
+    }
     assets
 }
 

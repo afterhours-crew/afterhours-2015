@@ -18,9 +18,11 @@
 pub mod assets;
 pub mod builds;
 mod cache;
+mod control;
 mod executable;
 mod fingerprint;
 mod items;
+mod licenses;
 mod scan;
 mod stats;
 #[cfg(any(test, feature = "synthetic"))]
@@ -39,7 +41,7 @@ pub const FORMAT: &str = "nfs-install-content";
 pub const VERSION: u64 = 1;
 /// Increment whenever a builder's output for an unchanged installation changes,
 /// so existing cache entries are rebuilt.
-pub const BUILDER_REVISION: u64 = 3;
+pub const BUILDER_REVISION: u64 = 4;
 /// Executable file name relative to the installation root.
 pub const EXECUTABLE: &str = "NFS16.exe";
 
@@ -76,15 +78,21 @@ pub enum Kind {
     PersistentContent,
     /// Stats group definitions for the local progression and reputation stores.
     StatDefinitions,
+    /// Known client license names; no account grants or awards.
+    ItemLicenses,
+    /// Installed Stats scopes and default AllDrive-only menu policy.
+    ControlCatalogs,
     /// The 64-byte world MAC template.
     WorldMacTemplate,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 4] = [
+    pub const ALL: [Kind; 6] = [
         Kind::ItemContent,
         Kind::PersistentContent,
         Kind::StatDefinitions,
+        Kind::ItemLicenses,
+        Kind::ControlCatalogs,
         Kind::WorldMacTemplate,
     ];
     /// Manifest key.
@@ -93,6 +101,8 @@ impl Kind {
             Self::ItemContent => "item_content",
             Self::PersistentContent => "persistent_content",
             Self::StatDefinitions => "stat_definitions",
+            Self::ItemLicenses => "item_licenses",
+            Self::ControlCatalogs => "control_catalogs",
             Self::WorldMacTemplate => "world_mac_template",
         }
     }
@@ -102,6 +112,8 @@ impl Kind {
             Self::ItemContent => "item-content.json",
             Self::PersistentContent => "persistent-content.json",
             Self::StatDefinitions => "stat-definitions.json",
+            Self::ItemLicenses => "item-licenses.json",
+            Self::ControlCatalogs => "control-catalogs.json",
             Self::WorldMacTemplate => "world-mac-template.bin",
         }
     }
@@ -212,6 +224,8 @@ pub fn build(
     let tables = tables::build(&mut assets, &fingerprint.digest)?;
     outputs.insert(Kind::StatDefinitions, stats::build(&tables)?);
     outputs.insert(Kind::PersistentContent, tables);
+    outputs.insert(Kind::ItemLicenses, licenses::build(&mut assets)?);
+    outputs.insert(Kind::ControlCatalogs, control::build(&mut assets)?);
     outputs.insert(
         Kind::WorldMacTemplate,
         executable::mac_template(&game_root.join(EXECUTABLE), &options.identity)?,

@@ -29,13 +29,23 @@ let items = prepared.path(nfs_content::Kind::ItemContent);
 | `ItemContent` | `item-content.json` | `Items/GameItemSystem`: every definition, its prices, quantity, ownership level, flags, sub/additional items and derived default, plus the starting inventory |
 | `PersistentContent` | `persistent-content.json` | `PersistentTableAsset` columns, types and defaults for the tables `nfs_services::persistent` requires |
 | `StatDefinitions` | `stat-definitions.json` | Installed columns and integer defaults of `ProgressionStats` and `RepValuesTable`, with the local service's group selection and display policy |
+| `ItemLicenses` | `item-licenses.json` | License names from the client's active Win32 `EntitlementQuery` assets; version 2 recognizes subsets without granting items |
+| `ControlCatalogs` | `control-catalogs.json` | `SpeedWallAsset` categories and their referenced `GameModeId.IdHash` values, plus local AllDrive menu policy |
 | `WorldMacTemplate` | `world-mac-template.bin` | 64 bytes of the executable image at the build's known address, checked by digest |
 
 Derived defaults are the stored 32-bit patterns of each class's same-named
 fields (floats as their bits), three words per colour/material vector and
 eight NUL-padded bytes of licence-plate text. Timed discounts have no static
-default. The outputs use the existing versioned formats, so the server's
-loaders and runtime behavior are unchanged.
+default. Item, table and MAC outputs retain their existing formats. Stats and
+menu outputs use the service loaders; license vocabulary uses the version-2
+subset policy described below.
+
+The default menu catalog disables time-limited features and recent-player
+listing, and offers no SpeedList types. SpeedList offerings belong to operator
+policy; an explicit server catalog overrides this default. Stats scopes use
+sorted unique mode hashes, merging adjacent values into inclusive ranges.
+License vocabulary follows only the active client entitlement service's Win32
+queries and deduplicates names; it contains no ownership claims or player grants.
 
 ## Build profiles
 

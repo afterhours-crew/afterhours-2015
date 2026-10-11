@@ -9,7 +9,8 @@
 //! caches (by default under `artifacts/content`). Later starts reuse the
 //! verified cache entry; a patched installation gets a new one. Resolution
 //! blocks and runs before the async runtime starts.
-//! It also builds Stats definitions; the CLI uses them unless overridden.
+//! It also builds Stats definitions, license vocabulary and menu catalogs;
+//! the CLI uses those unless overridden by operator configuration.
 use nfs_content::{Kind, Options, Prepared};
 use std::path::{Path, PathBuf};
 
@@ -22,6 +23,8 @@ pub struct Generated {
     pub item_content: PathBuf,
     pub persistent_content: PathBuf,
     pub stat_definitions: PathBuf,
+    pub item_licenses: PathBuf,
+    pub control_catalogs: PathBuf,
     pub world_mac_template: PathBuf,
     pub prepared: Prepared,
 }
@@ -58,6 +61,8 @@ pub fn resolve(
         item_content: prepared.path(Kind::ItemContent),
         persistent_content: prepared.path(Kind::PersistentContent),
         stat_definitions: prepared.path(Kind::StatDefinitions),
+        item_licenses: prepared.path(Kind::ItemLicenses),
+        control_catalogs: prepared.path(Kind::ControlCatalogs),
         world_mac_template: prepared.path(Kind::WorldMacTemplate),
         prepared,
     })
@@ -100,6 +105,8 @@ mod tests {
         assert!(items.inventory().is_some());
         crate::persistent::Catalog::load(&first.persistent_content).unwrap();
         nfs_services::stats::Catalog::load(&first.stat_definitions).unwrap();
+        nfs_services::item_licenses::Content::load(&first.item_licenses).unwrap();
+        nfs_services::control_catalogs::Catalog::load(&first.control_catalogs).unwrap();
         assert_eq!(std::fs::read(&first.world_mac_template).unwrap().len(), 64);
         let second = resolve(&dir.0, Path::new("game"), None, &options).unwrap();
         assert!(!second.prepared.built);
@@ -156,9 +163,13 @@ mod tests {
         for cache in [None, Some(Path::new("custom-cache"))] {
             let generated = resolve(&dir.0, Path::new("game"), cache, &options).unwrap();
             assert!(generated.item_content.is_absolute());
+            nfs_services::control_catalogs::Catalog::load(&dir.0.join(generated.control_catalogs))
+                .unwrap();
             crate::item_content::ItemContent::load(&dir.0.join(generated.item_content)).unwrap();
             crate::persistent::Catalog::load(&dir.0.join(generated.persistent_content)).unwrap();
             nfs_services::stats::Catalog::load(&dir.0.join(generated.stat_definitions)).unwrap();
+            nfs_services::item_licenses::Content::load(&dir.0.join(generated.item_licenses))
+                .unwrap();
             assert_eq!(
                 std::fs::read(dir.0.join(generated.world_mac_template))
                     .unwrap()

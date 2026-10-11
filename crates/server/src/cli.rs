@@ -189,12 +189,12 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
             || matchmaking_admission.is_none()
             || matchmaking_policy.is_none()
             || world_policy.is_none()
-            || control_catalogs.is_none()
+            || (control_catalogs.is_none() && !generated)
             || !has_stats
             || !owned_menu_awards
             || challenge_content.is_none()
             || !owned_local_social
-            || item_licenses.is_none())
+            || (item_licenses.is_none() && !generated))
     {
         return Err(
             "--owned-only requires every owned service option and no --control-content".into(),
@@ -305,6 +305,9 @@ fn resolve_install_content(args: &mut Args, options: &nfs_content::Options) -> R
     args.persistent_content = Some(generated.persistent_content);
     args.stat_definitions
         .get_or_insert(generated.stat_definitions);
+    args.item_licenses.get_or_insert(generated.item_licenses);
+    args.control_catalogs
+        .get_or_insert(generated.control_catalogs);
     args.world_mac_template = Some(generated.world_mac_template);
     Ok(())
 }
@@ -387,7 +390,7 @@ pub fn main() -> std::process::ExitCode {
         .is_some_and(|a| a == "--help" || a == "-h")
     {
         println!(
-            "nfs-server: owned local NFS 2015 services\n\nUsage: nfs-server --root <data-directory> --output <new-recording-directory> [configuration options]\n\nCreate account: nfs-server create-account --name <name> --state-directory <new-directory>\n--account-policy <policy.json> --item-content <items.json> --persistent-content <tables.json>\n\nRequired control configuration: --bootstrap-config, --auth-config,\n--group-policy, --matchmaking-admission, --matchmaking-policy, --world-policy,\n--control-catalogs, --stat-definitions, --challenge-content, --item-licenses,\n--owned-local-social and --owned-menu-awards.\n\nGarage configuration: --world-content (version 4), --world-mac-template,\n--item-content, --state-directory, --local-account, --persistent-content,\n--progression-content, --vehicle-content, --garage-layout, --sequence-content,\n--garage-logic.\n\nGame content: --game-dir <installation> builds --item-content,\n--persistent-content and --world-mac-template on first start, supplies\n--stat-definitions unless explicitly overridden, and caches the outputs\n(--content-cache, default artifacts/content under --root).\n\nAccount state is read from SQLite. Optional one-time imports: --local-identity,\n--entitlement-state, --kickback-state, --speedwall-state, --user-settings.\n\nOptional: --redirector-port, --idle-seconds, --qos-seconds, --stop-file.\nAll listeners are loopback. No manifest, captured reply store or external\nauthentication is used. See crates/server/README.md for schemas and limitations."
+            "nfs-server: owned local NFS 2015 services\n\nUsage: nfs-server --root <data-directory> --output <new-recording-directory> [configuration options]\n\nCreate account: nfs-server create-account --name <name> --state-directory <new-directory>\n--account-policy <policy.json> --item-content <items.json> --persistent-content <tables.json>\n\nRequired control configuration: --bootstrap-config, --auth-config,\n--group-policy, --matchmaking-admission, --matchmaking-policy, --world-policy,\n--control-catalogs, --stat-definitions, --challenge-content, --item-licenses,\n--owned-local-social and --owned-menu-awards.\n\nGarage configuration: --world-content (version 4), --world-mac-template,\n--item-content, --state-directory, --local-account, --persistent-content,\n--progression-content, --vehicle-content, --garage-layout, --sequence-content,\n--garage-logic.\n\nGame content: --game-dir <installation> builds --item-content,\n--persistent-content and --world-mac-template on first start, supplies\n--stat-definitions, --item-licenses and --control-catalogs unless explicitly\noverridden, and caches the outputs\n(--content-cache, default artifacts/content under --root).\n\nAccount state is read from SQLite. Optional one-time imports: --local-identity,\n--entitlement-state, --kickback-state, --speedwall-state, --user-settings.\n\nOptional: --redirector-port, --idle-seconds, --qos-seconds, --stop-file.\nAll listeners are loopback. No manifest, captured reply store or external\nauthentication is used. See crates/server/README.md for schemas and limitations."
         );
         return std::process::ExitCode::SUCCESS;
     }
@@ -769,10 +772,12 @@ mod tests {
         args
     }
 
-    const GENERATED: [&str; 3] = [
+    const GENERATED: [&str; 5] = [
         "--item-content",
         "--persistent-content",
         "--stat-definitions",
+        "--item-licenses",
+        "--control-catalogs",
     ];
 
     #[test]
@@ -826,6 +831,9 @@ mod tests {
         assert!(parsed.persistent_content.as_ref().unwrap().exists());
         let stats = parsed.stat_definitions.as_ref().unwrap();
         nfs_services::stats::Catalog::load(stats).unwrap();
+        nfs_services::item_licenses::Content::load(parsed.item_licenses.as_ref().unwrap()).unwrap();
+        nfs_services::control_catalogs::Catalog::load(parsed.control_catalogs.as_ref().unwrap())
+            .unwrap();
         assert!(parsed.world_mac_template.as_ref().unwrap().exists());
         assert_eq!(parsed.generated.as_ref().unwrap()["built"], true);
         let mut again = with_game("game");
@@ -843,6 +851,14 @@ mod tests {
         resolve_install_content(&mut explicit, &options).unwrap();
         assert_eq!(
             explicit.stat_definitions,
+            Some(PathBuf::from("configured-input"))
+        );
+        assert_eq!(
+            explicit.item_licenses,
+            Some(PathBuf::from("configured-input"))
+        );
+        assert_eq!(
+            explicit.control_catalogs,
             Some(PathBuf::from("configured-input"))
         );
         assert!(resolve_install_content(&mut with_game("missing"), &options).is_err());

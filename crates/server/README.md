@@ -145,6 +145,12 @@ line reports the entry as `install_content` (`fingerprint`, `built`,
 `directory`). It also supplies `--stat-definitions` when that option is absent:
 progression and reputation Stats groups use the installed column names and
 defaults. An explicit Stats catalog overrides the generated display policy.
+It also supplies `--item-licenses` and `--control-catalogs` when omitted.
+Generated licenses recognize duplicate-free subsets of installed license names
+without awarding items; they contain no account grants. Generated menu catalogs
+derive Stats scopes from the installed game modes and use local AllDrive policy:
+time-limited features and recent-player listing are disabled, and no SpeedList
+types are offered. Explicit catalogs retain their configured policies.
 An unsupported executable or unreadable installation stops startup.
 No game data is distributed with the server, and other content is still
 supplied through the options below.

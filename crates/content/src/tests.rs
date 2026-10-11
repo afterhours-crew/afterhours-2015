@@ -141,10 +141,81 @@ fn builds_outputs_the_service_loaders_accept() {
         stats["groups"][1]["stats"][0]["name"],
         "RepValuesTableColumn0"
     );
+    let licenses =
+        nfs_services::item_licenses::Content::load(&prepared.path(Kind::ItemLicenses)).unwrap();
+    assert_eq!(licenses.item_system(), "Items/GameItemSystem");
+    let catalogs: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(prepared.path(Kind::ControlCatalogs)).unwrap())
+            .unwrap();
+    nfs_services::control_catalogs::Catalog::from_json(&catalogs).unwrap();
+    assert_eq!(catalogs["key_scopes"][1]["name"], "SpeedWall_Synthetic");
+    assert_eq!(
+        catalogs["key_scopes"][1]["values"],
+        serde_json::json!([[10, 11], [99, 99]])
+    );
+    assert_eq!(catalogs["speed_list_types"], serde_json::json!([]));
+    assert_eq!(
+        licenses
+            .licenses()
+            .iter()
+            .map(|l| l.license.as_str())
+            .collect::<Vec<_>>(),
+        ["SyntheticA", "SyntheticB"]
+    );
     assert_eq!(
         std::fs::read(prepared.path(Kind::WorldMacTemplate)).unwrap(),
         install.template
     );
+}
+
+#[test]
+fn license_builder_rejects_missing_active_queries_and_bad_names() {
+    let mut missing = assets();
+    missing.retain(|a| a.name != "queries/synthetic113");
+    assert!(install_with(&missing).prepare().is_err());
+    let mut malformed = assets();
+    let query = malformed
+        .iter_mut()
+        .find(|a| a.name == "queries/synthetic113")
+        .unwrap();
+    query.partition = synthetic::PartitionWriter::default().build(
+        guid(0x71),
+        "EntitlementQuery",
+        guid(0xF1),
+        vec![
+            (
+                "Platform",
+                synthetic::Field::Enum("GamePlatform", "GamePlatform_Win32", 1),
+            ),
+            (
+                "EntitlementsData",
+                synthetic::Field::Structs(
+                    "EntitlementData",
+                    vec![vec![("License", synthetic::Field::CString("x".repeat(17)))]],
+                ),
+            ),
+        ],
+    );
+    assert!(install_with(&malformed).prepare().is_err());
+}
+
+#[test]
+fn scope_builder_rejects_missing_modes_and_wrong_id_types() {
+    let mut missing = assets();
+    missing.retain(|a| a.name != "modes/synthetic116");
+    assert!(install_with(&missing).prepare().is_err());
+    let mut malformed = assets();
+    let mode = malformed
+        .iter_mut()
+        .find(|a| a.name == "modes/synthetic116")
+        .unwrap();
+    mode.partition = synthetic::PartitionWriter::default().build(
+        guid(0x74),
+        "GameModeId",
+        guid(0xF4),
+        vec![("IdHash", synthetic::Field::Float(10.0))],
+    );
+    assert!(install_with(&malformed).prepare().is_err());
 }
 
 #[test]
