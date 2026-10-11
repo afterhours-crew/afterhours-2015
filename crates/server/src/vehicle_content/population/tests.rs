@@ -370,6 +370,12 @@ fn garage_exit_swaps_the_garage_car_for_a_driveable_world_car() {
         )
         .unwrap();
     let (scene, garage_car) = (garage.records[0].id, garage.records[1].id);
+    // The client simulates its garage car, then its world car (E101 grants).
+    assert_eq!(
+        players.owned_vehicles(3, 0x100000002),
+        [garage_car].into_iter().collect()
+    );
+    assert!(players.owned_vehicles(7, 0x100000002).is_empty());
     let objects = players.objects().len();
     let world = population
         .spawn_world(
@@ -387,6 +393,10 @@ fn garage_exit_swaps_the_garage_car_for_a_driveable_world_car() {
     let car = &world.records[0];
     assert_ne!(car.id, garage_car);
     assert_eq!(players.owned_vehicle(3, 0x100000002, p, 1), Some(car.id));
+    assert_eq!(
+        players.owned_vehicles(3, 0x100000002),
+        [car.id].into_iter().collect()
+    );
     let (
         Some(Initial::Vehicle { prefix, creation }),
         Some(Initial::Vehicle {

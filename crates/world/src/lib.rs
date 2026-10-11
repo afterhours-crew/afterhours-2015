@@ -9,6 +9,7 @@
 //! Scene roles are deployment inputs; this crate contains no asset catalogs.
 
 pub mod actors;
+pub mod arrival;
 pub mod frame;
 pub mod garage;
 pub mod launchers;
@@ -19,6 +20,7 @@ pub mod replication;
 pub mod sequences;
 pub mod session;
 pub mod spawn_points;
+pub mod teleport;
 
 pub use nfs_world_core::{
     application, bits, content, crypto, files, handshake, items, link, transport,

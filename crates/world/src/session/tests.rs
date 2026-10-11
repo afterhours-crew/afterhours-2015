@@ -1879,3 +1879,61 @@ fn replication_starts_when_the_reports_cover_the_registered_handles() {
     );
     assert_eq!(host.registration_progress(), (4, 4));
 }
+
+fn movement_grants(client: &Client, wires: &[Vec<u8>]) -> Vec<Vec<(u16, u32)>> {
+    host_frames(client, wires)
+        .into_iter()
+        .filter_map(|(bytes, len)| {
+            let span = nfs_protocol::world::BitSpan::new(&bytes, 0, len).unwrap();
+            let parsed = crate::frame::parse(span, crate::frame::Direction::FromHost).unwrap();
+            parsed.movement.map(|m| {
+                m.records
+                    .iter()
+                    .map(|r| (r.id, r.data.read_u32(0, r.data.len() as u8).unwrap()))
+                    .collect()
+            })
+        })
+        .collect()
+}
+
+#[test]
+fn movement_grants_repeat_at_the_official_cadence_for_sent_objects() {
+    let (mut host, client, _listener, now, sent) = entry_setup();
+    assert!(movement_grants(&client, &sent.send).is_empty());
+    // Object 1 (the Player) was created on the wire; 99 never was.
+    host.set_movement([99, 1].into_iter().collect()).unwrap();
+    let first = host.poll(now + 10);
+    assert_eq!(movement_grants(&client, &first.send), vec![vec![(1, 0)]]);
+    assert!(
+        movement_grants(
+            &client,
+            &host.poll(now + 10 + MOVEMENT_INTERVAL_MS - 1).send
+        )
+        .is_empty()
+    );
+    assert_eq!(
+        movement_grants(&client, &host.poll(now + 10 + MOVEMENT_INTERVAL_MS).send),
+        vec![vec![(1, 0)]]
+    );
+    // Only unsent objects remain: nothing is listed.
+    host.set_movement([99].into_iter().collect()).unwrap();
+    assert!(
+        movement_grants(
+            &client,
+            &host.poll(now + 10 + 2 * MOVEMENT_INTERVAL_MS).send
+        )
+        .is_empty()
+    );
+    host.set_movement(Default::default()).unwrap();
+    assert!(
+        movement_grants(
+            &client,
+            &host.poll(now + 10 + 3 * MOVEMENT_INTERVAL_MS).send
+        )
+        .is_empty()
+    );
+    assert_eq!(
+        host.set_movement((0..=crate::frame::MAX_MOVEMENT_RECORDS as u16).collect()),
+        Err(Error::Application(application::Error::Bound))
+    );
+}

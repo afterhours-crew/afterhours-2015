@@ -544,10 +544,23 @@ fn garage_exit_and_world_entry_follow_the_official_order() {
         [(4, 76, 1, 0), (4, 82, 0, 0), (4, 82, 1, 0), (4, 77, 0, 0)]
     );
     assert_eq!(model.stage(8), Some(Stage::EnteringWorld));
+    // World ready enters the arrive state; it is left only when the arrive
+    // sequence completes (E101, E742).
     assert_eq!(
         calls(model.receive(request(4, 8, 80, 0, 7).span(), owns).unwrap()),
-        [(4, 77, 1, 0), (4, 78, 0, 0), (4, 78, 1, 0), (4, 1, 0, 0)]
+        [(4, 77, 1, 0), (4, 78, 0, 0)]
     );
+    assert_eq!(model.stage(8), Some(Stage::Arriving));
+    assert_eq!(model.take_arriving(), vec![8]);
+    assert!(model.take_arriving().is_empty());
+    assert!(model.in_free_roam().is_empty());
+    assert_eq!(
+        model.receive(request(4, 8, 80, 0, 7).span(), owns).unwrap(),
+        Outcome::Repeated
+    );
+    assert_eq!(model.arrived(9), Outcome::Unsupported);
+    assert_eq!(calls(model.arrived(8)), [(4, 78, 1, 0), (4, 1, 0, 0)]);
+    assert_eq!(model.arrived(8), Outcome::Repeated);
     assert_eq!(model.stage(8), Some(Stage::FreeRoam));
     assert_eq!(model.in_free_roam(), vec![8]);
     for repeat in [

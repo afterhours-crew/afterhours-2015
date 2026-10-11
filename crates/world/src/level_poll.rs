@@ -8,7 +8,7 @@
 //! the same field, participant-scoped, with method 1 and a one-bit value
 //! (always set in the official session). The official host's spawn
 //! assignments go out on this tick, and every client spawn request follows a
-//! poll answer. Observed in E742/E747; modeled for E754.
+//! poll answer. Observed in E742/E747; modeled for E756.
 use crate::{
     garage::presence::Notification as Flag,
     participants::Endpoint,

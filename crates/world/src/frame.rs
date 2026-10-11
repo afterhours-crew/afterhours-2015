@@ -649,6 +649,7 @@ pub enum TimeSyncOut {
 pub struct Builder {
     time_sync: Option<TimeSyncOut>,
     messages: Option<(Option<u16>, Vec<Group<'static>>)>,
+    movement: Option<Vec<(u16, Vec<u8>)>>,
 }
 
 impl Builder {
@@ -668,6 +669,15 @@ impl Builder {
 
     pub fn messages(mut self, state: Option<u16>, groups: Vec<Group<'static>>) -> Self {
         self.messages = Some((state, groups));
+        self
+    }
+
+    /// Host AuthoritativeMove section: per object, the component selectors the
+    /// client is to report. Official hosts list every client-owned car with
+    /// selector 0 in each regular frame; the client starts its movement records
+    /// for an object 13-16 ms after the object's first listing (E101).
+    pub fn movement(mut self, grants: Vec<(u16, Vec<u8>)>) -> Self {
+        self.movement = Some(grants);
         self
     }
 
@@ -751,7 +761,9 @@ impl Builder {
     }
 
     pub fn mask(&self) -> u8 {
-        u8::from(self.time_sync.is_some()) | (u8::from(self.messages.is_some()) << 1)
+        u8::from(self.time_sync.is_some())
+            | (u8::from(self.messages.is_some()) << MESSAGES)
+            | (u8::from(self.movement.is_some()) << MOVEMENT)
     }
 
     pub fn build(&self) -> Result<BitWriter, Error> {
@@ -801,6 +813,22 @@ impl Builder {
                 for (i, m) in group.messages.iter().enumerate() {
                     Self::put_message(w, m)?;
                     w.put_bool(i + 1 < group.messages.len());
+                }
+            }
+        }
+        if let Some(grants) = &self.movement {
+            if grants.len() > MAX_MOVEMENT_RECORDS {
+                return Err(Error::Bound);
+            }
+            w.put(grants.len() as u64, 8);
+            for (id, selectors) in grants {
+                if selectors.is_empty() || selectors.len() > 15 || selectors.iter().any(|s| *s > 15)
+                {
+                    return Err(Error::Shape);
+                }
+                w.put(u64::from(*id), 16).put(selectors.len() as u64, 4);
+                for selector in selectors {
+                    w.put(u64::from(*selector), 4);
                 }
             }
         }

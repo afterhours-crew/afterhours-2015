@@ -5,6 +5,17 @@
 use super::*;
 
 impl Players {
+    /// Vehicles of the participants owned by `connection` and `persona`: the
+    /// cars that connection's client simulates.
+    pub fn owned_vehicles(&self, connection: u8, persona: u64) -> std::collections::BTreeSet<u16> {
+        self.vehicles
+            .iter()
+            .filter(|((participant, _), _)| {
+                self.owns_participant(connection, persona, *participant)
+            })
+            .map(|(_, id)| *id)
+            .collect()
+    }
     pub fn owned_identity(
         &self,
         connection: u8,

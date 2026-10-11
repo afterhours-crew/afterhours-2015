@@ -206,7 +206,8 @@ fn startup_exchange_has_the_observed_sizes_and_echoes() {
     ));
     assert!(matches!(
         Admission::decode(&r.send[1]).unwrap().message,
-        Message::Host4 { peer_echo: PEER_TOKEN, assigned_selector: HOST_SELECTOR, callback_kind: 0, ref opaque } if opaque.is_empty()
+        // Official hosts assigned 4; 1 is the client's own name for the host (E762).
+        Message::Host4 { peer_echo: PEER_TOKEN, assigned_selector: 4, callback_kind: 0, ref opaque } if opaque.is_empty()
     ));
     let again = a.receive(&client2(ENGINE), 310, &mut l).unwrap();
     assert_eq!(again.event, Some(Event::Client2 { repeated: true }));

@@ -871,6 +871,13 @@ pub async fn world_host(
     let Ok(persona) = u64::try_from(persona) else {
         return;
     };
+    let arrivals = match sequences.as_ref().and_then(|c| c.arrivals()).transpose() {
+        Ok(arrivals) => arrivals,
+        Err(error) => {
+            warn!(connection, ?error, "arrive sequence configuration rejected");
+            return;
+        }
+    };
     let sequences = match sequences.as_ref().map(|c| c.instance()).transpose() {
         Ok(owner) => owner,
         Err(error) => {
@@ -882,6 +889,7 @@ pub async fn world_host(
         .with_progression(progression)
         .with_vehicles(vehicles)
         .with_sequences(sequences)
+        .with_arrivals(arrivals)
         .with_garage_logic(garage_logic);
     let mut items = items::Exchanges::new(inventory, connection);
     if let Some(content) = &content
@@ -907,6 +915,36 @@ pub async fn world_host(
         }
         if !listener.files_alive(now_ms()) {
             warn!(connection, "incoming File deadline; closing world");
+            return;
+        }
+        while let Some(command) = listener.due_teleport(now_ms()) {
+            let bytes = match command.encode() {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    warn!(connection, ?error, "owned car teleport rejected");
+                    return;
+                }
+            };
+            match host.queue_content(nfs_world::teleport::CONTENT_TARGET, &bytes) {
+                Ok(chunks) => {
+                    info!(
+                        connection,
+                        chunks,
+                        participant = command.participant,
+                        vehicle = command.vehicle,
+                        "owned car teleport queued"
+                    );
+                    listener.teleport_sent();
+                }
+                Err(nfs_world::session::Error::Application(application::Error::Window)) => break,
+                Err(error) => {
+                    warn!(connection, ?error, "owned car teleport rejected");
+                    return;
+                }
+            }
+        }
+        if let Err(error) = host.set_movement(listener.movement_objects()) {
+            warn!(connection, ?error, "movement grants rejected");
             return;
         }
         let output = tokio::select! {

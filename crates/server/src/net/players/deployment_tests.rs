@@ -223,6 +223,20 @@ fn glass_reports_on_a_world_car_assign_one_spawn() {
         (40, nfs_world::participants::Call::Assign(1))
     );
     assert_eq!(first.endpoint, spawn.bindings().unwrap().assign);
+    // The assignment waits until due, then leaves in order (E765 regression:
+    // an assignment 145 ms after exit was never requested).
+    let mut pending = std::collections::VecDeque::from([(1_000, first), (1_500, first)]);
+    assert!(PlayerListener::release_spawns(&mut pending, 999).is_empty());
+    assert_eq!(
+        PlayerListener::release_spawns(&mut pending, 1_200),
+        vec![first]
+    );
+    assert_eq!(pending.len(), 1);
+    assert_eq!(
+        PlayerListener::release_spawns(&mut pending, 2_000),
+        vec![first]
+    );
+    assert!(pending.is_empty());
     // The three reports are glass signals, which the glass model answers
     // before the assignment (regression: E751 never reached the assignment).
     for report in [28_404_286, 14_703_462, 21_578_436] {
@@ -248,4 +262,115 @@ fn level_poll_binds_the_level_root_and_waits_for_a_participant() {
     let queued = listener.pending_rpcs.len();
     listener.advance_level_poll(10_000).unwrap();
     assert_eq!(listener.pending_rpcs.len(), queued);
+}
+
+#[test]
+fn the_world_car_is_registered_when_garage_logic_records_follow_it() {
+    use nfs_world::replication::Record;
+    let content = content();
+    let mut listener = PlayerListener::new(101);
+    listener.initialize_world(&content).unwrap();
+    let scenes: Vec<Record> = listener.pending[0]
+        .records
+        .iter()
+        .take(2)
+        .cloned()
+        .collect();
+    let car = scenes[0].id;
+    let section = Section {
+        float_bits: None,
+        flag: false,
+        deleted: vec![],
+        setup: None,
+        records: scenes,
+    };
+    let mut cars = BTreeMap::new();
+    PlayerListener::register_world_car(&mut cars, &[40], &section).unwrap();
+    assert_eq!(cars.get(&car), Some(&(40, false)));
+    // Several or no exiting participants register nothing.
+    let mut none = BTreeMap::new();
+    PlayerListener::register_world_car(&mut none, &[40, 41], &section).unwrap();
+    PlayerListener::register_world_car(&mut none, &[], &section).unwrap();
+    assert!(none.is_empty());
+    let mut full: BTreeMap<u16, (u16, bool)> = (1..=128).map(|g| (g + 1000, (1, false))).collect();
+    assert_eq!(
+        PlayerListener::register_world_car(&mut full, &[40], &section),
+        Err(replication::Error::Bound)
+    );
+}
+
+#[test]
+fn the_garage_car_is_deleted_once_the_client_reports_the_world_car() {
+    use nfs_world::logic::{EntityRef, Message};
+    let report = |ghost| Message::Reached {
+        event: 28_404_286,
+        target: EntityRef { ghost, entity: 2 },
+        player: 0,
+    };
+    let mut deferred = BTreeMap::from([(205, vec![203])]);
+    assert!(PlayerListener::garage_car_deletion(&report(204), &mut deferred).is_none());
+    let section = PlayerListener::garage_car_deletion(&report(205), &mut deferred).unwrap();
+    assert_eq!(section.deleted, vec![203]);
+    assert!(section.records.is_empty() && section.setup.is_none());
+    // The later reports of the same car delete nothing more.
+    assert!(PlayerListener::garage_car_deletion(&report(205), &mut deferred).is_none());
+    assert!(deferred.is_empty());
+}
+
+#[test]
+fn the_exit_teleport_targets_the_teleport_state_with_the_configured_destination() {
+    use nfs_protocol::world::rpc::Serial;
+    use nfs_world::participants::{Endpoint, ExitBindings};
+    let at = |selector| Endpoint {
+        scene: 10,
+        selector,
+        serial: Serial::new(0).unwrap(),
+    };
+    let exit = ExitBindings {
+        exit_request: at(96),
+        garage_exit_request: at(8),
+        state_94: at(93),
+        state_4: at(3),
+        state_3: at(2),
+        state_77: at(76),
+        state_83: at(82),
+        state_78: at(77),
+        ready_request: at(80),
+        state_79: at(78),
+        state_2: at(1),
+        garage_calls: [at(0), at(3), at(4), at(5), at(6)],
+    };
+    let mut bits = [0u32; 16];
+    for j in [0, 5, 10] {
+        bits[j] = 1f32.to_bits();
+    }
+    bits[12] = 12.5f32.to_bits();
+    let mut v = crate::vehicle_content::layout::tests::fixture();
+    v["exit_teleport"] = serde_json::json!({"transform_bits": bits});
+    let layout = crate::vehicle_content::layout::Layout::from_json(&v).unwrap();
+    let command = PlayerListener::exit_teleport(Some(exit), Some(&layout), 178, 205).unwrap();
+    assert_eq!(command.endpoint, exit.state_77);
+    assert_eq!((command.participant, command.vehicle), (178, 205));
+    assert_eq!(command.position, [12.5, 0., 0.]);
+    assert!(command.encode().is_ok());
+    // Without exit bindings or a configured destination there is no teleport.
+    assert!(PlayerListener::exit_teleport(None, Some(&layout), 178, 205).is_none());
+    let plain = crate::vehicle_content::layout::Layout::from_json(
+        &crate::vehicle_content::layout::tests::fixture(),
+    )
+    .unwrap();
+    assert!(PlayerListener::exit_teleport(Some(exit), Some(&plain), 178, 205).is_none());
+    assert!(PlayerListener::exit_teleport(Some(exit), None, 178, 205).is_none());
+}
+
+#[test]
+fn the_arrive_frame_carries_the_arrive_logic_deletions() {
+    use super::sequences::arrival_section;
+    assert_eq!(arrival_section(Vec::new(), Vec::new()), Ok(None));
+    // Deletions alone (no arrive sequence configured) still get a section.
+    let section = arrival_section(Vec::new(), vec![421, 422])
+        .unwrap()
+        .unwrap();
+    assert_eq!(section.deleted, vec![421, 422]);
+    assert!(section.records.is_empty() && section.setup.is_none() && !section.flag);
 }

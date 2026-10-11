@@ -49,8 +49,10 @@ pub mod delivery;
 
 /// Application kind of every envelope this layer sends or accepts after admission.
 pub const SEQUENCED_KIND: u8 = 20;
-/// The one selector a single-peer host assigns: reserve 0, allocate 1.
-pub const HOST_SELECTOR: u16 = 1;
+/// The one selector a single-peer host assigns its client. Official hosts
+/// assigned 4 and kept 1 for the client's own name of the host (E762); a client
+/// given 1 here would share an id with the host on owner connection fields.
+pub const HOST_SELECTOR: u16 = 4;
 /// Native challenge entries live ten seconds.
 pub const CHALLENGE_WINDOW_MS: u64 = 10_000;
 /// Timing and empty-control subtypes.
