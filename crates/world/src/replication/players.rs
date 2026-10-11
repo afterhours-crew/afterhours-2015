@@ -39,6 +39,7 @@ pub struct Players {
     participants: BTreeMap<u16, u16>,
     actors: BTreeMap<u16, u16>,
     vehicles: BTreeMap<(u16, u64), u16>,
+    goal_allocation_serial: u8,
 }
 
 /// Native runtime index of the player on `connection` and local `slot`.

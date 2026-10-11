@@ -89,7 +89,10 @@ impl State {
         mut resolve: impl FnMut(&str) -> Option<u16>,
     ) -> Result<Self, Error> {
         validate_components(components)?;
-        if components.iter().any(|c| c.kind.extra == MeshExtra::Light) {
+        if components
+            .iter()
+            .any(|c| matches!(c.kind.extra, MeshExtra::Light | MeshExtra::Spoiler))
+        {
             return Err(Error::Unsupported);
         }
         if tire_indices.into_iter().any(|v| v >= 256) {
@@ -107,6 +110,7 @@ impl State {
                         last: 0,
                     },
                     MeshExtra::Light => MeshValue::Light(0),
+                    MeshExtra::Spoiler => unreachable!("unsupported initialization rejected above"),
                 },
             })
             .collect();
@@ -392,6 +396,11 @@ mod tests {
     fn invalid_content_ownership_and_unresolved_light_profiles_fail() {
         let (mut c, mut d) = fixture();
         let mut component = component(MeshExtra::Light, &[(11, None)]);
+        assert_eq!(
+            State::from_vehicle(&c, &d, 1, &[component.clone()], [0, 0], |_| None),
+            Err(Error::Unsupported)
+        );
+        component.kind.extra = MeshExtra::Spoiler;
         assert_eq!(
             State::from_vehicle(&c, &d, 1, &[component.clone()], [0, 0], |_| None),
             Err(Error::Unsupported)

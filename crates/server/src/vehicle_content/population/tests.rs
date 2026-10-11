@@ -921,7 +921,6 @@ fn exit_handoff_keeps_car_relations_through_teleport_rollout_and_completion() {
                 local_index: 2,
             },
             catalog: Catalog::new(24, &[(5100, 3)]).unwrap(),
-            base_value: 37,
             flag: false,
         })
         .unwrap();

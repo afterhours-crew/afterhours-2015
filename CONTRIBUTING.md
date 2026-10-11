@@ -54,6 +54,11 @@ registry checksums are recorded in `Cargo.lock`. XML2 codecs use `quick-xml`
 Cargo registry; implementations are not vendored. The LSX AES arithmetic is
 original code tested with NIST standard vectors.
 
+The installation reader uses lz4_flex 0.14.0 (MIT, safe decoding only) and
+miniz_oxide 0.9.1 (MIT OR Zlib OR Apache-2.0; its adler2 dependency is 0BSD OR
+MIT OR Apache-2.0). Content fingerprints use sha2 0.11.0 and its RustCrypto
+dependencies (digest, block-buffer, crypto-common, hybrid-array, cpufeatures,
+typenum, cfg-if, libc), all MIT OR Apache-2.0.
 Content loaders use serde_json 1.0.151 (MIT OR Apache-2.0); all registry
 versions and checksums are locked. Main/master/default require pull requests
 and reject force pushes/deletion, including for administrators.

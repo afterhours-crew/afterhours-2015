@@ -28,8 +28,9 @@ impl Players {
             return Err(Error::Shape);
         }
         let mut next = self.objects.clone();
+        let allocation_serial = (self.goal_allocation_serial + 1) & 63;
         let goal = next.spawn(
-            Initial::ScriptedSplineGoal(definition.initial()?),
+            Initial::ScriptedSplineGoal(definition.initial(allocation_serial)?),
             Update::ScriptedSplineGoal,
         )?;
         let assigned = next
@@ -42,6 +43,7 @@ impl Players {
             )?
             .ok_or(Error::Shape)?;
         self.objects = next;
+        self.goal_allocation_serial = allocation_serial;
         Ok((goal, assigned))
     }
     /// Release the arrive flag and both owned Actor goal lists before deleting
@@ -221,6 +223,90 @@ impl Players {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn goal_counter_is_world_owned_wraps_and_only_advances_after_success() {
+        use entity::creation::{Asset, Catalog};
+        let mut world = Players::default();
+        let a = join(&mut world, 3, 101, 0);
+        let b = join(&mut world, 7, 202, 0);
+        world.create_actor(3, 101, a).unwrap();
+        world.create_actor(7, 202, b).unwrap();
+        let definition = spline::Definition {
+            asset: Asset {
+                bundle: 4,
+                type_id: 5000,
+                local_index: 0,
+            },
+            catalog: Catalog::new(4, &[(5000, 1)]).unwrap(),
+            flag: false,
+        };
+        let mut independent = world.clone();
+        let serial = |record: &Record| {
+            let Some(Initial::ScriptedSplineGoal(value)) = &record.initial else {
+                panic!()
+            };
+            value.allocation_serial
+        };
+        for i in 1..=66 {
+            let (connection, persona, participant) =
+                if i % 2 == 0 { (7, 202, b) } else { (3, 101, a) };
+            let before = world.objects.snapshot();
+            assert!(
+                world
+                    .start_spline(connection, persona + 1, participant, &definition)
+                    .is_err()
+            );
+            let mut invalid = definition.clone();
+            invalid.asset.local_index = 1;
+            assert!(
+                world
+                    .start_spline(connection, persona, participant, &invalid)
+                    .is_err()
+            );
+            assert_eq!(world.objects.snapshot(), before);
+            let (goal, _) = world
+                .start_spline(connection, persona, participant, &definition)
+                .unwrap();
+            assert_eq!(serial(&goal), i & 63);
+            assert!(
+                world
+                    .start_spline(connection, persona, participant, &definition)
+                    .is_err()
+            );
+            assert!(
+                world
+                    .finish_spline(connection, persona + 1, participant, goal.id)
+                    .is_err()
+            );
+            world
+                .finish_spline(connection, persona, participant, goal.id)
+                .unwrap();
+        }
+        assert_eq!(
+            serial(&independent.start_spline(3, 101, a, &definition).unwrap().0),
+            1
+        );
+        // Exhausted Ghost allocation also leaves the goal counter unchanged.
+        let mut exhausted = Players::default();
+        let participant = join(&mut exhausted, 3, 101, 0);
+        exhausted.create_actor(3, 101, participant).unwrap();
+        while exhausted
+            .objects
+            .spawn(
+                Initial::ScriptedSplineGoal(definition.initial(0).unwrap()),
+                Update::ScriptedSplineGoal,
+            )
+            .is_ok()
+        {}
+        let counter = exhausted.goal_allocation_serial;
+        assert!(
+            exhausted
+                .start_spline(3, 101, participant, &definition)
+                .is_err()
+        );
+        assert_eq!(exhausted.goal_allocation_serial, counter);
+    }
 
     #[test]
     fn replacement_flags_are_owned_repeat_safe_and_do_not_abandon_goals() {

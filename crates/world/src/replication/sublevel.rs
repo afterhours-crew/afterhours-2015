@@ -42,6 +42,44 @@ pub enum Kind {
     RpcSpawn,
 }
 
+const KIND_NAMES: &[(&str, Kind)] = &[
+    ("noop", Kind::Noop),
+    ("rpc", Kind::Rpc),
+    ("level_reference", Kind::LevelReference),
+    ("bool_property", Kind::BoolProperty),
+    ("float_property", Kind::FloatProperty),
+    ("i32_property", Kind::I32Property),
+    ("rpc_references", Kind::RpcReferences),
+    ("rpc_pairs", Kind::RpcPairs),
+    ("rpc_tagged", Kind::RpcTagged),
+    ("rpc_optional64", Kind::RpcOptional64),
+    ("rpc_guid", Kind::RpcGuid),
+    ("rpc_bool", Kind::RpcBool),
+    ("rpc_trigger_volume", Kind::RpcTriggerVolume),
+    ("rpc_map", Kind::RpcMap),
+    ("rpc_four_references", Kind::RpcFourReferences),
+    ("rpc_set64", Kind::RpcSet64),
+    ("rpc_pursuit_maps", Kind::RpcPursuitMaps),
+    ("rpc_spawn", Kind::RpcSpawn),
+];
+
+impl Kind {
+    /// Stable name in scene content documents and build profiles.
+    pub fn name(self) -> &'static str {
+        KIND_NAMES
+            .iter()
+            .find(|(_, kind)| *kind == self)
+            .expect("all kinds named")
+            .0
+    }
+    /// Decode a content name without accepting aliases or future shapes.
+    pub fn from_name(name: &str) -> Option<Self> {
+        KIND_NAMES
+            .iter()
+            .find_map(|(n, kind)| (*n == name).then_some(*kind))
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Profile {
     root: bool,

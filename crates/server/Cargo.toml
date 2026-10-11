@@ -19,9 +19,13 @@ nfs-protocol = { path = "../protocol" }
 nfs-world = { path = "../world" }
 nfs-storage = { path = "../storage" }
 nfs-services = { path = "../services" }
+nfs-content = { path = "../content" }
 nfs-server-support = { path = "../server-support" }
 openssl = { version = "=0.10.81", features = ["vendored"] }
 serde_json = "1"
 tokio = { version = "=1.53.2", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt", "std"] }
+
+[dev-dependencies]
+nfs-content = { path = "../content", features = ["synthetic"] }

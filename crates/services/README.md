@@ -10,6 +10,13 @@ the authenticated persona where required. Unknown forms receive no answer; the
 edge must not fall back to templates on these routes. This does not implement
 feature scheduling, SpeedList matchmaking or account history.
 
+Item inventory assurance (`2052/19`) acknowledges a recognized declaration
+without awarding items or modifying account grants. `nfs-item-licenses` version 1
+accepts its exact list or an empty declaration; version 2 accepts any
+duplicate-free subset of configured license/source pairs in any order. Unknown
+names, sources and item systems remain unsupported. The version-2 vocabulary
+can be generated from the player's installation and is not an ownership claim.
+
 Daily challenge reads join an explicit local catalog/period with current durable
 account progress, obtained awards and monthly ranks. Empty local history grants
 nothing. Reads preserve state, and validated state operations can share atomic

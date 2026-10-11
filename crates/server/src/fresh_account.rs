@@ -15,16 +15,27 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+/// Item and table content: explicit files or an installation to build them from.
+enum Content {
+    Files {
+        items: PathBuf,
+        tables: PathBuf,
+    },
+    Game {
+        game_dir: PathBuf,
+        cache: Option<PathBuf>,
+    },
+}
 struct Args {
     name: String,
     directory: PathBuf,
     policy: PathBuf,
-    items: PathBuf,
-    tables: PathBuf,
+    content: Content,
 }
 fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
     let (mut name, mut directory, mut policy, mut items, mut tables) =
         (None, None, None, None, None);
+    let (mut game_dir, mut cache) = (None, None);
     while let Some(flag) = args.next() {
         let value = args.next().ok_or("missing option value")?;
         match flag.to_str() {
@@ -37,24 +48,47 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
             Some("--account-policy") if policy.is_none() => policy = Some(PathBuf::from(value)),
             Some("--item-content") if items.is_none() => items = Some(PathBuf::from(value)),
             Some("--persistent-content") if tables.is_none() => tables = Some(PathBuf::from(value)),
+            Some("--game-dir") if game_dir.is_none() => game_dir = Some(PathBuf::from(value)),
+            Some("--content-cache") if cache.is_none() => cache = Some(PathBuf::from(value)),
             _ => return Err("unknown or repeated account creation option".into()),
         }
     }
+    let content = match (items, tables, game_dir) {
+        (Some(items), Some(tables), None) if cache.is_none() => Content::Files { items, tables },
+        (None, None, Some(game_dir)) => Content::Game { game_dir, cache },
+        _ => {
+            return Err(
+                "pass --item-content and --persistent-content, or --game-dir (optionally with --content-cache)"
+                    .into(),
+            );
+        }
+    };
     Ok(Args {
         name: name.ok_or("--name is required")?,
         directory: directory.ok_or("--state-directory is required")?,
         policy: policy.ok_or("--account-policy is required")?,
-        items: items.ok_or("--item-content is required")?,
-        tables: tables.ok_or("--persistent-content is required")?,
+        content,
     })
 }
-fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
+fn run(args: Args, options: &nfs_content::Options) -> Result<(), Box<dyn std::error::Error>> {
     let policy = Policy::load(&args.policy)?;
-    let items = ItemContent::load(&args.items)?;
+    let (items, tables) = match &args.content {
+        Content::Files { items, tables } => (items.clone(), tables.clone()),
+        Content::Game { game_dir, cache } => {
+            let generated = crate::install_content::resolve(
+                std::path::Path::new(""),
+                game_dir,
+                cache.as_deref(),
+                options,
+            )?;
+            (generated.item_content, generated.persistent_content)
+        }
+    };
+    let items = ItemContent::load(&items)?;
     let items = items
         .inventory()
         .ok_or("item content must contain an initialization policy")?;
-    let tables = persistent::Catalog::load(&args.tables)?;
+    let tables = persistent::Catalog::load(&tables)?;
     let now = u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())?;
     let prepared = Prepared::new(
         &args.name,
@@ -79,7 +113,7 @@ pub fn main(args: impl Iterator<Item = OsString>) -> std::process::ExitCode {
             return std::process::ExitCode::from(2);
         }
     };
-    match run(args) {
+    match run(args, &nfs_content::Options::default()) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("{error}");
@@ -113,10 +147,53 @@ mod tests {
             "Synthetic Driver"
         );
         assert!(parse(args[..8].iter().cloned()).is_err());
+        let mut game: Vec<OsString> = args[..6].to_vec();
+        game.extend(["--game-dir".into(), "installation".into()]);
+        assert!(matches!(
+            parse(game.clone().into_iter()).unwrap().content,
+            Content::Game { cache: None, .. }
+        ));
+        let mut both = game.clone();
+        both.extend(["--item-content".into(), "items.json".into()]);
+        assert!(parse(both.into_iter()).is_err());
+        let mut orphan = args.clone();
+        orphan.extend(["--content-cache".into(), "cache".into()]);
+        assert!(parse(orphan.into_iter()).is_err());
         for extra in [["--name", "replacement"], ["--profile", "existing.sqlite"]] {
             let mut duplicate = args.clone();
             duplicate.extend(extra.into_iter().map(OsString::from));
             assert!(parse(duplicate.into_iter()).is_err());
         }
+    }
+
+    #[test]
+    fn account_is_created_from_content_built_from_an_installation() {
+        let dir = std::env::temp_dir().join(format!("nfs-server-account-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (options, _) =
+            nfs_content::synthetic::write(&dir.join("game"), &nfs_content::synthetic::assets())
+                .unwrap();
+        let policy = dir.join("policy.json");
+        std::fs::write(
+            &policy,
+            serde_json::json!({"format":"nfs-fresh-account-policy","version":1,
+                "build_sha256":nfs_services::SUPPORTED_BUILD_SHA256,"screenshot_count_max":20,
+                "entitlements":{"scopes":[["synthetic"]],"grants":[]}})
+            .to_string(),
+        )
+        .unwrap();
+        let args = Args {
+            name: "Synthetic Driver".into(),
+            directory: dir.join("account"),
+            policy,
+            content: Content::Game {
+                game_dir: dir.join("game"),
+                cache: Some(dir.join("cache")),
+            },
+        };
+        run(args, &options).unwrap();
+        assert!(dir.join("account").is_dir());
+        assert_eq!(std::fs::read_dir(dir.join("cache")).unwrap().count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

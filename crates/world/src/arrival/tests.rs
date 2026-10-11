@@ -114,7 +114,6 @@ fn rollout_goal_is_owned_atomic_ordered_and_cleaned_once() {
                 local_index: 2,
             },
             catalog: Catalog::new(23, &[(5100, 3)]).unwrap(),
-            base_value: 37,
             flag: false,
         })
         .unwrap();

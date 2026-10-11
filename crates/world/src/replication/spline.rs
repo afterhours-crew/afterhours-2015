@@ -13,22 +13,21 @@ use std::collections::BTreeMap;
 pub struct Definition {
     pub asset: Asset,
     pub catalog: Catalog,
-    /// Six-bit base field; broader semantics are not established.
-    pub base_value: u8,
     pub flag: bool,
 }
 impl Definition {
     pub fn validate(&self) -> Result<(), Error> {
         self.catalog.flatten(self.asset)?;
-        if self.base_value >= 64 {
-            return Err(Error::Bound);
-        }
         Ok(())
     }
-    pub fn initial(&self) -> Result<Initial, Error> {
+    pub fn initial(&self, allocation_serial: u8) -> Result<Initial, Error> {
         self.validate()?;
+        if allocation_serial >= 64 {
+            return Err(Error::Bound);
+        }
         Ok(Initial {
             definition: self.clone(),
+            allocation_serial,
             selector: 0,
             serial: 1,
             asset_mode: 2,
@@ -39,6 +38,8 @@ impl Definition {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Initial {
     pub definition: Definition,
+    /// Goal allocation counter, wrapping at 64; independent of the RPC serial.
+    pub allocation_serial: u8,
     pub selector: u16,
     pub serial: u16,
     pub asset_mode: u8,
@@ -46,12 +47,15 @@ pub struct Initial {
 impl Initial {
     pub(super) fn write(&self, w: &mut Writer) -> Result<(), Error> {
         self.definition.validate()?;
+        if self.allocation_serial >= 64 {
+            return Err(Error::Bound);
+        }
         if !matches!(self.asset_mode, 2 | 3) {
             return Err(Error::Unsupported);
         }
         w.put(u64::from(self.selector), 9)?;
         w.put(u64::from(self.serial), 10)?;
-        w.put(u64::from(self.definition.base_value), 6)?;
+        w.put(u64::from(self.allocation_serial), 6)?;
         w.put(u64::from(self.asset_mode), 2)?;
         w.put(u64::from(self.definition.asset.bundle), 11)?;
         w.put(
@@ -106,7 +110,7 @@ impl Record {
         let initial = if create {
             let selector = r.take(9)? as u16;
             let serial = r.take(10)? as u16;
-            let base_value = r.take(6)? as u8;
+            let allocation_serial = r.take(6)? as u8;
             let asset_mode = r.take(2)? as u8;
             if !matches!(asset_mode, 2 | 3) {
                 return Err(Error::Unsupported);
@@ -121,9 +125,9 @@ impl Record {
                 definition: Definition {
                     asset,
                     catalog: catalog.clone(),
-                    base_value,
                     flag,
                 },
+                allocation_serial,
                 selector,
                 serial,
                 asset_mode,
@@ -156,14 +160,13 @@ mod tests {
                 local_index: 1,
             },
             catalog: catalog.clone(),
-            base_value: 37,
             flag: true,
         };
         (
             Record {
                 id: 27,
                 initial: Some(super::super::Initial::ScriptedSplineGoal(
-                    definition.initial().unwrap(),
+                    definition.initial(37).unwrap(),
                 )),
                 update: Update::ScriptedSplineGoal,
             },
@@ -239,7 +242,7 @@ mod tests {
             match field {
                 0 => bad.selector = 512,
                 1 => bad.serial = 1024,
-                2 => bad.definition.base_value = 64,
+                2 => bad.allocation_serial = 64,
                 3 => bad.definition.asset.local_index = 2,
                 _ => bad.asset_mode = 1,
             }

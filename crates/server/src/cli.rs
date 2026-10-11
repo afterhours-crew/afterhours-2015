@@ -18,9 +18,12 @@ struct Args {
     persistent_content: Option<PathBuf>,
     progression_content: Option<PathBuf>,
     vehicle_content: Option<PathBuf>,
+    vehicle_parts: Option<PathBuf>,
     garage_layout: Option<PathBuf>,
     sequence_content: Option<PathBuf>,
     garage_logic: Option<PathBuf>,
+    reputation_thresholds: Option<PathBuf>,
+    scene_catalog: Option<PathBuf>,
     control_catalogs: Option<PathBuf>,
     entitlement_state: Option<PathBuf>,
     user_settings: Option<PathBuf>,
@@ -44,6 +47,11 @@ struct Args {
     local_identity: Option<PathBuf>,
     state_directory: Option<PathBuf>,
     local_account: Option<nfs_storage::AccountId>,
+    /// Installation whose content replaces the item, table and template options.
+    game_dir: Option<PathBuf>,
+    content_cache: Option<PathBuf>,
+    /// Cache entry summary once `game_dir` has been resolved.
+    generated: Option<serde_json::Value>,
 }
 
 fn parse() -> Result<Args, String> {
@@ -57,8 +65,11 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
     let mut persistent_content = None;
     let mut progression_content = None;
     let (mut vehicle_content, mut garage_layout) = (None, None);
+    let mut vehicle_parts = None;
     let mut sequence_content = None;
     let mut garage_logic = None;
+    let mut reputation_thresholds = None;
+    let mut scene_catalog = None;
     let mut control_catalogs = None;
     let mut entitlement_state = None;
     let (mut kickback_state, mut speedwall_state, mut item_licenses) = (None, None, None);
@@ -78,6 +89,7 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
     let mut challenge_content = None;
     let mut bootstrap_config = None;
     let (mut auth_config, mut local_identity) = (None, None);
+    let (mut game_dir, mut content_cache) = (None, None);
     while let Some(flag) = args.next() {
         let mut value = || {
             args.next()
@@ -87,14 +99,19 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
             Some("--root") => root = value()?.into(),
             Some("--output") => output = Some(PathBuf::from(value()?)),
             Some("--stop-file") => stop_file = Some(PathBuf::from(value()?)),
+            Some("--scene-catalog") => scene_catalog = Some(PathBuf::from(value()?)),
             Some("--world-content") => world_content = Some(PathBuf::from(value()?)),
             Some("--item-content") => item_content = Some(PathBuf::from(value()?)),
             Some("--persistent-content") => persistent_content = Some(PathBuf::from(value()?)),
             Some("--progression-content") => progression_content = Some(PathBuf::from(value()?)),
             Some("--vehicle-content") => vehicle_content = Some(PathBuf::from(value()?)),
+            Some("--vehicle-parts") => vehicle_parts = Some(PathBuf::from(value()?)),
             Some("--garage-layout") => garage_layout = Some(PathBuf::from(value()?)),
             Some("--sequence-content") => sequence_content = Some(PathBuf::from(value()?)),
             Some("--garage-logic") => garage_logic = Some(PathBuf::from(value()?)),
+            Some("--reputation-thresholds") => {
+                reputation_thresholds = Some(PathBuf::from(value()?))
+            }
             Some("--control-catalogs") => control_catalogs = Some(PathBuf::from(value()?)),
             Some("--entitlement-state") => entitlement_state = Some(PathBuf::from(value()?)),
             Some("--kickback-state") => kickback_state = Some(PathBuf::from(value()?)),
@@ -123,6 +140,8 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
             Some("--local-identity") => local_identity = Some(PathBuf::from(value()?)),
             Some("--bootstrap-config") => bootstrap_config = Some(PathBuf::from(value()?)),
             Some("--state-directory") => state_directory = Some(PathBuf::from(value()?)),
+            Some("--game-dir") => game_dir = Some(PathBuf::from(value()?)),
+            Some("--content-cache") => content_cache = Some(PathBuf::from(value()?)),
             Some("--local-account") => {
                 let text = value()?;
                 local_account = Some(account(text.to_str().ok_or("bad local account")?)?);
@@ -154,6 +173,18 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
     if !(1..=3600).contains(&idle_seconds) || !(1..=86_400).contains(&qos_seconds) {
         return Err("idle must be 1..3600 s and qos 1..86400 s".into());
     }
+    let generated = game_dir.is_some();
+    if generated
+        && (item_content.is_some() || persistent_content.is_some() || world_mac_template.is_some())
+    {
+        return Err("--game-dir generates --item-content, --persistent-content and --world-mac-template; pass either the installation or those files".into());
+    }
+    if content_cache.is_some() && !generated {
+        return Err("--content-cache requires --game-dir".into());
+    }
+    let has_items = item_content.is_some() || generated;
+    let has_persistent = persistent_content.is_some() || generated;
+    let has_stats = stat_definitions.is_some() || generated;
     if entitlement_state.is_some() && (local_account.is_none() || auth_config.is_none()) {
         return Err("--entitlement-state requires owned authentication and --local-account".into());
     }
@@ -169,19 +200,19 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
             || matchmaking_admission.is_none()
             || matchmaking_policy.is_none()
             || world_policy.is_none()
-            || control_catalogs.is_none()
-            || stat_definitions.is_none()
+            || (control_catalogs.is_none() && !generated)
+            || !has_stats
             || !owned_menu_awards
             || challenge_content.is_none()
             || !owned_local_social
-            || item_licenses.is_none())
+            || (item_licenses.is_none() && !generated))
     {
         return Err(
             "--owned-only requires every owned service option and no --control-content".into(),
         );
     }
     let configured = [
-        item_content.is_some(),
+        has_items,
         state_directory.is_some(),
         local_account.is_some(),
     ];
@@ -190,38 +221,39 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
             "Items requires --item-content, --state-directory and --local-account together".into(),
         );
     }
-    if persistent_content.is_some() && item_content.is_none() {
+    if has_persistent && !has_items {
         return Err("--persistent-content requires the owned Items configuration".into());
     }
-    if progression_content.is_some() && persistent_content.is_none() {
+    if progression_content.is_some() && !has_persistent {
         return Err("--progression-content requires --persistent-content".into());
     }
-    if (vehicle_content.is_some() || garage_layout.is_some())
-        && !(vehicle_content.is_some()
-            && garage_layout.is_some()
-            && progression_content.is_some()
-            && world_content.is_some())
+    if (vehicle_content.is_some() || garage_layout.is_some() || generated)
+        && !((vehicle_content.is_some() || generated)
+            && (garage_layout.is_some() || generated)
+            && (progression_content.is_some() || generated)
+            && (world_content.is_some() || generated))
     {
         return Err("Vehicles require --vehicle-content, --garage-layout, --world-content and --progression-content".into());
     }
-    if sequence_content.is_some() && vehicle_content.is_none() {
+    if vehicle_parts.is_some() && vehicle_content.is_none() && !generated {
+        return Err("--vehicle-parts requires --vehicle-content".into());
+    }
+    if sequence_content.is_some() && vehicle_content.is_none() && !generated {
         return Err(
             "--sequence-content requires the owned vehicle/progression configuration".into(),
         );
     }
-    if garage_logic.is_some() && sequence_content.is_none() {
+    if garage_logic.is_some() && sequence_content.is_none() && !generated {
         return Err("--garage-logic requires --sequence-content".into());
     }
-    if (stat_definitions.is_some() || owned_menu_awards)
-        && (persistent_content.is_none() || garage_logic.is_none())
-    {
+    if (has_stats || owned_menu_awards) && (!has_persistent || garage_logic.is_none()) {
         return Err("--stat-definitions and --owned-menu-awards require --persistent-content and --garage-logic for current account state".into());
     }
-    if challenge_content.is_some() && item_content.is_none() {
+    if challenge_content.is_some() && !has_items {
         return Err("--challenge-content requires owned --item-content and account storage".into());
     }
     if (auth_config.is_some() || local_identity.is_some())
-        && !(auth_config.is_some() && item_content.is_some() && bootstrap_config.is_some())
+        && !(auth_config.is_some() && has_items && bootstrap_config.is_some())
     {
         return Err("--auth-config requires owned Items/account storage and --bootstrap-config; --local-identity is an optional import".into());
     }
@@ -238,9 +270,12 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
         persistent_content,
         progression_content,
         vehicle_content,
+        vehicle_parts,
         garage_layout,
         sequence_content,
         garage_logic,
+        reputation_thresholds,
+        scene_catalog,
         control_catalogs,
         entitlement_state,
         kickback_state,
@@ -264,7 +299,46 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
         world_policy,
         state_directory,
         local_account,
+        game_dir,
+        content_cache,
+        generated: None,
     })
+}
+
+/// Replace the generated options with files built from `--game-dir`.
+fn resolve_install_content(args: &mut Args, options: &nfs_content::Options) -> Result<(), String> {
+    let Some(game_dir) = &args.game_dir else {
+        return Ok(());
+    };
+    let generated = nfs_server::install_content::resolve(
+        &args.root,
+        game_dir,
+        args.content_cache.as_deref(),
+        options,
+    )
+    .map_err(|error| format!("cannot prepare content from the game installation: {error}"))?;
+    args.generated = Some(generated.summary());
+    args.item_content = Some(generated.item_content);
+    args.persistent_content = Some(generated.persistent_content);
+    args.stat_definitions
+        .get_or_insert(generated.stat_definitions);
+    args.item_licenses.get_or_insert(generated.item_licenses);
+    args.control_catalogs
+        .get_or_insert(generated.control_catalogs);
+    args.reputation_thresholds
+        .get_or_insert(generated.reputation_thresholds);
+    args.scene_catalog.get_or_insert(generated.scene_catalog);
+    args.world_content.get_or_insert(generated.world_content);
+    args.garage_layout.get_or_insert(generated.garage_layout);
+    args.vehicle_parts.get_or_insert(generated.vehicle_parts);
+    args.vehicle_content
+        .get_or_insert(generated.vehicle_profiles);
+    args.progression_content
+        .get_or_insert(generated.progression_content);
+    args.sequence_content
+        .get_or_insert(generated.sequence_content);
+    args.world_mac_template = Some(generated.world_mac_template);
+    Ok(())
 }
 
 fn account(text: &str) -> Result<nfs_storage::AccountId, String> {
@@ -336,6 +410,12 @@ fn inventory_config(args: &Args) -> Result<Option<net::InventoryProfile>, Failur
 pub fn main() -> std::process::ExitCode {
     if std::env::args_os()
         .nth(1)
+        .is_some_and(|a| a == "prepare-content")
+    {
+        return nfs_server::prepare_content::main(std::env::args_os().skip(2));
+    }
+    if std::env::args_os()
+        .nth(1)
         .is_some_and(|a| a == "create-account")
     {
         return nfs_server::fresh_account::main(std::env::args_os().skip(2));
@@ -345,7 +425,7 @@ pub fn main() -> std::process::ExitCode {
         .is_some_and(|a| a == "--help" || a == "-h")
     {
         println!(
-            "nfs-server: owned local NFS 2015 services\n\nUsage: nfs-server --root <data-directory> --output <new-recording-directory> [configuration options]\n\nCreate account: nfs-server create-account --name <name> --state-directory <new-directory>\n--account-policy <policy.json> --item-content <items.json> --persistent-content <tables.json>\n\nRequired control configuration: --bootstrap-config, --auth-config,\n--group-policy, --matchmaking-admission, --matchmaking-policy, --world-policy,\n--control-catalogs, --stat-definitions, --challenge-content, --item-licenses,\n--owned-local-social and --owned-menu-awards.\n\nGarage configuration: --world-content (version 4), --world-mac-template,\n--item-content, --state-directory, --local-account, --persistent-content,\n--progression-content, --vehicle-content, --garage-layout, --sequence-content,\n--garage-logic.\n\nAccount state is read from SQLite. Optional one-time imports: --local-identity,\n--entitlement-state, --kickback-state, --speedwall-state, --user-settings.\n\nOptional: --redirector-port, --idle-seconds, --qos-seconds, --stop-file.\nAll listeners are loopback. No manifest, captured reply store or external\nauthentication is used. See crates/server/README.md for schemas and limitations."
+            "nfs-server: owned local NFS 2015 services\n\nUsage: nfs-server --root <data-directory> --output <new-recording-directory> [configuration options]\n\nPrepare game content: nfs-server prepare-content --game-dir <installation>\n[--root <data-directory>] [--content-cache <directory>]\n\nCreate account: nfs-server create-account --name <name> --state-directory <new-directory>\n--account-policy <policy.json> --item-content <items.json> --persistent-content <tables.json>\n\nRequired control configuration: --bootstrap-config, --auth-config,\n--group-policy, --matchmaking-admission, --matchmaking-policy, --world-policy,\n--control-catalogs, --stat-definitions, --challenge-content, --item-licenses,\n--owned-local-social and --owned-menu-awards.\n\nGarage configuration: --world-content (version 4 or 5), --world-mac-template,\n--item-content, --state-directory, --local-account, --persistent-content,\n--progression-content, --vehicle-content, --garage-layout, --sequence-content,\n--garage-logic.\n\nGame content: --game-dir <installation> builds --item-content,\n--persistent-content and --world-mac-template on first start, supplies\n--stat-definitions, --item-licenses, --control-catalogs and\n--reputation-thresholds, --scene-catalog, --world-content, --garage-layout,\n--vehicle-content, --vehicle-parts, --progression-content and --sequence-content unless explicitly overridden, and caches the outputs\n(--content-cache, default artifacts/content under --root).\n\nAccount state is read from SQLite. Optional one-time imports: --local-identity,\n--entitlement-state, --kickback-state, --speedwall-state, --user-settings.\n\nOptional: --redirector-port, --idle-seconds, --qos-seconds, --stop-file.\nAll listeners are loopback. No manifest, captured reply store or external\nauthentication is used. See crates/server/README.md for schemas and limitations."
         );
         return std::process::ExitCode::SUCCESS;
     }
@@ -353,13 +433,18 @@ pub fn main() -> std::process::ExitCode {
         .with_writer(std::io::stderr)
         .with_ansi(false)
         .init();
-    let args = match parse() {
+    let mut args = match parse() {
         Ok(args) => args,
         Err(message) => {
             eprintln!("{message}");
             return std::process::ExitCode::from(2);
         }
     };
+    // First start reads the installation (blocking); later starts reuse the cache.
+    if let Err(message) = resolve_install_content(&mut args, &nfs_content::Options::default()) {
+        eprintln!("{message}");
+        return std::process::ExitCode::FAILURE;
+    }
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -445,8 +530,19 @@ async fn run(args: Args) -> Result<(), Failure> {
         pack = pack.validate()?;
     }
     let pack = Arc::new(pack);
+    let scene_catalog = args
+        .scene_catalog
+        .as_ref()
+        .map(|path| {
+            nfs_content::scenes::Catalog::load(&args.root.join(path))
+                .map_err(|_| Failure::ProfileConfig)
+        })
+        .transpose()?;
     let world_content = match &args.world_content {
-        Some(dir) => Some(Arc::new(content::WorldContent::load(&args.root.join(dir))?)),
+        Some(dir) => Some(Arc::new(content::WorldContent::load_with_scenes(
+            &args.root.join(dir),
+            scene_catalog.as_ref(),
+        )?)),
         None => None,
     };
     let progression = args
@@ -459,9 +555,13 @@ async fn run(args: Args) -> Result<(), Failure> {
     let vehicles = match (&args.vehicle_content, &args.garage_layout) {
         (Some(vehicles), Some(layout)) => {
             Some(Arc::new(nfs_server::vehicle_content::GarageContent {
-                vehicles: nfs_server::vehicle_content::Content::load(
+                vehicles: nfs_server::vehicle_content::Content::load_with_parts(
                     &args.root.join(vehicles),
                     inventory.as_ref().ok_or(Failure::ProfileConfig)?.bindings(),
+                    args.vehicle_parts
+                        .as_ref()
+                        .map(|p| args.root.join(p))
+                        .as_deref(),
                 )?,
                 layout: nfs_server::vehicle_content::layout::Layout::load(&args.root.join(layout))?,
             }))
@@ -474,10 +574,23 @@ async fn run(args: Args) -> Result<(), Failure> {
         .map(|path| nfs_server::sequence_content::SequenceContent::load(&args.root.join(path)))
         .transpose()?
         .map(Arc::new);
+    let default_reputation = args
+        .reputation_thresholds
+        .as_ref()
+        .map(|path| {
+            nfs_services::reputation::Thresholds::load(&args.root.join(path))
+                .map_err(|_| Failure::ProfileConfig)
+        })
+        .transpose()?;
     let garage_logic = args
         .garage_logic
         .as_ref()
-        .map(|path| nfs_server::garage_logic::GarageLogic::load(&args.root.join(path)))
+        .map(|path| {
+            nfs_server::garage_logic::GarageLogic::load_with_reputation(
+                &args.root.join(path),
+                default_reputation,
+            )
+        })
         .transpose()?
         .map(Arc::new);
     let entitlements = Some((account, Arc::new(owned.entitlements)));
@@ -585,6 +698,7 @@ async fn run(args: Args) -> Result<(), Failure> {
         "pack"
     });
     ready["manifest_mode"] = serde_json::json!("none");
+    ready["install_content"] = args.generated.clone().unwrap_or(serde_json::Value::Null);
     println!("{ready}");
     let (stop, shutdown) = tokio::sync::watch::channel(false);
     let config = net::Config {
@@ -711,6 +825,180 @@ mod tests {
             args.extend([flag.into(), value.into()]);
             assert!(parse_from(args.into_iter()).is_err());
         }
+    }
+
+    fn without(mut args: Vec<std::ffi::OsString>, flags: &[&str]) -> Vec<std::ffi::OsString> {
+        for flag in flags {
+            let index = args.iter().position(|s| s == flag).unwrap();
+            args.drain(index..index + 2);
+        }
+        args
+    }
+
+    const GENERATED: [&str; 5] = [
+        "--item-content",
+        "--persistent-content",
+        "--stat-definitions",
+        "--item-licenses",
+        "--control-catalogs",
+    ];
+
+    #[test]
+    fn game_dir_replaces_generated_options_exclusively() {
+        let mut args = without(configured(), &GENERATED);
+        args.extend(["--game-dir".into(), "game".into()]);
+        let parsed = parse_from(args.clone().into_iter()).unwrap();
+        assert_eq!(parsed.game_dir, Some(PathBuf::from("game")));
+        assert!(parsed.item_content.is_none() && parsed.generated.is_none());
+        let mut cached = args.clone();
+        cached.extend(["--content-cache".into(), "cache".into()]);
+        assert!(parse_from(cached.into_iter()).is_ok());
+        let missing_progression = without(
+            args.clone(),
+            &[
+                "--vehicle-content",
+                "--garage-layout",
+                "--progression-content",
+            ],
+        );
+        assert!(parse_from(missing_progression.into_iter()).is_ok());
+        for flag in [
+            "--item-content",
+            "--persistent-content",
+            "--world-mac-template",
+        ] {
+            let mut both = args.clone();
+            both.extend([flag.into(), "explicit".into()]);
+            assert!(parse_from(both.into_iter()).is_err(), "{flag}");
+        }
+        let mut orphan = configured();
+        orphan.extend(["--content-cache".into(), "cache".into()]);
+        assert!(parse_from(orphan.into_iter()).is_err());
+        // Without either source the dependent options are rejected as before.
+        assert!(parse_from(without(configured(), &GENERATED).into_iter()).is_err());
+    }
+
+    #[test]
+    fn resolution_fills_generated_paths_and_reports_the_entry() {
+        let dir = std::env::temp_dir().join(format!("nfs-server-cli-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (options, _) =
+            nfs_content::synthetic::write(&dir.join("game"), &nfs_content::synthetic::assets())
+                .unwrap();
+        let with_game = |game: &str| {
+            let mut args = without(configured(), &GENERATED);
+            args = without(
+                args,
+                &[
+                    "--world-content",
+                    "--garage-layout",
+                    "--vehicle-content",
+                    "--progression-content",
+                    "--sequence-content",
+                ],
+            );
+            args.extend([
+                "--root".into(),
+                dir.clone().into_os_string(),
+                "--game-dir".into(),
+                game.into(),
+            ]);
+            parse_from(args.into_iter()).unwrap()
+        };
+        let mut parsed = with_game("game");
+        resolve_install_content(&mut parsed, &options).unwrap();
+        let items = parsed.item_content.clone().unwrap();
+        assert!(items.starts_with(dir.join("artifacts/content")));
+        assert!(items.exists());
+        assert!(parsed.persistent_content.as_ref().unwrap().exists());
+        assert!(parsed.vehicle_parts.as_ref().unwrap().exists());
+        assert!(parsed.vehicle_content.as_ref().unwrap().exists());
+        nfs_server::progression::Content::load(parsed.progression_content.as_ref().unwrap())
+            .unwrap();
+        nfs_server::sequence_content::SequenceContent::load(
+            parsed.sequence_content.as_ref().unwrap(),
+        )
+        .unwrap()
+        .arrivals()
+        .unwrap()
+        .unwrap();
+        let stats = parsed.stat_definitions.as_ref().unwrap();
+        nfs_services::stats::Catalog::load(stats).unwrap();
+        nfs_services::item_licenses::Content::load(parsed.item_licenses.as_ref().unwrap()).unwrap();
+        nfs_services::control_catalogs::Catalog::load(parsed.control_catalogs.as_ref().unwrap())
+            .unwrap();
+        nfs_services::reputation::Thresholds::load(parsed.reputation_thresholds.as_ref().unwrap())
+            .unwrap();
+        let scenes =
+            nfs_content::scenes::Catalog::load(parsed.scene_catalog.as_ref().unwrap()).unwrap();
+        content::WorldContent::load_with_scenes(
+            parsed.world_content.as_ref().unwrap(),
+            Some(&scenes),
+        )
+        .unwrap()
+        .validate_runtime()
+        .unwrap();
+        crate::vehicle_content::layout::Layout::load(parsed.garage_layout.as_ref().unwrap())
+            .unwrap();
+        assert!(parsed.world_mac_template.as_ref().unwrap().exists());
+        assert_eq!(parsed.generated.as_ref().unwrap()["built"], true);
+        let mut again = with_game("game");
+        resolve_install_content(&mut again, &options).unwrap();
+        assert_eq!(again.generated.as_ref().unwrap()["built"], false);
+        // Stats presentation is operator policy, so an explicit catalog wins.
+        let mut explicit_args = without(configured(), &["--item-content", "--persistent-content"]);
+        explicit_args.extend(["--scene-catalog".into(), "authored-scenes.json".into()]);
+        explicit_args.extend(["--vehicle-parts".into(), "authored-parts.json".into()]);
+        explicit_args.extend([
+            "--root".into(),
+            dir.clone().into_os_string(),
+            "--game-dir".into(),
+            "game".into(),
+        ]);
+        let mut explicit = parse_from(explicit_args.into_iter()).unwrap();
+        resolve_install_content(&mut explicit, &options).unwrap();
+        assert_eq!(
+            explicit.stat_definitions,
+            Some(PathBuf::from("configured-input"))
+        );
+        assert_eq!(
+            explicit.item_licenses,
+            Some(PathBuf::from("configured-input"))
+        );
+        assert_eq!(
+            explicit.control_catalogs,
+            Some(PathBuf::from("configured-input"))
+        );
+        assert_eq!(
+            explicit.scene_catalog,
+            Some(PathBuf::from("authored-scenes.json"))
+        );
+        assert_eq!(
+            explicit.vehicle_parts,
+            Some(PathBuf::from("authored-parts.json"))
+        );
+        assert_eq!(
+            explicit.vehicle_content,
+            Some(PathBuf::from("configured-input"))
+        );
+        assert_eq!(
+            explicit.world_content,
+            Some(PathBuf::from("configured-input"))
+        );
+        assert_eq!(
+            explicit.garage_layout,
+            Some(PathBuf::from("configured-input"))
+        );
+        assert_eq!(
+            explicit.progression_content,
+            Some(PathBuf::from("configured-input"))
+        );
+        assert_eq!(
+            explicit.sequence_content,
+            Some(PathBuf::from("configured-input"))
+        );
+        assert!(resolve_install_content(&mut with_game("missing"), &options).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
