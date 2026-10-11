@@ -23,6 +23,7 @@ pub enum Error {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Kind {
+    PlayerManager,
     Actor,
     Entity,
     Participant,
@@ -33,6 +34,7 @@ pub enum Kind {
 impl Kind {
     pub fn index(self) -> u8 {
         match self {
+            Self::PlayerManager => 15,
             Self::Actor => 0,
             Self::Entity => 6,
             Self::Participant => 11,
@@ -43,6 +45,7 @@ impl Kind {
     }
     fn from_index(index: u8) -> Result<Self, Error> {
         match index {
+            15 => Ok(Self::PlayerManager),
             0 => Ok(Self::Actor),
             6 => Ok(Self::Entity),
             11 => Ok(Self::Participant),
@@ -156,6 +159,7 @@ pub struct PlayerUpdate {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Initial {
+    PlayerManager,
     ScriptedSplineGoal(spline::Initial),
     Actor(ActorInit),
     Entity {
@@ -177,6 +181,7 @@ impl Initial {
     pub fn kind(&self) -> Kind {
         match self {
             Self::Actor(_) => Kind::Actor,
+            Self::PlayerManager => Kind::PlayerManager,
             Self::ScriptedSplineGoal(_) => Kind::ScriptedSplineGoal,
             Self::Entity { .. } | Self::Vehicle { .. } => Kind::Entity,
             Self::Participant(_) => Kind::Participant,
@@ -187,6 +192,7 @@ impl Initial {
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Update {
+    PlayerManager(player_manager::Update),
     ScriptedSplineGoal,
     Actor(ActorUpdate),
     Entity {
@@ -207,6 +213,7 @@ pub enum Update {
 impl Update {
     pub fn kind(&self) -> Kind {
         match self {
+            Self::PlayerManager(_) => Kind::PlayerManager,
             Self::ScriptedSplineGoal => Kind::ScriptedSplineGoal,
             Self::Actor(_) => Kind::Actor,
             Self::Entity { .. } | Self::Vehicle { .. } => Kind::Entity,
@@ -315,6 +322,7 @@ impl Reader<'_> {
             Kind::SubLevel | Kind::Entity | Kind::ScriptedSplineGoal => {
                 return Err(Error::Unsupported);
             }
+            Kind::PlayerManager => Initial::PlayerManager,
             Kind::Actor => Initial::Actor(ActorInit {
                 participant: self.reference()?,
                 flag_a: self.bit()?,
@@ -341,6 +349,7 @@ impl Reader<'_> {
     }
     fn update(&mut self, kind: Kind) -> Result<Update, Error> {
         Ok(match kind {
+            Kind::PlayerManager => Update::PlayerManager(player_manager::Update::read(self)?),
             Kind::ScriptedSplineGoal => Update::ScriptedSplineGoal,
             Kind::SubLevel | Kind::Entity => return Err(Error::Unsupported),
             Kind::Participant => Update::Participant(ParticipantUpdate {
@@ -459,6 +468,7 @@ impl Writer {
             Initial::SubLevel { .. } | Initial::Entity { .. } | Initial::Vehicle { .. } => {
                 return Err(Error::Unsupported);
             }
+            Initial::PlayerManager => {}
             Initial::ScriptedSplineGoal(v) => v.write(self)?,
             Initial::Actor(v) => {
                 self.reference(&v.participant)?;
@@ -490,6 +500,7 @@ impl Writer {
             Update::SubLevel { .. } | Update::Entity { .. } | Update::Vehicle { .. } => {
                 return Err(Error::Unsupported);
             }
+            Update::PlayerManager(v) => v.write(self)?,
             Update::ScriptedSplineGoal => {}
             Update::Participant(v) => {
                 self.optional(&v.player, Self::reference)?;
@@ -638,6 +649,7 @@ pub mod entity;
 mod entity_record;
 pub mod spline;
 
+pub mod player_manager;
 pub mod players;
 mod scene_record;
 

@@ -133,7 +133,11 @@ fn explicit_scene_roles_bind_atomically_and_reject_incomplete_or_changed_content
     assert!(listener.players.objects().is_empty());
     assert!(listener.pending.is_empty());
     listener.initialize_world(&content).unwrap();
-    assert_eq!(listener.players.objects().len(), 15);
+    assert_eq!(listener.players.objects().len(), 16);
+    assert!(matches!(
+        listener.players.objects().get(16).unwrap().initial,
+        nfs_world::replication::Initial::PlayerManager
+    ));
     assert_eq!(listener.roles, content.roles);
     let before = listener.players.objects().snapshot();
     let queued = listener.pending.len();

@@ -627,3 +627,101 @@ fn client_physics_handoff_is_owned_ordered_bounded_and_preserves_other_component
             .is_empty()
     );
 }
+
+#[test]
+fn manager_seats_only_the_owned_player_in_its_own_car_and_clears_repeatedly() {
+    use nfs_world::replication::{Update, player_manager::Entry};
+    let (mut population, mut players, content, layout, items, p) = fixture();
+    let manager = players.enable_player_manager().unwrap().unwrap();
+    assert!(players.enable_player_manager().unwrap().is_none());
+    assert!(players.sync_player_manager().unwrap().is_none());
+    let layout = world_layout(&layout);
+    population
+        .spawn(
+            &mut players,
+            owner(p),
+            inventory(items.clone()),
+            &content,
+            &layout,
+            [0.; 3],
+        )
+        .unwrap();
+    let car = population
+        .spawn_world(
+            &mut players,
+            owner(p),
+            &inventory(items.clone()),
+            &content,
+            &layout,
+        )
+        .unwrap()
+        .records[0]
+        .id;
+    let before = players.objects().snapshot();
+    for (connection, persona, participant, vehicle) in [
+        (4, 0x100000002, p, car),
+        (3, 1, p, car),
+        (3, 0x100000002, p, manager.id),
+    ] {
+        assert!(
+            players
+                .bind_player_vehicle(connection, persona, participant, Some(vehicle))
+                .is_err()
+        );
+        assert_eq!(players.objects().snapshot(), before);
+    }
+    let binding = players
+        .bind_player_vehicle(3, 0x100000002, p, Some(car))
+        .unwrap()
+        .unwrap();
+    assert_eq!(binding.id, manager.id);
+    let Update::PlayerManager(delta) = binding.update else {
+        panic!()
+    };
+    let entry = delta.entries[2].as_ref().unwrap().as_ref().unwrap();
+    assert_eq!(*entry, Entry::driving(entry.player, car));
+    assert!(
+        players
+            .bind_player_vehicle(3, 0x100000002, p, Some(car))
+            .unwrap()
+            .is_none()
+    );
+    assert!(players.sync_player_manager().unwrap().is_none());
+    let other = join(&mut players, 7, 77);
+    players.sync_player_manager().unwrap().unwrap();
+    assert!(
+        players
+            .bind_player_vehicle(7, 77, other, Some(car))
+            .is_err()
+    );
+    let Update::PlayerManager(current) = &players.objects().get(manager.id).unwrap().current else {
+        panic!()
+    };
+    assert_eq!(current.entries[2], delta.entries[2]);
+    assert!(
+        current.entries[6]
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .detached
+    );
+    assert!(
+        players
+            .bind_player_vehicle(3, 0x100000002, p, None)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        players
+            .bind_player_vehicle(3, 0x100000002, p, None)
+            .unwrap()
+            .is_none()
+    );
+    let mut separate = Players::default();
+    assert_eq!(separate.enable_player_manager().unwrap().unwrap().id, 1);
+    let Update::PlayerManager(empty) = &separate.objects().get(1).unwrap().current else {
+        panic!()
+    };
+    assert!(empty.entries.iter().all(|s| *s == Some(None)));
+}

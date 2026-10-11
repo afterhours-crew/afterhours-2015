@@ -531,7 +531,8 @@ impl PlayerListener {
             .map(|c| c.prefix.level_id)
             .collect::<Vec<_>>();
         let mut players = self.players.clone();
-        let records = players.create_scenes(&levels, creations, profiles)?;
+        let mut records = players.create_scenes(&levels, creations, profiles)?;
+        records.extend(players.enable_player_manager()?);
         let mut launchers = self.launchers.clone();
         if let Some(catalog) = &content.launchers {
             launchers.bind(&records, catalog)?;
@@ -836,6 +837,14 @@ impl Listener for PlayerListener {
                     self.last_error = Some(error);
                     return false;
                 }
+            }
+        }
+        match players.sync_player_manager() {
+            Ok(record) => records.extend(record),
+            Err(error) => {
+                self.refused += 1;
+                self.last_error = Some(error);
+                return false;
             }
         }
         if !records.is_empty() && self.pending.len() >= MAX_PENDING {
