@@ -738,6 +738,7 @@ impl Listener for PlayerListener {
         let mut unsupported_logic = 0;
         let mut glass = self.glass.clone();
         let mut customization = self.customization.clone();
+        customization.retain_ghosts(|id| players.objects().get(id).is_some());
         let mut measurements = Vec::new();
         let mut responses = Vec::new();
         let logic_result = (|| {

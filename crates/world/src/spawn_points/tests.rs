@@ -248,6 +248,36 @@ fn other_endpoints_stale_ids_foreign_participants_and_bad_shapes_do_not_mutate()
 }
 
 #[test]
+fn delayed_previous_spawn_notifications_do_not_block_the_next_assignment() {
+    let mut model = bound();
+    let owns = |id| id == PLAYER || id == 41;
+    model.assign(41, 7).unwrap();
+    for value in 1..=3 {
+        model.assign(PLAYER, value).unwrap();
+        if value > 1 {
+            let before = model.clone();
+            for method in [REQUEST, RELEASE] {
+                let old = client(SCENE, PLAYER, 0, method, &with_id(value - 1));
+                assert_eq!(model.receive(old.span(), owns), Ok(Some(None)));
+            }
+            assert_eq!(model, before);
+        }
+        let current = client(SCENE, PLAYER, 0, REQUEST, &with_id(value));
+        assert!(model.receive(current.span(), owns).is_ok());
+        assert!(model.occupants.contains(&PLAYER));
+        assert!(!model.occupants.contains(&41));
+        let future = client(SCENE, PLAYER, 0, REQUEST, &with_id(value + 1));
+        let zero = client(SCENE, PLAYER, 0, RELEASE, &with_id(0));
+        let before = model.clone();
+        assert_eq!(model.receive(future.span(), owns), Err(Error::Shape));
+        assert_eq!(model.receive(zero.span(), owns), Err(Error::Shape));
+        assert_eq!(model, before);
+        let release = client(SCENE, PLAYER, 0, RELEASE, &with_id(value));
+        assert!(model.receive(release.span(), owns).is_ok());
+    }
+}
+
+#[test]
 fn participants_are_isolated_and_assignments_are_bounded() {
     let mut model = bound();
     model.assign(PLAYER, 1).unwrap();

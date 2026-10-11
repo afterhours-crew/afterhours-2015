@@ -54,6 +54,11 @@ impl Timers {
     pub fn state(&self, participant: u16) -> Option<&State> {
         self.participants.get(&participant)
     }
+    /// Timer measurements belong to the lifetime of their garage entity. A
+    /// recreated entity starts a new measurement, even for the same participant.
+    pub fn retain_ghosts(&mut self, live: impl Fn(u16) -> bool) {
+        self.participants.retain(|_, state| live(state.owner.ghost));
+    }
     pub fn receive(
         &mut self,
         owner: Owner,
@@ -184,6 +189,22 @@ mod tests {
         assert_eq!(t.state(1).unwrap().completed, 5);
         assert!(Timers::default().state(1).is_none());
     }
+    #[test]
+    fn retiring_one_entity_preserves_other_participants_running_measurements() {
+        let mut timers = Timers::default();
+        let a = owner(1, 0);
+        let b = owner(2, 1);
+        receive(&mut timers, a, START, 0);
+        receive(&mut timers, b, START, 1000);
+        let other = timers.state(b.participant).unwrap().clone();
+        timers.retain_ghosts(|ghost| ghost != a.ghost);
+        assert!(timers.state(a.participant).is_none());
+        assert_eq!(timers.state(b.participant), Some(&other));
+        let replacement = Owner { ghost: 99, ..a };
+        assert_eq!(receive(&mut timers, replacement, STOP, 7000), None);
+        assert_eq!(receive(&mut timers, b, STOP, 7000).unwrap().seconds, 6.0);
+    }
+
     #[test]
     fn independent_owners_reject_wrong_bus_slot_identity_and_clock_without_mutation() {
         let mut t = Timers::default();
