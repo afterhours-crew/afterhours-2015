@@ -1,4 +1,5 @@
 [package]
+workspace = "../.."
 name = "nfs-protocol"
 version = "0.1.0"
 description = "Evidence-backed NFS 2015 message schemas, independent of services"

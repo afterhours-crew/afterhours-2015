@@ -1,4 +1,5 @@
 [package]
+workspace = "../.."
 name = "nfs-lsx-codec"
 version = "0.1.0"
 description = "Bounded launcher stream, XML, envelope and transform codecs"

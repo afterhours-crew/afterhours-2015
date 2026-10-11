@@ -551,6 +551,48 @@ impl Encoder {
             result
         })
     }
+    /// Integer keys mapped to lists of bare structs. Both the map's list value
+    /// and each list's struct element use collection header 3. The caller must
+    /// finish with the corresponding schema to disambiguate the nested layout.
+    pub fn integer_struct_list_map<T>(
+        &mut self,
+        tag: [u8; 3],
+        entries: &[(u32, Vec<T>)],
+        mut fields: impl FnMut(&mut Self, &T) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        self.guard(|w| {
+            w.header(tag, Kind::Map)?;
+            w.append(&[0, 3])?;
+            w.collection(entries.len(), 2)?;
+            w.depth += 1;
+            let result = (|| {
+                for (key, values) in entries {
+                    w.value()?;
+                    w.integer_bytes(i64::from(*key))?;
+                    w.value()?;
+                    w.append(&[3])?;
+                    w.collection(values.len(), 1)?;
+                    w.depth += 1;
+                    let result = (|| {
+                        for value in values {
+                            w.value()?;
+                            w.depth += 1;
+                            let result = fields(w, value);
+                            w.depth -= 1;
+                            result?;
+                            w.append(&[0])?;
+                        }
+                        Ok(())
+                    })();
+                    w.depth -= 1;
+                    result?;
+                }
+                Ok(())
+            })();
+            w.depth -= 1;
+            result
+        })
+    }
     /// Retain an unknown field exactly, but recheck it under this writer's limits.
     pub fn raw_field(&mut self, field: Field<'_>) -> Result<(), Error> {
         self.guard(|w| {

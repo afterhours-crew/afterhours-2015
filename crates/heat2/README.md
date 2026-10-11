@@ -6,3 +6,6 @@ their bytes; typed adapters decide which shapes are supported.
 
 Constructed tests exercise scalar widths, floats, strings, lists, maps, unions,
 object IDs and malformed input. This crate supplies no reply or account policy.
+
+The writer also supports integer keys mapped to lists of structs. Both nested
+collection headers are3; finish with a matching schema to resolve that ambiguity.

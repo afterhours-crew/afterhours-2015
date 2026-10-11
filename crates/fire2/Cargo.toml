@@ -1,4 +1,5 @@
 [package]
+workspace = "../.."
 name = "nfs-fire2"
 version = "0.1.0"
 description = "Bounded Fire2 framing from NFS 2015 client observations"

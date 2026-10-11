@@ -1,0 +1,27 @@
+[package]
+workspace = "../.."
+name = "nfs-server"
+version = "0.1.0"
+description = "Local NFS 2015 backend server with owned session state"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+httparse = "=1.10.1"
+nfs-fire2 = { path = "../fire2" }
+nfs-heat2 = { path = "../heat2" }
+nfs-protocol = { path = "../protocol" }
+nfs-world = { path = "../world" }
+nfs-storage = { path = "../storage" }
+nfs-services = { path = "../services" }
+nfs-server-support = { path = "../server-support" }
+openssl = { version = "=0.10.81", features = ["vendored"] }
+serde_json = "1"
+tokio = { version = "=1.53.2", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt", "std"] }
