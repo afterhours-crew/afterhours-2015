@@ -7,7 +7,7 @@ use nfs_world::{
     arrival::Arrivals,
     content::bindings::name_key,
     replication::entity::creation::{Asset, Catalog, Content},
-    sequences::{self, Component, Definition, Sequences},
+    sequences::{Component, Definition, Layout, Sequences},
 };
 use serde_json::Value;
 use std::{fs::File, io::Read, path::Path};
@@ -18,8 +18,6 @@ pub struct SequenceContent {
     pub content: Content,
     /// Optional arrive sequence after garage exit (`nfs_world::arrival`).
     pub arrive: Option<(Definition, Content)>,
-    /// Optional fixed channel `(reference, selector)` of the arrive sequence.
-    pub arrive_channel: Option<(u16, u16)>,
 }
 impl SequenceContent {
     pub fn load(path: &Path) -> Result<Self, Failure> {
@@ -58,30 +56,27 @@ impl SequenceContent {
         {
             return Err(Failure::ProfileConfig);
         }
-        let (definition, content) = sequence(v)?;
+        let (definition, content) = sequence(v, Layout::Waiting)?;
         Sequences::new(definition, content.clone()).map_err(|_| Failure::ProfileConfig)?;
-        let mut arrive_channel = None;
         let arrive = match v.get("arrive") {
             None => None,
             Some(a) => {
-                let mut expected = vec!["asset", "catalog", "manager", "channel", "embedded_bus"];
-                if a.get("fixed_channel").is_some() {
-                    expected.push("fixed_channel");
-                    keys(&a["fixed_channel"], &["reference", "selector"])?;
-                    arrive_channel = Some((
-                        uint(&a["fixed_channel"]["reference"])?,
-                        uint(&a["fixed_channel"]["selector"])?,
-                    ));
+                keys(
+                    a,
+                    &[
+                        "blueprint",
+                        "asset",
+                        "catalog",
+                        "manager",
+                        "channel",
+                        "embedded_bus",
+                    ],
+                )?;
+                if a["blueprint"] != "Gameplay/Tests/GarageExitSequence" {
+                    return Err(Failure::ProfileConfig);
                 }
-                keys(a, &expected)?;
-                let parsed = sequence(a)?;
-                let arrivals = Arrivals::new(parsed.0, parsed.1.clone())
-                    .map_err(|_| Failure::ProfileConfig)?;
-                if let Some((reference, selector)) = arrive_channel {
-                    arrivals
-                        .with_fixed_channel(reference, selector)
-                        .map_err(|_| Failure::ProfileConfig)?;
-                }
+                let parsed = sequence(a, Layout::GarageExit)?;
+                Arrivals::new(parsed.0, parsed.1.clone()).map_err(|_| Failure::ProfileConfig)?;
                 Some(parsed)
             }
         };
@@ -89,24 +84,19 @@ impl SequenceContent {
             definition,
             content,
             arrive,
-            arrive_channel,
         })
     }
     pub fn instance(&self) -> Result<Sequences, nfs_world::replication::Error> {
         Sequences::new(self.definition, self.content.clone())
     }
     pub fn arrivals(&self) -> Option<Result<Arrivals, nfs_world::replication::Error>> {
-        self.arrive.as_ref().map(|(definition, content)| {
-            let arrivals = Arrivals::new(*definition, content.clone())?;
-            match self.arrive_channel {
-                Some((reference, selector)) => arrivals.with_fixed_channel(reference, selector),
-                None => Ok(arrivals),
-            }
-        })
+        self.arrive
+            .as_ref()
+            .map(|(definition, content)| Arrivals::new(*definition, content.clone()))
     }
 }
 /// Asset, catalog, manager, channel and bus of a sequence definition.
-fn sequence(v: &Value) -> Result<(Definition, Content), Failure> {
+fn sequence(v: &Value, layout: Layout) -> Result<(Definition, Content), Failure> {
     keys(&v["asset"], &["bundle", "type_id", "local_index"])?;
     let asset = Asset {
         bundle: uint(&v["asset"]["bundle"])?,
@@ -129,10 +119,11 @@ fn sequence(v: &Value) -> Result<(Definition, Content), Failure> {
         .collect::<Result<Vec<_>, Failure>>()?;
     let content = Content::new(
         vec![Catalog::new(asset.bundle, &entries).map_err(|_| Failure::ProfileConfig)?],
-        vec![(asset, sequences::profile())],
+        vec![(asset, layout.profile())],
     )
     .map_err(|_| Failure::ProfileConfig)?;
     let definition = Definition {
+        layout,
         asset,
         manager: component(&v["manager"])?,
         channel: component(&v["channel"])?,
@@ -209,7 +200,7 @@ mod tests {
             "manager":{"scene":"test/gameplay","component_index":3},"channel":{"scene":"test/garage","component_index":23},"embedded_bus":2});
         let plain = SequenceContent::from_json(&v).unwrap();
         assert!(plain.arrive.is_none() && plain.arrivals().is_none());
-        v["arrive"] = json!({"asset":{"bundle":16,"type_id":3424,"local_index":9},"catalog":[[3404,1],[3424,11]],
+        v["arrive"] = json!({"blueprint":"Gameplay/Tests/GarageExitSequence","asset":{"bundle":16,"type_id":3424,"local_index":9},"catalog":[[3404,1],[3424,11]],
             "manager":{"scene":"test/gameplay","component_index":3},"channel":{"scene":"test/garage","component_index":23},"embedded_bus":2});
         let c = SequenceContent::from_json(&v).unwrap();
         let (definition, _) = c.arrive.as_ref().unwrap();
@@ -229,11 +220,6 @@ mod tests {
         }
         let mut fixed = v.clone();
         fixed["arrive"]["fixed_channel"] = json!({"reference": 48, "selector": 8});
-        assert_eq!(
-            SequenceContent::from_json(&fixed).unwrap().arrive_channel,
-            Some((48, 8))
-        );
-        fixed["arrive"]["fixed_channel"]["selector"] = json!(512);
         assert!(SequenceContent::from_json(&fixed).is_err());
         let mut invalid = v;
         invalid["arrive"]["blueprint"] = json!("extra");

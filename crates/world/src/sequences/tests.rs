@@ -49,6 +49,7 @@ fn setup() -> (Players, Sequences) {
     )
     .unwrap();
     let definition = Definition {
+        layout: crate::sequences::Layout::Waiting,
         asset,
         manager: Component {
             scene_key: 7,

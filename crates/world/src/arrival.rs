@@ -6,7 +6,7 @@
 //!
 //! When the client reports the world ready, official hosts enter the startup
 //! arrive state (field 79, wire selector 78) and create a participant state
-//! sequence with the same layout as the garage waiting sequence (manager
+//! sequence with two additional local-participant RPC serializers (manager
 //! Gameplay selector 2, embedded bus 2; E101 and E742 used a Garage-bundle
 //! sequence asset). The client acknowledges it (selector 2, method 0), plays
 //! it and fires [`ARRIVED`] on its entity 1 when done; the host stops it, the
@@ -17,11 +17,11 @@
 use crate::{
     logic::Message,
     replication::{
-        Error, MAX_OBJECTS, Record,
+        Error, Record,
         entity::{self, creation::Content},
         players::Players,
     },
-    sequences::{Completed, Definition, Owner, Stop, profile},
+    sequences::{Completed, Definition, Layout, Owner, Stop},
 };
 use nfs_protocol::world::rpc::Serial;
 use std::collections::BTreeMap;
@@ -33,6 +33,10 @@ pub const FALLBACK_MS: u64 = 30_000;
 pub const MAX_INSTANCES: usize = 128;
 /// Client acknowledgements (method 0): started, then done before completing.
 const ACKNOWLEDGED: [u16; 2] = [2, 3];
+
+pub fn profile() -> entity::Profile {
+    Layout::GarageExit.profile()
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Phase {
@@ -52,36 +56,24 @@ struct Instance {
 pub struct Arrivals {
     definition: Definition,
     content: Content,
-    /// Channel written instead of the definition's scene component. Both
-    /// official arrive sequences name object 48, selector 8, which is no
-    /// scene in either session (E101: an Actor; E742: a Participant), while
-    /// the garage channel is unloaded after exit; a garage channel crashed
-    /// the client (E768).
-    fixed_channel: Option<(u16, u16)>,
     entries: BTreeMap<u16, Instance>,
     world_ms: u64,
 }
 
 impl Arrivals {
     pub fn new(definition: Definition, content: Content) -> Result<Self, Error> {
-        if definition.embedded_bus == 0 || content.profile(definition.asset)? != &profile() {
+        if definition.layout != Layout::GarageExit
+            || definition.embedded_bus == 0
+            || content.profile(definition.asset)? != &profile()
+        {
             return Err(Error::Shape);
         }
         Ok(Self {
             definition,
             content,
-            fixed_channel: None,
             entries: BTreeMap::new(),
             world_ms: 0,
         })
-    }
-
-    pub fn with_fixed_channel(mut self, reference: u16, selector: u16) -> Result<Self, Error> {
-        if reference == 0 || usize::from(reference) > MAX_OBJECTS || selector > 511 {
-            return Err(Error::Bound);
-        }
-        self.fixed_channel = Some((reference, selector));
-        Ok(self)
     }
 
     /// Create the participant's arrive sequence. Its number follows the
@@ -101,23 +93,9 @@ impl Arrivals {
             return Err(Error::Bound);
         }
         let fallback_at = self.world_ms.checked_add(FALLBACK_MS).ok_or(Error::Bound)?;
-        let mut creation = self
+        let creation = self
             .definition
             .creation(players.objects(), owner.participant, 1)?;
-        if let Some((reference, selector)) = self.fixed_channel
-            && let Some(Some(entity::Initial::RpcReference {
-                reference: channel,
-                target_selector,
-                ..
-            })) = creation
-                .body
-                .initial
-                .as_mut()
-                .map(|fields| fields.get_mut(2))
-        {
-            *channel = reference;
-            *target_selector = selector;
-        }
         let record = players
             .spawn_entities(vec![creation], &self.content)?
             .remove(0);

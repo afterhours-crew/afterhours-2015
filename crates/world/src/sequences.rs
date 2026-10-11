@@ -28,6 +28,7 @@ pub struct Component {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Definition {
+    pub layout: Layout,
     pub asset: Asset,
     pub manager: Component,
     pub embedded_bus: u32,
@@ -35,12 +36,24 @@ pub struct Definition {
 }
 
 pub fn profile() -> entity::Profile {
-    entity::Profile::new(&[
-        entity::Kind::SequenceRoot,
-        entity::Kind::RpcOptionalReference,
-        entity::Kind::RpcReference,
-    ])
-    .expect("fixed sequence profile")
+    Layout::Waiting.profile()
+}
+
+/// Serializer order belongs to the sequence blueprint, not its base class.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Layout {
+    Waiting,
+    GarageExit,
+}
+impl Layout {
+    pub fn profile(self) -> entity::Profile {
+        use entity::Kind::*;
+        let fields: &[entity::Kind] = match self {
+            Self::Waiting => &[SequenceRoot, RpcOptionalReference, RpcReference],
+            Self::GarageExit => &[SequenceRoot, RpcOptionalReference, Rpc, Rpc, RpcReference],
+        };
+        entity::Profile::new(fields).expect("fixed sequence profile")
+    }
 }
 
 impl Definition {
@@ -66,6 +79,31 @@ impl Definition {
             selector,
             serial: Serial::new(1).expect("fresh lifetime"),
         };
+        let mut initial = vec![
+            entity::Initial::SequenceRoot {
+                value: 1,
+                rpc: rpc(0),
+                manager,
+                manager_selector,
+                sequence: number,
+                participants: vec![participant],
+                stopping: false,
+            },
+            entity::Initial::RpcOptionalReference {
+                rpc: rpc(1),
+                reference: Some(participant),
+            },
+        ];
+        if self.layout == Layout::GarageExit {
+            // Local-participant started and finished event endpoints.
+            initial.extend([entity::Initial::Rpc(rpc(2)), entity::Initial::Rpc(rpc(3))]);
+        }
+        initial.push(entity::Initial::RpcReference {
+            rpc: rpc(initial.len() as u16),
+            reference: channel,
+            target_selector: channel_selector,
+        });
+        let updates = vec![Some(entity::Update::Noop); initial.len()];
         Ok(Creation {
             prefix: Prefix {
                 parent: None,
@@ -75,27 +113,8 @@ impl Definition {
                 asset: self.asset,
             },
             body: entity::Body {
-                initial: Some(vec![
-                    entity::Initial::SequenceRoot {
-                        value: 1,
-                        rpc: rpc(0),
-                        manager,
-                        manager_selector,
-                        sequence: number,
-                        participants: vec![participant],
-                        stopping: false,
-                    },
-                    entity::Initial::RpcOptionalReference {
-                        rpc: rpc(1),
-                        reference: Some(participant),
-                    },
-                    entity::Initial::RpcReference {
-                        rpc: rpc(2),
-                        reference: channel,
-                        target_selector: channel_selector,
-                    },
-                ]),
-                updates: vec![Some(entity::Update::Noop); 3],
+                initial: Some(initial),
+                updates,
             },
         })
     }
@@ -268,7 +287,10 @@ pub struct Sequences {
 }
 impl Sequences {
     pub fn new(definition: Definition, content: Content) -> Result<Self, Error> {
-        if definition.embedded_bus == 0 || content.profile(definition.asset)? != &profile() {
+        if definition.layout != Layout::Waiting
+            || definition.embedded_bus == 0
+            || content.profile(definition.asset)? != &profile()
+        {
             return Err(Error::Shape);
         }
         Ok(Self {

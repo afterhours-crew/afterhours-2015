@@ -104,9 +104,9 @@ impl Bindings {
     }
     pub fn is_sequence(&self, id: u16) -> bool {
         self.entities.get(&id).is_some_and(|binding| {
-            binding
-                .profile()
-                .is_ok_and(|profile| profile == &crate::sequences::profile())
+            binding.profile().is_ok_and(|profile| {
+                profile == &crate::sequences::profile() || profile == &crate::arrival::profile()
+            })
         })
     }
     pub fn reset(&mut self) {
