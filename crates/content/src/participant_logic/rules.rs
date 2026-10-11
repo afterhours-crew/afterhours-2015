@@ -15,10 +15,17 @@ pub struct Rules {
     pub spawners: BTreeSet<String>,
     pub root_channels: u32,
     pub spawner_channels: u32,
+    pub boolean_ports: BTreeMap<String, u32>,
 }
 impl Rules {
     pub fn from_json(v: &Value) -> Result<Self, Error> {
-        let names = ["classes", "spawners", "root_channels", "spawner_channels"];
+        let names = [
+            "classes",
+            "spawners",
+            "root_channels",
+            "spawner_channels",
+            "boolean_ports",
+        ];
         let map = v
             .as_object()
             .filter(|m| m.len() == names.len() && names.iter().all(|k| m.contains_key(*k)))
@@ -76,6 +83,7 @@ impl Rules {
             spawners,
             root_channels: number("root_channels")?,
             spawner_channels: number("spawner_channels")?,
+            boolean_ports: super::boolean::ports(&map["boolean_ports"])?,
         })
     }
     pub fn to_json(&self) -> Value {
@@ -97,6 +105,6 @@ impl Rules {
                 )
             })
             .collect();
-        json!({"classes":classes,"spawners":self.spawners,"root_channels":self.root_channels,"spawner_channels":self.spawner_channels})
+        json!({"classes":classes,"spawners":self.spawners,"root_channels":self.root_channels,"spawner_channels":self.spawner_channels,"boolean_ports":self.boolean_ports})
     }
 }

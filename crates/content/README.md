@@ -99,6 +99,17 @@ This extraction API supplies static layout only. It does not choose which logic
 to activate, initialize account-dependent values or publish another prepared file.
 The server's remaining garage lifecycle policy still needs those integrations.
 
+`AssetIndex::participant_boolean_values(blueprint)` derives each Boolean
+serializer's initial expression. It supports stored defaults, Boolean operators
+and the supported conditional math form. Dynamic leaves identify an exact channel
+reference occurrence and a port for the owning participant's property, set or
+context state. `Program::evaluate` requires those inputs from the caller and
+rejects missing state. Context reporting remains an explicit caller input.
+Disconnected fields remain uninitialized; unsupported connected sources fail.
+Compilation bounds graph depth and expression size, rejects cycles and checks
+the participant provider. BoolEntity defaults describe creation only: this API
+does not implement later achievement events or choose garage lifecycle policy.
+
 ## Vehicle parts
 
 The version-1 `nfs-vehicle-parts` document holds five definition catalogs, validated

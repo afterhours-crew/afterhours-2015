@@ -1,6 +1,6 @@
 {
   "format": "nfs-build-profile",
-  "version": 8,
+  "version": 9,
   "description": "Need for Speed (2015) PC, NFS16.exe with the SHA-256 below. Every value in this file belongs to that executable only; another build needs its own profile.",
   "executable": "NFS16.exe",
   "executable_sha256": "92aa6ff4b5f8d0f033ca7e88cb86cc64b42b1d2412c4294905eb22950616e4df",
@@ -1171,6 +1171,30 @@
       "ParticipantLogicSpawnerSetControlledEntityData"
     ],
     "root_channels": 440997395,
-    "spawner_channels": 2522390424
+    "spawner_channels": 2522390424,
+    "boolean_ports": {
+      "synced_input": 5862146,
+      "logic_output": 193453899,
+      "bool_value": 225375086,
+      "not_input": 5862146,
+      "accessor_output": 731416433,
+      "participant": 3062566331,
+      "provider_root": 560080367,
+      "property_link": 2526680631,
+      "set_link": 772610520,
+      "set_contains": 3672793056,
+      "context_link": 3054616982,
+      "context_output": 3739147852,
+      "active": 2484178249,
+      "math_input_bool": 3,
+      "math_function": 66,
+      "math_return": 67,
+      "math_return_bool": 1,
+      "math_if_bool": 193418248,
+      "bool_type": 2520298017,
+      "participant_property_type": 3544782840,
+      "participant_set_type": 3061063987,
+      "context_type": 2677756157
+    }
   }
 }
