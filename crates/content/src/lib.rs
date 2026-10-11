@@ -32,6 +32,7 @@ mod stats;
 #[cfg(any(test, feature = "synthetic"))]
 pub mod synthetic;
 mod tables;
+pub mod vehicle_parts;
 pub mod world;
 
 pub use fingerprint::{Fingerprint, Input, InputKind, fingerprint};
@@ -45,7 +46,7 @@ pub const FORMAT: &str = "nfs-install-content";
 pub const VERSION: u64 = 1;
 /// Increment whenever a builder's output for an unchanged installation changes,
 /// so existing cache entries are rebuilt.
-pub const BUILDER_REVISION: u64 = 9;
+pub const BUILDER_REVISION: u64 = 10;
 /// Executable file name relative to the installation root.
 pub const EXECUTABLE: &str = "NFS16.exe";
 
@@ -99,10 +100,12 @@ pub enum Kind {
     GarageLayout,
     /// The 64-byte world MAC template.
     WorldMacTemplate,
+    /// Vehicle customization, wheel, wrap, NOS and mesh item definitions.
+    VehicleParts,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 10] = [
+    pub const ALL: [Kind; 11] = [
         Kind::ItemContent,
         Kind::PersistentContent,
         Kind::StatDefinitions,
@@ -113,6 +116,7 @@ impl Kind {
         Kind::WorldContent,
         Kind::GarageLayout,
         Kind::WorldMacTemplate,
+        Kind::VehicleParts,
     ];
     /// Manifest key.
     pub fn key(self) -> &'static str {
@@ -127,6 +131,7 @@ impl Kind {
             Self::WorldContent => "world_content",
             Self::GarageLayout => "garage_layout",
             Self::WorldMacTemplate => "world_mac_template",
+            Self::VehicleParts => "vehicle_parts",
         }
     }
     /// File name inside a cache entry.
@@ -142,6 +147,7 @@ impl Kind {
             Self::WorldContent => "world-content.json",
             Self::GarageLayout => "garage-layout.json",
             Self::WorldMacTemplate => "world-mac-template.bin",
+            Self::VehicleParts => "vehicle-parts.json",
         }
     }
 }
@@ -248,6 +254,15 @@ pub fn build(
     let mut assets = scan::Assets::scan(&install)?;
     let mut outputs = BTreeMap::new();
     outputs.insert(Kind::ItemContent, items::build(&mut assets)?);
+    let item_content = nfs_services::item_content::ItemContent::from_json(
+        &serde_json::from_slice(&outputs[&Kind::ItemContent])
+            .map_err(|_| Error::Content("item JSON".into()))?,
+    )
+    .map_err(|_| Error::Content("item catalog".into()))?;
+    outputs.insert(
+        Kind::VehicleParts,
+        vehicle_parts::build(&mut assets, &item_content.catalog)?,
+    );
     let tables = tables::build(&mut assets, &fingerprint.digest)?;
     outputs.insert(Kind::StatDefinitions, stats::build(&tables)?);
     outputs.insert(Kind::PersistentContent, tables);

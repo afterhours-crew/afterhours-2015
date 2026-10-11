@@ -18,6 +18,7 @@ struct Args {
     persistent_content: Option<PathBuf>,
     progression_content: Option<PathBuf>,
     vehicle_content: Option<PathBuf>,
+    vehicle_parts: Option<PathBuf>,
     garage_layout: Option<PathBuf>,
     sequence_content: Option<PathBuf>,
     garage_logic: Option<PathBuf>,
@@ -64,6 +65,7 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
     let mut persistent_content = None;
     let mut progression_content = None;
     let (mut vehicle_content, mut garage_layout) = (None, None);
+    let mut vehicle_parts = None;
     let mut sequence_content = None;
     let mut garage_logic = None;
     let mut reputation_thresholds = None;
@@ -103,6 +105,7 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
             Some("--persistent-content") => persistent_content = Some(PathBuf::from(value()?)),
             Some("--progression-content") => progression_content = Some(PathBuf::from(value()?)),
             Some("--vehicle-content") => vehicle_content = Some(PathBuf::from(value()?)),
+            Some("--vehicle-parts") => vehicle_parts = Some(PathBuf::from(value()?)),
             Some("--garage-layout") => garage_layout = Some(PathBuf::from(value()?)),
             Some("--sequence-content") => sequence_content = Some(PathBuf::from(value()?)),
             Some("--garage-logic") => garage_logic = Some(PathBuf::from(value()?)),
@@ -232,6 +235,9 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
     {
         return Err("Vehicles require --vehicle-content, --garage-layout, --world-content and --progression-content".into());
     }
+    if vehicle_parts.is_some() && vehicle_content.is_none() {
+        return Err("--vehicle-parts requires --vehicle-content".into());
+    }
     if sequence_content.is_some() && vehicle_content.is_none() {
         return Err(
             "--sequence-content requires the owned vehicle/progression configuration".into(),
@@ -264,6 +270,7 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
         persistent_content,
         progression_content,
         vehicle_content,
+        vehicle_parts,
         garage_layout,
         sequence_content,
         garage_logic,
@@ -323,6 +330,7 @@ fn resolve_install_content(args: &mut Args, options: &nfs_content::Options) -> R
     args.scene_catalog.get_or_insert(generated.scene_catalog);
     args.world_content.get_or_insert(generated.world_content);
     args.garage_layout.get_or_insert(generated.garage_layout);
+    args.vehicle_parts.get_or_insert(generated.vehicle_parts);
     args.world_mac_template = Some(generated.world_mac_template);
     Ok(())
 }
@@ -541,9 +549,13 @@ async fn run(args: Args) -> Result<(), Failure> {
     let vehicles = match (&args.vehicle_content, &args.garage_layout) {
         (Some(vehicles), Some(layout)) => {
             Some(Arc::new(nfs_server::vehicle_content::GarageContent {
-                vehicles: nfs_server::vehicle_content::Content::load(
+                vehicles: nfs_server::vehicle_content::Content::load_with_parts(
                     &args.root.join(vehicles),
                     inventory.as_ref().ok_or(Failure::ProfileConfig)?.bindings(),
+                    args.vehicle_parts
+                        .as_ref()
+                        .map(|p| args.root.join(p))
+                        .as_deref(),
                 )?,
                 layout: nfs_server::vehicle_content::layout::Layout::load(&args.root.join(layout))?,
             }))
@@ -875,6 +887,7 @@ mod tests {
         assert!(items.starts_with(dir.join("artifacts/content")));
         assert!(items.exists());
         assert!(parsed.persistent_content.as_ref().unwrap().exists());
+        assert!(parsed.vehicle_parts.as_ref().unwrap().exists());
         let stats = parsed.stat_definitions.as_ref().unwrap();
         nfs_services::stats::Catalog::load(stats).unwrap();
         nfs_services::item_licenses::Content::load(parsed.item_licenses.as_ref().unwrap()).unwrap();
@@ -901,6 +914,7 @@ mod tests {
         // Stats presentation is operator policy, so an explicit catalog wins.
         let mut explicit_args = without(configured(), &["--item-content", "--persistent-content"]);
         explicit_args.extend(["--scene-catalog".into(), "authored-scenes.json".into()]);
+        explicit_args.extend(["--vehicle-parts".into(), "authored-parts.json".into()]);
         explicit_args.extend([
             "--root".into(),
             dir.clone().into_os_string(),
@@ -924,6 +938,10 @@ mod tests {
         assert_eq!(
             explicit.scene_catalog,
             Some(PathBuf::from("authored-scenes.json"))
+        );
+        assert_eq!(
+            explicit.vehicle_parts,
+            Some(PathBuf::from("authored-parts.json"))
         );
         assert_eq!(
             explicit.world_content,

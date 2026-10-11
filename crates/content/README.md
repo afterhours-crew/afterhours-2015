@@ -36,6 +36,7 @@ let items = prepared.path(nfs_content::Kind::ItemContent);
 | `SceneCatalog` | `scene-catalog.json` | Ordered scene composition, class construction rules and installed vehicle bundles; no instance state |
 | `WorldContent` | `world-content.json` | Installed startup names, parent relationships, traffic slot order and registry-resolved roles, with authored AllDrive host policy |
 | `GarageLayout` | `garage-layout.json` | Main garage slot links, locator transforms and persistent inventory-slot bindings, with graph-derived serializer positions |
+| `VehicleParts` | `vehicle-parts.json` | Item-system customization, tuning assets, NOS variants, wheel geometry, wrap/plate identifiers and mesh GUID alternatives |
 | `WorldMacTemplate` | `world-mac-template.bin` | 64 bytes of the executable image at the build's known address, checked by digest |
 
 Derived defaults are the stored 32-bit patterns of each class's same-named
@@ -73,6 +74,22 @@ and asset references (class ID and position in registry order). A Blueprint
 class without a profiled ID is an error, never a guess. These are inputs for
 world, garage and progression content. Vehicle entity layouts and progression
 definitions are still supplied separately.
+
+## Vehicle parts
+
+The version-1 `nfs-vehicle-parts` document holds five definition catalogs, validated
+against the item GUID/class catalog and the same typed models the server consumes.
+The builder follows every item-system definition, preserving ordered rim sizes,
+tire alternatives and mesh GUIDs. Persistent transmission values follow the item's
+tuning asset. Dynamic wraps use the static livery index and all 64 bits of the
+asset hash; account-selected wraps and tuning remain account state.
+
+Unknown classes, missing or mistyped required fields, unresolved transmission
+assets, duplicate definitions, nonfinite geometry and model bounds fail preparation.
+The catalogs have at most 16,384 definitions, individual alternatives at most 256,
+and the document at most 16 MiB. The installed item system, rather than a list of
+known cars or parts, determines membership. Vehicle entity profiles are a separate
+input until their construction order can be generated.
 
 ## Startup sub-levels
 

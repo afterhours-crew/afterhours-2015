@@ -70,6 +70,15 @@ fn builds_outputs_the_service_loaders_accept() {
         install.cache().join(&prepared.fingerprint.digest)
     );
     let items = ItemContent::load(&prepared.path(Kind::ItemContent)).unwrap();
+    vehicle_parts::Catalog::load(&prepared.path(Kind::VehicleParts), &items.catalog).unwrap();
+    let parts: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(prepared.path(Kind::VehicleParts)).unwrap()).unwrap();
+    assert_eq!(parts["parts"]["customization"].as_array().unwrap().len(), 5);
+    assert_eq!(
+        parts["parts"]["appearance"][0]["data_id"],
+        "18446744073709551603"
+    );
+    assert_eq!(parts["parts"]["appearance"][0]["version"], 2);
     let scenes = scenes::Catalog::load(&prepared.path(Kind::SceneCatalog)).unwrap();
     assert_eq!(scenes.profiles.profiles().count(), 20);
     assert!(scenes.profiles.profile(1).unwrap().is_root());

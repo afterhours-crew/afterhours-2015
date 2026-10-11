@@ -74,6 +74,15 @@ pub struct Request<'a> {
 
 impl Content {
     pub fn load(path: &Path, classes: &Catalog) -> Result<Self, Failure> {
+        Self::load_with_parts(path, classes, None)
+    }
+    /// Version 2 separates vehicle profiles from part definitions. Legacy
+    /// version 1 continues using its embedded definitions even with a game dir.
+    pub fn load_with_parts(
+        path: &Path,
+        classes: &Catalog,
+        parts: Option<&Path>,
+    ) -> Result<Self, Failure> {
         let mut bytes = Vec::new();
         File::open(path)
             .map_err(|_| Failure::Output)?
@@ -83,31 +92,67 @@ impl Content {
         if bytes.len() as u64 > MAX_BYTES {
             return Err(Failure::BodyLimit);
         }
-        Self::from_json(
-            &serde_json::from_slice(&bytes).map_err(|_| Failure::ProfileConfig)?,
-            classes,
-        )
+        let value: Value = serde_json::from_slice(&bytes).map_err(|_| Failure::ProfileConfig)?;
+        let parts = if value["version"] == 2 {
+            Some(
+                nfs_content::vehicle_parts::Catalog::load(
+                    parts.ok_or(Failure::ProfileConfig)?,
+                    classes,
+                )
+                .map_err(|_| Failure::ProfileConfig)?,
+            )
+        } else {
+            None
+        };
+        Self::from_json_with_parts(&value, classes, parts.as_ref())
     }
     pub fn from_json(value: &Value, classes: &Catalog) -> Result<Self, Failure> {
+        Self::from_json_with_parts(value, classes, None)
+    }
+    pub fn from_json_with_parts(
+        value: &Value,
+        classes: &Catalog,
+        parts: Option<&nfs_content::vehicle_parts::Catalog>,
+    ) -> Result<Self, Failure> {
         use parse::*;
-        keys(
-            value,
-            &["format", "version", "build_sha256", "parts", "vehicles"],
-            &[],
-        )?;
-        if value["format"] != "nfs-vehicle-content"
-            || value["version"] != 1
-            || value["build_sha256"] != BUILD
-        {
+        let parsed = match value["version"].as_u64() {
+            Some(1) => {
+                keys(
+                    value,
+                    &["format", "version", "build_sha256", "parts", "vehicles"],
+                    &[],
+                )?;
+                nfs_content::vehicle_parts::Catalog::from_rows(&value["parts"], classes).map_err(
+                    |e| match e {
+                        nfs_content::vehicle_parts::ParseError::Invalid => Failure::ProfileConfig,
+                        nfs_content::vehicle_parts::ParseError::Limit => Failure::BodyLimit,
+                    },
+                )?
+            }
+            Some(2) => {
+                keys(
+                    value,
+                    &["format", "version", "build_sha256", "vehicles"],
+                    &[],
+                )?;
+                parts
+                    .filter(|p| p.matches_classes(classes))
+                    .ok_or(Failure::ProfileConfig)?
+                    .clone()
+            }
+            _ => return Err(Failure::ProfileConfig),
+        };
+        if value["format"] != "nfs-vehicle-content" || value["build_sha256"] != BUILD {
             return Err(Failure::ProfileConfig);
         }
-        let p = &value["parts"];
-        keys(
-            p,
-            &["customization", "nos", "wheels", "appearance", "mesh"],
-            &[],
-        )?;
-        let (custom, nos, wheels, appearance, meshes) = parts::parse(p, classes)?;
+        let nfs_content::vehicle_parts::Catalog {
+            customization: custom,
+            nos,
+            wheels,
+            appearance,
+            meshes,
+            ..
+        } = parsed;
         let mut definitions = BTreeMap::new();
         let mut names = std::collections::BTreeSet::new();
         for row in array(&value["vehicles"], 512)? {

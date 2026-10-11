@@ -112,6 +112,8 @@ pub fn block(payload: &[u8], codec: u8) -> Vec<u8> {
 #[derive(Clone, Debug)]
 pub enum Field {
     Int(i32),
+    Long(i64),
+    Guids(Vec<[u8; 16]>),
     UInt(u32),
     Float(f32),
     Bool(bool),
@@ -288,6 +290,22 @@ impl PartitionWriter {
         for (name, field) in fields {
             let offset = 8 + payload.len() as u32;
             match field {
+                Field::Long(v) => {
+                    rows.push((name.to_string(), 0x12, 0, offset));
+                    payload.extend_from_slice(&v.to_le_bytes());
+                }
+                Field::Guids(list) => {
+                    let array_class =
+                        self.class("array", 16, vec![("member".to_string(), 0x15, 0, 0)]);
+                    let at = self.array_data.len() as u32;
+                    for value in list {
+                        self.array_data.extend_from_slice(value);
+                    }
+                    self.arrays
+                        .push((at, list.len() as u32, i32::from(array_class)));
+                    rows.push((name.to_string(), 0x04, array_class, offset));
+                    payload.extend_from_slice(&((self.arrays.len() - 1) as u32).to_le_bytes());
+                }
                 Field::Enum(type_name, enumerator, value) => {
                     let enum_class = self.class(
                         type_name,

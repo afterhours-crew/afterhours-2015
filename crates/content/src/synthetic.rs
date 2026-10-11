@@ -178,7 +178,13 @@ pub fn assets() -> Vec<Asset> {
             "SpoilerItemData",
             vec![],
             vec![],
-            vec![("DownforceSetting", Field::Int(5))],
+            vec![
+                ("DownforceSetting", Field::Int(5)),
+                ("SpoilerTuning", Field::RawPointer(0)),
+                ("WideCollision", Field::Bool(false)),
+                ("PerformanceModifier", Field::RawPointer(0)),
+                ("MeshGuids", Field::Guids(vec![])),
+            ],
         ),
         item(2, "BodyKitItemData", vec![1], vec![], vec![]),
         vehicle("GHOST"),
@@ -190,6 +196,8 @@ pub fn assets() -> Vec<Asset> {
             vec![],
             vec![
                 ("ByteVaultDataId", Field::Int(0)),
+                ("ByteVaultHash", Field::Long(-13)),
+                ("StaticLiveryIndex", Field::Int(2)),
                 ("LibraryPresetId", Field::Int(-1)),
                 ("DynamicFlags", Field::Int(0)),
             ],

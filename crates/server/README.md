@@ -189,6 +189,7 @@ For world/garage operation also supply:
 | `--game-dir`, `--content-cache` | Installation to build item, table and template content from, and its cache ([install content](src/install_content.rs)) |
 | `--progression-content` | Progression restoration and entity construction ([progression](src/progression.rs)) |
 | `--vehicle-content`, `--garage-layout` | Vehicle assets and parking layout ([vehicles](src/vehicle_content.rs), [layout](src/vehicle_content/layout.rs)) |
+| `--vehicle-parts` | Part definitions for version-2 vehicle content; defaults to installed content with `--game-dir` |
 | `--sequence-content`, `--garage-logic` | Sequence definitions and garage logic graph ([sequences](src/sequence_content.rs), [garage](src/garage_logic.rs)) |
 
 World content versions 1–3 remain readable by offline inspection APIs, but the
@@ -271,3 +272,11 @@ slots, their inventory bindings and the installed exit_teleport destination. The
 initial world_spawn pose remains separate. Deployments using that pose should keep
 their explicit layout while world-exit content generation is completed. Explicit
 layout files take precedence; no existing file is rewritten.
+
+`--game-dir` also supplies `vehicle-parts.json` unless `--vehicle-parts` is
+explicitly set. To use it, vehicle content version 2 has exactly `format`,
+`version`, `build_sha256` and `vehicles`; its vehicle rows keep the version-1
+schema, and the embedded `parts` section is removed. Version 2 requires a parts
+file and validates both inputs against the same item catalog. Vehicle content
+version 1 continues to use its embedded parts, including when `--game-dir` is
+present. Preparation does not yet generate vehicle entity profiles.
