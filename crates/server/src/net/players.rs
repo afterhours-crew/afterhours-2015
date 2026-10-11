@@ -782,13 +782,7 @@ impl Listener for PlayerListener {
                             notification.participant,
                             Some(target.ghost),
                         )? {
-                            deferred_sections.push(Section {
-                                float_bits: None,
-                                flag: false,
-                                deleted: Vec::new(),
-                                setup: None,
-                                records: vec![binding],
-                            });
+                            deferred_sections.extend(Self::binding_sections(binding)?);
                         }
                         if let Some(command) = Self::exit_teleport(
                             self.participants.exit_bindings(),

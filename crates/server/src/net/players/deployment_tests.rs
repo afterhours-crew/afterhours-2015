@@ -423,3 +423,26 @@ fn movement_grant_waits_for_world_car_report_and_keeps_garage_authority() {
     );
     assert!(!PlayerListener::ready_movement(BTreeSet::from([301]), &cars).contains(&301));
 }
+
+#[test]
+fn ready_binding_has_a_complete_encodable_replication_section() {
+    use nfs_world::replication::{
+        Record, Update as Delta,
+        player_manager::{Entry, Update},
+    };
+    let mut update = Update::default();
+    update.entries[0] = Some(Some(Entry::driving(2, 300)));
+    let mut record = Record {
+        id: 16,
+        initial: None,
+        update: Delta::PlayerManager(update),
+    };
+    let sections = PlayerListener::binding_sections(record.clone()).unwrap();
+    assert_eq!(sections.len(), 1);
+    assert!(sections[0].setup.is_some());
+    assert_eq!(sections[0].records, vec![record.clone()]);
+    assert!(sections[0].frame().is_ok());
+    // A bad record is rejected while readiness state is still transactional.
+    record.id = 0;
+    assert!(PlayerListener::binding_sections(record).is_err());
+}
