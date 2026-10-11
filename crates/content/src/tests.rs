@@ -132,6 +132,15 @@ fn builds_outputs_the_service_loaders_accept() {
         required_tables().len()
     );
     assert_eq!(document["source"]["sha256"], prepared.fingerprint.digest);
+    let stats = nfs_services::stats::Catalog::load(&prepared.path(Kind::StatDefinitions)).unwrap();
+    assert_eq!(stats.len(), 2);
+    let stats: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(prepared.path(Kind::StatDefinitions)).unwrap())
+            .unwrap();
+    assert_eq!(
+        stats["groups"][1]["stats"][0]["name"],
+        "RepValuesTableColumn0"
+    );
     assert_eq!(
         std::fs::read(prepared.path(Kind::WorldMacTemplate)).unwrap(),
         install.template

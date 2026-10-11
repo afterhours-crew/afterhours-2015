@@ -22,6 +22,7 @@ mod executable;
 mod fingerprint;
 mod items;
 mod scan;
+mod stats;
 #[cfg(any(test, feature = "synthetic"))]
 pub mod synthetic;
 mod tables;
@@ -38,7 +39,7 @@ pub const FORMAT: &str = "nfs-install-content";
 pub const VERSION: u64 = 1;
 /// Increment whenever a builder's output for an unchanged installation changes,
 /// so existing cache entries are rebuilt.
-pub const BUILDER_REVISION: u64 = 2;
+pub const BUILDER_REVISION: u64 = 3;
 /// Executable file name relative to the installation root.
 pub const EXECUTABLE: &str = "NFS16.exe";
 
@@ -73,14 +74,17 @@ pub enum Kind {
     ItemContent,
     /// Persistent-table schemas for `nfs_services::persistent::Catalog`.
     PersistentContent,
+    /// Stats group definitions for the local progression and reputation stores.
+    StatDefinitions,
     /// The 64-byte world MAC template.
     WorldMacTemplate,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 3] = [
+    pub const ALL: [Kind; 4] = [
         Kind::ItemContent,
         Kind::PersistentContent,
+        Kind::StatDefinitions,
         Kind::WorldMacTemplate,
     ];
     /// Manifest key.
@@ -88,6 +92,7 @@ impl Kind {
         match self {
             Self::ItemContent => "item_content",
             Self::PersistentContent => "persistent_content",
+            Self::StatDefinitions => "stat_definitions",
             Self::WorldMacTemplate => "world_mac_template",
         }
     }
@@ -96,6 +101,7 @@ impl Kind {
         match self {
             Self::ItemContent => "item-content.json",
             Self::PersistentContent => "persistent-content.json",
+            Self::StatDefinitions => "stat-definitions.json",
             Self::WorldMacTemplate => "world-mac-template.bin",
         }
     }
@@ -203,10 +209,9 @@ pub fn build(
     let mut assets = scan::Assets::scan(&install)?;
     let mut outputs = BTreeMap::new();
     outputs.insert(Kind::ItemContent, items::build(&mut assets)?);
-    outputs.insert(
-        Kind::PersistentContent,
-        tables::build(&mut assets, &fingerprint.digest)?,
-    );
+    let tables = tables::build(&mut assets, &fingerprint.digest)?;
+    outputs.insert(Kind::StatDefinitions, stats::build(&tables)?);
+    outputs.insert(Kind::PersistentContent, tables);
     outputs.insert(
         Kind::WorldMacTemplate,
         executable::mac_template(&game_root.join(EXECUTABLE), &options.identity)?,

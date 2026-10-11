@@ -142,7 +142,10 @@ through their loaders and caches them under `--content-cache` (default
 `artifacts/content`, relative to `--root`). Later starts verify and reuse that
 entry; a patched or repaired installation produces a new one. The readiness
 line reports the entry as `install_content` (`fingerprint`, `built`,
-`directory`). An unsupported executable or unreadable installation stops startup.
+`directory`). It also supplies `--stat-definitions` when that option is absent:
+progression and reputation Stats groups use the installed column names and
+defaults. An explicit Stats catalog overrides the generated display policy.
+An unsupported executable or unreadable installation stops startup.
 No game data is distributed with the server, and other content is still
 supplied through the options below.
 

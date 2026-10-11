@@ -9,6 +9,7 @@
 //! caches (by default under `artifacts/content`). Later starts reuse the
 //! verified cache entry; a patched installation gets a new one. Resolution
 //! blocks and runs before the async runtime starts.
+//! It also builds Stats definitions; the CLI uses them unless overridden.
 use nfs_content::{Kind, Options, Prepared};
 use std::path::{Path, PathBuf};
 
@@ -20,6 +21,7 @@ pub const DEFAULT_CACHE: &str = "artifacts/content";
 pub struct Generated {
     pub item_content: PathBuf,
     pub persistent_content: PathBuf,
+    pub stat_definitions: PathBuf,
     pub world_mac_template: PathBuf,
     pub prepared: Prepared,
 }
@@ -55,6 +57,7 @@ pub fn resolve(
     Ok(Generated {
         item_content: prepared.path(Kind::ItemContent),
         persistent_content: prepared.path(Kind::PersistentContent),
+        stat_definitions: prepared.path(Kind::StatDefinitions),
         world_mac_template: prepared.path(Kind::WorldMacTemplate),
         prepared,
     })
@@ -96,6 +99,7 @@ mod tests {
         let items = crate::item_content::ItemContent::load(&first.item_content).unwrap();
         assert!(items.inventory().is_some());
         crate::persistent::Catalog::load(&first.persistent_content).unwrap();
+        nfs_services::stats::Catalog::load(&first.stat_definitions).unwrap();
         assert_eq!(std::fs::read(&first.world_mac_template).unwrap().len(), 64);
         let second = resolve(&dir.0, Path::new("game"), None, &options).unwrap();
         assert!(!second.prepared.built);
@@ -154,6 +158,7 @@ mod tests {
             assert!(generated.item_content.is_absolute());
             crate::item_content::ItemContent::load(&dir.0.join(generated.item_content)).unwrap();
             crate::persistent::Catalog::load(&dir.0.join(generated.persistent_content)).unwrap();
+            nfs_services::stats::Catalog::load(&dir.0.join(generated.stat_definitions)).unwrap();
             assert_eq!(
                 std::fs::read(dir.0.join(generated.world_mac_template))
                     .unwrap()

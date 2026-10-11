@@ -173,6 +173,7 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
     }
     let has_items = item_content.is_some() || generated;
     let has_persistent = persistent_content.is_some() || generated;
+    let has_stats = stat_definitions.is_some() || generated;
     if entitlement_state.is_some() && (local_account.is_none() || auth_config.is_none()) {
         return Err("--entitlement-state requires owned authentication and --local-account".into());
     }
@@ -189,7 +190,7 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
             || matchmaking_policy.is_none()
             || world_policy.is_none()
             || control_catalogs.is_none()
-            || stat_definitions.is_none()
+            || !has_stats
             || !owned_menu_awards
             || challenge_content.is_none()
             || !owned_local_social
@@ -231,9 +232,7 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
     if garage_logic.is_some() && sequence_content.is_none() {
         return Err("--garage-logic requires --sequence-content".into());
     }
-    if (stat_definitions.is_some() || owned_menu_awards)
-        && (!has_persistent || garage_logic.is_none())
-    {
+    if (has_stats || owned_menu_awards) && (!has_persistent || garage_logic.is_none()) {
         return Err("--stat-definitions and --owned-menu-awards require --persistent-content and --garage-logic for current account state".into());
     }
     if challenge_content.is_some() && !has_items {
@@ -304,6 +303,8 @@ fn resolve_install_content(args: &mut Args, options: &nfs_content::Options) -> R
     args.generated = Some(generated.summary());
     args.item_content = Some(generated.item_content);
     args.persistent_content = Some(generated.persistent_content);
+    args.stat_definitions
+        .get_or_insert(generated.stat_definitions);
     args.world_mac_template = Some(generated.world_mac_template);
     Ok(())
 }
@@ -386,7 +387,7 @@ pub fn main() -> std::process::ExitCode {
         .is_some_and(|a| a == "--help" || a == "-h")
     {
         println!(
-            "nfs-server: owned local NFS 2015 services\n\nUsage: nfs-server --root <data-directory> --output <new-recording-directory> [configuration options]\n\nCreate account: nfs-server create-account --name <name> --state-directory <new-directory>\n--account-policy <policy.json> --item-content <items.json> --persistent-content <tables.json>\n\nRequired control configuration: --bootstrap-config, --auth-config,\n--group-policy, --matchmaking-admission, --matchmaking-policy, --world-policy,\n--control-catalogs, --stat-definitions, --challenge-content, --item-licenses,\n--owned-local-social and --owned-menu-awards.\n\nGarage configuration: --world-content (version 4), --world-mac-template,\n--item-content, --state-directory, --local-account, --persistent-content,\n--progression-content, --vehicle-content, --garage-layout, --sequence-content,\n--garage-logic.\n\nGame content: --game-dir <installation> builds --item-content,\n--persistent-content and --world-mac-template on first start and caches them\n(--content-cache, default artifacts/content under --root).\n\nAccount state is read from SQLite. Optional one-time imports: --local-identity,\n--entitlement-state, --kickback-state, --speedwall-state, --user-settings.\n\nOptional: --redirector-port, --idle-seconds, --qos-seconds, --stop-file.\nAll listeners are loopback. No manifest, captured reply store or external\nauthentication is used. See crates/server/README.md for schemas and limitations."
+            "nfs-server: owned local NFS 2015 services\n\nUsage: nfs-server --root <data-directory> --output <new-recording-directory> [configuration options]\n\nCreate account: nfs-server create-account --name <name> --state-directory <new-directory>\n--account-policy <policy.json> --item-content <items.json> --persistent-content <tables.json>\n\nRequired control configuration: --bootstrap-config, --auth-config,\n--group-policy, --matchmaking-admission, --matchmaking-policy, --world-policy,\n--control-catalogs, --stat-definitions, --challenge-content, --item-licenses,\n--owned-local-social and --owned-menu-awards.\n\nGarage configuration: --world-content (version 4), --world-mac-template,\n--item-content, --state-directory, --local-account, --persistent-content,\n--progression-content, --vehicle-content, --garage-layout, --sequence-content,\n--garage-logic.\n\nGame content: --game-dir <installation> builds --item-content,\n--persistent-content and --world-mac-template on first start, supplies\n--stat-definitions unless explicitly overridden, and caches the outputs\n(--content-cache, default artifacts/content under --root).\n\nAccount state is read from SQLite. Optional one-time imports: --local-identity,\n--entitlement-state, --kickback-state, --speedwall-state, --user-settings.\n\nOptional: --redirector-port, --idle-seconds, --qos-seconds, --stop-file.\nAll listeners are loopback. No manifest, captured reply store or external\nauthentication is used. See crates/server/README.md for schemas and limitations."
         );
         return std::process::ExitCode::SUCCESS;
     }
@@ -768,7 +769,11 @@ mod tests {
         args
     }
 
-    const GENERATED: [&str; 2] = ["--item-content", "--persistent-content"];
+    const GENERATED: [&str; 3] = [
+        "--item-content",
+        "--persistent-content",
+        "--stat-definitions",
+    ];
 
     #[test]
     fn game_dir_replaces_generated_options_exclusively() {
@@ -819,11 +824,27 @@ mod tests {
         assert!(items.starts_with(dir.join("artifacts/content")));
         assert!(items.exists());
         assert!(parsed.persistent_content.as_ref().unwrap().exists());
+        let stats = parsed.stat_definitions.as_ref().unwrap();
+        nfs_services::stats::Catalog::load(stats).unwrap();
         assert!(parsed.world_mac_template.as_ref().unwrap().exists());
         assert_eq!(parsed.generated.as_ref().unwrap()["built"], true);
         let mut again = with_game("game");
         resolve_install_content(&mut again, &options).unwrap();
         assert_eq!(again.generated.as_ref().unwrap()["built"], false);
+        // Stats presentation is operator policy, so an explicit catalog wins.
+        let mut explicit_args = without(configured(), &["--item-content", "--persistent-content"]);
+        explicit_args.extend([
+            "--root".into(),
+            dir.clone().into_os_string(),
+            "--game-dir".into(),
+            "game".into(),
+        ]);
+        let mut explicit = parse_from(explicit_args.into_iter()).unwrap();
+        resolve_install_content(&mut explicit, &options).unwrap();
+        assert_eq!(
+            explicit.stat_definitions,
+            Some(PathBuf::from("configured-input"))
+        );
         assert!(resolve_install_content(&mut with_game("missing"), &options).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }

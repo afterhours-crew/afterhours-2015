@@ -28,6 +28,7 @@ let items = prepared.path(nfs_content::Kind::ItemContent);
 | --- | --- | --- |
 | `ItemContent` | `item-content.json` | `Items/GameItemSystem`: every definition, its prices, quantity, ownership level, flags, sub/additional items and derived default, plus the starting inventory |
 | `PersistentContent` | `persistent-content.json` | `PersistentTableAsset` columns, types and defaults for the tables `nfs_services::persistent` requires |
+| `StatDefinitions` | `stat-definitions.json` | Installed columns and integer defaults of `ProgressionStats` and `RepValuesTable`, with the local service's group selection and display policy |
 | `WorldMacTemplate` | `world-mac-template.bin` | 64 bytes of the executable image at the build's known address, checked by digest |
 
 Derived defaults are the stored 32-bit patterns of each class's same-named
