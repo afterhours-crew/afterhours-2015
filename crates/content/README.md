@@ -35,6 +35,7 @@ let items = prepared.path(nfs_content::Kind::ItemContent);
 | `ReputationThresholds` | `reputation-thresholds.json` | `IntScoreToIntLevelAsset.LevelThresholds`, following the reputation calculator's asset reference |
 | `SceneCatalog` | `scene-catalog.json` | Ordered scene composition, class construction rules and installed vehicle bundles; no instance state |
 | `WorldContent` | `world-content.json` | Installed startup names, parent relationships, traffic slot order and registry-resolved roles, with authored AllDrive host policy |
+| `GarageLayout` | `garage-layout.json` | Main garage slot links, locator transforms and persistent inventory-slot bindings, with graph-derived serializer positions |
 | `WorldMacTemplate` | `world-mac-template.bin` | 64 bytes of the executable image at the build's known address, checked by digest |
 
 Derived defaults are the stored 32-bit patterns of each class's same-named
@@ -121,6 +122,24 @@ It contains no scene-specific index tables, player identities or captured values
 
 The server accepts this catalog with version 5 world configuration, allowing
 scene_profiles and launchers to be omitted. The generated world document uses
-this form. Vehicle, garage, sequence and progression inputs and service policy
+this form. Vehicle, garage logic, sequence and progression inputs and service policy
 remain separate. Generation and portable tests do not establish live game or
 offline-play acceptance.
+
+## Garage layout
+
+The main garage is the unique constructed GarageEntityData with one primary and
+four secondary slot links. Link order determines slot ordinals; serializer
+indexes come from construction order. Each VehicleSlotEntityData has one Location
+property driven by a constructed LocatorEntityData's Transform. The builder
+preserves all twelve stored float bit patterns and adds the four zero padding
+words the runtime layout requires. PersistentGarageVehiclesEntityData supplies
+the corresponding five ItemEntityData bindings by their class-level ports.
+
+Build profiles select port identifiers; installed connection arrays supply all
+scene-specific targets, indexes and transforms. Null/dangling links, duplicate
+slots, ambiguous occurrences, unsupported property flags and nonfinite or invalid
+transforms fail preparation. No account inventory or runtime identity is read.
+The generated layout contains garage parking slots. Optional world_spawn and
+exit_teleport overrides are still separate deployment configuration, pending
+complete world-exit content support; an explicit --garage-layout takes precedence.

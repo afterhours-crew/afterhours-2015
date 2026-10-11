@@ -418,7 +418,152 @@ pub fn runtime_world() -> Vec<Asset> {
             vec![(guid(0x28), guid(0x38))],
         ),
     ]);
+    result.retain(|a| {
+        !["levels/runtime/garage", "levels/runtime/gameplay"].contains(&a.name.as_str())
+    });
+    result.extend(garage_layout());
     result
+}
+
+/// Deliberately unrelated to the supported executable's port identifiers.
+pub fn garage_links() -> crate::garage::Links {
+    crate::garage::Links {
+        primary_slot: 100,
+        secondary_slots: 101,
+        slot_location: 102,
+        locator_transform: 103,
+        items: [200, 201, 202, 203, 204],
+    }
+}
+
+fn connection(
+    source: u32,
+    source_field: u32,
+    target: u32,
+    target_field: u32,
+) -> Vec<(&'static str, Field)> {
+    vec![
+        ("Source", Field::RawPointer(source)),
+        ("SourceFieldId", Field::Int(source_field as i32)),
+        ("Target", Field::RawPointer(target)),
+        ("TargetFieldId", Field::Int(target_field as i32)),
+    ]
+}
+
+type ObjectFields = Vec<(&'static str, Field)>;
+type SceneObjects = Vec<(&'static str, ObjectFields)>;
+
+pub fn garage_layout() -> Vec<Asset> {
+    garage_layout_with(|_, _, _, _| {})
+}
+
+pub(crate) fn garage_layout_with(
+    edit: impl FnOnce(&mut ObjectFields, &mut SceneObjects, &mut ObjectFields, &mut SceneObjects),
+) -> Vec<Asset> {
+    let ports = garage_links();
+    let mut garage_objects = vec![("GarageEntityData", vec![])];
+    garage_objects.extend((0..5).map(|_| ("VehicleSlotEntityData", vec![])));
+    garage_objects.extend((0..5).map(|i| {
+        (
+            "LocatorEntityData",
+            vec![(
+                "Transform",
+                Field::Struct(
+                    "LinearTransform",
+                    vec![
+                        ("right", vector(1.0, 0.0, 0.0)),
+                        ("up", vector(0.0, 1.0, 0.0)),
+                        ("forward", vector(0.0, 0.0, 1.0)),
+                        ("trans", vector(i as f32 * 7.0, 2.0, -3.0)),
+                    ],
+                ),
+            )],
+        )
+    }));
+    let links = (0..5)
+        .map(|i| {
+            connection(
+                2,
+                if i == 0 {
+                    ports.primary_slot
+                } else {
+                    ports.secondary_slots
+                },
+                i + 3,
+                0,
+            )
+        })
+        .collect();
+    let properties = (0..5)
+        .map(|i| {
+            let mut row = connection(i + 8, ports.locator_transform, i + 3, ports.slot_location);
+            row.push(("Flags", Field::UInt(1)));
+            row
+        })
+        .collect();
+    let mut gameplay_objects = vec![("PersistentGarageVehiclesEntityData", vec![])];
+    gameplay_objects.extend((0..5).map(|_| ("ItemEntityData", vec![])));
+    let mut garage_fields = vec![
+        ("Name", Field::CString("levels/Runtime/Garage".into())),
+        (
+            "Objects",
+            Field::RawPointers(
+                std::iter::once(2)
+                    .chain((3..=7).rev())
+                    .chain(8..=12)
+                    .collect(),
+            ),
+        ),
+        ("LinkConnections", Field::Structs("LinkConnection", links)),
+        (
+            "PropertyConnections",
+            Field::Structs("PropertyConnection", properties),
+        ),
+    ];
+    let mut gameplay_fields = vec![
+        ("Name", Field::CString("levels/Runtime/Gameplay".into())),
+        (
+            "Objects",
+            Field::RawPointers(std::iter::once(2).chain((3..=7).rev()).collect()),
+        ),
+        (
+            "LinkConnections",
+            Field::Structs(
+                "LinkConnection",
+                (0..5)
+                    .map(|i| connection(2, ports.items[i], i as u32 + 3, 0))
+                    .collect(),
+            ),
+        ),
+    ];
+    edit(
+        &mut garage_fields,
+        &mut garage_objects,
+        &mut gameplay_fields,
+        &mut gameplay_objects,
+    );
+    vec![
+        Asset {
+            name: "levels/runtime/garage".into(),
+            partition: PartitionWriter::default().build_many(
+                guid(0x21),
+                "SubWorldData",
+                guid(0x31),
+                garage_fields,
+                garage_objects,
+            ),
+        },
+        Asset {
+            name: "levels/runtime/gameplay".into(),
+            partition: PartitionWriter::default().build_many(
+                guid(0x23),
+                "SubWorldData",
+                guid(0x33),
+                gameplay_fields,
+                gameplay_objects,
+            ),
+        },
+    ]
 }
 
 fn sub_world(name: &str, auto: bool) -> (&'static str, Vec<(&'static str, Field)>) {
@@ -647,6 +792,7 @@ pub fn write(root: &Path, assets: &[Asset]) -> std::io::Result<(Options, [u8; 64
                 .iter()
                 .map(|(c, id)| (c.to_string(), *id))
                 .collect(),
+            garage_links: garage_links(),
             scenes: crate::scenes::Rules {
                 level: RUNTIME_LEVEL.to_owned(),
                 classes: [
@@ -660,6 +806,20 @@ pub fn write(root: &Path, assets: &[Asset]) -> std::io::Result<(Options, [u8; 64
                         Some(nfs_world::replication::sublevel::Kind::LevelReference),
                     ),
                     ("BundlePreLoadEntityData", None),
+                    (
+                        "GarageEntityData",
+                        Some(nfs_world::replication::sublevel::Kind::Rpc),
+                    ),
+                    (
+                        "VehicleSlotEntityData",
+                        Some(nfs_world::replication::sublevel::Kind::Rpc),
+                    ),
+                    (
+                        "ItemEntityData",
+                        Some(nfs_world::replication::sublevel::Kind::Rpc),
+                    ),
+                    ("PersistentGarageVehiclesEntityData", None),
+                    ("LocatorEntityData", None),
                     (
                         "SyntheticRpc",
                         Some(nfs_world::replication::sublevel::Kind::Rpc),

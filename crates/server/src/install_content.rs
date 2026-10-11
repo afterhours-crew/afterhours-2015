@@ -28,6 +28,7 @@ pub struct Generated {
     pub reputation_thresholds: PathBuf,
     pub scene_catalog: PathBuf,
     pub world_content: PathBuf,
+    pub garage_layout: PathBuf,
     pub world_mac_template: PathBuf,
     pub prepared: Prepared,
 }
@@ -69,6 +70,7 @@ pub fn resolve(
         reputation_thresholds: prepared.path(Kind::ReputationThresholds),
         scene_catalog: prepared.path(Kind::SceneCatalog),
         world_content: prepared.path(Kind::WorldContent),
+        garage_layout: prepared.path(Kind::GarageLayout),
         world_mac_template: prepared.path(Kind::WorldMacTemplate),
         prepared,
     })
@@ -118,6 +120,7 @@ mod tests {
             crate::content::WorldContent::load_with_scenes(&first.world_content, Some(&scenes))
                 .unwrap();
         world.validate_runtime().unwrap();
+        crate::vehicle_content::layout::Layout::load(&first.garage_layout).unwrap();
         assert_eq!(std::fs::read(&first.world_mac_template).unwrap().len(), 64);
         let second = resolve(&dir.0, Path::new("game"), None, &options).unwrap();
         assert!(!second.prepared.built);

@@ -210,9 +210,21 @@ impl PartitionWriter {
     fn struct_class(&mut self, name: &str, items: &[Vec<(&'static str, Field)>]) -> (u16, u16) {
         let first = items.first().cloned().unwrap_or_default();
         let mut rows = Vec::new();
+        let mut offset = 0;
         for (i, (member, field)) in first.iter().enumerate() {
-            let offset = (i * 4) as u32;
-            if let Field::Enum(type_name, _, _) = field {
+            if let Field::Struct(type_name, _) = field {
+                let nested: Vec<_> = items
+                    .iter()
+                    .map(|item| match &item[i].1 {
+                        Field::Struct(name, fields) if name == type_name => fields.clone(),
+                        _ => panic!("inconsistent synthetic struct"),
+                    })
+                    .collect();
+                let (class, size) = self.struct_class(type_name, &nested);
+                rows.push((member.to_string(), 0x02, class, offset));
+                offset += u32::from(size);
+                continue;
+            } else if let Field::Enum(type_name, _, _) = field {
                 let mut enumerators: Vec<(String, u8, u16, u32)> = Vec::new();
                 for item in items {
                     if let Some((_, Field::Enum(_, enumerator, value))) = item.get(i)
@@ -226,8 +238,9 @@ impl PartitionWriter {
             } else {
                 rows.push((member.to_string(), scalar_code(field), 0, offset));
             }
+            offset += 4;
         }
-        let size = (first.len() * 4) as u16;
+        let size = u16::try_from(offset).expect("synthetic struct size");
         (self.class(name, size, rows), size)
     }
     fn scalar(&mut self, field: &Field) -> [u8; 4] {
@@ -238,7 +251,17 @@ impl PartitionWriter {
             Field::Bool(v) => [u8::from(*v), 0, 0, 0],
             Field::CString(text) => self.string(text).to_le_bytes(),
             Field::Enum(_, _, value) => value.to_le_bytes(),
+            Field::RawPointer(value) => value.to_le_bytes(),
+            Field::Import(file, instance) => self.import(*file, *instance).to_le_bytes(),
             _ => panic!("not a scalar field"),
+        }
+    }
+
+    fn inline(&mut self, field: &Field) -> Vec<u8> {
+        if let Field::Struct(_, fields) = field {
+            fields.iter().flat_map(|(_, f)| self.inline(f)).collect()
+        } else {
+            self.scalar(field).to_vec()
         }
     }
 
@@ -324,11 +347,9 @@ impl PartitionWriter {
                     let (struct_class, size) =
                         self.struct_class(type_name, std::slice::from_ref(members));
                     rows.push((name.to_string(), 0x02, struct_class, offset));
-                    for (_, member) in members {
-                        let bytes = self.scalar(member);
-                        payload.extend_from_slice(&bytes);
-                    }
-                    debug_assert_eq!(size as usize, members.len() * 4);
+                    let bytes = self.inline(field);
+                    debug_assert_eq!(size as usize, bytes.len());
+                    payload.extend_from_slice(&bytes);
                 }
                 Field::Structs(type_name, items) => {
                     let (struct_class, _) = self.struct_class(type_name, items);
@@ -340,7 +361,7 @@ impl PartitionWriter {
                     let at = self.array_data.len() as u32;
                     for item in items {
                         for (_, member) in item {
-                            let bytes = self.scalar(member);
+                            let bytes = self.inline(member);
                             self.array_data.extend_from_slice(&bytes);
                         }
                     }
@@ -463,6 +484,7 @@ fn scalar_code(field: &Field) -> u8 {
         Field::Float(_) => 0x13,
         Field::Bool(_) => 0x0A,
         Field::CString(_) => 0x07,
+        Field::RawPointer(_) | Field::Import(_, _) => 0x03,
         _ => panic!("not a scalar field"),
     }
 }

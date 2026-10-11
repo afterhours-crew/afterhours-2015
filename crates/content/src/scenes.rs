@@ -38,6 +38,15 @@ pub struct Scene {
     pub level_references: Vec<String>,
 }
 
+/// Static definition identity at one occurrence in a scene's construction tree.
+/// Non-serializing objects still own links needed by other content builders.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Instance {
+    pub asset: String,
+    pub index: usize,
+    pub serializer: Option<usize>,
+}
+
 /// Installed scene shapes and launcher endpoints, without live identities,
 /// state values, service policy or network messages.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -246,6 +255,7 @@ struct Walk<'a> {
     kinds: Vec<Kind>,
     launchers: Vec<usize>,
     level_references: Vec<String>,
+    instances: Option<Vec<Instance>>,
 }
 
 impl Walk<'_> {
@@ -274,6 +284,13 @@ impl Walk<'_> {
                 object.class
             ))
         })?;
+        if let Some(instances) = &mut self.instances {
+            instances.push(Instance {
+                asset: asset.to_owned(),
+                index,
+                serializer: kind.map(|_| self.kinds.len()),
+            });
+        }
         if let Some(kind) = kind {
             if self.kinds.len() >= MAX_SERIALIZERS {
                 return Err(Error::Content("scene serializer bound".into()));
@@ -336,6 +353,15 @@ impl Walk<'_> {
 }
 
 fn profile(assets: &mut Assets, rules: &Rules, name: &str) -> Result<Scene, Error> {
+    Ok(construct(assets, rules, name, false)?.0)
+}
+
+pub(crate) fn construct(
+    assets: &mut Assets,
+    rules: &Rules,
+    name: &str,
+    record_instances: bool,
+) -> Result<(Scene, Vec<Instance>), Error> {
     let name = name.to_lowercase();
     let root = match assets.objects(&name)?.first().map(|o| o.class.as_str()) {
         Some("LevelData") => true,
@@ -350,14 +376,18 @@ fn profile(assets: &mut Assets, rules: &Rules, name: &str) -> Result<Scene, Erro
         kinds: vec![Kind::Noop],
         launchers: Vec::new(),
         level_references: Vec::new(),
+        instances: record_instances.then(Vec::new),
     };
     walk.visit(&name, 0, 0)?;
-    Ok(Scene {
-        profile: Profile::new(root, &walk.kinds)
-            .map_err(|_| Error::Content("invalid scene profile".into()))?,
-        launchers: walk.launchers,
-        level_references: walk.level_references,
-    })
+    Ok((
+        Scene {
+            profile: Profile::new(root, &walk.kinds)
+                .map_err(|_| Error::Content("invalid scene profile".into()))?,
+            launchers: walk.launchers,
+            level_references: walk.level_references,
+        },
+        walk.instances.unwrap_or_default(),
+    ))
 }
 
 impl AssetIndex {

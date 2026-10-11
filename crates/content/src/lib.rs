@@ -21,6 +21,7 @@ mod cache;
 mod control;
 mod executable;
 mod fingerprint;
+pub mod garage;
 mod items;
 mod licenses;
 mod reputation;
@@ -44,7 +45,7 @@ pub const FORMAT: &str = "nfs-install-content";
 pub const VERSION: u64 = 1;
 /// Increment whenever a builder's output for an unchanged installation changes,
 /// so existing cache entries are rebuilt.
-pub const BUILDER_REVISION: u64 = 7;
+pub const BUILDER_REVISION: u64 = 8;
 /// Executable file name relative to the installation root.
 pub const EXECUTABLE: &str = "NFS16.exe";
 
@@ -59,6 +60,7 @@ pub struct BuildIdentity {
     pub blueprint_class_ids: BTreeMap<String, u32>,
     /// Server scene construction rules tied to this executable.
     pub scenes: scenes::Rules,
+    pub garage_links: garage::Links,
 }
 
 impl BuildIdentity {
@@ -93,12 +95,14 @@ pub enum Kind {
     SceneCatalog,
     /// Startup descriptor, registrations and role bindings with AllDrive policy.
     WorldContent,
+    /// Garage slots, parking transforms and inventory slot bindings.
+    GarageLayout,
     /// The 64-byte world MAC template.
     WorldMacTemplate,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 9] = [
+    pub const ALL: [Kind; 10] = [
         Kind::ItemContent,
         Kind::PersistentContent,
         Kind::StatDefinitions,
@@ -107,6 +111,7 @@ impl Kind {
         Kind::ReputationThresholds,
         Kind::SceneCatalog,
         Kind::WorldContent,
+        Kind::GarageLayout,
         Kind::WorldMacTemplate,
     ];
     /// Manifest key.
@@ -120,6 +125,7 @@ impl Kind {
             Self::ReputationThresholds => "reputation_thresholds",
             Self::SceneCatalog => "scene_catalog",
             Self::WorldContent => "world_content",
+            Self::GarageLayout => "garage_layout",
             Self::WorldMacTemplate => "world_mac_template",
         }
     }
@@ -134,6 +140,7 @@ impl Kind {
             Self::ReputationThresholds => "reputation-thresholds.json",
             Self::SceneCatalog => "scene-catalog.json",
             Self::WorldContent => "world-content.json",
+            Self::GarageLayout => "garage-layout.json",
             Self::WorldMacTemplate => "world-mac-template.bin",
         }
     }
@@ -257,6 +264,7 @@ pub fn build(
     )?;
     let mut index = assets::AssetIndex::from_assets(assets, options.identity.clone());
     outputs.insert(Kind::WorldContent, startup::build(&mut index, &catalog)?);
+    outputs.insert(Kind::GarageLayout, garage::build(&mut index)?);
     outputs.insert(
         Kind::WorldMacTemplate,
         executable::mac_template(&game_root.join(EXECUTABLE), &options.identity)?,

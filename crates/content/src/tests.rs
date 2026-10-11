@@ -190,6 +190,13 @@ fn changed_construction_rules_do_not_reuse_an_installation_cache() {
         fingerprint(&install.game(), &options).unwrap()
     );
     assert!(prepare(&install.game(), &install.cache(), &options).is_err());
+    let mut changed_links = install.options();
+    changed_links.identity.garage_links.primary_slot = 999;
+    assert_ne!(
+        first.fingerprint,
+        fingerprint(&install.game(), &changed_links).unwrap()
+    );
+    assert!(prepare(&install.game(), &install.cache(), &changed_links).is_err());
     assert!(!install.prepare().unwrap().built);
 }
 

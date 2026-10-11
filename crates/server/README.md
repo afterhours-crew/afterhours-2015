@@ -265,3 +265,9 @@ indexes from the installed registries. Existing vehicle, garage, sequence and
 progression configuration must use the same generated level IDs. To retain an
 older deployment's order, pass its `--world-content` explicitly. Those other
 inputs and service policy are still required for a complete deployment.
+
+`--game-dir` supplies a generated `--garage-layout` for the five main parking
+slots and their inventory bindings. It does not supply the optional world_spawn
+or exit_teleport poses. Deployments using those poses should keep their explicit
+layout while world-exit content generation is completed. Explicit layout files
+take precedence; no existing file is rewritten.
