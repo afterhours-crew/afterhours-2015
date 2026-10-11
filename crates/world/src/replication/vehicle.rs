@@ -15,6 +15,7 @@ pub mod health;
 pub mod initialize;
 pub mod lifecycle;
 pub mod mesh;
+pub mod movement;
 pub mod nos;
 pub mod orientation;
 mod parts;

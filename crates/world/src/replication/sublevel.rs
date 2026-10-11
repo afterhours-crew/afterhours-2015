@@ -33,6 +33,8 @@ pub enum Kind {
     RpcOptional64,
     RpcGuid,
     RpcBool,
+    /// Trigger volume RPC with an enabled initial collision listener.
+    RpcTriggerVolume,
     RpcMap,
     RpcFourReferences,
     RpcSet64,
@@ -53,6 +55,7 @@ const KIND_NAMES: &[(&str, Kind)] = &[
     ("rpc_optional64", Kind::RpcOptional64),
     ("rpc_guid", Kind::RpcGuid),
     ("rpc_bool", Kind::RpcBool),
+    ("rpc_trigger_volume", Kind::RpcTriggerVolume),
     ("rpc_map", Kind::RpcMap),
     ("rpc_four_references", Kind::RpcFourReferences),
     ("rpc_set64", Kind::RpcSet64),

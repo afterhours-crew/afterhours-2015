@@ -192,6 +192,13 @@ For world/garage operation also supply:
 | `--vehicle-parts` | Part definitions for version-2 vehicle content; defaults to installed content with `--game-dir`. Explicit profiles, parts and layouts retain precedence |
 | `--sequence-content`, `--garage-logic` | Sequence definitions and garage logic graph ([sequences](src/sequence_content.rs), [garage](src/garage_logic.rs)) |
 
+Sequence content version 2 omits `arrive.spline.base_value`: the six-bit goal
+allocation counter belongs to the current world and wraps after 63. It advances
+only when a goal and its Actor assignment commit together. Version 1 remains
+readable; its legacy `base_value` is range-checked and ignored. The current shape
+of `arrive.spline` is exactly `asset`, `catalog` and `flag`; runtime counters and
+RPC serials are never content fields.
+
 World content versions 1–3 remain readable by offline inspection APIs, but the
 runtime requires version 4 or 5 with `roles`. This object names `level`, `gameplay`,
 `startup`, `garage`, `progression`, ten ordered `traffic` scene keys, and

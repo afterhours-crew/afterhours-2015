@@ -59,6 +59,7 @@ fn setup() -> (Players, Arrivals) {
     )
     .unwrap();
     let definition = Definition {
+        layout: crate::sequences::Layout::GarageExit,
         asset,
         manager: Component {
             scene_key: 7,
@@ -100,6 +101,112 @@ fn reached(event: u32, ghost: u16, entity: u32) -> Message {
         target: EntityRef { ghost, entity },
         player: 0,
     }
+}
+
+#[test]
+fn rollout_goal_is_owned_atomic_ordered_and_cleaned_once() {
+    let (mut players, arrivals) = setup();
+    let mut arrivals = arrivals
+        .with_spline(spline::Definition {
+            asset: Asset {
+                bundle: 23,
+                type_id: 5100,
+                local_index: 2,
+            },
+            catalog: Catalog::new(23, &[(5100, 3)]).unwrap(),
+            flag: false,
+        })
+        .unwrap();
+    let owner = join(&mut players);
+    let before = players.objects().snapshot();
+    // Missing Actor must not consume either the sequence or goal identity.
+    assert_eq!(
+        arrivals.start_rollout(&mut players, owner),
+        Err(Error::UnknownObject)
+    );
+    assert_eq!(players.objects().snapshot(), before);
+    assert_eq!(arrivals.ghost(owner.participant), None);
+    let actor = players
+        .create_actor(owner.connection, owner.persona, owner.participant)
+        .unwrap()
+        .unwrap()
+        .id;
+    let records = arrivals.start_rollout(&mut players, owner).unwrap();
+    assert_eq!(records.len(), 3);
+    let goal = records[0].id;
+    assert!(matches!(
+        records[0].initial,
+        Some(Initial::ScriptedSplineGoal(_))
+    ));
+    assert_eq!(records[1].id, actor);
+    assert!(
+        matches!(&records[1].update,crate::replication::Update::Actor(a) if a.references_a.as_deref()==Some(&[goal]))
+    );
+    let sequence = records[2].id;
+    assert_eq!(sequence + 1, goal);
+    assert!(
+        arrivals
+            .start_rollout(&mut players, owner)
+            .unwrap()
+            .is_empty()
+    );
+    let second_player = players
+        .create(
+            5,
+            500,
+            Request {
+                name: b"Second".to_vec(),
+                flag: false,
+                slot: 0,
+            },
+        )
+        .unwrap()
+        .unwrap()
+        .id;
+    let second = Owner {
+        connection: 5,
+        persona: 500,
+        participant: players.join(5, 500, second_player).unwrap().unwrap().id,
+    };
+    players.create_actor(5, 500, second.participant).unwrap();
+    let other = arrivals.start_rollout(&mut players, second).unwrap();
+    let snapshot = players.objects().snapshot();
+    assert_eq!(
+        players.finish_spline(5, 500, second.participant, goal),
+        Err(Error::UnknownObject)
+    );
+    assert_eq!(
+        arrivals.finish_rollout(&mut players, owner),
+        Err(Error::Shape)
+    );
+    assert_eq!(players.objects().snapshot(), snapshot);
+    arrivals
+        .arrived(&reached(ARRIVED, sequence, 1))
+        .unwrap()
+        .unwrap();
+    let call = Completed {
+        sequence,
+        participant: owner.participant,
+    };
+    arrivals.complete(&players, owner, call).unwrap().unwrap();
+    let (cleared, deleted) = arrivals.finish_rollout(&mut players, owner).unwrap();
+    assert_eq!(deleted, vec![sequence, goal]);
+    assert!(
+        matches!(&cleared[0].update,crate::replication::Update::Actor(a) if a.flag_a == Some(false) && a.references_a.as_deref()==Some(&[]) && a.references_b.as_deref()==Some(&[]))
+    );
+    assert!(players.objects().get(goal).is_none() && players.objects().get(sequence).is_none());
+    assert!(players.objects().get(other[0].id).is_some());
+    assert_eq!(arrivals.complete(&players, owner, call), Ok(None));
+    assert_eq!(
+        arrivals.finish_rollout(&mut players, owner),
+        Ok((vec![], vec![]))
+    );
+    assert_eq!(
+        Arrivals::new(arrivals.definition, arrivals.content.clone())
+            .unwrap()
+            .ghost(owner.participant),
+        None
+    );
 }
 
 #[test]
@@ -167,36 +274,6 @@ fn an_arrive_sequence_starts_once_stops_on_the_event_and_completes_once() {
 }
 
 #[test]
-fn a_fixed_channel_replaces_the_scene_component() {
-    let (mut players, arrivals) = setup();
-    // The reference must name an existing object (here scene 2).
-    let mut arrivals = arrivals.with_fixed_channel(2, 8).unwrap();
-    let owner = join(&mut players);
-    let record = arrivals.start(&mut players, owner).unwrap().unwrap();
-    let Some(Initial::Entity { fields, .. }) = &record.initial else {
-        panic!()
-    };
-    let entity::Initial::RpcReference {
-        reference,
-        target_selector,
-        ..
-    } = &fields[2]
-    else {
-        panic!()
-    };
-    assert_eq!((*reference, *target_selector), (2, 8));
-    let (mut players, arrivals) = setup();
-    let mut dangling = arrivals.with_fixed_channel(48, 8).unwrap();
-    let owner = join(&mut players);
-    assert_eq!(
-        dangling.start(&mut players, owner),
-        Err(Error::UnknownObject)
-    );
-    assert!(setup().1.with_fixed_channel(0, 8).is_err());
-    assert!(setup().1.with_fixed_channel(48, 512).is_err());
-}
-
-#[test]
 fn a_silent_client_is_stopped_after_the_fallback() {
     let (mut players, mut arrivals) = setup();
     let owner = join(&mut players);
@@ -210,6 +287,62 @@ fn a_silent_client_is_stopped_after_the_fallback() {
     );
     assert!(arrivals.poll(1_000 + 2 * FALLBACK_MS).unwrap().is_empty());
     assert_eq!(arrivals.poll(0), Err(Error::Shape));
+}
+
+#[test]
+fn rollout_has_both_acknowledgements_before_its_scene_channel() {
+    let (mut players, mut arrivals) = setup();
+    let owner = join(&mut players);
+    let record = arrivals.start(&mut players, owner).unwrap().unwrap();
+    let Some(Initial::Entity { fields, .. }) = record.initial else {
+        panic!()
+    };
+    assert_eq!(fields.len(), 5);
+    for selector in [2, 3] {
+        assert_eq!(
+            fields[selector],
+            entity::Initial::Rpc(entity::Rpc {
+                selector: selector as u16,
+                serial: Serial::new(1).unwrap(),
+            })
+        );
+    }
+    assert_eq!(
+        fields[4],
+        entity::Initial::RpcReference {
+            rpc: entity::Rpc {
+                selector: 4,
+                serial: Serial::new(1).unwrap()
+            },
+            reference: 2,
+            target_selector: 0,
+        }
+    );
+    let body = entity::Body {
+        initial: Some(fields),
+        updates: vec![Some(entity::Update::Noop); 5],
+    };
+    let encoded = body.encode(&profile()).unwrap();
+    assert_eq!(encoded.len(), 228);
+    let decoded = entity::Body::decode(encoded.span(), &profile(), true).unwrap();
+    assert_eq!(decoded.bits, encoded.len());
+    assert_eq!(decoded.body, body);
+    for len in 0..encoded.len() {
+        assert!(
+            entity::Body::decode(encoded.span().slice(0, len).unwrap(), &profile(), true).is_err()
+        );
+    }
+    // The waiting profile would consume RPC3 as a bogus reference/selector.
+    assert_ne!(profile(), crate::sequences::profile());
+    let mut bad = arrivals.definition;
+    bad.layout = Layout::Waiting;
+    assert!(Arrivals::new(bad, arrivals.content.clone()).is_err());
+    let waiting_content = Content::new(
+        vec![Catalog::new(16, &[(3404, 1), (3424, 11)]).unwrap()],
+        vec![(arrivals.definition.asset, crate::sequences::profile())],
+    )
+    .unwrap();
+    assert!(Arrivals::new(arrivals.definition, waiting_content).is_err());
 }
 
 #[test]
@@ -238,6 +371,7 @@ fn foreign_participants_and_wrong_profiles_are_refused() {
     )
     .unwrap();
     let definition = Definition {
+        layout: crate::sequences::Layout::GarageExit,
         asset,
         manager: Component {
             scene_key: 7,

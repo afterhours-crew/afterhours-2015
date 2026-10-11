@@ -7,7 +7,7 @@ use nfs_world::{
     arrival::Arrivals,
     content::bindings::name_key,
     replication::entity::creation::{Asset, Catalog, Content},
-    sequences::{self, Component, Definition, Sequences},
+    sequences::{Component, Definition, Layout, Sequences},
 };
 use serde_json::Value;
 use std::{fs::File, io::Read, path::Path};
@@ -18,8 +18,7 @@ pub struct SequenceContent {
     pub content: Content,
     /// Optional arrive sequence after garage exit (`nfs_world::arrival`).
     pub arrive: Option<(Definition, Content)>,
-    /// Optional fixed channel `(reference, selector)` of the arrive sequence.
-    pub arrive_channel: Option<(u16, u16)>,
+    pub spline: Option<nfs_world::replication::spline::Definition>,
 }
 impl SequenceContent {
     pub fn load(path: &Path) -> Result<Self, Failure> {
@@ -51,37 +50,56 @@ impl SequenceContent {
         }
         keys(v, &expected)?;
         if v["format"] != "nfs-waiting-sequence"
-            || v["version"] != 1
+            || !matches!(v["version"].as_u64(), Some(1 | 2))
             || v["build_sha256"]
                 != "92aa6ff4b5f8d0f033ca7e88cb86cc64b42b1d2412c4294905eb22950616e4df"
             || v["blueprint"] != "Gameplay/WaitingForGarageSequence"
         {
             return Err(Failure::ProfileConfig);
         }
-        let (definition, content) = sequence(v)?;
+        let (definition, content) = sequence(v, Layout::Waiting)?;
         Sequences::new(definition, content.clone()).map_err(|_| Failure::ProfileConfig)?;
-        let mut arrive_channel = None;
+        let mut spline = None;
         let arrive = match v.get("arrive") {
             None => None,
             Some(a) => {
-                let mut expected = vec!["asset", "catalog", "manager", "channel", "embedded_bus"];
-                if a.get("fixed_channel").is_some() {
-                    expected.push("fixed_channel");
-                    keys(&a["fixed_channel"], &["reference", "selector"])?;
-                    arrive_channel = Some((
-                        uint(&a["fixed_channel"]["reference"])?,
-                        uint(&a["fixed_channel"]["selector"])?,
-                    ));
+                let mut arrive_keys = vec![
+                    "blueprint",
+                    "asset",
+                    "catalog",
+                    "manager",
+                    "channel",
+                    "embedded_bus",
+                ];
+                if a.get("spline").is_some() {
+                    arrive_keys.push("spline");
                 }
-                keys(a, &expected)?;
-                let parsed = sequence(a)?;
-                let arrivals = Arrivals::new(parsed.0, parsed.1.clone())
-                    .map_err(|_| Failure::ProfileConfig)?;
-                if let Some((reference, selector)) = arrive_channel {
-                    arrivals
-                        .with_fixed_channel(reference, selector)
-                        .map_err(|_| Failure::ProfileConfig)?;
+                keys(a, &arrive_keys)?;
+                if let Some(value) = a.get("spline") {
+                    if v["version"] == 1 {
+                        keys(value, &["asset", "catalog", "base_value", "flag"])?;
+                        // Legacy documents stored a captured goal counter as content.
+                        // Validate it for compatibility, but allocate from owned state.
+                        if uint::<u8>(&value["base_value"])? >= 64 {
+                            return Err(Failure::ProfileConfig);
+                        }
+                    } else {
+                        keys(value, &["asset", "catalog", "flag"])?;
+                    }
+                    let (asset, catalog) = asset_catalog(value)?;
+                    let definition = nfs_world::replication::spline::Definition {
+                        asset,
+                        catalog,
+                        flag: value["flag"].as_bool().ok_or(Failure::ProfileConfig)?,
+                    };
+                    definition.validate().map_err(|_| Failure::ProfileConfig)?;
+                    spline = Some(definition);
                 }
+                if a["blueprint"] != "Gameplay/Tests/GarageExitSequence" {
+                    return Err(Failure::ProfileConfig);
+                }
+                let parsed = sequence(a, Layout::GarageExit)?;
+                Arrivals::new(parsed.0, parsed.1.clone()).map_err(|_| Failure::ProfileConfig)?;
                 Some(parsed)
             }
         };
@@ -89,7 +107,7 @@ impl SequenceContent {
             definition,
             content,
             arrive,
-            arrive_channel,
+            spline,
         })
     }
     pub fn instance(&self) -> Result<Sequences, nfs_world::replication::Error> {
@@ -98,15 +116,15 @@ impl SequenceContent {
     pub fn arrivals(&self) -> Option<Result<Arrivals, nfs_world::replication::Error>> {
         self.arrive.as_ref().map(|(definition, content)| {
             let arrivals = Arrivals::new(*definition, content.clone())?;
-            match self.arrive_channel {
-                Some((reference, selector)) => arrivals.with_fixed_channel(reference, selector),
+            match &self.spline {
+                Some(spline) => arrivals.with_spline(spline.clone()),
                 None => Ok(arrivals),
             }
         })
     }
 }
 /// Asset, catalog, manager, channel and bus of a sequence definition.
-fn sequence(v: &Value) -> Result<(Definition, Content), Failure> {
+fn asset_catalog(v: &Value) -> Result<(Asset, Catalog), Failure> {
     keys(&v["asset"], &["bundle", "type_id", "local_index"])?;
     let asset = Asset {
         bundle: uint(&v["asset"]["bundle"])?,
@@ -127,12 +145,17 @@ fn sequence(v: &Value) -> Result<(Definition, Content), Failure> {
             Ok((uint(&a[0])?, uint(&a[1])?))
         })
         .collect::<Result<Vec<_>, Failure>>()?;
-    let content = Content::new(
-        vec![Catalog::new(asset.bundle, &entries).map_err(|_| Failure::ProfileConfig)?],
-        vec![(asset, sequences::profile())],
-    )
-    .map_err(|_| Failure::ProfileConfig)?;
+    Ok((
+        asset,
+        Catalog::new(asset.bundle, &entries).map_err(|_| Failure::ProfileConfig)?,
+    ))
+}
+fn sequence(v: &Value, layout: Layout) -> Result<(Definition, Content), Failure> {
+    let (asset, catalog) = asset_catalog(v)?;
+    let content = Content::new(vec![catalog], vec![(asset, layout.profile())])
+        .map_err(|_| Failure::ProfileConfig)?;
     let definition = Definition {
+        layout,
         asset,
         manager: component(&v["manager"])?,
         channel: component(&v["channel"])?,
@@ -189,7 +212,7 @@ mod tests {
             ("/channel/component_index", json!(512)),
             ("/manager/component_index", json!(0)),
             ("/embedded_bus", json!(0)),
-            ("/version", json!(2)),
+            ("/version", json!(3)),
         ] {
             let mut invalid = v.clone();
             *invalid.pointer_mut(pointer).unwrap() = bad;
@@ -209,7 +232,7 @@ mod tests {
             "manager":{"scene":"test/gameplay","component_index":3},"channel":{"scene":"test/garage","component_index":23},"embedded_bus":2});
         let plain = SequenceContent::from_json(&v).unwrap();
         assert!(plain.arrive.is_none() && plain.arrivals().is_none());
-        v["arrive"] = json!({"asset":{"bundle":16,"type_id":3424,"local_index":9},"catalog":[[3404,1],[3424,11]],
+        v["arrive"] = json!({"blueprint":"Gameplay/Tests/GarageExitSequence","asset":{"bundle":16,"type_id":3424,"local_index":9},"catalog":[[3404,1],[3424,11]],
             "manager":{"scene":"test/gameplay","component_index":3},"channel":{"scene":"test/garage","component_index":23},"embedded_bus":2});
         let c = SequenceContent::from_json(&v).unwrap();
         let (definition, _) = c.arrive.as_ref().unwrap();
@@ -227,13 +250,51 @@ mod tests {
             *invalid.pointer_mut(pointer).unwrap() = bad;
             assert!(SequenceContent::from_json(&invalid).is_err(), "{pointer}");
         }
+        v["arrive"]["spline"] = json!({"asset":{"bundle":23,"type_id":5100,"local_index":1},"catalog":[[5100,3]],"base_value":37,"flag":false});
+        assert!(
+            SequenceContent::from_json(&v)
+                .unwrap()
+                .arrivals()
+                .unwrap()
+                .is_ok()
+        );
+        for (pointer, bad) in [
+            ("/arrive/spline/asset/local_index", json!(3)),
+            ("/arrive/spline/base_value", json!(64)),
+            ("/arrive/spline/flag", json!(0)),
+        ] {
+            let mut invalid = v.clone();
+            *invalid.pointer_mut(pointer).unwrap() = bad;
+            assert!(SequenceContent::from_json(&invalid).is_err());
+        }
+        let mut foreign = v.clone();
+        foreign["arrive"]["spline"]["actor"] = json!(27);
+        assert!(SequenceContent::from_json(&foreign).is_err());
+        let legacy = SequenceContent::from_json(&v).unwrap();
+        let mut current = v.clone();
+        current["version"] = json!(2);
+        assert!(SequenceContent::from_json(&current).is_err());
+        current["arrive"]["spline"]
+            .as_object_mut()
+            .unwrap()
+            .remove("base_value");
+        assert_eq!(
+            SequenceContent::from_json(&current).unwrap().spline,
+            legacy.spline
+        );
+        let mut changed_legacy = v.clone();
+        changed_legacy["arrive"]["spline"]["base_value"] = json!(0);
+        assert_eq!(
+            SequenceContent::from_json(&changed_legacy).unwrap().spline,
+            legacy.spline
+        );
+        for name in ["allocation_serial", "selector", "serial"] {
+            let mut invalid = current.clone();
+            invalid["arrive"]["spline"][name] = json!(1);
+            assert!(SequenceContent::from_json(&invalid).is_err());
+        }
         let mut fixed = v.clone();
         fixed["arrive"]["fixed_channel"] = json!({"reference": 48, "selector": 8});
-        assert_eq!(
-            SequenceContent::from_json(&fixed).unwrap().arrive_channel,
-            Some((48, 8))
-        );
-        fixed["arrive"]["fixed_channel"]["selector"] = json!(512);
         assert!(SequenceContent::from_json(&fixed).is_err());
         let mut invalid = v;
         invalid["arrive"]["blueprint"] = json!("extra");

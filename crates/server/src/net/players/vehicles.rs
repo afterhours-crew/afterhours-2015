@@ -21,6 +21,24 @@ pub(super) struct Output {
     pub replies: Vec<HostRpc>,
 }
 impl PlayerListener {
+    pub(super) fn binding_sections(
+        bindings: Vec<replication::Record>,
+    ) -> Result<Vec<Section>, replication::Error> {
+        // The standard section encoder supplies the required setup and validates
+        // the complete frame before the listener commits the readiness transition.
+        split_scenes(bindings, nfs_world::application::OUTBOUND_FRAME_BITS)
+    }
+    /// Grant simulation only after a newly created world car reports readiness.
+    /// Existing garage cars retain their usual authority.
+    pub(super) fn ready_movement(
+        owned: BTreeSet<u16>,
+        world_cars: &BTreeMap<u16, (u16, bool)>,
+    ) -> BTreeSet<u16> {
+        owned
+            .into_iter()
+            .filter(|id| world_cars.get(id).is_none_or(|(_, ready)| *ready))
+            .collect()
+    }
     pub(super) fn garage_presence(
         roles: Option<&crate::scene_roles::SceneRoles>,
         players: &Players,
@@ -182,7 +200,7 @@ impl PlayerListener {
         if content.layout.world_spawn().is_none() {
             return Ok(None);
         }
-        let spawned = population.spawn_world(
+        let mut spawned = population.spawn_world(
             players,
             Owner {
                 connection: HOST_SELECTOR as u8,
@@ -198,6 +216,11 @@ impl PlayerListener {
             // here would need content delivery before the creation.
             return Err(replication::Error::Unsupported);
         }
+        spawned.records.extend(players.actor_departing(
+            HOST_SELECTOR as u8,
+            persona,
+            participant,
+        )?);
         // The garage car stays on the wire until the client reports the world
         // car; the official host deletes it in a later frame (E742, E759).
         Ok(Some((

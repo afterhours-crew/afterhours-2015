@@ -34,6 +34,48 @@ fn asset(seed: u8, name: &str, class: &str, fields: Vec<(&'static str, Field)>) 
 }
 
 #[test]
+fn generated_trigger_profiles_preserve_enabled_collision_listeners() {
+    use nfs_world::replication::sublevel::ordinary::{self, Value};
+    let root = Asset {
+        name: "scene".into(),
+        partition: PartitionWriter::default().build_many(
+            guid(1),
+            "SubWorldData",
+            guid(0x81),
+            vec![("Objects", Field::RawPointers(vec![2, 3]))],
+            vec![
+                ("TriggerVolumeEntityData", vec![]),
+                ("BoolPropertyClientNotificationEntityData", vec![]),
+            ],
+        ),
+    };
+    let mut f = fixture(vec![root]);
+    let supported = crate::BuildIdentity::supported();
+    for class in [
+        "TriggerVolumeEntityData",
+        "BoolPropertyClientNotificationEntityData",
+    ] {
+        f.index
+            .identity
+            .scenes
+            .classes
+            .insert(class.into(), supported.scenes.classes[class]);
+    }
+    let profile = f.index.scene("scene").unwrap().profile;
+    assert_eq!(
+        profile.kinds(),
+        [Kind::Noop, Kind::RpcTriggerVolume, Kind::RpcBool]
+    );
+    assert_eq!(
+        ordinary::unpopulated(&profile).unwrap(),
+        [Value::Noop, Value::Boolean(true), Value::Boolean(false)]
+    );
+    for kind in profile.kinds() {
+        assert_eq!(Kind::from_name(kind.name()), Some(*kind));
+    }
+}
+
+#[test]
 fn construction_order_preserves_shared_instances_and_ignores_unlinked_objects() {
     let root = Asset {
         name: "level".into(),

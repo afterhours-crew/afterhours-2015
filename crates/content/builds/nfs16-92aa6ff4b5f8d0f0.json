@@ -593,7 +593,7 @@
       "TransformHubEntityData": null,
       "TransformMultiplierEntityData": null,
       "TransformSplitterEntityData": null,
-      "TriggerVolumeEntityData": "rpc_bool",
+    "TriggerVolumeEntityData": "rpc_trigger_volume",
       "TriggerVolumeListenerEntityData": null,
       "TriggeredParticipantTransitionEntityData": "rpc",
       "TriggeredPredicateEntityData": null,

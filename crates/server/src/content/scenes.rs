@@ -65,7 +65,7 @@ mod tests {
     use super::*;
     #[test]
     fn static_store_rejects_unknown_shapes_and_instance_data() {
-        let value = json!([{"content_key":7,"root":false,"serializers":["noop","rpc_bool"]}]);
+        let value = json!([{"content_key":7,"root":false,"serializers":["noop","rpc_bool","rpc_trigger_volume"]}]);
         assert_eq!(json(&parse(&value).unwrap()), value);
         let mut altered = value.clone();
         altered[0]["values"] = json!([false]);
