@@ -123,3 +123,62 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod inverse_tests {
+    use super::*;
+    #[test]
+    fn inverse_uses_origin_precision_and_absolute_escape() {
+        for fractional in [0, 5, 7, 16] {
+            for mode in 1..=7 {
+                let vector = Vector::Packed {
+                    mode,
+                    values: [0, -1, 0],
+                };
+                let step = 1. / (1u32 << fractional) as f32;
+                assert_eq!(
+                    vector.to_position([4., 8., 16.], fractional).unwrap(),
+                    [4., 8. - step, 16.]
+                );
+            }
+        }
+        let absolute = [9000., -0., -5.];
+        assert_eq!(
+            Vector::FloatBits(absolute.map(f32::to_bits))
+                .to_position([1.; 3], 7)
+                .unwrap()
+                .map(f32::to_bits),
+            absolute.map(f32::to_bits)
+        );
+    }
+    #[test]
+    fn inverse_rejects_invalid_modes_ranges_and_nonfinite_values() {
+        for vector in [
+            Vector::Packed {
+                mode: 0,
+                values: [0; 3],
+            },
+            Vector::Packed {
+                mode: 8,
+                values: [0; 3],
+            },
+            Vector::Packed {
+                mode: 1,
+                values: [128, 0, 0],
+            },
+            Vector::Packed {
+                mode: 1,
+                values: [-129, 0, 0],
+            },
+            Vector::FloatBits([f32::NAN.to_bits(), 0, 0]),
+        ] {
+            assert_eq!(vector.to_position([0.; 3], 7), Err(Error::Shape));
+        }
+        let vector = Vector::Packed {
+            mode: 1,
+            values: [0; 3],
+        };
+        assert_eq!(vector.to_position([f32::INFINITY; 3], 7), Err(Error::Shape));
+        assert_eq!(vector.to_position([0.; 3], 17), Err(Error::Shape));
+    }
+}

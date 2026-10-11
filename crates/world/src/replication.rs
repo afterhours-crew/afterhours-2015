@@ -28,6 +28,7 @@ pub enum Kind {
     Actor,
     Entity,
     Participant,
+    ParticipantLocationMap,
     Player,
     SubLevel,
     ScriptedSplineGoal,
@@ -40,6 +41,7 @@ impl Kind {
             Self::Actor => 0,
             Self::Entity => 6,
             Self::Participant => 11,
+            Self::ParticipantLocationMap => 12,
             Self::Player => 14,
             Self::SubLevel => 24,
             Self::ScriptedSplineGoal => 20,
@@ -52,6 +54,7 @@ impl Kind {
             0 => Ok(Self::Actor),
             6 => Ok(Self::Entity),
             11 => Ok(Self::Participant),
+            12 => Ok(Self::ParticipantLocationMap),
             14 => Ok(Self::Player),
             24 => Ok(Self::SubLevel),
             20 => Ok(Self::ScriptedSplineGoal),
@@ -175,6 +178,7 @@ pub enum Initial {
         creation: vehicle::Creation,
     },
     Participant(ParticipantInit),
+    ParticipantLocationMap,
     Player(PlayerInit),
     SubLevel {
         prefix: sublevel::Prefix,
@@ -189,6 +193,7 @@ impl Initial {
             Self::ScriptedSplineGoal(_) => Kind::ScriptedSplineGoal,
             Self::Entity { .. } | Self::Vehicle { .. } => Kind::Entity,
             Self::Participant(_) => Kind::Participant,
+            Self::ParticipantLocationMap => Kind::ParticipantLocationMap,
             Self::PlayerView(_) => Kind::PlayerView,
             Self::Player(_) => Kind::Player,
             Self::SubLevel { .. } => Kind::SubLevel,
@@ -210,6 +215,7 @@ pub enum Update {
         fields: Vec<Option<vehicle::Update>>,
     },
     Participant(ParticipantUpdate),
+    ParticipantLocationMap(location_map::Update),
     Player(PlayerUpdate),
     SubLevel {
         profile: sublevel::Profile,
@@ -224,6 +230,7 @@ impl Update {
             Self::Actor(_) => Kind::Actor,
             Self::Entity { .. } | Self::Vehicle { .. } => Kind::Entity,
             Self::Participant(_) => Kind::Participant,
+            Self::ParticipantLocationMap(_) => Kind::ParticipantLocationMap,
             Self::PlayerView(_) => Kind::PlayerView,
             Self::Player(_) => Kind::Player,
             Self::SubLevel { .. } => Kind::SubLevel,
@@ -330,6 +337,7 @@ impl Reader<'_> {
                 return Err(Error::Unsupported);
             }
             Kind::PlayerManager => Initial::PlayerManager,
+            Kind::ParticipantLocationMap => Initial::ParticipantLocationMap,
             Kind::PlayerView => Initial::PlayerView(player_view::Initial::read(self)?),
             Kind::Actor => Initial::Actor(ActorInit {
                 participant: self.reference()?,
@@ -358,6 +366,9 @@ impl Reader<'_> {
     fn update(&mut self, kind: Kind) -> Result<Update, Error> {
         Ok(match kind {
             Kind::PlayerManager => Update::PlayerManager(player_manager::Update::read(self)?),
+            Kind::ParticipantLocationMap => {
+                Update::ParticipantLocationMap(location_map::Update::read(self)?)
+            }
             Kind::PlayerView => Update::PlayerView(player_view::Update::read(self)?),
             Kind::ScriptedSplineGoal => Update::ScriptedSplineGoal,
             Kind::SubLevel | Kind::Entity => return Err(Error::Unsupported),
@@ -477,7 +488,7 @@ impl Writer {
             Initial::SubLevel { .. } | Initial::Entity { .. } | Initial::Vehicle { .. } => {
                 return Err(Error::Unsupported);
             }
-            Initial::PlayerManager => {}
+            Initial::PlayerManager | Initial::ParticipantLocationMap => {}
             Initial::PlayerView(v) => v.write(self)?,
             Initial::ScriptedSplineGoal(v) => v.write(self)?,
             Initial::Actor(v) => {
@@ -511,6 +522,7 @@ impl Writer {
                 return Err(Error::Unsupported);
             }
             Update::PlayerManager(v) => v.write(self)?,
+            Update::ParticipantLocationMap(v) => v.write(self)?,
             Update::PlayerView(v) => v.write(self)?,
             Update::ScriptedSplineGoal => {}
             Update::Participant(v) => {
@@ -660,6 +672,7 @@ pub mod entity;
 mod entity_record;
 pub mod spline;
 
+pub mod location_map;
 pub mod player_manager;
 pub mod player_view;
 pub mod players;
