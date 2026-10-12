@@ -123,6 +123,8 @@ impl PlayerListener {
                 );
                 replies.push(nfs_world::participants::HostRpc::Participant(notification));
                 replies.extend(events);
+                self.spawn_released
+                    .insert(notification.participant, world_ms);
             }
         }
         self.level_poll = level_poll;

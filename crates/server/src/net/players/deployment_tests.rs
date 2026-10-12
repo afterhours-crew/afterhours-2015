@@ -67,6 +67,20 @@ fn spawn_presentation_waits_for_capacity_with_poll_and_rejects_foreign_owner() {
         call: Call::Assign(1),
     };
     listener.pending_spawns.push_back((100, notification));
+    // The teleport waits for the assignment to leave in an earlier tick; a
+    // participant with no scheduled assignment teleports when due.
+    let assign = listener.spawn_points.bindings().unwrap().assign;
+    let teleport = move |participant: u16, vehicle: u16| nfs_world::teleport::Command {
+        endpoint: assign,
+        participant,
+        vehicle,
+        position: [1.0, 2.0, 3.0],
+        basis: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+    };
+    listener
+        .pending_teleports
+        .push_back((50, teleport(participant, 300)));
+    assert_eq!(listener.due_teleport(100), None);
     let filler = HostRpc::Participant(notification);
     listener
         .pending_rpcs
@@ -85,6 +99,18 @@ fn spawn_presentation_waits_for_capacity_with_poll_and_rejects_foreign_owner() {
     assert_eq!(listener.pending_rpcs[1], filler);
     assert!(matches!(listener.pending_rpcs[2],HostRpc::Event(e) if e.event==14));
     assert!(listener.pending_spawns.is_empty());
+    assert_eq!(listener.due_teleport(100), None);
+    assert_eq!(listener.due_teleport(101), Some(teleport(participant, 300)));
+    listener.teleport_sent();
+    listener
+        .pending_teleports
+        .push_back((200, teleport(participant + 1, 301)));
+    assert_eq!(listener.due_teleport(199), None);
+    assert_eq!(
+        listener.due_teleport(200),
+        Some(teleport(participant + 1, 301))
+    );
+    listener.teleport_sent();
     listener.pending_rpcs.clear();
     listener.advance_level_poll(101).unwrap();
     assert!(listener.pending_rpcs.is_empty());

@@ -60,6 +60,12 @@ pub(super) struct PlayerListener {
     pending_spawns: VecDeque<(u64, nfs_world::participants::Notification)>,
     /// Host teleports of world cars, due at world ms (sent as content).
     pending_teleports: VecDeque<(u64, nfs_world::teleport::Command)>,
+    /// World clock at which each participant's spawn assignment was queued.
+    /// The teleport waits for it: the client adopts the assigned spawn id
+    /// only when the assignment precedes its spawn-zone report, and the
+    /// car reports the zone within tens of milliseconds of the teleport
+    /// (E844b: a later assignment left the client on id 1 with no prompt).
+    spawn_released: BTreeMap<u16, u64>,
     /// Completion handoffs awaiting a current owned binding snapshot.
     pending_binding_refreshes: VecDeque<(u64, u16)>,
     glass: crate::glass::Glass,
@@ -417,12 +423,26 @@ impl PlayerListener {
     pub(super) fn files_alive(&mut self, now: u64) -> bool {
         self.stats.files_alive(now)
     }
-    /// The next host teleport due by `world_ms`, oldest first.
+    /// The next host teleport due by `world_ms`, oldest first, once the
+    /// participant's spawn assignment has left in an earlier tick (official
+    /// E742: assignment, then the client's zone report; the teleport may not
+    /// overtake the assignment). A participant without a scheduled
+    /// assignment (no SpawnPoints scene) teleports when due.
     pub(super) fn due_teleport(&self, world_ms: u64) -> Option<nfs_world::teleport::Command> {
-        self.pending_teleports
-            .front()
-            .filter(|(at, _)| *at <= world_ms)
-            .map(|(_, command)| *command)
+        let (at, command) = self.pending_teleports.front()?;
+        if *at > world_ms
+            || self
+                .pending_spawns
+                .iter()
+                .any(|(_, n)| n.participant == command.participant)
+            || self
+                .spawn_released
+                .get(&command.participant)
+                .is_some_and(|released| *released >= world_ms)
+        {
+            return None;
+        }
+        Some(*command)
     }
     pub(super) fn teleport_sent(&mut self) {
         self.pending_teleports.pop_front();
@@ -455,6 +475,7 @@ impl PlayerListener {
             deferred_deletions: BTreeMap::new(),
             pending_spawns: VecDeque::new(),
             pending_teleports: VecDeque::new(),
+            spawn_released: BTreeMap::new(),
             pending_binding_refreshes: VecDeque::new(),
             arrivals: None,
             returns: None,
@@ -1585,6 +1606,7 @@ impl Listener for PlayerListener {
         for (participant, removed) in completed_returns {
             self.pending_spawns
                 .retain(|(_, n)| n.participant != participant);
+            self.spawn_released.remove(&participant);
             self.pending_teleports.retain(|(_, n)| n.vehicle != removed);
             self.pending_binding_refreshes
                 .retain(|(_, p)| *p != participant);
