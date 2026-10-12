@@ -320,3 +320,66 @@ fn independent_account_restore_and_reconnect_use_current_committed_generation() 
     assert_eq!(restore(&snapshot), restore(&repo.snapshot(who).unwrap()));
     assert_eq!(restore(&snapshot).generation(), 3);
 }
+
+#[test]
+fn post_intro_rows_restore_as_intro_complete_with_the_activated_main_objective() {
+    let catalog = Catalog::from_json(&content()).unwrap();
+    let settings = Settings {
+        consumer_beta: false,
+    };
+    let rows = catalog.post_intro(settings);
+    assert_eq!(
+        rows,
+        [(10, false, true), (20, false, true), (30, true, false)].map(|(id, active, completed)| {
+            ObjectiveRow {
+                id,
+                active,
+                completed,
+            }
+        })
+    );
+    // The main objective gated on the consumer-beta setting stays unwritten
+    // when that setting blocks it.
+    assert_eq!(
+        catalog
+            .post_intro(Settings {
+                consumer_beta: true
+            })
+            .len(),
+        2
+    );
+    let (_, _, mut snapshot) = local();
+    snapshot.tables.get_mut(&OBJECTIVES).unwrap().rows = rows
+        .iter()
+        .map(|row| {
+            (
+                row.id,
+                Row::from([
+                    (ACTIVE, Value::Int(row.active.into())),
+                    (COMPLETED, Value::Int(row.completed.into())),
+                ]),
+            )
+        })
+        .collect();
+    let mut restored = restore(&snapshot);
+    for id in [10, 20] {
+        assert_eq!(
+            restored.branch(Branch::Intro).objectives()[&id],
+            Objective {
+                active: false,
+                completed: true
+            }
+        );
+    }
+    assert_eq!(
+        restored.branch(Branch::Main).objectives()[&30],
+        Objective {
+            active: true,
+            completed: false
+        }
+    );
+    let dispatched = dispatch(&mut restored).unwrap();
+    assert!(dispatched[&Branch::Intro].activated.is_empty());
+    assert_eq!(dispatched[&Branch::Main].activated, [30]);
+    assert!(ready(&dispatched, false));
+}

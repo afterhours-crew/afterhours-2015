@@ -12,15 +12,28 @@ use crate::{
 use nfs_storage::{
     AccountId, Batch, MemoryRepository, Op, Timestamp,
     account::{Document, Kind, Repository},
+    tables::{MAX_ROWS, Row, Value as Cell},
 };
 use nfs_world_core::items::InventoryCatalog;
 use serde_json::{Value, json};
-use std::{fs::File, io::Read, path::Path};
+use std::{collections::BTreeSet, fs::File, io::Read, path::Path};
 
 pub const SEED_BYTES: usize = 40;
 pub const MAX_POLICY_BYTES: usize = 512 * 1024;
 // Garage, persistent tables, awards and challenges reserve MAX through MAX-3.
 pub const INITIAL_BATCH: u64 = u64::MAX - 4;
+/// The objective state table and its two saved cells (E470: the client's
+/// native restore applies a saved objective only when both cells exist).
+pub const OBJECTIVES_TABLE: &str = "ProgressionObjective";
+pub const ACTIVE_COLUMN: &str = "Active";
+pub const COMPLETED_COLUMN: &str = "Completed";
+/// Objective state stored at creation, both cells always present.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ObjectiveRow {
+    pub id: u64,
+    pub active: bool,
+    pub completed: bool,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
     Policy,
@@ -127,6 +140,9 @@ impl Prepared {
     /// Construct and validate all state in memory before touching the filesystem.
     /// Positive persona/account IDs use distinct local domains. Item IDs are
     /// account-scoped and come from the existing Items initialization policy.
+    /// `objectives` are saved objective states written into the otherwise
+    /// asset-default objective table (none for a pre-prologue account); each
+    /// ID once, both cells stored, validated against the table schema.
     pub fn new(
         name: &str,
         seed: [u8; SEED_BYTES],
@@ -134,6 +150,7 @@ impl Prepared {
         policy: &Policy,
         items: &InventoryCatalog,
         tables: &persistent::Catalog,
+        objectives: &[ObjectiveRow],
     ) -> Result<Self, Error> {
         if name.len() > 32 {
             return Err(Error::Identity);
@@ -185,6 +202,36 @@ impl Prepared {
             .map_err(|_| Error::Progression)?;
         let snapshot = crate::challenges::ensure_empty(&memory, storage, snapshot, now)
             .map_err(|_| Error::Progression)?;
+        // Later initializers reread the repository, so write the rows last.
+        let mut snapshot = snapshot;
+        if !objectives.is_empty() {
+            if objectives.len() > MAX_ROWS {
+                return Err(Error::Bounds);
+            }
+            let table = snapshot
+                .tables
+                .get_mut(&persistent::key(OBJECTIVES_TABLE))
+                .filter(|table| table.rows.is_empty())
+                .ok_or(Error::Progression)?;
+            let mut ids = BTreeSet::new();
+            for row in objectives {
+                if row.id == 0 || !ids.insert(row.id) {
+                    return Err(Error::Progression);
+                }
+                table.rows.insert(
+                    row.id,
+                    Row::from([
+                        (persistent::key(ACTIVE_COLUMN), Cell::Int(row.active.into())),
+                        (
+                            persistent::key(COMPLETED_COLUMN),
+                            Cell::Int(row.completed.into()),
+                        ),
+                    ]),
+                );
+            }
+            // The schema view rejects columns the table does not define.
+            tables.view(&snapshot).map_err(|_| Error::Progression)?;
+        }
         let mut ops: Vec<_> = snapshot.items.into_values().map(Op::Insert).collect();
         ops.push(Op::SetGarage(snapshot.garage.ok_or(Error::Inventory)?));
         ops.extend(

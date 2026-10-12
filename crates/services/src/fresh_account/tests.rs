@@ -50,15 +50,118 @@ fn catalog() -> InventoryCatalog {
     .unwrap()
 }
 fn prepare(label: u8) -> Prepared {
+    prepare_with(label, &persistent::tests::catalog(), &[]).unwrap()
+}
+/// The synthetic table catalog with the real objective columns.
+fn objective_tables() -> persistent::Catalog {
+    let mut v = persistent::tests::content();
+    v["tables"][0]["columns"] = json!([
+        {"name":ACTIVE_COLUMN,"key":persistent::key(ACTIVE_COLUMN),"value_type":"int","default":""},
+        {"name":COMPLETED_COLUMN,"key":persistent::key(COMPLETED_COLUMN),"value_type":"int","default":""}
+    ]);
+    persistent::Catalog::from_json(&v).unwrap()
+}
+fn prepare_with(
+    label: u8,
+    tables: &persistent::Catalog,
+    rows: &[ObjectiveRow],
+) -> Result<Prepared, Error> {
     Prepared::new(
         "Fresh Driver",
         [label; SEED_BYTES],
         Timestamp(17),
         &Policy::from_json(&policy()).unwrap(),
         &catalog(),
-        &persistent::tests::catalog(),
+        tables,
+        rows,
     )
-    .unwrap()
+}
+
+#[test]
+fn saved_objective_rows_are_published_with_both_cells_and_validated() {
+    let rows = [
+        ObjectiveRow {
+            id: 10,
+            active: false,
+            completed: true,
+        },
+        ObjectiveRow {
+            id: 30,
+            active: true,
+            completed: false,
+        },
+    ];
+    let root = Root::new();
+    let prepared = prepare_with(5, &objective_tables(), &rows).unwrap();
+    let account = prepared.identity().storage_account();
+    prepared.publish(&root.0).unwrap();
+    let repository = SqliteRepository::open_owned_directory(&root.0).unwrap();
+    let saved = repository.snapshot(account).unwrap();
+    assert_eq!(saved.generation, 1);
+    let objectives = persistent::key(OBJECTIVES_TABLE);
+    let table = &saved.tables[&objectives];
+    assert_eq!(table.rows.len(), 2);
+    for row in rows {
+        let cells = &table.rows[&row.id];
+        assert_eq!(cells.len(), 2);
+        assert_eq!(
+            cells[&persistent::key(ACTIVE_COLUMN)],
+            Cell::Int(row.active.into())
+        );
+        assert_eq!(
+            cells[&persistent::key(COMPLETED_COLUMN)],
+            Cell::Int(row.completed.into())
+        );
+    }
+    // The same catalog reopens the saved rows as present cells; absent
+    // objectives have none.
+    let loaded = objective_tables().view(&saved).unwrap();
+    assert!(loaded.has_cell(objectives, 30, persistent::key(ACTIVE_COLUMN)));
+    assert!(loaded.has_cell(objectives, 10, persistent::key(COMPLETED_COLUMN)));
+    assert!(!loaded.has_cell(objectives, 20, persistent::key(ACTIVE_COLUMN)));
+    // Without rows the table stays asset-default and empty, as before.
+    let fresh = prepare(6);
+    let fresh_table = fresh
+        .batch
+        .ops
+        .iter()
+        .find_map(|op| match op {
+            Op::SetTable(key, table) if *key == objectives => Some(table),
+            _ => None,
+        })
+        .unwrap();
+    assert!(fresh_table.rows.is_empty());
+    // Duplicate or zero IDs, columns the schema lacks and too many rows fail
+    // before anything is published.
+    let duplicate = [rows[0], rows[0]];
+    assert_eq!(
+        prepare_with(7, &objective_tables(), &duplicate).err(),
+        Some(Error::Progression)
+    );
+    let zero = [ObjectiveRow {
+        id: 0,
+        active: true,
+        completed: false,
+    }];
+    assert_eq!(
+        prepare_with(7, &objective_tables(), &zero).err(),
+        Some(Error::Progression)
+    );
+    assert_eq!(
+        prepare_with(7, &persistent::tests::catalog(), &rows).err(),
+        Some(Error::Progression)
+    );
+    let many: Vec<_> = (1..=MAX_ROWS as u64 + 1)
+        .map(|id| ObjectiveRow {
+            id,
+            active: false,
+            completed: true,
+        })
+        .collect();
+    assert_eq!(
+        prepare_with(7, &objective_tables(), &many).err(),
+        Some(Error::Bounds)
+    );
 }
 
 #[test]
@@ -156,7 +259,8 @@ fn account_bearing_policy_and_invalid_identity_inputs_are_rejected_before_publis
                 Timestamp(1),
                 &policy,
                 &catalog(),
-                &persistent::tests::catalog()
+                &persistent::tests::catalog(),
+                &[]
             ),
             Err(Error::Identity)
         ));
@@ -168,7 +272,8 @@ fn account_bearing_policy_and_invalid_identity_inputs_are_rejected_before_publis
             Timestamp(1),
             &policy,
             &catalog(),
-            &persistent::tests::catalog()
+            &persistent::tests::catalog(),
+            &[]
         ),
         Err(Error::Identity)
     ));

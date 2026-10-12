@@ -5,7 +5,7 @@
 #[cfg(test)]
 use crate::content::BUILD;
 use crate::{Failure, persistent::Loaded};
-pub use data::{Branch, FORMAT, Settings, VERSION};
+pub use data::{Branch, FORMAT, ObjectiveRow, Settings, VERSION};
 use nfs_content::progression as data;
 use nfs_storage::tables::Value;
 use serde_json::Value as Json;
@@ -86,6 +86,10 @@ impl Restored {
 impl Catalog {
     pub fn objective_ids(&self, branch: Branch) -> BTreeSet<u64> {
         self.definition.objective_ids(branch)
+    }
+    /// Saved objective rows of a post-prologue account; see the content crate.
+    pub fn post_intro(&self, settings: Settings) -> Vec<ObjectiveRow> {
+        self.definition.post_intro(settings)
     }
     pub fn load(path: &Path) -> Result<Self, Failure> {
         Ok(Self {
