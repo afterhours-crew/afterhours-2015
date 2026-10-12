@@ -203,6 +203,33 @@ fn request_and_release_toggle_the_occupied_flag() {
         })))
     );
     assert_eq!(model.receive(release.span(), owns), Ok(Some(None)));
+    // The report form names the participant and kind; a repeated release
+    // is current but changes no flag, a stale id is not current.
+    assert_eq!(
+        model.report(release.span(), owns),
+        Ok(Some(Report {
+            participant: PLAYER,
+            release: true,
+            current: true,
+            flag: None
+        }))
+    );
+    let on = model.report(request.span(), owns).unwrap().unwrap();
+    assert_eq!(
+        (on.participant, on.release, on.current),
+        (PLAYER, false, true)
+    );
+    assert_eq!(on.flag.map(|f| f.enabled), Some(true));
+    model.assign(PLAYER, 2).unwrap();
+    assert_eq!(
+        model.report(release.span(), owns),
+        Ok(Some(Report {
+            participant: PLAYER,
+            release: true,
+            current: false,
+            flag: None
+        }))
+    );
 }
 
 #[test]

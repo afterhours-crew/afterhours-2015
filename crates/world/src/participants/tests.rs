@@ -547,6 +547,25 @@ fn three_round_trips_keep_return_order_retries_and_foreign_owners_isolated() {
         );
         assert_eq!(model, before);
         let route = request(4, 8, 100, 0, 7);
+        // The first request of a zone visit only shows the prompt; the second
+        // (PageDown) starts the return. Leaving the zone resets the prompt.
+        assert_eq!(
+            model.receive(route.span(), |p| p == 8).unwrap(),
+            Outcome::Advanced(Vec::new())
+        );
+        assert_eq!(model.stage(8), Some(Stage::ReturnPrompted));
+        assert_eq!(model.take_prompted(), [8]);
+        assert!(model.take_returning().is_empty());
+        assert_eq!(model.leave_prompt(8), Outcome::Advanced(Vec::new()));
+        assert_eq!(model.stage(8), Some(Stage::FreeRoam));
+        assert_eq!(model.leave_prompt(8), Outcome::Repeated);
+        assert_eq!(model.leave_prompt(9), Outcome::Unsupported);
+        assert_eq!(
+            model.receive(route.span(), |p| p == 8).unwrap(),
+            Outcome::Advanced(Vec::new())
+        );
+        assert_eq!(model.take_prompted(), [8]);
+        assert!(model.in_free_roam().contains(&8));
         assert_eq!(
             calls(model.receive(route.span(), |p| p == 8).unwrap()),
             [
@@ -563,10 +582,12 @@ fn three_round_trips_keep_return_order_retries_and_foreign_owners_isolated() {
             ]
         );
         assert_eq!(model.take_returning(), [8]);
+        assert!(model.take_prompted().is_empty());
         assert_eq!(
             model.receive(route.span(), |p| p == 8).unwrap(),
             Outcome::Repeated
         );
+        assert_eq!(model.leave_prompt(8), Outcome::Unsupported);
         assert!(model.take_returning().is_empty());
         assert_eq!(
             calls(model.returned_to_garage(8)),

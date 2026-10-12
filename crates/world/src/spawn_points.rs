@@ -124,6 +124,15 @@ impl SpawnPoints {
         body: BitSpan<'_>,
         owns: impl Fn(u16) -> bool,
     ) -> Result<Option<Option<Flag>>, Error> {
+        Ok(self.report(body, owns)?.map(|report| report.flag))
+    }
+    /// `receive` with the accepted call's participant and kind, for callers
+    /// that follow the zone (the garage prompt ends when the car leaves it).
+    pub fn report(
+        &mut self,
+        body: BitSpan<'_>,
+        owns: impl Fn(u16) -> bool,
+    ) -> Result<Option<Report>, Error> {
         let Some(b) = self.bindings else {
             return Ok(None);
         };
@@ -165,24 +174,46 @@ impl SpawnPoints {
         if id == 0 || id > current {
             return Err(Error::Shape);
         }
+        let release = route.method_index() == RELEASE;
         // The next assignment is reserved before it is published. In-flight
         // callbacks still carry the previous spawn id; acknowledge them without
         // applying old occupancy to the current spawn or blocking reliable RPCs.
         if id < current {
-            return Ok(Some(None));
+            return Ok(Some(Report {
+                participant,
+                release,
+                current: false,
+                flag: None,
+            }));
         }
         let was = !self.occupants.is_empty();
-        if route.method_index() == REQUEST {
-            self.occupants.insert(participant);
-        } else {
+        if release {
             self.occupants.remove(&participant);
+        } else {
+            self.occupants.insert(participant);
         }
         let now = !self.occupants.is_empty();
-        Ok(Some((now != was).then_some(Flag {
-            endpoint: b.occupied,
-            enabled: now,
-        })))
+        Ok(Some(Report {
+            participant,
+            release,
+            current: true,
+            flag: (now != was).then_some(Flag {
+                endpoint: b.occupied,
+                enabled: now,
+            }),
+        }))
     }
+}
+/// An accepted client call on the assignment endpoint.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Report {
+    pub participant: u16,
+    /// A release (method 3) rather than a request (method 2).
+    pub release: bool,
+    /// The call carries the current spawn id; a stale id is acknowledged only.
+    pub current: bool,
+    /// The occupied-flag change to publish, if any.
+    pub flag: Option<Flag>,
 }
 
 #[cfg(test)]

@@ -1068,7 +1068,15 @@ impl Listener for PlayerListener {
                 match activation.receive_ready(
                     body,
                     |id| players.owns_participant(HOST_SELECTOR as u8, self.persona, id),
-                    |id| participants.stage(id) == Some(nfs_world::participants::Stage::FreeRoam),
+                    |id| {
+                        matches!(
+                            participants.stage(id),
+                            Some(
+                                nfs_world::participants::Stage::FreeRoam
+                                    | nfs_world::participants::Stage::ReturnPrompted
+                            )
+                        )
+                    },
                 ) {
                     Ok(Some(nfs_world::world_activation::Report::Retired { participant })) => {
                         // Queued unsubscription not yet applied by the client (E838).
@@ -1126,12 +1134,28 @@ impl Listener for PlayerListener {
                     return self.refuse_rpc(error, body);
                 }
             }
-            match spawn_points.receive(body, |id| {
+            match spawn_points.report(body, |id| {
                 players.owns_participant(HOST_SELECTOR as u8, self.persona, id)
             }) {
-                Ok(Some(flag)) => {
-                    tracing::info!(?flag, "owned spawn request or release");
-                    responses.extend(flag.map(nfs_world::participants::HostRpc::SpawnOccupied));
+                Ok(Some(report)) => {
+                    tracing::info!(flag = ?report.flag, "owned spawn request or release");
+                    responses.extend(
+                        report
+                            .flag
+                            .map(nfs_world::participants::HostRpc::SpawnOccupied),
+                    );
+                    // The car left the spawn zone: the Enter Garage prompt is
+                    // gone, so the next field-100 request is a first request.
+                    if report.release
+                        && report.current
+                        && participants.leave_prompt(report.participant)
+                            == nfs_world::participants::Outcome::Advanced(Vec::new())
+                    {
+                        tracing::info!(
+                            participant = report.participant,
+                            "garage prompt ended; the car left the spawn zone"
+                        );
+                    }
                     continue;
                 }
                 Ok(None) => {}
@@ -1155,6 +1179,16 @@ impl Listener for PlayerListener {
                                 .into_iter()
                                 .map(nfs_world::participants::HostRpc::Participant)
                                 .collect();
+                            let prompted = participants.take_prompted();
+                            if let [participant] = prompted.as_slice() {
+                                // First field-100 request of this zone visit:
+                                // nothing goes out, so that PageDown repeats it.
+                                tracing::info!(
+                                    participant,
+                                    "garage prompt shown; the return waits for the confirming request"
+                                );
+                                continue;
+                            }
                             let returning = participants.take_returning();
                             if let [participant] = returning.as_slice() {
                                 let (
@@ -1495,9 +1529,13 @@ impl Listener for PlayerListener {
             return self.refuse(replication::Error::Bound);
         }
         for participant in participants.in_free_roam() {
-            if self.participants.stage(participant)
-                != Some(nfs_world::participants::Stage::FreeRoam)
-            {
+            if !matches!(
+                self.participants.stage(participant),
+                Some(
+                    nfs_world::participants::Stage::FreeRoam
+                        | nfs_world::participants::Stage::ReturnPrompted
+                )
+            ) {
                 tracing::info!(
                     participant,
                     "world entry completed; participant entered free roam"

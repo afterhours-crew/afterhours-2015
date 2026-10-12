@@ -205,6 +205,14 @@ pub enum Stage {
     Arriving,
     /// Startup state 2 after the exit chain: driving in the open world.
     FreeRoam,
+    /// The client's first startup field-100 request of a spawn-zone visit: its
+    /// Enter Garage prompt shows. Still free roam; nothing is answered. The
+    /// return begins when the request repeats while the car is still in the
+    /// zone, which the client does on PageDown when the first request went
+    /// unanswered (E827: a repeat 34 s after the arrival request; E841c: an
+    /// answered first request made PageDown close the prompt instead). Leaving
+    /// the zone ends the prompt.
+    ReturnPrompted,
     /// The garage-entry sequence is running while the garage is prepared.
     ReturningToGarage,
 }
@@ -357,6 +365,7 @@ pub struct Lifecycle {
     arriving: Vec<u16>,
     returning: Option<ReturnBindings>,
     returned_requests: Vec<u16>,
+    prompted_requests: Vec<u16>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Outcome {
@@ -374,6 +383,22 @@ impl Lifecycle {
     }
     pub fn take_returning(&mut self) -> Vec<u16> {
         std::mem::take(&mut self.returned_requests)
+    }
+    /// Participants whose Enter Garage prompt began since the last call.
+    pub fn take_prompted(&mut self) -> Vec<u16> {
+        std::mem::take(&mut self.prompted_requests)
+    }
+    /// The prompted participant's car left the spawn zone: the prompt is gone
+    /// and the next request is a first request again.
+    pub fn leave_prompt(&mut self, participant: u16) -> Outcome {
+        match self.stages.get_mut(&participant) {
+            Some(stage @ Stage::ReturnPrompted) => {
+                *stage = Stage::FreeRoam;
+                Outcome::Advanced(Vec::new())
+            }
+            Some(Stage::FreeRoam) => Outcome::Repeated,
+            _ => Outcome::Unsupported,
+        }
     }
     /// Called only after validating and completing this owner's entry sequence.
     pub fn returned_to_garage(&mut self, participant: u16) -> Outcome {
@@ -659,7 +684,9 @@ impl Lifecycle {
     pub fn in_free_roam(&self) -> Vec<u16> {
         self.stages
             .iter()
-            .filter_map(|(&id, stage)| (*stage == Stage::FreeRoam).then_some(id))
+            .filter_map(|(&id, stage)| {
+                matches!(stage, Stage::FreeRoam | Stage::ReturnPrompted).then_some(id)
+            })
             .collect()
     }
     pub fn available(&self) -> bool {
@@ -758,6 +785,7 @@ impl Lifecycle {
                     | Stage::ExitingGarage
                     | Stage::EnteringWorld
                     | Stage::FreeRoam
+                    | Stage::ReturnPrompted
             ) {
                 Ok(Outcome::Repeated)
             } else {
@@ -813,7 +841,15 @@ impl Lifecycle {
             .ok_or(Error::UnknownObject)?;
         match *stage {
             Stage::ReturningToGarage => return Ok(Some(Outcome::Repeated)),
-            Stage::FreeRoam => {}
+            Stage::FreeRoam => {
+                // First request of this zone visit: the prompt shows and the
+                // host answers nothing, so that the client repeats the request
+                // on PageDown (`Stage::ReturnPrompted`).
+                *stage = Stage::ReturnPrompted;
+                self.prompted_requests.push(participant);
+                return Ok(Some(Outcome::Advanced(Vec::new())));
+            }
+            Stage::ReturnPrompted => {}
             _ => return Ok(Some(Outcome::Unsupported)),
         }
         *stage = Stage::ReturningToGarage;
@@ -923,7 +959,11 @@ impl Lifecycle {
             }
             (
                 ExitRoute::Exit | ExitRoute::WorldLoaded | ExitRoute::WorldReady,
-                Stage::ExitingGarage | Stage::EnteringWorld | Stage::Arriving | Stage::FreeRoam,
+                Stage::ExitingGarage
+                | Stage::EnteringWorld
+                | Stage::Arriving
+                | Stage::FreeRoam
+                | Stage::ReturnPrompted,
             ) => return Ok(Some(Outcome::Repeated)),
             _ => return Ok(Some(Outcome::Unsupported)),
         };
