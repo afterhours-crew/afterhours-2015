@@ -887,3 +887,144 @@ fn player_view_admission_rolls_back_when_full_and_retries_once_per_session() {
             .is_none()
     );
 }
+
+/// E838: the host retired a participant's world membership when it queued
+/// the unsubscription, but the client reported a volume crossing before that
+/// notification arrived. The frame was refused and its reliable report was
+/// resent in every later frame, so every later frame was refused too.
+#[test]
+fn late_world_reports_from_a_retired_participant_do_not_refuse_the_frame() {
+    use nfs_protocol::world::rpc::Serial;
+    use nfs_world::{
+        bits::BitWriter,
+        replication::sublevel::{gameplay, ordinary},
+        world_activation::{Activation, Catalog, Site},
+    };
+    let profiles = Content::new(vec![(501, gameplay::profile().unwrap())]).unwrap();
+    let creation = ordinary::creation(
+        1,
+        501,
+        None,
+        Serial::new(0).unwrap(),
+        &ordinary::unpopulated(profiles.profile(501).unwrap()).unwrap(),
+        &profiles,
+    )
+    .unwrap();
+    let mut listener = PlayerListener::new(101);
+    let records = listener
+        .players
+        .create_scenes(&[1], vec![creation], &profiles)
+        .unwrap();
+    listener.players.enable_player_manager().unwrap().unwrap();
+    let site = |serializer| Site {
+        scene_key: 501,
+        serializer,
+    };
+    listener.world_activation = Some(
+        Activation::bind(
+            &records,
+            &Catalog {
+                volumes: vec![site(5)],
+                presence: site(19),
+                streamed: site(47),
+                location: site(28),
+            },
+        )
+        .unwrap(),
+    );
+    let player = listener
+        .players
+        .create(
+            HOST_SELECTOR as u8,
+            101,
+            nfs_world::replication::players::Request {
+                name: b"Driver".to_vec(),
+                flag: false,
+                slot: 0,
+            },
+        )
+        .unwrap()
+        .unwrap()
+        .id;
+    let participant = listener
+        .players
+        .join(HOST_SELECTOR as u8, 101, player)
+        .unwrap()
+        .unwrap()
+        .id;
+    let objects = listener.players.objects();
+    let (scene, volume) = objects.scene_endpoint(501, 5).unwrap();
+    let (_, location) = objects.scene_endpoint(501, 28).unwrap();
+    let report = |participant: u16, selector: u16, method: u32, clock: Option<f64>| {
+        let mut payload = BitWriter::new();
+        payload.put(selector.into(), 9).put(method.into(), 32);
+        if let Some(clock) = clock {
+            payload.put(clock.to_bits(), 64).put(0, 32);
+        }
+        payload.put(0, 7);
+        let mut body = BitWriter::new();
+        body.put(0, 32)
+            .put(0, 32)
+            .put(2, 8)
+            .put(scene.into(), 13)
+            .put(participant.into(), 13)
+            .put(payload.bytes().len() as u64, 9)
+            .put_span(payload.span());
+        let mut wire = BitWriter::new();
+        wire.put(1 << frame::MESSAGES, 6)
+            .put(1, 4)
+            .put(0, 1)
+            .put(1, 1)
+            .put(0, 3)
+            .put(0, 7)
+            .put(47, 7)
+            .put_span(body.span())
+            .put(0, 1)
+            .align();
+        wire
+    };
+    let deliver = |listener: &mut PlayerListener, wire: &BitWriter| {
+        let accepted = listener.frame(Queued {
+            advertised: None,
+            frame: 0,
+            data: wire.span(),
+        });
+        listener.pending.clear();
+        listener.pending_rpcs.clear();
+        accepted
+    };
+    let players = listener.players.clone();
+    let owns = |id| players.owns_participant(HOST_SELECTOR as u8, 101, id);
+    let activation = listener.world_activation.as_mut().unwrap();
+    assert_eq!(
+        activation.set(participant, true, 16, owns).unwrap().len(),
+        3
+    );
+    assert!(deliver(
+        &mut listener,
+        &report(participant, volume, 2, Some(1.))
+    ));
+    // The return retires membership; the unsubscription is still queued.
+    let activation = listener.world_activation.as_mut().unwrap();
+    assert_eq!(
+        activation.set(participant, false, 16, owns).unwrap().len(),
+        2
+    );
+    for wire in [
+        report(participant, volume, 3, Some(2.)),
+        report(participant, location, 0, None),
+        report(participant, volume, 2, Some(3.)),
+    ] {
+        assert!(deliver(&mut listener, &wire), "{:?}", listener.last_error);
+    }
+    assert_eq!((listener.refused, listener.last_error), (0, None));
+    // Ownership is still enforced: an unknown participant refuses the frame.
+    assert!(!deliver(
+        &mut listener,
+        &report(participant + 1, volume, 3, Some(4.))
+    ));
+    assert_eq!(
+        (listener.refused, listener.last_error),
+        (1, Some(replication::Error::UnknownObject))
+    );
+}

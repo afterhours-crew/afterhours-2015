@@ -20,6 +20,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 mod activation;
 mod customization;
 mod launchers;
+mod refusal;
 mod returning;
 mod sequences;
 
@@ -721,9 +722,7 @@ impl Listener for PlayerListener {
                 }),
                 Ok(_) => {}
                 Err(error) => {
-                    self.refused += 1;
-                    self.last_error = Some(error);
-                    return false;
+                    return self.refuse(error);
                 }
             }
         }
@@ -872,18 +871,14 @@ impl Listener for PlayerListener {
             Ok::<(), replication::Error>(())
         })();
         if let Err(error) = logic_result {
-            self.refused += 1;
-            self.last_error = Some(error);
-            return false;
+            return self.refuse(error);
         }
         for request in requests {
             match players.create(HOST_SELECTOR as u8, self.persona, request) {
                 Ok(Some(record)) => records.push(record),
                 Ok(None) => {}
                 Err(error) => {
-                    self.refused += 1;
-                    self.last_error = Some(error);
-                    return false;
+                    return self.refuse(error);
                 }
             }
         }
@@ -905,31 +900,24 @@ impl Listener for PlayerListener {
                         Ok(())
                     });
                 if let Err(error) = joined {
-                    self.refused += 1;
-                    self.last_error = Some(error);
-                    return false;
+                    return self.refuse(error);
                 }
             }
         }
         match players.sync_player_views() {
             Ok(views) => records.extend(views),
             Err(error) => {
-                self.refused += 1;
-                self.last_error = Some(error);
-                return false;
+                return self.refuse(error);
             }
         }
         match players.sync_player_manager() {
             Ok(record) => records.extend(record),
             Err(error) => {
-                self.refused += 1;
-                self.last_error = Some(error);
-                return false;
+                return self.refuse(error);
             }
         }
         if !records.is_empty() && self.pending.len() >= MAX_PENDING {
-            self.refused += 1;
-            return false;
+            return self.refuse(replication::Error::Bound);
         }
         let mut launchers = self.launchers.clone();
         let mut unsupported = 0;
@@ -939,9 +927,7 @@ impl Listener for PlayerListener {
                 Ok(true) => continue,
                 Ok(false) => {}
                 Err(error) => {
-                    self.refused += 1;
-                    self.last_error = Some(error);
-                    return false;
+                    return self.refuse_rpc(error, body);
                 }
             }
             if let Some(sequences) = &mut sequences {
@@ -949,9 +935,7 @@ impl Listener for PlayerListener {
                     Ok(true) => continue,
                     Ok(false) => {}
                     Err(error) => {
-                        self.refused += 1;
-                        self.last_error = Some(error);
-                        return false;
+                        return self.refuse_rpc(error, body);
                     }
                 }
             }
@@ -970,9 +954,7 @@ impl Listener for PlayerListener {
                         ) {
                             Ok(output) => output,
                             Err(error) => {
-                                self.refused += 1;
-                                self.last_error = Some(error);
-                                return false;
+                                return self.refuse_rpc(error, body);
                             }
                         };
                         // The exit presentation's last logic leaves with the
@@ -986,9 +968,7 @@ impl Listener for PlayerListener {
                         ) {
                             Ok(logic) => logic,
                             Err(error) => {
-                                self.refused += 1;
-                                self.last_error = Some(error);
-                                return false;
+                                return self.refuse_rpc(error, body);
                             }
                         };
                         tracing::info!(
@@ -1027,9 +1007,7 @@ impl Listener for PlayerListener {
                     }
                     Ok(None) => {}
                     Err(error) => {
-                        self.refused += 1;
-                        self.last_error = Some(error);
-                        return false;
+                        return self.refuse_rpc(error, body);
                     }
                 }
             }
@@ -1065,9 +1043,7 @@ impl Listener for PlayerListener {
                     Ok(Some(None)) => continue,
                     Ok(Some(Some((entry, removed)))) => {
                         let Some((participant, _)) = world_cars.remove(&removed) else {
-                            self.refused += 1;
-                            self.last_error = Some(replication::Error::UnknownObject);
-                            return false;
+                            return self.refuse_rpc(replication::Error::UnknownObject, body);
                         };
                         completed_returns.push((participant, removed));
                         exit_entries.push(entry);
@@ -1075,9 +1051,7 @@ impl Listener for PlayerListener {
                     }
                     Ok(None) => {}
                     Err(error) => {
-                        self.refused += 1;
-                        self.last_error = Some(error);
-                        return false;
+                        return self.refuse_rpc(error, body);
                     }
                 }
             }
@@ -1086,9 +1060,7 @@ impl Listener for PlayerListener {
                     Ok(true) => continue,
                     Ok(false) => {}
                     Err(error) => {
-                        self.refused += 1;
-                        self.last_error = Some(error);
-                        return false;
+                        return self.refuse_rpc(error, body);
                     }
                 }
             }
@@ -1098,25 +1070,36 @@ impl Listener for PlayerListener {
                     |id| players.owns_participant(HOST_SELECTOR as u8, self.persona, id),
                     |id| participants.stage(id) == Some(nfs_world::participants::Stage::FreeRoam),
                 ) {
+                    Ok(Some(nfs_world::world_activation::Report::Retired { participant })) => {
+                        // Queued unsubscription not yet applied by the client (E838).
+                        tracing::info!(participant, "late world report from a retired participant");
+                        continue;
+                    }
                     Ok(Some(report)) => {
                         tracing::debug!(?report, "owned world volume or location report");
                         continue;
                     }
                     Ok(None) => {}
                     Err(error) => {
-                        self.refused += 1;
-                        self.last_error = Some(error);
-                        return false;
+                        return self.refuse_rpc(error, body);
                     }
                 }
             }
-            match trigger_volumes.receive(body, |id| {
-                world_cars.contains_key(&id)
-                    && players
-                        .owned_vehicles(HOST_SELECTOR as u8, self.persona)
-                        .contains(&id)
-            }) {
-                Ok(Some(report)) => {
+            match trigger_volumes.receive_retired(
+                body,
+                |id| {
+                    world_cars.contains_key(&id)
+                        && players
+                            .owned_vehicles(HOST_SELECTOR as u8, self.persona)
+                            .contains(&id)
+                },
+                |id| players.objects().retired(id),
+            ) {
+                Ok(Some(nfs_world::trigger_volumes::Outcome::Retired { vehicle })) => {
+                    tracing::info!(vehicle, "late trigger volume report for a removed car");
+                    continue;
+                }
+                Ok(Some(nfs_world::trigger_volumes::Outcome::Observed(report))) => {
                     if report.changed {
                         tracing::info!(
                             scene = report.scene,
@@ -1131,9 +1114,7 @@ impl Listener for PlayerListener {
                 }
                 Ok(None) => {}
                 Err(error) => {
-                    self.refused += 1;
-                    self.last_error = Some(error);
-                    return false;
+                    return self.refuse_rpc(error, body);
                 }
             }
             match level_poll.receive(body, |id| {
@@ -1142,9 +1123,7 @@ impl Listener for PlayerListener {
                 Ok(Some(_)) => continue,
                 Ok(None) => {}
                 Err(error) => {
-                    self.refused += 1;
-                    self.last_error = Some(error);
-                    return false;
+                    return self.refuse_rpc(error, body);
                 }
             }
             match spawn_points.receive(body, |id| {
@@ -1157,9 +1136,7 @@ impl Listener for PlayerListener {
                 }
                 Ok(None) => {}
                 Err(error) => {
-                    self.refused += 1;
-                    self.last_error = Some(error);
-                    return false;
+                    return self.refuse_rpc(error, body);
                 }
             }
             match launchers.receive(body, |id| {
@@ -1192,9 +1169,7 @@ impl Listener for PlayerListener {
                                     self.vehicles.as_deref(),
                                 )
                                 else {
-                                    self.refused += 1;
-                                    self.last_error = Some(replication::Error::Unsupported);
-                                    return false;
+                                    return self.refuse_rpc(replication::Error::Unsupported, body);
                                 };
                                 match Self::begin_return(
                                     &mut players,
@@ -1210,9 +1185,7 @@ impl Listener for PlayerListener {
                                 ) {
                                     Ok(entries) => exit_entries.extend(entries),
                                     Err(error) => {
-                                        self.refused += 1;
-                                        self.last_error = Some(error);
-                                        return false;
+                                        return self.refuse_rpc(error, body);
                                     }
                                 }
                                 continue;
@@ -1231,9 +1204,7 @@ impl Listener for PlayerListener {
                                     Ok(Some(rpc)) => chain.insert(3.min(chain.len()), rpc),
                                     Ok(None) => {}
                                     Err(error) => {
-                                        self.refused += 1;
-                                        self.last_error = Some(error);
-                                        return false;
+                                        return self.refuse_rpc(error, body);
                                     }
                                 }
                             }
@@ -1253,9 +1224,7 @@ impl Listener for PlayerListener {
                                     }
                                     Ok(None) => None,
                                     Err(error) => {
-                                        self.refused += 1;
-                                        self.last_error = Some(error);
-                                        return false;
+                                        return self.refuse_rpc(error, body);
                                     }
                                 },
                                 _ => None,
@@ -1282,9 +1251,7 @@ impl Listener for PlayerListener {
                                         );
                                     }
                                     Err(error) => {
-                                        self.refused += 1;
-                                        self.last_error = Some(error);
-                                        return false;
+                                        return self.refuse_rpc(error, body);
                                     }
                                 }
                             }
@@ -1302,17 +1269,14 @@ impl Listener for PlayerListener {
                                     if let Err(error) =
                                         Self::register_world_car(&mut world_cars, &exited, &section)
                                     {
-                                        self.refused += 1;
-                                        self.last_error = Some(error);
-                                        return false;
+                                        return self.refuse_rpc(error, body);
                                     }
                                     if let Some(car) = section.records.first()
                                         && !garage_deletions.is_empty()
                                     {
                                         if deferred_deletions.len() >= MAX_WORLD_CARS {
-                                            self.refused += 1;
-                                            self.last_error = Some(replication::Error::Bound);
-                                            return false;
+                                            return self
+                                                .refuse_rpc(replication::Error::Bound, body);
                                         }
                                         deferred_deletions
                                             .insert(car.id, std::mem::take(&mut garage_deletions));
@@ -1334,9 +1298,7 @@ impl Listener for PlayerListener {
                                         }
                                         Ok((None, chain)) => responses.extend(chain),
                                         Err(error) => {
-                                            self.refused += 1;
-                                            self.last_error = Some(error);
-                                            return false;
+                                            return self.refuse_rpc(error, body);
                                         }
                                     }
                                 }
@@ -1345,16 +1307,12 @@ impl Listener for PlayerListener {
                         Ok(nfs_world::participants::Outcome::Repeated) => {}
                         Ok(nfs_world::participants::Outcome::Unsupported) => unsupported += 1,
                         Err(error) => {
-                            self.refused += 1;
-                            self.last_error = Some(error);
-                            return false;
+                            return self.refuse_rpc(error, body);
                         }
                     }
                 }
                 Err(error) => {
-                    self.refused += 1;
-                    self.last_error = Some(error);
-                    return false;
+                    return self.refuse_rpc(error, body);
                 }
             }
         }
@@ -1377,9 +1335,7 @@ impl Listener for PlayerListener {
                     responses.extend(chain);
                 }
                 Err(error) => {
-                    self.refused += 1;
-                    self.last_error = Some(error);
-                    return false;
+                    return self.refuse(error);
                 }
             }
         }
@@ -1396,9 +1352,7 @@ impl Listener for PlayerListener {
             }
             Ok(spawned) => sections.extend(spawned),
             Err(error) => {
-                self.refused += 1;
-                self.last_error = Some(error);
-                return false;
+                return self.refuse(error);
             }
         }
         let spawned = match Self::populate(
@@ -1411,9 +1365,7 @@ impl Listener for PlayerListener {
         ) {
             Ok(output) => output,
             Err(error) => {
-                self.refused += 1;
-                self.last_error = Some(error);
-                return false;
+                return self.refuse(error);
             }
         };
         sections.extend(spawned.sections);
@@ -1426,9 +1378,7 @@ impl Listener for PlayerListener {
         ) {
             Ok(replies) => responses.extend(replies),
             Err(error) => {
-                self.refused += 1;
-                self.last_error = Some(error);
-                return false;
+                return self.refuse(error);
             }
         }
         let mut logic_vehicles_fired = self.logic_vehicles_fired.clone();
@@ -1445,9 +1395,7 @@ impl Listener for PlayerListener {
                 responses.extend(events);
             }
             Err(error) => {
-                self.refused += 1;
-                self.last_error = Some(error);
-                return false;
+                return self.refuse(error);
             }
         }
         let mut blocked = Vec::new();
@@ -1492,16 +1440,12 @@ impl Listener for PlayerListener {
                                             },
                                         )
                                     {
-                                        self.refused += 1;
-                                        self.last_error = Some(replication::Error::Bound);
-                                        return false;
+                                        return self.refuse(replication::Error::Bound);
                                     }
                                     entries.push((section.remove(0), entry_replies));
                                 }
                                 Err(error) => {
-                                    self.refused += 1;
-                                    self.last_error = Some(error);
-                                    return false;
+                                    return self.refuse(error);
                                 }
                             }
                         } else {
@@ -1517,9 +1461,7 @@ impl Listener for PlayerListener {
             if !nfs_world::session::replication_frame(section, replies, 0)
                 .is_ok_and(|wire| wire.len() <= nfs_world::application::OUTBOUND_FRAME_BITS)
             {
-                self.refused += 1;
-                self.last_error = Some(replication::Error::Bound);
-                return false;
+                return self.refuse(replication::Error::Bound);
             }
         }
         entries.extend(exit_entries);
@@ -1530,9 +1472,7 @@ impl Listener for PlayerListener {
         match players.sync_location_map(HOST_SELECTOR as u8, self.persona, &map_cars, [0.; 3]) {
             Ok(record) => records.extend(record),
             Err(error) => {
-                self.refused += 1;
-                self.last_error = Some(error);
-                return false;
+                return self.refuse(error);
             }
         }
         if let Err(error) = Self::bind_progression_launchers(
@@ -1542,9 +1482,7 @@ impl Listener for PlayerListener {
             &mut launchers,
             self.persona,
         ) {
-            self.refused += 1;
-            self.last_error = Some(error);
-            return false;
+            return self.refuse(error);
         }
         if spawned.messages.len() > MAX_PENDING.saturating_sub(self.pending_content.len())
             || responses.len() > nfs_world::session::MAX_RPC_QUEUE - self.pending_rpcs.len()
@@ -1554,8 +1492,7 @@ impl Listener for PlayerListener {
             || scheduled_binding_refreshes.len()
                 > MAX_PENDING.saturating_sub(self.pending_binding_refreshes.len())
         {
-            self.refused += 1;
-            return false;
+            return self.refuse(replication::Error::Bound);
         }
         for participant in participants.in_free_roam() {
             if self.participants.stage(participant)

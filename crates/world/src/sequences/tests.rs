@@ -525,3 +525,22 @@ fn restart_keeps_streaming_readiness_but_requires_new_vehicle_acknowledgement() 
         next
     );
 }
+
+#[test]
+fn removed_ghosts_stay_retired_because_ids_are_never_reallocated() {
+    let (mut players, mut sequences) = setup();
+    let owner = join(&mut players, 1, 10);
+    let first = sequences.start(&mut players, owner).unwrap().unwrap().id;
+    let objects = players.objects();
+    assert!(!objects.retired(0));
+    assert!(!objects.retired(first));
+    assert!(!objects.retired(first + 1));
+    assert!(!objects.retired(owner.participant));
+    players.remove_entities(&[first]).unwrap();
+    assert!(players.objects().retired(first));
+    let other = join(&mut players, 2, 20);
+    assert!(other.participant > first);
+    assert!(players.objects().retired(first));
+    assert!(!players.objects().retired(other.participant));
+    assert!(!players.objects().retired(other.participant + 1));
+}
