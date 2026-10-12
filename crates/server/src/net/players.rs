@@ -1138,7 +1138,13 @@ impl Listener for PlayerListener {
                 players.owns_participant(HOST_SELECTOR as u8, self.persona, id)
             }) {
                 Ok(Some(report)) => {
-                    tracing::info!(flag = ?report.flag, "owned spawn request or release");
+                    tracing::info!(
+                        participant = report.participant,
+                        release = report.release,
+                        current = report.current,
+                        flag = ?report.flag,
+                        "owned spawn request or release"
+                    );
                     responses.extend(
                         report
                             .flag
@@ -1146,8 +1152,10 @@ impl Listener for PlayerListener {
                     );
                     // The car left the spawn zone: the Enter Garage prompt is
                     // gone, so the next field-100 request is a first request.
+                    // Later visits report the first assignment's id (E843:
+                    // every second-visit call was stale), so a stale release
+                    // ends the prompt too.
                     if report.release
-                        && report.current
                         && participants.leave_prompt(report.participant)
                             == nfs_world::participants::Outcome::Advanced(Vec::new())
                     {
