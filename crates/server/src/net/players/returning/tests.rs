@@ -275,12 +275,24 @@ fn return_handlers_publish_valid_frames_restore_loading_and_allow_three_exits() 
             .unwrap();
         lifecycle.take_arriving();
         lifecycle.arrived(participant);
-        let Outcome::Advanced(chain) = lifecycle
-            .receive(request(scene, participant, 100, 0).span(), |_| true)
-            .unwrap()
-        else {
+        // The prompt request sends only the presentation; the chain follows
+        // the car's garage-volume entry (official E742 order).
+        assert_eq!(
+            lifecycle
+                .receive(request(scene, participant, 100, 0).span(), |_| true)
+                .unwrap(),
+            Outcome::Advanced(Vec::new())
+        );
+        assert_eq!(lifecycle.take_prompted(), [participant]);
+        assert!(
+            PlayerListener::request_return(None, &players, &ghosts, persona, participant)
+                .unwrap()
+                .is_empty()
+        );
+        let Outcome::Advanced(chain) = lifecycle.enter_garage(participant) else {
             panic!()
         };
+        assert_eq!(chain.len(), 10);
         lifecycle.take_returning();
         returns.poll(cycle * 8000).unwrap();
         // Exercise the production queue's reference validation, not only wire

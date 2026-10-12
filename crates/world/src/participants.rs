@@ -205,6 +205,11 @@ pub enum Stage {
     Arriving,
     /// Startup state 2 after the exit chain: driving in the open world.
     FreeRoam,
+    /// The client reached the garage approach zone (startup field 100): its
+    /// Enter Garage prompt shows. Still free roam; the return waits for the
+    /// car to enter the garage trigger volume (official E742: the host fires
+    /// only the presentation here and starts the return after the crossing).
+    ReturnPrompted,
     /// The garage-entry sequence is running while the garage is prepared.
     ReturningToGarage,
 }
@@ -357,6 +362,7 @@ pub struct Lifecycle {
     arriving: Vec<u16>,
     returning: Option<ReturnBindings>,
     returned_requests: Vec<u16>,
+    prompted_requests: Vec<u16>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Outcome {
@@ -374,6 +380,52 @@ impl Lifecycle {
     }
     pub fn take_returning(&mut self) -> Vec<u16> {
         std::mem::take(&mut self.returned_requests)
+    }
+    /// Participants whose Enter Garage prompt request arrived since the last call.
+    pub fn take_prompted(&mut self) -> Vec<u16> {
+        std::mem::take(&mut self.prompted_requests)
+    }
+    /// The prompted participant's car entered the garage volume (or was already
+    /// inside): leave free roam and start the garage-entry chain.
+    pub fn enter_garage(&mut self, participant: u16) -> Outcome {
+        let Some(r) = self.returning else {
+            return Outcome::Unsupported;
+        };
+        let Some(stage) = self.stages.get_mut(&participant) else {
+            return Outcome::Unsupported;
+        };
+        match *stage {
+            Stage::ReturnPrompted => {}
+            Stage::ReturningToGarage => return Outcome::Repeated,
+            _ => return Outcome::Unsupported,
+        }
+        *stage = Stage::ReturningToGarage;
+        self.returned_requests.push(participant);
+        let mut chain = vec![(r.free_roam, Call::Leave)];
+        for (i, endpoint) in r.preparing.into_iter().enumerate() {
+            chain.extend([
+                (endpoint, Call::Enter),
+                (
+                    endpoint,
+                    if i == 1 || i == 2 {
+                        Call::LeaveTagged(31)
+                    } else {
+                        Call::Leave
+                    },
+                ),
+            ]);
+        }
+        chain.push((r.sequence, Call::Enter));
+        Outcome::Advanced(
+            chain
+                .into_iter()
+                .map(|(endpoint, call)| Notification {
+                    endpoint,
+                    participant,
+                    call,
+                })
+                .collect(),
+        )
     }
     /// Called only after validating and completing this owner's entry sequence.
     pub fn returned_to_garage(&mut self, participant: u16) -> Outcome {
@@ -659,7 +711,9 @@ impl Lifecycle {
     pub fn in_free_roam(&self) -> Vec<u16> {
         self.stages
             .iter()
-            .filter_map(|(&id, stage)| (*stage == Stage::FreeRoam).then_some(id))
+            .filter_map(|(&id, stage)| {
+                matches!(stage, Stage::FreeRoam | Stage::ReturnPrompted).then_some(id)
+            })
             .collect()
     }
     pub fn available(&self) -> bool {
@@ -758,6 +812,7 @@ impl Lifecycle {
                     | Stage::ExitingGarage
                     | Stage::EnteringWorld
                     | Stage::FreeRoam
+                    | Stage::ReturnPrompted
             ) {
                 Ok(Outcome::Repeated)
             } else {
@@ -812,37 +867,18 @@ impl Lifecycle {
             .get_mut(&participant)
             .ok_or(Error::UnknownObject)?;
         match *stage {
-            Stage::ReturningToGarage => return Ok(Some(Outcome::Repeated)),
+            Stage::ReturnPrompted | Stage::ReturningToGarage => {
+                return Ok(Some(Outcome::Repeated));
+            }
             Stage::FreeRoam => {}
             _ => return Ok(Some(Outcome::Unsupported)),
         }
-        *stage = Stage::ReturningToGarage;
-        self.returned_requests.push(participant);
-        let mut chain = vec![(r.free_roam, Call::Leave)];
-        for (i, endpoint) in r.preparing.into_iter().enumerate() {
-            chain.extend([
-                (endpoint, Call::Enter),
-                (
-                    endpoint,
-                    if i == 1 || i == 2 {
-                        Call::LeaveTagged(31)
-                    } else {
-                        Call::Leave
-                    },
-                ),
-            ]);
-        }
-        chain.push((r.sequence, Call::Enter));
-        Ok(Some(Outcome::Advanced(
-            chain
-                .into_iter()
-                .map(|(endpoint, call)| Notification {
-                    endpoint,
-                    participant,
-                    call,
-                })
-                .collect(),
-        )))
+        // The prompt request alone starts nothing on the wire: the official
+        // host answers it with the presentation and keeps the participant in
+        // free roam until the car enters the garage volume (`enter_garage`).
+        *stage = Stage::ReturnPrompted;
+        self.prompted_requests.push(participant);
+        Ok(Some(Outcome::Advanced(Vec::new())))
     }
     /// Garage exit and world entry (E747). `Ok(None)` is "not an exit route".
     fn exit_route(
@@ -923,7 +959,11 @@ impl Lifecycle {
             }
             (
                 ExitRoute::Exit | ExitRoute::WorldLoaded | ExitRoute::WorldReady,
-                Stage::ExitingGarage | Stage::EnteringWorld | Stage::Arriving | Stage::FreeRoam,
+                Stage::ExitingGarage
+                | Stage::EnteringWorld
+                | Stage::Arriving
+                | Stage::FreeRoam
+                | Stage::ReturnPrompted,
             ) => return Ok(Some(Outcome::Repeated)),
             _ => return Ok(Some(Outcome::Unsupported)),
         };

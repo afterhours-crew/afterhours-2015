@@ -26,6 +26,72 @@ fn empty_section() -> Section {
     }
 }
 impl PlayerListener {
+    /// The Enter Garage prompt request (startup field 100): only the
+    /// presentation's old-context stop goes out now. The official host keeps
+    /// the participant in free roam until the car enters the garage volume.
+    pub(super) fn request_return(
+        logic: Option<&crate::garage_logic::GarageLogic>,
+        players: &Players,
+        ghosts: &BTreeMap<u16, BTreeMap<u16, u16>>,
+        persona: u64,
+        participant: u16,
+    ) -> Result<Vec<Entry>, replication::Error> {
+        let requested = Self::presentation_events(
+            logic,
+            crate::garage_logic::Which::ReturnRequested,
+            players,
+            ghosts,
+            persona,
+            participant,
+        )?;
+        Ok(if requested.is_empty() {
+            Vec::new()
+        } else {
+            vec![(empty_section(), requested)]
+        })
+    }
+    /// Leave free roam for the prompted participant and begin the return;
+    /// `Unsupported` when the deployment lacks return content.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn garage_entered(
+        players: &mut Players,
+        participants: &mut nfs_world::participants::Lifecycle,
+        returns: Option<&mut Arrivals>,
+        population: Option<&mut Population>,
+        inventory: Option<&Inventory>,
+        content: Option<&GarageContent>,
+        logic: Option<&crate::garage_logic::GarageLogic>,
+        ghosts: &mut BTreeMap<u16, BTreeMap<u16, u16>>,
+        persona: u64,
+        participant: u16,
+    ) -> Result<Vec<Entry>, replication::Error> {
+        let (Some(returns), Some(population), Some(inventory), Some(content)) =
+            (returns, population, inventory, content)
+        else {
+            return Err(replication::Error::Unsupported);
+        };
+        let Outcome::Advanced(chain) = participants.enter_garage(participant) else {
+            return Err(replication::Error::Shape);
+        };
+        tracing::info!(
+            participant,
+            "car entered the garage volume after the prompt; garage return begins"
+        );
+        Self::begin_return(
+            players,
+            returns,
+            population,
+            inventory,
+            content,
+            logic,
+            ghosts,
+            persona,
+            participant,
+            chain.into_iter().map(HostRpc::Participant).collect(),
+        )
+    }
+    /// The car entered the garage volume after the prompt: stage the
+    /// replacement garage car, start the entry sequence and leave free roam.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn begin_return(
         players: &mut Players,
@@ -45,20 +111,7 @@ impl PlayerListener {
             participant,
         };
         returns.reset(players, owner)?;
-        // Deliver the old driving context's stop before its destruction. Both
-        // frames are reserved together by the listener's surrounding transaction.
-        let requested = Self::presentation_events(
-            logic,
-            crate::garage_logic::Which::ReturnRequested,
-            players,
-            ghosts,
-            persona,
-            participant,
-        )?;
         let mut out = Vec::new();
-        if !requested.is_empty() {
-            out.push((empty_section(), requested));
-        }
         let staged = population.prepare_return(
             players,
             crate::vehicle_content::population::Owner {

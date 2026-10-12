@@ -1068,7 +1068,15 @@ impl Listener for PlayerListener {
                 match activation.receive_ready(
                     body,
                     |id| players.owns_participant(HOST_SELECTOR as u8, self.persona, id),
-                    |id| participants.stage(id) == Some(nfs_world::participants::Stage::FreeRoam),
+                    |id| {
+                        matches!(
+                            participants.stage(id),
+                            Some(
+                                nfs_world::participants::Stage::FreeRoam
+                                    | nfs_world::participants::Stage::ReturnPrompted
+                            )
+                        )
+                    },
                 ) {
                     Ok(Some(nfs_world::world_activation::Report::Retired { participant })) => {
                         // Queued unsubscription not yet applied by the client (E838).
@@ -1109,6 +1117,37 @@ impl Listener for PlayerListener {
                             seconds = report.seconds,
                             "owned trigger volume crossing"
                         );
+                    }
+                    // The prompted participant's car entered the garage volume
+                    // (official E742: the return chain follows this report).
+                    let garage_scene = self
+                        .roles
+                        .as_ref()
+                        .and_then(|r| players.objects().scene(r.garage));
+                    if report.entered
+                        && report.changed
+                        && Some(report.scene) == garage_scene
+                        && let Some(&(participant, _)) = world_cars.get(&report.vehicle)
+                        && participants.stage(participant)
+                            == Some(nfs_world::participants::Stage::ReturnPrompted)
+                    {
+                        match Self::garage_entered(
+                            &mut players,
+                            &mut participants,
+                            returns.as_mut(),
+                            population.as_mut(),
+                            self.inventory.as_ref(),
+                            self.vehicles.as_deref(),
+                            self.logic.as_deref(),
+                            &mut logic_ghosts,
+                            self.persona,
+                            participant,
+                        ) {
+                            Ok(entries) => exit_entries.extend(entries),
+                            Err(error) => {
+                                return self.refuse_rpc(error, body);
+                            }
+                        }
                     }
                     continue;
                 }
@@ -1155,37 +1194,53 @@ impl Listener for PlayerListener {
                                 .into_iter()
                                 .map(nfs_world::participants::HostRpc::Participant)
                                 .collect();
-                            let returning = participants.take_returning();
-                            if let [participant] = returning.as_slice() {
-                                let (
-                                    Some(returns),
-                                    Some(population),
-                                    Some(inventory),
-                                    Some(content),
-                                ) = (
-                                    returns.as_mut(),
-                                    population.as_mut(),
-                                    self.inventory.as_ref(),
-                                    self.vehicles.as_deref(),
-                                )
-                                else {
-                                    return self.refuse_rpc(replication::Error::Unsupported, body);
-                                };
-                                match Self::begin_return(
-                                    &mut players,
-                                    returns,
-                                    population,
-                                    inventory,
-                                    content,
+                            let prompted = participants.take_prompted();
+                            if let [participant] = prompted.as_slice() {
+                                let participant = *participant;
+                                // Prompt shown (startup field 100): presentation only.
+                                match Self::request_return(
                                     self.logic.as_deref(),
-                                    &mut logic_ghosts,
+                                    &players,
+                                    &logic_ghosts,
                                     self.persona,
-                                    *participant,
-                                    chain,
+                                    participant,
                                 ) {
                                     Ok(entries) => exit_entries.extend(entries),
                                     Err(error) => {
                                         return self.refuse_rpc(error, body);
+                                    }
+                                }
+                                tracing::info!(
+                                    participant,
+                                    "garage prompt shown; return waits for the garage volume"
+                                );
+                                // A car already inside the garage volume enters now.
+                                let garage_scene = self
+                                    .roles
+                                    .as_ref()
+                                    .and_then(|r| players.objects().scene(r.garage));
+                                let car = world_cars
+                                    .iter()
+                                    .find_map(|(&car, &(p, _))| (p == participant).then_some(car));
+                                if let (Some(scene), Some(car)) = (garage_scene, car)
+                                    && trigger_volumes.inside_scene(scene, car)
+                                {
+                                    match Self::garage_entered(
+                                        &mut players,
+                                        &mut participants,
+                                        returns.as_mut(),
+                                        population.as_mut(),
+                                        self.inventory.as_ref(),
+                                        self.vehicles.as_deref(),
+                                        self.logic.as_deref(),
+                                        &mut logic_ghosts,
+                                        self.persona,
+                                        participant,
+                                    ) {
+                                        Ok(entries) => exit_entries.extend(entries),
+                                        Err(error) => {
+                                            return self.refuse_rpc(error, body);
+                                        }
                                     }
                                 }
                                 continue;

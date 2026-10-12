@@ -547,8 +547,24 @@ fn three_round_trips_keep_return_order_retries_and_foreign_owners_isolated() {
         );
         assert_eq!(model, before);
         let route = request(4, 8, 100, 0, 7);
+        // The prompt request keeps the participant in free roam and sends
+        // nothing until the car enters the garage volume.
         assert_eq!(
-            calls(model.receive(route.span(), |p| p == 8).unwrap()),
+            model.receive(route.span(), |p| p == 8).unwrap(),
+            Outcome::Advanced(Vec::new())
+        );
+        assert_eq!(model.stage(8), Some(Stage::ReturnPrompted));
+        assert_eq!(model.in_free_roam(), [8]);
+        assert_eq!(model.take_prompted(), [8]);
+        assert!(model.take_returning().is_empty());
+        assert_eq!(
+            model.receive(route.span(), |p| p == 8).unwrap(),
+            Outcome::Repeated
+        );
+        assert!(model.take_prompted().is_empty());
+        assert_eq!(model.enter_garage(9), Outcome::Unsupported);
+        assert_eq!(
+            calls(model.enter_garage(8)),
             [
                 (4, 1, 1, 0),
                 (4, 61, 0, 0),
@@ -562,7 +578,10 @@ fn three_round_trips_keep_return_order_retries_and_foreign_owners_isolated() {
                 (4, 67, 0, 0)
             ]
         );
+        assert_eq!(model.stage(8), Some(Stage::ReturningToGarage));
+        assert!(model.in_free_roam().is_empty());
         assert_eq!(model.take_returning(), [8]);
+        assert_eq!(model.enter_garage(8), Outcome::Repeated);
         assert_eq!(
             model.receive(route.span(), |p| p == 8).unwrap(),
             Outcome::Repeated
@@ -762,4 +781,65 @@ fn tagged_leave_carries_its_tail_and_plain_calls_keep_zero_padding() {
     );
     assert_eq!(ExitBindings::from_records(&[], 1, 2), Ok(None));
     assert_eq!(ExitBindings::from_records(&[], 1, 1), Err(Error::Shape));
+}
+
+#[test]
+fn the_garage_volume_entry_starts_the_return_only_after_the_prompt() {
+    let mut model = in_customization(8);
+    let ep = |selector| Endpoint {
+        scene: 4,
+        selector,
+        serial: Serial::new(2).unwrap(),
+    };
+    // No return content: the prompt route stays unsupported.
+    assert_eq!(model.enter_garage(8), Outcome::Unsupported);
+    model.returning = Some(ReturnBindings {
+        request: ep(100),
+        free_roam: ep(1),
+        preparing: [61, 63, 65, 73].map(ep),
+        sequence: ep(67),
+        finishing: [68, 70, 60].map(ep),
+    });
+    // Entering the garage volume before free roam or before the prompt does
+    // nothing: the official chain follows the prompt request.
+    assert_eq!(model.enter_garage(8), Outcome::Unsupported);
+    assert!(matches!(
+        model
+            .receive(request(4, 8, 96, 0, 7).span(), |p| p == 8)
+            .unwrap(),
+        Outcome::Advanced(_)
+    ));
+    model.take_exited();
+    model
+        .receive(request(4, 8, 76, 3, 7).span(), |p| p == 8)
+        .unwrap();
+    model
+        .receive(request(4, 8, 80, 0, 7).span(), |p| p == 8)
+        .unwrap();
+    model.take_arriving();
+    model.arrived(8);
+    assert_eq!(model.stage(8), Some(Stage::FreeRoam));
+    assert_eq!(model.enter_garage(8), Outcome::Unsupported);
+    assert_eq!(model.stage(8), Some(Stage::FreeRoam));
+    let before = model.clone();
+    assert_eq!(
+        model
+            .receive(request(4, 8, 100, 0, 7).span(), |p| p == 8)
+            .unwrap(),
+        Outcome::Advanced(Vec::new())
+    );
+    assert_ne!(model, before);
+    assert_eq!(model.take_prompted(), [8]);
+    // Exit-route repeats stay inert while prompted, as in free roam.
+    assert_eq!(
+        model
+            .receive(request(4, 8, 80, 0, 7).span(), |p| p == 8)
+            .unwrap(),
+        Outcome::Repeated
+    );
+    assert!(matches!(model.enter_garage(8), Outcome::Advanced(chain) if chain.len() == 10));
+    assert_eq!(model.stage(8), Some(Stage::ReturningToGarage));
+    assert!(matches!(model.returned_to_garage(8), Outcome::Advanced(chain) if chain.len() == 10));
+    assert_eq!(model.returned_to_garage(8), Outcome::Repeated);
+    assert_eq!(model.stage(8), Some(Stage::LoadingGarage));
 }

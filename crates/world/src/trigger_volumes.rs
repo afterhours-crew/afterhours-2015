@@ -81,6 +81,12 @@ impl Volumes {
     pub fn retain_vehicles(&mut self, owns: impl Fn(u16) -> bool) {
         self.observations.retain(|(_, _, car), _| owns(*car));
     }
+    /// Whether `vehicle`'s latest report on any volume of `scene` is an entry.
+    pub fn inside_scene(&self, scene: u16, vehicle: u16) -> bool {
+        self.observations
+            .iter()
+            .any(|((s, _, car), o)| *s == scene && *car == vehicle && o.entered)
+    }
     /// Client methods 2/3 contain the crossing clock followed by seven padding
     /// bits. Padding is not required to be zero. Old/repeated reports are inert.
     pub fn receive(
@@ -276,8 +282,12 @@ mod tests {
         assert!(!v.receive(enter.span(), |_| true).unwrap().unwrap().changed);
         assert!(v.observations[&(scene, 1, 32)].entered);
         assert!(!v.observations[&(scene, 1, 31)].entered);
+        assert!(v.inside_scene(scene, 32));
+        assert!(!v.inside_scene(scene, 31));
+        assert!(!v.inside_scene(scene + 1, 32));
         v.retain_vehicles(|car| car == 32);
         assert_eq!(v.observations.len(), 1);
+        assert!(!v.inside_scene(scene, 31));
         let before = v.clone();
         assert!(v.bind(&[r]).is_err());
         assert_eq!(v, before);
