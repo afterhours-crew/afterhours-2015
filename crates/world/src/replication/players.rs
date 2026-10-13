@@ -6,6 +6,7 @@ use super::*;
 use std::collections::BTreeMap;
 
 mod actors;
+mod locations;
 mod manager;
 mod vehicles;
 mod views;
@@ -38,6 +39,7 @@ pub struct Players {
     manager: Option<u16>,
     views: BTreeMap<u16, u16>,
     view_serial: u16,
+    location_maps: BTreeMap<(u8, u64), u16>,
     players: BTreeMap<(u8, u8), Player>,
     participants: BTreeMap<u16, u16>,
     actors: BTreeMap<u16, u16>,

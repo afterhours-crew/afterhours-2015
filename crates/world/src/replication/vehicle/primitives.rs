@@ -45,6 +45,31 @@ pub enum Vector {
     Packed { mode: u8, values: [i32; 3] },
 }
 impl Vector {
+    /// Decode a position using the same explicit origin and precision as the writer.
+    /// The float escape already contains absolute coordinates.
+    pub fn to_position(&self, origin: [f32; 3], fractional: u8) -> Result<[f32; 3], Error> {
+        if fractional > 16 || origin.iter().any(|v| !v.is_finite()) {
+            return Err(Error::Shape);
+        }
+        let result = match self {
+            Self::FloatBits(bits) => bits.map(f32::from_bits),
+            Self::Packed { mode, values } => {
+                if *mode == 0 {
+                    return Err(Error::Shape);
+                }
+                let n = width(*mode, fractional)?;
+                let bound = 1i32 << (n - 1);
+                if values.iter().any(|v| !(-bound..bound).contains(v)) {
+                    return Err(Error::Shape);
+                }
+                std::array::from_fn(|i| origin[i] + values[i] as f32 / (1u32 << fractional) as f32)
+            }
+        };
+        if result.iter().any(|v| !v.is_finite()) {
+            return Err(Error::Shape);
+        }
+        Ok(result)
+    }
     pub(in crate::replication) fn read(r: &mut Reader<'_>, fractional: u8) -> Result<Self, Error> {
         let mode = r.take(3)? as u8;
         Ok(if mode == 0 {

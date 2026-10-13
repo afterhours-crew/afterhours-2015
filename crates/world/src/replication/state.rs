@@ -202,6 +202,22 @@ impl World {
         current: &Update,
         removed: Option<u16>,
     ) -> Result<(), Error> {
+        if let Initial::ParticipantLocationMap = initial {
+            let Update::ParticipantLocationMap(map) = current else {
+                return Err(Error::TypeMismatch);
+            };
+            for entry in map.groups.iter().flatten().flat_map(|g| &g.entries) {
+                if removed == Some(entry.participant)
+                    || self
+                        .objects
+                        .get(&entry.participant)
+                        .map(|o| o.initial.kind())
+                        != Some(Kind::Participant)
+                {
+                    return Err(Error::UnknownObject);
+                }
+            }
+        }
         if let Initial::PlayerView(view) = initial {
             let kind = |id| {
                 if removed == Some(id) {
@@ -473,6 +489,9 @@ impl Update {
         match (self, new) {
             (Self::PlayerManager(a), Self::PlayerManager(b)) => a.merge(b)?,
             (Self::PlayerView(a), Self::PlayerView(b)) => a.merge(b),
+            (Self::ParticipantLocationMap(a), Self::ParticipantLocationMap(b)) => {
+                replace(&mut a.groups, &b.groups)
+            }
             (Self::ScriptedSplineGoal, Self::ScriptedSplineGoal) => {}
             (Self::Participant(a), Self::Participant(b)) => {
                 replace(&mut a.player, &b.player);

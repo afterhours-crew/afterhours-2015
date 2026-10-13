@@ -1523,6 +1523,18 @@ impl Listener for PlayerListener {
             }
         }
         entries.extend(exit_entries);
+        let map_cars = world_cars
+            .iter()
+            .map(|(&car, &(participant, _))| (participant, car))
+            .collect();
+        match players.sync_location_map(HOST_SELECTOR as u8, self.persona, &map_cars, [0.; 3]) {
+            Ok(record) => records.extend(record),
+            Err(error) => {
+                self.refused += 1;
+                self.last_error = Some(error);
+                return false;
+            }
+        }
         if let Err(error) = Self::bind_progression_launchers(
             self.progression.as_deref(),
             &players,
