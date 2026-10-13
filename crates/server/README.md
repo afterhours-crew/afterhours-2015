@@ -328,9 +328,12 @@ present. Preparation does not yet generate vehicle entity profiles.
 
 ## Local launcher IPC
 
+The [local launcher integration guide](../../docs/LOCAL-LAUNCHER.md) describes
+the component boundaries, implemented requests and remaining launcher work.
+
 The optional `--lsx-port 3216` listener runs in the same server process and uses
 the same SQLite-backed account identity as backend authentication. Omit the flag
-to leave the port available to an installed launcher. Port0 selects an ephemeral
+to leave the port available to an installed launcher. Port 0 selects an ephemeral
 port for tests. LSX startup, settings and local authorization-code requests are
 modeled; unknown requests are logged without payloads and remain unsupported.
 The listener uses fresh OS entropy, loopback binding, four concurrent connection

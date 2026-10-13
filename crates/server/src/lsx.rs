@@ -267,6 +267,67 @@ mod tests {
         assert!(TcpListener::bind(address).await.is_ok());
     }
     #[tokio::test]
+    async fn connection_limit_rejects_excess_clients_and_recovers_closed_slots() {
+        let listener = bind(0).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (stop, shutdown) = watch::channel(false);
+        let server = tokio::spawn(serve(
+            listener,
+            Profile {
+                user_id: 1,
+                persona_id: 2,
+                persona: "Test".into(),
+                avatar_id: String::new(),
+            },
+            Duration::from_secs(30),
+            shutdown,
+        ));
+        let mut clients = Vec::new();
+        for _ in 0..4 {
+            let mut stream = TcpStream::connect(address).await.unwrap();
+            let hello = Envelope::parse(&read_frame(&mut stream).await).unwrap();
+            assert_eq!(hello.payload.name, "Challenge");
+            clients.push(stream);
+        }
+        let mut excess = TcpStream::connect(address).await.unwrap();
+        let mut byte = [0];
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), excess.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        drop(clients.pop().unwrap());
+        // Accept and task completion are independently scheduled. A connection
+        // may still be refused until the closed client's task has been reaped.
+        let mut replacement = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let mut candidate = TcpStream::connect(address).await.unwrap();
+                if candidate.read(&mut byte).await.unwrap() == 1 {
+                    assert_eq!(byte, [b'<']);
+                    break candidate;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let mut greeting = vec![b'<'];
+        greeting.extend(read_frame(&mut replacement).await);
+        assert_eq!(
+            Envelope::parse(&greeting).unwrap().payload.name,
+            "Challenge"
+        );
+        stop.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn idle_incomplete_handshake_is_closed() {
         let listener = bind(0).await.unwrap();
         let address = listener.local_addr().unwrap();
