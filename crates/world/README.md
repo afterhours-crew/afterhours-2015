@@ -24,3 +24,10 @@ A trigger volume starts enabled so its client collision listener exists; ordinar
 Boolean endpoints retain their inactive default. The world session accepts bounded,
 ordered enter/leave reports only for its owned world cars and drops observations
 when those cars are removed. Reports do not synthesize cinematic completion.
+
+Common-world activation subscribes each eligible participant to configured volume
+filters and notifies the scene of world occupancy and streamed-volume membership.
+The model resolves current scene IDs/serials, commits complete batches within the
+caller’s queue capacity, and accepts owned, ordered crossing/location reports.
+Race-event eligibility is separate; this model does not enable all event volumes
+or award progression from a crossing report.

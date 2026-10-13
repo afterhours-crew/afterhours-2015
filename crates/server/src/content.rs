@@ -76,6 +76,11 @@ impl WorldContent {
         }
         let profiles = self.scene_profiles.as_ref().ok_or(Failure::ProfileConfig)?;
         self.launchers.as_ref().ok_or(Failure::ProfileConfig)?;
+        if let Some(catalog) = &roles.free_roam {
+            catalog
+                .validate_profiles(profiles)
+                .map_err(|_| Failure::ProfileConfig)?;
+        }
         for key in [
             1,
             roles.gameplay,
@@ -109,6 +114,23 @@ impl WorldContent {
                 != 1
             {
                 return Err(Failure::ProfileConfig);
+            }
+        }
+        if let Some(catalog) = &roles.free_roam {
+            for site in catalog.volumes.iter().chain([
+                &catalog.presence,
+                &catalog.streamed,
+                &catalog.location,
+            ]) {
+                if bindings
+                    .hierarchy()
+                    .iter()
+                    .filter(|level| level.content_key == site.scene_key)
+                    .count()
+                    != 1
+                {
+                    return Err(Failure::ProfileConfig);
+                }
             }
         }
         for key in roles.traffic {

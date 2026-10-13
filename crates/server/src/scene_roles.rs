@@ -9,6 +9,7 @@ use crate::Failure;
 use nfs_world::replication::{entity::creation::Asset, sublevel::root};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
+mod activation;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SceneRoles {
@@ -23,6 +24,7 @@ pub struct SceneRoles {
     /// The level's SpawnPoints scene (`levels/Genesis01/SpawnPoints` in the
     /// official session). Optional: without it, world spawns stay unsupported.
     pub spawn_points: Option<u32>,
+    pub free_roam: Option<nfs_world::world_activation::Catalog>,
 }
 
 fn fields(v: &Value, expected: &[&str]) -> Result<(), Failure> {
@@ -78,6 +80,9 @@ impl SceneRoles {
                 return Err(Failure::ProfileConfig);
             }
         }
+        if let Some(catalog) = &self.free_roam {
+            catalog.validate().map_err(|_| Failure::ProfileConfig)?;
+        }
         if self.customization_timer == self.streaming_gate {
             return Err(Failure::ProfileConfig);
         }
@@ -96,7 +101,7 @@ impl SceneRoles {
                 "customization_timer",
                 "streaming_gate",
             ],
-            &["spawn_points"],
+            &["spawn_points", "free_roam"],
         )?;
         let level = v["level"]
             .as_str()
@@ -122,12 +127,16 @@ impl SceneRoles {
             customization_timer: asset(&v["customization_timer"])?,
             streaming_gate: asset(&v["streaming_gate"])?,
             spawn_points: v.get("spawn_points").map(number).transpose()?,
+            free_roam: v.get("free_roam").map(activation::parse).transpose()?,
         };
         result.validate()?;
         Ok(result)
     }
     pub fn to_json(&self) -> Value {
         let mut v = json!({"level":String::from_utf8_lossy(&self.level),"gameplay":self.gameplay,"startup":self.startup,"garage":self.garage,"progression":self.progression,"traffic":self.traffic,"customization_timer":asset_json(self.customization_timer),"streaming_gate":asset_json(self.streaming_gate)});
+        if let Some(catalog) = &self.free_roam {
+            v["free_roam"] = activation::json(catalog);
+        }
         if let Some(key) = self.spawn_points {
             v["spawn_points"] = json!(key);
         }

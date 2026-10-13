@@ -795,6 +795,7 @@ pub enum HostRpc {
     LevelPoll(crate::garage::presence::Notification),
     SequenceStop(crate::sequences::Stop),
     Event(crate::logic::Fire),
+    WorldActivation(crate::world_activation::Notification),
 }
 impl HostRpc {
     pub fn scene(self) -> u16 {
@@ -809,6 +810,7 @@ impl HostRpc {
             }
             Self::SequenceStop(v) => v.sequence,
             Self::Event(v) => v.target.ghost,
+            Self::WorldActivation(v) => v.endpoint.scene,
         }
     }
     pub fn encode(self) -> Result<BitWriter, Error> {
@@ -821,6 +823,7 @@ impl HostRpc {
             Self::GaragePresence(v) | Self::SpawnOccupied(v) | Self::LevelPoll(v) => v.encode(),
             Self::SequenceStop(v) => v.encode(),
             Self::Event(v) => v.encode().map_err(|_| Error::Shape),
+            Self::WorldActivation(v) => v.encode(),
         }
     }
 }

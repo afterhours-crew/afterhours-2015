@@ -22,6 +22,7 @@ impl PlayerListener {
             return Err(replication::Error::Shape);
         }
         self.advance_binding_refreshes(world_ms)?;
+        self.advance_world_activation()?;
         if let Some(arrivals) = self.arrivals.as_mut() {
             for stop in arrivals.poll(world_ms)? {
                 tracing::info!(

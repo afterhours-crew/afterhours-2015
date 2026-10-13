@@ -34,3 +34,4 @@ mod test_data {
 
 pub mod trigger_volumes;
 pub mod vehicle_reports;
+pub mod world_activation;
