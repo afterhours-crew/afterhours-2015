@@ -2124,8 +2124,7 @@ fn queued_notifications_for_sent_objects_ride_ahead_of_the_next_replication_fram
     host.queue_replication(scene(4)).unwrap();
     // A notification on the sent scene rides with the next frame; one on the
     // unsent scene 2 waits for its creation, and keeps the one behind it in
-    // order (E845b/E846: the occupied flag waited 0.8–6.3 s behind the
-    // replication queue; the official flag follows the report by ≤175 ms).
+    // order, even under a continuous replication stream.
     host.queue_launcher_enabled(enabled(1)).unwrap();
     host.queue_launcher_enabled(enabled(2)).unwrap();
     host.queue_launcher_enabled(enabled(1)).unwrap();

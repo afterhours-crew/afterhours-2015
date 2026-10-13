@@ -461,7 +461,7 @@ fn three_lifetimes_clear_and_reassign_with_delayed_callbacks_and_isolation() {
         assert_eq!(assign.call, Call::Assign(value));
         if value > 1 {
             // A delayed callback with the previous lifetime's id is
-            // acknowledged without touching the occupancy (E843, E839).
+            // acknowledged without touching the occupancy.
             let late = client(SCENE, PLAYER, 0, RELEASE, &with_id(value - 1));
             assert_eq!(
                 model.report(late.span(), owns),
@@ -484,7 +484,7 @@ fn three_lifetimes_clear_and_reassign_with_delayed_callbacks_and_isolation() {
         let on = model.report(request.span(), owns).unwrap().unwrap();
         assert!(matches!(on.flag, Some(Flag { enabled: true, .. })));
         // Entering the garage clears the assignment while the car still
-        // occupies the zone: method 1 and the flag drop (E845b).
+        // occupies the zone: method 1 and the flag drop.
         let (clear, flag) = model.clear(PLAYER).unwrap().unwrap();
         assert_eq!((clear.participant, clear.call), (PLAYER, Call::Leave));
         assert_eq!(

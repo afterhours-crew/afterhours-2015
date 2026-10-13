@@ -13,12 +13,8 @@ impl PlayerListener {
         {
             return Ok(());
         }
-        // The official host deactivates in two parts: streamed-leave, presence
-        // off and 33 volumes at the return start (E742 seg01 168,129, seg03
-        // 281,710), the remaining 100 world-sublevel volumes after the
-        // finishing chain with the assignment clear (175,920; 289,326). The
-        // whole batch leaves at the return start here; the late part is a
-        // content split still to be modeled (E849).
+        // Deactivation currently retires all configured volumes at return
+        // start. Separate later sublevel retirement is not modeled here.
         let active: BTreeSet<_> = self.participants.in_free_roam().into_iter().collect();
         let targets: BTreeSet<_> = self
             .world_activation
@@ -95,8 +91,7 @@ impl PlayerListener {
                     "owned world participant activation queued"
                 );
                 if clearing {
-                    // The official host clears the SpawnPoints assignment
-                    // ahead of the participant-scoped leave batch (E742).
+                    // Clear the spawn subscription before the leave batch.
                     let clear = self.spawn_clear(participant)?;
                     self.pending_rpcs.extend(clear);
                 }

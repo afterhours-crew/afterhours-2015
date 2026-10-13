@@ -97,7 +97,7 @@ fn spawn_presentation_waits_for_capacity_with_poll_and_rejects_foreign_owner() {
     listener.advance_level_poll(100).unwrap();
     assert!(matches!(listener.pending_rpcs[0], HostRpc::LevelPoll(_)));
     assert_eq!(listener.pending_rpcs[1], filler);
-    // The spawn presentation no longer rides the assignment (E854).
+    // Spawn presentation waits for the zone report.
     assert_eq!(listener.pending_rpcs.len(), 2);
     assert!(listener.pending_spawns.is_empty());
     assert_eq!(listener.due_teleport(100), None);

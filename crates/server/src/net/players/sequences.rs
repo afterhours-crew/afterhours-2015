@@ -103,7 +103,7 @@ impl PlayerListener {
                 .take_while(|(due, _)| *due <= world_ms)
             {
                 // The spawn presentation follows the client's zone report, not
-                // the assignment (E854; see the spawn report handling).
+                // the assignment; see the spawn report handling.
                 if replies.len() + 1
                     > nfs_world::session::MAX_RPC_QUEUE.saturating_sub(self.pending_rpcs.len())
                 {
@@ -128,7 +128,7 @@ impl PlayerListener {
         Ok(())
     }
     /// Release the glass replies held for a world car one host frame after
-    /// its participant's first spawn-zone report (E854). Queue space is
+    /// its participant's first spawn-zone report. Queue space is
     /// checked; a full queue retries on the next tick.
     pub(in crate::net) fn advance_settled(
         &mut self,

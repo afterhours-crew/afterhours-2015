@@ -37,10 +37,7 @@ const SPAWN_DELAY_MS: u64 = 750;
 /// send it about 100 ms before the assignment (E101 676 ms, E742 870 ms).
 const TELEPORT_DELAY_MS: u64 = 650;
 const BINDING_REFRESH_DELAY_MS: u64 = 100;
-/// Delay from the participant's first spawn-zone report to the world car's
-/// glass replies: the official host answers them one frame (100 ms) after
-/// the occupied flag, never before the assignment (E854: E101, E742 seg01,
-/// seg02 and seg04).
+/// One host frame between the first spawn-zone report and held glass replies.
 const SETTLE_DELAY_MS: u64 = 100;
 /// Glass replies held per world car (three reports per car).
 const MAX_HELD_GLASS: usize = 8;
@@ -66,7 +63,7 @@ pub(super) struct PlayerListener {
     /// Spawn assignments held until due (world ms), sent with a level poll.
     pending_spawns: VecDeque<(u64, nfs_world::participants::Notification)>,
     /// Participant -> glass replies of its world car, held until the
-    /// participant reports the spawn zone (E854).
+    /// participant reports the spawn zone.
     held_glass: BTreeMap<u16, Vec<nfs_world::logic::Fire>>,
     /// Participants whose world car has reported the spawn zone this lifetime.
     spawn_settled: BTreeSet<u16>,
@@ -853,7 +850,7 @@ impl Listener for PlayerListener {
                     let fire = glass.receive(owner, &message)?;
                     match world_cars.get(&target.ghost) {
                         // A world car's replies wait for the participant's
-                        // spawn-zone report (E854); garage cars answer at once.
+                        // spawn-zone report; garage cars answer at once.
                         Some((participant, _)) if !spawn_settled.contains(participant) => {
                             let held = held_glass.entry(*participant).or_default();
                             if held.len() >= MAX_HELD_GLASS {
@@ -1206,9 +1203,8 @@ impl Listener for PlayerListener {
                             .flag
                             .map(nfs_world::participants::HostRpc::SpawnOccupied),
                     );
-                    // First zone report of a world car's lifetime: the official
-                    // host sends the spawn presentation with the occupied flag
-                    // and the car's glass replies one frame later (E854).
+                    // First current zone report of a world-car lifetime:
+                    // publish spawn presentation and schedule held replies.
                     if !report.release
                         && report.current
                         && !spawn_settled.contains(&report.participant)
@@ -1276,7 +1272,7 @@ impl Listener for PlayerListener {
                                 // First field-100 request of this zone visit:
                                 // nothing goes out, so that PageDown repeats it.
                                 // Before free roam the prompt is carried into
-                                // it by the arrival (E846).
+                                // it by the arrival.
                                 tracing::info!(
                                     participant,
                                     stage = ?participants.stage(*participant),
@@ -1300,13 +1296,9 @@ impl Listener for PlayerListener {
                                 else {
                                     return self.refuse_rpc(replication::Error::Unsupported, body);
                                 };
-                                // The garage slot calls follow the entry in
-                                // their own frame: the official host spreads
-                                // the chain over three frames (E742 seg03
-                                // 281,710 / 281,912 / 282,009) and the entry
-                                // frame has no room for five more
-                                // notifications (E852: refused by the
-                                // outbound bound, every later frame refused).
+                                // Send garage slot refreshes in a following
+                                // frame so the return entry stays within the
+                                // outbound frame bound.
                                 let (slots, chain): (Vec<_>, Vec<_>) =
                                     chain.into_iter().partition(|rpc| {
                                         matches!(
@@ -1407,10 +1399,8 @@ impl Listener for PlayerListener {
                                 }
                             }
                             for &participant in &exited {
-                                // The object count per lifetime shows what a
-                                // completed return leaves alive (E849: the
-                                // client reports one more root-scene call per
-                                // return).
+                                // Retain object-lifetime diagnostics across
+                                // repeated garage/world transitions.
                                 let ids: Vec<u16> =
                                     players.objects().iter().map(|(id, _)| id).collect();
                                 tracing::info!(

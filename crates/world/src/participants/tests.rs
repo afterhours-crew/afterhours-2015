@@ -795,9 +795,8 @@ fn tagged_leave_carries_its_tail_and_plain_calls_keep_zero_padding() {
 
 #[test]
 fn arrival_requests_carry_the_prompt_into_free_roam_across_three_lifetimes() {
-    // E846: the client requests at the spawn before free roam; the prompt
-    // shows and must survive the arrival, a release during the arrival ends
-    // it, and only a repeated request in free roam (PageDown) returns.
+    // Preserve a pre-arrival request until confirmation or zone release.
+    // Only a repeated request in free roam starts the return.
     let mut model = in_customization(8);
     let ep = |selector| Endpoint {
         scene: 4,
@@ -824,8 +823,7 @@ fn arrival_requests_carry_the_prompt_into_free_roam_across_three_lifetimes() {
         model.take_exited();
         assert_eq!(model.stage(8), Some(Stage::ExitingGarage));
         if request_while_exiting {
-            // E845b: the request 51 ms after the exit teleport, before the
-            // world-loaded report.
+            // A request before the world-loaded report cannot return yet.
             assert_eq!(model.receive(route.span(), owns).unwrap(), prompt_only);
             assert_eq!(model.take_prompted(), [8]);
             assert!(model.prompted(8));
@@ -845,7 +843,7 @@ fn arrival_requests_carry_the_prompt_into_free_roam_across_three_lifetimes() {
         assert!(matches!(model.returned_to_garage(8), Outcome::Advanced(_)));
         assert!(matches!(model.enter_customization(8), Outcome::Advanced(_)));
     };
-    // Lifetime 1 (E846 cycle 2): request while exiting, a repeat during the
+    // Lifetime 1: request while exiting, a repeat during the
     // arrival is the same prompt, the rollout release ends it, the re-entry
     // request starts it again, free roam begins prompted and PageDown
     // returns.
@@ -902,8 +900,7 @@ fn arrival_requests_carry_the_prompt_into_free_roam_across_three_lifetimes() {
 
 #[test]
 fn the_return_rebinds_the_car_slot_with_its_item_and_tags_the_empty_slots() {
-    // E742 seg03 282,009 ms: `[162,355] s7 m1` with the car's item in two
-    // words, `s8`–`s11 m2` with tail 19, inside the return chain.
+    // The occupied slot carries a two-word item; empty slots carry tail 19.
     let mut model = ready();
     model.exit = Some(exit_bindings());
     model.begin(8).unwrap();

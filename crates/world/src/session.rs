@@ -922,12 +922,8 @@ impl Host {
             world.blocked_level = None;
             let mut timed = section.clone();
             timed.float_bits = Some(replication_time(application, now_ms).to_bits());
-            // Queued notifications whose objects the client already holds ride
-            // in this frame ahead of the records, as official frames carry
-            // notifications with replication: the host's occupied flag follows
-            // the client's zone report within 175 ms while replication
-            // continues (E742), whereas a queue that waits for an empty
-            // replication queue published it 0.8–6.3 s late (E845b, E846).
+            // Send notifications for objects already held by the client ahead
+            // of these records, so continuous replication cannot starve them.
             // Queue order is kept: the prefix up to the first notification
             // that names an unsent object, as far as the frame bound allows.
             let mut before = before.clone();

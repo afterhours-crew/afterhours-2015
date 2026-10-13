@@ -32,14 +32,13 @@ pub enum Call {
     LeaveTagged(u8),
     /// Method-2 call on a participant-scoped garage endpoint at garage exit.
     Notify,
-    /// Method-2 call carrying a nonzero 5-bit tail (observed 19 on the four
-    /// empty garage slots inside the return chain, E742 seg03 282,009 ms).
+    /// Method-2 call carrying a nonzero 5-bit tail for empty garage slots.
     NotifyTagged(u8),
     /// Method 0 carrying a u32 argument (SpawnPoints assignment id).
     Assign(u32),
     /// Method 1 carrying a u64 item id in two words (the garage slot
     /// binding, the same wire form as `garage::Binding`), re-sent for the
-    /// returning car's slot inside the return chain (E742 seg03 282,009 ms).
+    /// returning car's slot inside the return chain.
     GarageItem(u64),
 }
 impl Call {
@@ -898,12 +897,9 @@ impl Lifecycle {
         for (i, endpoint) in r.preparing.into_iter().enumerate() {
             chain.push((endpoint, Call::Enter));
             if i == 3 {
-                // The official return re-binds the garage slots between the
-                // fourth preparing state's enter and leave: the car's slot
-                // with its item (method 1, two words), the other four slots
-                // with method 2 tail 19 (E742 seg03 282,009 ms). The login
-                // bindings are sent once (`take_garage_bindings`); this is
-                // the only other time the official host sends them.
+                // Refresh the occupied slot with its item and empty slots
+                // with their tagged notification on each return. Initial
+                // login bindings are sent separately by take_garage_bindings.
                 if let (Some(b), Some(slots)) = (self.bindings, self.garage) {
                     for (endpoint, item) in b.garage.into_iter().zip(slots.values()) {
                         chain.push((

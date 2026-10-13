@@ -150,13 +150,10 @@ impl SpawnPoints {
         self.assigned.insert(participant, value);
         Ok(notification)
     }
-    /// Clear `participant`'s subscription when its car enters the garage: the
-    /// official host calls method 1 on the assignment field inside the
-    /// free-roam deactivation batch, after the client's zone release (E742
-    /// seg01 175,920 ms, seg03 289,326 ms; never after a plain drive-away).
-    /// Without it the client keeps the old value and ignores the next
-    /// assignment (E845b: id 1 reported after `Assign(2)`, no prompt). The
-    /// participant leaves the occupants; the session counter continues.
+    /// Clear the subscription when the car enters the garage, allowing the
+    /// next lifetime to subscribe with a fresh token. A plain drive-away only
+    /// changes occupancy. The participant leaves the occupants here while
+    /// its session counter continues.
     /// `Ok(None)` for a participant without an assignment.
     pub fn clear(
         &mut self,

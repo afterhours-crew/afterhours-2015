@@ -267,8 +267,7 @@ impl Activation {
             return Ok(Vec::new());
         }
         let mut out = Vec::with_capacity(needed);
-        // Official order in both directions: the streamed call, the scene
-        // presence, then the volumes (E742 seg04 143,411; seg03 281,710).
+        // In both directions: streamed call, scene presence, then volumes.
         out.push(Notification {
             endpoint: self.streamed,
             participant: Some(participant),
