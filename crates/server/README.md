@@ -339,10 +339,18 @@ shutdown. It does not launch the game, change client registration or remove
 installation/activation dependencies. Cold disconnected acceptance is separate.
 
 Local validation on the supported installed client reached menus, garage and free
-roam with EA Desktop absent and its background service stopped. A second run
-reached those states with non-loopback traffic blocked for the game, its installed
-activation helper and this server. The existing installation/license cache was
-retained; this is not a cold-boot or activation-independence claim.
+roam after a Windows restart, with EA Desktop absent and its background service
+stopped. Non-loopback traffic was blocked for the game, its installed activation
+helper and this server. The game returned to the garage and quit normally; a
+restart of both game and server recovered the same account and car in the garage.
+The second process finished closing just after the temporary block expired, so
+that final shutdown is not claimed to be fully network-isolated.
+
+These runs used a guarded research launch procedure and an existing local account.
+The installed license/cache state was retained; fresh-profile startup, cache
+lifetime, activation independence and a packaged launch path remain unverified.
+Other applications and system DNS stayed online. IPv6 loopback and active block
+rules were checked, but no external IPv6 route was available for a drop test.
 
 Startup QoS may first report an unresolved external endpoint and then resolve it.
 The user-session model accepts that first resolution while preserving the
