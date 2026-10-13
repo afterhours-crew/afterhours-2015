@@ -229,6 +229,14 @@ batches. Event targets resolve to current per-participant objects; queue pressur
 retains the entire phase for retry. Installed preparation does not yet derive
 these optional event phases. Live driving acceptance remains open.
 
+Garage return requires the installed entry sequence and all three garage logic
+phases: `return_requested`, `returning`, and `returned`. The entry definition
+includes both cinematic channels, its spline and a validated server timer.
+The server prepares a replacement garage car, completes the cinematic, detaches
+the driven car, and re-arms garage loading for subsequent trips. Missing return
+presentation keeps the request unsupported. Portable repeated-cycle tests cover
+this path; game acceptance is recorded separately.
+
 At garage exit the server answers the leave request with the participant state
 chain and, when the garage layout has a `world_spawn` pose, replaces the garage
 car with a driveable world car in the same frame. When the client reports the

@@ -161,8 +161,15 @@ impl SpawnPoints {
             .arguments()
             .read_u32(ID_OFFSET, 32)
             .map_err(|_| Error::Shape)?;
-        if self.assigned(participant) != Some(id) {
+        let current = self.assigned(participant).ok_or(Error::Shape)?;
+        if id == 0 || id > current {
             return Err(Error::Shape);
+        }
+        // The next assignment is reserved before it is published. In-flight
+        // callbacks still carry the previous spawn id; acknowledge them without
+        // applying old occupancy to the current spawn or blocking reliable RPCs.
+        if id < current {
+            return Ok(Some(None));
         }
         let was = !self.occupants.is_empty();
         if route.method_index() == REQUEST {

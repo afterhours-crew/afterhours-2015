@@ -78,6 +78,7 @@ impl Players {
     pub fn owned_vehicles(&self, connection: u8, persona: u64) -> std::collections::BTreeSet<u16> {
         self.vehicles
             .iter()
+            .chain(self.staged_vehicles.iter())
             .filter(|((participant, _), _)| {
                 self.owns_participant(connection, persona, *participant)
             })
@@ -163,5 +164,57 @@ impl Players {
         let record = self.objects.spawn_vehicle(creation, content)?;
         self.vehicles.insert((participant, item), record.id);
         Ok(record)
+    }
+
+    pub fn staged_vehicle(
+        &self,
+        connection: u8,
+        persona: u64,
+        participant: u16,
+        item: u64,
+    ) -> Option<u16> {
+        self.owns_participant(connection, persona, participant)
+            .then(|| self.staged_vehicles.get(&(participant, item)).copied())
+            .flatten()
+    }
+    /// Prepare one replacement without changing the driven vehicle binding.
+    pub fn stage_vehicle(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        participant: u16,
+        item: u64,
+        creation: vehicle::EntityCreation,
+        content: &entity::creation::Content,
+    ) -> Result<Record, Error> {
+        if self
+            .owned_vehicle(connection, persona, participant, item)
+            .is_none()
+        {
+            return Err(Error::UnknownObject);
+        }
+        if self.staged_vehicles.contains_key(&(participant, item)) {
+            return Err(Error::DuplicateObject);
+        }
+        // At most one replacement for each bounded, existing owned vehicle.
+        let record = self.objects.spawn_vehicle(creation, content)?;
+        self.staged_vehicles.insert((participant, item), record.id);
+        Ok(record)
+    }
+    /// Commit a prepared replacement only after publishing a participant/view detach.
+    pub fn promote_staged_vehicle(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        participant: u16,
+        item: u64,
+    ) -> Result<u16, Error> {
+        let id = self
+            .staged_vehicle(connection, persona, participant, item)
+            .ok_or(Error::UnknownObject)?;
+        let removed = self.remove_vehicle(connection, persona, participant, item)?;
+        self.staged_vehicles.remove(&(participant, item));
+        self.vehicles.insert((participant, item), id);
+        Ok(removed)
     }
 }

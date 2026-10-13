@@ -12,6 +12,8 @@ use std::collections::BTreeMap;
 pub struct Rules {
     pub waiting: String,
     pub exit: String,
+    pub entry: String,
+    pub entry_timer_events: [u32; 4],
     pub waiting_scene: String,
     pub exit_scene: String,
     pub manager_scene: String,
@@ -26,6 +28,8 @@ impl Rules {
         const NAMES: &[&str] = &[
             "waiting",
             "exit",
+            "entry",
+            "entry_timer_events",
             "waiting_scene",
             "exit_scene",
             "manager_scene",
@@ -88,6 +92,21 @@ impl Rules {
         let result = Self {
             waiting: path("waiting")?,
             exit: path("exit")?,
+            entry: path("entry")?,
+            entry_timer_events: map["entry_timer_events"]
+                .as_array()
+                .filter(|a| a.len() == 4)
+                .ok_or_else(|| bad("entry timer events"))?
+                .iter()
+                .map(|v| {
+                    v.as_u64()
+                        .and_then(|n| u32::try_from(n).ok())
+                        .filter(|n| *n != 0)
+                        .ok_or_else(|| bad("entry timer event"))
+                })
+                .collect::<Result<Vec<_>, _>>()?
+                .try_into()
+                .map_err(|_| bad("entry timer events"))?,
             waiting_scene: path("waiting_scene")?,
             exit_scene: path("exit_scene")?,
             manager_scene: path("manager_scene")?,
@@ -97,13 +116,16 @@ impl Rules {
             spline_link: number("spline_link")?,
             spline_class_id: number("spline_class_id")?,
         };
-        if result.waiting == result.exit {
+        if result.waiting == result.exit
+            || result.entry == result.exit
+            || result.entry == result.waiting
+        {
             return Err(bad("duplicate sequence roots"));
         }
         Ok(result)
     }
     pub fn to_json(&self) -> Value {
-        json!({"waiting":self.waiting,"exit":self.exit,"waiting_scene":self.waiting_scene,"exit_scene":self.exit_scene,"manager_scene":self.manager_scene,
+        json!({"waiting":self.waiting,"exit":self.exit,"entry":self.entry,"entry_timer_events":self.entry_timer_events,"waiting_scene":self.waiting_scene,"exit_scene":self.exit_scene,"manager_scene":self.manager_scene,
             "classes":self.classes,"root_channels":self.root_channels,"spawner_channels":self.spawner_channels,"spline_link":self.spline_link,"spline_class_id":self.spline_class_id})
     }
 }

@@ -41,4 +41,10 @@ impl SequenceContent {
             }
         })
     }
+    pub fn returns(&self) -> Option<Result<Arrivals, nfs_world::replication::Error>> {
+        self.returning.as_ref().map(|r| {
+            Arrivals::returning(r.definition, r.content.clone(), r.duration_ms)?
+                .with_spline(r.spline.clone())
+        })
+    }
 }

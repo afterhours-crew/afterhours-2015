@@ -33,6 +33,7 @@ pub struct Definition {
     pub manager: Component,
     pub embedded_bus: u32,
     pub channel: Component,
+    pub presentation: Option<Component>,
 }
 
 pub fn profile() -> entity::Profile {
@@ -44,12 +45,21 @@ pub fn profile() -> entity::Profile {
 pub enum Layout {
     Waiting,
     GarageExit,
+    GarageEntry,
 }
 impl Layout {
     pub fn profile(self) -> entity::Profile {
         use entity::Kind::*;
         let fields: &[entity::Kind] = match self {
             Self::Waiting => &[SequenceRoot, RpcOptionalReference, RpcReference],
+            Self::GarageEntry => &[
+                SequenceRoot,
+                RpcOptionalReference,
+                Rpc,
+                Rpc,
+                RpcReference,
+                RpcReference,
+            ],
             Self::GarageExit => &[SequenceRoot, RpcOptionalReference, Rpc, Rpc, RpcReference],
         };
         entity::Profile::new(fields).expect("fixed sequence profile")
@@ -94,7 +104,7 @@ impl Definition {
                 reference: Some(participant),
             },
         ];
-        if self.layout == Layout::GarageExit {
+        if matches!(self.layout, Layout::GarageExit | Layout::GarageEntry) {
             // Local-participant started and finished event endpoints.
             initial.extend([entity::Initial::Rpc(rpc(2)), entity::Initial::Rpc(rpc(3))]);
         }
@@ -103,6 +113,19 @@ impl Definition {
             reference: channel,
             target_selector: channel_selector,
         });
+        if (self.layout == Layout::GarageEntry) != self.presentation.is_some() {
+            return Err(Error::Shape);
+        }
+        if let Some(presentation) = self.presentation {
+            let (reference, target_selector) = world
+                .scene_endpoint(presentation.scene_key, presentation.index)
+                .ok_or(Error::UnknownObject)?;
+            initial.push(entity::Initial::RpcReference {
+                rpc: rpc(5),
+                reference,
+                target_selector,
+            });
+        }
         let updates = vec![Some(entity::Update::Noop); initial.len()];
         Ok(Creation {
             prefix: Prefix {
@@ -276,6 +299,7 @@ enum Phase {
     Running { fallback_at: u64 },
     Stopping,
     Complete,
+    ReadyForRestart,
 }
 
 #[derive(Clone, Debug)]
@@ -286,6 +310,25 @@ pub struct Sequences {
     world_ms: u64,
 }
 impl Sequences {
+    /// Re-arm a completed and already deleted waiting sequence for another trip.
+    pub fn reset(&mut self, players: &Players, owner: Owner) -> Result<(), Error> {
+        if !players.owns_participant(owner.connection, owner.persona, owner.participant) {
+            return Err(Error::UnknownObject);
+        }
+        if let Some(instance) = self.entries.get_mut(&owner.participant) {
+            if instance.owner != owner {
+                return Err(Error::UnknownObject);
+            }
+            if instance.phase != Phase::Complete || players.objects().get(instance.ghost).is_some()
+            {
+                return Err(Error::Shape);
+            }
+            instance.phase = Phase::ReadyForRestart;
+            instance.ready_at = None;
+            instance.garage_loaded = false;
+        }
+        Ok(())
+    }
     pub fn new(definition: Definition, content: Content) -> Result<Self, Error> {
         if definition.layout != Layout::Waiting
             || definition.embedded_bus == 0
@@ -304,14 +347,17 @@ impl Sequences {
         if !players.owns_participant(owner.connection, owner.persona, owner.participant) {
             return Err(Error::UnknownObject);
         }
+        let mut streaming = None;
         if let Some(old) = self.entries.get(&owner.participant) {
-            return if old.owner == owner {
-                Ok(None)
-            } else {
-                Err(Error::DuplicateObject)
-            };
+            if old.owner != owner {
+                return Err(Error::DuplicateObject);
+            }
+            if old.phase != Phase::ReadyForRestart {
+                return Ok(None);
+            }
+            streaming = old.streaming;
         }
-        if self.entries.len() >= MAX_INSTANCES {
+        if !self.entries.contains_key(&owner.participant) && self.entries.len() >= MAX_INSTANCES {
             return Err(Error::Bound);
         }
         let fallback_at = self.world_ms.checked_add(FALLBACK_MS).ok_or(Error::Bound)?;
@@ -329,7 +375,7 @@ impl Sequences {
                 owner,
                 ghost: record.id,
                 phase: Phase::Running { fallback_at },
-                streaming: None,
+                streaming,
                 garage_loaded: false,
                 ready_at: None,
             },
@@ -460,7 +506,10 @@ impl Sequences {
         if instance.owner != owner || instance.ghost != call.sequence {
             return Err(Error::UnknownObject);
         }
-        if matches!(instance.phase, Phase::Running { .. }) {
+        if matches!(
+            instance.phase,
+            Phase::Running { .. } | Phase::ReadyForRestart
+        ) {
             return Err(Error::Shape);
         }
         let changed = instance.phase != Phase::Complete;

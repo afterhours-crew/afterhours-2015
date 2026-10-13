@@ -20,6 +20,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 mod activation;
 mod customization;
 mod launchers;
+mod returning;
 mod sequences;
 
 #[cfg(test)]
@@ -69,6 +70,7 @@ pub(super) struct PlayerListener {
     sequences: Option<nfs_world::sequences::Sequences>,
     /// Arrive sequences after garage exit (optional sequence content).
     arrivals: Option<nfs_world::arrival::Arrivals>,
+    returns: Option<nfs_world::arrival::Arrivals>,
     inventory: Option<Inventory>,
     logic: Option<std::sync::Arc<crate::garage_logic::GarageLogic>>,
     logic_ghosts: BTreeMap<u16, BTreeMap<u16, u16>>,
@@ -454,6 +456,7 @@ impl PlayerListener {
             pending_teleports: VecDeque::new(),
             pending_binding_refreshes: VecDeque::new(),
             arrivals: None,
+            returns: None,
             glass: crate::glass::Glass::default(),
             customization: crate::customization_timer::Timers::default(),
             world_ms: 0,
@@ -490,6 +493,10 @@ impl PlayerListener {
     }
     pub(super) fn with_arrivals(mut self, arrivals: Option<nfs_world::arrival::Arrivals>) -> Self {
         self.arrivals = arrivals;
+        self
+    }
+    pub(super) fn with_returns(mut self, returns: Option<nfs_world::arrival::Arrivals>) -> Self {
+        self.returns = returns;
         self
     }
     pub(super) fn with_sequences(
@@ -564,6 +571,22 @@ impl PlayerListener {
             }
         }
         let mut spawn_points = nfs_world::spawn_points::SpawnPoints::default();
+        if self.returns.is_some() {
+            use crate::garage_logic::Which;
+            if self.logic.as_ref().is_some_and(|logic| {
+                [Which::ReturnRequested, Which::Returning, Which::Returned]
+                    .into_iter()
+                    .all(|phase| logic.has(phase))
+            }) && self.sequences.is_some()
+                && self.vehicles.is_some()
+            {
+                participants.bind_return(&records, roles.startup)?;
+            } else {
+                tracing::warn!(
+                    "garage return presentation or loading content absent; return stays unsupported"
+                );
+            }
+        }
         match roles
             .spawn_points
             .map(|key| spawn_points.bind(&records, key))
@@ -706,6 +729,8 @@ impl Listener for PlayerListener {
         }
         let mut scheduled_spawns = Vec::new();
         let mut arrivals = self.arrivals.clone();
+        let mut returns = self.returns.clone();
+        let mut completed_returns = Vec::new();
         let mut scheduled_teleports = Vec::new();
         let mut scheduled_binding_refreshes = Vec::new();
         let mut sequences = self.sequences.clone();
@@ -713,6 +738,7 @@ impl Listener for PlayerListener {
         let mut unsupported_logic = 0;
         let mut glass = self.glass.clone();
         let mut customization = self.customization.clone();
+        customization.retain_ghosts(|id| players.objects().get(id).is_some());
         let mut measurements = Vec::new();
         let mut responses = Vec::new();
         let logic_result = (|| {
@@ -1007,6 +1033,54 @@ impl Listener for PlayerListener {
                     }
                 }
             }
+            if let (
+                Some(returns),
+                Some(population),
+                Some(inventory),
+                Some(content),
+                Some(sequences),
+            ) = (
+                returns.as_mut(),
+                population.as_mut(),
+                self.inventory.as_ref(),
+                self.vehicles.as_deref(),
+                sequences.as_mut(),
+            ) {
+                match Self::finish_return_call(
+                    body,
+                    returns,
+                    &mut players,
+                    &mut participants,
+                    population,
+                    inventory,
+                    content,
+                    sequences,
+                    arrivals.as_mut(),
+                    self.logic.as_deref(),
+                    &mut logic_ghosts,
+                    &mut garage_presence,
+                    self.roles.as_ref(),
+                    self.persona,
+                ) {
+                    Ok(Some(None)) => continue,
+                    Ok(Some(Some((entry, removed)))) => {
+                        let Some((participant, _)) = world_cars.remove(&removed) else {
+                            self.refused += 1;
+                            self.last_error = Some(replication::Error::UnknownObject);
+                            return false;
+                        };
+                        completed_returns.push((participant, removed));
+                        exit_entries.push(entry);
+                        continue;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        self.refused += 1;
+                        self.last_error = Some(error);
+                        return false;
+                    }
+                }
+            }
             if let Some(population) = &mut population {
                 match Self::vehicle_loaded(population, &players, self.persona, body) {
                     Ok(true) => continue,
@@ -1104,6 +1178,45 @@ impl Listener for PlayerListener {
                                 .into_iter()
                                 .map(nfs_world::participants::HostRpc::Participant)
                                 .collect();
+                            let returning = participants.take_returning();
+                            if let [participant] = returning.as_slice() {
+                                let (
+                                    Some(returns),
+                                    Some(population),
+                                    Some(inventory),
+                                    Some(content),
+                                ) = (
+                                    returns.as_mut(),
+                                    population.as_mut(),
+                                    self.inventory.as_ref(),
+                                    self.vehicles.as_deref(),
+                                )
+                                else {
+                                    self.refused += 1;
+                                    self.last_error = Some(replication::Error::Unsupported);
+                                    return false;
+                                };
+                                match Self::begin_return(
+                                    &mut players,
+                                    returns,
+                                    population,
+                                    inventory,
+                                    content,
+                                    self.logic.as_deref(),
+                                    &mut logic_ghosts,
+                                    self.persona,
+                                    *participant,
+                                    chain,
+                                ) {
+                                    Ok(entries) => exit_entries.extend(entries),
+                                    Err(error) => {
+                                        self.refused += 1;
+                                        self.last_error = Some(error);
+                                        return false;
+                                    }
+                                }
+                                continue;
+                            }
                             let exited = participants.take_exited();
                             // Official order: presence off follows the leave of
                             // customization and state 94 (E747).
@@ -1276,6 +1389,11 @@ impl Listener for PlayerListener {
             sequences.as_mut(),
             self.persona,
         ) {
+            Ok(spawned) if !completed_returns.is_empty() => {
+                // Publish the return completion and garage loading context
+                // before starting the next waiting sequence.
+                exit_entries.extend(spawned.into_iter().map(|section| (section, Vec::new())));
+            }
             Ok(spawned) => sections.extend(spawned),
             Err(error) => {
                 self.refused += 1;
@@ -1433,7 +1551,7 @@ impl Listener for PlayerListener {
             {
                 tracing::info!(
                     participant,
-                    "owned world entry completed; participant entered FreeRoam state 2 (world vehicle not modeled)"
+                    "world entry completed; participant entered free roam"
                 );
             }
         }
@@ -1452,7 +1570,7 @@ impl Listener for PlayerListener {
             {
                 tracing::info!(
                     participant,
-                    "owned Garage vehicles acknowledged; later transition not inferred"
+                    "garage vehicles loaded; waiting for garage readiness"
                 );
             }
         }
@@ -1468,9 +1586,23 @@ impl Listener for PlayerListener {
         self.deferred_deletions = deferred_deletions;
         self.pending_spawns.extend(scheduled_spawns);
         self.arrivals = arrivals;
+        self.returns = returns;
+        for (participant, removed) in completed_returns {
+            self.pending_spawns
+                .retain(|(_, n)| n.participant != participant);
+            self.pending_teleports.retain(|(_, n)| n.vehicle != removed);
+            self.pending_binding_refreshes
+                .retain(|(_, p)| *p != participant);
+            tracing::info!(
+                participant,
+                world_car = removed,
+                "garage return completed; garage loading begins"
+            );
+        }
         self.pending_teleports.extend(scheduled_teleports);
         self.pending_binding_refreshes
             .extend(scheduled_binding_refreshes);
+        glass.retain_vehicles(|id| self.players.objects().get(id).is_some());
         self.glass = glass;
         self.customization = customization;
         for (participant, measurement) in measurements {

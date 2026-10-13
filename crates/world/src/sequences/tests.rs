@@ -49,6 +49,7 @@ fn setup() -> (Players, Sequences) {
     )
     .unwrap();
     let definition = Definition {
+        presentation: None,
         layout: crate::sequences::Layout::Waiting,
         asset,
         manager: Component {
@@ -480,4 +481,47 @@ fn streaming_checks_current_asset_participant_local_slot_and_transactional_error
         second
     );
     assert_eq!(sequences.poll(FALLBACK_MS, 2).unwrap()[0].sequence, first);
+}
+
+#[test]
+fn restart_keeps_streaming_readiness_but_requires_new_vehicle_acknowledgement() {
+    let (mut players, mut sequences) = setup();
+    let owner = join(&mut players, 1, 10);
+    let first = sequences.start(&mut players, owner).unwrap().unwrap().id;
+    let gate = streaming(&mut players, owner);
+    sequences
+        .bind_streaming(&players, owner, gate, STREAMING_ASSET)
+        .unwrap();
+    sequences
+        .streaming_event(&reached(gate, STREAMING_LOADED, 0))
+        .unwrap();
+    sequences.garage_loaded(owner, true).unwrap();
+    sequences.poll(FIRST_READY_MS, 1).unwrap();
+    let old = Completed {
+        sequence: first,
+        participant: owner.participant,
+    };
+    sequences.complete(&players, owner, old).unwrap();
+    assert!(sequences.reset(&players, owner).is_err());
+    players.remove_entities(&[first]).unwrap();
+    sequences
+        .streaming_event(&reached(gate, STREAMING_UNLOADED, 0))
+        .unwrap();
+    // Return loading can finish before its new waiting sequence exists.
+    sequences
+        .streaming_event(&reached(gate, STREAMING_LOADED, 0))
+        .unwrap();
+    sequences.reset(&players, owner).unwrap();
+    assert_eq!(sequences.complete(&players, owner, old), Err(Error::Shape));
+    let next = sequences.start(&mut players, owner).unwrap().unwrap().id;
+    assert_ne!(next, first);
+    assert!(!sequences.is_complete(owner.participant));
+    assert!(sequences.complete(&players, owner, old).is_err());
+    assert!(sequences.poll(2 * FIRST_READY_MS, 1).unwrap().is_empty());
+    sequences.garage_loaded(owner, true).unwrap();
+    assert!(sequences.poll(3 * FIRST_READY_MS, 0).unwrap().is_empty());
+    assert_eq!(
+        sequences.poll(3 * FIRST_READY_MS, 1).unwrap()[0].sequence,
+        next
+    );
 }

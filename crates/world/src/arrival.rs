@@ -62,9 +62,52 @@ pub struct Arrivals {
     content: Content,
     entries: BTreeMap<u16, Instance>,
     world_ms: u64,
+    duration_ms: u64,
 }
 
 impl Arrivals {
+    /// An installed, server-timed garage entry uses the same sequence handshake.
+    pub fn returning(
+        definition: Definition,
+        content: Content,
+        duration_ms: u64,
+    ) -> Result<Self, Error> {
+        if definition.layout != Layout::GarageEntry
+            || definition.embedded_bus == 0
+            || duration_ms == 0
+            || duration_ms > FALLBACK_MS
+            || content.profile(definition.asset)? != &definition.layout.profile()
+        {
+            return Err(Error::Shape);
+        }
+        Ok(Self {
+            definition,
+            spline: None,
+            content,
+            entries: BTreeMap::new(),
+            world_ms: 0,
+            duration_ms,
+        })
+    }
+    /// Only a completed, cleaned lifetime can be reused. Old ghost IDs stay stale.
+    pub fn reset(&mut self, players: &Players, owner: Owner) -> Result<(), Error> {
+        if !players.owns_participant(owner.connection, owner.persona, owner.participant) {
+            return Err(Error::UnknownObject);
+        }
+        if let Some(instance) = self.entries.get(&owner.participant) {
+            if instance.owner != owner {
+                return Err(Error::UnknownObject);
+            }
+            if instance.phase != Phase::Complete
+                || !instance.cleaned
+                || players.objects().get(instance.ghost).is_some()
+            {
+                return Err(Error::Shape);
+            }
+        }
+        self.entries.remove(&owner.participant);
+        Ok(())
+    }
     pub fn with_spline(mut self, definition: spline::Definition) -> Result<Self, Error> {
         if !self.entries.is_empty() {
             return Err(Error::Shape);
@@ -161,6 +204,7 @@ impl Arrivals {
             content,
             entries: BTreeMap::new(),
             world_ms: 0,
+            duration_ms: FALLBACK_MS,
         })
     }
 
@@ -180,7 +224,10 @@ impl Arrivals {
         if self.entries.len() >= MAX_INSTANCES {
             return Err(Error::Bound);
         }
-        let fallback_at = self.world_ms.checked_add(FALLBACK_MS).ok_or(Error::Bound)?;
+        let fallback_at = self
+            .world_ms
+            .checked_add(self.duration_ms)
+            .ok_or(Error::Bound)?;
         let creation = self
             .definition
             .creation(players.objects(), owner.participant, 1)?;
@@ -206,7 +253,7 @@ impl Arrivals {
         let Message::Reached { event, target, .. } = message else {
             return Ok(None);
         };
-        if *event != ARRIVED || target.entity != 1 {
+        if self.definition.layout != Layout::GarageExit || *event != ARRIVED || target.entity != 1 {
             return Ok(None);
         }
         let Some(instance) = self.entries.values_mut().find(|i| i.ghost == target.ghost) else {
@@ -221,13 +268,18 @@ impl Arrivals {
 
     /// Stops for sequences that never reported [`ARRIVED`].
     pub fn poll(&mut self, world_ms: u64) -> Result<Vec<Stop>, Error> {
+        self.poll_capacity(world_ms, MAX_INSTANCES)
+    }
+    pub fn poll_capacity(&mut self, world_ms: u64, capacity: usize) -> Result<Vec<Stop>, Error> {
         if world_ms < self.world_ms {
             return Err(Error::Shape);
         }
         self.world_ms = world_ms;
         let mut stops = Vec::new();
         for instance in self.entries.values_mut() {
-            if matches!(instance.phase, Phase::Running { fallback_at } if world_ms >= fallback_at) {
+            if stops.len() < capacity
+                && matches!(instance.phase, Phase::Running { fallback_at } if world_ms >= fallback_at)
+            {
                 instance.phase = Phase::Stopping;
                 stops.push(stop(instance.ghost));
             }

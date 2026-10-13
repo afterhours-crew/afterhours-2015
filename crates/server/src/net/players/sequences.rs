@@ -23,6 +23,18 @@ impl PlayerListener {
         }
         self.advance_binding_refreshes(world_ms)?;
         self.advance_world_activation()?;
+        if let Some(returns) = &mut self.returns {
+            let capacity =
+                nfs_world::session::MAX_RPC_QUEUE.saturating_sub(self.pending_rpcs.len());
+            for stop in returns.poll_capacity(world_ms, capacity)? {
+                tracing::info!(
+                    sequence = stop.sequence,
+                    "garage entry cinematic finished; waiting for client completion"
+                );
+                self.pending_rpcs
+                    .push_back(nfs_world::participants::HostRpc::SequenceStop(stop));
+            }
+        }
         if let Some(arrivals) = self.arrivals.as_mut() {
             for stop in arrivals.poll(world_ms)? {
                 tracing::info!(

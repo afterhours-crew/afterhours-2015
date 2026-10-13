@@ -613,6 +613,127 @@ fn binding_refresh_listener() -> (PlayerListener, u16) {
 }
 
 #[test]
+fn recreated_customization_timer_accepts_new_lifetime_without_reusing_old_measurement() {
+    use crate::{
+        customization_timer as timer,
+        garage_logic::{GarageLogic, Which},
+    };
+    use nfs_world::logic::{EntityRef, Message};
+    let (mut listener, participant) = binding_refresh_listener();
+    let scenes = Content::new(vec![(
+        101,
+        nfs_world::replication::sublevel::gameplay::profile().unwrap(),
+    )])
+    .unwrap();
+    let creation = nfs_world::replication::sublevel::ordinary::creation(
+        1,
+        101,
+        None,
+        nfs_protocol::world::rpc::Serial::new(0).unwrap(),
+        &nfs_world::replication::sublevel::ordinary::unpopulated(scenes.profile(101).unwrap())
+            .unwrap(),
+        &scenes,
+    )
+    .unwrap();
+    listener
+        .players
+        .create_scenes(&[1], vec![creation], &scenes)
+        .unwrap();
+    let mut policy = crate::garage_logic::tests::content_json();
+    let entity = policy["spawn"]["entities"][3].clone();
+    let empty = serde_json::json!({"scene_updates":[],"entities":[],"events":[]});
+    policy["spawn"] = empty.clone();
+    policy["spawn"]["entities"] = serde_json::json!([entity.clone()]);
+    policy["entry"] = empty.clone();
+    policy["vehicles"] = empty.clone();
+    policy["exit"] = empty.clone();
+    policy["exit"]["delete_capture_ids"] = serde_json::json!([295]);
+    policy["returning"] = empty.clone();
+    policy["returning"]["entities"] = serde_json::json!([entity]);
+    policy["returned"] = empty;
+    let logic = GarageLogic::from_json(&policy).unwrap();
+    let mut roles = content().roles.unwrap();
+    roles.customization_timer = Asset {
+        bundle: 4,
+        type_id: 10,
+        local_index: 3,
+    };
+    listener.roles = Some(roles);
+    let mut ghosts = BTreeMap::new();
+    logic
+        .produce(
+            Which::Spawn,
+            &mut listener.players,
+            participant,
+            &mut ghosts,
+        )
+        .unwrap();
+    let deliver = |listener: &mut PlayerListener, ghost, event| {
+        let body = Message::Reached {
+            event,
+            target: EntityRef { ghost, entity: 2 },
+            player: 0,
+        }
+        .encode()
+        .unwrap();
+        let mut wire = nfs_world::bits::BitWriter::new();
+        wire.put(1 << frame::MESSAGES, 6)
+            .put(1, 4)
+            .put(0, 1)
+            .put(1, 1)
+            .put(0, 3)
+            .put(0, 7)
+            .put(82, 7)
+            .put_span(body.span())
+            .put(0, 1)
+            .align();
+        let accepted = listener.frame(Queued {
+            advertised: None,
+            frame: 0,
+            data: wire.span(),
+        });
+        listener.pending.clear();
+        listener.pending_rpcs.clear();
+        accepted
+    };
+    for cycle in 0..3 {
+        let current = ghosts[&295];
+        listener.logic_ghosts.insert(participant, ghosts.clone());
+        listener.world_ms = cycle * 10_000;
+        assert!(
+            deliver(&mut listener, current, timer::STOP),
+            "cycle {cycle}: {:?}",
+            listener.last_error
+        );
+        assert_eq!(
+            listener.customization.state(participant).unwrap().completed,
+            0
+        );
+        assert!(deliver(&mut listener, current, timer::START));
+        listener.world_ms += 6_000;
+        assert!(deliver(&mut listener, current, timer::STOP));
+        assert_eq!(
+            listener.customization.state(participant).unwrap().completed,
+            1
+        );
+        logic
+            .produce(Which::Exit, &mut listener.players, participant, &mut ghosts)
+            .unwrap();
+        logic
+            .produce(
+                Which::Returning,
+                &mut listener.players,
+                participant,
+                &mut ghosts,
+            )
+            .unwrap();
+        listener.logic_ghosts.insert(participant, ghosts.clone());
+        assert_ne!(ghosts[&295], current);
+        assert!(!deliver(&mut listener, current, timer::STOP));
+    }
+}
+
+#[test]
 fn completion_binding_refresh_waits_for_deadline_and_preserves_presentation_order_once() {
     let (mut listener, participant) = binding_refresh_listener();
     let expected = listener

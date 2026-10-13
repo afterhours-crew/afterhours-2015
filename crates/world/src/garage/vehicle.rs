@@ -139,6 +139,30 @@ pub struct Pending {
     entries: BTreeMap<(u16, u16, u16), (Binding, bool)>,
 }
 impl Pending {
+    /// Replace a loaded garage slot with a newly prepared lifetime. A late ACK
+    /// for the old car cannot satisfy this binding.
+    pub fn replace_slot(&mut self, binding: Binding) -> Result<Option<Binding>, Error> {
+        binding.encode()?;
+        let key = (
+            binding.endpoint.scene,
+            binding.endpoint.selector,
+            binding.participant,
+        );
+        let Some((old, loaded)) = self.entries.get(&key) else {
+            return Err(Error::UnknownObject);
+        };
+        if *old == binding {
+            return Ok(None);
+        }
+        if !loaded {
+            return Err(Error::Shape);
+        }
+        let mut next = self.clone();
+        next.entries.remove(&key);
+        let result = next.offer(binding)?;
+        *self = next;
+        Ok(result)
+    }
     pub fn has_endpoint(&self, scene: u16, selector: u16) -> bool {
         self.entries
             .keys()

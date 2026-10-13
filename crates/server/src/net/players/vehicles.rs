@@ -108,7 +108,7 @@ impl PlayerListener {
         }
         Ok(out)
     }
-    fn presence_endpoint(
+    pub(super) fn presence_endpoint(
         roles: Option<&crate::scene_roles::SceneRoles>,
         players: &Players,
     ) -> Result<nfs_world::participants::Endpoint, replication::Error> {
