@@ -19,6 +19,78 @@ fn content() -> WorldContent {
 }
 
 #[test]
+fn spawn_presentation_waits_for_capacity_with_poll_and_rejects_foreign_owner() {
+    use nfs_world::participants::{Call, HostRpc, Notification};
+    let content = content_with(Some(&SPAWN_LAYOUT));
+    let key = content.roles.as_ref().unwrap().gameplay;
+    let mut listener = PlayerListener::new(101);
+    listener.initialize_world(&content).unwrap();
+    let player = listener
+        .players
+        .create(
+            HOST_SELECTOR as u8,
+            101,
+            Request {
+                name: b"Driver".to_vec(),
+                flag: false,
+                slot: 0,
+            },
+        )
+        .unwrap()
+        .unwrap()
+        .id;
+    let participant = listener
+        .players
+        .join(HOST_SELECTOR as u8, 101, player)
+        .unwrap()
+        .unwrap()
+        .id;
+    listener.participants.begin(participant).unwrap();
+    let mut v = crate::garage_logic::tests::presentation_json();
+    v["world_spawn"]["events"][0]["target"] = serde_json::json!({"scene_content_key":key});
+    let logic = std::sync::Arc::new(crate::garage_logic::GarageLogic::from_json(&v).unwrap());
+    assert!(
+        PlayerListener::presentation_events(
+            Some(&logic),
+            crate::garage_logic::Which::WorldSpawn,
+            &listener.players,
+            &listener.logic_ghosts,
+            202,
+            participant
+        )
+        .is_err()
+    );
+    listener.logic = Some(logic);
+    let notification = Notification {
+        endpoint: listener.spawn_points.bindings().unwrap().assign,
+        participant,
+        call: Call::Assign(1),
+    };
+    listener.pending_spawns.push_back((100, notification));
+    let filler = HostRpc::Participant(notification);
+    listener
+        .pending_rpcs
+        .resize(nfs_world::session::MAX_RPC_QUEUE - 2, filler);
+    let before = listener.level_poll.clone();
+    listener.advance_level_poll(100).unwrap();
+    assert_eq!(listener.level_poll, before);
+    assert_eq!(listener.pending_spawns.len(), 1);
+    assert_eq!(
+        listener.pending_rpcs.len(),
+        nfs_world::session::MAX_RPC_QUEUE - 2
+    );
+    listener.pending_rpcs.clear();
+    listener.advance_level_poll(100).unwrap();
+    assert!(matches!(listener.pending_rpcs[0], HostRpc::LevelPoll(_)));
+    assert_eq!(listener.pending_rpcs[1], filler);
+    assert!(matches!(listener.pending_rpcs[2],HostRpc::Event(e) if e.event==14));
+    assert!(listener.pending_spawns.is_empty());
+    listener.pending_rpcs.clear();
+    listener.advance_level_poll(101).unwrap();
+    assert!(listener.pending_rpcs.is_empty());
+}
+
+#[test]
 fn installed_scenes_fill_version_five_without_masking_invalid_overrides() {
     let content = content();
     let catalog = nfs_content::scenes::Catalog {

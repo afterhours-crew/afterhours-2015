@@ -45,6 +45,81 @@ fn bound(count: usize) -> (Activation, Record, Catalog) {
         catalog,
     )
 }
+
+#[test]
+fn early_location_preserves_activation_order_and_requires_ready_owner() {
+    let (mut a, r, _) = bound(2);
+    let location = client(r.id, 7, 2, 0, None, 0);
+    let before = a.clone();
+    assert_eq!(
+        a.receive(location.span(), |_| true),
+        Err(Error::UnknownObject)
+    );
+    assert_eq!(
+        a.receive_ready(location.span(), |_| false, |_| true),
+        Err(Error::UnknownObject)
+    );
+    assert_eq!(a, before);
+    assert_eq!(
+        a.receive_ready(location.span(), |_| true, |_| true)
+            .unwrap(),
+        Some(Report::Location {
+            participant: 7,
+            first: true
+        })
+    );
+    assert_eq!(
+        a.receive_ready(location.span(), |_| true, |_| true)
+            .unwrap(),
+        Some(Report::Location {
+            participant: 7,
+            first: false
+        })
+    );
+    assert!(a.participants().next().is_none());
+    let crossing = client(r.id, 7, 3, 2, Some(1.), 0);
+    assert_eq!(
+        a.receive_ready(crossing.span(), |_| true, |_| true),
+        Err(Error::UnknownObject)
+    );
+    assert!(a.set(7, true, 3, |_| true).unwrap().is_empty());
+    assert!(a.located_before_activation.contains(&7));
+    assert_eq!(a.set(7, true, 4, |_| true).unwrap().len(), 4);
+    assert!(a.located_before_activation.is_empty());
+    assert_eq!(
+        a.receive(location.span(), |_| true).unwrap(),
+        Some(Report::Location {
+            participant: 7,
+            first: false
+        })
+    );
+    a.set(7, false, 3, |_| true).unwrap();
+    assert_eq!(
+        a.receive(location.span(), |_| true),
+        Err(Error::UnknownObject)
+    );
+}
+
+#[test]
+fn pending_locations_are_bounded_and_detach_clears_unpublished_state() {
+    let (mut a, r, _) = bound(1);
+    for id in 1..=MAX_PARTICIPANTS as u16 {
+        a.receive_ready(client(r.id, id, 2, 0, None, 0).span(), |_| true, |_| true)
+            .unwrap();
+    }
+    let before = a.clone();
+    assert_eq!(
+        a.receive_ready(client(r.id, 129, 2, 0, None, 0).span(), |_| true, |_| true),
+        Err(Error::Bound)
+    );
+    assert_eq!(a, before);
+    assert!(a.set(7, false, 0, |_| true).unwrap().is_empty());
+    assert!(!a.located_before_activation.contains(&7));
+    a.receive_ready(client(r.id, 129, 2, 0, None, 0).span(), |_| true, |_| true)
+        .unwrap();
+    let other = bound(1).0;
+    assert!(other.located_before_activation.is_empty());
+}
 fn client(
     scene: u16,
     participant: u16,
