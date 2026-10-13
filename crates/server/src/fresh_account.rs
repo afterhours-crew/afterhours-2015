@@ -26,16 +26,31 @@ enum Content {
         cache: Option<PathBuf>,
     },
 }
+/// Saved progression of the new account.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Progression {
+    /// Asset-default tables: the wired initial objectives, i.e. the start of
+    /// the official prologue, whose scripted events an owned host does not run.
+    Fresh,
+    /// The intro branch complete and the main objectives it activates active:
+    /// the official fresh career after its prologue (E742), where the garage
+    /// is entered on the PageDown prompt rather than on arrival.
+    PostIntro,
+}
 struct Args {
     name: String,
     directory: PathBuf,
     policy: PathBuf,
     content: Content,
+    progression: Progression,
+    /// Explicit progression content; required with files and post-intro.
+    progression_content: Option<PathBuf>,
 }
 fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
     let (mut name, mut directory, mut policy, mut items, mut tables) =
         (None, None, None, None, None);
     let (mut game_dir, mut cache) = (None, None);
+    let (mut progression, mut progression_content) = (None, None);
     while let Some(flag) = args.next() {
         let value = args.next().ok_or("missing option value")?;
         match flag.to_str() {
@@ -48,6 +63,16 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
             Some("--account-policy") if policy.is_none() => policy = Some(PathBuf::from(value)),
             Some("--item-content") if items.is_none() => items = Some(PathBuf::from(value)),
             Some("--persistent-content") if tables.is_none() => tables = Some(PathBuf::from(value)),
+            Some("--progression-content") if progression_content.is_none() => {
+                progression_content = Some(PathBuf::from(value))
+            }
+            Some("--progression") if progression.is_none() => {
+                progression = Some(match value.to_str() {
+                    Some("fresh") => Progression::Fresh,
+                    Some("post-intro") => Progression::PostIntro,
+                    _ => return Err("--progression takes fresh or post-intro".into()),
+                })
+            }
             Some("--game-dir") if game_dir.is_none() => game_dir = Some(PathBuf::from(value)),
             Some("--content-cache") if cache.is_none() => cache = Some(PathBuf::from(value)),
             _ => return Err("unknown or repeated account creation option".into()),
@@ -55,25 +80,44 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
     }
     let content = match (items, tables, game_dir) {
         (Some(items), Some(tables), None) if cache.is_none() => Content::Files { items, tables },
-        (None, None, Some(game_dir)) => Content::Game { game_dir, cache },
+        (None, None, Some(game_dir)) if progression_content.is_none() => {
+            Content::Game { game_dir, cache }
+        }
         _ => {
             return Err(
-                "pass --item-content and --persistent-content, or --game-dir (optionally with --content-cache)"
+                "pass --item-content and --persistent-content (plus --progression-content for --progression post-intro), or --game-dir (optionally with --content-cache)"
                     .into(),
             );
         }
     };
+    let progression = progression.unwrap_or(Progression::Fresh);
+    if matches!(content, Content::Files { .. })
+        && (progression == Progression::PostIntro) != progression_content.is_some()
+    {
+        return Err(
+            "--progression post-intro needs --progression-content, which nothing else uses".into(),
+        );
+    }
     Ok(Args {
         name: name.ok_or("--name is required")?,
         directory: directory.ok_or("--state-directory is required")?,
         policy: policy.ok_or("--account-policy is required")?,
         content,
+        progression,
+        progression_content,
     })
 }
-fn run(args: Args, options: &nfs_content::Options) -> Result<(), Box<dyn std::error::Error>> {
+fn run(
+    args: Args,
+    options: &nfs_content::Options,
+) -> Result<nfs_storage::AccountId, Box<dyn std::error::Error>> {
     let policy = Policy::load(&args.policy)?;
-    let (items, tables) = match &args.content {
-        Content::Files { items, tables } => (items.clone(), tables.clone()),
+    let (items, tables, progression_content) = match &args.content {
+        Content::Files { items, tables } => (
+            items.clone(),
+            tables.clone(),
+            args.progression_content.clone(),
+        ),
         Content::Game { game_dir, cache } => {
             let generated = crate::install_content::resolve(
                 std::path::Path::new(""),
@@ -81,7 +125,11 @@ fn run(args: Args, options: &nfs_content::Options) -> Result<(), Box<dyn std::er
                 cache.as_deref(),
                 options,
             )?;
-            (generated.item_content, generated.persistent_content)
+            (
+                generated.item_content,
+                generated.persistent_content,
+                Some(generated.progression_content),
+            )
         }
     };
     let items = ItemContent::load(&items)?;
@@ -89,6 +137,18 @@ fn run(args: Args, options: &nfs_content::Options) -> Result<(), Box<dyn std::er
         .inventory()
         .ok_or("item content must contain an initialization policy")?;
     let tables = persistent::Catalog::load(&tables)?;
+    let objectives = match args.progression {
+        Progression::Fresh => Vec::new(),
+        Progression::PostIntro => {
+            let content = nfs_content::progression::Content::load(
+                progression_content
+                    .as_deref()
+                    .ok_or("post-intro progression needs progression content")?,
+            )
+            .map_err(|e| format!("progression content: {e:?}"))?;
+            content.catalog.post_intro(content.settings)
+        }
+    };
     let now = u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())?;
     let prepared = Prepared::new(
         &args.name,
@@ -97,13 +157,18 @@ fn run(args: Args, options: &nfs_content::Options) -> Result<(), Box<dyn std::er
         &policy,
         items,
         &tables,
+        &objectives,
     )?;
     prepared.publish(&args.directory)?;
+    let progression = match args.progression {
+        Progression::Fresh => "fresh",
+        Progression::PostIntro => "post-intro",
+    };
     println!(
         "{}",
-        serde_json::json!({"created":true,"local_account":prepared.identity().storage_account().hex(),"schema_version":nfs_storage::sqlite::VERSION})
+        serde_json::json!({"created":true,"local_account":prepared.identity().storage_account().hex(),"schema_version":nfs_storage::sqlite::VERSION,"progression":progression,"objective_rows":objectives.len()})
     );
-    Ok(())
+    Ok(prepared.identity().storage_account())
 }
 pub fn main(args: impl Iterator<Item = OsString>) -> std::process::ExitCode {
     let args = match parse(args) {
@@ -114,7 +179,7 @@ pub fn main(args: impl Iterator<Item = OsString>) -> std::process::ExitCode {
         }
     };
     match run(args, &nfs_content::Options::default()) {
-        Ok(()) => std::process::ExitCode::SUCCESS,
+        Ok(_) => std::process::ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("{error}");
             std::process::ExitCode::FAILURE
@@ -164,6 +229,37 @@ mod tests {
             duplicate.extend(extra.into_iter().map(OsString::from));
             assert!(parse(duplicate.into_iter()).is_err());
         }
+        // Progression defaults to fresh; post-intro needs progression content
+        // with explicit files, which nothing else may pass, and derives it
+        // from an installation.
+        let parsed = parse(args.clone().into_iter()).unwrap();
+        assert_eq!(parsed.progression, Progression::Fresh);
+        assert!(parsed.progression_content.is_none());
+        let mut post = args.clone();
+        post.extend(["--progression".into(), "post-intro".into()]);
+        assert!(parse(post.clone().into_iter()).is_err());
+        post.extend(["--progression-content".into(), "progression.json".into()]);
+        let parsed = parse(post.into_iter()).unwrap();
+        assert_eq!(parsed.progression, Progression::PostIntro);
+        assert_eq!(
+            parsed.progression_content.as_deref(),
+            Some(std::path::Path::new("progression.json"))
+        );
+        let mut unused = args.clone();
+        unused.extend(["--progression-content".into(), "progression.json".into()]);
+        assert!(parse(unused.into_iter()).is_err());
+        let mut unknown = args.clone();
+        unknown.extend(["--progression".into(), "finished".into()]);
+        assert!(parse(unknown.into_iter()).is_err());
+        let mut game_post = game.clone();
+        game_post.extend(["--progression".into(), "post-intro".into()]);
+        assert_eq!(
+            parse(game_post.into_iter()).unwrap().progression,
+            Progression::PostIntro
+        );
+        let mut game_explicit = game.clone();
+        game_explicit.extend(["--progression-content".into(), "progression.json".into()]);
+        assert!(parse(game_explicit.into_iter()).is_err());
     }
 
     #[test]
@@ -185,15 +281,70 @@ mod tests {
         let args = Args {
             name: "Synthetic Driver".into(),
             directory: dir.join("account"),
+            policy: policy.clone(),
+            content: Content::Game {
+                game_dir: dir.join("game"),
+                cache: Some(dir.join("cache")),
+            },
+            progression: Progression::Fresh,
+            progression_content: None,
+        };
+        run(args, &options).unwrap();
+        assert!(dir.join("account").is_dir());
+        assert_eq!(std::fs::read_dir(dir.join("cache")).unwrap().count(), 1);
+        // A post-intro account from the same installation stores the intro
+        // objectives completed, read back through the generated catalogs.
+        let args = Args {
+            name: "Synthetic Driver".into(),
+            directory: dir.join("post-intro"),
             policy,
             content: Content::Game {
                 game_dir: dir.join("game"),
                 cache: Some(dir.join("cache")),
             },
+            progression: Progression::PostIntro,
+            progression_content: None,
         };
-        run(args, &options).unwrap();
-        assert!(dir.join("account").is_dir());
-        assert_eq!(std::fs::read_dir(dir.join("cache")).unwrap().count(), 1);
+        let account = run(args, &options).unwrap();
+        let generated = crate::install_content::resolve(
+            std::path::Path::new(""),
+            &dir.join("game"),
+            Some(&dir.join("cache")),
+            &options,
+        )
+        .unwrap();
+        let progression =
+            crate::progression::Content::load(&generated.progression_content).unwrap();
+        let tables = persistent::Catalog::load(&generated.persistent_content).unwrap();
+        let repository =
+            nfs_storage::SqliteRepository::open_owned_directory(&dir.join("post-intro")).unwrap();
+        let snapshot = nfs_storage::InventoryRepository::snapshot(&repository, account).unwrap();
+        let restored = progression
+            .catalog
+            .restore(&tables.view(&snapshot).unwrap(), progression.settings)
+            .unwrap();
+        let intro = progression
+            .catalog
+            .objective_ids(crate::progression::Branch::Intro);
+        assert!(!intro.is_empty());
+        for id in &intro {
+            assert_eq!(
+                restored
+                    .branch(crate::progression::Branch::Intro)
+                    .objectives()[id],
+                crate::progression::Objective {
+                    active: false,
+                    completed: true
+                }
+            );
+        }
+        assert!(
+            restored
+                .branch(crate::progression::Branch::Main)
+                .objectives()
+                .values()
+                .all(|o| !o.completed)
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

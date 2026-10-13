@@ -73,6 +73,15 @@ Instead of `--item-content` and `--persistent-content`, pass `--game-dir
 `artifacts/content`) to build both from the player's game files; see
 [Game content](#game-content).
 
+`--progression post-intro` saves the account past the official prologue: every
+intro objective is stored completed and the main objectives it activates are
+stored active, so the client plays the open world normally and enters the
+garage on its prompt instead of automatically, as the prologue's "drive to the
+garage" step does. With explicit content files it needs `--progression-content
+<file>`; with `--game-dir` the generated content is used. The default,
+`--progression fresh`, keeps the asset-default tables, i.e. the start of the
+prologue, whose scripted events this server does not run.
+
 All paths follow the current directory. The parent of `--state-directory` must
 exist and the final directory must be new. Names are nonempty UTF-8, at most 32
 bytes, with no control characters. The JSON result contains `created: true` and

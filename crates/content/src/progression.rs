@@ -3,6 +3,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! Validated static progression defaults and entity shapes. Account state stays in the server.
+pub use nfs_services::fresh_account::ObjectiveRow;
 use serde_json::Value as Json;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -107,19 +108,57 @@ fn expression(
     })
 }
 impl Expr {
+    /// The activation value with no objective completed yet.
     pub fn initial(&self, settings: Settings) -> bool {
+        self.evaluate(settings, &BTreeSet::new())
+    }
+    /// The activation value once the given objectives are completed.
+    pub fn evaluate(&self, settings: Settings, completed: &BTreeSet<u64>) -> bool {
         match self {
             Self::Constant(v) => *v,
-            Self::Completed(_) => false,
+            Self::Completed(id) => completed.contains(id),
             Self::ConsumerBeta => settings.consumer_beta,
-            Self::Not(v) => !v.initial(settings),
-            Self::All(v) => v.iter().all(|e| e.initial(settings)),
+            Self::Not(v) => !v.evaluate(settings, completed),
+            Self::All(v) => v.iter().all(|e| e.evaluate(settings, completed)),
         }
     }
 }
 impl Catalog {
     pub fn branches(&self) -> &BTreeMap<Branch, Definition> {
         &self.branches
+    }
+    /// Saved objective rows of an account whose whole intro branch is complete
+    /// and whose main objectives activated by that completion are active: the
+    /// state after the official fresh career's prologue (E742: the intro
+    /// objectives advance in order and the last one leaves at the garage exit
+    /// after the player's PageDown entry), without the prologue's scripted
+    /// events, which an owned host does not run. Every intro objective is
+    /// stored inactive and completed; a main objective is stored active and
+    /// incomplete when its activation holds with exactly the intro completed.
+    /// Objectives without a row keep their wired initial state.
+    pub fn post_intro(&self, settings: Settings) -> Vec<ObjectiveRow> {
+        let intro = self.objective_ids(Branch::Intro);
+        let mut rows: Vec<_> = intro
+            .iter()
+            .map(|&id| ObjectiveRow {
+                id,
+                active: false,
+                completed: true,
+            })
+            .collect();
+        if let Some(main) = self.branches.get(&Branch::Main) {
+            rows.extend(
+                main.objectives
+                    .iter()
+                    .filter(|(_, expr)| expr.evaluate(settings, &intro))
+                    .map(|&(id, _)| ObjectiveRow {
+                        id,
+                        active: true,
+                        completed: false,
+                    }),
+            );
+        }
+        rows
     }
 
     pub fn objective_ids(&self, branch: Branch) -> BTreeSet<u64> {

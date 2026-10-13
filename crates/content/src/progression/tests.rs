@@ -167,3 +167,44 @@ fn profile_rejects_unknown_roles_ports_and_duplicate_roots() {
         synthetic::progression::rules()
     );
 }
+
+#[test]
+fn activation_evaluates_against_completed_objectives_and_post_intro_rows_follow() {
+    let catalog = Catalog::from_json(&serde_json::json!({"version":1,"build_sha256":BUILD,
+        "source":{"path":"constructed-progression","sha256":"00".repeat(32)},"branches":[
+        {"name":"main","objectives":[
+            {"id":30,"active":{"all":[{"completed":20},{"negate":{"setting":"Gameplay.NFS16ConsumerBeta"}}]}},
+            {"id":40,"active":{"completed":30}},
+            {"id":50,"active":{"constant":false}}],"ints":[7]},
+        {"name":"intro","objectives":[{"id":20,"active":{"completed":10}},{"id":10,"active":{"constant":true}}],"ints":[]}
+    ]}))
+    .unwrap();
+    let off = Settings {
+        consumer_beta: false,
+    };
+    let on = Settings {
+        consumer_beta: true,
+    };
+    let main = &catalog.branches()[&Branch::Main].objectives;
+    let intro = catalog.objective_ids(Branch::Intro);
+    assert_eq!(intro, BTreeSet::from([10, 20]));
+    let (first, second, never) = (&main[0].1, &main[1].1, &main[2].1);
+    assert!(!first.initial(off));
+    assert!(first.evaluate(off, &intro));
+    assert!(!first.evaluate(on, &intro));
+    assert!(!first.evaluate(off, &BTreeSet::from([10])));
+    assert!(!second.evaluate(off, &intro));
+    assert!(second.evaluate(off, &BTreeSet::from([30])));
+    assert!(!never.evaluate(off, &BTreeSet::from([10, 20, 30, 40])));
+    assert_eq!(
+        catalog.post_intro(off),
+        [(10, false, true), (20, false, true), (30, true, false)].map(|(id, active, completed)| {
+            ObjectiveRow {
+                id,
+                active,
+                completed,
+            }
+        })
+    );
+    assert_eq!(catalog.post_intro(on).len(), 2);
+}

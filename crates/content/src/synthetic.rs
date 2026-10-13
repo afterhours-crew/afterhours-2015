@@ -120,8 +120,19 @@ pub fn table(index: u8, name: &str, secondary: bool, count: usize) -> Asset {
                     ("DefaultValue", Field::CString("0".into())),
                 ]
             } else {
+                // The objective table keeps its real column names: saved
+                // objective rows are written by those names at creation.
+                let column = if name == nfs_services::fresh_account::OBJECTIVES_TABLE {
+                    [
+                        nfs_services::fresh_account::ACTIVE_COLUMN,
+                        nfs_services::fresh_account::COMPLETED_COLUMN,
+                    ][i]
+                        .to_string()
+                } else {
+                    format!("{name}Column{i}")
+                };
                 vec![
-                    ("Name", Field::CString(format!("{name}Column{i}"))),
+                    ("Name", Field::CString(column)),
                     (
                         "DataType",
                         Field::Enum("PersistentPropertyType", "PersistentPropertyType_Int", 0),
