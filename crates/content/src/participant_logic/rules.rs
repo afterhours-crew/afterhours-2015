@@ -16,6 +16,7 @@ pub struct Rules {
     pub root_channels: u32,
     pub spawner_channels: u32,
     pub boolean_ports: BTreeMap<String, u32>,
+    pub integer_ports: BTreeMap<String, u32>,
 }
 impl Rules {
     pub fn from_json(v: &Value) -> Result<Self, Error> {
@@ -25,6 +26,7 @@ impl Rules {
             "root_channels",
             "spawner_channels",
             "boolean_ports",
+            "integer_ports",
         ];
         let map = v
             .as_object()
@@ -84,6 +86,7 @@ impl Rules {
             root_channels: number("root_channels")?,
             spawner_channels: number("spawner_channels")?,
             boolean_ports: super::boolean::ports(&map["boolean_ports"])?,
+            integer_ports: super::integer::ports(&map["integer_ports"])?,
         })
     }
     pub fn to_json(&self) -> Value {
@@ -105,6 +108,6 @@ impl Rules {
                 )
             })
             .collect();
-        json!({"classes":classes,"spawners":self.spawners,"root_channels":self.root_channels,"spawner_channels":self.spawner_channels,"boolean_ports":self.boolean_ports})
+        json!({"classes":classes,"spawners":self.spawners,"root_channels":self.root_channels,"spawner_channels":self.spawner_channels,"boolean_ports":self.boolean_ports,"integer_ports":self.integer_ports})
     }
 }

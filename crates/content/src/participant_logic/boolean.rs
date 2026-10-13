@@ -197,6 +197,18 @@ impl<S: Source> Compiler<'_, '_, S> {
         Ok(())
     }
     fn channel(&mut self, endpoint: Endpoint, kind: &str) -> Result<Port, Error> {
+        self.channel_type(
+            endpoint,
+            kind == "bool_type",
+            self.rules.boolean_ports[kind],
+        )
+    }
+    fn channel_type(
+        &mut self,
+        endpoint: Endpoint,
+        property: bool,
+        expected_type: u32,
+    ) -> Result<Port, Error> {
         if endpoint.port == 0 {
             return Err(bad("zero Boolean channel port"));
         }
@@ -210,7 +222,7 @@ impl<S: Source> Compiler<'_, '_, S> {
         }
         let key = self.graph.target_field(&endpoint.site, "ChannelAsset")?;
         let asset = self.graph.source.object(&key)?;
-        let (table, ty) = if kind == "bool_type" {
+        let (table, ty) = if property {
             ("Properties", "FieldTypeHash")
         } else {
             ("Links", "LinkTypeHash")
@@ -240,7 +252,7 @@ impl<S: Source> Compiler<'_, '_, S> {
                     fields
                         .get(ty)
                         .ok_or_else(|| bad("Boolean channel declaration type"))?,
-                )? != self.rules.boolean_ports[kind]
+                )? != expected_type
                 {
                     return Err(bad("Boolean channel type mismatch"));
                 }
@@ -489,6 +501,31 @@ impl AssetIndex {
         let (_, fields) = shape(&nodes, &rules)?;
         compile(&mut graph, &fields, &rules)
     }
+}
+
+// Integer accessors share the same participant ownership and typed channel-link
+// contract. Keep these checks in one place for both expression compilers.
+pub(super) fn property_binding<S: Source>(
+    graph: &mut Graph<S>,
+    fields: &[(Site, Kind)],
+    rules: &Rules,
+    site: &Site,
+    property_link: u32,
+) -> Result<Port, Error> {
+    let mut compiler = Compiler {
+        graph,
+        fields,
+        rules,
+        ops: Vec::new(),
+        active: BTreeSet::new(),
+    };
+    compiler.self_participant(site)?;
+    let target = compiler.one_link(site, property_link)?;
+    compiler.channel_type(
+        target,
+        false,
+        rules.integer_ports["participant_property_type"],
+    )
 }
 
 #[cfg(test)]

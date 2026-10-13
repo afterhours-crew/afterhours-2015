@@ -20,6 +20,7 @@ use std::collections::{BTreeMap, BTreeSet};
 mod rules;
 pub use rules::Rules;
 pub mod boolean;
+pub mod integer;
 
 /// An explicit owner context, rather than a global search by channel asset.
 #[derive(Clone, Debug, Eq, PartialEq)]
