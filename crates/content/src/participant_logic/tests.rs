@@ -264,6 +264,41 @@ fn rules_reject_unknown_kinds_duplicate_spawners_and_unbounded_identifiers() {
 }
 
 #[test]
+fn synced_float_keeps_its_position_between_other_serializers() {
+    use crate::graph::tests::{Memory, local};
+    let mut source = Memory::default();
+    source.put(
+        "a",
+        0,
+        "ParticipantLogicBlueprint",
+        &[
+            ("Flags", Value::UInt16(1)),
+            (
+                "Objects",
+                Value::Array(vec![local(1), local(2), local(3), local(4)]),
+            ),
+        ],
+    );
+    source.put("a", 1, "ParticipantLogicEntityData", &[]);
+    source.put("a", 2, "SyncedIntEntityData", &[]);
+    source.put("a", 3, "SyncedFloatEntityData", &[]);
+    source.put("a", 4, "SyncedBoolEntityData", &[]);
+    let rules = crate::BuildIdentity::supported().participant_logic;
+    let nodes = Graph::new(&mut source).read(Site::root("a")).unwrap();
+    let (_, fields) = shape(&nodes, &rules).unwrap();
+    assert_eq!(
+        fields.iter().map(|(_, kind)| *kind).collect::<Vec<_>>(),
+        vec![
+            Kind::Root,
+            Kind::I32Property,
+            Kind::FloatProperty,
+            Kind::BoolProperty
+        ]
+    );
+    assert_eq!(Rules::from_json(&rules.to_json()).unwrap(), rules);
+}
+
+#[test]
 fn shape_counts_repeated_prefab_occurrences_and_rejects_duplicate_roots() {
     use crate::graph::tests::{Memory, local, ptr};
     let mut source = Memory::default();

@@ -547,6 +547,27 @@ fn three_round_trips_keep_return_order_retries_and_foreign_owners_isolated() {
         );
         assert_eq!(model, before);
         let route = request(4, 8, 100, 0, 7);
+        // The first request of a zone visit only shows the prompt; the second
+        // (PageDown) starts the return. Leaving the zone resets the prompt.
+        assert_eq!(
+            model.receive(route.span(), |p| p == 8).unwrap(),
+            Outcome::Advanced(Vec::new())
+        );
+        assert_eq!(model.stage(8), Some(Stage::ReturnPrompted));
+        assert_eq!(model.take_prompted(), [8]);
+        assert!(model.take_returning().is_empty());
+        assert_eq!(model.leave_prompt(8), Outcome::Advanced(Vec::new()));
+        assert_eq!(model.stage(8), Some(Stage::FreeRoam));
+        assert_eq!(model.leave_prompt(8), Outcome::Repeated);
+        assert_eq!(model.leave_prompt(9), Outcome::Unsupported);
+        assert_eq!(
+            model.receive(route.span(), |p| p == 8).unwrap(),
+            Outcome::Advanced(Vec::new())
+        );
+        assert_eq!(model.take_prompted(), [8]);
+        assert!(model.in_free_roam().contains(&8));
+        // The five garage slots are re-sent between the fourth preparing
+        // state's enter and leave; without items each is method 2 tail 19.
         assert_eq!(
             calls(model.receive(route.span(), |p| p == 8).unwrap()),
             [
@@ -558,15 +579,23 @@ fn three_round_trips_keep_return_order_retries_and_foreign_owners_isolated() {
                 (4, 65, 0, 0),
                 (4, 65, 1, 31),
                 (4, 73, 0, 0),
+                (2, 7, 2, 19),
+                (2, 8, 2, 19),
+                (2, 9, 2, 19),
+                (2, 10, 2, 19),
+                (2, 11, 2, 19),
                 (4, 73, 1, 0),
                 (4, 67, 0, 0)
             ]
         );
         assert_eq!(model.take_returning(), [8]);
+        assert!(model.take_prompted().is_empty());
+        assert!(!model.in_free_roam().contains(&8));
         assert_eq!(
             model.receive(route.span(), |p| p == 8).unwrap(),
             Outcome::Repeated
         );
+        assert_eq!(model.leave_prompt(8), Outcome::Unsupported);
         assert!(model.take_returning().is_empty());
         assert_eq!(
             calls(model.returned_to_garage(8)),
@@ -762,4 +791,181 @@ fn tagged_leave_carries_its_tail_and_plain_calls_keep_zero_padding() {
     );
     assert_eq!(ExitBindings::from_records(&[], 1, 2), Ok(None));
     assert_eq!(ExitBindings::from_records(&[], 1, 1), Err(Error::Shape));
+}
+
+#[test]
+fn arrival_requests_carry_the_prompt_into_free_roam_across_three_lifetimes() {
+    // Preserve a pre-arrival request until confirmation or zone release.
+    // Only a repeated request in free roam starts the return.
+    let mut model = in_customization(8);
+    let ep = |selector| Endpoint {
+        scene: 4,
+        selector,
+        serial: Serial::new(2).unwrap(),
+    };
+    model.returning = Some(ReturnBindings {
+        request: ep(100),
+        free_roam: ep(1),
+        preparing: [61, 63, 65, 73].map(ep),
+        sequence: ep(67),
+        finishing: [68, 70, 60].map(ep),
+    });
+    model.stages.insert(9, Stage::Customization);
+    let owns = |p| p == 8 || p == 9;
+    let route = request(4, 8, 100, 0, 7);
+    let other = request(4, 9, 100, 0, 7);
+    let prompt_only = Outcome::Advanced(Vec::new());
+    let exit_to_arriving = |model: &mut Lifecycle, request_while_exiting: bool| {
+        assert!(matches!(
+            model.receive(request(4, 8, 96, 0, 7).span(), owns).unwrap(),
+            Outcome::Advanced(_)
+        ));
+        model.take_exited();
+        assert_eq!(model.stage(8), Some(Stage::ExitingGarage));
+        if request_while_exiting {
+            // A request before the world-loaded report cannot return yet.
+            assert_eq!(model.receive(route.span(), owns).unwrap(), prompt_only);
+            assert_eq!(model.take_prompted(), [8]);
+            assert!(model.prompted(8));
+            assert_eq!(model.stage(8), Some(Stage::ExitingGarage));
+        }
+        model.receive(request(4, 8, 76, 3, 7).span(), owns).unwrap();
+        model.receive(request(4, 8, 80, 0, 7).span(), owns).unwrap();
+        model.take_arriving();
+        assert_eq!(model.stage(8), Some(Stage::Arriving));
+    };
+    let return_chain = |model: &mut Lifecycle| {
+        assert_eq!(calls(model.receive(route.span(), owns).unwrap()).len(), 15);
+        assert_eq!(model.take_returning(), [8]);
+        assert!(model.take_prompted().is_empty());
+        assert!(!model.prompted(8));
+        assert_eq!(model.leave_prompt(8), Outcome::Unsupported);
+        assert!(matches!(model.returned_to_garage(8), Outcome::Advanced(_)));
+        assert!(matches!(model.enter_customization(8), Outcome::Advanced(_)));
+    };
+    // Lifetime 1: request while exiting, a repeat during the
+    // arrival is the same prompt, the rollout release ends it, the re-entry
+    // request starts it again, free roam begins prompted and PageDown
+    // returns.
+    exit_to_arriving(&mut model, true);
+    assert_eq!(model.receive(route.span(), owns).unwrap(), prompt_only);
+    assert!(model.take_prompted().is_empty());
+    assert!(model.take_returning().is_empty());
+    assert_eq!(model.leave_prompt(8), prompt_only);
+    assert!(!model.prompted(8));
+    assert_eq!(model.leave_prompt(8), Outcome::Unsupported);
+    assert_eq!(model.receive(route.span(), owns).unwrap(), prompt_only);
+    assert_eq!(model.take_prompted(), [8]);
+    assert_eq!(calls(model.arrived(8)).len(), 2);
+    assert_eq!(model.stage(8), Some(Stage::ReturnPrompted));
+    assert_eq!(model.arrived(8), Outcome::Repeated);
+    assert!(model.prompted(8));
+    assert!(model.in_free_roam().contains(&8));
+    // A prompt that began during the arrival never confirms by itself: the
+    // repeat in free roam does.
+    return_chain(&mut model);
+    // Lifetime 2: the prompt carried into free roam is cancelled by driving
+    // away; the next visit prompts again and returns on the repeat.
+    exit_to_arriving(&mut model, false);
+    assert_eq!(model.receive(route.span(), owns).unwrap(), prompt_only);
+    assert_eq!(model.take_prompted(), [8]);
+    assert_eq!(calls(model.arrived(8)).len(), 2);
+    assert_eq!(model.stage(8), Some(Stage::ReturnPrompted));
+    assert_eq!(model.leave_prompt(8), prompt_only);
+    assert_eq!(model.stage(8), Some(Stage::FreeRoam));
+    assert!(!model.prompted(8));
+    assert_eq!(model.receive(route.span(), owns).unwrap(), prompt_only);
+    assert_eq!(model.take_prompted(), [8]);
+    return_chain(&mut model);
+    // Lifetime 3: no arrival request; the other participant's request is
+    // unsupported in the garage and leaves the prompt of 8 alone.
+    exit_to_arriving(&mut model, false);
+    assert!(!model.prompted(8));
+    assert_eq!(calls(model.arrived(8)).len(), 2);
+    assert_eq!(model.stage(8), Some(Stage::FreeRoam));
+    assert_eq!(model.receive(route.span(), owns).unwrap(), prompt_only);
+    assert_eq!(model.take_prompted(), [8]);
+    assert_eq!(
+        model.receive(other.span(), owns).unwrap(),
+        Outcome::Unsupported
+    );
+    assert_eq!(model.stage(9), Some(Stage::Customization));
+    assert!(!model.prompted(9));
+    assert_eq!(model.leave_prompt(9), Outcome::Unsupported);
+    assert!(model.prompted(8));
+    assert!(model.take_prompted().is_empty());
+    return_chain(&mut model);
+    assert_eq!(model.stage(9), Some(Stage::Customization));
+}
+
+#[test]
+fn the_return_rebinds_the_car_slot_with_its_item_and_tags_the_empty_slots() {
+    // The occupied slot carries a two-word item; empty slots carry tail 19.
+    let mut model = ready();
+    model.exit = Some(exit_bindings());
+    model.begin(8).unwrap();
+    model
+        .set_garage([Some(0x1234_5678_9abc_def0), None, None, None, None])
+        .unwrap();
+    model.receive(ack(8, 3).span(), |p| p == 8).unwrap();
+    let login = model.take_garage_bindings();
+    assert_eq!(login.len(), 1);
+    model.finish_persistent(|p| p == 8);
+    assert!(model.begin_progression(8));
+    assert_eq!(model.enter_garage_loading(8).len(), 12);
+    assert!(matches!(model.enter_customization(8), Outcome::Advanced(_)));
+    let ep = |selector| Endpoint {
+        scene: 4,
+        selector,
+        serial: Serial::new(2).unwrap(),
+    };
+    model.returning = Some(ReturnBindings {
+        request: ep(100),
+        free_roam: ep(1),
+        preparing: [61, 63, 65, 73].map(ep),
+        sequence: ep(67),
+        finishing: [68, 70, 60].map(ep),
+    });
+    let owns = |p| p == 8;
+    for (endpoint, method) in [(96u16, 0u32), (76, 3), (80, 0)] {
+        model
+            .receive(request(4, 8, endpoint, method, 7).span(), owns)
+            .unwrap();
+    }
+    model.take_exited();
+    model.take_arriving();
+    assert!(matches!(model.arrived(8), Outcome::Advanced(_)));
+    let route = request(4, 8, 100, 0, 7);
+    assert_eq!(
+        model.receive(route.span(), owns).unwrap(),
+        Outcome::Advanced(Vec::new())
+    );
+    let Outcome::Advanced(chain) = model.receive(route.span(), owns).unwrap() else {
+        panic!("return chain expected");
+    };
+    assert_eq!(chain.len(), 15);
+    let slot = chain[8];
+    assert_eq!(slot.call, Call::GarageItem(0x1234_5678_9abc_def0));
+    assert_eq!((slot.endpoint.scene, slot.endpoint.selector), (2, 7));
+    // Same wire form as the login binding: the garage codec decodes it.
+    let decoded = crate::garage::Binding::decode(slot.encode().unwrap().span()).unwrap();
+    assert_eq!(decoded.item, 0x1234_5678_9abc_def0);
+    assert_eq!(decoded.participant, 8);
+    assert_eq!(decoded.endpoint, slot.endpoint);
+    assert_eq!(decoded, login[0]);
+    for (i, n) in chain[9..13].iter().enumerate() {
+        assert_eq!(n.call, Call::NotifyTagged(19));
+        assert_eq!(n.endpoint.selector, 8 + i as u16);
+        assert_eq!(n.encode().unwrap().len(), slot.encode().unwrap().len() - 64);
+    }
+    // A zero item has no wire form.
+    assert!(
+        Notification {
+            endpoint: ep(7),
+            participant: 8,
+            call: Call::GarageItem(0),
+        }
+        .encode()
+        .is_err()
+    );
 }

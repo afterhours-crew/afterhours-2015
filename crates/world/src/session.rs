@@ -247,6 +247,9 @@ pub const MOVEMENT_INTERVAL_MS: u64 = 100;
 pub const MAX_REPLICATION_QUEUE: usize = 32;
 pub const MAX_REPLICATION_QUEUE_BITS: usize = 1024 * 1024;
 pub const MAX_RPC_QUEUE: usize = 2048;
+/// Notifications carried ahead of one replication frame's records; the
+/// RPC-only frame sends 15 per frame.
+pub const MAX_EAGER_NOTIFICATIONS: usize = 15;
 pub const MAX_CONTENT_CHUNKS: usize = 4096;
 
 fn missing_scene_level(
@@ -919,14 +922,43 @@ impl Host {
             world.blocked_level = None;
             let mut timed = section.clone();
             timed.float_bits = Some(replication_time(application, now_ms).to_bits());
-            let bits = match replication_frame(&timed, before, world.next_ex_sequence) {
-                Ok(bits) => bits,
-                Err(_) => {
-                    out.events
-                        .push(Event::ApplicationError(application::Error::Shape));
-                    return;
+            // Send notifications for objects already held by the client ahead
+            // of these records, so continuous replication cannot starve them.
+            // Queue order is kept: the prefix up to the first notification
+            // that names an unsent object, as far as the frame bound allows.
+            let mut before = before.clone();
+            let mut eager = 0;
+            if before.is_empty() {
+                for reply in &self.rpc_queue {
+                    if eager == MAX_EAGER_NOTIFICATIONS
+                        || !reply
+                            .objects()
+                            .iter()
+                            .all(|id| self.sent_objects.contains(id))
+                    {
+                        break;
+                    }
+                    before.push(*reply);
+                    eager += 1;
+                }
+            }
+            let bits = loop {
+                match replication_frame(&timed, &before, world.next_ex_sequence) {
+                    Ok(bits) if bits.len() <= self.max_replication_frame_bits || eager == 0 => {
+                        break bits;
+                    }
+                    Ok(_) => {
+                        before.pop();
+                        eager -= 1;
+                    }
+                    Err(_) => {
+                        out.events
+                            .push(Event::ApplicationError(application::Error::Shape));
+                        return;
+                    }
                 }
             };
+            let before = &before;
             let first_player = world.player_entry.first_creation(section);
             let sent = if let Some(player) = first_player {
                 application
@@ -965,6 +997,7 @@ impl Host {
             }
             self.replication_bits -= size;
             self.replication_queue.pop_front();
+            self.rpc_queue.drain(..eager);
             self.replication_sent += 1;
             self.replication_clock_ms = Some(now_ms);
             world.next_ex_sequence = (world.next_ex_sequence + notifications as u8) & 0x7f;

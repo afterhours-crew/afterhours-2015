@@ -275,6 +275,16 @@ fn return_handlers_publish_valid_frames_restore_loading_and_allow_three_exits() 
             .unwrap();
         lifecycle.take_arriving();
         lifecycle.arrived(participant);
+        // The first request shows the prompt and starts nothing; the repeated
+        // request (PageDown) begins the return.
+        assert_eq!(
+            lifecycle
+                .receive(request(scene, participant, 100, 0).span(), |_| true)
+                .unwrap(),
+            Outcome::Advanced(Vec::new())
+        );
+        assert_eq!(lifecycle.take_prompted(), [participant]);
+        assert!(lifecycle.take_returning().is_empty());
         let Outcome::Advanced(chain) = lifecycle
             .receive(request(scene, participant, 100, 0).span(), |_| true)
             .unwrap()

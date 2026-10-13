@@ -99,6 +99,7 @@ fn kind(v: &Json) -> Result<Kind, ParseError> {
         Some("rpc_flags") => Ok(Kind::RpcFlags),
         Some("bool_property") => Ok(Kind::BoolProperty),
         Some("i32_property") => Ok(Kind::I32Property),
+        Some("float_property") => Ok(Kind::FloatProperty),
         Some("rpc_variant") => Ok(Kind::RpcVariant),
         Some("rpc_ghost_reference") => Ok(Kind::RpcGhostReference),
         _ => Err(ParseError::Invalid),

@@ -37,6 +37,10 @@ const SPAWN_DELAY_MS: u64 = 750;
 /// send it about 100 ms before the assignment (E101 676 ms, E742 870 ms).
 const TELEPORT_DELAY_MS: u64 = 650;
 const BINDING_REFRESH_DELAY_MS: u64 = 100;
+/// One host frame between the first spawn-zone report and held glass replies.
+const SETTLE_DELAY_MS: u64 = 100;
+/// Glass replies held per world car (three reports per car).
+const MAX_HELD_GLASS: usize = 8;
 
 pub(super) struct PlayerListener {
     stats: Accepting,
@@ -58,8 +62,21 @@ pub(super) struct PlayerListener {
     deferred_deletions: BTreeMap<u16, Vec<u16>>,
     /// Spawn assignments held until due (world ms), sent with a level poll.
     pending_spawns: VecDeque<(u64, nfs_world::participants::Notification)>,
+    /// Participant -> glass replies of its world car, held until the
+    /// participant reports the spawn zone.
+    held_glass: BTreeMap<u16, Vec<nfs_world::logic::Fire>>,
+    /// Participants whose world car has reported the spawn zone this lifetime.
+    spawn_settled: BTreeSet<u16>,
+    /// Release times (world ms) of the held glass replies.
+    pending_settled: VecDeque<(u64, u16)>,
     /// Host teleports of world cars, due at world ms (sent as content).
     pending_teleports: VecDeque<(u64, nfs_world::teleport::Command)>,
+    /// World clock at which each participant's spawn assignment was queued.
+    /// The teleport waits for it: the client adopts the assigned spawn id
+    /// only when the assignment precedes its spawn-zone report, and the
+    /// car reports the zone within tens of milliseconds of the teleport
+    /// (E844b: a later assignment left the client on id 1 with no prompt).
+    spawn_released: BTreeMap<u16, u64>,
     /// Completion handoffs awaiting a current owned binding snapshot.
     pending_binding_refreshes: VecDeque<(u64, u16)>,
     glass: crate::glass::Glass,
@@ -417,12 +434,26 @@ impl PlayerListener {
     pub(super) fn files_alive(&mut self, now: u64) -> bool {
         self.stats.files_alive(now)
     }
-    /// The next host teleport due by `world_ms`, oldest first.
+    /// The next host teleport due by `world_ms`, oldest first, once the
+    /// participant's spawn assignment has left in an earlier tick (official
+    /// E742: assignment, then the client's zone report; the teleport may not
+    /// overtake the assignment). A participant without a scheduled
+    /// assignment (no SpawnPoints scene) teleports when due.
     pub(super) fn due_teleport(&self, world_ms: u64) -> Option<nfs_world::teleport::Command> {
-        self.pending_teleports
-            .front()
-            .filter(|(at, _)| *at <= world_ms)
-            .map(|(_, command)| *command)
+        let (at, command) = self.pending_teleports.front()?;
+        if *at > world_ms
+            || self
+                .pending_spawns
+                .iter()
+                .any(|(_, n)| n.participant == command.participant)
+            || self
+                .spawn_released
+                .get(&command.participant)
+                .is_some_and(|released| *released >= world_ms)
+        {
+            return None;
+        }
+        Some(*command)
     }
     pub(super) fn teleport_sent(&mut self) {
         self.pending_teleports.pop_front();
@@ -454,7 +485,11 @@ impl PlayerListener {
             world_cars: BTreeMap::new(),
             deferred_deletions: BTreeMap::new(),
             pending_spawns: VecDeque::new(),
+            held_glass: BTreeMap::new(),
+            spawn_settled: BTreeSet::new(),
+            pending_settled: VecDeque::new(),
             pending_teleports: VecDeque::new(),
+            spawn_released: BTreeMap::new(),
             pending_binding_refreshes: VecDeque::new(),
             arrivals: None,
             returns: None,
@@ -727,6 +762,9 @@ impl Listener for PlayerListener {
             }
         }
         let mut scheduled_spawns = Vec::new();
+        let mut held_glass = self.held_glass.clone();
+        let mut spawn_settled = self.spawn_settled.clone();
+        let mut scheduled_settled = Vec::new();
         let mut arrivals = self.arrivals.clone();
         let mut returns = self.returns.clone();
         let mut completed_returns = Vec::new();
@@ -809,9 +847,19 @@ impl Listener for PlayerListener {
                             )
                         })
                         .ok_or(replication::Error::UnknownObject)?;
-                    responses.push(nfs_world::participants::HostRpc::Event(
-                        glass.receive(owner, &message)?,
-                    ));
+                    let fire = glass.receive(owner, &message)?;
+                    match world_cars.get(&target.ghost) {
+                        // A world car's replies wait for the participant's
+                        // spawn-zone report; garage cars answer at once.
+                        Some((participant, _)) if !spawn_settled.contains(participant) => {
+                            let held = held_glass.entry(*participant).or_default();
+                            if held.len() >= MAX_HELD_GLASS {
+                                return Err(replication::Error::Bound);
+                            }
+                            held.push(fire);
+                        }
+                        _ => responses.push(nfs_world::participants::HostRpc::Event(fire)),
+                    }
                     // A world car's first glass report also shows that the
                     // client has the car: assign its spawn point (E751), sent
                     // with a level poll once due (`release_spawns`).
@@ -819,6 +867,11 @@ impl Listener for PlayerListener {
                         Self::world_car_ready(&message, &mut world_cars, &mut spawn_points)?
                             .flatten()
                     {
+                        responses.extend(
+                            spawn_points
+                                .set_presentation_ready(notification.participant, false)?
+                                .map(nfs_world::participants::HostRpc::SpawnOccupied),
+                        );
                         tracing::info!(
                             participant = notification.participant,
                             call = ?notification.call,
@@ -1068,7 +1121,15 @@ impl Listener for PlayerListener {
                 match activation.receive_ready(
                     body,
                     |id| players.owns_participant(HOST_SELECTOR as u8, self.persona, id),
-                    |id| participants.stage(id) == Some(nfs_world::participants::Stage::FreeRoam),
+                    |id| {
+                        matches!(
+                            participants.stage(id),
+                            Some(
+                                nfs_world::participants::Stage::FreeRoam
+                                    | nfs_world::participants::Stage::ReturnPrompted
+                            )
+                        )
+                    },
                 ) {
                     Ok(Some(nfs_world::world_activation::Report::Retired { participant })) => {
                         // Queued unsubscription not yet applied by the client (E838).
@@ -1126,12 +1187,63 @@ impl Listener for PlayerListener {
                     return self.refuse_rpc(error, body);
                 }
             }
-            match spawn_points.receive(body, |id| {
+            match spawn_points.report(body, |id| {
                 players.owns_participant(HOST_SELECTOR as u8, self.persona, id)
             }) {
-                Ok(Some(flag)) => {
-                    tracing::info!(?flag, "owned spawn request or release");
-                    responses.extend(flag.map(nfs_world::participants::HostRpc::SpawnOccupied));
+                Ok(Some(report)) => {
+                    tracing::info!(
+                        participant = report.participant,
+                        release = report.release,
+                        current = report.current,
+                        flag = ?report.flag,
+                        "owned spawn request or release"
+                    );
+                    responses.extend(
+                        report
+                            .flag
+                            .map(nfs_world::participants::HostRpc::SpawnOccupied),
+                    );
+                    // First current zone report of a world-car lifetime:
+                    // publish spawn presentation and schedule held replies.
+                    if !report.release
+                        && report.current
+                        && !spawn_settled.contains(&report.participant)
+                        && world_cars.values().any(|(p, _)| *p == report.participant)
+                    {
+                        spawn_settled.insert(report.participant);
+                        match Self::presentation_events(
+                            self.logic.as_deref(),
+                            crate::garage_logic::Which::WorldSpawn,
+                            &players,
+                            &logic_ghosts,
+                            self.persona,
+                            report.participant,
+                        ) {
+                            Ok(events) => responses.extend(events),
+                            Err(error) => return self.refuse_rpc(error, body),
+                        }
+                        scheduled_settled
+                            .push((self.world_ms + SETTLE_DELAY_MS, report.participant));
+                        tracing::info!(
+                            participant = report.participant,
+                            held = held_glass.get(&report.participant).map_or(0, Vec::len),
+                            "owned world car settled at the spawn; presentation sent, glass replies due"
+                        );
+                    }
+                    // The car left the spawn zone: the Enter Garage prompt is
+                    // gone, so the next field-100 request is a first request.
+                    // Later visits report the first assignment's id (E843:
+                    // every second-visit call was stale), so a stale release
+                    // ends the prompt too.
+                    if report.release
+                        && participants.leave_prompt(report.participant)
+                            == nfs_world::participants::Outcome::Advanced(Vec::new())
+                    {
+                        tracing::info!(
+                            participant = report.participant,
+                            "garage prompt ended; the car left the spawn zone"
+                        );
+                    }
                     continue;
                 }
                 Ok(None) => {}
@@ -1155,6 +1267,19 @@ impl Listener for PlayerListener {
                                 .into_iter()
                                 .map(nfs_world::participants::HostRpc::Participant)
                                 .collect();
+                            let prompted = participants.take_prompted();
+                            if let [participant] = prompted.as_slice() {
+                                // First field-100 request of this zone visit:
+                                // nothing goes out, so that PageDown repeats it.
+                                // Before free roam the prompt is carried into
+                                // it by the arrival.
+                                tracing::info!(
+                                    participant,
+                                    stage = ?participants.stage(*participant),
+                                    "garage prompt shown; the return waits for the confirming request"
+                                );
+                                continue;
+                            }
                             let returning = participants.take_returning();
                             if let [participant] = returning.as_slice() {
                                 let (
@@ -1171,6 +1296,21 @@ impl Listener for PlayerListener {
                                 else {
                                     return self.refuse_rpc(replication::Error::Unsupported, body);
                                 };
+                                // Send garage slot refreshes in a following
+                                // frame so the return entry stays within the
+                                // outbound frame bound.
+                                let (slots, chain): (Vec<_>, Vec<_>) =
+                                    chain.into_iter().partition(|rpc| {
+                                        matches!(
+                                            rpc,
+                                            nfs_world::participants::HostRpc::Participant(n)
+                                                if matches!(
+                                                    n.call,
+                                                    nfs_world::participants::Call::GarageItem(_)
+                                                        | nfs_world::participants::Call::NotifyTagged(_)
+                                                )
+                                        )
+                                    });
                                 match Self::begin_return(
                                     &mut players,
                                     returns,
@@ -1187,6 +1327,9 @@ impl Listener for PlayerListener {
                                     Err(error) => {
                                         return self.refuse_rpc(error, body);
                                     }
+                                }
+                                if !slots.is_empty() {
+                                    exit_entries.push((returning::empty_section(), slots));
                                 }
                                 continue;
                             }
@@ -1256,9 +1399,15 @@ impl Listener for PlayerListener {
                                 }
                             }
                             for &participant in &exited {
+                                // Retain object-lifetime diagnostics across
+                                // repeated garage/world transitions.
+                                let ids: Vec<u16> =
+                                    players.objects().iter().map(|(id, _)| id).collect();
                                 tracing::info!(
                                     participant,
                                     world_car = world_car.is_some(),
+                                    objects = ids.len(),
+                                    ?ids,
                                     "owned garage exit granted; participant loads the world (startup state 77)"
                                 );
                             }
@@ -1270,6 +1419,10 @@ impl Listener for PlayerListener {
                                         Self::register_world_car(&mut world_cars, &exited, &section)
                                     {
                                         return self.refuse_rpc(error, body);
+                                    }
+                                    for participant in &exited {
+                                        spawn_settled.remove(participant);
+                                        held_glass.remove(participant);
                                     }
                                     if let Some(car) = section.records.first()
                                         && !garage_deletions.is_empty()
@@ -1495,9 +1648,13 @@ impl Listener for PlayerListener {
             return self.refuse(replication::Error::Bound);
         }
         for participant in participants.in_free_roam() {
-            if self.participants.stage(participant)
-                != Some(nfs_world::participants::Stage::FreeRoam)
-            {
+            if !matches!(
+                self.participants.stage(participant),
+                Some(
+                    nfs_world::participants::Stage::FreeRoam
+                        | nfs_world::participants::Stage::ReturnPrompted
+                )
+            ) {
                 tracing::info!(
                     participant,
                     "world entry completed; participant entered free roam"
@@ -1534,11 +1691,18 @@ impl Listener for PlayerListener {
         self.world_activation = world_activation;
         self.deferred_deletions = deferred_deletions;
         self.pending_spawns.extend(scheduled_spawns);
+        self.held_glass = held_glass;
+        self.spawn_settled = spawn_settled;
+        self.pending_settled.extend(scheduled_settled);
         self.arrivals = arrivals;
         self.returns = returns;
         for (participant, removed) in completed_returns {
             self.pending_spawns
                 .retain(|(_, n)| n.participant != participant);
+            self.pending_settled.retain(|(_, p)| *p != participant);
+            self.held_glass.remove(&participant);
+            self.spawn_settled.remove(&participant);
+            self.spawn_released.remove(&participant);
             self.pending_teleports.retain(|(_, n)| n.vehicle != removed);
             self.pending_binding_refreshes
                 .retain(|(_, p)| *p != participant);

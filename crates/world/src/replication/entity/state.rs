@@ -76,6 +76,9 @@ impl State {
                 (Initial::I32Property(value), Some(Update::I32Property(Some(next)))) => {
                     *value = Some(next)
                 }
+                (Initial::FloatProperty(value), Some(Update::FloatProperty(Some(next)))) => {
+                    *value = Some(next)
+                }
                 (
                     Initial::RpcGhostReference { reference, .. },
                     Some(Update::GhostReference(Some(next))),
@@ -103,6 +106,7 @@ impl State {
                     | Kind::RpcOptionalReference => Update::Noop,
                     Kind::RpcGhostReference => Update::GhostReference(None),
                     Kind::BoolProperty => Update::BoolProperty(None),
+                    Kind::FloatProperty => Update::FloatProperty(None),
                     Kind::I32Property => Update::I32Property(None),
                 })
             })

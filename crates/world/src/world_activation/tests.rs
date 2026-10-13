@@ -93,7 +93,9 @@ fn early_location_preserves_activation_order_and_requires_ready_owner() {
             first: false
         })
     );
-    a.set(7, false, 3, |_| true).unwrap();
+    // The leave now carries the streamed-leave call as well (capacity 4).
+    assert!(a.set(7, false, 3, |_| true).unwrap().is_empty());
+    assert_eq!(a.set(7, false, 4, |_| true).unwrap().len(), 4);
     assert_eq!(
         a.receive(location.span(), |_| true).unwrap(),
         Some(Report::Retired { participant: 7 })
@@ -167,12 +169,17 @@ fn large_batch_is_atomic_repeat_safe_and_shared_presence_tracks_occupancy() {
     assert_eq!(second.len(), 161);
     assert!(!second.iter().any(|v| matches!(v.call, Call::Presence(_))));
     let before = a.clone();
-    assert!(a.set(7, false, 159, |_| true).unwrap().is_empty());
+    assert!(a.set(7, false, 160, |_| true).unwrap().is_empty());
     assert_eq!(a, before);
-    let leave = a.set(7, false, 160, |_| true).unwrap();
-    assert!(leave.iter().all(|v| v.call == Call::Unsubscribe));
-    let last = a.set(8, false, 161, |_| true).unwrap();
-    assert_eq!(last[0].call, Call::Presence(false));
+    let leave = a.set(7, false, 161, |_| true).unwrap();
+    assert_eq!(leave.len(), 161);
+    assert_eq!(leave[0].call, Call::StreamedParticipantLeave);
+    assert_eq!(leave[0].participant, Some(7));
+    assert!(leave[1..].iter().all(|v| v.call == Call::Unsubscribe));
+    assert!(a.set(8, false, 161, |_| true).unwrap().is_empty());
+    let last = a.set(8, false, 162, |_| true).unwrap();
+    assert_eq!(last[0].call, Call::StreamedParticipantLeave);
+    assert_eq!(last[1].call, Call::Presence(false));
     assert_eq!(a.members, original.members);
     assert_eq!(a.retired, [7, 8].into_iter().collect());
     assert_eq!(a.set(7, true, 162, |_| true).unwrap(), first);
