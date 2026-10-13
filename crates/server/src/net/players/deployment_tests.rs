@@ -84,20 +84,21 @@ fn spawn_presentation_waits_for_capacity_with_poll_and_rejects_foreign_owner() {
     let filler = HostRpc::Participant(notification);
     listener
         .pending_rpcs
-        .resize(nfs_world::session::MAX_RPC_QUEUE - 2, filler);
+        .resize(nfs_world::session::MAX_RPC_QUEUE - 1, filler);
     let before = listener.level_poll.clone();
     listener.advance_level_poll(100).unwrap();
     assert_eq!(listener.level_poll, before);
     assert_eq!(listener.pending_spawns.len(), 1);
     assert_eq!(
         listener.pending_rpcs.len(),
-        nfs_world::session::MAX_RPC_QUEUE - 2
+        nfs_world::session::MAX_RPC_QUEUE - 1
     );
     listener.pending_rpcs.clear();
     listener.advance_level_poll(100).unwrap();
     assert!(matches!(listener.pending_rpcs[0], HostRpc::LevelPoll(_)));
     assert_eq!(listener.pending_rpcs[1], filler);
-    assert!(matches!(listener.pending_rpcs[2],HostRpc::Event(e) if e.event==14));
+    // The spawn presentation no longer rides the assignment (E854).
+    assert_eq!(listener.pending_rpcs.len(), 2);
     assert!(listener.pending_spawns.is_empty());
     assert_eq!(listener.due_teleport(100), None);
     assert_eq!(listener.due_teleport(101), Some(teleport(participant, 300)));
@@ -390,6 +391,32 @@ fn glass_reports_on_a_world_car_assign_one_spawn() {
         );
     }
     assert_eq!(spawn.assigned(40), Some(1));
+}
+
+#[test]
+fn leaving_free_roam_clears_the_spawn_assignment_once() {
+    use nfs_world::participants::{Call, HostRpc};
+    let mut listener = PlayerListener::new(101);
+    listener
+        .initialize_world(&content_with(Some(&SPAWN_LAYOUT)))
+        .unwrap();
+    // No assignment: nothing to clear (and no reserve needed).
+    assert!(listener.spawn_clear(40).unwrap().is_empty());
+    let assign = listener.spawn_points.assign(40, 1).unwrap();
+    let rpcs = listener.spawn_clear(40).unwrap();
+    assert_eq!(rpcs.len(), 1);
+    let HostRpc::Participant(n) = rpcs[0] else {
+        panic!("participant notification expected");
+    };
+    assert_eq!(
+        (n.endpoint, n.participant, n.call),
+        (assign.endpoint, 40, Call::Leave)
+    );
+    // The clear is idempotent at the model level and the counter continues.
+    assert_eq!(listener.spawn_points.next_value(40), 2);
+    let mut unbound = PlayerListener::new(101);
+    unbound.initialize_world(&content_with(None)).unwrap();
+    assert!(unbound.spawn_clear(40).unwrap().is_empty());
 }
 
 #[test]
@@ -1034,7 +1061,7 @@ fn late_world_reports_from_a_retired_participant_do_not_refuse_the_frame() {
     let activation = listener.world_activation.as_mut().unwrap();
     assert_eq!(
         activation.set(participant, false, 16, owns).unwrap().len(),
-        2
+        3
     );
     for wire in [
         report(participant, volume, 3, Some(2.)),
@@ -1053,4 +1080,168 @@ fn late_world_reports_from_a_retired_participant_do_not_refuse_the_frame() {
         (listener.refused, listener.last_error),
         (1, Some(replication::Error::UnknownObject))
     );
+}
+
+#[test]
+fn held_glass_replies_release_one_frame_after_the_spawn_report_within_capacity() {
+    use nfs_world::logic::{EntityRef, Fire};
+    use nfs_world::participants::HostRpc;
+    let mut listener = PlayerListener::new(101);
+    listener
+        .initialize_world(&content_with(Some(&SPAWN_LAYOUT)))
+        .unwrap();
+    let fire = |event, ghost| Fire {
+        event,
+        player: Some(3),
+        target: EntityRef { ghost, entity: 2 },
+    };
+    // Two participants settle at different times; replies keep their order.
+    listener
+        .held_glass
+        .insert(40, vec![fire(11, 300), fire(9, 300), fire(7, 300)]);
+    listener.held_glass.insert(41, vec![fire(11, 301)]);
+    listener.pending_settled.push_back((1_100, 40));
+    listener.pending_settled.push_back((1_250, 41));
+    listener.advance_settled(1_099).unwrap();
+    assert!(listener.pending_rpcs.is_empty());
+    assert_eq!(listener.pending_settled.len(), 2);
+    // A full queue keeps the due release for the next tick.
+    let filler = HostRpc::Event(fire(5, 999));
+    listener
+        .pending_rpcs
+        .resize(nfs_world::session::MAX_RPC_QUEUE - 2, filler);
+    listener.advance_settled(1_100).unwrap();
+    assert_eq!(listener.pending_settled.len(), 2);
+    assert_eq!(listener.held_glass.len(), 2);
+    listener.pending_rpcs.clear();
+    listener.advance_settled(1_100).unwrap();
+    assert_eq!(listener.pending_settled.len(), 1);
+    assert_eq!(
+        listener
+            .pending_rpcs
+            .iter()
+            .map(|r| match r {
+                HostRpc::Event(f) => (f.event, f.target.ghost),
+                _ => panic!("event expected"),
+            })
+            .collect::<Vec<_>>(),
+        vec![(11, 300), (9, 300), (7, 300)]
+    );
+    assert!(!listener.held_glass.contains_key(&40));
+    listener.advance_settled(1_250).unwrap();
+    assert!(listener.pending_settled.is_empty());
+    assert!(listener.held_glass.is_empty());
+    assert_eq!(listener.pending_rpcs.len(), 4);
+    // A settled participant whose replies were already released is a no-op.
+    listener.pending_settled.push_back((1_300, 40));
+    listener.advance_settled(1_300).unwrap();
+    assert_eq!(listener.pending_rpcs.len(), 4);
+}
+
+#[test]
+fn settled_logic_precedes_glass_atomically_for_three_new_lifetimes() {
+    use crate::garage_logic::{GarageLogic, Which};
+    use nfs_world::{
+        logic::{EntityRef, Fire},
+        participants::HostRpc,
+    };
+    let mut policy = crate::garage_logic::tests::presentation_json();
+    let mut definition = policy["spawn"]["entities"][3].clone();
+    definition["capture_id"] = serde_json::json!(350);
+    policy["exit"]["entities"] = serde_json::json!([definition]);
+    policy["world_settled"]["events"] = serde_json::json!([
+        {"target":{"capture_id":350},"entity":1,"event":21},
+        {"target":{"capture_id":350},"entity":2,"event":20}
+    ]);
+    policy["returning"] =
+        serde_json::json!({"scene_updates":[],"entities":[],"delete_capture_ids":[350]});
+    let logic = std::sync::Arc::new(GarageLogic::from_json(&policy).unwrap());
+    let (mut players, _) = crate::garage_logic::tests::world();
+    let player = players
+        .create(
+            HOST_SELECTOR as u8,
+            100,
+            Request {
+                name: b"Driver".to_vec(),
+                flag: false,
+                slot: 0,
+            },
+        )
+        .unwrap()
+        .unwrap();
+    let participant = players
+        .join(HOST_SELECTOR as u8, 100, player.id)
+        .unwrap()
+        .unwrap()
+        .id;
+    let mut listener = PlayerListener::new(100);
+    listener.players = players;
+    listener.logic = Some(logic.clone());
+    let mut ghosts = BTreeMap::new();
+    for phase in [Which::Spawn, Which::Entry] {
+        logic
+            .produce(phase, &mut listener.players, participant, &mut ghosts)
+            .unwrap();
+    }
+    let mut previous = None;
+    for cycle in 0..3 {
+        logic
+            .produce(Which::Exit, &mut listener.players, participant, &mut ghosts)
+            .unwrap();
+        let target = ghosts[&350];
+        assert_ne!(previous, Some(target));
+        listener.logic_ghosts.insert(participant, ghosts.clone());
+        let fire = Fire {
+            event: 11,
+            player: Some(0),
+            target: EntityRef {
+                ghost: 700,
+                entity: 2,
+            },
+        };
+        listener.held_glass.insert(participant, vec![fire]);
+        let due = 100 + cycle * 1000;
+        listener.pending_settled.push_back((due, participant));
+        listener.advance_settled(due - 1).unwrap();
+        assert!(listener.pending_rpcs.is_empty());
+        listener
+            .pending_rpcs
+            .resize(nfs_world::session::MAX_RPC_QUEUE - 2, HostRpc::Event(fire));
+        listener.advance_settled(due).unwrap();
+        assert_eq!(listener.pending_settled.len(), 1);
+        assert!(listener.held_glass.contains_key(&participant));
+        listener.pending_rpcs.clear();
+        listener.advance_settled(due).unwrap();
+        let events = listener
+            .pending_rpcs
+            .iter()
+            .map(|r| match r {
+                HostRpc::Event(f) => (f.event, f.target.ghost),
+                _ => panic!("expected event"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(events, vec![(21, target), (20, target), (11, 700)]);
+        listener.advance_settled(due + 1).unwrap();
+        assert_eq!(listener.pending_rpcs.len(), 3);
+        listener.pending_rpcs.clear();
+        logic
+            .produce(
+                Which::Returning,
+                &mut listener.players,
+                participant,
+                &mut ghosts,
+            )
+            .unwrap();
+        assert!(listener.players.objects().get(target).is_none());
+        previous = Some(target);
+    }
+    // A foreign owner cannot consume the callback or its held replies.
+    listener.pending_settled.push_back((4000, participant));
+    listener.persona = 999;
+    assert_eq!(
+        listener.advance_settled(4000),
+        Err(replication::Error::UnknownObject)
+    );
+    assert_eq!(listener.pending_settled.len(), 1);
+    assert!(listener.pending_rpcs.is_empty());
 }

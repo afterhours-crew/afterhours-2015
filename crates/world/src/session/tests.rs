@@ -2076,3 +2076,122 @@ fn timed_split_keeps_full_record_batches_inside_session_frame_bound() {
         Err(crate::replication::Error::Bound)
     );
 }
+
+#[test]
+fn queued_notifications_for_sent_objects_ride_ahead_of_the_next_replication_frame() {
+    use crate::{
+        launchers::Enabled,
+        replication::{
+            Record,
+            sublevel::{Rpc, root},
+        },
+    };
+    use nfs_protocol::world::rpc::Serial;
+    let (mut host, client, _, now) = established_with_content();
+    let content = root::content().unwrap();
+    let scene = |id| {
+        let creation = root::creation(
+            Rpc {
+                selector: 0,
+                serial: Serial::new(0).unwrap(),
+            },
+            [None; root::REFERENCES],
+        )
+        .unwrap();
+        let mut section = owned_section(1);
+        section.records = vec![Record::from_scene(id, creation, &content).unwrap()];
+        section
+    };
+    let enabled = |scene| Enabled {
+        scene,
+        selector: 0,
+        serial: Serial::new(0).unwrap(),
+    };
+    host.queue_replication(scene(1)).unwrap();
+    let t = now + REPORT_TIMEOUT_MS;
+    host.poll(t);
+    host.poll(t + STATE_WAIT_MS);
+    let t = t + 2 * STATE_WAIT_MS;
+    assert!(matches!(
+        host.poll(t).events[..],
+        [Event::Replication { .. }]
+    ));
+    assert!(host.sent_objects.contains(&1));
+    // Three sections wait in the replication queue (as the movement-driven
+    // stream does in free roam); scene 2 is created by the first of them.
+    host.queue_replication(scene(2)).unwrap();
+    host.queue_replication(scene(3)).unwrap();
+    host.queue_replication(scene(4)).unwrap();
+    // A notification on the sent scene rides with the next frame; one on the
+    // unsent scene 2 waits for its creation, and keeps the one behind it in
+    // order (E845b/E846: the occupied flag waited 0.8–6.3 s behind the
+    // replication queue; the official flag follows the report by ≤175 ms).
+    host.queue_launcher_enabled(enabled(1)).unwrap();
+    host.queue_launcher_enabled(enabled(2)).unwrap();
+    host.queue_launcher_enabled(enabled(1)).unwrap();
+    let parse_notifications = |out: &Output| {
+        let frames = host_frames(&client, &out.send);
+        let parsed = frame::parse(
+            BitSpan::new(&frames[0].0, 0, frames[0].1).unwrap(),
+            frame::Direction::FromHost,
+        )
+        .unwrap();
+        parsed
+            .messages
+            .as_ref()
+            .map_or(0, |m| m.groups[0].messages.len())
+    };
+    let out = host.poll(t + REPLICATION_INTERVAL_MS);
+    assert_eq!(
+        out.events,
+        vec![
+            Event::Replication {
+                records: 1,
+                fragments: 1,
+                remaining: 2
+            },
+            Event::RpcNotifications {
+                count: 1,
+                remaining: 2
+            }
+        ]
+    );
+    assert_eq!(parse_notifications(&out), 1);
+    assert_eq!(host.rpc_queue.len(), 2);
+    let out = host.poll(t + 2 * REPLICATION_INTERVAL_MS);
+    assert_eq!(
+        out.events,
+        vec![
+            Event::Replication {
+                records: 1,
+                fragments: 1,
+                remaining: 1
+            },
+            Event::RpcNotifications {
+                count: 2,
+                remaining: 0
+            }
+        ]
+    );
+    assert_eq!(parse_notifications(&out), 2);
+    assert!(host.rpc_queue.is_empty());
+    let out = host.poll(t + 3 * REPLICATION_INTERVAL_MS);
+    assert_eq!(
+        out.events,
+        vec![Event::Replication {
+            records: 1,
+            fragments: 1,
+            remaining: 0
+        }]
+    );
+    assert_eq!(parse_notifications(&out), 0);
+    // Without queued replication the RPC-only frame still serves the queue.
+    host.queue_launcher_enabled(enabled(2)).unwrap();
+    assert_eq!(
+        host.poll(t + 4 * REPLICATION_INTERVAL_MS).events,
+        vec![Event::RpcNotifications {
+            count: 1,
+            remaining: 0
+        }]
+    );
+}

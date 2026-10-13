@@ -52,6 +52,7 @@ impl Rules {
                 Some("rpc") => Some(Kind::Rpc),
                 Some("bool") => Some(Kind::BoolProperty),
                 Some("int") => Some(Kind::I32Property),
+                Some("float") => Some(Kind::FloatProperty),
                 Some("variant") => Some(Kind::RpcVariant),
                 _ => return Err(bad("participant serializer kind")),
             };
@@ -99,6 +100,7 @@ impl Rules {
                         Kind::Rpc => "rpc",
                         Kind::BoolProperty => "bool",
                         Kind::I32Property => "int",
+                        Kind::FloatProperty => "float",
                         Kind::RpcVariant => "variant",
                         _ => "unsupported",
                     }),

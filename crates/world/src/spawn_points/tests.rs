@@ -143,15 +143,15 @@ fn binds_the_scene_layout_and_rejects_absent_duplicate_or_other_shapes() {
 }
 
 #[test]
-fn assignments_carry_the_value_then_padding() {
+fn subscriptions_carry_the_token_false_membership_and_padding() {
     let mut model = bound();
     for (participant, value) in [(PLAYER, 1), (PLAYER, 2), (PLAYER, 3)] {
         let n = model.assign(participant, value).unwrap();
         assert_eq!(n.call, Call::Assign(value));
         assert_eq!(model.assigned(participant), Some(value));
     }
-    // Selector, serial, method 0, then the u32 id and five padding bits that
-    // complete the byte (11-byte payload).
+    // Selector, serial, method 0, then the u32 token, false membership and
+    // four padding bits that complete the byte (11-byte payload).
     let wire = model.assign(41, 4).unwrap().encode().unwrap();
     host_route(&wire, 2, |references, selector, method, bits| {
         assert_eq!(references, [SCENE, 41]);
@@ -162,6 +162,72 @@ fn assignments_carry_the_value_then_padding() {
         SpawnPoints::default().assign(PLAYER, 1),
         Err(Error::Unsupported)
     );
+}
+
+#[test]
+fn arrival_gates_the_prompt_but_preserves_crossings_and_three_lifetimes() {
+    let mut model = bound();
+    let before = model.clone();
+    assert_eq!(
+        model.set_presentation_ready(PLAYER, false),
+        Err(Error::UnknownObject)
+    );
+    assert_eq!(model, before);
+    for token in 1..=3 {
+        model.assign(PLAYER, token).unwrap();
+        assert_eq!(model.set_presentation_ready(PLAYER, false), Ok(None));
+        let enter = client(SCENE, PLAYER, 0, REQUEST, &with_id(token));
+        let leave = client(SCENE, PLAYER, 0, RELEASE, &with_id(token));
+        // Loading, leaving the box during rollout and entering it again do
+        // not publish a prompt before the driving context is ready.
+        for report in [&enter, &leave, &enter] {
+            assert_eq!(model.receive(report.span(), |_| true), Ok(Some(None)));
+        }
+        assert!(matches!(
+            model.set_presentation_ready(PLAYER, true),
+            Ok(Some(Flag { enabled: true, .. }))
+        ));
+        assert_eq!(model.set_presentation_ready(PLAYER, true), Ok(None));
+        assert!(matches!(
+            model.receive(leave.span(), |_| true),
+            Ok(Some(Some(Flag { enabled: false, .. })))
+        ));
+        assert!(matches!(
+            model.receive(enter.span(), |_| true),
+            Ok(Some(Some(Flag { enabled: true, .. })))
+        ));
+        assert!(matches!(
+            model.clear(PLAYER).unwrap().unwrap().1,
+            Some(Flag { enabled: false, .. })
+        ));
+    }
+}
+
+#[test]
+fn readiness_uses_current_occupancy_and_does_not_hide_another_ready_player() {
+    let mut model = bound();
+    for participant in [PLAYER, 41] {
+        model.assign(participant, 1).unwrap();
+        model.set_presentation_ready(participant, false).unwrap();
+    }
+    let enter = |p| client(SCENE, p, 0, REQUEST, &with_id(1));
+    let leave = |p| client(SCENE, p, 0, RELEASE, &with_id(1));
+    model.receive(enter(PLAYER).span(), |_| true).unwrap();
+    model.receive(leave(PLAYER).span(), |_| true).unwrap();
+    // A car that finished its animation outside must not show a prompt.
+    assert_eq!(model.set_presentation_ready(PLAYER, true), Ok(None));
+    assert!(matches!(
+        model.receive(enter(PLAYER).span(), |_| true),
+        Ok(Some(Some(Flag { enabled: true, .. })))
+    ));
+    assert_eq!(model.receive(enter(41).span(), |_| true), Ok(Some(None)));
+    assert_eq!(model.set_presentation_ready(41, true), Ok(None));
+    assert_eq!(model.set_presentation_ready(PLAYER, false), Ok(None));
+    assert_eq!(model.clear(PLAYER).unwrap().unwrap().1, None);
+    assert!(matches!(
+        model.receive(leave(41).span(), |_| true),
+        Ok(Some(Some(Flag { enabled: false, .. })))
+    ));
 }
 
 #[test]
@@ -336,4 +402,122 @@ fn participants_are_isolated_and_assignments_are_bounded() {
     // An assigned participant may be set again.
     assert_eq!(full.assign(1, 129).unwrap().call, Call::Assign(129));
     assert_eq!(full.assigned(1), Some(129));
+}
+
+#[test]
+fn the_garage_clear_calls_method_one_and_drops_the_occupant() {
+    let mut model = bound();
+    let owns = |_| true;
+    assert_eq!(
+        SpawnPoints::default().clear(PLAYER),
+        Err(Error::Unsupported)
+    );
+    assert_eq!(model.clear(PLAYER), Ok(None));
+    model.assign(PLAYER, 1).unwrap();
+    // Released before the clear (official order): no flag change.
+    let (n, flag) = model.clear(PLAYER).unwrap().unwrap();
+    assert_eq!((n.participant, n.call, flag), (PLAYER, Call::Leave, None));
+    assert_eq!(n.endpoint, model.bindings().unwrap().assign);
+    host_route(
+        &n.encode().unwrap(),
+        2,
+        |references, selector, method, bits| {
+            assert_eq!(references, [SCENE, PLAYER]);
+            assert_eq!((selector, method), (0, 1));
+            assert_eq!(bits, "00000");
+        },
+    );
+    // The counter and currency continue from the cleared value.
+    assert_eq!(model.assigned(PLAYER), Some(1));
+    assert_eq!(model.next_value(PLAYER), 2);
+    // Still occupying at the clear (no release reported): the flag drops.
+    model.assign(PLAYER, 2).unwrap();
+    assert!(matches!(
+        model.receive(client(SCENE, PLAYER, 0, REQUEST, &with_id(2)).span(), owns),
+        Ok(Some(Some(Flag { enabled: true, .. })))
+    ));
+    let (n, flag) = model.clear(PLAYER).unwrap().unwrap();
+    assert_eq!(n.call, Call::Leave);
+    assert!(matches!(flag, Some(Flag { enabled: false, .. })));
+    assert_eq!(flag.unwrap().endpoint, model.bindings().unwrap().occupied);
+    // The next visit's enter raises the flag again.
+    model.assign(PLAYER, 3).unwrap();
+    assert!(matches!(
+        model.receive(client(SCENE, PLAYER, 0, REQUEST, &with_id(3)).span(), owns),
+        Ok(Some(Some(Flag { enabled: true, .. })))
+    ));
+}
+
+#[test]
+fn three_lifetimes_clear_and_reassign_with_delayed_callbacks_and_isolation() {
+    let mut model = bound();
+    let owns = |id| id == PLAYER || id == 41;
+    let occupied = model.bindings().unwrap().occupied;
+    // Another participant's assignment is untouched by the player's clears.
+    model.assign(41, 5).unwrap();
+    for value in 1..=3u32 {
+        assert_eq!(model.next_value(PLAYER), value);
+        let assign = model.assign(PLAYER, value).unwrap();
+        assert_eq!(assign.call, Call::Assign(value));
+        if value > 1 {
+            // A delayed callback with the previous lifetime's id is
+            // acknowledged without touching the occupancy (E843, E839).
+            let late = client(SCENE, PLAYER, 0, RELEASE, &with_id(value - 1));
+            assert_eq!(
+                model.report(late.span(), owns),
+                Ok(Some(Report {
+                    participant: PLAYER,
+                    release: true,
+                    current: false,
+                    flag: None
+                }))
+            );
+        }
+        let request = client(SCENE, PLAYER, 0, REQUEST, &with_id(value));
+        let release = client(SCENE, PLAYER, 0, RELEASE, &with_id(value));
+        let on = model.report(request.span(), owns).unwrap().unwrap();
+        assert!(on.current && !on.release);
+        assert!(matches!(on.flag, Some(Flag { enabled: true, .. })));
+        // Drive-away and re-entry toggle the flag within the lifetime.
+        let off = model.report(release.span(), owns).unwrap().unwrap();
+        assert!(matches!(off.flag, Some(Flag { enabled: false, .. })));
+        let on = model.report(request.span(), owns).unwrap().unwrap();
+        assert!(matches!(on.flag, Some(Flag { enabled: true, .. })));
+        // Entering the garage clears the assignment while the car still
+        // occupies the zone: method 1 and the flag drop (E845b).
+        let (clear, flag) = model.clear(PLAYER).unwrap().unwrap();
+        assert_eq!((clear.participant, clear.call), (PLAYER, Call::Leave));
+        assert_eq!(
+            flag,
+            Some(Flag {
+                endpoint: occupied,
+                enabled: false
+            })
+        );
+        // A repeated clear changes no occupancy; the counter continues.
+        assert_eq!(model.clear(PLAYER), Ok(Some((clear, None))));
+        assert_eq!(model.assigned(PLAYER), Some(value));
+        assert_eq!(model.next_value(PLAYER), value + 1);
+        // The cleared id stays current for late callbacks of this lifetime
+        // until the next assignment.
+        assert_eq!(
+            model.report(release.span(), owns).unwrap().unwrap().flag,
+            None
+        );
+        assert_eq!(model.assigned(41), Some(5));
+    }
+    // The other participant's zone visit raises the flag on its own id.
+    let other = client(SCENE, 41, 0, REQUEST, &with_id(5));
+    let on = model.report(other.span(), owns).unwrap().unwrap();
+    assert_eq!((on.participant, on.current), (41, true));
+    assert!(matches!(on.flag, Some(Flag { enabled: true, .. })));
+    // The player's clear does not drop a flag the other participant holds.
+    model.assign(PLAYER, 4).unwrap();
+    let request = client(SCENE, PLAYER, 0, REQUEST, &with_id(4));
+    assert_eq!(
+        model.report(request.span(), owns).unwrap().unwrap().flag,
+        None
+    );
+    assert_eq!(model.clear(PLAYER).unwrap().unwrap().1, None);
+    assert_eq!(model.assigned(41), Some(5));
 }

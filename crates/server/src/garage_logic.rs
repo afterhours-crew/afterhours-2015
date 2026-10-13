@@ -52,8 +52,10 @@ pub enum Role {
         tag: u8,
         value: Option<u32>,
     },
+    EmptyVariant,
     Bool(Option<bool>),
     Int(Option<i32>),
+    Float(Option<u32>),
     Reputation(ReputationField),
     ReputationLevelStat,
     Flags([bool; 2]),
@@ -64,9 +66,12 @@ impl Role {
             Self::Root { .. } => Kind::Root,
             Self::Channel { .. } | Self::EntityChannel { .. } => Kind::RpcReference,
             Self::Rpc => Kind::Rpc,
-            Self::Variant { .. } | Self::ReputationLevelStat => Kind::RpcVariant,
+            Self::Variant { .. } | Self::EmptyVariant | Self::ReputationLevelStat => {
+                Kind::RpcVariant
+            }
             Self::Bool(_) => Kind::BoolProperty,
             Self::Int(_) | Self::Reputation(_) => Kind::I32Property,
+            Self::Float(_) => Kind::FloatProperty,
             Self::Flags(_) => Kind::RpcFlags,
         }
     }
@@ -127,6 +132,8 @@ pub enum Which {
     WorldReady,
     /// Spawn assignment released after the world car is ready.
     WorldSpawn,
+    /// First spawn-zone report has settled; queued with the vehicle replies.
+    WorldSettled,
     /// Completion presentation and world membership have been queued.
     FreeRoam,
     /// Prepare the return cinematic and retire driving-only presentation.
@@ -148,6 +155,7 @@ pub struct GarageLogic {
     arrived: Batch,
     world_ready: Batch,
     world_spawn: Batch,
+    world_settled: Batch,
     free_roam: Batch,
     returning: Batch,
     return_requested: Batch,
@@ -211,6 +219,9 @@ fn role(v: &Json) -> Result<Role, Failure> {
         }
         "variant" => {
             keys(v, &["kind", "tag", "value"])?;
+            if v["tag"].is_null() && v["value"].is_null() {
+                return Ok(Role::EmptyVariant);
+            }
             let tag: u8 = uint(&v["tag"])?;
             let value = if v["value"].is_null() {
                 None
@@ -240,6 +251,14 @@ fn role(v: &Json) -> Result<Role, Failure> {
                         .and_then(|n| i32::try_from(n).ok())
                         .ok_or(Failure::ProfileConfig)?,
                 ),
+            })
+        }
+        "float" => {
+            keys(v, &["kind", "bits"])?;
+            Role::Float(if v["bits"].is_null() {
+                None
+            } else {
+                Some(uint(&v["bits"])?)
             })
         }
         "reputation" => {
@@ -573,6 +592,7 @@ impl GarageLogic {
         };
         let world_ready = event_phase("world_ready", &exited)?;
         let world_spawn = event_phase("world_spawn", &exited)?;
+        let world_settled = event_phase("world_settled", &exited)?;
         let free_roam = event_phase("free_roam", &after(&after(&exited, &arrive), &arrived))?;
         let driving = after(&after(&exited, &arrive), &arrived);
         let return_requested = event_phase("return_requested", &driving)?;
@@ -673,6 +693,7 @@ impl GarageLogic {
             arrived,
             world_ready,
             world_spawn,
+            world_settled,
             free_roam,
             returning,
             return_requested,
@@ -699,6 +720,7 @@ impl GarageLogic {
             Which::Arrived => &self.arrived,
             Which::WorldReady => &self.world_ready,
             Which::WorldSpawn => &self.world_spawn,
+            Which::WorldSettled => &self.world_settled,
             Which::FreeRoam => &self.free_roam,
             Which::Returning => &self.returning,
             Which::ReturnRequested => &self.return_requested,
@@ -932,8 +954,16 @@ impl GarageLogic {
                     },
                     Update::Noop,
                 ),
+                Role::EmptyVariant => (
+                    Initial::RpcVariant {
+                        rpc: rpc()?,
+                        value: None,
+                    },
+                    Update::Noop,
+                ),
                 Role::Bool(value) => (Initial::BoolProperty(value), Update::BoolProperty(None)),
                 Role::Int(value) => (Initial::I32Property(value), Update::I32Property(None)),
+                Role::Float(value) => (Initial::FloatProperty(value), Update::FloatProperty(None)),
                 Role::Reputation(field) => (
                     Initial::I32Property(Some(
                         reputation.ok_or(replication::Error::Shape)?.get(field),
@@ -1030,6 +1060,7 @@ pub(crate) mod tests {
         v["exit"] = phase(&[10]);
         v["world_ready"] = phase(&[11, 12, 13]);
         v["world_spawn"] = phase(&[14]);
+        v["world_settled"] = phase(&[21, 20]);
         v["arrive"] = phase(&[15]);
         v["arrived"] = phase(&[16]);
         v["free_roam"] = phase(&[17]);
@@ -1097,6 +1128,7 @@ pub(crate) mod tests {
         for (phase, expected) in [
             (Which::WorldReady, vec![11, 12, 13]),
             (Which::WorldSpawn, vec![14]),
+            (Which::WorldSettled, vec![21, 20]),
             (Which::FreeRoam, vec![17]),
         ] {
             let events = logic.events(phase, &players, &ghosts).unwrap();
@@ -1106,7 +1138,7 @@ pub(crate) mod tests {
         assert_eq!(players.objects().snapshot(), before);
         players.remove_entities(&[target]).unwrap();
         assert!(logic.events(Which::WorldReady, &players, &ghosts).is_err());
-        for phase in ["world_ready", "world_spawn", "free_roam"] {
+        for phase in ["world_ready", "world_spawn", "world_settled", "free_roam"] {
             let mut bad = v.clone();
             bad[phase]["entity_updates"] = json!([{"capture_id":291,"field":3,"bool":false}]);
             assert!(GarageLogic::from_json(&bad).is_err());
@@ -1591,3 +1623,6 @@ pub(crate) mod tests {
         assert!(GarageLogic::from_json(&v).is_ok());
     }
 }
+
+#[cfg(test)]
+mod value_tests;

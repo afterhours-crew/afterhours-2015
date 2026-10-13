@@ -32,15 +32,22 @@ pub enum Call {
     LeaveTagged(u8),
     /// Method-2 call on a participant-scoped garage endpoint at garage exit.
     Notify,
+    /// Method-2 call carrying a nonzero 5-bit tail (observed 19 on the four
+    /// empty garage slots inside the return chain, E742 seg03 282,009 ms).
+    NotifyTagged(u8),
     /// Method 0 carrying a u32 argument (SpawnPoints assignment id).
     Assign(u32),
+    /// Method 1 carrying a u64 item id in two words (the garage slot
+    /// binding, the same wire form as `garage::Binding`), re-sent for the
+    /// returning car's slot inside the return chain (E742 seg03 282,009 ms).
+    GarageItem(u64),
 }
 impl Call {
     pub fn method(self) -> u32 {
         match self {
             Self::Add | Self::Enter | Self::Assign(_) => 0,
-            Self::Leave | Self::LeaveTagged(_) => 1,
-            Self::LoadInventory | Self::Notify => 2,
+            Self::Leave | Self::LeaveTagged(_) | Self::GarageItem(_) => 1,
+            Self::LoadInventory | Self::Notify | Self::NotifyTagged(_) => 2,
         }
     }
     pub fn argument(self) -> Option<u32> {
@@ -53,7 +60,7 @@ impl Call {
     /// `LeaveTagged`.
     pub fn tail(self) -> u8 {
         match self {
-            Self::LeaveTagged(tail) => tail,
+            Self::LeaveTagged(tail) | Self::NotifyTagged(tail) => tail,
             _ => 0,
         }
     }
@@ -80,7 +87,12 @@ impl Notification {
             .put(self.endpoint.selector.into(), 9)
             .put(self.endpoint.serial.value().into(), 10)
             .put(self.call.method().into(), 32);
-        if let Some(argument) = self.call.argument() {
+        if let Call::GarageItem(item) = self.call {
+            if item == 0 {
+                return Err(Error::Bound);
+            }
+            payload.put(item & 0xffff_ffff, 32).put(item >> 32, 32);
+        } else if let Some(argument) = self.call.argument() {
             payload.put(argument.into(), 32);
         }
         payload.put(self.call.tail().into(), 5);
@@ -366,6 +378,10 @@ pub struct Lifecycle {
     returning: Option<ReturnBindings>,
     returned_requests: Vec<u16>,
     prompted_requests: Vec<u16>,
+    /// Participants with a garage request before free roam. `arrived`
+    /// carries this pending request into free roam; a zone release ends it.
+    /// This state alone does not establish whether the client UI is visible.
+    arrival_prompts: BTreeSet<u16>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Outcome {
@@ -389,8 +405,12 @@ impl Lifecycle {
         std::mem::take(&mut self.prompted_requests)
     }
     /// The prompted participant's car left the spawn zone: the prompt is gone
-    /// and the next request is a first request again.
+    /// and the next request is a first request again, in free roam or still
+    /// during the arrival.
     pub fn leave_prompt(&mut self, participant: u16) -> Outcome {
+        if self.arrival_prompts.remove(&participant) {
+            return Outcome::Advanced(Vec::new());
+        }
         match self.stages.get_mut(&participant) {
             Some(stage @ Stage::ReturnPrompted) => {
                 *stage = Stage::FreeRoam;
@@ -658,14 +678,19 @@ impl Lifecycle {
     }
     /// The arrive sequence completed: leave the arrive state and enter free
     /// roam (startup state 2), as the official host does once the client has
-    /// completed the sequence (E101, E742).
+    /// completed the sequence (E101, E742). Preserve a request received
+    /// during arrival so the next request in free roam can confirm it.
     pub fn arrived(&mut self, participant: u16) -> Outcome {
         let Some(x) = self.exit else {
             return Outcome::Unsupported;
         };
         match self.stages.get_mut(&participant) {
             Some(stage @ Stage::Arriving) => {
-                *stage = Stage::FreeRoam;
+                *stage = if self.arrival_prompts.remove(&participant) {
+                    Stage::ReturnPrompted
+                } else {
+                    Stage::FreeRoam
+                };
                 Outcome::Advanced(
                     [(x.state_79, Call::Leave), (x.state_2, Call::Enter)]
                         .into_iter()
@@ -677,9 +702,15 @@ impl Lifecycle {
                         .collect(),
                 )
             }
-            Some(Stage::FreeRoam) => Outcome::Repeated,
+            Some(Stage::FreeRoam | Stage::ReturnPrompted) => Outcome::Repeated,
             _ => Outcome::Unsupported,
         }
+    }
+    /// Whether a request from this zone visit awaits confirmation, in free
+    /// roam or during arrival. This does not report client UI visibility.
+    pub fn prompted(&self, participant: u16) -> bool {
+        self.arrival_prompts.contains(&participant)
+            || self.stages.get(&participant) == Some(&Stage::ReturnPrompted)
     }
     pub fn in_free_roam(&self) -> Vec<u16> {
         self.stages
@@ -850,23 +881,49 @@ impl Lifecycle {
                 return Ok(Some(Outcome::Advanced(Vec::new())));
             }
             Stage::ReturnPrompted => {}
+            Stage::ExitingGarage | Stage::EnteringWorld | Stage::Arriving => {
+                // Carry a request before free roam into the arrival result.
+                // Nothing before free roam confirms; a repeat here is the
+                // same prompt. A zone release ends it (`leave_prompt`).
+                if self.arrival_prompts.insert(participant) {
+                    self.prompted_requests.push(participant);
+                }
+                return Ok(Some(Outcome::Advanced(Vec::new())));
+            }
             _ => return Ok(Some(Outcome::Unsupported)),
         }
         *stage = Stage::ReturningToGarage;
         self.returned_requests.push(participant);
         let mut chain = vec![(r.free_roam, Call::Leave)];
         for (i, endpoint) in r.preparing.into_iter().enumerate() {
-            chain.extend([
-                (endpoint, Call::Enter),
-                (
-                    endpoint,
-                    if i == 1 || i == 2 {
-                        Call::LeaveTagged(31)
-                    } else {
-                        Call::Leave
-                    },
-                ),
-            ]);
+            chain.push((endpoint, Call::Enter));
+            if i == 3 {
+                // The official return re-binds the garage slots between the
+                // fourth preparing state's enter and leave: the car's slot
+                // with its item (method 1, two words), the other four slots
+                // with method 2 tail 19 (E742 seg03 282,009 ms). The login
+                // bindings are sent once (`take_garage_bindings`); this is
+                // the only other time the official host sends them.
+                if let (Some(b), Some(slots)) = (self.bindings, self.garage) {
+                    for (endpoint, item) in b.garage.into_iter().zip(slots.values()) {
+                        chain.push((
+                            endpoint,
+                            match item {
+                                Some(item) => Call::GarageItem(item),
+                                None => Call::NotifyTagged(19),
+                            },
+                        ));
+                    }
+                }
+            }
+            chain.push((
+                endpoint,
+                if i == 1 || i == 2 {
+                    Call::LeaveTagged(31)
+                } else {
+                    Call::Leave
+                },
+            ));
         }
         chain.push((r.sequence, Call::Enter));
         Ok(Some(Outcome::Advanced(
@@ -997,6 +1054,27 @@ pub enum HostRpc {
     WorldActivation(crate::world_activation::Notification),
 }
 impl HostRpc {
+    /// Every object the notification names; the client must hold each one
+    /// before the notification is sent.
+    pub fn objects(self) -> Vec<u16> {
+        match self {
+            Self::Launcher(v) => vec![v.scene],
+            Self::Participant(v) => vec![v.endpoint.scene, v.participant],
+            Self::Garage(v) => vec![v.endpoint.scene, v.participant],
+            Self::Actor(v) => vec![v.endpoint.scene, v.participant, v.actor],
+            Self::Vehicle(v) => vec![v.endpoint.scene, v.participant, v.vehicle],
+            Self::GaragePresence(v) | Self::SpawnOccupied(v) | Self::LevelPoll(v) => {
+                vec![v.endpoint.scene]
+            }
+            Self::SequenceStop(v) => vec![v.sequence],
+            Self::Event(v) => vec![v.target.ghost],
+            Self::WorldActivation(v) => {
+                let mut ids = vec![v.endpoint.scene];
+                ids.extend(v.participant);
+                ids
+            }
+        }
+    }
     pub fn scene(self) -> u16 {
         match self {
             Self::Launcher(v) => v.scene,

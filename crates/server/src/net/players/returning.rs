@@ -16,7 +16,7 @@ use nfs_world::{
 type Entry = (Section, Vec<HostRpc>);
 #[cfg(test)]
 mod tests;
-fn empty_section() -> Section {
+pub(super) fn empty_section() -> Section {
     Section {
         float_bits: None,
         flag: false,

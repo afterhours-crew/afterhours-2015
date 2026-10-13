@@ -7,13 +7,13 @@
 //! teleport locations by the garage, the garage and club map markers and a
 //! race box trigger at the garage entrance.
 //!
-//! The host sets the participant's integer property on field 1 (method 0,
-//! u32 value). The official session sent 1, 2 and 3 at the prelude, the
-//! starter car and the garage exit. The client notifies the same field with
-//! method 2 and method 3, echoing the value after an f64 clock. The host
-//! mirrors that on the scene's flag (field 2); the timing fits entering and
-//! leaving the garage trigger box. Observed in E742/E747; the value meanings
-//! are inferred from that timing.
+//! Field 1 is the garage's VolumeParticipantSetFilter subscription: method 0
+//! carries a u32 token and an initial false membership bit, method 1 removes
+//! it. Client methods 2 and 3 echo the token after an f64 clock. Field 2 is
+//! the associated SetClientNotification Boolean, which triggers the entrance
+//! prompt. Track reported occupancy separately from presentation readiness so
+//! a rollout crossing need not expose the prompt before the driving context
+//! exists. These endpoints are distinct from the scene's integer properties.
 use crate::{
     garage::presence::Notification as Flag,
     participants::{Call, Endpoint, Notification},
@@ -47,6 +47,7 @@ pub struct SpawnPoints {
     bindings: Option<Bindings>,
     assigned: BTreeMap<u16, u32>,
     occupants: BTreeSet<u16>,
+    presentation_blocked: BTreeSet<u16>,
 }
 
 impl SpawnPoints {
@@ -93,6 +94,37 @@ impl SpawnPoints {
     pub fn assigned(&self, participant: u16) -> Option<u32> {
         self.assigned.get(&participant).copied()
     }
+    fn presented(&self) -> bool {
+        self.occupants
+            .iter()
+            .any(|p| !self.presentation_blocked.contains(p))
+    }
+    /// Gate this participant's contribution to the scene notification while
+    /// retaining current zone reports. The caller publishes returned changes
+    /// in order with its lifecycle transition. Readiness alone never invents
+    /// an occupied zone, and another ready occupant keeps the scene flag on.
+    pub fn set_presentation_ready(
+        &mut self,
+        participant: u16,
+        ready: bool,
+    ) -> Result<Option<Flag>, Error> {
+        let b = self.bindings.ok_or(Error::Unsupported)?;
+        if !self.assigned.contains_key(&participant) {
+            return Err(Error::UnknownObject);
+        }
+        let was = self.presented();
+        if ready {
+            self.presentation_blocked.remove(&participant);
+        } else {
+            // Assigned participants already obey MAX_PARTICIPANTS.
+            self.presentation_blocked.insert(participant);
+        }
+        let now = self.presented();
+        Ok((now != was).then_some(Flag {
+            endpoint: b.occupied,
+            enabled: now,
+        }))
+    }
     /// Official hosts number a participant's world spawns 1, 2, 3, ... within
     /// a session: E101's first garage exit assigned 1, and E742's garage exit
     /// assigned 3 after the prelude (1) and starter choice (2).
@@ -101,7 +133,9 @@ impl SpawnPoints {
             .get(&participant)
             .map_or(1, |v| v.saturating_add(1))
     }
-    /// Set `participant`'s property to `value`.
+    /// Subscribe `participant` with `value` as the current crossing token.
+    /// The existing zero-aligned assignment codec also supplies the initial
+    /// false membership bit, followed by four alignment bits.
     pub fn assign(&mut self, participant: u16, value: u32) -> Result<Notification, Error> {
         let b = self.bindings.ok_or(Error::Unsupported)?;
         if !self.assigned.contains_key(&participant) && self.assigned.len() == MAX_PARTICIPANTS {
@@ -115,6 +149,38 @@ impl SpawnPoints {
         notification.encode()?;
         self.assigned.insert(participant, value);
         Ok(notification)
+    }
+    /// Clear `participant`'s subscription when its car enters the garage: the
+    /// official host calls method 1 on the assignment field inside the
+    /// free-roam deactivation batch, after the client's zone release (E742
+    /// seg01 175,920 ms, seg03 289,326 ms; never after a plain drive-away).
+    /// Without it the client keeps the old value and ignores the next
+    /// assignment (E845b: id 1 reported after `Assign(2)`, no prompt). The
+    /// participant leaves the occupants; the session counter continues.
+    /// `Ok(None)` for a participant without an assignment.
+    pub fn clear(
+        &mut self,
+        participant: u16,
+    ) -> Result<Option<(Notification, Option<Flag>)>, Error> {
+        let b = self.bindings.ok_or(Error::Unsupported)?;
+        if !self.assigned.contains_key(&participant) {
+            return Ok(None);
+        }
+        let notification = Notification {
+            endpoint: b.assign,
+            participant,
+            call: Call::Leave,
+        };
+        notification.encode()?;
+        let was = self.presented();
+        self.occupants.remove(&participant);
+        self.presentation_blocked.remove(&participant);
+        let now = self.presented();
+        let flag = (now != was).then_some(Flag {
+            endpoint: b.occupied,
+            enabled: now,
+        });
+        Ok(Some((notification, flag)))
     }
     /// A client request or release on the assignment endpoint. `Ok(None)` is
     /// "not this endpoint"; `Ok(Some(None))` an accepted call that leaves the
@@ -186,13 +252,13 @@ impl SpawnPoints {
                 flag: None,
             }));
         }
-        let was = !self.occupants.is_empty();
+        let was = self.presented();
         if release {
             self.occupants.remove(&participant);
         } else {
             self.occupants.insert(participant);
         }
-        let now = !self.occupants.is_empty();
+        let now = self.presented();
         Ok(Some(Report {
             participant,
             release,

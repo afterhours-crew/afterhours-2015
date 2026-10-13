@@ -1178,7 +1178,8 @@
       "UnlockItemCategoryEntityData": null,
       "UnlockItemTransactionEntityData": null,
       "ValuesPersistenceEntityData": null,
-      "VoipControlEntityData": null
+      "VoipControlEntityData": null,
+      "SyncedFloatEntityData": "float"
     },
     "spawners": [
       "ParticipantLogicSpawnerEntityData",

@@ -16,6 +16,7 @@ pub enum Kind {
     RpcReference,
     RpcFlags,
     BoolProperty,
+    FloatProperty,
     I32Property,
     RpcVariant,
     RpcGhostReference,
@@ -73,6 +74,8 @@ pub enum Initial {
         flags: [bool; 2],
     },
     BoolProperty(Option<bool>),
+    /// IEEE-754 bits, preserving NaN payloads and signed zero.
+    FloatProperty(Option<u32>),
     I32Property(Option<i32>),
     RpcVariant {
         rpc: Rpc,
@@ -96,6 +99,7 @@ impl Initial {
             Self::RpcReference { .. } => Kind::RpcReference,
             Self::RpcFlags { .. } => Kind::RpcFlags,
             Self::BoolProperty(_) => Kind::BoolProperty,
+            Self::FloatProperty(_) => Kind::FloatProperty,
             Self::I32Property(_) => Kind::I32Property,
             Self::RpcVariant { .. } => Kind::RpcVariant,
             Self::RpcGhostReference { .. } => Kind::RpcGhostReference,
@@ -108,6 +112,7 @@ impl Initial {
 pub enum Update {
     Noop,
     BoolProperty(Option<bool>),
+    FloatProperty(Option<u32>),
     I32Property(Option<i32>),
     GhostReference(Option<u16>),
 }
@@ -125,6 +130,7 @@ impl Update {
                     | Kind::RpcVariant
                     | Kind::RpcOptionalReference
             ) | (Self::BoolProperty(_), Kind::BoolProperty)
+                | (Self::FloatProperty(_), Kind::FloatProperty)
                 | (Self::GhostReference(_), Kind::RpcGhostReference)
                 | (Self::I32Property(_), Kind::I32Property)
         )
@@ -200,6 +206,7 @@ impl Body {
                         flags: [r.bit()?, r.bit()?],
                     },
                     Kind::BoolProperty => Initial::BoolProperty(r.optional(Reader::bit)?),
+                    Kind::FloatProperty => Initial::FloatProperty(r.optional(|r| r.take(32))?),
                     Kind::I32Property => {
                         Initial::I32Property(r.optional(|r| Ok(r.take(32)? as i32))?)
                     }
@@ -242,6 +249,7 @@ impl Body {
                         Update::GhostReference(r.optional(Reader::reference)?)
                     }
                     Kind::BoolProperty => Update::BoolProperty(r.optional(Reader::bit)?),
+                    Kind::FloatProperty => Update::FloatProperty(r.optional(|r| r.take(32))?),
                     Kind::I32Property => {
                         Update::I32Property(r.optional(|r| Ok(r.take(32)? as i32))?)
                     }
@@ -321,6 +329,7 @@ impl Body {
                         w.bit(flags[1])?;
                     }
                     Initial::BoolProperty(v) => w.optional(v, |w, v| w.bit(*v))?,
+                    Initial::FloatProperty(v) => w.optional(v, |w, v| w.put(u64::from(*v), 32))?,
                     Initial::I32Property(v) => {
                         w.optional(v, |w, v| w.put(u64::from(*v as u32), 32))?
                     }
@@ -362,6 +371,7 @@ impl Body {
                     Update::Noop => (),
                     Update::GhostReference(v) => w.optional(v, Writer::reference)?,
                     Update::BoolProperty(v) => w.optional(v, |w, v| w.bit(*v))?,
+                    Update::FloatProperty(v) => w.optional(v, |w, v| w.put(u64::from(*v), 32))?,
                     Update::I32Property(v) => {
                         w.optional(v, |w, v| w.put(u64::from(*v as u32), 32))?
                     }
@@ -372,6 +382,8 @@ impl Body {
     }
 }
 
+#[cfg(test)]
+mod float_tests;
 #[cfg(test)]
 mod sequence_tests;
 

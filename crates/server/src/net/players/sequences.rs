@@ -102,15 +102,9 @@ impl PlayerListener {
                 .iter()
                 .take_while(|(due, _)| *due <= world_ms)
             {
-                let events = Self::presentation_events(
-                    self.logic.as_deref(),
-                    crate::garage_logic::Which::WorldSpawn,
-                    &self.players,
-                    &self.logic_ghosts,
-                    self.persona,
-                    notification.participant,
-                )?;
-                if replies.len() + 1 + events.len()
+                // The spawn presentation follows the client's zone report, not
+                // the assignment (E854; see the spawn report handling).
+                if replies.len() + 1
                     > nfs_world::session::MAX_RPC_QUEUE.saturating_sub(self.pending_rpcs.len())
                 {
                     // Keep the due poll and assignment together for the retry.
@@ -122,7 +116,6 @@ impl PlayerListener {
                     "owned spawn point assigned"
                 );
                 replies.push(nfs_world::participants::HostRpc::Participant(notification));
-                replies.extend(events);
                 self.spawn_released
                     .insert(notification.participant, world_ms);
             }
@@ -132,6 +125,46 @@ impl PlayerListener {
             let _ = Self::release_spawns(&mut self.pending_spawns, world_ms);
         }
         self.pending_rpcs.extend(replies);
+        Ok(())
+    }
+    /// Release the glass replies held for a world car one host frame after
+    /// its participant's first spawn-zone report (E854). Queue space is
+    /// checked; a full queue retries on the next tick.
+    pub(in crate::net) fn advance_settled(
+        &mut self,
+        world_ms: u64,
+    ) -> Result<(), replication::Error> {
+        while let Some(&(due, participant)) = self.pending_settled.front() {
+            if due > world_ms {
+                break;
+            }
+            let held = self.held_glass.get(&participant).map_or(0, Vec::len);
+            let events = Self::presentation_events(
+                self.logic.as_deref(),
+                crate::garage_logic::Which::WorldSettled,
+                &self.players,
+                &self.logic_ghosts,
+                self.persona,
+                participant,
+            )?;
+            if self.pending_rpcs.len() + held + events.len() > nfs_world::session::MAX_RPC_QUEUE {
+                return Ok(());
+            }
+            self.pending_settled.pop_front();
+            self.pending_rpcs.extend(events);
+            if let Some(fires) = self.held_glass.remove(&participant) {
+                tracing::info!(
+                    participant,
+                    replies = fires.len(),
+                    "owned world car glass replies released"
+                );
+                self.pending_rpcs.extend(
+                    fires
+                        .into_iter()
+                        .map(nfs_world::participants::HostRpc::Event),
+                );
+            }
+        }
         Ok(())
     }
     pub(super) fn refresh_readiness(
@@ -243,6 +276,12 @@ impl PlayerListener {
                     if let nfs_world::participants::Outcome::Advanced(calls) =
                         participants.arrived(participant)
                     {
+                        if participants.prompted(participant) {
+                            tracing::info!(
+                                participant,
+                                "garage prompt carried into free roam; the return waits for the confirming request"
+                            );
+                        }
                         chain.extend(
                             calls
                                 .into_iter()
@@ -352,6 +391,12 @@ impl PlayerListener {
         else {
             return Err(replication::Error::Unsupported);
         };
+        if participants.prompted(call.participant) {
+            tracing::info!(
+                participant = call.participant,
+                "garage prompt carried into free roam; the return waits for the confirming request"
+            );
+        }
         Ok(Some(Some((
             sequence,
             call.participant,

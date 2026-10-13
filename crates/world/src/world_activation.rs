@@ -83,9 +83,16 @@ impl Catalog {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Call {
-    Subscribe { token: u32, inside: bool },
+    Subscribe {
+        token: u32,
+        inside: bool,
+    },
     Unsubscribe,
+    /// Method 3 on the streamed site when the participant enters free roam.
     StreamedParticipant,
+    /// Method 4 on the streamed site when the participant leaves free roam.
+    /// Balance the entry notification before the next garage/world lifetime.
+    StreamedParticipantLeave,
     Presence(bool),
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -112,6 +119,7 @@ impl Notification {
             Call::Subscribe { .. } | Call::Presence(true) => 0,
             Call::Unsubscribe | Call::Presence(false) => 1,
             Call::StreamedParticipant => 3,
+            Call::StreamedParticipantLeave => 4,
         };
         payload
             .put(self.endpoint.selector.into(), 9)
@@ -254,18 +262,22 @@ impl Activation {
             return Err(Error::Bound);
         }
         let presence_changed = self.members.len() == usize::from(!active);
-        let needed = self.volumes.len() + usize::from(active) + usize::from(presence_changed);
+        let needed = self.volumes.len() + 1 + usize::from(presence_changed);
         if needed > capacity {
             return Ok(Vec::new());
         }
         let mut out = Vec::with_capacity(needed);
-        if active {
-            out.push(Notification {
-                endpoint: self.streamed,
-                participant: Some(participant),
-                call: Call::StreamedParticipant,
-            });
-        }
+        // Official order in both directions: the streamed call, the scene
+        // presence, then the volumes (E742 seg04 143,411; seg03 281,710).
+        out.push(Notification {
+            endpoint: self.streamed,
+            participant: Some(participant),
+            call: if active {
+                Call::StreamedParticipant
+            } else {
+                Call::StreamedParticipantLeave
+            },
+        });
         if presence_changed {
             out.push(Notification {
                 endpoint: self.presence,

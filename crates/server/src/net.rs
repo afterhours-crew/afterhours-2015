@@ -925,6 +925,10 @@ pub async fn world_host(
             warn!(connection, ?error, "level poll rejected");
             return;
         }
+        if let Err(error) = listener.advance_settled(now_ms()) {
+            warn!(connection, ?error, "world car settlement rejected");
+            return;
+        }
         if !listener.files_alive(now_ms()) {
             warn!(connection, "incoming File deadline; closing world");
             return;
