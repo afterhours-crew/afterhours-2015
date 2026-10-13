@@ -325,3 +325,26 @@ schema, and the embedded `parts` section is removed. Version 2 requires a parts
 file and validates both inputs against the same item catalog. Vehicle content
 version 1 continues to use its embedded parts, including when `--game-dir` is
 present. Preparation does not yet generate vehicle entity profiles.
+
+## Local launcher IPC
+
+The optional `--lsx-port 3216` listener runs in the same server process and uses
+the same SQLite-backed account identity as backend authentication. Omit the flag
+to leave the port available to an installed launcher. Port0 selects an ephemeral
+port for tests. LSX startup, settings and local authorization-code requests are
+modeled; unknown requests are logged without payloads and remain unsupported.
+The listener uses fresh OS entropy, loopback binding, four concurrent connection
+slots, the configured idle timeout, a five-second write deadline and shared
+shutdown. It does not launch the game, change client registration or remove
+installation/activation dependencies. Cold disconnected acceptance is separate.
+
+Local validation on the supported installed client reached menus, garage and free
+roam with EA Desktop absent and its background service stopped. A second run
+reached those states with non-loopback traffic blocked for the game, its installed
+activation helper and this server. The existing installation/license cache was
+retained; this is not a cold-boot or activation-independence claim.
+
+Startup QoS may first report an unresolved external endpoint and then resolve it.
+The user-session model accepts that first resolution while preserving the
+connection machine and internal endpoint; it still rejects replacement of an
+already established external endpoint.

@@ -74,6 +74,9 @@ impl Identity {
             name,
         })
     }
+    pub fn name(&self) -> &str {
+        &self.name
+    }
     pub fn storage_account(&self) -> nfs_storage::AccountId {
         self.storage
     }

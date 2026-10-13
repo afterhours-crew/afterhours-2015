@@ -10,6 +10,7 @@ struct Args {
     world_mac_template: Option<PathBuf>,
     output: PathBuf,
     redirector_port: u16,
+    lsx_port: Option<u16>,
     idle_seconds: u64,
     qos_seconds: u64,
     stop_file: Option<PathBuf>,
@@ -62,6 +63,7 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
     let (mut output, mut stop_file, mut world_content) = (None, None, None);
     let (mut redirector_port, mut idle_seconds, mut qos_seconds) = (0, 120, 900);
     let (mut item_content, mut state_directory, mut local_account) = (None, None, None);
+    let mut lsx_port = None;
     let mut persistent_content = None;
     let mut progression_content = None;
     let (mut vehicle_content, mut garage_layout) = (None, None);
@@ -148,6 +150,14 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
             }
             Some("--template-frames") => {
                 return Err("runtime replay is unsupported; use modeled world content".into());
+            }
+            Some("--lsx-port") => {
+                lsx_port = Some(
+                    value()?
+                        .to_str()
+                        .and_then(|v| v.parse().ok())
+                        .ok_or("bad LSX port")?,
+                );
             }
             Some("--redirector-port") => {
                 redirector_port = value()?
@@ -262,6 +272,7 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
         world_mac_template,
         output: output.ok_or("--output is required")?,
         redirector_port,
+        lsx_port,
         idle_seconds,
         qos_seconds,
         stop_file,
@@ -425,7 +436,7 @@ pub fn main() -> std::process::ExitCode {
         .is_some_and(|a| a == "--help" || a == "-h")
     {
         println!(
-            "nfs-server: owned local NFS 2015 services\n\nUsage: nfs-server --root <data-directory> --output <new-recording-directory> [configuration options]\n\nPrepare game content: nfs-server prepare-content --game-dir <installation>\n[--root <data-directory>] [--content-cache <directory>]\n\nCreate account: nfs-server create-account --name <name> --state-directory <new-directory>\n--account-policy <policy.json> --item-content <items.json> --persistent-content <tables.json>\n\nRequired control configuration: --bootstrap-config, --auth-config,\n--group-policy, --matchmaking-admission, --matchmaking-policy, --world-policy,\n--control-catalogs, --stat-definitions, --challenge-content, --item-licenses,\n--owned-local-social and --owned-menu-awards.\n\nGarage configuration: --world-content (version 4 or 5), --world-mac-template,\n--item-content, --state-directory, --local-account, --persistent-content,\n--progression-content, --vehicle-content, --garage-layout, --sequence-content,\n--garage-logic.\n\nGame content: --game-dir <installation> builds --item-content,\n--persistent-content and --world-mac-template on first start, supplies\n--stat-definitions, --item-licenses, --control-catalogs and\n--reputation-thresholds, --scene-catalog, --world-content, --garage-layout,\n--vehicle-content, --vehicle-parts, --progression-content and --sequence-content unless explicitly overridden, and caches the outputs\n(--content-cache, default artifacts/content under --root).\n\nAccount state is read from SQLite. Optional one-time imports: --local-identity,\n--entitlement-state, --kickback-state, --speedwall-state, --user-settings.\n\nOptional: --redirector-port, --idle-seconds, --qos-seconds, --stop-file.\nAll listeners are loopback. No manifest, captured reply store or external\nauthentication is used. See crates/server/README.md for schemas and limitations."
+            "nfs-server: owned local NFS 2015 services\n\nUsage: nfs-server --root <data-directory> --output <new-recording-directory> [configuration options]\n\nPrepare game content: nfs-server prepare-content --game-dir <installation>\n[--root <data-directory>] [--content-cache <directory>]\n\nCreate account: nfs-server create-account --name <name> --state-directory <new-directory>\n--account-policy <policy.json> --item-content <items.json> --persistent-content <tables.json>\n\nRequired control configuration: --bootstrap-config, --auth-config,\n--group-policy, --matchmaking-admission, --matchmaking-policy, --world-policy,\n--control-catalogs, --stat-definitions, --challenge-content, --item-licenses,\n--owned-local-social and --owned-menu-awards.\n\nGarage configuration: --world-content (version 4 or 5), --world-mac-template,\n--item-content, --state-directory, --local-account, --persistent-content,\n--progression-content, --vehicle-content, --garage-layout, --sequence-content,\n--garage-logic.\n\nGame content: --game-dir <installation> builds --item-content,\n--persistent-content and --world-mac-template on first start, supplies\n--stat-definitions, --item-licenses, --control-catalogs and\n--reputation-thresholds, --scene-catalog, --world-content, --garage-layout,\n--vehicle-content, --vehicle-parts, --progression-content and --sequence-content unless explicitly overridden, and caches the outputs\n(--content-cache, default artifacts/content under --root).\n\nAccount state is read from SQLite. Optional one-time imports: --local-identity,\n--entitlement-state, --kickback-state, --speedwall-state, --user-settings.\n\nOptional: --lsx-port (3216 for the game), --redirector-port, --idle-seconds, --qos-seconds, --stop-file.\nAll listeners are loopback. No manifest, captured reply store or external\nauthentication is used. See crates/server/README.md for schemas and limitations."
         );
         return std::process::ExitCode::SUCCESS;
     }
@@ -495,6 +506,7 @@ async fn run(args: Args) -> Result<(), Failure> {
         let bytes = std::fs::read(args.root.join(path)).map_err(|_| Failure::Output)?;
         pack = pack.with_world_mac_template(&bytes)?;
     }
+    let lsx_profile = nfs_server::lsx::profile(&owned.identity);
     pack = pack.with_authentication(auth_config, owned.identity)?;
     if let Some(path) = &args.bootstrap_config {
         pack = pack.with_bootstrap(
@@ -656,6 +668,15 @@ async fn run(args: Args) -> Result<(), Failure> {
     }
     let listeners = net::Listeners::bind(args.redirector_port).await?;
     let a = listeners.addresses()?;
+    let lsx_listener = match args.lsx_port {
+        Some(port) => Some(nfs_server::lsx::bind(port).await?),
+        None => None,
+    };
+    let lsx_address = lsx_listener
+        .as_ref()
+        .map(|listener| listener.local_addr())
+        .transpose()
+        .map_err(|_| Failure::Io)?;
     let (recorder, thread) = record::start(&args.root, &args.output)?;
     let features = pack.features();
     let mut ready = serde_json::json!({"ready":true,"pid":std::process::id(),
@@ -697,6 +718,7 @@ async fn run(args: Args) -> Result<(), Failure> {
     } else {
         "pack"
     });
+    ready["lsx"] = serde_json::json!(lsx_address.map(|a| a.to_string()));
     ready["manifest_mode"] = serde_json::json!("none");
     ready["install_content"] = args.generated.clone().unwrap_or(serde_json::Value::Null);
     println!("{ready}");
@@ -723,7 +745,22 @@ async fn run(args: Args) -> Result<(), Failure> {
         speedwall,
         item_licenses,
     };
-    let server = tokio::spawn(net::serve(listeners, pack, recorder, config, shutdown));
+    let mut servers = tokio::task::JoinSet::new();
+    servers.spawn(net::serve(
+        listeners,
+        pack,
+        recorder,
+        config,
+        shutdown.clone(),
+    ));
+    if let Some(listener) = lsx_listener {
+        servers.spawn(nfs_server::lsx::serve(
+            listener,
+            lsx_profile,
+            Duration::from_secs(args.idle_seconds),
+            shutdown,
+        ));
+    }
     let stop_file = args.stop_file.clone();
     let watch_file = async move {
         match stop_file {
@@ -736,12 +773,20 @@ async fn run(args: Args) -> Result<(), Failure> {
             None => std::future::pending().await,
         }
     };
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {}
-        () = watch_file => {}
-    }
+    let early = tokio::select! {
+        _ = tokio::signal::ctrl_c() => None,
+        () = watch_file => None,
+        result = servers.join_next() => result,
+    };
     let _ = stop.send(true);
-    let served = server.await.map_err(|_| Failure::Io)?;
+    let mut served = early
+        .map(|r| r.unwrap_or(Err(Failure::Io)))
+        .unwrap_or(Ok(()));
+    while let Some(result) = servers.join_next().await {
+        if let Err(error) = result.unwrap_or(Err(Failure::Io)) {
+            served = Err(error);
+        }
+    }
     thread.finish()?;
     served
 }
@@ -1016,5 +1061,26 @@ mod tests {
         }
         assert!(parse_from(args.into_iter()).is_ok());
         // Existence and schema of persisted state are checked before readiness.
+    }
+
+    #[test]
+    fn lsx_port_is_optional_and_bounded() {
+        assert!(
+            parse_from(configured().into_iter())
+                .unwrap()
+                .lsx_port
+                .is_none()
+        );
+        for port in ["0", "3216", "65535"] {
+            let mut args = configured();
+            args.extend(["--lsx-port".into(), port.into()]);
+            assert_eq!(
+                parse_from(args.into_iter()).unwrap().lsx_port,
+                Some(port.parse().unwrap())
+            );
+        }
+        let mut args = configured();
+        args.extend(["--lsx-port".into(), "65536".into()]);
+        assert!(parse_from(args.into_iter()).is_err());
     }
 }

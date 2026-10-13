@@ -221,6 +221,13 @@ name = "nfs-heat2"
 version = "0.1.0"
 
 [[package]]
+name = "nfs-lsx"
+version = "0.1.0"
+dependencies = [
+ "nfs-lsx-codec",
+]
+
+[[package]]
 name = "nfs-lsx-codec"
 version = "0.1.0"
 
@@ -241,6 +248,7 @@ dependencies = [
  "nfs-content",
  "nfs-fire2",
  "nfs-heat2",
+ "nfs-lsx",
  "nfs-protocol",
  "nfs-server-support",
  "nfs-services",

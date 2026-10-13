@@ -12,6 +12,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+nfs-lsx = { path = "../lsx" }
 httparse = "=1.10.1"
 nfs-fire2 = { path = "../fire2" }
 nfs-heat2 = { path = "../heat2" }

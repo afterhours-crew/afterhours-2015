@@ -210,6 +210,45 @@ impl Envelope {
         )
     }
 
+    /// Numeric connectivity flag expected by the SDK's signed scalar reader.
+    pub fn internet_connected(kind: Kind, sender: &str, id: u64, connected: bool) -> Self {
+        Self::reply(
+            kind,
+            sender,
+            id,
+            Element::new("InternetConnectedState")
+                .attribute("connected", if connected { "1" } else { "0" }),
+        )
+    }
+
+    /// Locally generated authorization code; callers own authentication policy.
+    pub fn auth_code(kind: Kind, sender: &str, id: u64, value: &str) -> Self {
+        Self::reply(
+            kind,
+            sender,
+            id,
+            Element::new("AuthCode").attribute("value", value),
+        )
+    }
+
+    /// Presence of the selected local account, with no advertised game session.
+    pub fn presence(kind: Kind, sender: &str, id: u64, presence: &PresenceUpdate) -> Self {
+        Self::reply(
+            kind,
+            sender,
+            id,
+            Element::new("GetPresenceResponse")
+                .attribute("UserId", &presence.user_id.to_string())
+                .attribute("Presence", presence.state.name())
+                .attribute("Title", "")
+                .attribute("TitleId", "")
+                .attribute("MultiplayerId", "")
+                .attribute("RichPresence", &presence.rich_presence)
+                .attribute("GamePresence", &presence.game_presence)
+                .attribute("SessionId", &presence.session_id),
+        )
+    }
+
     /// The error payload the game's callbacks fall back to.
     pub fn error(kind: Kind, sender: &str, id: u64, code: i32, description: &str) -> Self {
         Self::reply(
@@ -241,6 +280,21 @@ impl Envelope {
                 language: field("Language")?,
                 version: field("Version")?,
             },
+            "GetAuthCode" => Incoming::GetAuthCode {
+                client_id: field("ClientId")?,
+                scope: field("Scope")?,
+            },
+            "GetInternetConnectedState" => Incoming::GetInternetConnectedState,
+            "GetPresence" => Incoming::GetPresence {
+                user_id: field("UserId")?.parse().map_err(|_| Error::Field)?,
+            },
+            "SetPresence" => Incoming::SetPresence(PresenceUpdate {
+                user_id: field("UserId")?.parse().map_err(|_| Error::Field)?,
+                state: PresenceState::parse(&field("Presence")?).ok_or(Error::Field)?,
+                rich_presence: field("RichPresence")?,
+                game_presence: field("GamePresence")?,
+                session_id: field("SessionId")?,
+            }),
             "GetConfig" => Incoming::GetConfig,
             "GetProfile" => Incoming::GetProfile {
                 index: field("index")?.parse().map_err(|_| Error::Field)?,
@@ -271,6 +325,15 @@ pub enum Incoming {
         version: String,
     },
     GetConfig,
+    GetInternetConnectedState,
+    GetPresence {
+        user_id: u64,
+    },
+    SetPresence(PresenceUpdate),
+    GetAuthCode {
+        client_id: String,
+        scope: String,
+    },
     GetProfile {
         index: u64,
     },
@@ -294,6 +357,28 @@ pub struct Profile {
     pub avatar_id: String,
 }
 
+/// Ephemeral presence supplied by one local SDK connection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PresenceUpdate {
+    pub user_id: u64,
+    pub state: PresenceState,
+    pub rich_presence: String,
+    pub game_presence: String,
+    pub session_id: String,
+}
+
+impl PresenceUpdate {
+    pub fn online(user_id: u64) -> Self {
+        Self {
+            user_id,
+            state: PresenceState::Online,
+            rich_presence: String::new(),
+            game_presence: String::new(),
+            session_id: String::new(),
+        }
+    }
+}
+
 macro_rules! names {
     ($(#[$doc:meta])* $name:ident { $($variant:ident = $text:literal),+ $(,)? }) => {
         $(#[$doc])*
@@ -314,6 +399,14 @@ macro_rules! names {
             }
         }
     };
+}
+
+names! {
+    /// Presence enum names in the SDK table's order.
+    PresenceState {
+        Offline = "OFFLINE", Online = "ONLINE", InGame = "INGAME", Busy = "BUSY",
+        Idle = "IDLE", Joinable = "JOINABLE", JoinableInviteOnly = "JOINABLE_INVITE_ONLY",
+    }
 }
 
 names! {
@@ -573,5 +666,96 @@ mod tests {
             Envelope::parse(b"<LSX><Request id=\"1\"><GetProfile index=\"x\"/></Request></LSX>")
                 .unwrap();
         assert_eq!(e.incoming(), Err(Error::Field));
+    }
+
+    #[test]
+    fn authorization_code_codec_preserves_routing_and_exact_scalar_name() {
+        let request = Envelope::parse(br#"<LSX><Request recipient="LocalLogin" id="42"><GetAuthCode ClientId="local-client" Scope=""/></Request></LSX>"#).unwrap();
+        assert_eq!(
+            request.incoming().unwrap(),
+            Incoming::GetAuthCode {
+                client_id: "local-client".into(),
+                scope: String::new()
+            }
+        );
+        assert_eq!(
+            Envelope::auth_code(Kind::Response, "LocalLogin", 42, "a&b").to_xml(),
+            "<LSX><Response sender=\"LocalLogin\" id=\"42\"><AuthCode value=\"a&amp;b\"/></Response></LSX>"
+        );
+        let missing =
+            Envelope::parse(br#"<LSX><Request><GetAuthCode Scope=""/></Request></LSX>"#).unwrap();
+        assert_eq!(missing.incoming(), Err(Error::Field));
+    }
+
+    #[test]
+    fn connectivity_uses_the_numeric_attribute_expected_by_the_client() {
+        let request = Envelope::parse(
+            br#"<LSX><Request id="10"><GetInternetConnectedState/></Request></LSX>"#,
+        )
+        .unwrap();
+        assert_eq!(
+            request.incoming().unwrap(),
+            Incoming::GetInternetConnectedState
+        );
+        for (value, text) in [(true, "1"), (false, "0")] {
+            let reply = Envelope::internet_connected(Kind::Response, SDK_SERVICE, 10, value);
+            assert_eq!(reply.payload.name, "InternetConnectedState");
+            assert_eq!(reply.payload.attr("connected"), Some(text));
+            assert!(reply.payload.children.is_empty());
+        }
+    }
+
+    #[test]
+    fn presence_requires_a_numeric_user_and_emits_named_status() {
+        for value in ["", "-1", "18446744073709551616", "other"] {
+            let input = format!("<LSX><Request><GetPresence UserId=\"{value}\"/></Request></LSX>");
+            assert_eq!(
+                Envelope::parse(input.as_bytes()).unwrap().incoming(),
+                Err(Error::Field)
+            );
+        }
+        let input = br#"<LSX><Request id="12"><GetPresence UserId="9001"/></Request></LSX>"#;
+        assert_eq!(
+            Envelope::parse(input).unwrap().incoming().unwrap(),
+            Incoming::GetPresence { user_id: 9001 }
+        );
+        assert_eq!(
+            Envelope::presence(
+                Kind::Response,
+                SDK_SERVICE,
+                12,
+                &PresenceUpdate::online(9001)
+            )
+            .to_xml(),
+            "<LSX><Response sender=\"EbisuSDK\" id=\"12\"><GetPresenceResponse UserId=\"9001\" Presence=\"ONLINE\" Title=\"\" TitleId=\"\" MultiplayerId=\"\" RichPresence=\"\" GamePresence=\"\" SessionId=\"\"/></Response></LSX>"
+        );
+    }
+
+    #[test]
+    fn presence_update_parses_exact_enum_and_required_fields() {
+        for status in PresenceState::ALL {
+            let input = format!(
+                "<LSX><Request><SetPresence UserId=\"9001\" Presence=\"{}\" RichPresence=\"Drive &amp; race\" GamePresence=\"\" SessionId=\"\"/></Request></LSX>",
+                status.name()
+            );
+            let Incoming::SetPresence(value) = Envelope::parse(input.as_bytes())
+                .unwrap()
+                .incoming()
+                .unwrap()
+            else {
+                panic!("wrong request")
+            };
+            assert_eq!(value.state, *status);
+            assert_eq!(value.rich_presence, "Drive & race");
+        }
+        for input in [
+            r#"<LSX><Request><SetPresence UserId="1" Presence="online" RichPresence="" GamePresence="" SessionId=""/></Request></LSX>"#,
+            r#"<LSX><Request><SetPresence UserId="1" Presence="ONLINE" RichPresence="" GamePresence=""/></Request></LSX>"#,
+        ] {
+            assert_eq!(
+                Envelope::parse(input.as_bytes()).unwrap().incoming(),
+                Err(Error::Field)
+            );
+        }
     }
 }

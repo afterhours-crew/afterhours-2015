@@ -6,6 +6,7 @@ members = [
     "crates/world-core",
     "crates/world",
     "crates/lsx-codec",
+    "crates/lsx",
     "crates/storage",
     "crates/services",
     "crates/server-support",
