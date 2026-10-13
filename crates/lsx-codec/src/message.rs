@@ -5,9 +5,8 @@
 //! LSX envelopes and typed startup payloads. Scalar readers select attributes
 //! by exact name; serializers retain the required attribute/child distinction.
 //!
-//! Opening Challenge direction and the request-field placement of GetProfile,
-//! GetSetting and GetGameInfo remain unverified on the wire. The parser accepts
-//! attributes or child text for those request fields. Callers select the envelope;
+//! The parser accepts GetProfile, GetSetting and GetGameInfo request fields as
+//! attributes or child text. Callers select the envelope kind and routing;
 //! this module supplies no handshake, configuration or authentication policy.
 
 use crate::xml::{self, Element};
@@ -16,6 +15,7 @@ use std::fmt;
 pub const ROOT: &str = "LSX";
 pub const REQUEST: &str = "Request";
 pub const RESPONSE: &str = "Response";
+pub const EVENT: &str = "Event";
 /// The launcher's identity in the handshake.
 pub const LAUNCHER: &str = "EALS";
 /// The SDK service the game addresses after the handshake.
@@ -28,7 +28,7 @@ pub enum Error {
     Xml(xml::Error),
     /// The root is not `LSX`.
     Root,
-    /// The envelope child is neither `Request` nor `Response`, or is missing.
+    /// The envelope child is not `Request`, `Response` or `Event`, or is missing.
     Kind,
     /// The `id` attribute is not a decimal number.
     Id,
@@ -55,6 +55,7 @@ impl From<xml::Error> for Error {
 pub enum Kind {
     Request,
     Response,
+    Event,
 }
 
 impl Kind {
@@ -62,6 +63,7 @@ impl Kind {
         match text {
             REQUEST => Some(Self::Request),
             RESPONSE => Some(Self::Response),
+            EVENT => Some(Self::Event),
             _ => None,
         }
     }
@@ -70,6 +72,7 @@ impl Kind {
         match self {
             Self::Request => REQUEST,
             Self::Response => RESPONSE,
+            Self::Event => EVENT,
         }
     }
 }
@@ -81,6 +84,8 @@ pub struct Envelope {
     pub kind: Kind,
     pub sender: Option<String>,
     pub recipient: Option<String>,
+    /// Missing IDs parse as zero. Event serialization omits a zero ID;
+    /// request/response serialization continues to emit it explicitly.
     pub id: u64,
     pub payload: Element,
 }
@@ -92,11 +97,7 @@ impl Envelope {
             return Err(Error::Root);
         }
         let child = root.children.first().ok_or(Error::Kind)?;
-        let kind = match child.name.as_str() {
-            REQUEST => Kind::Request,
-            RESPONSE => Kind::Response,
-            _ => return Err(Error::Kind),
-        };
+        let kind = Kind::parse(&child.name).ok_or(Error::Kind)?;
         // The game's dispatcher substitutes "0" for a missing id.
         let id = child
             .attr("id")
@@ -121,17 +122,15 @@ impl Envelope {
         if let Some(recipient) = &self.recipient {
             kind = kind.attribute("recipient", recipient);
         }
+        if self.kind != Kind::Event || self.id != 0 {
+            kind = kind.attribute("id", &self.id.to_string());
+        }
         Element::new(ROOT)
-            .child(
-                kind.attribute("id", &self.id.to_string())
-                    .child(self.payload.clone()),
-            )
+            .child(kind.child(self.payload.clone()))
             .to_xml()
     }
 
-    /// A launcher message: `kind` is the envelope element the game will be
-    /// asked to match (see [`Kind`]; which one it expects is the open
-    /// hypothesis, so callers choose).
+    /// A launcher message; the caller supplies its envelope kind and routing.
     fn reply(kind: Kind, sender: &str, id: u64, payload: Element) -> Self {
         Self {
             kind,
@@ -360,6 +359,55 @@ mod tests {
     use super::*;
 
     #[test]
+    fn uncorrelated_challenge_event_round_trips_across_frame_splits() {
+        // Constructed values: no captured challenge or launcher build is used.
+        let xml = "<LSX><Event sender=\"EALS\"><Challenge key=\"0123456789abcdef0123456789abcdef\" version=\"1,2,3,4\" build=\"test\"/></Event></LSX>";
+        let expected = Envelope::challenge(
+            Kind::Event,
+            0,
+            "0123456789abcdef0123456789abcdef",
+            "1,2,3,4",
+            "test",
+        );
+        assert_eq!(Envelope::parse(xml.as_bytes()).unwrap(), expected);
+        assert_eq!(expected.to_xml(), xml);
+        let wire = crate::frame::encode(xml.as_bytes()).unwrap();
+        for split in 0..=wire.len() {
+            let mut frames = crate::frame::Frames::new();
+            frames.feed(&wire[..split]).unwrap();
+            frames.feed(&wire[split..]).unwrap();
+            assert_eq!(
+                Envelope::parse(&frames.next_frame().unwrap()).unwrap(),
+                expected
+            );
+            assert!(frames.next_frame().is_none());
+        }
+    }
+
+    #[test]
+    fn event_routing_and_nonzero_ids_survive_without_changing_request_ids() {
+        let xml = "<LSX><Event sender=\"local\" recipient=\"peer\" id=\"27\"><Notice value=\"x\"/></Event></LSX>";
+        let event = Envelope::parse(xml.as_bytes()).unwrap();
+        assert_eq!((event.kind, event.id), (Kind::Event, 27));
+        assert_eq!(event.to_xml(), xml);
+        assert_eq!(Kind::parse("event"), None);
+        assert_eq!(Kind::parse("Event"), Some(Kind::Event));
+        for kind in [Kind::Request, Kind::Response] {
+            let envelope = Envelope::challenge(kind, 0, "key", "version", "build");
+            assert!(envelope.to_xml().contains("id=\"0\""));
+            assert_eq!(
+                Envelope::parse(envelope.to_xml().as_bytes()).unwrap(),
+                envelope
+            );
+        }
+        assert_eq!(
+            Envelope::parse(b"<LSX><Event id=\"bad\"><X/></Event></LSX>"),
+            Err(Error::Id)
+        );
+        assert_eq!(Envelope::parse(b"<LSX><Event/></LSX>"), Err(Error::Payload));
+    }
+
+    #[test]
     fn enum_tables_keep_the_observed_order_and_spellings() {
         assert_eq!(Facility::ALL.len(), 34);
         assert_eq!(Facility::ALL[0], Facility::Sdk);
@@ -488,7 +536,7 @@ mod tests {
         assert_eq!(Envelope::parse(b"<lsx><Request/></lsx>"), Err(Error::Root));
         assert_eq!(Envelope::parse(b"<LSX/>"), Err(Error::Kind));
         assert_eq!(
-            Envelope::parse(b"<LSX><Event id=\"1\"><X/></Event></LSX>"),
+            Envelope::parse(b"<LSX><Other id=\"1\"><X/></Other></LSX>"),
             Err(Error::Kind)
         );
         assert_eq!(
