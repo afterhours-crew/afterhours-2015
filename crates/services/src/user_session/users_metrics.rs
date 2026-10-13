@@ -181,7 +181,34 @@ impl Followup {
                 .encode(body_limits())
                 .map_err(|_| Failure::IneligibleRequest)?
         {
-            return Err(Failure::IneligibleRequest);
+            // The initial update can precede QoS address discovery. Permit its
+            // first external endpoint resolution while retaining this session's
+            // machine and internal endpoint. Established endpoint changes are
+            // outside this startup transition.
+            let (Some(old_external), Some(new_external), Some(old_internal), Some(new_internal)) = (
+                &old.external_address,
+                &new.external_address,
+                &old.internal_address,
+                &new.internal_address,
+            ) else {
+                return Err(Failure::IneligibleRequest);
+            };
+            if old.machine_id != new.machine_id
+                || old_external.ip != Some(0)
+                || old_external.port != Some(0)
+                || old_external.machine_id != new_external.machine_id
+                || new_external.ip.is_none_or(|ip| ip == 0)
+                || new_external.port.is_none_or(|port| port == 0)
+                || old_internal
+                    .encode(body_limits())
+                    .map_err(|_| Failure::Reply)?
+                    != new_internal
+                        .encode(body_limits())
+                        .map_err(|_| Failure::IneligibleRequest)?
+            {
+                return Err(Failure::IneligibleRequest);
+            }
+            data.address = info.address;
         }
         let best = latency
             .0

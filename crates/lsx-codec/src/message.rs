@@ -5,9 +5,8 @@
 //! LSX envelopes and typed startup payloads. Scalar readers select attributes
 //! by exact name; serializers retain the required attribute/child distinction.
 //!
-//! Opening Challenge direction and the request-field placement of GetProfile,
-//! GetSetting and GetGameInfo remain unverified on the wire. The parser accepts
-//! attributes or child text for those request fields. Callers select the envelope;
+//! The parser accepts GetProfile, GetSetting and GetGameInfo request fields as
+//! attributes or child text. Callers select the envelope kind and routing;
 //! this module supplies no handshake, configuration or authentication policy.
 
 use crate::xml::{self, Element};
@@ -16,6 +15,7 @@ use std::fmt;
 pub const ROOT: &str = "LSX";
 pub const REQUEST: &str = "Request";
 pub const RESPONSE: &str = "Response";
+pub const EVENT: &str = "Event";
 /// The launcher's identity in the handshake.
 pub const LAUNCHER: &str = "EALS";
 /// The SDK service the game addresses after the handshake.
@@ -28,7 +28,7 @@ pub enum Error {
     Xml(xml::Error),
     /// The root is not `LSX`.
     Root,
-    /// The envelope child is neither `Request` nor `Response`, or is missing.
+    /// The envelope child is not `Request`, `Response` or `Event`, or is missing.
     Kind,
     /// The `id` attribute is not a decimal number.
     Id,
@@ -55,6 +55,7 @@ impl From<xml::Error> for Error {
 pub enum Kind {
     Request,
     Response,
+    Event,
 }
 
 impl Kind {
@@ -62,6 +63,7 @@ impl Kind {
         match text {
             REQUEST => Some(Self::Request),
             RESPONSE => Some(Self::Response),
+            EVENT => Some(Self::Event),
             _ => None,
         }
     }
@@ -70,6 +72,7 @@ impl Kind {
         match self {
             Self::Request => REQUEST,
             Self::Response => RESPONSE,
+            Self::Event => EVENT,
         }
     }
 }
@@ -81,6 +84,8 @@ pub struct Envelope {
     pub kind: Kind,
     pub sender: Option<String>,
     pub recipient: Option<String>,
+    /// Missing IDs parse as zero. Event serialization omits a zero ID;
+    /// request/response serialization continues to emit it explicitly.
     pub id: u64,
     pub payload: Element,
 }
@@ -92,11 +97,7 @@ impl Envelope {
             return Err(Error::Root);
         }
         let child = root.children.first().ok_or(Error::Kind)?;
-        let kind = match child.name.as_str() {
-            REQUEST => Kind::Request,
-            RESPONSE => Kind::Response,
-            _ => return Err(Error::Kind),
-        };
+        let kind = Kind::parse(&child.name).ok_or(Error::Kind)?;
         // The game's dispatcher substitutes "0" for a missing id.
         let id = child
             .attr("id")
@@ -121,17 +122,15 @@ impl Envelope {
         if let Some(recipient) = &self.recipient {
             kind = kind.attribute("recipient", recipient);
         }
+        if self.kind != Kind::Event || self.id != 0 {
+            kind = kind.attribute("id", &self.id.to_string());
+        }
         Element::new(ROOT)
-            .child(
-                kind.attribute("id", &self.id.to_string())
-                    .child(self.payload.clone()),
-            )
+            .child(kind.child(self.payload.clone()))
             .to_xml()
     }
 
-    /// A launcher message: `kind` is the envelope element the game will be
-    /// asked to match (see [`Kind`]; which one it expects is the open
-    /// hypothesis, so callers choose).
+    /// A launcher message; the caller supplies its envelope kind and routing.
     fn reply(kind: Kind, sender: &str, id: u64, payload: Element) -> Self {
         Self {
             kind,
@@ -211,6 +210,45 @@ impl Envelope {
         )
     }
 
+    /// Numeric connectivity flag expected by the SDK's signed scalar reader.
+    pub fn internet_connected(kind: Kind, sender: &str, id: u64, connected: bool) -> Self {
+        Self::reply(
+            kind,
+            sender,
+            id,
+            Element::new("InternetConnectedState")
+                .attribute("connected", if connected { "1" } else { "0" }),
+        )
+    }
+
+    /// Locally generated authorization code; callers own authentication policy.
+    pub fn auth_code(kind: Kind, sender: &str, id: u64, value: &str) -> Self {
+        Self::reply(
+            kind,
+            sender,
+            id,
+            Element::new("AuthCode").attribute("value", value),
+        )
+    }
+
+    /// Presence of the selected local account, with no advertised game session.
+    pub fn presence(kind: Kind, sender: &str, id: u64, presence: &PresenceUpdate) -> Self {
+        Self::reply(
+            kind,
+            sender,
+            id,
+            Element::new("GetPresenceResponse")
+                .attribute("UserId", &presence.user_id.to_string())
+                .attribute("Presence", presence.state.name())
+                .attribute("Title", "")
+                .attribute("TitleId", "")
+                .attribute("MultiplayerId", "")
+                .attribute("RichPresence", &presence.rich_presence)
+                .attribute("GamePresence", &presence.game_presence)
+                .attribute("SessionId", &presence.session_id),
+        )
+    }
+
     /// The error payload the game's callbacks fall back to.
     pub fn error(kind: Kind, sender: &str, id: u64, code: i32, description: &str) -> Self {
         Self::reply(
@@ -242,6 +280,21 @@ impl Envelope {
                 language: field("Language")?,
                 version: field("Version")?,
             },
+            "GetAuthCode" => Incoming::GetAuthCode {
+                client_id: field("ClientId")?,
+                scope: field("Scope")?,
+            },
+            "GetInternetConnectedState" => Incoming::GetInternetConnectedState,
+            "GetPresence" => Incoming::GetPresence {
+                user_id: field("UserId")?.parse().map_err(|_| Error::Field)?,
+            },
+            "SetPresence" => Incoming::SetPresence(PresenceUpdate {
+                user_id: field("UserId")?.parse().map_err(|_| Error::Field)?,
+                state: PresenceState::parse(&field("Presence")?).ok_or(Error::Field)?,
+                rich_presence: field("RichPresence")?,
+                game_presence: field("GamePresence")?,
+                session_id: field("SessionId")?,
+            }),
             "GetConfig" => Incoming::GetConfig,
             "GetProfile" => Incoming::GetProfile {
                 index: field("index")?.parse().map_err(|_| Error::Field)?,
@@ -272,6 +325,15 @@ pub enum Incoming {
         version: String,
     },
     GetConfig,
+    GetInternetConnectedState,
+    GetPresence {
+        user_id: u64,
+    },
+    SetPresence(PresenceUpdate),
+    GetAuthCode {
+        client_id: String,
+        scope: String,
+    },
     GetProfile {
         index: u64,
     },
@@ -295,6 +357,28 @@ pub struct Profile {
     pub avatar_id: String,
 }
 
+/// Ephemeral presence supplied by one local SDK connection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PresenceUpdate {
+    pub user_id: u64,
+    pub state: PresenceState,
+    pub rich_presence: String,
+    pub game_presence: String,
+    pub session_id: String,
+}
+
+impl PresenceUpdate {
+    pub fn online(user_id: u64) -> Self {
+        Self {
+            user_id,
+            state: PresenceState::Online,
+            rich_presence: String::new(),
+            game_presence: String::new(),
+            session_id: String::new(),
+        }
+    }
+}
+
 macro_rules! names {
     ($(#[$doc:meta])* $name:ident { $($variant:ident = $text:literal),+ $(,)? }) => {
         $(#[$doc])*
@@ -315,6 +399,14 @@ macro_rules! names {
             }
         }
     };
+}
+
+names! {
+    /// Presence enum names in the SDK table's order.
+    PresenceState {
+        Offline = "OFFLINE", Online = "ONLINE", InGame = "INGAME", Busy = "BUSY",
+        Idle = "IDLE", Joinable = "JOINABLE", JoinableInviteOnly = "JOINABLE_INVITE_ONLY",
+    }
 }
 
 names! {
@@ -358,6 +450,55 @@ names! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uncorrelated_challenge_event_round_trips_across_frame_splits() {
+        // Constructed values: no captured challenge or launcher build is used.
+        let xml = "<LSX><Event sender=\"EALS\"><Challenge key=\"0123456789abcdef0123456789abcdef\" version=\"1,2,3,4\" build=\"test\"/></Event></LSX>";
+        let expected = Envelope::challenge(
+            Kind::Event,
+            0,
+            "0123456789abcdef0123456789abcdef",
+            "1,2,3,4",
+            "test",
+        );
+        assert_eq!(Envelope::parse(xml.as_bytes()).unwrap(), expected);
+        assert_eq!(expected.to_xml(), xml);
+        let wire = crate::frame::encode(xml.as_bytes()).unwrap();
+        for split in 0..=wire.len() {
+            let mut frames = crate::frame::Frames::new();
+            frames.feed(&wire[..split]).unwrap();
+            frames.feed(&wire[split..]).unwrap();
+            assert_eq!(
+                Envelope::parse(&frames.next_frame().unwrap()).unwrap(),
+                expected
+            );
+            assert!(frames.next_frame().is_none());
+        }
+    }
+
+    #[test]
+    fn event_routing_and_nonzero_ids_survive_without_changing_request_ids() {
+        let xml = "<LSX><Event sender=\"local\" recipient=\"peer\" id=\"27\"><Notice value=\"x\"/></Event></LSX>";
+        let event = Envelope::parse(xml.as_bytes()).unwrap();
+        assert_eq!((event.kind, event.id), (Kind::Event, 27));
+        assert_eq!(event.to_xml(), xml);
+        assert_eq!(Kind::parse("event"), None);
+        assert_eq!(Kind::parse("Event"), Some(Kind::Event));
+        for kind in [Kind::Request, Kind::Response] {
+            let envelope = Envelope::challenge(kind, 0, "key", "version", "build");
+            assert!(envelope.to_xml().contains("id=\"0\""));
+            assert_eq!(
+                Envelope::parse(envelope.to_xml().as_bytes()).unwrap(),
+                envelope
+            );
+        }
+        assert_eq!(
+            Envelope::parse(b"<LSX><Event id=\"bad\"><X/></Event></LSX>"),
+            Err(Error::Id)
+        );
+        assert_eq!(Envelope::parse(b"<LSX><Event/></LSX>"), Err(Error::Payload));
+    }
 
     #[test]
     fn enum_tables_keep_the_observed_order_and_spellings() {
@@ -488,7 +629,7 @@ mod tests {
         assert_eq!(Envelope::parse(b"<lsx><Request/></lsx>"), Err(Error::Root));
         assert_eq!(Envelope::parse(b"<LSX/>"), Err(Error::Kind));
         assert_eq!(
-            Envelope::parse(b"<LSX><Event id=\"1\"><X/></Event></LSX>"),
+            Envelope::parse(b"<LSX><Other id=\"1\"><X/></Other></LSX>"),
             Err(Error::Kind)
         );
         assert_eq!(
@@ -525,5 +666,96 @@ mod tests {
             Envelope::parse(b"<LSX><Request id=\"1\"><GetProfile index=\"x\"/></Request></LSX>")
                 .unwrap();
         assert_eq!(e.incoming(), Err(Error::Field));
+    }
+
+    #[test]
+    fn authorization_code_codec_preserves_routing_and_exact_scalar_name() {
+        let request = Envelope::parse(br#"<LSX><Request recipient="LocalLogin" id="42"><GetAuthCode ClientId="local-client" Scope=""/></Request></LSX>"#).unwrap();
+        assert_eq!(
+            request.incoming().unwrap(),
+            Incoming::GetAuthCode {
+                client_id: "local-client".into(),
+                scope: String::new()
+            }
+        );
+        assert_eq!(
+            Envelope::auth_code(Kind::Response, "LocalLogin", 42, "a&b").to_xml(),
+            "<LSX><Response sender=\"LocalLogin\" id=\"42\"><AuthCode value=\"a&amp;b\"/></Response></LSX>"
+        );
+        let missing =
+            Envelope::parse(br#"<LSX><Request><GetAuthCode Scope=""/></Request></LSX>"#).unwrap();
+        assert_eq!(missing.incoming(), Err(Error::Field));
+    }
+
+    #[test]
+    fn connectivity_uses_the_numeric_attribute_expected_by_the_client() {
+        let request = Envelope::parse(
+            br#"<LSX><Request id="10"><GetInternetConnectedState/></Request></LSX>"#,
+        )
+        .unwrap();
+        assert_eq!(
+            request.incoming().unwrap(),
+            Incoming::GetInternetConnectedState
+        );
+        for (value, text) in [(true, "1"), (false, "0")] {
+            let reply = Envelope::internet_connected(Kind::Response, SDK_SERVICE, 10, value);
+            assert_eq!(reply.payload.name, "InternetConnectedState");
+            assert_eq!(reply.payload.attr("connected"), Some(text));
+            assert!(reply.payload.children.is_empty());
+        }
+    }
+
+    #[test]
+    fn presence_requires_a_numeric_user_and_emits_named_status() {
+        for value in ["", "-1", "18446744073709551616", "other"] {
+            let input = format!("<LSX><Request><GetPresence UserId=\"{value}\"/></Request></LSX>");
+            assert_eq!(
+                Envelope::parse(input.as_bytes()).unwrap().incoming(),
+                Err(Error::Field)
+            );
+        }
+        let input = br#"<LSX><Request id="12"><GetPresence UserId="9001"/></Request></LSX>"#;
+        assert_eq!(
+            Envelope::parse(input).unwrap().incoming().unwrap(),
+            Incoming::GetPresence { user_id: 9001 }
+        );
+        assert_eq!(
+            Envelope::presence(
+                Kind::Response,
+                SDK_SERVICE,
+                12,
+                &PresenceUpdate::online(9001)
+            )
+            .to_xml(),
+            "<LSX><Response sender=\"EbisuSDK\" id=\"12\"><GetPresenceResponse UserId=\"9001\" Presence=\"ONLINE\" Title=\"\" TitleId=\"\" MultiplayerId=\"\" RichPresence=\"\" GamePresence=\"\" SessionId=\"\"/></Response></LSX>"
+        );
+    }
+
+    #[test]
+    fn presence_update_parses_exact_enum_and_required_fields() {
+        for status in PresenceState::ALL {
+            let input = format!(
+                "<LSX><Request><SetPresence UserId=\"9001\" Presence=\"{}\" RichPresence=\"Drive &amp; race\" GamePresence=\"\" SessionId=\"\"/></Request></LSX>",
+                status.name()
+            );
+            let Incoming::SetPresence(value) = Envelope::parse(input.as_bytes())
+                .unwrap()
+                .incoming()
+                .unwrap()
+            else {
+                panic!("wrong request")
+            };
+            assert_eq!(value.state, *status);
+            assert_eq!(value.rich_presence, "Drive & race");
+        }
+        for input in [
+            r#"<LSX><Request><SetPresence UserId="1" Presence="online" RichPresence="" GamePresence="" SessionId=""/></Request></LSX>"#,
+            r#"<LSX><Request><SetPresence UserId="1" Presence="ONLINE" RichPresence="" GamePresence=""/></Request></LSX>"#,
+        ] {
+            assert_eq!(
+                Envelope::parse(input.as_bytes()).unwrap().incoming(),
+                Err(Error::Field)
+            );
+        }
     }
 }

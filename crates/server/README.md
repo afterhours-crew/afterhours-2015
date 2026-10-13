@@ -325,3 +325,37 @@ schema, and the embedded `parts` section is removed. Version 2 requires a parts
 file and validates both inputs against the same item catalog. Vehicle content
 version 1 continues to use its embedded parts, including when `--game-dir` is
 present. Preparation does not yet generate vehicle entity profiles.
+
+## Local launcher IPC
+
+The [local launcher integration guide](../../docs/LOCAL-LAUNCHER.md) describes
+the component boundaries, implemented requests and remaining launcher work.
+
+The optional `--lsx-port 3216` listener runs in the same server process and uses
+the same SQLite-backed account identity as backend authentication. Omit the flag
+to leave the port available to an installed launcher. Port 0 selects an ephemeral
+port for tests. LSX startup, settings and local authorization-code requests are
+modeled; unknown requests are logged without payloads and remain unsupported.
+The listener uses fresh OS entropy, loopback binding, four concurrent connection
+slots, the configured idle timeout, a five-second write deadline and shared
+shutdown. It does not launch the game, change client registration or remove
+installation/activation dependencies. Cold disconnected acceptance is separate.
+
+Local validation on the supported installed client reached menus, garage and free
+roam after a Windows restart, with EA Desktop absent and its background service
+stopped. Non-loopback traffic was blocked for the game, its installed activation
+helper and this server. The game returned to the garage and quit normally; a
+restart of both game and server recovered the same account and car in the garage.
+The second process finished closing just after the temporary block expired, so
+that final shutdown is not claimed to be fully network-isolated.
+
+These runs used a guarded research launch procedure and an existing local account.
+The installed license/cache state was retained; fresh-profile startup, cache
+lifetime, activation independence and a packaged launch path remain unverified.
+Other applications and system DNS stayed online. IPv6 loopback and active block
+rules were checked, but no external IPv6 route was available for a drop test.
+
+Startup QoS may first report an unresolved external endpoint and then resolve it.
+The user-session model accepts that first resolution while preserving the
+connection machine and internal endpoint; it still rejects replacement of an
+already established external endpoint.

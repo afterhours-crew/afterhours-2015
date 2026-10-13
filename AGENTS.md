@@ -16,6 +16,10 @@ completed checkpoints and open/update their pull requests. Do not commit or push
 directly to the default branch, force-push an open PR or merge without the owner.
 Stage explicit paths and review the complete diff before pushing.
 
+Owner override, 2026-10-13: commit locally and test local changes. Do not push or
+open a pull request until the change is tested, well documented and working.
+This supersedes routine checkpoint publication while investigating a change.
+
 Follow CONTRIBUTING.md for architecture, ownership, dependency and testing rules.
 Run all three listed Cargo gates for code changes. State exactly what has been
 tested; passing library tests does not establish game or offline-play acceptance.

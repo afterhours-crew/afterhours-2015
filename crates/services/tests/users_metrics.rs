@@ -176,6 +176,62 @@ fn ready() -> (Followup, Vec<u8>) {
     assert!(!h.complete());
     (h, before)
 }
+
+fn unresolved() -> Followup {
+    let mut first = network(0);
+    let Some(NetworkAddress::IpPair(pair)) = &mut first.network_info.as_mut().unwrap().address
+    else {
+        panic!("pair")
+    };
+    pair.external_address.as_mut().unwrap().port = Some(0);
+    let mut h = handler();
+    h.response(&wire(20, 0, 5, &first.encode(body_limits()).unwrap()))
+        .unwrap()
+        .unwrap();
+    h.response(&hardware(6, 0)).unwrap().unwrap();
+    h
+}
+
+#[test]
+fn first_qos_discovery_resolves_external_endpoint_and_retries_only_ack() {
+    let mut h = unresolved();
+    let request = metrics_wire(&metrics([0; 4]));
+    let output = h.response(&request).unwrap().unwrap();
+    let update =
+        UserSessionExtendedDataUpdate::decode(decode(&output[1]).body, body_limits()).unwrap();
+    assert_eq!(update.user_id, Some(100));
+    let Some(NetworkAddress::IpPair(pair)) = update.extended_data.unwrap().address else {
+        panic!("pair")
+    };
+    assert_eq!(pair.external_address.as_ref().unwrap().ip, Some(0xc0000201));
+    assert_eq!(pair.external_address.as_ref().unwrap().port, Some(32123));
+    assert_eq!(pair.internal_address.as_ref().unwrap().ip, Some(0x7f000001));
+    assert_eq!(
+        h.response(&request).unwrap().unwrap(),
+        vec![output[0].clone()]
+    );
+    assert!(h.complete());
+}
+
+#[test]
+fn initial_resolution_cannot_replace_machine_or_internal_endpoint() {
+    for mutation in 0..4 {
+        let mut h = unresolved();
+        let mut update = metrics([0; 4]);
+        let Some(NetworkAddress::IpPair(pair)) = &mut update.network_info.as_mut().unwrap().address
+        else {
+            panic!("pair")
+        };
+        match mutation {
+            0 => pair.machine_id = Some(123),
+            1 => pair.internal_address.as_mut().unwrap().port = Some(123),
+            2 => pair.external_address.as_mut().unwrap().machine_id = Some(123),
+            _ => pair.external_address.as_mut().unwrap().port = Some(0),
+        }
+        assert!(h.response(&metrics_wire(&update)).is_err());
+        assert!(!h.complete());
+    }
+}
 fn fields(body: &[u8]) -> Vec<([u8; 3], Vec<u8>)> {
     nfs_heat2::decode(body, body_limits())
         .unwrap()
