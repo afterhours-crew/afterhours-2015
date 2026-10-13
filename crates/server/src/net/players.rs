@@ -885,6 +885,14 @@ impl Listener for PlayerListener {
                 }
             }
         }
+        match players.sync_player_views() {
+            Ok(views) => records.extend(views),
+            Err(error) => {
+                self.refused += 1;
+                self.last_error = Some(error);
+                return false;
+            }
+        }
         match players.sync_player_manager() {
             Ok(record) => records.extend(record),
             Err(error) => {

@@ -31,3 +31,9 @@ The model resolves current scene IDs/serials, commits complete batches within th
 caller’s queue capacity, and accepts owned, ordered crossing/location reports.
 Race-event eligibility is separate; this model does not enable all event volumes
 or award progression from a crossing report.
+
+Player views have typed base and view serializers and one owned instance per
+player. Vehicle binding updates the manager, participant and view atomically;
+detachment clears view seats before vehicle deletion. Creation and retry handling
+share the listener transaction, so full output queues cannot leave unpublished
+view state. Numeric view fields whose meaning is unresolved remain explicit.

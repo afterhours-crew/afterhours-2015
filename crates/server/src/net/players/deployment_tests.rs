@@ -681,3 +681,88 @@ fn completion_binding_refresh_retains_due_work_under_backpressure_and_is_session
     assert!(listener.advance_sequences(100).is_err());
     assert_eq!(listener.pending_entries.len(), MAX_PENDING);
 }
+
+#[test]
+fn player_view_admission_rolls_back_when_full_and_retries_once_per_session() {
+    let mut listener = PlayerListener::new(101);
+    listener.initialize_world(&content()).unwrap();
+    let wire = frame::Builder::new()
+        .messages(
+            None,
+            vec![frame::Group {
+                channel: 0,
+                sequence: Some(0),
+                messages: vec![frame::Message::CreatePlayer {
+                    name: b"Driver".to_vec(),
+                    flag: false,
+                    slot: 0,
+                }],
+            }],
+        )
+        .build()
+        .unwrap();
+    let deliver = |listener: &mut PlayerListener| {
+        listener.frame(Queued {
+            advertised: None,
+            frame: 0,
+            data: wire.span(),
+        })
+    };
+    let initial = listener.players.objects().snapshot();
+    let filler = listener.pending.front().unwrap().clone();
+    listener.pending.resize(MAX_PENDING, filler);
+    assert!(!deliver(&mut listener));
+    assert_eq!(listener.players.objects().snapshot(), initial);
+    assert_eq!(listener.pending.len(), MAX_PENDING);
+    assert!(listener.pending_rpcs.is_empty());
+    listener.pending.clear();
+    assert!(deliver(&mut listener));
+    let records: Vec<_> = listener.pending.iter().flat_map(|s| &s.records).collect();
+    let player_at = records
+        .iter()
+        .position(|r| matches!(r.initial, Some(replication::Initial::Player(_))))
+        .unwrap();
+    let view_at = records
+        .iter()
+        .position(|r| matches!(r.initial, Some(replication::Initial::PlayerView(_))))
+        .unwrap();
+    assert!(player_at < view_at);
+    let view = records[view_at];
+    let player = records[player_at].id;
+    assert_eq!(
+        listener
+            .players
+            .owned_player_view(HOST_SELECTOR as u8, 101, player),
+        Some(view.id)
+    );
+    for section in &listener.pending {
+        assert!(section.encode().unwrap().len() <= nfs_world::application::OUTBOUND_FRAME_BITS);
+    }
+    let accepted = listener.players.objects().snapshot();
+    listener.pending.clear();
+    listener.pending_rpcs.clear();
+    assert!(deliver(&mut listener));
+    assert_eq!(listener.players.objects().snapshot(), accepted);
+    assert!(listener.pending.is_empty());
+    let mut reconnected = PlayerListener::new(202);
+    reconnected.initialize_world(&content()).unwrap();
+    assert!(deliver(&mut reconnected));
+    let new_player = reconnected
+        .players
+        .objects()
+        .iter()
+        .find_map(|(id, o)| matches!(o.initial, replication::Initial::Player(_)).then_some(id))
+        .unwrap();
+    assert!(
+        reconnected
+            .players
+            .owned_player_view(HOST_SELECTOR as u8, 202, new_player)
+            .is_some()
+    );
+    assert!(
+        reconnected
+            .players
+            .owned_player_view(HOST_SELECTOR as u8, 101, new_player)
+            .is_none()
+    );
+}
