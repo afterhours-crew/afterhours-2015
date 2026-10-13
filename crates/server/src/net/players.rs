@@ -1622,10 +1622,22 @@ impl Listener for PlayerListener {
             .iter()
             .map(|(&car, &(participant, _))| (participant, car))
             .collect();
-        match players.sync_location_map(HOST_SELECTOR as u8, self.persona, &map_cars, [0.; 3]) {
-            Ok(record) => records.extend(record),
-            Err(error) => {
-                return self.refuse(error);
+        if let Some(catalog) = self
+            .roles
+            .as_ref()
+            .and_then(|roles| roles.free_roam.as_ref())
+        {
+            match players.sync_location_service(
+                HOST_SELECTOR as u8,
+                self.persona,
+                &map_cars,
+                [0.; 3],
+                catalog.location,
+            ) {
+                Ok(batch) => records.extend(batch),
+                Err(error) => {
+                    return self.refuse(error);
+                }
             }
         }
         if let Err(error) = Self::bind_progression_launchers(
