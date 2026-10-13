@@ -6,6 +6,71 @@ use super::super::location_map::{Coordinate, Entry, Group};
 use super::*;
 
 impl Players {
+    /// Publish an owner's locations and bind the resulting human map to the
+    /// configured location service. The map precedes its reference in the
+    /// returned batch. Returning to the garage clears both atomically; a later
+    /// exit reuses the map and restores the binding. Other map slots are kept.
+    pub fn sync_location_service(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        cars: &BTreeMap<u16, u16>,
+        origin: [f32; 3],
+        site: crate::world_activation::Site,
+    ) -> Result<Vec<Record>, Error> {
+        let scene = self
+            .objects
+            .scene(site.scene_key)
+            .ok_or(Error::UnknownObject)?;
+        let Some(state::Object {
+            current: Update::SubLevel { profile, fields },
+            ..
+        }) = self.objects.get(scene)
+        else {
+            return Err(Error::TypeMismatch);
+        };
+        if profile.kinds().get(site.serializer) != Some(&sublevel::Kind::RpcFourReferences) {
+            return Err(Error::TypeMismatch);
+        }
+        let profile = profile.clone();
+        let bound = match fields.get(site.serializer) {
+            Some(Some(sublevel::Update::FourReferences(values))) => values[3].unwrap_or(0),
+            _ => return Err(Error::TypeMismatch),
+        };
+        let owned = self.location_maps.get(&(connection, persona)).copied();
+        if bound != 0 && Some(bound) != owned {
+            return Err(Error::UnknownObject);
+        }
+        let mut next = self.clone();
+        let mut records: Vec<_> = next
+            .sync_location_map(connection, persona, cars, origin)?
+            .into_iter()
+            .collect();
+        let target = if cars.is_empty() {
+            0
+        } else {
+            *next
+                .location_maps
+                .get(&(connection, persona))
+                .ok_or(Error::UnknownObject)?
+        };
+        if bound != target {
+            let mut fields = vec![None; profile.kinds().len()];
+            fields[site.serializer] = Some(sublevel::Update::FourReferences([
+                None,
+                None,
+                None,
+                Some(target),
+            ]));
+            records.extend(
+                next.objects
+                    .change(scene, Update::SubLevel { profile, fields })?,
+            );
+        }
+        *self = next;
+        Ok(records)
+    }
+
     /// Publish this owner's active world cars. Empty input clears an existing
     /// map; no map is allocated until there is a world car. The caller selects
     /// world cars, while ownership and participant/car association are checked
