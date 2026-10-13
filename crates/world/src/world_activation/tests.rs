@@ -95,8 +95,8 @@ fn early_location_preserves_activation_order_and_requires_ready_owner() {
     );
     a.set(7, false, 3, |_| true).unwrap();
     assert_eq!(
-        a.receive(location.span(), |_| true),
-        Err(Error::UnknownObject)
+        a.receive(location.span(), |_| true).unwrap(),
+        Some(Report::Retired { participant: 7 })
     );
 }
 
@@ -173,8 +173,10 @@ fn large_batch_is_atomic_repeat_safe_and_shared_presence_tracks_occupancy() {
     assert!(leave.iter().all(|v| v.call == Call::Unsubscribe));
     let last = a.set(8, false, 161, |_| true).unwrap();
     assert_eq!(last[0].call, Call::Presence(false));
-    assert_eq!(a, original);
+    assert_eq!(a.members, original.members);
+    assert_eq!(a.retired, [7, 8].into_iter().collect());
     assert_eq!(a.set(7, true, 162, |_| true).unwrap(), first);
+    assert_eq!(a.retired, [8].into_iter().collect());
 }
 #[test]
 fn generated_wire_has_typed_references_payload_and_zero_padding() {
@@ -288,7 +290,14 @@ fn reports_are_owned_monotonic_isolated_and_never_invent_host_replies() {
         })
     );
     a.set(7, false, 10, |_| true).unwrap();
-    assert_eq!(a.receive(enter.span(), |_| true), Err(Error::UnknownObject));
+    assert_eq!(
+        a.receive(enter.span(), |_| true).unwrap(),
+        Some(Report::Retired { participant: 7 })
+    );
+    assert_eq!(
+        a.receive(enter.span(), |_| false),
+        Err(Error::UnknownObject)
+    );
     let other = bound(2).0;
     assert!(other.members.is_empty());
     assert_eq!(a.members.len(), 1);
@@ -348,4 +357,62 @@ fn binding_and_member_limits_fail_before_changes() {
     let before = a.clone();
     assert_eq!(a.set(129, true, 10, |_| true), Err(Error::Bound));
     assert_eq!(a, before);
+}
+
+#[test]
+fn retired_participants_report_inertly_until_reactivated_and_retirement_is_bounded() {
+    let (mut a, r, _) = bound(2);
+    a.set(7, true, 10, |_| true).unwrap();
+    let enter = client(r.id, 7, 3, 2, Some(1.), 0);
+    assert!(matches!(
+        a.receive(enter.span(), |_| true).unwrap(),
+        Some(Report::Crossing { .. })
+    ));
+    // The host retires membership when it queues the unsubscription; the
+    // client keeps reporting until that notification arrives (E838).
+    a.set(7, false, 10, |_| true).unwrap();
+    let before = a.clone();
+    let leave = client(r.id, 7, 3, 3, Some(2.), 0);
+    let location = client(r.id, 7, 2, 0, None, 0);
+    for report in [&leave, &location, &enter] {
+        assert_eq!(
+            a.receive_ready(report.span(), |_| true, |_| false).unwrap(),
+            Some(Report::Retired { participant: 7 })
+        );
+    }
+    assert_eq!(a, before);
+    // Ownership and shape still decide; never-activated participants are unknown.
+    assert_eq!(
+        a.receive(leave.span(), |_| false),
+        Err(Error::UnknownObject)
+    );
+    assert_eq!(
+        a.receive(client(r.id, 7, 3, 3, Some(-1.), 0).span(), |_| true),
+        Err(Error::Shape)
+    );
+    assert_eq!(
+        a.receive(client(r.id, 8, 3, 3, Some(2.), 0).span(), |_| true),
+        Err(Error::UnknownObject)
+    );
+    assert_eq!(a, before);
+    // Reactivation clears retirement and restores live reports.
+    a.set(7, true, 10, |_| true).unwrap();
+    assert!(!a.retired.contains(&7));
+    assert!(matches!(
+        a.receive(enter.span(), |_| true).unwrap(),
+        Some(Report::Crossing { changed: true, .. })
+    ));
+    // Retirement follows ownership and is bounded like membership.
+    a.set(7, false, 10, |_| true).unwrap();
+    a.set(9, true, 10, |_| true).unwrap();
+    a.set(9, false, 10, |id| id == 9).unwrap();
+    assert_eq!(a.retired, [9].into_iter().collect());
+    for id in 10..10 + MAX_PARTICIPANTS as u16 {
+        a.set(id, true, 10, |_| true).unwrap();
+        a.set(id, false, 10, |_| true).unwrap();
+    }
+    assert_eq!(a.retired.len(), MAX_PARTICIPANTS);
+    assert!(!a.retired.contains(&9));
+    assert!(a.retired.contains(&10));
+    assert!(a.retired.contains(&(9 + MAX_PARTICIPANTS as u16)));
 }

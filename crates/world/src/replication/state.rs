@@ -38,6 +38,11 @@ impl World {
     pub fn get(&self, id: u16) -> Option<&Object> {
         self.objects.get(&id)
     }
+    /// Whether `id` named an object this world created and has since removed.
+    /// IDs are allocated once, so a retired ID never names a newer object.
+    pub fn retired(&self, id: u16) -> bool {
+        id != 0 && usize::from(id) < self.next && !self.objects.contains_key(&id)
+    }
     pub fn iter(&self) -> impl Iterator<Item = (u16, &Object)> {
         self.objects.iter().map(|(id, object)| (*id, object))
     }

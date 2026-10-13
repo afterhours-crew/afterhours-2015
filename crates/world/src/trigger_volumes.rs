@@ -23,6 +23,14 @@ pub struct Report {
     pub seconds: f64,
     pub changed: bool,
 }
+/// A well-formed report from an owned client. `Retired` names a car this host
+/// created and has since removed: the client reported it before applying the
+/// deletion (E838). Such a report changes nothing and needs no reply.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Outcome {
+    Observed(Report),
+    Retired { vehicle: u16 },
+}
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Observation {
     seconds: f64,
@@ -80,6 +88,20 @@ impl Volumes {
         body: BitSpan<'_>,
         owns: impl Fn(u16) -> bool,
     ) -> Result<Option<Report>, Error> {
+        match self.receive_retired(body, owns, |_| false)? {
+            Some(Outcome::Observed(report)) => Ok(Some(report)),
+            Some(Outcome::Retired { .. }) => Err(Error::UnknownObject),
+            None => Ok(None),
+        }
+    }
+    /// `retired` tells whether an unowned car ID once named an owned car that
+    /// was removed. Ownership still decides every live report.
+    pub fn receive_retired(
+        &mut self,
+        body: BitSpan<'_>,
+        owns: impl Fn(u16) -> bool,
+        retired: impl Fn(u16) -> bool,
+    ) -> Result<Option<Outcome>, Error> {
         let envelope = Envelope::decode(
             body,
             Limits {
@@ -110,12 +132,6 @@ impl Volumes {
         {
             return Err(Error::Shape);
         }
-        if !owns(vehicle) {
-            return Err(Error::UnknownObject);
-        }
-        if !enabled {
-            return Err(Error::Shape);
-        }
         let high = route
             .arguments()
             .read_u32(0, 32)
@@ -126,6 +142,16 @@ impl Volumes {
             .map_err(|_| Error::Shape)?;
         let seconds = f64::from_bits((u64::from(high) << 32) | u64::from(low));
         if !seconds.is_finite() || seconds < 0. {
+            return Err(Error::Shape);
+        }
+        if !owns(vehicle) {
+            return if retired(vehicle) {
+                Ok(Some(Outcome::Retired { vehicle }))
+            } else {
+                Err(Error::UnknownObject)
+            };
+        }
+        if !enabled {
             return Err(Error::Shape);
         }
         let key = (scene, route.selector(), vehicle);
@@ -140,14 +166,14 @@ impl Volumes {
             self.observations
                 .insert(key, Observation { seconds, entered });
         }
-        Ok(Some(Report {
+        Ok(Some(Outcome::Observed(Report {
             scene,
             selector: route.selector(),
             vehicle,
             entered,
             seconds,
             changed,
-        }))
+        })))
     }
 }
 
@@ -288,6 +314,48 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .changed
+        );
+    }
+    #[test]
+    fn retired_cars_report_inertly_and_unknown_or_malformed_reports_stay_refused() {
+        let (mut v, r) = bound();
+        let late = call(r.id, 207, 1, 3, 4.);
+        let before = v.clone();
+        assert_eq!(
+            v.receive_retired(late.span(), |_| false, |car| car == 207)
+                .unwrap(),
+            Some(Outcome::Retired { vehicle: 207 })
+        );
+        assert_eq!(v, before);
+        assert_eq!(
+            v.receive_retired(late.span(), |_| false, |_| false),
+            Err(Error::UnknownObject)
+        );
+        assert_eq!(v.receive(late.span(), |_| false), Err(Error::UnknownObject));
+        // Live ownership decides; a retirement claim never overrides it.
+        assert!(matches!(
+            v.receive_retired(call(r.id, 207, 1, 2, 5.).span(), |car| car == 207, |_| true)
+                .unwrap(),
+            Some(Outcome::Observed(Report {
+                entered: true,
+                changed: true,
+                ..
+            }))
+        ));
+        assert!(v.observations[&(r.id, 1, 207)].entered);
+        // Only a well-formed report is inert.
+        assert_eq!(
+            v.receive_retired(call(r.id, 207, 1, 3, f64::NAN).span(), |_| false, |_| true),
+            Err(Error::Shape)
+        );
+        assert!(
+            v.receive_retired(late.span().slice(0, 40).unwrap(), |_| false, |_| true)
+                .is_err()
+        );
+        assert!(
+            v.receive_retired(call(r.id, 207, 0, 3, 4.).span(), |_| false, |_| true)
+                .unwrap()
+                .is_none()
         );
     }
 }

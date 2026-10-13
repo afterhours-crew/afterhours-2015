@@ -149,6 +149,12 @@ pub enum Report {
         inside: bool,
         changed: bool,
     },
+    /// A well-formed report from an owned participant whose membership this
+    /// host already retired. The client sent it before it applied the queued
+    /// unsubscription (E838). It changes no state and needs no reply.
+    Retired {
+        participant: u16,
+    },
 }
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Member {
@@ -164,6 +170,8 @@ pub struct Activation {
     location: Endpoint,
     members: BTreeMap<u16, Member>,
     located_before_activation: std::collections::BTreeSet<u16>,
+    /// Owned participants deactivated since their last activation.
+    retired: BTreeSet<u16>,
 }
 impl Activation {
     pub fn bind(records: &[Record], catalog: &Catalog) -> Result<Self, Error> {
@@ -215,6 +223,7 @@ impl Activation {
             location: endpoint(catalog.location, sublevel::Kind::RpcFourReferences)?,
             members: BTreeMap::new(),
             located_before_activation: Default::default(),
+            retired: BTreeSet::new(),
         })
     }
     pub fn participants(&self) -> impl Iterator<Item = u16> + '_ {
@@ -280,6 +289,8 @@ impl Activation {
         for notification in &out {
             notification.encode()?;
         }
+        // Retirement is bounded by currently owned participants.
+        self.retired.retain(|&id| id != participant && owns(id));
         if active {
             self.members.insert(
                 participant,
@@ -290,6 +301,10 @@ impl Activation {
             );
         } else {
             self.members.remove(&participant);
+            if self.retired.len() >= MAX_PARTICIPANTS {
+                self.retired.pop_first();
+            }
+            self.retired.insert(participant);
         }
         Ok(out)
     }
@@ -362,14 +377,13 @@ impl Activation {
                     }
                     self.located_before_activation.insert(participant)
                 }
+                None if self.retired.contains(&participant) => {
+                    return Ok(Some(Report::Retired { participant }));
+                }
                 None => return Err(Error::UnknownObject),
             };
             return Ok(Some(Report::Location { participant, first }));
         }
-        let member = self
-            .members
-            .get_mut(&participant)
-            .ok_or(Error::UnknownObject)?;
         if route.arguments().len() != 103 {
             return Err(Error::Shape);
         }
@@ -381,6 +395,13 @@ impl Activation {
         if !seconds.is_finite() || seconds < 0. || token != 0 {
             return Err(Error::Shape);
         }
+        let Some(member) = self.members.get_mut(&participant) else {
+            return if self.retired.contains(&participant) {
+                Ok(Some(Report::Retired { participant }))
+            } else {
+                Err(Error::UnknownObject)
+            };
+        };
         let inside = route.method_index() == 2;
         let previous = member.observations.get(&key);
         let fresh = previous.is_none_or(|(time, _)| seconds > *time);
