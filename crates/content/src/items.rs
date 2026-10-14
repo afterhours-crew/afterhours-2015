@@ -14,7 +14,7 @@
 use crate::Error;
 use crate::scan::Assets;
 use nfs_frostbite::ebx::{Fields, Object, Value};
-use nfs_services::item_content::{FORMAT, ItemContent, PURCHASE_VERSION};
+use nfs_services::item_content::{FORMAT, ItemContent, SCOPED_PURCHASE_VERSION};
 use nfs_world_core::items::{DefinitionClass, Layout};
 use serde_json::{Value as Json, json};
 
@@ -246,7 +246,34 @@ fn initial_offer(object: &Object) -> Result<bool, Error> {
         && empty("AdditionalItems")?)
 }
 
-/// Build the canonical `nfs-item-definitions` version 3 document.
+fn vehicle_scope(object: &Object) -> Result<Option<Json>, Error> {
+    if object.class != "RaceVehicleItemData" {
+        return Ok(None);
+    }
+    if object.fields.get("UsesScope").and_then(Value::as_bool) != Some(true) {
+        return Err(missing(&object.class, "UsesScope"));
+    }
+    let parts = object
+        .fields
+        .get("SortedScope")
+        .and_then(Value::as_array)
+        .ok_or_else(|| missing(&object.class, "SortedScope"))?;
+    let parts = parts
+        .iter()
+        .map(|value| match value {
+            Value::Guid(guid) => Ok(nfs_frostbite::hex(guid)),
+            _ => Err(missing(&object.class, "SortedScope GUID")),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let guid = object
+        .guid
+        .ok_or_else(|| missing(&object.class, "exported GUID"))?;
+    Ok(Some(
+        json!({"vehicle":nfs_frostbite::hex(&guid),"definitions":parts}),
+    ))
+}
+
+/// Build the canonical `nfs-item-definitions` version 4 document.
 pub fn build(assets: &mut Assets) -> Result<Vec<u8>, Error> {
     let system = assets
         .objects(ITEM_SYSTEM)?
@@ -256,6 +283,7 @@ pub fn build(assets: &mut Assets) -> Result<Vec<u8>, Error> {
         .ok_or_else(|| Error::Content(format!("{ITEM_SYSTEM} is not an item system")))?;
     let mut definitions = Vec::new();
     let mut purchase_offers = Vec::new();
+    let mut vehicle_scopes = Vec::new();
     for value in system
         .fields
         .get("Items")
@@ -263,6 +291,9 @@ pub fn build(assets: &mut Assets) -> Result<Vec<u8>, Error> {
         .ok_or_else(|| missing("ItemSystemData", "Items"))?
     {
         let (_, object) = assets.resolve(value.as_pointer())?;
+        if let Some(scope) = vehicle_scope(&object)? {
+            vehicle_scopes.push(scope);
+        }
         if initial_offer(&object)? {
             purchase_offers.push(nfs_frostbite::hex(
                 &object
@@ -275,11 +306,12 @@ pub fn build(assets: &mut Assets) -> Result<Vec<u8>, Error> {
     let initial = references(assets, &system, "Inventory")?;
     let document = json!({
         "format": FORMAT,
-        "version": PURCHASE_VERSION,
+        "version": SCOPED_PURCHASE_VERSION,
         "build_sha256": nfs_services::SUPPORTED_BUILD_SHA256,
         "definitions": definitions,
         "initial_definitions": initial,
         "purchase_offers": purchase_offers,
+        "vehicle_scopes": vehicle_scopes,
     });
     // The consuming loader validates classes, layouts, references and bounds;
     // its export is the canonical form written to the cache.
@@ -291,6 +323,33 @@ pub fn build(assets: &mut Assets) -> Result<Vec<u8>, Error> {
 #[cfg(test)]
 mod offer_tests {
     use super::*;
+    #[test]
+    fn vehicle_scope_comes_only_from_explicit_installed_guid_arrays() {
+        let mut object = Object {
+            class: "RaceVehicleItemData".into(),
+            guid: Some([1; 16]),
+            fields: Fields(vec![
+                ("UsesScope".into(), Value::Bool(true)),
+                (
+                    "SortedScope".into(),
+                    Value::Array(vec![Value::Guid([2; 16])]),
+                ),
+            ]),
+        };
+        assert_eq!(
+            vehicle_scope(&object).unwrap().unwrap(),
+            json!({
+            "vehicle":"01010101010101010101010101010101",
+            "definitions":["02020202020202020202020202020202"]})
+        );
+        object.fields.0[0].1 = Value::Bool(false);
+        assert!(vehicle_scope(&object).is_err());
+        object.fields.0[0].1 = Value::Bool(true);
+        object.fields.0[1].1 = Value::Array(vec![Value::UInt32(2)]);
+        assert!(vehicle_scope(&object).is_err());
+        object.class = "AirFilterItemData".into();
+        assert_eq!(vehicle_scope(&object).unwrap(), None);
+    }
     #[test]
     fn only_explicit_unrestricted_entry_parts_become_offers() {
         let mut fields = std::collections::BTreeMap::new();

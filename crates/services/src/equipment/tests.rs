@@ -100,6 +100,44 @@ fn edit(snapshot: &Snapshot, part: u64) -> Edit {
 }
 
 #[test]
+fn owning_a_part_does_not_bypass_vehicle_scope_and_stock_restore_remains_available() {
+    let repo = MemoryRepository::default();
+    let account = who(1);
+    let initial = setup(&repo, account);
+    let catalog = catalog();
+    let items = inventory::collection(&initial, catalog.bindings()).unwrap();
+    let offers = Offers::new([[3; 16]])
+        .unwrap()
+        .with_vehicle_scopes(&catalog, [([1; 16], vec![[2; 16]])])
+        .unwrap();
+    assert_eq!(
+        prepare(
+            account,
+            initial.generation,
+            &items,
+            10,
+            12,
+            &catalog,
+            &offers
+        ),
+        Err(Error::Unsupported)
+    );
+    assert!(
+        prepare(
+            account,
+            initial.generation,
+            &items,
+            10,
+            11,
+            &catalog,
+            &offers
+        )
+        .is_ok()
+    );
+    assert_eq!(repo.snapshot(account).unwrap(), initial);
+}
+
+#[test]
 fn staging_cancel_commit_retry_and_stock_restore_preserve_owned_spares_and_money() {
     let repo = MemoryRepository::default();
     let account = who(1);

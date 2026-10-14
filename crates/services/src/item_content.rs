@@ -4,7 +4,8 @@
 
 //! Versioned static item definitions. V1 contains GUID/class bindings; V2 adds
 //! asset prices, links, constructor defaults and an explicit initial recipe.
-//! V3 adds explicit supported purchase offers. No format accepts captured
+//! V3 adds explicit supported purchase offers; V4 adds vehicle compatibility.
+//! No format accepts captured
 //! instances, player ids or reply envelopes.
 use crate::{ContentError, SUPPORTED_BUILD_SHA256 as BUILD};
 use nfs_world_core::items::{
@@ -18,6 +19,7 @@ pub const FORMAT: &str = "nfs-item-definitions";
 pub const VERSION: u8 = 1;
 pub const INVENTORY_VERSION: u8 = 2;
 pub const PURCHASE_VERSION: u8 = 3;
+pub const SCOPED_PURCHASE_VERSION: u8 = 4;
 pub const MAX_STORE_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -86,7 +88,10 @@ impl ItemContent {
         Self::from_json(&serde_json::from_slice(&bytes).map_err(|_| ContentError::Invalid)?)
     }
     pub fn from_json(value: &Value) -> Result<Self, ContentError> {
-        if value["version"] == INVENTORY_VERSION || value["version"] == PURCHASE_VERSION {
+        if value["version"] == INVENTORY_VERSION
+            || value["version"] == PURCHASE_VERSION
+            || value["version"] == SCOPED_PURCHASE_VERSION
+        {
             return Self::inventory_from_json(value);
         }
         fields(value, &["format", "version", "build_sha256", "definitions"])?;
@@ -132,8 +137,11 @@ impl ItemContent {
             "definitions",
             "initial_definitions",
         ];
-        if value["version"] == PURCHASE_VERSION {
+        if value["version"] == PURCHASE_VERSION || value["version"] == SCOPED_PURCHASE_VERSION {
             expected.push("purchase_offers");
+        }
+        if value["version"] == SCOPED_PURCHASE_VERSION {
+            expected.push("vehicle_scopes");
         }
         fields(value, &expected)?;
         if value["format"] != FORMAT || value["build_sha256"] != BUILD {
@@ -217,8 +225,10 @@ impl ItemContent {
         }
         let inventory = InventoryCatalog::new(definitions, guids(&value["initial_definitions"])?)
             .map_err(|_| ContentError::Invalid)?;
-        let purchase_offers = if value["version"] == PURCHASE_VERSION {
-            let offers = crate::purchase::Offers::new(guids(&value["purchase_offers"])?)
+        let purchase_offers = if value["version"] == PURCHASE_VERSION
+            || value["version"] == SCOPED_PURCHASE_VERSION
+        {
+            let mut offers = crate::purchase::Offers::new(guids(&value["purchase_offers"])?)
                 .map_err(|_| ContentError::Invalid)?;
             for guid in offers.definitions() {
                 let definition = inventory
@@ -229,6 +239,24 @@ impl ItemContent {
                 {
                     return Err(ContentError::Invalid);
                 }
+            }
+            if value["version"] == SCOPED_PURCHASE_VERSION {
+                let rows = value["vehicle_scopes"]
+                    .as_array()
+                    .ok_or(ContentError::Invalid)?;
+                if rows.len() > 512 {
+                    return Err(ContentError::TooLarge);
+                }
+                let scopes = rows
+                    .iter()
+                    .map(|row| {
+                        fields(row, &["vehicle", "definitions"])?;
+                        Ok((guid(&row["vehicle"])?, guids(&row["definitions"])?))
+                    })
+                    .collect::<Result<Vec<_>, ContentError>>()?;
+                offers = offers
+                    .with_vehicle_scopes(&inventory, scopes)
+                    .map_err(|_| ContentError::Invalid)?;
             }
             Some(offers)
         } else {
@@ -260,6 +288,12 @@ impl ItemContent {
                 document["version"] = json!(PURCHASE_VERSION);
                 document["purchase_offers"] =
                     json!(offers.definitions().map(|g| hex(g)).collect::<Vec<_>>());
+                if let Some(scopes) = offers.vehicle_scopes() {
+                    document["version"] = json!(SCOPED_PURCHASE_VERSION);
+                    document["vehicle_scopes"] = json!(scopes.iter().map(|(vehicle, parts)| {
+                        json!({"vehicle":hex(vehicle),"definitions":parts.iter().map(|g|hex(g)).collect::<Vec<_>>()})
+                    }).collect::<Vec<_>>());
+                }
             }
             return document;
         }
@@ -366,6 +400,52 @@ mod tests {
             Err(nfs_world_core::items::Error::UnsupportedDefault)
         );
     }
+    #[test]
+    fn v4_scopes_round_trip_and_reject_incomplete_or_foreign_definition_links() {
+        let mut value = inventory_document();
+        value["version"] = json!(SCOPED_PURCHASE_VERSION);
+        value["definitions"][0]["class"] = json!("AirFilterItemData");
+        let mut car = value["definitions"][0].clone();
+        car["guid"] = json!("22222222222222222222222222222222");
+        car["class"] = json!("RaceVehicleItemData");
+        car["default_derived_hex"] = json!("00".repeat(68));
+        value["definitions"].as_array_mut().unwrap().push(car);
+        value["purchase_offers"] = json!(["11111111111111111111111111111111"]);
+        value["vehicle_scopes"] = json!([{"vehicle":"22222222222222222222222222222222",
+            "definitions":["11111111111111111111111111111111"]}]);
+        let content = ItemContent::from_json(&value).unwrap();
+        assert_eq!(content.to_json(), value);
+        assert!(
+            content
+                .purchase_offers()
+                .unwrap()
+                .allows(&[0x22; 16], &[0x11; 16])
+        );
+        assert!(
+            !content
+                .purchase_offers()
+                .unwrap()
+                .allows(&[0x33; 16], &[0x11; 16])
+        );
+        for (field, bad) in [
+            ("vehicle", json!("11111111111111111111111111111111")),
+            ("definitions", json!(["33333333333333333333333333333333"])),
+            (
+                "definitions",
+                json!([
+                    "11111111111111111111111111111111",
+                    "11111111111111111111111111111111"
+                ]),
+            ),
+        ] {
+            let mut bad_value = value.clone();
+            bad_value["vehicle_scopes"][0][field] = bad;
+            assert!(ItemContent::from_json(&bad_value).is_err());
+        }
+        value.as_object_mut().unwrap().remove("vehicle_scopes");
+        assert!(ItemContent::from_json(&value).is_err());
+    }
+
     #[test]
     fn v3_offers_are_explicit_bounded_and_resolve_to_purchasable_parts() {
         let mut value = inventory_document();

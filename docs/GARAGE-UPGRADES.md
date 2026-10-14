@@ -4,6 +4,9 @@ This candidate models unrestricted, REP-zero leaf performance-part purchases,
 their equip/save requests, and restoring stock parts. The install-content builder
 selects supported offers from the installed definitions. Prices, part GUIDs and
 owned item IDs are never copied from a saved account or hardcoded in the server.
+The car's own installed compatibility list restricts both purchase and equip;
+an offer for a different car cannot be bought or fitted just because it exists
+in the catalog. Recorded stock defaults remain available to restore.
 The candidate also stages the 31 handling controls against installed parts and
 the car's transmission flag. Parts with REP or other restrictions, composite
 parts, visual customization, selling and wraps remain unsupported.

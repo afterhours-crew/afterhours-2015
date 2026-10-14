@@ -69,7 +69,7 @@ pub fn item(
         ),
         ("Deprecated", Field::Bool(false)),
         ("RequiresOwner", Field::Bool(true)),
-        ("UsesScope", Field::Bool(false)),
+        ("UsesScope", Field::Bool(class == "RaceVehicleItemData")),
         ("Purchasable", Field::Bool(true)),
         ("Optional", Field::Bool(seed.is_multiple_of(2))),
         (
@@ -170,6 +170,10 @@ pub fn vehicle(plate: &str) -> Asset {
         vec![],
         vec![2],
         vec![
+            (
+                "SortedScope",
+                Field::Guids(vec![reference(1).1, reference(2).1]),
+            ),
             ("DefaultPaint", vector(0.025, 0.11, 0.6)),
             ("RaceVehicle", vehicles::import(1)),
             ("Material", vector(0.76, 0.73, 1.0)),

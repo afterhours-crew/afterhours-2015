@@ -78,9 +78,7 @@ impl Edit {
         if !crate::purchase::performance_class(class)
             || !selected.children.is_empty()
             || !selected.defaults.is_empty()
-            || (!offers
-                .definitions()
-                .any(|guid| *guid == selected.definition)
+            || (!offers.allows(&self.before.definition, &selected.definition)
                 && !self.before.defaults.contains(&part))
         {
             return Err(Error::Unsupported);

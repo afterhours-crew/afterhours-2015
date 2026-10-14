@@ -58,10 +58,57 @@ pub fn performance_class(class: DefinitionClass) -> bool {
 /// Offers must already be resolved from installed compatibility/unlock policy.
 /// No client-supplied prices or definitions are added to this set on demand.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Offers(BTreeSet<Guid>);
+pub struct Offers {
+    definitions: BTreeSet<Guid>,
+    vehicle_scopes: Option<BTreeMap<Guid, BTreeSet<Guid>>>,
+}
 impl Offers {
     pub fn definitions(&self) -> impl Iterator<Item = &Guid> {
-        self.0.iter()
+        self.definitions.iter()
+    }
+    pub fn vehicle_scopes(&self) -> Option<&BTreeMap<Guid, BTreeSet<Guid>>> {
+        self.vehicle_scopes.as_ref()
+    }
+    /// Resolve the installed vehicle's explicit part list before a purchase or
+    /// equip. Legacy explicit offer sets have no additional vehicle restriction.
+    pub fn allows(&self, vehicle: &Guid, part: &Guid) -> bool {
+        self.definitions.contains(part)
+            && self.vehicle_scopes.as_ref().is_none_or(|scopes| {
+                scopes
+                    .get(vehicle)
+                    .is_some_and(|scope| scope.contains(part))
+            })
+    }
+    pub fn with_vehicle_scopes(
+        mut self,
+        catalog: &InventoryCatalog,
+        entries: impl IntoIterator<Item = (Guid, Vec<Guid>)>,
+    ) -> Result<Self, Error> {
+        let invalid = || Error::Rejected(Reason::Offer);
+        let mut scopes = BTreeMap::new();
+        let mut total = 0usize;
+        for (vehicle, parts) in entries {
+            total = total.checked_add(parts.len()).ok_or_else(invalid)?;
+            if scopes.len() >= 512
+                || total > 262_144
+                || parts.len() > items::MAX_COLLECTION
+                || catalog.bindings().class(&vehicle).ok()
+                    != Some(DefinitionClass::RaceVehicleItemData)
+            {
+                return Err(invalid());
+            }
+            let mut scope = BTreeSet::new();
+            for part in parts {
+                if catalog.definition(&part).is_err() || !scope.insert(part) {
+                    return Err(invalid());
+                }
+            }
+            if scopes.insert(vehicle, scope).is_some() {
+                return Err(invalid());
+            }
+        }
+        self.vehicle_scopes = Some(scopes);
+        Ok(self)
     }
     pub fn new(guids: impl IntoIterator<Item = Guid>) -> Result<Self, Error> {
         let mut set = BTreeSet::new();
@@ -70,7 +117,10 @@ impl Offers {
                 return Err(Error::Rejected(Reason::Offer));
             }
         }
-        Ok(Self(set))
+        Ok(Self {
+            definitions: set,
+            vehicle_scopes: None,
+        })
     }
 }
 
@@ -220,7 +270,7 @@ pub fn buy(
     now: Timestamp,
 ) -> Result<Purchased, Error> {
     let guid = selected(request)?;
-    if !offers.0.contains(&guid) {
+    if !offers.definitions.contains(&guid) {
         return Err(Error::Rejected(Reason::Offer));
     }
     let definition = catalog.definition(&guid).map_err(inventory::Error::from)?;
@@ -258,6 +308,9 @@ pub fn buy(
                 .is_none_or(|slots| !slots.0.contains(&Some(owner)))
         {
             return Err(Error::Rejected(Reason::Owner));
+        }
+        if !offers.allows(&vehicle.definition.0, &guid) {
+            return Err(Error::Rejected(Reason::Offer));
         }
         let (mut receipts, next) = ledger(&snapshot)?;
         let definition_text = Value::String(guid_text(guid));

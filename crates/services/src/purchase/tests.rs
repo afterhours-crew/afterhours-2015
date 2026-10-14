@@ -78,6 +78,51 @@ fn purchase(
 }
 
 #[test]
+fn vehicle_scope_is_checked_before_money_receipts_or_inventory_change() {
+    let repo = MemoryRepository::default();
+    let who = account(1);
+    initialize(&repo, who, 100);
+    let before = repo.snapshot(who).unwrap();
+    let catalog = catalog();
+    let offers = Offers::new([[2; 16], [3; 16]])
+        .unwrap()
+        .with_vehicle_scopes(&catalog, [([1; 16], vec![[3; 16]])])
+        .unwrap();
+    assert!(!offers.allows(&[1; 16], &[2; 16]));
+    assert!(!offers.allows(&[9; 16], &[3; 16]));
+    assert_eq!(
+        buy(&repo, who, &catalog, &offers, &request(), Timestamp(3)).unwrap_err(),
+        Error::Rejected(Reason::Offer)
+    );
+    assert_eq!(repo.snapshot(who).unwrap(), before);
+    let mut permitted = request();
+    permitted.selection = PurchaseSelection::Definitions(vec![[3; 16]]);
+    let first = buy(&repo, who, &catalog, &offers, &permitted, Timestamp(4)).unwrap();
+    assert_eq!(first.balance, Balance(81));
+    let repeated = buy(&repo, who, &catalog, &offers, &permitted, Timestamp(5)).unwrap();
+    assert!(repeated.replayed);
+    assert_eq!(first.snapshot, repeated.snapshot);
+    for entries in [
+        vec![([2; 16], vec![[3; 16]])], // a part cannot be the vehicle scope owner
+        vec![([1; 16], vec![[9; 16]])], // unresolved definition
+        vec![([1; 16], vec![[3; 16], [3; 16]])],
+        vec![([1; 16], vec![]), ([1; 16], vec![])],
+    ] {
+        assert!(
+            Offers::new([[2; 16]])
+                .unwrap()
+                .with_vehicle_scopes(&catalog, entries)
+                .is_err()
+        );
+    }
+    let none = Offers::new([[2; 16]])
+        .unwrap()
+        .with_vehicle_scopes(&catalog, [])
+        .unwrap();
+    assert!(!none.allows(&[1; 16], &[2; 16]));
+}
+
+#[test]
 fn different_performance_classes_use_their_own_defaults_prices_and_receipts() {
     let repo = MemoryRepository::default();
     let who = account(1);
