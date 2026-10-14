@@ -7,7 +7,7 @@
 //! retaining purchased and default spares.
 use crate::{inventory, purchase::Offers};
 use nfs_storage::{AccountId, Batch, InventoryRepository, ItemId, Op, Snapshot, Timestamp};
-use nfs_world_core::items::{Collection, DefinitionClass, Derived, InventoryCatalog, Item, OWNED};
+use nfs_world_core::items::{Collection, Derived, InventoryCatalog, Item, OWNED};
 use std::collections::{BTreeMap, BTreeSet};
 
 const BATCH_NAMESPACE: u64 = 1 << 61;
@@ -18,15 +18,15 @@ pub struct Edit {
     generation: u64,
     before: Item,
     after: Item,
-    part: Option<Item>,
+    selected: BTreeMap<u64, Item>,
     parts: BTreeMap<u64, (Item, Item)>,
 }
 impl Edit {
     pub fn vehicle(&self) -> u64 {
         self.before.id
     }
-    pub fn item(&self) -> Option<u64> {
-        self.part.as_ref().map(|p| p.id)
+    pub fn selected(&self) -> impl Iterator<Item = u64> + '_ {
+        self.selected.keys().copied()
     }
     pub fn generation(&self) -> u64 {
         self.generation
@@ -34,9 +34,9 @@ impl Edit {
     pub fn preview(&self, items: &Collection) -> Result<Collection, Error> {
         if items.items.get(&self.before.id) != Some(&self.before)
             || self
-                .part
-                .as_ref()
-                .is_some_and(|part| items.items.get(&part.id) != Some(part))
+                .selected
+                .values()
+                .any(|part| items.items.get(&part.id) != Some(part))
         {
             return Err(Error::Conflict);
         }
@@ -54,6 +54,64 @@ impl Edit {
         stats
             .apply(&mut self.after.derived)
             .map_err(|_| Error::Shape)?;
+        Ok(self)
+    }
+
+    /// Apply leaf selections in request order. Different categories accumulate;
+    /// later selections of the same category replace the earlier preview only.
+    pub fn with_part(
+        mut self,
+        items: &Collection,
+        part: u64,
+        catalog: &InventoryCatalog,
+        offers: &Offers,
+    ) -> Result<Self, Error> {
+        let preview = self.preview(items)?;
+        let selected = preview.items.get(&part).ok_or(Error::Ownership)?;
+        if selected.owner != self.vehicle() || selected.state != OWNED {
+            return Err(Error::Ownership);
+        }
+        let class = catalog
+            .bindings()
+            .class(&selected.definition)
+            .map_err(inventory::Error::from)?;
+        if !crate::purchase::performance_class(class)
+            || !selected.children.is_empty()
+            || !selected.defaults.is_empty()
+            || (!offers
+                .definitions()
+                .any(|guid| *guid == selected.definition)
+                && !self.before.defaults.contains(&part))
+        {
+            return Err(Error::Unsupported);
+        }
+        let mut installed = Vec::new();
+        for &id in &self.after.children {
+            let child = preview.items.get(&id).ok_or(Error::Shape)?;
+            if child.owner != self.vehicle() || child.state != OWNED {
+                return Err(Error::Ownership);
+            }
+            if catalog
+                .bindings()
+                .class(&child.definition)
+                .map_err(inventory::Error::from)?
+                == class
+            {
+                installed.push(id);
+            }
+        }
+        if installed.len() > 1 {
+            return Err(Error::Unsupported);
+        }
+        if installed.first() != Some(&part) {
+            self.after.children.retain(|id| !installed.contains(id));
+            self.after.children.push(part);
+        }
+        self.selected
+            .insert(part, items.items.get(&part).ok_or(Error::Shape)?.clone());
+        self.preview(items)?
+            .encode(catalog.bindings())
+            .map_err(inventory::Error::from)?;
         Ok(self)
     }
 
@@ -169,71 +227,8 @@ pub fn prepare(
     catalog: &InventoryCatalog,
     offers: &Offers,
 ) -> Result<Edit, Error> {
-    items
-        .encode(catalog.bindings())
-        .map_err(inventory::Error::from)?;
-    let car = items.items.get(&vehicle).ok_or(Error::Ownership)?;
-    let selected = items.items.get(&part).ok_or(Error::Ownership)?;
-    if car.owner != 0
-        || car.state != OWNED
-        || !matches!(car.derived, Derived::RaceVehicle { .. })
-        || selected.owner != vehicle
-        || selected.state != OWNED
-    {
-        return Err(Error::Ownership);
-    }
-    if catalog
-        .bindings()
-        .class(&selected.definition)
-        .map_err(inventory::Error::from)?
-        != DefinitionClass::AirFilterItemData
-        || selected.derived != Derived::Empty
-        || !selected.children.is_empty()
-        || !selected.defaults.is_empty()
-        || (!offers
-            .definitions()
-            .any(|guid| *guid == selected.definition)
-            && !car.defaults.contains(&part))
-    {
-        return Err(Error::Unsupported);
-    }
-    let mut installed = Vec::new();
-    for &id in &car.children {
-        let child = items.items.get(&id).ok_or(Error::Shape)?;
-        if child.owner != vehicle || child.state != OWNED {
-            return Err(Error::Shape);
-        }
-        if catalog
-            .bindings()
-            .class(&child.definition)
-            .map_err(inventory::Error::from)?
-            == DefinitionClass::AirFilterItemData
-        {
-            installed.push(id);
-        }
-    }
-    if installed.len() != 1 {
-        return Err(Error::Unsupported);
-    }
-    let mut after = car.clone();
-    if installed[0] != part {
-        // Native leaf replacement removes the previous class and appends the
-        // selected item. The displaced part remains owned, available to re-equip.
-        after.children.retain(|id| *id != installed[0]);
-        after.children.push(part);
-    }
-    let edit = Edit {
-        account,
-        generation,
-        before: car.clone(),
-        after,
-        part: Some(selected.clone()),
-        parts: BTreeMap::new(),
-    };
-    edit.preview(items)?
-        .encode(catalog.bindings())
-        .map_err(inventory::Error::from)?;
-    Ok(edit)
+    prepare_vehicle(account, generation, items, vehicle, catalog)?
+        .with_part(items, part, catalog, offers)
 }
 
 /// A dyno result can arrive without changing the selected part. It is still
@@ -268,7 +263,7 @@ pub fn prepare_vehicle(
         generation,
         before: car.clone(),
         after: car.clone(),
-        part: None,
+        selected: BTreeMap::new(),
         parts: BTreeMap::new(),
     })
 }
@@ -292,7 +287,7 @@ pub fn commit(
     if snapshot
         .garage
         .is_none_or(|slots| !slots.0.contains(&Some(vehicle)))
-        || edit.part.as_ref().is_some_and(|part| {
+        || edit.selected.values().any(|part| {
             !edit.parts.contains_key(&part.id) && current.items.get(&part.id) != Some(part)
         })
     {
@@ -321,7 +316,7 @@ pub fn commit(
         let current = repository.snapshot(account)?;
         let collection = inventory::collection(&current, catalog.bindings())?;
         return if edit.saved(&collection)
-            && edit.part.as_ref().is_none_or(|part| {
+            && edit.selected.values().all(|part| {
                 edit.parts.contains_key(&part.id) || collection.items.get(&part.id) == Some(part)
             }) {
             Ok(current)

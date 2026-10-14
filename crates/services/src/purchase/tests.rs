@@ -3,7 +3,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 use super::*;
 use nfs_storage::{Applied, MemoryRepository, SqliteRepository};
-use nfs_world_core::items::{Definition, DefinitionFlags, Layout, OwnershipLevel};
+use nfs_world_core::items::{Definition, DefinitionFlags, Derived, Layout, OwnershipLevel};
 use std::sync::{Arc, Barrier};
 
 fn account(n: u8) -> AccountId {
@@ -75,6 +75,60 @@ fn purchase(
         request,
         Timestamp(3),
     )
+}
+
+#[test]
+fn different_performance_classes_use_their_own_defaults_prices_and_receipts() {
+    let repo = MemoryRepository::default();
+    let who = account(1);
+    initialize(&repo, who, 100);
+    let before = repo.snapshot(who).unwrap();
+    let base = catalog();
+    let mut definitions: Vec<_> = base.definitions().map(|(g, d)| (*g, d.clone())).collect();
+    let brake = Derived::BrakeDiscs {
+        brake_strength_setting: 4,
+        brake_bias_setting: 6,
+    };
+    let nos = Derived::NosTuning { nos_setting: 7 };
+    for (guid, class, derived, price) in [
+        (4, DefinitionClass::BrakesItemData, brake.clone(), 30),
+        (5, DefinitionClass::NosTuningItemData, nos.clone(), 25),
+    ] {
+        definitions.push((
+            [guid; 16],
+            Definition {
+                class,
+                default_derived: Some(derived),
+                buy_price: price,
+                ..base.definition(&[2; 16]).unwrap().clone()
+            },
+        ));
+    }
+    let catalog = InventoryCatalog::new(definitions, vec![]).unwrap();
+    let offers = Offers::new([[4; 16], [5; 16]]).unwrap();
+    for (guid, derived, balance) in [(4, brake, 70), (5, nos, 45)] {
+        let request = PurchaseRequest {
+            selection: PurchaseSelection::Definitions(vec![[guid; 16]]),
+            ..request()
+        };
+        let result = buy(&repo, who, &catalog, &offers, &request, Timestamp(3)).unwrap();
+        let item = &result.items.items[&result.items.roots[0]];
+        assert_eq!(item.derived, derived);
+        assert_eq!(item.owner, 10);
+        assert_eq!(result.balance, Balance(balance));
+        assert_eq!(
+            result.snapshot.items[&ItemId::new(10).unwrap()],
+            before.items[&ItemId::new(10).unwrap()]
+        );
+        let retry = buy(&repo, who, &catalog, &offers, &request, Timestamp(4)).unwrap();
+        assert!(retry.replayed);
+        assert_eq!(retry.items, result.items);
+        assert_eq!(retry.snapshot, result.snapshot);
+    }
+    assert_eq!(
+        repo.snapshot(who).unwrap().generation,
+        before.generation + 2
+    );
 }
 
 #[test]

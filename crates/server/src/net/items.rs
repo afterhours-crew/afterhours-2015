@@ -112,33 +112,44 @@ impl Profile {
             tokio::task::spawn_blocking(move || {
                 let _permit = permit;
                 let tables = service.persistent.as_ref().ok_or(Error::Worker)?;
-                let edit = if let Some(item) = request.item {
-                    nfs_services::equipment::prepare(
-                        account,
-                        request.generation,
-                        &request.items,
-                        request.car,
-                        item,
-                        &service.catalog,
-                        service.offers.as_deref().ok_or(Error::Worker)?,
+                let mut edit = nfs_services::equipment::prepare_vehicle(
+                    account,
+                    request.generation,
+                    &request.items,
+                    request.car,
+                    &service.catalog,
+                )
+                .map_err(Error::Equipment)?;
+                for &item in &request.selections {
+                    edit = edit
+                        .with_part(
+                            &request.items,
+                            item,
+                            &service.catalog,
+                            service.offers.as_deref().ok_or(Error::Worker)?,
+                        )
+                        .map_err(Error::Equipment)?;
+                }
+                let transmission = if request.handling.transmission().is_some() {
+                    Some(
+                        request
+                            .content
+                            .vehicles
+                            .transmission_values(
+                                &edit.preview(&request.items).map_err(Error::Equipment)?,
+                                request.car,
+                            )
+                            .map_err(|_| Error::Worker)?,
                     )
-                    .map_err(Error::Equipment)?
                 } else {
-                    nfs_services::equipment::prepare_vehicle(
-                        account,
-                        request.generation,
-                        &request.items,
-                        request.car,
-                        &service.catalog,
-                    )
-                    .map_err(Error::Equipment)?
+                    None
                 };
                 let edit = edit
                     .with_handling(
                         &request.items,
                         &service.catalog,
                         request.handling,
-                        request.transmission,
+                        transmission,
                     )
                     .map_err(Error::Equipment)?;
                 let edit = if let Some(stats) = request.dyno {
@@ -526,7 +537,7 @@ impl Exchanges {
                                 connection = self.connection,
                                 generation,
                                 car = request.car,
-                                item = ?request.item,
+                                items = ?request.selections,
                                 dyno = request.dyno.is_some(),
                                 handling = request.handling.iter().count(),
                                 "owned equipment committed"

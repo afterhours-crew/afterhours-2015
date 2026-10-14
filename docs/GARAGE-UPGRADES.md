@@ -1,12 +1,13 @@
 # Garage upgrade development
 
-This candidate models one unrestricted, REP-zero air-filter purchase, its equip
-and save requests, and restoring the stock filter. The install-content builder
+This candidate models unrestricted, REP-zero leaf performance-part purchases,
+their equip/save requests, and restoring stock parts. The install-content builder
 selects supported offers from the installed definitions. Prices, part GUIDs and
 owned item IDs are never copied from a saved account or hardcoded in the server.
 The candidate also stages the 31 handling controls against installed parts and
-the car's transmission flag. Other performance parts, visual customization,
-selling and wraps remain unsupported. See the [gameplay checklist](GAMEPLAY-CHECKLIST.md).
+the car's transmission flag. Parts with REP or other restrictions, composite
+parts, visual customization, selling and wraps remain unsupported.
+See the [gameplay checklist](GAMEPLAY-CHECKLIST.md).
 
 The purchase, cash deduction and durable equip have been accepted by the game.
 The latest combined live test restored stock, re-equipped the upgrade, drove and
@@ -83,10 +84,14 @@ the game/server to load the new balance.
 
 ## Validation scope
 
-Purchase inserts the owned part, deducts cash and records a durable receipt in
+Purchase initializes the part's typed defaults from its installed definition,
+inserts the owned part, deducts cash and records a durable receipt in
 one transaction. Retrying that offer for that car returns the original part
 without charging again. Equip stages an account-bound edit; commit replaces the
-installed air-filter child while retaining the displaced part and stock defaults.
+installed child of the same performance class while retaining the displaced part
+and stock defaults. Multiple categories accumulate in one edit; a later selection
+of the same category replaces its earlier preview. An edit accepts at most 128
+selections and saves all of them together.
 Restoring stock is an equip operation and does not refund cash. Cancellation
 before purchase confirmation does not send a purchase. Merely staging an edit
 does not write storage.
@@ -126,6 +131,10 @@ combined part/result commits, stale generations and preservation of unrelated
 vehicle data. Inventory update tests cover record closure, resource bounds and
 delivery ordering. These checks do not establish that the game sends dyno results
 in every menu path; that remains part of live acceptance.
+Broader performance tests cover nonempty typed defaults and independent receipts,
+ordered multi-category edits, stock restoration and tuning the final selected part.
+The generated offer set and prices are compared with the supported installation;
+only the original air-filter purchase has live acceptance so far.
 Handling checks cover all category layouts, malformed and duplicate settings,
 combined part changes, transmission selection, cancellation, stale edits,
 account isolation, notification/chassis refresh and SQLite restart persistence.

@@ -140,6 +140,7 @@ fn fixture() -> (
     car.children.push(6);
     car.children.push(8);
     car.defaults.push(6);
+    car.defaults.push(8);
     items.roots = items.items.keys().copied().collect();
     let catalog = Arc::new(InventoryCatalog::new(definitions, vec![]).unwrap());
     let vehicles =
@@ -386,6 +387,26 @@ fn handling_wire(scene: u16, player: u16, car: u16, changes: &[(u8, u8)]) -> Bit
         .put(payload.bytes().len() as u64, 9)
         .put_span(payload.span());
     body
+}
+
+#[tokio::test]
+async fn multiple_categories_are_retained_until_one_commit() {
+    let (mut listener, mut jobs, repo, account, scene, player, car) = fixture();
+    let before = repo.snapshot(account).unwrap();
+    for item in [7, 8, 8] {
+        assert!(accept(&mut listener, &wire(scene, player, Some(car), 0, item)).unwrap());
+    }
+    assert_eq!(listener.equipment.edits[&player].selections, vec![7, 8]);
+    assert!(accept(&mut listener, &wire(scene, player, None, 5, 0)).unwrap());
+    jobs.start(&mut listener, 3, Timestamp(3));
+    assert!(jobs.completed(&mut listener).await);
+    let update = crate::net::items::tests::deliver_notification(&mut jobs);
+    assert!(update.items.items[&1].children.contains(&7));
+    assert!(update.items.items[&1].children.contains(&8));
+    assert!(!update.items.items[&1].children.contains(&6));
+    let after = repo.snapshot(account).unwrap();
+    assert_eq!(after.generation, before.generation + 1);
+    assert_eq!(after.tables, before.tables);
 }
 
 #[tokio::test]

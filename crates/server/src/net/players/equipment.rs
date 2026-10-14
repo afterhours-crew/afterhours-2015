@@ -11,10 +11,10 @@ pub(in crate::net) struct EquipmentRequest {
     pub player: u16,
     pub vehicle: u16,
     pub car: u64,
-    pub item: Option<u64>,
+    pub selections: Vec<u64>,
     pub dyno: Option<nfs_world::items::DynoStats>,
     pub handling: nfs_world::items::HandlingChanges,
-    pub transmission: Option<[u8; 2]>,
+    pub content: Arc<crate::vehicle_content::GarageContent>,
     pub player_index: u32,
     pub generation: u64,
     pub items: Arc<nfs_world::items::Collection>,
@@ -71,6 +71,7 @@ impl PlayerListener {
                 }
                 let inventory = self.inventory.as_ref().ok_or(replication::Error::Shape)?;
                 let loaded = self.persistent.as_ref().ok_or(replication::Error::Shape)?;
+                let content = self.vehicles.as_ref().ok_or(replication::Error::Shape)?;
                 if !inventory.slots.values().contains(&Some(car)) {
                     return Err(replication::Error::UnknownObject);
                 }
@@ -98,10 +99,10 @@ impl PlayerListener {
                         player: call.player,
                         vehicle,
                         car,
-                        item: None,
+                        selections: Vec::new(),
                         dyno: None,
                         handling: nfs_world::items::HandlingChanges::default(),
-                        transmission: None,
+                        content: content.clone(),
                         player_index: u32::from(player.runtime_index),
                         generation: loaded.generation(),
                         items: inventory.items.clone(),
@@ -114,22 +115,16 @@ impl PlayerListener {
                 }
                 match call.operation {
                     Operation::Equip { item, .. } => {
-                        if edit.item != Some(item) {
+                        if edit.selections.last() != Some(&item) {
+                            if edit.selections.len() >= 128 {
+                                return Err(replication::Error::Bound);
+                            }
                             edit.dyno = None;
+                            edit.selections.push(item);
                         }
-                        edit.item = Some(item);
                     }
                     Operation::Dyno { stats, .. } => edit.dyno = Some(stats),
                     Operation::Handling { changes, .. } => {
-                        if changes.transmission().is_some() {
-                            edit.transmission = Some(
-                                self.vehicles
-                                    .as_ref()
-                                    .ok_or(replication::Error::Shape)?
-                                    .vehicles
-                                    .transmission_values(&inventory.items, car)?,
-                            );
-                        }
                         if !changes.is_empty() {
                             edit.dyno = None;
                         }

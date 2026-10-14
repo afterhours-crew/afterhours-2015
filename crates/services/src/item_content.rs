@@ -224,7 +224,7 @@ impl ItemContent {
                 let definition = inventory
                     .definition(guid)
                     .map_err(|_| ContentError::Invalid)?;
-                if definition.class != DefinitionClass::AirFilterItemData
+                if !crate::purchase::performance_class(definition.class)
                     || !definition.flags.purchasable
                 {
                     return Err(ContentError::Invalid);

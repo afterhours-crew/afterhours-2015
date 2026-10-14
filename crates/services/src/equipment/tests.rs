@@ -5,6 +5,7 @@
 use super::*;
 use crate::bank::Balance;
 use nfs_storage::{DefinitionGuid, GarageSlots, ItemRecord, MemoryRepository};
+use nfs_world_core::items::DefinitionClass;
 use nfs_world_core::items::{Definition, DefinitionFlags, Layout, OwnershipLevel};
 
 fn catalog() -> InventoryCatalog {
@@ -386,6 +387,59 @@ fn handling_rejects_wrong_owner_missing_parts_and_invalid_transmission_without_p
             )
         });
     assert!(result.is_err());
+}
+
+#[test]
+fn sequential_equip_keeps_other_categories_and_tunes_only_the_final_installed_part() {
+    let repo = MemoryRepository::default();
+    let account = who(1);
+    let (catalog, before) = handling_fixture(&repo, account);
+    let items = inventory::collection(&before, catalog.bindings()).unwrap();
+    let offers = Offers::new([[3; 16]]).unwrap();
+    // Select an upgraded air filter, change the persistent tuning part, then
+    // restore the filter. This must retain the second category's selection.
+    let pending = prepare(
+        account,
+        before.generation,
+        &items,
+        10,
+        12,
+        &catalog,
+        &offers,
+    )
+    .unwrap()
+    .with_part(&items, 17, &catalog, &offers)
+    .unwrap()
+    .with_part(&items, 11, &catalog, &offers)
+    .unwrap()
+    .with_handling(
+        &items,
+        &catalog,
+        nfs_world_core::items::HandlingChanges::new([(26, 9)]).unwrap(),
+        None,
+    )
+    .unwrap();
+    let after = commit(&repo, account, &catalog, &pending, Timestamp(3)).unwrap();
+    let car = &after.items[&ItemId::new(10).unwrap()];
+    assert!(car.sub_items.contains(&ItemId::new(11).unwrap()));
+    assert!(car.sub_items.contains(&ItemId::new(17).unwrap()));
+    assert!(!car.sub_items.contains(&ItemId::new(12).unwrap()));
+    assert!(!car.sub_items.contains(&ItemId::new(14).unwrap()));
+    assert_eq!(
+        &after.items[&ItemId::new(17).unwrap()].derived[12..16],
+        &9u32.to_le_bytes()
+    );
+    for id in [11, 12, 14, 15, 16] {
+        assert_eq!(
+            after.items[&ItemId::new(id).unwrap()],
+            before.items[&ItemId::new(id).unwrap()]
+        );
+    }
+    assert_eq!(after.generation, before.generation + 1);
+    assert_eq!(
+        commit(&repo, account, &catalog, &pending, Timestamp(4)).unwrap(),
+        after
+    );
 }
 
 #[test]

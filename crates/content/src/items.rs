@@ -210,10 +210,12 @@ fn definition(assets: &mut Assets, object: &Object) -> Result<Json, Error> {
     }))
 }
 
-/// Initial purchase scope: unrestricted leaf air filters available without REP
+/// Initial purchase scope: unrestricted leaf performance parts without REP
 /// progression. Unknown requirements never become an implicit unlocked offer.
 fn initial_offer(object: &Object) -> Result<bool, Error> {
-    if object.class != "AirFilterItemData" {
+    if !DefinitionClass::from_name(&object.class)
+        .is_some_and(nfs_services::purchase::performance_class)
+    {
         return Ok(false);
     }
     let f = &object.fields;
@@ -318,6 +320,34 @@ mod offer_tests {
             fields: Fields(fields.into_iter().collect()),
         };
         assert!(initial_offer(&original).unwrap());
+        for class in [
+            "BrakesItemData",
+            "NosTuningItemData",
+            "EcuItemData",
+            "SteeringTuningItemData",
+        ] {
+            assert!(
+                initial_offer(&Object {
+                    class: class.into(),
+                    ..original.clone()
+                })
+                .unwrap()
+            );
+        }
+        for class in [
+            "HoodItemData",
+            "RimsItemData",
+            "CurrencyItemData",
+            "RaceVehicleItemData",
+        ] {
+            assert!(
+                !initial_offer(&Object {
+                    class: class.into(),
+                    ..original.clone()
+                })
+                .unwrap()
+            );
+        }
         for (key, value) in [
             ("UnlocksAtRepLevel", Value::UInt32(2)),
             ("Purchasable", Value::Bool(false)),

@@ -12,13 +12,48 @@ use nfs_storage::{
     tables::{Table, Value},
 };
 use nfs_world_core::items::{
-    self, Collection, DefinitionClass, Derived, Guid, InventoryCatalog, PurchaseRequest,
-    PurchaseSelection,
+    self, Collection, DefinitionClass, Guid, InventoryCatalog, PurchaseRequest, PurchaseSelection,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
 const MAX_OFFERS: usize = 256;
 const BATCH_NAMESPACE: u64 = 1 << 62;
+
+/// Performance classes whose leaf replacement is keyed by exact class. Visual
+/// parts may additionally use location and compatibility rules and are separate.
+pub fn performance_class(class: DefinitionClass) -> bool {
+    use DefinitionClass::*;
+    matches!(
+        class,
+        AirFilterItemData
+            | BrakesItemData
+            | CamShaftItemData
+            | ClutchItemData
+            | ControlArmTuningItemData
+            | CylinderHeadsItemData
+            | DifferentialTuningItemData
+            | EcuItemData
+            | ElectricSystemItemData
+            | EngineBlockItemData
+            | EngineDisplacementItemData
+            | ExhaustManifoldItemData
+            | ExhaustSystemItemData
+            | ForcedInductionItemData
+            | FuelSystemItemData
+            | GearboxTuningItemData
+            | GearsItemData
+            | HandbrakeTuningItemData
+            | IgnitionItemData
+            | IntakeManifoldItemData
+            | NosTuningItemData
+            | PersistantTuningItemData
+            | RadiatorItemData
+            | SteeringTuningItemData
+            | SuspensionTuningItemData
+            | SwaybarTuningItemData
+            | TireCompositionItemData
+    )
+}
 
 /// Offers must already be resolved from installed compatibility/unlock policy.
 /// No client-supplied prices or definitions are added to this set on demand.
@@ -189,9 +224,9 @@ pub fn buy(
         return Err(Error::Rejected(Reason::Offer));
     }
     let definition = catalog.definition(&guid).map_err(inventory::Error::from)?;
-    // This first transaction supports leaf air filters only. Other categories,
-    // recursive ownership, quantities and ID-selection purchases remain explicit.
-    if definition.class != DefinitionClass::AirFilterItemData
+    // The offer set has already resolved compatibility and unlocks. Purchase
+    // still enforces the supported leaf ownership/default construction contract.
+    if !performance_class(definition.class)
         || definition.quantity != 1
         || !definition.flags.requires_owner
         || !definition.flags.purchasable
@@ -199,7 +234,7 @@ pub fn buy(
         || definition.flags.uses_scope
         || !definition.sub_items.is_empty()
         || !definition.additional_items.is_empty()
-        || definition.default_derived != Some(Derived::Empty)
+        || definition.default_derived.is_none()
     {
         return Err(Error::Rejected(Reason::Offer));
     }
@@ -286,7 +321,12 @@ pub fn buy(
             sell_price: definition.sell_price,
             default_items: vec![],
             sub_items: vec![],
-            derived: vec![],
+            derived: definition
+                .default_derived
+                .as_ref()
+                .ok_or(Error::Rejected(Reason::Offer))?
+                .encode()
+                .map_err(inventory::Error::from)?,
         };
         // The namespace is reserved for purchase attempts. Competing purchases
         // on this generation may replay a winner: re-read the receipt before
