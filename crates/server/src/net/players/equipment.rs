@@ -12,6 +12,7 @@ pub(in crate::net) struct EquipmentRequest {
     pub vehicle: u16,
     pub car: u64,
     pub selections: Vec<u64>,
+    pub part_edits: Vec<Operation>,
     pub dyno: Option<nfs_world::items::DynoStats>,
     pub handling: nfs_world::items::HandlingChanges,
     pub content: Arc<crate::vehicle_content::GarageContent>,
@@ -62,9 +63,40 @@ impl PlayerListener {
             Operation::Begin => {
                 state.edits.remove(&call.player);
             }
-            Operation::Equip { vehicle, .. }
-            | Operation::Dyno { vehicle, .. }
-            | Operation::Handling { vehicle, .. } => {
+            Operation::Equip { .. }
+            | Operation::Dyno { .. }
+            | Operation::Handling { .. }
+            | Operation::Paint { .. }
+            | Operation::RimSize { .. } => {
+                let vehicle = match call.operation {
+                    Operation::Equip { vehicle, .. }
+                    | Operation::Dyno { vehicle, .. }
+                    | Operation::Handling { vehicle, .. } => vehicle,
+                    _ => {
+                        // These RPCs omit the car reference. Resolve only this
+                        // player's garage car, never another player's display
+                        // car or a world lifetime. Ambiguous selection fails.
+                        let mut cars = players
+                            .owned_vehicles(HOST_SELECTOR as u8, self.persona)
+                            .into_iter()
+                            .filter(|vehicle| {
+                                !self.world_cars.contains_key(vehicle)
+                                    && players
+                                        .player_vehicle_item(
+                                            HOST_SELECTOR as u8,
+                                            self.persona,
+                                            call.player,
+                                            *vehicle,
+                                        )
+                                        .is_some()
+                            });
+                        let vehicle = cars.next().ok_or(replication::Error::UnknownObject)?;
+                        if cars.next().is_some() {
+                            return Err(replication::Error::Unsupported);
+                        }
+                        vehicle
+                    }
+                };
                 let (participant, car) = players
                     .player_vehicle_item(HOST_SELECTOR as u8, self.persona, call.player, vehicle)
                     .ok_or(replication::Error::UnknownObject)?;
@@ -98,7 +130,8 @@ impl PlayerListener {
                 else {
                     return Err(replication::Error::UnknownObject);
                 };
-                if let Operation::Equip { item, .. } = call.operation
+                if let Operation::Equip { item, .. } | Operation::RimSize { item, .. } =
+                    call.operation
                     && !inventory
                         .items
                         .items
@@ -118,6 +151,7 @@ impl PlayerListener {
                         vehicle,
                         car,
                         selections: Vec::new(),
+                        part_edits: Vec::new(),
                         dyno: None,
                         handling: nfs_world::items::HandlingChanges::default(),
                         content: content.clone(),
@@ -132,6 +166,16 @@ impl PlayerListener {
                     || edit.generation != loaded.generation()
                 {
                     return Err(replication::Error::Shape);
+                }
+                if matches!(
+                    call.operation,
+                    Operation::Equip { .. } | Operation::Paint { .. } | Operation::RimSize { .. }
+                ) && edit.part_edits.last() != Some(&call.operation)
+                {
+                    if edit.part_edits.len() >= 128 {
+                        return Err(replication::Error::Bound);
+                    }
+                    edit.part_edits.push(call.operation);
                 }
                 match call.operation {
                     Operation::Equip { item, .. } => {
@@ -150,6 +194,7 @@ impl PlayerListener {
                         }
                         edit.handling.merge(changes);
                     }
+                    Operation::Paint { .. } | Operation::RimSize { .. } => (),
                     _ => unreachable!(),
                 }
             }

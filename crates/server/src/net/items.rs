@@ -127,15 +127,37 @@ impl Profile {
                     &service.catalog,
                 )
                 .map_err(Error::Equipment)?;
-                for &item in &request.selections {
-                    edit = edit
-                        .with_part(
+                for operation in &request.part_edits {
+                    use nfs_services::item_builder::Operation;
+                    edit = match *operation {
+                        Operation::Equip { item, .. } => edit.with_part(
                             &request.items,
                             item,
                             &service.catalog,
                             service.offers.as_deref().ok_or(Error::Worker)?,
-                        )
-                        .map_err(Error::Equipment)?;
+                        ),
+                        Operation::Paint { paint } => edit.with_paint(
+                            &request.items,
+                            &service.catalog,
+                            service.offers.as_deref().ok_or(Error::Worker)?,
+                            paint,
+                        ),
+                        Operation::RimSize { item, size } => {
+                            request
+                                .content
+                                .vehicles
+                                .validate_rim_size(
+                                    &edit.preview(&request.items).map_err(Error::Equipment)?,
+                                    request.car,
+                                    item,
+                                    size,
+                                )
+                                .map_err(|_| Error::Worker)?;
+                            edit.with_rim_size(&request.items, &service.catalog, item, size)
+                        }
+                        _ => return Err(Error::Worker),
+                    }
+                    .map_err(Error::Equipment)?;
                 }
                 let transmission = if request.handling.transmission().is_some() {
                     Some(

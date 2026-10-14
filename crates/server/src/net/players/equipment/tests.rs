@@ -18,6 +18,8 @@ use nfs_world::{
 };
 use serde_json::json;
 
+mod appearance;
+
 fn tables() -> persistent::Catalog {
     let rows:Vec<_>=persistent::required_tables().iter().map(|&(name,secondary,count)|{
         let columns:Vec<_>=(0..count).map(|i| {
@@ -162,11 +164,15 @@ fn fixture() -> (
             .unwrap()
             .clone();
         entry["guid"] = json!("09".repeat(16));
+        if family == "customization" {
+            entry["chassis"]["rim_values"] = json!([0.45, 0.5, 0.55]);
+        }
         if family == "mesh" {
             entry["guids"] = json!(["22".repeat(16)]);
         }
         if family == "wheels" {
             entry["diameter"] = json!(0.75);
+            entry["sizes"] = json!([0.45, 0.5, 0.55]);
         }
         document["parts"][family]
             .as_array_mut()
@@ -177,6 +183,31 @@ fn fixture() -> (
         .as_array_mut()
         .unwrap()
         .push(json!({"guid":"22".repeat(16),"bundle":"wheel/upgrade"}));
+    let mut tire = items.items[&4].clone();
+    tire.id = 10;
+    tire.definition = [10; 16];
+    items.items.insert(10, tire);
+    let tire_definition = definitions
+        .iter()
+        .find(|(g, _)| *g == [4; 16])
+        .unwrap()
+        .1
+        .clone();
+    definitions.push(([10; 16], tire_definition));
+    for family in ["customization", "wheels", "mesh"] {
+        let mut entry = document["parts"][family]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["guid"] == "04".repeat(16))
+            .unwrap()
+            .clone();
+        entry["guid"] = json!("0a".repeat(16));
+        document["parts"][family]
+            .as_array_mut()
+            .unwrap()
+            .push(entry);
+    }
     let car = items.items.get_mut(&1).unwrap();
     car.children.push(6);
     car.children.push(8);
@@ -284,9 +315,9 @@ fn fixture() -> (
         bank: None,
     });
     listener.vehicles = Some(Arc::new(GarageContent { vehicles, layout }));
-    let offers = nfs_services::purchase::Offers::new([[7; 16], [9; 16]])
+    let offers = nfs_services::purchase::Offers::new([[7; 16], [9; 16], [10; 16]])
         .unwrap()
-        .with_vehicle_scopes(&catalog, [([1; 16], vec![[7; 16], [9; 16]])])
+        .with_vehicle_scopes(&catalog, [([1; 16], vec![[7; 16], [9; 16], [10; 16]])])
         .unwrap()
         .with_part_policy(
             &catalog,
@@ -296,8 +327,9 @@ fn fixture() -> (
                 ([4; 16], 0),
                 ([5; 16], 1),
                 ([9; 16], 0),
+                ([10; 16], 0),
             ],
-            [([7; 16], 0), ([9; 16], 0)],
+            [([7; 16], 0), ([9; 16], 0), ([10; 16], 0)],
         )
         .unwrap();
     let profile = Service::new(repo.clone(), catalog)

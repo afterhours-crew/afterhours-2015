@@ -12,6 +12,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const BATCH_NAMESPACE: u64 = 1 << 61;
 
+mod appearance;
+pub use appearance::Paint;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Edit {
     account: AccountId,

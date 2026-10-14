@@ -28,7 +28,9 @@ remains unchecked.
    with one performance part, then extend to visual parts, handling/tuning, paint
    and wraps. Inventory, part definitions and transactional storage already exist;
    performance purchases and three handling controls now survive garage return
-   and game/server restart. Visual parts, paint and wraps remain unfinished.
+   and game/server restart. Selected hood, headlight and rim upgrades also pass
+   those transitions; rim paint/size survive a tire change and restart. Broader
+   visual customization, body paint and wraps remain unfinished.
 2. [ ] **Free-roam REP and unlocks.** Award driving scores, update levels and make
    newly eligible content available. Current stored-score/level read models do
    not implement earning REP.

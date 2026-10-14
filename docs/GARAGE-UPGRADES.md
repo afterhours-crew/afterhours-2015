@@ -32,11 +32,28 @@ The front-rim test exposed an offer-filter bug: shared wheels can retain an
 inactive scope list. That filter is corrected while retaining the current car's
 active compatibility list. The retry bought and equipped the front rim for the
 displayed price, retained the stock rear rim, and loaded the new front rim in
-free roam and on garage return. Wheel paint and size were edited in the same
-run, but their persistence is not yet established. Rim restart remains pending.
+free roam and on garage return. That run also exposed a separate bug: changing
+tires reset the rim paint and size because those save requests were unhandled.
+The current candidate stages body paint, both rim paint layers on each axle,
+and rim size in the same owned transaction path. Part and paint edits retain
+request order; a later tire change preserves the saved rim finish. Portable
+tests cover this regression, exact retries, cancellation, invalid requests and
+database reopen. The follow-up live test confirmed the rim model after restart,
+applied green primary and yellow secondary paint to both axles, increased the
+front rim size, then replaced the front tire with an owned stock tire. The front
+rim retained both colors and its size after the tire change, garage return and
+a full game/server restart. The rear rim retained its green paint as well.
+Both axles' green paint was visible in free roam; the yellow lip was difficult
+to distinguish under the outdoor night lighting. The saved account retained
+the exact paint values and size selection, with no further cash deduction.
+
+Paint requests omit a vehicle reference. For now they require one unambiguous
+owned garage car; active-car selection across multiple owned cars belongs to
+the separate garage-management checklist item. Size requests must identify an
+installed owned rim and a size that fits its authored axle dimensions.
 
 These checks cover the tested starting car, not every supported definition or
-menu path. Visual parts, paint and wraps remain unfinished; the earlier wrap
+menu path. Broader visual parts, body paint and wraps remain unfinished; the earlier wrap
 test waited for the custom-wrap library. Client
 performance numbers changing immediately after purchase are only a local preview;
 the return/restart checks are needed to establish that they were saved.

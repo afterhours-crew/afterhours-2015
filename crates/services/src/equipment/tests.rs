@@ -8,6 +8,8 @@ use nfs_storage::{DefinitionGuid, GarageSlots, ItemRecord, MemoryRepository};
 use nfs_world_core::items::DefinitionClass;
 use nfs_world_core::items::{Definition, DefinitionFlags, Layout, OwnershipLevel};
 
+mod appearance;
+
 fn catalog() -> InventoryCatalog {
     let part = Definition {
         class: DefinitionClass::AirFilterItemData,

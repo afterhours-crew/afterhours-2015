@@ -19,6 +19,13 @@ pub enum Operation {
         vehicle: u16,
         changes: nfs_world_core::items::HandlingChanges,
     },
+    Paint {
+        paint: crate::equipment::Paint,
+    },
+    RimSize {
+        item: u64,
+        size: u8,
+    },
     Commit,
 }
 
@@ -50,7 +57,7 @@ impl Binding {
             .map_err(|_| Error::Shape)?;
         if envelope.references().first() != Some(&self.scene)
             || route.selector() != self.selector
-            || !matches!(route.method_index(), 0 | 3 | 4 | 5 | 8)
+            || !matches!(route.method_index(), 0 | 1 | 3 | 4 | 5 | 8 | 10)
         {
             return Ok(None);
         }
@@ -66,6 +73,39 @@ impl Binding {
             return Err(Error::Ownership);
         }
         let operation = match route.method_index() {
+            1 => {
+                let args = route.arguments();
+                if args.len() != 207 {
+                    return Err(Error::Shape);
+                }
+                let mut words = [0; 6];
+                for (i, word) in words.iter_mut().enumerate() {
+                    *word = args.read_u32(i * 32, 32).map_err(|_| Error::Shape)?;
+                }
+                Operation::Paint {
+                    paint: crate::equipment::Paint::new(
+                        args.read_u32(192, 8).map_err(|_| Error::Shape)? as u8,
+                        words[..3].try_into().map_err(|_| Error::Shape)?,
+                        words[3..].try_into().map_err(|_| Error::Shape)?,
+                    )
+                    .map_err(|_| Error::Shape)?,
+                }
+            }
+            10 => {
+                let args = route.arguments();
+                if args.len() != 79 {
+                    return Err(Error::Shape);
+                }
+                let item = u64::from(args.read_u32(0, 32).map_err(|_| Error::Shape)?)
+                    | (u64::from(args.read_u32(32, 32).map_err(|_| Error::Shape)?) << 32);
+                if item == 0 {
+                    return Err(Error::Shape);
+                }
+                Operation::RimSize {
+                    item,
+                    size: args.read_u32(64, 8).map_err(|_| Error::Shape)? as u8,
+                }
+            }
             0 => {
                 if route.arguments().len() != 71 {
                     return Err(Error::Shape);

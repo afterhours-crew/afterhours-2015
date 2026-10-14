@@ -101,6 +101,10 @@ impl Offers {
     pub fn supports(&self, class: DefinitionClass) -> bool {
         performance_class(class) || (self.part_policy.is_some() && visual_class(class))
     }
+    /// Installed spatial metadata, including owned stock and spare definitions.
+    pub fn location(&self, guid: &Guid) -> Option<u8> {
+        self.part_policy.as_ref()?.locations.get(guid).copied()
+    }
     /// Exact class is insufficient for front/rear visual parts. Missing spatial
     /// metadata is an error, including when restoring an owned stock default.
     pub fn same_slot(&self, catalog: &InventoryCatalog, a: &Guid, b: &Guid) -> Result<bool, Error> {

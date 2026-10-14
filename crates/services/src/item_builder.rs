@@ -10,6 +10,8 @@ use nfs_protocol::world::{
     rpc::{Envelope, Limits, RouteProfile},
 };
 
+#[cfg(test)]
+mod appearance_tests;
 mod requests;
 pub use requests::{Call, Operation};
 

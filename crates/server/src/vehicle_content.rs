@@ -63,6 +63,28 @@ pub struct EquipmentPresentation {
 }
 
 impl Content {
+    pub fn validate_rim_size(
+        &self,
+        items: &Collection,
+        vehicle: u64,
+        item: u64,
+        size: u8,
+    ) -> Result<(), Error> {
+        let car = items.items.get(&vehicle).ok_or(Error::UnknownObject)?;
+        let rim = items.items.get(&item).ok_or(Error::UnknownObject)?;
+        let definition = self
+            .definition(&car.definition)
+            .ok_or(Error::UnknownObject)?;
+        if rim.owner != vehicle
+            || !car.children.contains(&item)
+            || !self
+                .wheels
+                .allows_size(&rim.definition, size, definition.wheel_baseline)
+        {
+            return Err(Error::Bound);
+        }
+        Ok(())
+    }
     /// Build and encode all inventory-derived components before an equipment
     /// transaction commits. Motion, authority and initial creation are excluded.
     pub fn equipment(
