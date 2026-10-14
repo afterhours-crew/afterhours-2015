@@ -35,6 +35,10 @@ rotation and gameplay reward policies are not inferred by this service.
   (`2052/23`) likewise require the current persona and supported item system,
   returning a zero total for the empty local catalog. Populated catalogs and
   wrap user-list queries are explicitly unsupported.
+- Speed-wall brief reads (`2050/79`) return the account's saved row, or the
+  defined Autolog not-found error when a supported own-persona query has no row.
+  Empty accounts gain no rank or score. Completing the request allows the
+  client's shared content queue to continue to wrap-header downloads.
 - Inventory loading initializes an empty account once, validates item graphs,
   preserves later progress and produces replies only from committed state.
 - ItemBuilder begin-update validates a complete bounded call against the current

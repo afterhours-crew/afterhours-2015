@@ -52,9 +52,15 @@ owned garage car; active-car selection across multiple owned cars belongs to
 the separate garage-management checklist item. Size requests must identify an
 installed owned rim and a size that fits its authored axle dimensions.
 
+The paint-library loading wait was caused by an unanswered speed-wall read on
+an empty account. Supported reads now return the defined not-found error when
+there is no saved row, allowing the client's shared download queue to continue.
+A live test reached the library and body-paint editor with all header downloads
+completed. Saving then reached the unsupported wrap upload and displayed a save
+error. Body-paint and wrap persistence are therefore still unvalidated.
+
 These checks cover the tested starting car, not every supported definition or
-menu path. Broader visual parts, body paint and wraps remain unfinished; the earlier wrap
-test waited for the custom-wrap library. Client
+menu path. Broader visual parts, body paint and wraps remain unfinished. Client
 performance numbers changing immediately after purchase are only a local preview;
 the return/restart checks are needed to establish that they were saved.
 

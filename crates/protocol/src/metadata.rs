@@ -17,6 +17,8 @@ schema!(Fire2Metadata {
 pub const UTIL_USS_RECORD_NOT_FOUND: i32 = 0x00c8_0009;
 /// Kickback error for a record that does not exist.
 pub const KICKBACK_ERR_NOT_FOUND: i32 = 0x0004_0805;
+/// Autolog error for a record that does not exist.
+pub const AUTOLOG_ERR_NOT_FOUND: i32 = 0x000e_0802;
 
 /// Names for the observed nonzero statuses and the not-found statuses the
 /// services return, each verified in its component's error-name method (the
@@ -27,6 +29,7 @@ pub const fn error_name(component: u16, code: i32) -> Option<&'static str> {
     match (component, code) {
         (30_722, 0x0001_7802) => Some("USER_ERR_USER_NOT_FOUND"),
         (2_050, 0x001b_0802) => Some("AUTOLOG_ERR_NEWS_JSON_DECODE"),
+        (2_050, AUTOLOG_ERR_NOT_FOUND) => Some("AUTOLOG_ERR_NOT_FOUND"),
         (9, UTIL_USS_RECORD_NOT_FOUND) => Some("UTIL_USS_RECORD_NOT_FOUND"),
         (2_053, KICKBACK_ERR_NOT_FOUND) => Some("KICKBACK_ERR_NOT_FOUND"),
         _ => None,

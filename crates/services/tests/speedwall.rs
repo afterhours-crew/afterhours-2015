@@ -111,13 +111,9 @@ fn own_row_names_the_current_persona_and_display_name() {
 }
 
 #[test]
-fn other_walls_personas_accounts_and_malformed_frames_do_not_answer() {
+fn unknown_stat_personas_accounts_and_malformed_frames_do_not_answer() {
     let a = account(1);
     let state = State::from_json(&document(a), a).unwrap();
-    assert_eq!(
-        state.reply(&query(42, 6, 0, 1), a, 42, b"N"),
-        Err(Error::Unsupported)
-    );
     assert_eq!(
         state.reply(&query(42, 5, 2, 1), a, 42, b"N"),
         Err(Error::Unsupported)
@@ -183,6 +179,59 @@ fn other_walls_personas_accounts_and_malformed_frames_do_not_answer() {
     )
     .unwrap();
     assert_eq!(state.reply(&foreign, a, 42, b"N"), Err(Error::Ineligible));
+}
+
+#[test]
+fn missing_owned_row_completes_with_not_found_without_creating_progress() {
+    use nfs_protocol::metadata::{AUTOLOG_ERR_NOT_FOUND, Fire2Metadata, error_name};
+    let a = account(1);
+    let empty = State::new(a, vec![]).unwrap();
+    let populated = State::from_json(&document(a), a).unwrap();
+    let limits = nfs_fire2::Limits::new(128, 32, 64).unwrap();
+    for (state, wall, stat) in [(&empty, 5, 0), (&empty, 5, 1), (&populated, 6, 0)] {
+        let before = state.rows().to_vec();
+        for correlation in [1, 0x00ff_ffff] {
+            let request = query(42, wall, stat, correlation);
+            let reply = state.reply(&request, a, 42, b"Local").unwrap();
+            assert_eq!(state.reply(&request, a, 42, b"Local").unwrap(), reply);
+            let decoded = nfs_fire2::decode(&reply, limits).unwrap().unwrap();
+            assert_eq!(decoded.consumed, reply.len());
+            let f = decoded.frame;
+            assert_eq!(
+                (
+                    f.fields.routing_a,
+                    f.fields.routing_b,
+                    f.fields.category,
+                    f.fields.correlation
+                ),
+                (2050, 79, 3, correlation)
+            );
+            assert!(f.body.is_empty());
+            let metadata = Fire2Metadata::decode(f.metadata, body_limits()).unwrap();
+            assert_eq!(metadata.context, Some(0));
+            assert_eq!(metadata.error_code, Some(AUTOLOG_ERR_NOT_FOUND));
+            assert_eq!(metadata.unknown_field_count(), 0);
+        }
+        assert_eq!(state.rows(), before);
+    }
+    assert_eq!(
+        error_name(2050, AUTOLOG_ERR_NOT_FOUND),
+        Some("AUTOLOG_ERR_NOT_FOUND")
+    );
+    assert_eq!(error_name(2053, AUTOLOG_ERR_NOT_FOUND), None);
+    // Empty state must not weaken account/persona isolation or enum validation.
+    assert_eq!(
+        empty.reply(&query(43, 5, 0, 1), a, 42, b"N"),
+        Err(Error::Identity)
+    );
+    assert_eq!(
+        empty.reply(&query(42, 5, 0, 1), account(2), 42, b"N"),
+        Err(Error::Identity)
+    );
+    assert_eq!(
+        empty.reply(&query(42, 5, -1, 1), a, 42, b"N"),
+        Err(Error::Unsupported)
+    );
 }
 
 #[test]
