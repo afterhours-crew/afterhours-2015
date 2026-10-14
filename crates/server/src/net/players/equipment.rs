@@ -64,9 +64,12 @@ impl PlayerListener {
                 state.edits.remove(&call.player);
             }
             Operation::Equip { .. }
+            | Operation::StockPaint
             | Operation::Dyno { .. }
             | Operation::Handling { .. }
             | Operation::Paint { .. }
+            | Operation::LicensePlate { .. }
+            | Operation::WindowTint { .. }
             | Operation::Livery { .. }
             | Operation::RimSize { .. } => {
                 let vehicle = match call.operation {
@@ -172,7 +175,10 @@ impl PlayerListener {
                 if matches!(
                     call.operation,
                     Operation::Equip { .. }
+                        | Operation::StockPaint
                         | Operation::Paint { .. }
+                        | Operation::LicensePlate { .. }
+                        | Operation::WindowTint { .. }
                         | Operation::RimSize { .. }
                         | Operation::Livery { .. }
                 ) && edit.part_edits.last() != Some(&call.operation)
@@ -200,6 +206,9 @@ impl PlayerListener {
                         edit.handling.merge(changes);
                     }
                     Operation::Paint { .. }
+                    | Operation::StockPaint
+                    | Operation::LicensePlate { .. }
+                    | Operation::WindowTint { .. }
                     | Operation::RimSize { .. }
                     | Operation::Livery { .. } => (),
                     _ => unreachable!(),

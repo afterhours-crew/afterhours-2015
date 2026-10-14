@@ -7,6 +7,7 @@ use super::*;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Operation {
     Begin,
+    StockPaint,
     Equip {
         vehicle: u16,
         item: u64,
@@ -21,6 +22,12 @@ pub enum Operation {
     },
     Paint {
         paint: crate::equipment::Paint,
+    },
+    LicensePlate {
+        plate: crate::equipment::LicensePlate,
+    },
+    WindowTint {
+        tint: crate::equipment::WindowTint,
     },
     RimSize {
         item: u64,
@@ -62,7 +69,7 @@ impl Binding {
             .map_err(|_| Error::Shape)?;
         if envelope.references().first() != Some(&self.scene)
             || route.selector() != self.selector
-            || !matches!(route.method_index(), 0 | 1 | 3 | 4 | 5 | 8 | 9 | 10)
+            || !matches!(route.method_index(), 0..=5 | 7..=11)
         {
             return Ok(None);
         }
@@ -78,6 +85,34 @@ impl Binding {
             return Err(Error::Ownership);
         }
         let operation = match route.method_index() {
+            2 => {
+                let args = route.arguments();
+                let length = args.read_u32(0, 10).map_err(|_| Error::Shape)? as usize;
+                if args.len() != 10 + 8 * length + 5 {
+                    return Err(Error::Shape);
+                }
+                // Only this prefix can reach the native eight-byte car field.
+                // The envelope bound and exact extent still validate all input.
+                let mut text = [0; 7];
+                for (i, byte) in text.iter_mut().take(length).enumerate() {
+                    *byte = args.read_u32(10 + 8 * i, 8).map_err(|_| Error::Shape)? as u8;
+                }
+                Operation::LicensePlate {
+                    plate: crate::equipment::LicensePlate::new(&text),
+                }
+            }
+            11 => {
+                let args = route.arguments();
+                if args.len() != 39 {
+                    return Err(Error::Shape);
+                }
+                Operation::WindowTint {
+                    tint: crate::equipment::WindowTint::new(
+                        args.read_u32(0, 32).map_err(|_| Error::Shape)?,
+                    )
+                    .map_err(|_| Error::Shape)?,
+                }
+            }
             9 => {
                 let args = route.arguments();
                 if args.len() != 135 {
@@ -181,14 +216,14 @@ impl Binding {
                         .map_err(|_| Error::Shape)?,
                 }
             }
-            4 | 5 => {
+            4 | 5 | 7 => {
                 if route.arguments().len() != 7 {
                     return Err(Error::Shape);
                 }
-                if route.method_index() == 4 {
-                    Operation::Begin
-                } else {
-                    Operation::Commit
+                match route.method_index() {
+                    4 => Operation::Begin,
+                    5 => Operation::Commit,
+                    _ => Operation::StockPaint,
                 }
             }
             _ => return Err(Error::Shape),

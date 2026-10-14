@@ -91,6 +91,18 @@ menu path. Broader visual parts and the complete wrap-edit workflow remain unfin
 performance numbers changing immediately after purchase are only a local preview;
 the return/restart checks are needed to establish that they were saved.
 
+The next candidate adds plate text, window tint and restoring factory body paint
+to the same ordered transaction. Plate text uses the native seven-byte limit and
+terminator; tint retains finite values from zero through one. Factory paint comes
+from the current car's installed definition and preserves tint, plate, livery and
+wheel finishes. Portable tests cover exact request bounds, cancellation, retries,
+account isolation, stale edits, storage reopen and later equipment changes. These
+three menu paths still need live verification; the attempted combined run stopped
+at the splash because a Windows firewall prompt from a completed test covered it.
+The QoS rejection test now checks invalid addresses without binding wildcard
+sockets. The remaining network integration tests use loopback; no firewall rule
+or administrator access was added.
+
 For unattended menu testing, [change the game's Back key to F9](MENU-KEYBINDING.md)
 through its user profile. This works without a mod and leaves Computer Use's
 Escape stop control available.

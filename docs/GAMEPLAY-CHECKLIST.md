@@ -33,6 +33,8 @@ remains unchecked.
    visual customization and the complete wrap-edit workflow remain unfinished.
    Saved local wraps now reload after restart; applying one retains body paint
    and the equipped livery across the tested garage/world transitions.
+   Plate text, window tint and factory body-paint reset have automated coverage;
+   their live menu and persistence checks are pending.
 2. [ ] **Free-roam REP and unlocks.** Award driving scores, update levels and make
    newly eligible content available. Current stored-score/level read models do
    not implement earning REP.

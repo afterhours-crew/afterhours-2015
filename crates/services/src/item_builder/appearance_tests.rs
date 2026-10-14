@@ -10,8 +10,9 @@ fn wire(method: u32, arguments: &BitWriter, references: &[u16]) -> BitWriter {
     payload
         .put(6, 9)
         .put(method.into(), 32)
-        .put_span(arguments.span())
-        .put(127, 7);
+        .put_span(arguments.span());
+    let padding = (8 - payload.len() % 8) % 8;
+    payload.put((1 << padding) - 1, padding);
     let mut body = BitWriter::new();
     body.put(0, 64).put(references.len() as u64, 8);
     for id in references {
@@ -20,6 +21,64 @@ fn wire(method: u32, arguments: &BitWriter, references: &[u16]) -> BitWriter {
     body.put(payload.bytes().len() as u64, 9)
         .put_span(payload.span());
     body
+}
+
+#[test]
+fn plate_reads_ten_bit_byte_count_and_tint_reads_exact_float_bits() {
+    check(7, &BitWriter::new(), Operation::StockPaint);
+    for text in [
+        b"".as_slice(),
+        b"LOCAL",
+        b"ABCDEFG",
+        b"ABCDEFGH",
+        b"AB\0C",
+        &[255; 249],
+    ] {
+        let mut args = BitWriter::new();
+        args.put(text.len() as u64, 10);
+        for byte in text {
+            args.put((*byte).into(), 8);
+        }
+        check(
+            2,
+            &args,
+            Operation::LicensePlate {
+                plate: crate::equipment::LicensePlate::new(text),
+            },
+        );
+    }
+    let binding = Binding::new(10, 6).unwrap();
+    for value in [0f32, -0., 0.125, 0.9, 1.] {
+        let mut args = BitWriter::new();
+        args.put(value.to_bits().into(), 32);
+        check(
+            11,
+            &args,
+            Operation::WindowTint {
+                tint: crate::equipment::WindowTint::new(value.to_bits()).unwrap(),
+            },
+        );
+    }
+    for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.01, 1.01] {
+        let mut args = BitWriter::new();
+        args.put(value.to_bits().into(), 32);
+        assert_eq!(
+            binding.read(wire(11, &args, &[10, 12]).span(), |_| true),
+            Err(Error::Shape)
+        );
+    }
+    for (declared, actual) in [(0, 1), (1, 0), (1023, 1), (250, 250)] {
+        let mut args = BitWriter::new();
+        args.put(declared, 10);
+        for _ in 0..actual {
+            args.put(65, 8);
+        }
+        assert!(
+            binding
+                .read(wire(2, &args, &[10, 12]).span(), |_| true)
+                .is_err()
+        );
+    }
 }
 fn check(method: u32, arguments: &BitWriter, operation: Operation) {
     let binding = Binding::new(10, 6).unwrap();

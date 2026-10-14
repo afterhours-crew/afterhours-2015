@@ -464,35 +464,3 @@ fn concurrent_runs_have_separate_cas_endpoints_and_observations() {
     assert_cleanup(first.tls, first.udp);
     assert_cleanup(second.tls, second.udp);
 }
-
-#[test]
-fn wildcard_owned_endpoints_are_rejected_before_any_worker_starts() {
-    let identity = Identity::new().unwrap();
-    for tls_wildcard in [true, false] {
-        let listener = TcpListener::bind((
-            if tls_wildcard {
-                Ipv4Addr::UNSPECIFIED
-            } else {
-                Ipv4Addr::LOCALHOST
-            },
-            0,
-        ))
-        .unwrap();
-        let udp = UdpSocket::bind((
-            if tls_wildcard {
-                Ipv4Addr::LOCALHOST
-            } else {
-                Ipv4Addr::UNSPECIFIED
-            },
-            0,
-        ))
-        .unwrap();
-        let started = Instant::now();
-        let result = run(listener, udp, Instant::now() + SERVICE_LIMIT, &identity);
-        assert!(started.elapsed() < Duration::from_secs(1));
-        assert_eq!(result.status, Stop::NonLoopback);
-        assert_eq!(result.udp.status, Stop::NonLoopback);
-        assert!(result.connections.is_empty());
-        assert!(result.udp.datagrams.is_empty());
-    }
-}

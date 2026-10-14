@@ -14,7 +14,7 @@ const BATCH_NAMESPACE: u64 = 1 << 61;
 
 mod appearance;
 mod livery;
-pub use appearance::Paint;
+pub use appearance::{LicensePlate, Paint, WindowTint};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Edit {

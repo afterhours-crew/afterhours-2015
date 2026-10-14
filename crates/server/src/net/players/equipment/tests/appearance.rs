@@ -4,6 +4,117 @@
 
 use super::*;
 
+fn car_finish_wire(scene: u16, player: u16, plate: Option<&[u8]>, tint: f32) -> BitWriter {
+    let mut payload = BitWriter::new();
+    payload
+        .put(2, 9)
+        .put(if plate.is_some() { 2 } else { 11 }, 32);
+    if let Some(text) = plate {
+        payload.put(text.len() as u64, 10);
+        for byte in text {
+            payload.put((*byte).into(), 8);
+        }
+    } else {
+        payload.put(tint.to_bits().into(), 32);
+    }
+    let padding = (8 - payload.len() % 8) % 8;
+    payload.put(0, padding);
+    let mut body = BitWriter::new();
+    body.put(0, 64)
+        .put(2, 8)
+        .put(scene.into(), 13)
+        .put(player.into(), 13)
+        .put(payload.bytes().len() as u64, 9)
+        .put_span(payload.span());
+    body
+}
+
+#[tokio::test]
+async fn plate_and_tint_save_together_refresh_appearance_and_survive_later_equipment() {
+    let (mut listener, mut jobs, repo, account, scene, player, car) = fixture();
+    let before = repo.snapshot(account).unwrap();
+    accept(
+        &mut listener,
+        &appearance_wire(scene, player, Some(0), 0, 0),
+    )
+    .unwrap();
+    accept(&mut listener, &wire(scene, player, None, 7, 0)).unwrap();
+    for body in [
+        car_finish_wire(scene, player, Some(b"FIRST"), 0.),
+        car_finish_wire(scene, player, None, 0.75),
+        car_finish_wire(scene, player, Some(b"LOCAL12"), 0.),
+    ] {
+        accept(&mut listener, &body).unwrap();
+    }
+    assert_eq!(repo.snapshot(account).unwrap(), before);
+    accept(&mut listener, &wire(scene, player, None, 5, 0)).unwrap();
+    jobs.start(&mut listener, 3, Timestamp(3));
+    assert!(jobs.completed(&mut listener).await);
+    let update = crate::net::items::tests::deliver_notification(&mut jobs);
+    let Derived::RaceVehicle {
+        window_tint,
+        default_license_plate_text,
+        ..
+    } = update.items.items[&1].derived
+    else {
+        panic!()
+    };
+    assert_eq!(window_tint, 0.75f32.to_bits());
+    assert_eq!(default_license_plate_text, *b"LOCAL12\0");
+    assert_eq!(listener.pending[0].records[0].id, car);
+    let saved = repo.snapshot(account).unwrap();
+    assert_eq!(
+        &saved.items[&ItemId::new(1).unwrap()].derived[..24],
+        &before.items[&ItemId::new(1).unwrap()].derived[..24]
+    );
+    assert_eq!(saved.generation, before.generation + 1);
+    assert_eq!(saved.tables, before.tables);
+    // Exact retransmission after commit is a durable no-op.
+    accept(&mut listener, &car_finish_wire(scene, player, None, 0.75)).unwrap();
+    accept(
+        &mut listener,
+        &car_finish_wire(scene, player, Some(b"LOCAL12"), 0.),
+    )
+    .unwrap();
+    accept(&mut listener, &wire(scene, player, None, 5, 0)).unwrap();
+    jobs.start(&mut listener, 4, Timestamp(4));
+    assert!(jobs.completed(&mut listener).await);
+    crate::net::items::tests::deliver_notification(&mut jobs);
+    assert_eq!(repo.snapshot(account).unwrap(), saved);
+    accept(&mut listener, &wire(scene, player, Some(car), 0, 7)).unwrap();
+    accept(&mut listener, &wire(scene, player, None, 5, 0)).unwrap();
+    jobs.start(&mut listener, 5, Timestamp(5));
+    assert!(jobs.completed(&mut listener).await);
+    let update = crate::net::items::tests::deliver_notification(&mut jobs);
+    assert_eq!(
+        update.items.items[&1].derived.encode().unwrap(),
+        saved.items[&ItemId::new(1).unwrap()].derived
+    );
+}
+
+#[tokio::test]
+async fn car_finish_cancellation_and_foreign_or_world_targets_cannot_save() {
+    for plate in [None, Some(b"LOCAL".as_slice())] {
+        let (mut listener, mut jobs, repo, account, scene, player, car) = fixture();
+        let before = repo.snapshot(account).unwrap();
+        assert!(
+            accept(
+                &mut listener,
+                &car_finish_wire(scene, player + 1000, plate, 0.5)
+            )
+            .is_err()
+        );
+        accept(&mut listener, &car_finish_wire(scene, player, plate, 0.5)).unwrap();
+        accept(&mut listener, &wire(scene, player, None, 4, 0)).unwrap();
+        accept(&mut listener, &wire(scene, player, None, 5, 0)).unwrap();
+        jobs.start(&mut listener, 3, Timestamp(3));
+        assert!(!jobs.working());
+        listener.world_cars.insert(car, (0, false));
+        assert!(accept(&mut listener, &car_finish_wire(scene, player, plate, 0.5)).is_err());
+        assert_eq!(repo.snapshot(account).unwrap(), before);
+    }
+}
+
 fn livery_wire(scene: u16, player: u16, item: u64, data_id: u32) -> BitWriter {
     let mut payload = BitWriter::new();
     payload

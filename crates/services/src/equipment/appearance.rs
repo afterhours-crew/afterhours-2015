@@ -5,6 +5,42 @@
 use super::*;
 use nfs_world_core::items::DefinitionClass;
 
+/// Native bounded plate copy: at most seven bytes, then one terminator.
+/// The bytes after the terminator in the existing car record are preserved.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LicensePlate {
+    bytes: [u8; 7],
+    length: u8,
+}
+impl LicensePlate {
+    pub fn new(text: &[u8]) -> Self {
+        let length = text
+            .iter()
+            .position(|b| *b == 0)
+            .unwrap_or(text.len())
+            .min(7);
+        let mut bytes = [0; 7];
+        bytes[..length].copy_from_slice(&text[..length]);
+        Self {
+            bytes,
+            length: length as u8,
+        }
+    }
+}
+
+/// Finite unit-interval window tint, retaining the client's exact float bits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WindowTint(u32);
+impl WindowTint {
+    pub fn new(bits: u32) -> Result<Self, Error> {
+        let value = f32::from_bits(bits);
+        if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+            return Err(Error::Shape);
+        }
+        Ok(Self(bits))
+    }
+}
+
 /// Body (0), front rim primary/secondary (1/2), rear primary/secondary (3/4).
 /// Keep the original float bits in inventory; replication quantizes separately.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -32,6 +68,56 @@ impl Paint {
 }
 
 impl Edit {
+    /// Restore only body color/material from this car's installed definition.
+    /// Tint, plate, livery and wheel finishes are separate edits.
+    pub fn with_stock_paint(mut self, catalog: &InventoryCatalog) -> Result<Self, Error> {
+        let definition = catalog
+            .definition(&self.after.definition)
+            .map_err(inventory::Error::from)?;
+        let Some(Derived::RaceVehicle {
+            default_paint: color,
+            material: finish,
+            ..
+        }) = &definition.default_derived
+        else {
+            return Err(Error::Unsupported);
+        };
+        Paint::new(0, *color, *finish)?;
+        let Derived::RaceVehicle {
+            default_paint,
+            material,
+            ..
+        } = &mut self.after.derived
+        else {
+            return Err(Error::Shape);
+        };
+        *default_paint = *color;
+        *material = *finish;
+        Ok(self)
+    }
+
+    pub fn with_license_plate(mut self, plate: LicensePlate) -> Result<Self, Error> {
+        let Derived::RaceVehicle {
+            default_license_plate_text,
+            ..
+        } = &mut self.after.derived
+        else {
+            return Err(Error::Shape);
+        };
+        let length = usize::from(plate.length);
+        default_license_plate_text[..length].copy_from_slice(&plate.bytes[..length]);
+        default_license_plate_text[length] = 0;
+        Ok(self)
+    }
+
+    pub fn with_window_tint(mut self, tint: WindowTint) -> Result<Self, Error> {
+        let Derived::RaceVehicle { window_tint, .. } = &mut self.after.derived else {
+            return Err(Error::Shape);
+        };
+        *window_tint = tint.0;
+        Ok(self)
+    }
+
     /// Paint only the current car or its installed rim on the selected axle.
     /// Defaults and owned spares are not implicit paint targets.
     pub fn with_paint(
