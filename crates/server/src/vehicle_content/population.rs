@@ -62,6 +62,20 @@ pub struct Inventory {
     pub items: Arc<Collection>,
 }
 impl Population {
+    pub fn registrations(&self) -> &registrations::Registry {
+        &self.registrations
+    }
+    pub fn update_registrations(
+        &mut self,
+        previous: &registrations::Registry,
+        next: registrations::Registry,
+    ) -> Result<(), Error> {
+        if &self.registrations != previous {
+            return Err(Error::Shape);
+        }
+        self.registrations = next;
+        Ok(())
+    }
     /// Refresh the owned inventory used for later garage/world lifetimes after
     /// a validated purchase or equipment commit. No spawn or authority changes.
     pub fn refresh_inventory(
@@ -275,7 +289,11 @@ impl Population {
                     authority_components: &components,
                 },
                 &mut next.authority,
-                |name| next.registrations.mesh_level(name).ok(),
+                |name| {
+                    next.registrations
+                        .resolve_mesh(name, &mut output.messages)
+                        .ok()
+                },
             )?;
             let asset = Asset {
                 bundle: registration.asset_bundle,
@@ -436,7 +454,7 @@ impl Population {
                 entry.slot.basis(),
             ),
         };
-        let prepared = next
+        let mut prepared = next
             .registrations
             .prepare(&[&definition.bundle])
             .map_err(|_| Error::Unsupported)?;
@@ -487,7 +505,11 @@ impl Population {
                 authority_components: &components,
             },
             &mut next.authority,
-            |name| next.registrations.mesh_level(name).ok(),
+            |name| {
+                next.registrations
+                    .resolve_mesh(name, &mut prepared.messages)
+                    .ok()
+            },
         )?;
         let asset = Asset {
             bundle: registration.asset_bundle,

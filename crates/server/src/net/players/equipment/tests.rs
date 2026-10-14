@@ -136,11 +136,53 @@ fn fixture() -> (
     document["parts"]["mesh"].as_array_mut().unwrap().push(
         json!({"guid":"08".repeat(16),"class_name":"PersistantTuningItemData","kind":"ignore"}),
     );
+    // An owned alternative front rim, with a different mesh bundle and paint.
+    let mut rim = items.items[&2].clone();
+    rim.id = 9;
+    rim.definition = [9; 16];
+    let Derived::Rims { primary_paint, .. } = &mut rim.derived else {
+        panic!()
+    };
+    *primary_paint = [0.25f32.to_bits(); 3];
+    items.items.insert(9, rim.clone());
+    let mut definition = definitions
+        .iter()
+        .find(|(g, _)| *g == [2; 16])
+        .unwrap()
+        .1
+        .clone();
+    definition.default_derived = Some(rim.derived);
+    definitions.push(([9; 16], definition));
+    for family in ["customization", "wheels", "appearance", "mesh"] {
+        let mut entry = document["parts"][family]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["guid"] == "02".repeat(16))
+            .unwrap()
+            .clone();
+        entry["guid"] = json!("09".repeat(16));
+        if family == "mesh" {
+            entry["guids"] = json!(["22".repeat(16)]);
+        }
+        if family == "wheels" {
+            entry["diameter"] = json!(0.75);
+        }
+        document["parts"][family]
+            .as_array_mut()
+            .unwrap()
+            .push(entry);
+    }
+    document["vehicles"][0]["meshes"][0]["variants"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"guid":"22".repeat(16),"bundle":"wheel/upgrade"}));
     let car = items.items.get_mut(&1).unwrap();
     car.children.push(6);
     car.children.push(8);
     car.defaults.push(6);
     car.defaults.push(8);
+    car.defaults.extend([2, 3, 4, 5]);
     items.roots = items.items.keys().copied().collect();
     let catalog = Arc::new(InventoryCatalog::new(definitions, vec![]).unwrap());
     let vehicles =
@@ -242,9 +284,25 @@ fn fixture() -> (
         bank: None,
     });
     listener.vehicles = Some(Arc::new(GarageContent { vehicles, layout }));
+    let offers = nfs_services::purchase::Offers::new([[7; 16], [9; 16]])
+        .unwrap()
+        .with_vehicle_scopes(&catalog, [([1; 16], vec![[7; 16], [9; 16]])])
+        .unwrap()
+        .with_part_policy(
+            &catalog,
+            [
+                ([2; 16], 0),
+                ([3; 16], 1),
+                ([4; 16], 0),
+                ([5; 16], 1),
+                ([9; 16], 0),
+            ],
+            [([7; 16], 0), ([9; 16], 0)],
+        )
+        .unwrap();
     let profile = Service::new(repo.clone(), catalog)
         .with_persistent(tables)
-        .with_purchase_offers(nfs_services::purchase::Offers::new([[7; 16]]).unwrap())
+        .with_purchase_offers(offers)
         .bind(account);
     (
         listener,
@@ -407,6 +465,72 @@ async fn multiple_categories_are_retained_until_one_commit() {
     let after = repo.snapshot(account).unwrap();
     assert_eq!(after.generation, before.generation + 1);
     assert_eq!(after.tables, before.tables);
+}
+
+#[tokio::test]
+async fn invalid_equipment_presentation_fails_before_any_inventory_write() {
+    let (mut listener, mut jobs, repo, account, scene, player, car) = fixture();
+    let before = repo.snapshot(account).unwrap();
+    assert!(accept(&mut listener, &wire(scene, player, Some(car), 0, 7)).unwrap());
+    assert!(accept(&mut listener, &wire(scene, player, None, 5, 0)).unwrap());
+    listener.equipment.committed.front_mut().unwrap().owner.name = vec![b'x'; 1025];
+    jobs.start(&mut listener, 3, Timestamp(3));
+    assert!(!jobs.completed(&mut listener).await);
+    assert_eq!(repo.snapshot(account).unwrap(), before);
+    assert!(listener.pending.is_empty());
+    assert!(listener.pending_content.is_empty());
+}
+
+#[tokio::test]
+async fn visual_rim_edit_refreshes_mesh_and_appearance_without_replacing_the_rear() {
+    let (mut listener, mut jobs, repo, account, scene, player, car) = fixture();
+    let before = repo.snapshot(account).unwrap();
+    let physics = listener
+        .players
+        .vehicle_physics(HOST_SELECTOR as u8, listener.persona, car)
+        .unwrap();
+    assert!(accept(&mut listener, &wire(scene, player, Some(car), 0, 9)).unwrap());
+    assert!(accept(&mut listener, &wire(scene, player, None, 5, 0)).unwrap());
+    jobs.start(&mut listener, 3, Timestamp(3));
+    assert!(jobs.completed(&mut listener).await);
+    let notification = crate::net::items::tests::deliver_notification(&mut jobs);
+    assert!(notification.items.items[&1].children.contains(&9));
+    assert!(notification.items.items[&1].children.contains(&3));
+    assert!(!notification.items.items[&1].children.contains(&2));
+    assert!(notification.items.items[&1].defaults.contains(&2));
+    assert_eq!(listener.pending_content.len(), 2);
+    assert!(
+        listener
+            .population
+            .as_ref()
+            .unwrap()
+            .registrations()
+            .mesh_level("wheel/upgrade")
+            .is_ok()
+    );
+    let replication::Update::Vehicle { fields, .. } = &listener.pending[0].records[0].update else {
+        panic!()
+    };
+    assert!(
+        fields
+            .iter()
+            .any(|f| matches!(f, Some(replication::vehicle::Update::Appearance(_))))
+    );
+    assert!(
+        fields
+            .iter()
+            .any(|f| matches!(f, Some(replication::vehicle::Update::Mesh(_))))
+    );
+    assert_eq!(
+        listener
+            .players
+            .vehicle_physics(HOST_SELECTOR as u8, listener.persona, car)
+            .unwrap(),
+        physics
+    );
+    let saved = repo.snapshot(account).unwrap();
+    assert_eq!(saved.tables, before.tables);
+    assert_eq!(saved.generation, before.generation + 1);
 }
 
 #[tokio::test]

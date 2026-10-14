@@ -38,6 +38,123 @@ fn catalog() -> InventoryCatalog {
 fn who(n: u8) -> AccountId {
     AccountId::from_owned_config([n; 16]).unwrap()
 }
+
+#[test]
+fn front_and_rear_visual_slots_equip_independently_and_restore_recorded_defaults() {
+    let repo = MemoryRepository::default();
+    let account = who(1);
+    let original = setup(&repo, account);
+    let mut definitions = catalog()
+        .definitions()
+        .map(|(g, d)| (*g, d.clone()))
+        .collect::<Vec<_>>();
+    for (_, part) in &mut definitions[1..] {
+        part.class = DefinitionClass::RimsItemData;
+        part.default_derived =
+            Some(Derived::decode(DefinitionClass::RimsItemData.layout(), &[0; 52]).unwrap());
+    }
+    for guid in [[4; 16], [5; 16]] {
+        definitions.push((guid, definitions[1].1.clone()));
+    }
+    let catalog = InventoryCatalog::new(definitions, vec![]).unwrap();
+    let id = |v| ItemId::new(v).unwrap();
+    let mut car = original.items[&id(10)].clone();
+    car.sub_items.push(id(13));
+    car.default_items.push(id(13));
+    let mut stock = original.items[&id(11)].clone();
+    stock.derived = vec![0; 52];
+    let mut front = original.items[&id(12)].clone();
+    front.derived = vec![0; 52];
+    let rear = ItemRecord {
+        id: id(13),
+        definition: DefinitionGuid([4; 16]),
+        ..stock.clone()
+    };
+    let rear_new = ItemRecord {
+        id: id(14),
+        definition: DefinitionGuid([5; 16]),
+        ..stock.clone()
+    };
+    repo.apply(
+        account,
+        &Batch {
+            id: 2,
+            expected_generation: original.generation,
+            ops: vec![
+                Op::Update(car),
+                Op::Update(stock),
+                Op::Update(front),
+                Op::Insert(rear),
+                Op::Insert(rear_new),
+            ],
+        },
+        Timestamp(2),
+    )
+    .unwrap();
+    let before = repo.snapshot(account).unwrap();
+    let items = inventory::collection(&before, catalog.bindings()).unwrap();
+    let offers = Offers::new([[3; 16], [5; 16]])
+        .unwrap()
+        .with_vehicle_scopes(&catalog, [([1; 16], vec![[3; 16], [5; 16]])])
+        .unwrap();
+    let locations = [([2; 16], 0), ([3; 16], 0), ([4; 16], 1), ([5; 16], 1)];
+    assert!(
+        offers
+            .clone()
+            .with_part_policy(
+                &catalog,
+                locations[..3].iter().copied(),
+                [([3; 16], 0), ([5; 16], 0)]
+            )
+            .is_err()
+    );
+    assert!(
+        prepare(
+            account,
+            before.generation,
+            &items,
+            10,
+            12,
+            &catalog,
+            &offers
+        )
+        .is_err()
+    );
+    let offers = offers
+        .with_part_policy(&catalog, locations, [([3; 16], 0), ([5; 16], 0)])
+        .unwrap();
+    let front = prepare(
+        account,
+        before.generation,
+        &items,
+        10,
+        12,
+        &catalog,
+        &offers,
+    )
+    .unwrap();
+    assert_eq!(
+        front.preview(&items).unwrap().items[&10].children,
+        vec![13, 12]
+    );
+    let both = front
+        .with_part(&items, 14, &catalog, &offers)
+        .unwrap()
+        .with_part(&items, 12, &catalog, &offers)
+        .unwrap();
+    let saved = commit(&repo, account, &catalog, &both, Timestamp(3)).unwrap();
+    assert_eq!(saved.items[&id(10)].sub_items, vec![id(12), id(14)]);
+    assert_eq!(saved.items[&id(10)].default_items, vec![id(11), id(13)]);
+    assert_eq!(saved.tables, before.tables);
+    let items = inventory::collection(&saved, catalog.bindings()).unwrap();
+    let restore = prepare(account, saved.generation, &items, 10, 11, &catalog, &offers)
+        .unwrap()
+        .with_part(&items, 13, &catalog, &offers)
+        .unwrap();
+    let restored = commit(&repo, account, &catalog, &restore, Timestamp(4)).unwrap();
+    assert_eq!(restored.items[&id(10)].sub_items, vec![id(11), id(13)]);
+    assert_eq!(restored.items.len(), 5);
+}
 fn setup(repo: &dyn InventoryRepository, account: AccountId) -> Snapshot {
     repo.open(account).unwrap();
     let id = |n| ItemId::new(n).unwrap();

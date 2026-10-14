@@ -6,6 +6,8 @@
 //! score thresholds. No captured account values belong to this model.
 use crate::persistent::{Loaded, key};
 mod content;
+mod operator;
+pub use operator::set_for_operator;
 pub const MAX_THRESHOLDS: usize = 256;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -63,6 +65,20 @@ impl Scores {
 #[derive(Clone, Debug)]
 pub struct Thresholds(Vec<i32>);
 impl Thresholds {
+    pub fn maximum_level(&self) -> u32 {
+        self.0.len() as u32
+    }
+    /// Minimum score for an authored level. Zero is the unrestricted-offer
+    /// sentinel, not a level to assign to a player.
+    pub fn score_for_level(&self, level: u32) -> Result<i32, Error> {
+        if level == 0 {
+            return Ok(0);
+        }
+        self.0
+            .get((level - 1) as usize)
+            .copied()
+            .ok_or(Error::Shape)
+    }
     pub fn new(values: Vec<i32>) -> Result<Self, Error> {
         if values.is_empty()
             || values.len() > MAX_THRESHOLDS

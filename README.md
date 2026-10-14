@@ -10,7 +10,7 @@ The launcher prepares content from a supported installation and creates an
 independent local account. Its current validation scope and installation
 requirements are documented in that guide. See the [gameplay checklist](docs/GAMEPLAY-CHECKLIST.md)
 for tested gameplay and the prioritized garage/free-roam work remaining.
-The first upgrade candidate and local test-cash command are covered in
+The upgrade candidate and local test-cash/REP commands are covered in
 [garage upgrade development](docs/GARAGE-UPGRADES.md).
 The workspace owns these implemented components:
 

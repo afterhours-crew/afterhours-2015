@@ -64,6 +64,18 @@ fn asset_bundle(stream: u16) -> Result<u16, Error> {
 }
 
 impl Registry {
+    /// Resolve a selected part's bundle, publishing its names and registration
+    /// before the vehicle record that refers to it. The caller stages this
+    /// registry and messages until the complete vehicle update validates.
+    pub fn resolve_mesh(&mut self, name: &str, messages: &mut Vec<Message>) -> Result<u16, Error> {
+        if let Ok(level) = self.mesh_level(name) {
+            return Ok(level);
+        }
+        let prepared = self.prepare(&[name])?;
+        let level = prepared.bindings.first().ok_or(Error::Shape)?.level;
+        messages.extend(prepared.messages);
+        Ok(level)
+    }
     pub fn from_messages(messages: &[Message]) -> Result<Self, Error> {
         Bindings::from_messages(messages)?;
         let mut result = Self::default();

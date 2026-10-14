@@ -75,7 +75,7 @@ impl Edit {
             .bindings()
             .class(&selected.definition)
             .map_err(inventory::Error::from)?;
-        if !crate::purchase::performance_class(class)
+        if !offers.supports(class)
             || !selected.children.is_empty()
             || !selected.defaults.is_empty()
             || (!offers.allows(&self.before.definition, &selected.definition)
@@ -89,11 +89,9 @@ impl Edit {
             if child.owner != self.vehicle() || child.state != OWNED {
                 return Err(Error::Ownership);
             }
-            if catalog
-                .bindings()
-                .class(&child.definition)
-                .map_err(inventory::Error::from)?
-                == class
+            if offers
+                .same_slot(catalog, &child.definition, &selected.definition)
+                .map_err(|_| Error::Unsupported)?
             {
                 installed.push(id);
             }

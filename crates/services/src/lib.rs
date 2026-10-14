@@ -9,6 +9,7 @@ pub mod authentication;
 pub mod awards;
 pub mod bank;
 pub mod bootstrap;
+pub mod category_unlocks;
 pub mod challenges;
 pub mod client_state;
 pub mod control_catalogs;

@@ -24,6 +24,7 @@ pub struct Service {
     catalog: Arc<InventoryCatalog>,
     persistent: Option<Arc<crate::persistent::Catalog>>,
     offers: Option<Arc<nfs_services::purchase::Offers>>,
+    category_unlocks: Option<Arc<nfs_services::category_unlocks::Policy>>,
     workers: Arc<Semaphore>,
 }
 impl Service {
@@ -33,6 +34,7 @@ impl Service {
             catalog,
             persistent: None,
             offers: None,
+            category_unlocks: None,
             workers: Arc::new(Semaphore::new(WORKERS)),
         }
     }
@@ -42,6 +44,10 @@ impl Service {
     }
     pub fn with_purchase_offers(mut self, offers: nfs_services::purchase::Offers) -> Self {
         self.offers = Some(Arc::new(offers));
+        self
+    }
+    pub fn with_category_unlocks(mut self, policy: nfs_services::category_unlocks::Policy) -> Self {
+        self.category_unlocks = Some(Arc::new(policy));
         self
     }
     pub fn bind(&self, account: AccountId) -> Profile {
@@ -88,6 +94,7 @@ struct Equipped {
     items: Arc<nfs_world::items::Collection>,
     notification: Vec<u8>,
     edit: nfs_services::equipment::Edit,
+    presentation: crate::vehicle_content::EquipmentPresentation,
 }
 
 fn supported_request(bytes: &[u8]) -> Result<bool, nfs_world::items::Error> {
@@ -158,6 +165,17 @@ impl Profile {
                     edit
                 };
                 // Validate the exact outbound update before the durable write.
+                let preview = edit.preview(&request.items).map_err(Error::Equipment)?;
+                let presentation = request
+                    .content
+                    .vehicles
+                    .equipment(
+                        &preview,
+                        request.car,
+                        request.owner.clone(),
+                        &request.registrations,
+                    )
+                    .map_err(|_| Error::Worker)?;
                 let notification = nfs_world::items::UpdateNotification {
                     player_index: request.player_index,
                     items: edit
@@ -186,6 +204,7 @@ impl Profile {
                     items: Arc::new(items),
                     notification,
                     edit,
+                    presentation,
                 })
             })
             .await
@@ -381,7 +400,7 @@ impl Profile {
                         kind,
                     }));
                 }
-                let reply = inventory::answer_load_with_tables(
+                let reply = inventory::answer_load_with_policy(
                     &request,
                     service.repository.as_ref(),
                     account,
@@ -389,6 +408,7 @@ impl Profile {
                     1,
                     now,
                     service.persistent.as_deref(),
+                    service.category_unlocks.as_deref(),
                 )
                 .map_err(Error::Inventory)?;
                 reply
@@ -525,9 +545,11 @@ impl Exchanges {
                     items,
                     notification,
                     edit,
+                    presentation,
                 }) => {
                     let generation = loaded.generation();
-                    match listener.equipped_inventory(&request, loaded, items, &edit) {
+                    match listener.equipped_inventory(&request, loaded, items, &edit, presentation)
+                    {
                         Ok(()) => {
                             self.pending[0] = Some(Completed {
                                 name: b"Items".to_vec(),

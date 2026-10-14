@@ -5,6 +5,56 @@
 use super::*;
 
 impl Players {
+    /// Publish only inventory-derived equipment fields, validating the complete
+    /// delta before changing the owned object. Creation and motion are forbidden.
+    pub fn set_vehicle_equipment(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        id: u16,
+        body: vehicle::Body,
+    ) -> Result<Option<Record>, Error> {
+        if !self.owned_vehicles(connection, persona).contains(&id) {
+            return Err(Error::UnknownObject);
+        }
+        let Some(state::Object {
+            current: Update::Vehicle { binding, fields },
+            ..
+        }) = self.objects.get(id)
+        else {
+            return Err(Error::TypeMismatch);
+        };
+        if body.creation.is_some() || body.updates.len() != fields.len() {
+            return Err(Error::Shape);
+        }
+        let mut chassis = 0;
+        for update in body.updates.iter().flatten() {
+            match update {
+                vehicle::Update::Chassis(c)
+                    if c.physics.is_none()
+                        && c.flag.is_none()
+                        && c.custom.is_some()
+                        && c.pair.is_none() =>
+                {
+                    chassis += 1
+                }
+                vehicle::Update::Tuning(Some(_))
+                | vehicle::Update::Appearance(_)
+                | vehicle::Update::Mesh(Some(_)) => (),
+                _ => return Err(Error::Shape),
+            }
+        }
+        if chassis != 1 {
+            return Err(Error::Shape);
+        }
+        self.objects.change(
+            id,
+            Update::Vehicle {
+                binding: binding.clone(),
+                fields: body.updates,
+            },
+        )
+    }
     /// Resolve a live car through this exact owned player's participant.
     pub fn player_vehicle_item(
         &self,

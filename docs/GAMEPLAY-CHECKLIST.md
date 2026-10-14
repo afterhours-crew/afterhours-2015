@@ -27,7 +27,8 @@ remains unchecked.
 1. [ ] **Garage upgrades and customization.** Buy, equip and save changes. Start
    with one performance part, then extend to visual parts, handling/tuning, paint
    and wraps. Inventory, part definitions and transactional storage already exist;
-   editing and committing a purchase through the game is unfinished.
+   performance purchases and three handling controls now survive garage return
+   and game/server restart. Visual parts, paint and wraps remain unfinished.
 2. [ ] **Free-roam REP and unlocks.** Award driving scores, update levels and make
    newly eligible content available. Current stored-score/level read models do
    not implement earning REP.
@@ -67,13 +68,13 @@ The initial implementation is intentionally one complete supported purchase,
 not a claim that every customization menu works:
 
 - [ ] Obtain the supported transaction contract and installed item/price data.
-- [ ] Buy and equip a compatible performance part through the garage UI.
-- [ ] Deduct the supported price exactly once in the same durable transaction.
+- [x] Buy and equip a compatible performance part through the garage UI.
+- [x] Deduct the supported price exactly once in the same durable transaction.
 - [ ] Canceling an edit and insufficient funds leave the account unchanged.
 - [ ] Retries cannot duplicate the part or charge; independent accounts stay
   isolated and stale concurrent edits cannot overwrite newer changes.
-- [ ] The resulting vehicle uses the part in free roam and on garage return.
-- [ ] Restart both game and server; the part and balance remain correct.
+- [x] The resulting vehicle uses the part in free roam and on garage return.
+- [x] Restart both game and server; the part and balance remain correct.
 - [ ] Pass portable tests, protocol reference comparisons and a documented live
   run. Record limitations before checking off this acceptance.
 

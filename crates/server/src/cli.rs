@@ -419,6 +419,9 @@ fn inventory_config(args: &Args) -> Result<Option<net::InventoryProfile>, Failur
     if let Some(offers) = content.purchase_offers() {
         service = service.with_purchase_offers(offers.clone());
     }
+    if let Some(policy) = content.category_unlocks() {
+        service = service.with_category_unlocks(policy.clone());
+    }
     if let Some(persistent) = persistent {
         service = service.with_persistent(Arc::new(persistent));
     }
@@ -428,6 +431,12 @@ fn inventory_config(args: &Args) -> Result<Option<net::InventoryProfile>, Failur
 pub fn main() -> std::process::ExitCode {
     if std::env::args_os().nth(1).is_some_and(|a| a == "bank") {
         return nfs_server::bank_account::main(std::env::args_os().skip(2));
+    }
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|a| a == "reputation")
+    {
+        return nfs_server::reputation_account::main(std::env::args_os().skip(2));
     }
     if std::env::args_os()
         .nth(1)

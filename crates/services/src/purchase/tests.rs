@@ -49,6 +49,68 @@ fn request() -> PurchaseRequest {
         selection: PurchaseSelection::Definitions(vec![[2; 16]]),
     }
 }
+
+#[test]
+fn rep_requirement_checks_committed_score_and_does_not_charge_a_retry_after_reset() {
+    let repo = MemoryRepository::default();
+    let who = account(1);
+    initialize(&repo, who, 100);
+    let catalog = catalog();
+    let offers = Offers::new([[2; 16]])
+        .unwrap()
+        .with_vehicle_scopes(&catalog, [([1; 16], vec![[2; 16]])])
+        .unwrap()
+        .with_part_policy(&catalog, [], [([2; 16], 25)])
+        .unwrap();
+    let before = repo.snapshot(who).unwrap();
+    assert_eq!(
+        buy(&repo, who, &catalog, &offers, &request(), Timestamp(3)).unwrap_err(),
+        Error::Rejected(Reason::Offer)
+    );
+    assert_eq!(repo.snapshot(who).unwrap(), before);
+    for (batch, score, success) in [(30, 24, false), (31, 25, true), (32, 0, true)] {
+        let snapshot = repo.snapshot(who).unwrap();
+        repo.apply(
+            who,
+            &Batch {
+                id: batch,
+                expected_generation: snapshot.generation,
+                ops: vec![Op::SetTable(
+                    crate::persistent::key("RepValuesTable"),
+                    Table {
+                        rows: BTreeMap::from([(
+                            0,
+                            BTreeMap::from([
+                                (crate::persistent::key("RepScore"), Value::Int(score)),
+                                (crate::persistent::key("RepLevel"), Value::Int(999)),
+                            ]),
+                        )]),
+                    },
+                )],
+            },
+            Timestamp(batch),
+        )
+        .unwrap();
+        let before = repo.snapshot(who).unwrap();
+        let result = buy(
+            &repo,
+            who,
+            &catalog,
+            &offers,
+            &request(),
+            Timestamp(batch + 1),
+        );
+        assert_eq!(result.is_ok(), success);
+        if batch == 31 {
+            assert_eq!(result.unwrap().balance, Balance(81));
+        } else {
+            assert_eq!(repo.snapshot(who).unwrap(), before);
+            if batch == 32 {
+                assert!(result.unwrap().replayed);
+            }
+        }
+    }
+}
 fn initialize(repo: &dyn InventoryRepository, who: AccountId, amount: u32) {
     let snapshot = inventory::load(repo, who, &catalog(), 10, Timestamp(1)).unwrap();
     repo.apply(

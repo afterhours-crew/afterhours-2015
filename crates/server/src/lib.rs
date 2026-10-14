@@ -32,6 +32,7 @@ pub mod prepare_content;
 pub mod progression;
 pub mod recommendations;
 pub mod record;
+pub mod reputation_account;
 pub mod scene_roles;
 pub mod seeds;
 pub mod sequence_content;

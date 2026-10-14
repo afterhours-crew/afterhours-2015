@@ -18,6 +18,8 @@ pub(in crate::net) struct EquipmentRequest {
     pub player_index: u32,
     pub generation: u64,
     pub items: Arc<nfs_world::items::Collection>,
+    pub owner: replication::vehicle::Resource,
+    pub registrations: crate::vehicle_content::registrations::Registry,
 }
 #[derive(Clone, Debug, Default)]
 pub(super) struct State {
@@ -63,7 +65,7 @@ impl PlayerListener {
             Operation::Equip { vehicle, .. }
             | Operation::Dyno { vehicle, .. }
             | Operation::Handling { vehicle, .. } => {
-                let (_, car) = players
+                let (participant, car) = players
                     .player_vehicle_item(HOST_SELECTOR as u8, self.persona, call.player, vehicle)
                     .ok_or(replication::Error::UnknownObject)?;
                 if self.world_cars.contains_key(&vehicle) {
@@ -72,6 +74,22 @@ impl PlayerListener {
                 let inventory = self.inventory.as_ref().ok_or(replication::Error::Shape)?;
                 let loaded = self.persistent.as_ref().ok_or(replication::Error::Shape)?;
                 let content = self.vehicles.as_ref().ok_or(replication::Error::Shape)?;
+                let identity = players
+                    .owned_identity(HOST_SELECTOR as u8, self.persona, participant)
+                    .ok_or(replication::Error::UnknownObject)?;
+                let owner = replication::vehicle::Resource {
+                    words: [
+                        identity.identity.persona as u32,
+                        (identity.identity.persona >> 32) as u32,
+                    ],
+                    name: identity.name,
+                };
+                let registrations = self
+                    .population
+                    .as_ref()
+                    .ok_or(replication::Error::Shape)?
+                    .registrations()
+                    .clone();
                 if !inventory.slots.values().contains(&Some(car)) {
                     return Err(replication::Error::UnknownObject);
                 }
@@ -106,6 +124,8 @@ impl PlayerListener {
                         player_index: u32::from(player.runtime_index),
                         generation: loaded.generation(),
                         items: inventory.items.clone(),
+                        owner,
+                        registrations,
                     });
                 if edit.car != car
                     || edit.vehicle != vehicle
@@ -151,6 +171,7 @@ impl PlayerListener {
         loaded: Arc<crate::persistent::Loaded>,
         items: Arc<nfs_world::items::Collection>,
         edit: &nfs_services::equipment::Edit,
+        presentation: crate::vehicle_content::EquipmentPresentation,
     ) -> Result<(), replication::Error> {
         let old = self.inventory.as_ref().ok_or(replication::Error::Shape)?;
         let before = self.persistent.as_ref().ok_or(replication::Error::Shape)?;
@@ -177,19 +198,17 @@ impl PlayerListener {
         {
             return Err(replication::Error::Shape);
         }
-        let content = self
-            .vehicles
-            .as_ref()
-            .ok_or(replication::Error::Unsupported)?;
-        let custom = content.vehicles.customization(&items, request.car)?;
         let mut players = self.players.clone();
-        let record = players.set_vehicle_customization(
+        let record = players.set_vehicle_equipment(
             HOST_SELECTOR as u8,
             self.persona,
             request.vehicle,
-            custom,
+            presentation.body,
         )?;
         if record.is_some() && self.pending.len() >= MAX_PENDING {
+            return Err(replication::Error::Bound);
+        }
+        if presentation.messages.len() > MAX_PENDING.saturating_sub(self.pending_content.len()) {
             return Err(replication::Error::Bound);
         }
         let inventory = Inventory {
@@ -198,6 +217,7 @@ impl PlayerListener {
         };
         let mut population = self.population.clone();
         if let Some(population) = &mut population {
+            population.update_registrations(&request.registrations, presentation.registrations)?;
             population.refresh_inventory(
                 &players,
                 HOST_SELECTOR as u8,
@@ -210,6 +230,7 @@ impl PlayerListener {
         self.population = population;
         self.inventory = Some(inventory);
         self.persistent = Some(loaded);
+        self.pending_content.extend(presentation.messages);
         if let Some(record) = record {
             self.pending.push_back(Section {
                 float_bits: None,

@@ -2,7 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! Atomic ownership of one unique, car-owned performance part. Equipping is a
+//! Atomic ownership of one unique, car-owned supported part. Equipping is a
 //! separate ItemBuilder transaction. The caller supplies an explicit offer set;
 //! merely appearing in the item catalog does not authorize an offer or unlock.
 use crate::{bank::Balance, inventory};
@@ -16,7 +16,9 @@ use nfs_world_core::items::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-const MAX_OFFERS: usize = 256;
+mod policy;
+pub use policy::{PartPolicy, part_class, spatial_class, visual_class};
+const MAX_OFFERS: usize = items::MAX_COLLECTION;
 const BATCH_NAMESPACE: u64 = 1 << 62;
 
 /// Performance classes whose leaf replacement is keyed by exact class. Visual
@@ -55,12 +57,13 @@ pub fn performance_class(class: DefinitionClass) -> bool {
     )
 }
 
-/// Offers must already be resolved from installed compatibility/unlock policy.
+/// Offers and their requirements come from installed compatibility/unlock policy.
 /// No client-supplied prices or definitions are added to this set on demand.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Offers {
     definitions: BTreeSet<Guid>,
     vehicle_scopes: Option<BTreeMap<Guid, BTreeSet<Guid>>>,
+    part_policy: Option<PartPolicy>,
 }
 impl Offers {
     pub fn definitions(&self) -> impl Iterator<Item = &Guid> {
@@ -120,6 +123,7 @@ impl Offers {
         Ok(Self {
             definitions: set,
             vehicle_scopes: None,
+            part_policy: None,
         })
     }
 }
@@ -274,9 +278,9 @@ pub fn buy(
         return Err(Error::Rejected(Reason::Offer));
     }
     let definition = catalog.definition(&guid).map_err(inventory::Error::from)?;
-    // The offer set has already resolved compatibility and unlocks. Purchase
-    // still enforces the supported leaf ownership/default construction contract.
-    if !performance_class(definition.class)
+    // The offer set excludes unknown unlock conditions. Purchase enforces the
+    // supported leaf construction contract, vehicle scope and saved REP score.
+    if !offers.supports(definition.class)
         || definition.quantity != 1
         || !definition.flags.requires_owner
         || !definition.flags.purchasable
@@ -341,6 +345,12 @@ pub fn buy(
             item.owner == Some(owner) && item.definition.0 == guid && item.state == items::OWNED
         }) {
             return Err(Error::Rejected(Reason::AlreadyOwned));
+        }
+        // Check the committed score on each retry, in the same generation as
+        // the debit. Previously completed purchases remain replayable even if
+        // an operator later resets REP; no second item or debit is generated.
+        if !offers.unlocked(&snapshot, &guid)? {
+            return Err(Error::Rejected(Reason::Offer));
         }
         let balance = Balance::from_snapshot(&snapshot)?
             .debit(definition.buy_price)

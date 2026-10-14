@@ -175,6 +175,70 @@ fn customization_updates_only_owned_chassis_and_preserves_motion_and_identity() 
             .is_none()
     );
 }
+
+#[test]
+fn equipment_delta_rejects_foreign_cars_motion_and_creation_and_keeps_identity() {
+    let mut world = Players::default();
+    let (_, participant) = player(&mut world, 1, 101);
+    let car = car(&mut world, 1, 101, participant, 10);
+    let before = world.objects().get(car).unwrap().clone();
+    let Update::Vehicle { fields, .. } = &before.current else {
+        panic!()
+    };
+    let Some(vehicle::Update::Chassis(chassis)) = &fields[1] else {
+        panic!()
+    };
+    let mut custom = vehicle::Customization {
+        value: 0,
+        list_a: vec![],
+        list_b: vec![],
+        index: None,
+        values: [0; 2],
+        flag: false,
+        tuning: [0; 32],
+    };
+    custom.values[0] = 2;
+    let delta = vehicle::Body {
+        creation: None,
+        updates: vec![
+            None,
+            Some(vehicle::Update::Chassis(Box::new(vehicle::ChassisUpdate {
+                physics: None,
+                flag: None,
+                custom: Some(custom),
+                pair: None,
+            }))),
+        ],
+    };
+    assert_eq!(
+        world.set_vehicle_equipment(2, 101, car, delta.clone()),
+        Err(Error::UnknownObject)
+    );
+    let mut invalid = delta.clone();
+    invalid.updates[1] = fields[1].clone();
+    assert!(world.set_vehicle_equipment(1, 101, car, invalid).is_err());
+    let mut invalid = delta.clone();
+    invalid.updates[0] = Some(vehicle::Update::Root(None));
+    assert!(world.set_vehicle_equipment(1, 101, car, invalid).is_err());
+    assert_eq!(world.objects().get(car), Some(&before));
+    assert!(
+        world
+            .set_vehicle_equipment(1, 101, car, delta.clone())
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(world.objects().get(car).unwrap().initial, before.initial);
+    assert_eq!(
+        world.vehicle_physics(1, 101, car).unwrap(),
+        chassis.physics.clone().unwrap()
+    );
+    assert!(
+        world
+            .set_vehicle_equipment(1, 101, car, delta)
+            .unwrap()
+            .is_none()
+    );
+}
 #[test]
 fn marker_moves_clears_and_rebinds_to_three_car_lifetimes() {
     let mut world = Players::default();

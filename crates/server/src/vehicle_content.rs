@@ -55,7 +55,81 @@ pub struct Request<'a> {
     pub authority_components: &'a [u64],
 }
 
+#[derive(Clone, Debug)]
+pub struct EquipmentPresentation {
+    pub body: Body,
+    pub registrations: registrations::Registry,
+    pub messages: Vec<nfs_world::content::Message>,
+}
+
 impl Content {
+    /// Build and encode all inventory-derived components before an equipment
+    /// transaction commits. Motion, authority and initial creation are excluded.
+    pub fn equipment(
+        &self,
+        items: &Collection,
+        vehicle: u64,
+        owner: Resource,
+        registrations: &registrations::Registry,
+    ) -> Result<EquipmentPresentation, Error> {
+        let item = items.items.get(&vehicle).ok_or(Error::UnknownObject)?;
+        let d = self
+            .definition(&item.definition)
+            .ok_or(Error::Unsupported)?;
+        let custom = self.customization(items, vehicle)?;
+        let wheels = wheel_customization::State::from_vehicle(
+            items,
+            &self.wheels,
+            vehicle,
+            d.wheel_baseline,
+        )?;
+        let appearance = appearance::State::from_vehicle(
+            items,
+            &self.appearance,
+            vehicle,
+            &d.appearance,
+            owner,
+        )?;
+        let mut registrations = registrations.clone();
+        let mut messages = Vec::new();
+        let mesh = mesh::State::from_vehicle(
+            items,
+            &self.meshes,
+            vehicle,
+            &d.meshes,
+            wheels.tire_indices(),
+            |name| registrations.resolve_mesh(name, &mut messages).ok(),
+        )?;
+        let updates = d
+            .profile
+            .kinds()
+            .iter()
+            .map(|kind| {
+                Ok(match kind {
+                    Kind::Chassis => Some(Update::Chassis(Box::new(ChassisUpdate {
+                        physics: None,
+                        flag: None,
+                        custom: Some(custom.clone()),
+                        pair: None,
+                    }))),
+                    Kind::Tuning => Some(wheels.update(true)),
+                    Kind::Appearance => Some(appearance.update(63)?),
+                    Kind::Mesh(_) => Some(mesh.update(true)),
+                    _ => None,
+                })
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        let body = Body {
+            creation: None,
+            updates,
+        };
+        body.encode(&d.profile)?;
+        Ok(EquipmentPresentation {
+            body,
+            registrations,
+            messages,
+        })
+    }
     pub fn transmission_values(&self, items: &Collection, vehicle: u64) -> Result<[u8; 2], Error> {
         self.custom.tuning().transmission_values(items, vehicle)
     }

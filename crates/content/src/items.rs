@@ -14,12 +14,13 @@
 use crate::Error;
 use crate::scan::Assets;
 use nfs_frostbite::ebx::{Fields, Object, Value};
-use nfs_services::item_content::{FORMAT, ItemContent, SCOPED_PURCHASE_VERSION};
+use nfs_services::item_content::{FORMAT, ItemContent, PART_POLICY_VERSION};
 use nfs_world_core::items::{DefinitionClass, Layout};
 use serde_json::{Value as Json, json};
 
 pub const ITEM_SYSTEM: &str = "items/gameitemsystem";
 const PLATE_TEXT_BYTES: usize = 8;
+mod unlocks;
 
 enum Slot {
     Word(&'static str),
@@ -210,12 +211,10 @@ fn definition(assets: &mut Assets, object: &Object) -> Result<Json, Error> {
     }))
 }
 
-/// Initial purchase scope: unrestricted leaf performance parts without REP
-/// progression. Unknown requirements never become an implicit unlocked offer.
+/// Supported leaf performance/visual parts. REP-only requirements are resolved
+/// separately; other unlock conditions never become implicit unlocked offers.
 fn initial_offer(object: &Object) -> Result<bool, Error> {
-    if !DefinitionClass::from_name(&object.class)
-        .is_some_and(nfs_services::purchase::performance_class)
-    {
+    if !DefinitionClass::from_name(&object.class).is_some_and(nfs_services::purchase::part_class) {
         return Ok(false);
     }
     let f = &object.fields;
@@ -235,12 +234,17 @@ fn initial_offer(object: &Object) -> Result<bool, Error> {
         && flag("RequiresOwner")?
         && !flag("UsesScope")?
         && word(f, &object.class, "Quantity")? == 1
-        && word(f, &object.class, "UnlocksAtRepLevel")? == 0
-        && f.get("UnlockCriteriaDescriptionID")
-            .and_then(Value::as_str)
-            .ok_or_else(|| missing(&object.class, "UnlockCriteriaDescriptionID"))?
-            .is_empty()
-        && empty("SortedScope")?
+        && word(f, &object.class, "UnlocksAtRepLevel")?
+            <= nfs_services::reputation::MAX_THRESHOLDS as u32
+        && matches!(
+            f.get("UnlockCriteriaDescriptionID")
+                .and_then(Value::as_str)
+                .ok_or_else(|| missing(&object.class, "UnlockCriteriaDescriptionID"))?,
+            "" | "ID_UNLOCKED_AT_REP_LEVEL"
+        )
+        // UsesScope is false above: an authored but inactive part scope must
+        // not suppress shared wheels. The car's active scope still determines
+        // compatibility at purchase and equip.
         && empty("SortedRestrictions")?
         && empty("SubItems")?
         && empty("AdditionalItems")?)
@@ -273,8 +277,13 @@ fn vehicle_scope(object: &Object) -> Result<Option<Json>, Error> {
     ))
 }
 
-/// Build the canonical `nfs-item-definitions` version 4 document.
+/// Build the canonical `nfs-item-definitions` version 5 document.
 pub fn build(assets: &mut Assets) -> Result<Vec<u8>, Error> {
+    let thresholds = nfs_services::reputation::Thresholds::from_json(
+        &serde_json::from_slice(&crate::reputation::build(assets)?)
+            .map_err(|_| Error::Content("REP thresholds encoding".into()))?,
+    )
+    .map_err(|_| Error::Content("REP thresholds invalid".into()))?;
     let system = assets
         .objects(ITEM_SYSTEM)?
         .first()
@@ -284,6 +293,8 @@ pub fn build(assets: &mut Assets) -> Result<Vec<u8>, Error> {
     let mut definitions = Vec::new();
     let mut purchase_offers = Vec::new();
     let mut vehicle_scopes = Vec::new();
+    let mut part_locations = Vec::new();
+    let mut purchase_requirements = Vec::new();
     for value in system
         .fields
         .get("Items")
@@ -291,10 +302,27 @@ pub fn build(assets: &mut Assets) -> Result<Vec<u8>, Error> {
         .ok_or_else(|| missing("ItemSystemData", "Items"))?
     {
         let (_, object) = assets.resolve(value.as_pointer())?;
+        if DefinitionClass::from_name(&object.class)
+            .is_some_and(nfs_services::purchase::spatial_class)
+        {
+            let location = match object.fields.get("Location") {
+                Some(Value::Enum {
+                    value: value @ 0..=1,
+                    ..
+                }) => *value,
+                _ => return Err(missing(&object.class, "Location")),
+            };
+            part_locations.push(json!({"definition":nfs_frostbite::hex(&object.guid.ok_or_else(|| missing(&object.class,"exported GUID"))?),"location":location}));
+        }
         if let Some(scope) = vehicle_scope(&object)? {
             vehicle_scopes.push(scope);
         }
         if initial_offer(&object)? {
+            let level = word(&object.fields, &object.class, "UnlocksAtRepLevel")?;
+            let score = thresholds.score_for_level(level).map_err(|_| {
+                Error::Content("part REP level exceeds installed thresholds".into())
+            })?;
+            purchase_requirements.push(json!({"definition":nfs_frostbite::hex(&object.guid.ok_or_else(|| missing(&object.class,"exported GUID"))?),"minimum_rep_score":score}));
             purchase_offers.push(nfs_frostbite::hex(
                 &object
                     .guid
@@ -306,12 +334,15 @@ pub fn build(assets: &mut Assets) -> Result<Vec<u8>, Error> {
     let initial = references(assets, &system, "Inventory")?;
     let document = json!({
         "format": FORMAT,
-        "version": SCOPED_PURCHASE_VERSION,
+        "version": PART_POLICY_VERSION,
         "build_sha256": nfs_services::SUPPORTED_BUILD_SHA256,
         "definitions": definitions,
         "initial_definitions": initial,
         "purchase_offers": purchase_offers,
         "vehicle_scopes": vehicle_scopes,
+        "part_locations":part_locations,
+        "purchase_requirements":purchase_requirements,
+        "category_unlocks":unlocks::build(assets, &thresholds)?,
     });
     // The consuming loader validates classes, layouts, references and bounds;
     // its export is the canonical form written to the cache.
@@ -351,7 +382,7 @@ mod offer_tests {
         assert_eq!(vehicle_scope(&object).unwrap(), None);
     }
     #[test]
-    fn only_explicit_unrestricted_entry_parts_become_offers() {
+    fn only_explicit_leaf_parts_with_known_unlocks_become_offers() {
         let mut fields = std::collections::BTreeMap::new();
         for name in ["Purchasable", "RequiresOwner"] {
             fields.insert(name.into(), Value::Bool(true));
@@ -384,6 +415,8 @@ mod offer_tests {
             "NosTuningItemData",
             "EcuItemData",
             "SteeringTuningItemData",
+            "HoodItemData",
+            "RimsItemData",
         ] {
             assert!(
                 initial_offer(&Object {
@@ -394,10 +427,10 @@ mod offer_tests {
             );
         }
         for class in [
-            "HoodItemData",
-            "RimsItemData",
             "CurrencyItemData",
             "RaceVehicleItemData",
+            "BodyKitItemData",
+            "LiveryCustomizationItemData",
         ] {
             assert!(
                 !initial_offer(&Object {
@@ -408,7 +441,7 @@ mod offer_tests {
             );
         }
         for (key, value) in [
-            ("UnlocksAtRepLevel", Value::UInt32(2)),
+            ("UnlocksAtRepLevel", Value::UInt32(257)),
             ("Purchasable", Value::Bool(false)),
             ("UsesScope", Value::Bool(true)),
             ("Deprecated", Value::Bool(true)),
@@ -434,6 +467,36 @@ mod offer_tests {
                 .1 = value;
             assert!(!initial_offer(&changed).unwrap(), "accepted {key}");
         }
+        let mut restricted = original.clone();
+        for (name, value) in &mut restricted.fields.0 {
+            if name == "UnlocksAtRepLevel" {
+                *value = Value::UInt32(2);
+            }
+            if name == "UnlockCriteriaDescriptionID" {
+                *value = Value::String("ID_UNLOCKED_AT_REP_LEVEL".into());
+            }
+        }
+        assert!(initial_offer(&restricted).unwrap());
+        // Shared visual parts may retain an inactive scope naming another car.
+        // Candidate compatibility comes from the current car's active scope.
+        let mut shared = original.clone();
+        shared.class = "RimsItemData".into();
+        shared
+            .fields
+            .0
+            .iter_mut()
+            .find(|(k, _)| k == "SortedScope")
+            .unwrap()
+            .1 = Value::Array(vec![Value::Guid([9; 16])]);
+        assert!(initial_offer(&shared).unwrap());
+        shared
+            .fields
+            .0
+            .iter_mut()
+            .find(|(k, _)| k == "UsesScope")
+            .unwrap()
+            .1 = Value::Bool(true);
+        assert!(!initial_offer(&shared).unwrap());
         let mut missing = original;
         missing
             .fields
