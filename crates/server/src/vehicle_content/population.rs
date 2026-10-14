@@ -355,7 +355,8 @@ impl Population {
         Ok(removed)
     }
     /// Garage exit: remove the participant's primary garage car and re-create
-    /// it as a world car at the layout's world spawn (official E748 shape:
+    /// it as a world car at the configured spawn, or at its installed garage
+    /// resting pose when an exit destination is available (official E748 shape:
     /// same bundle scene and gameplay blueprint, sub id 2, driveable chassis).
     pub fn spawn_world(
         &mut self,
@@ -365,7 +366,9 @@ impl Population {
         content: &Content,
         layout: &Layout,
     ) -> Result<WorldSpawn, Error> {
-        let spawn = layout.world_spawn().ok_or(Error::Unsupported)?;
+        if layout.world_spawn().is_none() && layout.exit_teleport().is_none() {
+            return Err(Error::Unsupported);
+        }
         let identity = players
             .owned_identity(owner.connection, owner.persona, owner.participant)
             .ok_or(Error::UnknownObject)?;
@@ -392,6 +395,19 @@ impl Population {
         let definition = content
             .definition(&item.definition)
             .ok_or(Error::Unsupported)?;
+        // Installation-derived layouts supply the exit teleport, not a sampled
+        // pre-teleport root pose. Preserve the owned garage car's resting pose
+        // for the swap; the normal readiness handshake moves it to the exit.
+        let (position, basis) = match layout.world_spawn() {
+            Some(spawn) => (spawn.locator(), spawn.basis()),
+            None => (
+                definition
+                    .resting
+                    .position_at(entry.slot.locator())?
+                    .map(|v| v.map_or(0., f32::from_bits)),
+                entry.slot.basis(),
+            ),
+        };
         let prepared = next
             .registrations
             .prepare(&[&definition.bundle])
@@ -431,8 +447,8 @@ impl Population {
             Request {
                 items: &inventory.items,
                 vehicle: entry.item,
-                locator: spawn.locator(),
-                basis: spawn.basis(),
+                locator: position,
+                basis,
                 origin: [0.; 3],
                 speed: Some(0.),
                 connection: Some(owner.connection),

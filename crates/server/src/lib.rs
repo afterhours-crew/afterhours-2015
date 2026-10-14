@@ -20,6 +20,7 @@ pub mod glass;
 pub mod identity;
 pub mod install_content;
 pub mod limits;
+pub mod local_setup;
 pub mod lsx;
 pub mod matchmaking_session;
 pub mod matchmaking_status;

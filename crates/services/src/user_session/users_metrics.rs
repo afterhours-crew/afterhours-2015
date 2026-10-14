@@ -19,7 +19,7 @@ pub enum State {
 pub struct Followup {
     initial: Option<users_followup::Followup>,
     current: Vec<u8>,
-    aliases: [Vec<u8>; 4],
+    aliases: Vec<Vec<u8>>,
     state: State,
     completed: bool,
     previous: Option<(Vec<u8>, Vec<u8>)>,
@@ -52,7 +52,7 @@ impl Followup {
         Ok(Self {
             initial: Some(users_followup::Followup::new(initial_user_added_frame)?),
             current: Vec::new(),
-            aliases: std::array::from_fn(|_| Vec::new()),
+            aliases: Vec::new(),
             state: State::Network,
             completed: false,
             previous: None,
@@ -87,7 +87,7 @@ impl Followup {
         self.state = State::ObserveOnly;
         self.initial = None;
         self.current = Vec::new();
-        self.aliases = std::array::from_fn(|_| Vec::new());
+        self.aliases.clear();
     }
 
     fn next(&mut self, request: &[u8]) -> Result<Option<Vec<Vec<u8>>>, Failure> {
@@ -105,10 +105,12 @@ impl Followup {
                         .network_info
                         .and_then(|i| i.ping_site_latency_by_alias)
                         .ok_or(Failure::Reply)?;
-                    if aliases.0.len() != 4 || output.len() != 2 {
+                    if !(1..=users_followup::MAX_PING_SITES).contains(&aliases.0.len())
+                        || output.len() != 2
+                    {
                         return Err(Failure::Reply);
                     }
-                    self.aliases = std::array::from_fn(|i| aliases.0[i].0.to_vec());
+                    self.aliases = aliases.0.iter().map(|(name, _)| name.to_vec()).collect();
                     self.current = frame(&output[1])?.body.to_vec();
                     self.state = State::Hardware;
                 } else {
@@ -159,7 +161,7 @@ impl Followup {
         let latency = info
             .ping_site_latency_by_alias
             .ok_or(Failure::IneligibleRequest)?;
-        if latency.0.len() != 4
+        if latency.0.len() != self.aliases.len()
             || latency
                 .0
                 .iter()

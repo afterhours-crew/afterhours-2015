@@ -193,7 +193,8 @@ async fn settings_ack_is_durable_and_reads_refresh_across_connections() {
     let store = std::sync::Arc::new(
         Store::open(Settings::default(), Some((state.clone(), account))).unwrap(),
     );
-    let (recorder, thread) = record::start(&root.0, &root.output()).unwrap();
+    let (recorder, thread) =
+        record::start_with_options(&root.0, &root.output(), record::Options::raw()).unwrap();
     let (mut client, mut server) = pair().await;
     let server_store = store.clone();
     let task = tokio::spawn(async move {
@@ -272,7 +273,8 @@ async fn settings_persistence_failure_sends_no_success_reply() {
     let path = nfs_storage::settings::Repository::open_owned_directory(&state)
         .unwrap()
         .path(account);
-    let (recorder, thread) = record::start(&root.0, &root.output()).unwrap();
+    let (recorder, thread) =
+        record::start_with_options(&root.0, &root.output(), record::Options::raw()).unwrap();
     let (mut client, mut server) = pair().await;
     let task = tokio::spawn(async move {
         let mut handler = SettingsHandler {
@@ -318,7 +320,8 @@ async fn settings_persistence_failure_sends_no_success_reply() {
 #[tokio::test]
 async fn concatenated_requests_get_ordered_replies_and_exact_recording() {
     let root = Root::new("concat");
-    let (recorder, thread) = record::start(&root.0, &root.output()).unwrap();
+    let (recorder, thread) =
+        record::start_with_options(&root.0, &root.output(), record::Options::raw()).unwrap();
     let (mut client, mut server) = pair().await;
     let requests = [frame(1, 5, 1, b"a"), frame(1, 5, 2, b"bb")];
     let task = tokio::spawn(async move {
@@ -372,7 +375,8 @@ async fn concatenated_requests_get_ordered_replies_and_exact_recording() {
 #[tokio::test]
 async fn byte_by_byte_frame_is_handled_once_complete() {
     let root = Root::new("bytewise");
-    let (recorder, thread) = record::start(&root.0, &root.output()).unwrap();
+    let (recorder, thread) =
+        record::start_with_options(&root.0, &root.output(), record::Options::raw()).unwrap();
     let (mut client, mut server) = pair().await;
     let request = frame(1, 9, 3, b"slow body");
     let task = tokio::spawn(async move {
@@ -409,7 +413,8 @@ async fn byte_by_byte_frame_is_handled_once_complete() {
 #[tokio::test]
 async fn unsupported_request_gets_no_reply_and_later_requests_are_still_served() {
     let root = Root::new("unsupported");
-    let (recorder, thread) = record::start(&root.0, &root.output()).unwrap();
+    let (recorder, thread) =
+        record::start_with_options(&root.0, &root.output(), record::Options::raw()).unwrap();
     let (mut client, mut server) = pair().await;
     let requests = [
         frame(1, 5, 1, b""),
@@ -464,7 +469,8 @@ async fn unsupported_request_gets_no_reply_and_later_requests_are_still_served()
 #[tokio::test]
 async fn oversized_header_closes_the_connection_without_reply() {
     let root = Root::new("oversized");
-    let (recorder, thread) = record::start(&root.0, &root.output()).unwrap();
+    let (recorder, thread) =
+        record::start_with_options(&root.0, &root.output(), record::Options::raw()).unwrap();
     let (mut client, mut server) = pair().await;
     let mut header = frame(1, 5, 1, b"");
     header[..4].copy_from_slice(&u32::MAX.to_be_bytes());
@@ -496,7 +502,8 @@ async fn oversized_header_closes_the_connection_without_reply() {
 #[tokio::test]
 async fn idle_connection_ends_and_keeps_partial_input() {
     let root = Root::new("idle");
-    let (recorder, thread) = record::start(&root.0, &root.output()).unwrap();
+    let (recorder, thread) =
+        record::start_with_options(&root.0, &root.output(), record::Options::raw()).unwrap();
     let (mut client, mut server) = pair().await;
     let partial = &frame(1, 5, 1, b"abc")[..10];
     let task = tokio::spawn(async move {

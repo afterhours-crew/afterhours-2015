@@ -5,8 +5,10 @@ servers as the goals. This is the canonical home for runtime code and its
 first-party dependencies.
 
 Components arrive incrementally once their behavior is understood and tested.
-The standalone server now builds here; operating a compatible garage requires
-separately supplied content and account state. The workspace owns
+The standalone server and [Windows launcher](docs/LOCAL-LAUNCHER.md) build here.
+The launcher prepares content from a supported installation and creates an
+independent local account. Its current validation scope and installation
+requirements are documented in that guide. The workspace owns
 these implemented components:
 
 | Component | Responsibility |
@@ -28,12 +30,43 @@ Tests use constructed inputs, standard cryptographic vectors and temporary
 databases. Game files and service access are unnecessary. See the
 [contribution and promotion process](CONTRIBUTING.md).
 
+## Build and run on Windows
+
+Afterhours is distributed as source: **no server executable or installer is
+included**. Start with the [Windows setup guide](docs/LOCAL-LAUNCHER.md), which
+lists the build tools, supported game installation and activation requirements.
+Once those prerequisites are installed, open an ordinary PowerShell 7 window:
+
+```powershell
+git clone https://github.com/Afterhours-Crew/afterhours-2015.git
+Set-Location afterhours-2015
+cargo build --release -p nfs-server --locked
+if ($LASTEXITCODE -ne 0) { throw 'Server build failed; read the Cargo error above.' }
+./launcher/Start-Afterhours.ps1 -GameDirectory 'F:\EA Games\Need for Speed'
+```
+
+Replace the game path with your installation directory. The build produces
+`target/release/nfs-server.exe`. The PowerShell script prepares local content and
+an account, starts both the server and game, and keeps logs visible in the terminal.
+Wait for `ready` before pressing Space. Normal game exit also stops the server.
+Running Afterhours does not require administrator access; installing third-party
+build tools may. No private checkout, copied profile or database service is needed.
+
+For custom build output paths, saved data, setup checks and troubleshooting, see
+the [running instructions](docs/LOCAL-LAUNCHER.md#build-from-source).
+Developers can also [run just the server](crates/server/README.md#run-only-the-server-on-windows).
+
 ## Build and test
 
 Install Rust through rustup and a native C toolchain (MSVC Build Tools on Windows,
-or a C compiler on Linux). `rust-toolchain.toml` selects Rust 1.98.1, rustfmt and
+or a C compiler on Linux), and Perl for the vendored OpenSSL build (for example,
+Strawberry Perl on Windows, with `perl` on PATH). Windows also needs NASM on PATH
+for OpenSSL assembly. `rust-toolchain.toml` selects Rust 1.98.1, rustfmt and
 Clippy. SQLite is built from the bundled dependency; no database service is needed.
 Cargo downloads locked dependencies on the first build.
+The [Windows prerequisite checklist](docs/LOCAL-LAUNCHER.md#install-the-build-tools)
+links the installers and names the required components. The commands below build
+and check the entire workspace; they do not start the game.
 
 ```sh
 cargo build --workspace --locked
@@ -45,13 +78,14 @@ cargo test --workspace --locked
 Once the toolchain and dependencies are cached, add `--offline` to Cargo build,
 Clippy and test commands. No private repository, account profile or recording is
 needed. Passing these tests establishes the covered component behavior, not
-offline play or launcher independence. The account creation command generates
-independent local identities and state; client startup with newly created state
-and complete garage mutations remain unfinished. A guarded local launch procedure
+offline play or launcher independence. New local accounts start after the
+unsupported scripted prologue; complete progression and garage mutations remain
+unfinished. A guarded local launch procedure
 has reached free roam after a Windows restart without the EA app or service and
-with external game traffic blocked. Packaging that procedure and resolving the
-remaining installation/cache scope are separate from the LSX listener; see
-[local launcher validation](crates/server/README.md#local-launcher-ipc).
+with external game traffic blocked. The public source launcher now supplies
+setup, process ownership and temporary routing without administrator privileges;
+its validation is reported separately in the [running instructions](docs/LOCAL-LAUNCHER.md).
+Existing installation registration and activation-cache requirements remain.
 
 The world attribute service consumes a committed readiness permit, validates the
 current group-to-world association and builds a typed notification. The association

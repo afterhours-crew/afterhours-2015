@@ -9,7 +9,7 @@ use nfs_fire2::{Fields, Frame};
 use nfs_protocol::util::*;
 use std::net::{Ipv4Addr, SocketAddr};
 mod content;
-pub use content::Config;
+pub use content::{Config, local_configuration};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {

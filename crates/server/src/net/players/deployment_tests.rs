@@ -19,6 +19,226 @@ fn content() -> WorldContent {
 }
 
 #[test]
+fn sustained_driving_keeps_physics_and_minimap_in_one_bounded_frame() {
+    use crate::vehicle_content::population::{Owner, tests as population_tests};
+    use nfs_world::{
+        bits::BitWriter,
+        replication::{
+            Update,
+            sublevel::ordinary,
+            vehicle::{Vector, movement::Sample},
+        },
+        world_activation::{Catalog, Site},
+    };
+    let persona = 0x100000003;
+    let (mut population, mut players, vehicles, layout, items, _) = population_tests::fixture();
+    let player = players
+        .create(
+            HOST_SELECTOR as u8,
+            persona,
+            Request {
+                name: b"Moving driver".to_vec(),
+                flag: false,
+                slot: 0,
+            },
+        )
+        .unwrap()
+        .unwrap()
+        .id;
+    let participant = players
+        .join(HOST_SELECTOR as u8, persona, player)
+        .unwrap()
+        .unwrap()
+        .id;
+    players
+        .create_actor(HOST_SELECTOR as u8, persona, participant)
+        .unwrap();
+    let layout = population_tests::world_layout(&layout);
+    let owner = || Owner {
+        connection: HOST_SELECTOR as u8,
+        persona,
+        participant,
+    };
+    let inventory = population_tests::inventory(items);
+    population
+        .spawn(
+            &mut players,
+            owner(),
+            inventory.clone(),
+            &vehicles,
+            &layout,
+            [0.; 3],
+        )
+        .unwrap();
+    let car = population
+        .spawn_world(&mut players, owner(), &inventory, &vehicles, &layout)
+        .unwrap()
+        .records[0]
+        .id;
+    let key = 99;
+    let profiles = Content::new(vec![(
+        key,
+        Profile::new(
+            false,
+            &[
+                Kind::Noop,
+                Kind::RpcBool,
+                Kind::Rpc,
+                Kind::RpcFourReferences,
+            ],
+        )
+        .unwrap(),
+    )])
+    .unwrap();
+    let scene = ordinary::creation(
+        99,
+        key,
+        None,
+        nfs_protocol::world::rpc::Serial::new(0).unwrap(),
+        &ordinary::unpopulated(profiles.profile(key).unwrap()).unwrap(),
+        &profiles,
+    )
+    .unwrap();
+    players
+        .create_scenes(&[99], vec![scene], &profiles)
+        .unwrap();
+    let mut roles = content().roles.unwrap();
+    roles.free_roam = Some(Catalog {
+        volumes: vec![],
+        presence: Site {
+            scene_key: key,
+            serializer: 1,
+        },
+        streamed: Site {
+            scene_key: key,
+            serializer: 2,
+        },
+        location: Site {
+            scene_key: key,
+            serializer: 3,
+        },
+    });
+    // Complete the initial view and map creation before steady movement.
+    players.sync_player_views().unwrap();
+    players.sync_player_manager().unwrap();
+    let map = players
+        .sync_location_service(
+            HOST_SELECTOR as u8,
+            persona,
+            &BTreeMap::from([(participant, car)]),
+            [0.; 3],
+            roles.free_roam.as_ref().unwrap().location,
+        )
+        .unwrap()[0]
+        .id;
+    let mut sample = Sample {
+        physics: players
+            .vehicle_physics(HOST_SELECTOR as u8, persona, car)
+            .unwrap(),
+        flag: true,
+    };
+    let mut listener = PlayerListener::new(persona);
+    listener.players = players;
+    listener.roles = Some(roles);
+    listener.world_cars.insert(car, (participant, false));
+    // At ten accepted reports per second, a second frame for the minimap
+    // would grow the queue even with a conservative ten-frame/second drain.
+    let mut previous = None;
+    for step in 0..600u32 {
+        listener.world_ms = u64::from(step) * 100;
+        let x = step as f32 * 8.;
+        sample.physics.identity_words = [(5f64.to_bits() >> 32) as u32, 0, step + 150];
+        sample.physics.position = Vector::from_position([x, 2., 40.], [0.; 3], 7).unwrap();
+        let (header, body) = sample.encode().unwrap();
+        let mut wire = BitWriter::new();
+        wire.put(1 << frame::MOVEMENT, 6)
+            .put_span(header.span())
+            .put(1, 6)
+            .put(u64::from(car), 16)
+            .put(0, 4)
+            .put(body.len() as u64, 16)
+            .put_span(body.span());
+        wire.align();
+        if step == 300 {
+            // A full queue must roll back both position and echo admission;
+            // retrying the same sample after capacity returns publishes it.
+            listener
+                .pending
+                .resize(MAX_PENDING, previous.clone().unwrap());
+            let before = listener.players.objects().snapshot();
+            assert!(!listener.frame(Queued {
+                advertised: None,
+                frame: step as u16,
+                data: wire.span(),
+            }));
+            assert_eq!(listener.players.objects().snapshot(), before);
+            assert_eq!(listener.pending.len(), MAX_PENDING);
+            listener.pending.clear();
+        }
+        assert!(listener.frame(Queued {
+            advertised: None,
+            frame: step as u16,
+            data: wire.span()
+        }));
+        assert_eq!(
+            listener.pending.len(),
+            1,
+            "report {step} must not amplify queued frames"
+        );
+        let section = listener.pending.pop_front().unwrap();
+        assert!(
+            nfs_world::session::replication_frame(&section, &[], 0)
+                .unwrap()
+                .len()
+                <= nfs_world::application::OUTBOUND_FRAME_BITS
+        );
+        assert!(section.records.iter().any(|r| r.id == car));
+        if step > 0 {
+            assert!(section.records.iter().any(|r| r.id == map));
+            let Update::ParticipantLocationMap(location) =
+                &listener.players.objects().get(map).unwrap().current
+            else {
+                panic!()
+            };
+            assert_eq!(
+                location.groups.as_ref().unwrap()[0].entries[0].x,
+                nfs_world::replication::location_map::Coordinate::from_world(x).unwrap()
+            );
+        }
+        assert_eq!(listener.refused, usize::from(step >= 300));
+        previous = Some(section);
+    }
+    // Clearing world ownership still sends map removal and service unbinding
+    // without relying on another movement report.
+    listener.world_cars.clear();
+    let empty = frame::Builder::new()
+        .messages(
+            None,
+            vec![frame::Group {
+                channel: 0,
+                sequence: Some(0),
+                messages: vec![frame::Message::CreatePlayer {
+                    name: b"Moving driver".to_vec(),
+                    flag: false,
+                    slot: 0,
+                }],
+            }],
+        )
+        .build()
+        .unwrap();
+    assert!(listener.frame(Queued {
+        advertised: None,
+        frame: 600,
+        data: empty.span()
+    }));
+    assert_eq!(listener.pending.len(), 1);
+    let cleared = listener.pending.pop_front().unwrap();
+    assert_eq!(cleared.records.len(), 2);
+    assert_eq!(cleared.records[0].id, map);
+    assert!(!cleared.records.iter().any(|r| r.id == car));
+}
+
+#[test]
 fn spawn_presentation_waits_for_capacity_with_poll_and_rejects_foreign_owner() {
     use nfs_world::participants::{Call, HostRpc, Notification};
     let content = content_with(Some(&SPAWN_LAYOUT));
