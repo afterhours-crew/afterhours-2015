@@ -735,6 +735,7 @@ impl Listener for PlayerListener {
         let mut world_cars = self.world_cars.clone();
         let mut deferred_deletions = self.deferred_deletions.clone();
         let mut deferred_sections = Vec::new();
+        let mut movement_section = None;
         let mut vehicle_reports = self.vehicle_reports.clone();
         let mut trigger_volumes = self.trigger_volumes.clone();
         let mut world_activation = self.world_activation.clone();
@@ -748,13 +749,15 @@ impl Listener for PlayerListener {
                 &cars,
                 self.world_ms,
             ) {
-                Ok(reports) if !reports.is_empty() => deferred_sections.push(Section {
-                    float_bits: None,
-                    flag: false,
-                    deleted: Vec::new(),
-                    setup: Some(Setup::RawEscape([0; 3])),
-                    records: reports,
-                }),
+                Ok(reports) if !reports.is_empty() => {
+                    movement_section = Some(Section {
+                        float_bits: None,
+                        flag: false,
+                        deleted: Vec::new(),
+                        setup: Some(Setup::RawEscape([0; 3])),
+                        records: reports,
+                    })
+                }
                 Ok(_) => {}
                 Err(error) => {
                     return self.refuse(error);
@@ -1634,7 +1637,23 @@ impl Listener for PlayerListener {
                 [0.; 3],
                 catalog.location,
             ) {
-                Ok(batch) => records.extend(batch),
+                Ok(mut batch) => {
+                    // One accepted movement sample can change both chassis and
+                    // minimap position. Two frames per sample can outrun the
+                    // host's bounded send queue and delay lifecycle messages.
+                    // Both use world origin zero; retain ordinary framing if
+                    // their combined timed frame would exceed the wire limit.
+                    if let Some(section) = &mut movement_section {
+                        let original_len = section.records.len();
+                        section.records.append(&mut batch);
+                        if !nfs_world::session::replication_frame(section, &[], 0).is_ok_and(
+                            |wire| wire.len() <= nfs_world::application::OUTBOUND_FRAME_BITS,
+                        ) {
+                            batch = section.records.split_off(original_len);
+                        }
+                    }
+                    records.extend(batch);
+                }
                 Err(error) => {
                     return self.refuse(error);
                 }
@@ -1648,6 +1667,9 @@ impl Listener for PlayerListener {
             self.persona,
         ) {
             return self.refuse(error);
+        }
+        if let Some(section) = movement_section {
+            deferred_sections.insert(0, section);
         }
         if spawned.messages.len() > MAX_PENDING.saturating_sub(self.pending_content.len())
             || responses.len() > nfs_world::session::MAX_RPC_QUEUE - self.pending_rpcs.len()

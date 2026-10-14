@@ -6,8 +6,8 @@ and creates a separate local account. It does not need a research repository,
 private scripts, copied profile or captured service replies.
 
 **Development preview:** local menu, garage, driving and repeated garage returns
-have been tested on the supported installation. Complete progression and cold
-network-isolated acceptance of this public launcher remain open. The precise
+have been tested on the supported installation, including an owner-run cold
+disconnected test of this public script. Complete progression remains open. The precise
 validation scope and installation limits are listed below.
 
 ## Requirements
@@ -224,14 +224,34 @@ displayed the prompt and player arrow, and PageDown returned again from the
 spawn. Normal quit cleaned up the game, server and listener. An immediate
 game/server restart required no further sign-in, restored the same account's
 Mustang garage and quit normally. The owner reported a delay before the approach
-prompt appeared; its latency and cause remain under investigation.
+prompt appeared; the later driving regression below addresses that backlog.
 
-Rust formatting, Clippy and 1,107 tests pass, along with the Windows launcher
+After another Windows reboot, the owner reported successful disconnected launch,
+driving and garage return twice with the existing account and once with a fresh
+local account. Completed session logs corroborate those transitions and normal
+supervisor shutdown. Network disconnection was performed and reported by the
+owner; no independent network sampler ran during that test. The existing installed
+activation cache was retained after earlier online activation. A fresh local
+account is independent server data, not a fresh game installation or license.
+The owner estimated roughly ten seconds for both the approach prompt and the
+response after PageDown. Driving exposed a queue problem: each accepted movement
+sample sent chassis and minimap updates as separate frames. They now share a frame
+when the existing size limit permits; larger batches retain separate framing.
+A subsequent local release test recorded 1,127 replication sends over two minutes
+with no remaining backlog. The approach prompt was visible in the first screenshot
+about 1.4 seconds after the server detected re-entry, and PageDown began the
+transition immediately. These are sampled UI observations, not exact first-visible
+latencies. The garage animation and loading still take their normal time.
+The following exit again showed the prompt and minimap arrow; PageDown at spawn
+returned successfully. Normal quit cleaned up the game, server, listener and test
+console. The EA app was absent and its service remained stopped.
+
+Rust formatting, Clippy and 1,108 tests pass, along with the Windows launcher
 and disposable process-cleanup checks above. The next-day launch initially
 required manual activation; the successful release gameplay and immediate
-restart do not establish next-day activation-cache acceptance. Cold external-network
-isolation through final exit, and fresh-install/cache-lifetime acceptance remain
-separate gates. Earlier local research runs do not substitute for these checks.
+restart do not establish next-day activation-cache acceptance. The later owner-run
+cold test establishes the scope described above. Fresh-install/cache-lifetime
+acceptance remains open. Earlier research runs do not substitute for public-script checks.
 
 ### Manual disconnected test without administrator access
 
@@ -364,7 +384,7 @@ not activation independence or fresh-install acceptance.
 
 The public launcher described above now owns setup, launch, routing and cleanup,
 using the existing registration without changing it. Its validation is reported
-separately from that earlier procedure. Cold-start network isolation through final
-process exit and activation-cache lifetime remain separate acceptance gates.
+separately from that earlier procedure, including the owner's cold disconnected
+test. Activation-cache lifetime remains a separate acceptance gate.
 The LSX component can be developed and tested independently of installed-game
 validation.
