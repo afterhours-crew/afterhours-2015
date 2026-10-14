@@ -396,6 +396,7 @@ fn content_with(spawn: Option<&[Kind]>) -> WorldContent {
         },
         spawn_points: spawn.map(|_| keys[14]),
         free_roam: None,
+        bank: None,
         streaming_gate: Asset {
             bundle: 2,
             type_id: 3,

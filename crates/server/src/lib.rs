@@ -8,6 +8,7 @@
 //! state is durable and session/world state is isolated per connection.
 extern crate self as nfs_server;
 pub mod auxiliary;
+pub mod bank_account;
 pub mod cli;
 pub mod client_state;
 pub mod content;

@@ -19,6 +19,8 @@ use nfs_world::{
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 mod activation;
 mod customization;
+mod equipment;
+pub(super) use equipment::EquipmentRequest;
 mod launchers;
 mod refusal;
 mod returning;
@@ -90,6 +92,7 @@ pub(super) struct PlayerListener {
     arrivals: Option<nfs_world::arrival::Arrivals>,
     returns: Option<nfs_world::arrival::Arrivals>,
     inventory: Option<Inventory>,
+    equipment: equipment::State,
     logic: Option<std::sync::Arc<crate::garage_logic::GarageLogic>>,
     logic_ghosts: BTreeMap<u16, BTreeMap<u16, u16>>,
     logic_vehicles_fired: BTreeSet<u16>,
@@ -122,6 +125,93 @@ impl std::fmt::Debug for PlayerListener {
     }
 }
 impl PlayerListener {
+    pub(super) fn purchase_ready(&self) -> bool {
+        self.inventory.is_some()
+            && self.persistent.is_some()
+            && self.bank_notification(0).is_ok_and(|reply| reply.is_some())
+    }
+
+    fn bank_notification(
+        &self,
+        amount: u32,
+    ) -> Result<Option<nfs_world::participants::HostRpc>, replication::Error> {
+        let Some(bank) = self.roles.as_ref().and_then(|roles| roles.bank) else {
+            return Ok(None);
+        };
+        let scene = self
+            .players
+            .objects()
+            .scene(bank.scene)
+            .ok_or(replication::Error::UnknownObject)?;
+        let Some(replication::Initial::SubLevel { fields, .. }) =
+            self.players.objects().get(scene).map(|o| &o.initial)
+        else {
+            return Err(replication::Error::TypeMismatch);
+        };
+        let rpc = fields
+            .get(bank.serializer)
+            .and_then(replication::sublevel::Initial::rpc)
+            .ok_or(replication::Error::TypeMismatch)?;
+        Ok(Some(nfs_world::participants::HostRpc::Bank(
+            nfs_world::bank::Balance {
+                endpoint: nfs_world::participants::Endpoint {
+                    scene,
+                    selector: rpc.selector,
+                    serial: rpc.serial,
+                },
+                amount,
+            },
+        )))
+    }
+
+    /// A purchase adds owned records but does not equip them or replace a live
+    /// car. ItemBuilder owns that subsequent transition. Other persistent game
+    /// tables and all previously owned records must remain identical here.
+    pub(super) fn purchased_inventory(
+        &mut self,
+        garage: [Option<u64>; 5],
+        persistent: Option<std::sync::Arc<crate::persistent::Loaded>>,
+        items: std::sync::Arc<nfs_world::items::Collection>,
+    ) -> Result<(), replication::Error> {
+        let old = self.inventory.as_ref().ok_or(replication::Error::Shape)?;
+        let before = self.persistent.as_ref().ok_or(replication::Error::Shape)?;
+        let after = persistent.as_ref().ok_or(replication::Error::Shape)?;
+        let slots = nfs_world::garage::Slots::new(garage)?;
+        if slots != old.slots
+            || after.garage() != garage
+            || after.generation() < before.generation()
+            || after.tables() != before.tables()
+            || after.stores() != before.stores()
+            || old
+                .items
+                .items
+                .iter()
+                .any(|(id, item)| items.items.get(id) != Some(item))
+        {
+            return Err(replication::Error::Shape);
+        }
+        let reply = self
+            .bank_notification(after.balance().0)?
+            .ok_or(replication::Error::Unsupported)?;
+        if self.pending_rpcs.len() >= nfs_world::session::MAX_RPC_QUEUE {
+            return Err(replication::Error::Bound);
+        }
+        let inventory = Inventory { slots, items };
+        if let Some(population) = &mut self.population {
+            population.refresh_inventory(
+                &self.players,
+                HOST_SELECTOR as u8,
+                self.persona,
+                old,
+                &inventory,
+            )?;
+        }
+        self.inventory = Some(inventory);
+        self.persistent = persistent;
+        self.pending_rpcs.push_back(reply);
+        Ok(())
+    }
+
     pub(super) fn inventory_with_items(
         &mut self,
         garage: [Option<u64>; 5],
@@ -298,6 +388,31 @@ impl PlayerListener {
                     .bind_actor(roles.gameplay, HOST_SELECTOR as u8, persona, participant)?
                     .ok_or(replication::Error::Shape)?;
                 replies.extend(participants.enter_garage_with_actor(binding)?);
+                if let Some(bank) = roles.bank {
+                    let scene = players
+                        .objects()
+                        .scene(bank.scene)
+                        .ok_or(replication::Error::UnknownObject)?;
+                    let Some(replication::Initial::SubLevel { fields, .. }) =
+                        players.objects().get(scene).map(|o| &o.initial)
+                    else {
+                        return Err(replication::Error::TypeMismatch);
+                    };
+                    let rpc = fields
+                        .get(bank.serializer)
+                        .and_then(replication::sublevel::Initial::rpc)
+                        .ok_or(replication::Error::TypeMismatch)?;
+                    replies.push(nfs_world::participants::HostRpc::Bank(
+                        nfs_world::bank::Balance {
+                            endpoint: nfs_world::participants::Endpoint {
+                                scene,
+                                selector: rpc.selector,
+                                serial: rpc.serial,
+                            },
+                            amount: loaded.balance().0,
+                        },
+                    ));
+                }
                 if let Some(logic) = logic {
                     let ghosts = logic_ghosts.entry(participant).or_default();
                     if !ghosts.is_empty() {
@@ -501,6 +616,7 @@ impl PlayerListener {
             world_activation: None,
             sequences: None,
             inventory: None,
+            equipment: equipment::State::default(),
             logic: None,
             logic_ghosts: BTreeMap::new(),
             logic_vehicles_fired: BTreeSet::new(),
@@ -978,7 +1094,13 @@ impl Listener for PlayerListener {
         let mut launchers = self.launchers.clone();
         let mut unsupported = 0;
         let mut exit_entries = Vec::new();
+        let mut equipment = self.equipment.clone();
         for body in rpcs {
+            match self.stage_equipment(&players, body, &mut equipment) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(error) => return self.refuse_rpc(error, body),
+            }
             match Self::item_builder_begin(self.roles.as_ref(), &players, self.persona, body) {
                 Ok(true) => continue,
                 Ok(false) => {}
@@ -1773,6 +1895,7 @@ impl Listener for PlayerListener {
             );
         }
         self.sequences = sequences;
+        self.equipment = equipment;
         self.logic_ghosts = logic_ghosts;
         self.logic_vehicles_fired = logic_vehicles_fired;
         self.pending_content.extend(spawned.messages);

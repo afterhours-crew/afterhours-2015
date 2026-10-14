@@ -11,6 +11,12 @@ use serde_json::{Value, json};
 use std::collections::BTreeSet;
 mod activation;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Bank {
+    pub scene: u32,
+    pub serializer: usize,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SceneRoles {
     pub level: Vec<u8>,
@@ -25,6 +31,7 @@ pub struct SceneRoles {
     /// official session). Optional: without it, world spawns stay unsupported.
     pub spawn_points: Option<u32>,
     pub free_roam: Option<nfs_world::world_activation::Catalog>,
+    pub bank: Option<Bank>,
 }
 
 fn fields(v: &Value, expected: &[&str]) -> Result<(), Failure> {
@@ -83,6 +90,11 @@ impl SceneRoles {
         if let Some(catalog) = &self.free_roam {
             catalog.validate().map_err(|_| Failure::ProfileConfig)?;
         }
+        if self.bank.is_some_and(|b| {
+            b.scene <= 1 || b.serializer >= nfs_world::replication::sublevel::MAX_SERIALIZERS
+        }) {
+            return Err(Failure::ProfileConfig);
+        }
         if self.customization_timer == self.streaming_gate {
             return Err(Failure::ProfileConfig);
         }
@@ -101,7 +113,7 @@ impl SceneRoles {
                 "customization_timer",
                 "streaming_gate",
             ],
-            &["spawn_points", "free_roam"],
+            &["spawn_points", "free_roam", "bank"],
         )?;
         let level = v["level"]
             .as_str()
@@ -128,6 +140,16 @@ impl SceneRoles {
             streaming_gate: asset(&v["streaming_gate"])?,
             spawn_points: v.get("spawn_points").map(number).transpose()?,
             free_roam: v.get("free_roam").map(activation::parse).transpose()?,
+            bank: v
+                .get("bank")
+                .map(|bank| {
+                    fields(bank, &["scene", "serializer"])?;
+                    Ok::<_, Failure>(Bank {
+                        scene: number(&bank["scene"])?,
+                        serializer: number(&bank["serializer"])?,
+                    })
+                })
+                .transpose()?,
         };
         result.validate()?;
         Ok(result)
@@ -139,6 +161,9 @@ impl SceneRoles {
         }
         if let Some(key) = self.spawn_points {
             v["spawn_points"] = json!(key);
+        }
+        if let Some(bank) = self.bank {
+            v["bank"] = json!({"scene":bank.scene,"serializer":bank.serializer});
         }
         v
     }

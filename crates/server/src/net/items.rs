@@ -2,7 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-use super::players::PlayerListener;
+use super::players::{EquipmentRequest, PlayerListener};
 use crate::inventory;
 use nfs_storage::{AccountId, InventoryRepository, Timestamp};
 use nfs_world::{
@@ -23,6 +23,7 @@ pub struct Service {
     repository: Arc<dyn InventoryRepository>,
     catalog: Arc<InventoryCatalog>,
     persistent: Option<Arc<crate::persistent::Catalog>>,
+    offers: Option<Arc<nfs_services::purchase::Offers>>,
     workers: Arc<Semaphore>,
 }
 impl Service {
@@ -31,11 +32,16 @@ impl Service {
             repository,
             catalog,
             persistent: None,
+            offers: None,
             workers: Arc::new(Semaphore::new(WORKERS)),
         }
     }
     pub fn with_persistent(mut self, catalog: Arc<crate::persistent::Catalog>) -> Self {
         self.persistent = Some(catalog);
+        self
+    }
+    pub fn with_purchase_offers(mut self, offers: nfs_services::purchase::Offers) -> Self {
+        self.offers = Some(Arc::new(offers));
         self
     }
     pub fn bind(&self, account: AccountId) -> Profile {
@@ -62,13 +68,84 @@ enum Error {
     Inventory(inventory::Error),
     Worker,
     Deadline,
+    Purchase(nfs_services::purchase::Error),
+    Equipment(nfs_services::equipment::Error),
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReplyKind {
+    Load,
+    Purchase,
+    Rejected,
 }
 #[derive(Debug)]
 struct LoadedReply {
     reply: inventory::Reply,
     items: Arc<nfs_world::items::Collection>,
+    kind: ReplyKind,
+}
+struct Equipped {
+    loaded: Arc<crate::persistent::Loaded>,
+    items: Arc<nfs_world::items::Collection>,
+}
+
+fn supported_request(bytes: &[u8]) -> Result<bool, nfs_world::items::Error> {
+    use nfs_world::items;
+    match bytes.get(4) {
+        Some(&items::PURCHASE_ITEMS) => items::PurchaseRequest::decode(bytes).map(|_| true),
+        _ => items::Request::decode(bytes).map(|r| r.operation == items::LOAD_INVENTORY),
+    }
 }
 impl Profile {
+    async fn equip(&self, request: &EquipmentRequest, now: Timestamp) -> Result<Equipped, Error> {
+        let service = self.service.clone();
+        let account = self.account;
+        let request = request.clone();
+        timeout(JOB_TIMEOUT, async move {
+            let permit = service
+                .workers
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| Error::Worker)?;
+            tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                let offers = service.offers.as_deref().ok_or(Error::Worker)?;
+                let tables = service.persistent.as_ref().ok_or(Error::Worker)?;
+                let edit = nfs_services::equipment::prepare(
+                    account,
+                    request.generation,
+                    &request.items,
+                    request.car,
+                    request.item,
+                    &service.catalog,
+                    offers,
+                )
+                .map_err(Error::Equipment)?;
+                let snapshot = nfs_services::equipment::commit(
+                    service.repository.as_ref(),
+                    account,
+                    &service.catalog,
+                    &edit,
+                    now,
+                )
+                .map_err(Error::Equipment)?;
+                let items = inventory::collection(&snapshot, service.catalog.bindings())
+                    .map_err(Error::Inventory)?;
+                let loaded = tables
+                    .view(&snapshot)
+                    .map_err(|e| Error::Inventory(e.into()))?;
+                Ok(Equipped {
+                    loaded: Arc::new(loaded),
+                    items: Arc::new(items),
+                })
+            })
+            .await
+            .map_err(|_| Error::Worker)?
+        })
+        .await
+        .map_err(|_| Error::Deadline)?
+    }
+
     pub fn bindings(&self) -> &nfs_world::items::Catalog {
         self.service.catalog.bindings()
     }
@@ -178,9 +255,14 @@ impl Profile {
         .map_err(|_| crate::Failure::Io)?
     }
     async fn answer(&self, request: Vec<u8>, now: Timestamp) -> Result<Option<LoadedReply>, Error> {
-        let decoded =
-            nfs_world::items::Request::decode(&request).map_err(|e| Error::Inventory(e.into()))?;
-        if decoded.operation != nfs_world::items::LOAD_INVENTORY {
+        if !supported_request(&request).map_err(|e| Error::Inventory(e.into()))? {
+            return Ok(None);
+        }
+        let purchase = (request[4] == nfs_world::items::PURCHASE_ITEMS)
+            .then(|| nfs_world::items::PurchaseRequest::decode(&request))
+            .transpose()
+            .map_err(|e| Error::Inventory(e.into()))?;
+        if purchase.is_some() && self.service.offers.is_none() {
             return Ok(None);
         }
         let service = self.service.clone();
@@ -193,6 +275,63 @@ impl Profile {
                 .map_err(|_| Error::Worker)?;
             tokio::task::spawn_blocking(move || {
                 let _permit = permit;
+                if let Some(request) = purchase {
+                    let offers = service.offers.as_deref().ok_or(Error::Worker)?;
+                    let (snapshot, purchased, kind) = match nfs_services::purchase::buy(
+                        service.repository.as_ref(),
+                        account,
+                        &service.catalog,
+                        offers,
+                        &request,
+                        now,
+                    ) {
+                        Ok(result) => (result.snapshot, Some(result.items), ReplyKind::Purchase),
+                        Err(nfs_services::purchase::Error::Rejected(reason)) => {
+                            info!(?reason, "owned purchase rejected without mutation");
+                            (
+                                service
+                                    .repository
+                                    .snapshot(account)
+                                    .map_err(|e| Error::Inventory(e.into()))?,
+                                None,
+                                ReplyKind::Rejected,
+                            )
+                        }
+                        Err(error) => return Err(Error::Purchase(error)),
+                    };
+                    let items = inventory::collection(&snapshot, service.catalog.bindings())
+                        .map_err(Error::Inventory)?;
+                    let persistent = service
+                        .persistent
+                        .as_ref()
+                        .map(|tables| {
+                            tables
+                                .view(&snapshot)
+                                .map(Arc::new)
+                                .map_err(|e| Error::Inventory(e.into()))
+                        })
+                        .transpose()?;
+                    let bytes = nfs_world::items::PurchaseReply {
+                        sequence: request.sequence,
+                        purchased,
+                    }
+                    .encode(service.catalog.bindings())
+                    .map_err(|e| Error::Inventory(e.into()))?;
+                    return Ok(Some(LoadedReply {
+                        reply: inventory::Reply {
+                            generation: snapshot.generation,
+                            bytes,
+                            persistent,
+                            garage: snapshot
+                                .garage
+                                .ok_or(Error::Worker)?
+                                .0
+                                .map(|id| id.map(nfs_storage::ItemId::get)),
+                        },
+                        items: Arc::new(items),
+                        kind,
+                    }));
+                }
                 let reply = inventory::answer_load_with_tables(
                     &request,
                     service.repository.as_ref(),
@@ -211,6 +350,7 @@ impl Profile {
                         Ok(LoadedReply {
                             reply,
                             items: Arc::new(items),
+                            kind: ReplyKind::Load,
                         })
                     })
                     .transpose()
@@ -225,6 +365,7 @@ impl Profile {
 pub(super) struct Exchanges {
     profile: Option<Profile>,
     jobs: JoinSet<(usize, Result<Option<LoadedReply>, Error>)>,
+    equipment: JoinSet<(EquipmentRequest, Result<Equipped, Error>)>,
     pending: [Option<Completed>; 2],
     started: [Option<u64>; 2],
     connection: u32,
@@ -234,16 +375,31 @@ impl Exchanges {
         Self {
             profile,
             jobs: JoinSet::new(),
+            equipment: JoinSet::new(),
             pending: [None, None],
             started: [None, None],
             connection,
         }
     }
     pub(super) fn working(&self) -> bool {
-        !self.jobs.is_empty()
+        !self.jobs.is_empty() || !self.equipment.is_empty()
     }
     pub(super) fn start(&mut self, listener: &mut PlayerListener, now: u64, utc: Timestamp) {
         if self.working() {
+            return;
+        }
+        if let Some(request) = listener.take_equipment() {
+            if let Some(profile) = self.profile.clone() {
+                self.equipment.spawn(async move {
+                    let result = profile.equip(&request, utc).await;
+                    (request, result)
+                });
+            } else {
+                warn!(
+                    connection = self.connection,
+                    "equipment service not configured"
+                );
+            }
             return;
         }
         for index in 0..2 {
@@ -271,12 +427,12 @@ impl Exchanges {
                 );
                 continue;
             };
-            match nfs_world::items::Request::decode(&request.bytes) {
-                Ok(request) if request.operation != nfs_world::items::LOAD_INVENTORY => {
+            match supported_request(&request.bytes) {
+                Ok(false) => {
                     warn!(
                         connection = self.connection,
                         handler,
-                        operation = request.operation,
+                        operation = request.bytes[4],
                         "unsupported Items operation"
                     );
                     continue;
@@ -292,6 +448,13 @@ impl Exchanges {
                 }
                 _ => {}
             }
+            if request.bytes[4] == nfs_world::items::PURCHASE_ITEMS && !listener.purchase_ready() {
+                warn!(
+                    connection = self.connection,
+                    handler, "purchase before owned inventory is ready"
+                );
+                continue;
+            }
             self.started[index] = Some(now);
             self.jobs
                 .spawn(async move { (index, profile.answer(request.bytes, utc).await) });
@@ -299,16 +462,62 @@ impl Exchanges {
         }
     }
     pub(super) async fn completed(&mut self, listener: &mut PlayerListener) -> bool {
+        // start() serializes account writes across Files and equipment RPCs.
+        if !self.equipment.is_empty() {
+            let Some(Ok((request, result))) = self.equipment.join_next().await else {
+                return false;
+            };
+            return match result {
+                Ok(Equipped { loaded, items }) => {
+                    let generation = loaded.generation();
+                    match listener.equipped_inventory(&request, loaded, items) {
+                        Ok(()) => {
+                            info!(
+                                connection = self.connection,
+                                generation,
+                                car = request.car,
+                                item = request.item,
+                                "owned equipment committed"
+                            );
+                            true
+                        }
+                        Err(error) => {
+                            warn!(
+                                connection = self.connection,
+                                ?error,
+                                "equipment snapshot rejected"
+                            );
+                            false
+                        }
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        connection = self.connection,
+                        ?error,
+                        "equipment commit failed"
+                    );
+                    false
+                }
+            };
+        }
         let Some(Ok((index, result))) = self.jobs.join_next().await else {
             return false;
         };
         match result {
-            Ok(Some(LoadedReply { reply, items })) => {
-                if let Err(error) = listener.inventory_with_items(
-                    reply.garage,
-                    reply.persistent.clone(),
-                    Some(items),
-                ) {
+            Ok(Some(LoadedReply { reply, items, kind })) => {
+                let applied = match kind {
+                    ReplyKind::Load => listener.inventory_with_items(
+                        reply.garage,
+                        reply.persistent.clone(),
+                        Some(items),
+                    ),
+                    ReplyKind::Purchase => {
+                        listener.purchased_inventory(reply.garage, reply.persistent.clone(), items)
+                    }
+                    ReplyKind::Rejected => Ok(()),
+                };
+                if let Err(error) = applied {
                     warn!(
                         connection = self.connection,
                         ?error,
@@ -320,6 +529,7 @@ impl Exchanges {
                     connection = self.connection,
                     handler = index + 4,
                     generation = reply.generation,
+                    ?kind,
                     bytes = reply.bytes.len(),
                     persistent_tables = reply.persistent.as_ref().map_or(0, |p| p.tables().len()),
                     persistent_stores = reply.persistent.as_ref().map_or(0, |p| p.stores().len()),

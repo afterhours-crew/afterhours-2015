@@ -10,6 +10,7 @@
 
 pub mod actors;
 pub mod arrival;
+pub mod bank;
 pub mod frame;
 pub mod garage;
 pub mod launchers;

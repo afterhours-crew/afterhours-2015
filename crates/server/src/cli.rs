@@ -416,6 +416,9 @@ fn inventory_config(args: &Args) -> Result<Option<net::InventoryProfile>, Failur
     let repository = nfs_storage::SqliteRepository::open_owned_directory(&directory)
         .map_err(|_| Failure::Output)?;
     let mut service = net::InventoryService::new(Arc::new(repository), Arc::new(catalog));
+    if let Some(offers) = content.purchase_offers() {
+        service = service.with_purchase_offers(offers.clone());
+    }
     if let Some(persistent) = persistent {
         service = service.with_persistent(Arc::new(persistent));
     }
@@ -423,6 +426,9 @@ fn inventory_config(args: &Args) -> Result<Option<net::InventoryProfile>, Failur
 }
 
 pub fn main() -> std::process::ExitCode {
+    if std::env::args_os().nth(1).is_some_and(|a| a == "bank") {
+        return nfs_server::bank_account::main(std::env::args_os().skip(2));
+    }
     if std::env::args_os()
         .nth(1)
         .is_some_and(|a| a == "prepare-local")

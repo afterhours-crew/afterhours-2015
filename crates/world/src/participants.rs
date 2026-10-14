@@ -1035,6 +1035,7 @@ impl Lifecycle {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HostRpc {
+    Bank(crate::bank::Balance),
     Launcher(crate::launchers::Enabled),
     Participant(Notification),
     Garage(crate::garage::Binding),
@@ -1054,6 +1055,7 @@ impl HostRpc {
     /// before the notification is sent.
     pub fn objects(self) -> Vec<u16> {
         match self {
+            Self::Bank(v) => vec![v.endpoint.scene],
             Self::Launcher(v) => vec![v.scene],
             Self::Participant(v) => vec![v.endpoint.scene, v.participant],
             Self::Garage(v) => vec![v.endpoint.scene, v.participant],
@@ -1073,6 +1075,7 @@ impl HostRpc {
     }
     pub fn scene(self) -> u16 {
         match self {
+            Self::Bank(v) => v.endpoint.scene,
             Self::Launcher(v) => v.scene,
             Self::Participant(v) => v.endpoint.scene,
             Self::Garage(v) => v.endpoint.scene,
@@ -1088,6 +1091,7 @@ impl HostRpc {
     }
     pub fn encode(self) -> Result<BitWriter, Error> {
         match self {
+            Self::Bank(v) => v.encode(),
             Self::Launcher(v) => v.encode(),
             Self::Participant(v) => v.encode(),
             Self::Garage(v) => v.encode(),

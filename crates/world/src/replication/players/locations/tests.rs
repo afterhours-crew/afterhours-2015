@@ -110,6 +110,71 @@ fn entries(record: &Record) -> Vec<Entry> {
         .flat_map(|g| g.entries.clone())
         .collect()
 }
+
+#[test]
+fn customization_updates_only_owned_chassis_and_preserves_motion_and_identity() {
+    let mut world = Players::default();
+    let (player, participant) = player(&mut world, 1, 101);
+    let car = car(&mut world, 1, 101, participant, 10);
+    assert_eq!(
+        world.player_vehicle_item(1, 101, player, car),
+        Some((participant, 10))
+    );
+    assert_eq!(world.player_vehicle_item(2, 101, player, car), None);
+    let before = world.objects().get(car).unwrap().clone();
+    let Update::Vehicle { fields, .. } = &before.current else {
+        panic!()
+    };
+    let Some(vehicle::Update::Chassis(chassis)) = &fields[1] else {
+        panic!()
+    };
+    let mut custom = vehicle::Customization {
+        value: 0,
+        list_a: vec![],
+        list_b: vec![],
+        index: None,
+        values: [0; 2],
+        flag: false,
+        tuning: [0; 32],
+    };
+    custom.values[0] = 2;
+    assert!(
+        world
+            .set_vehicle_customization(2, 101, car, custom.clone())
+            .is_err()
+    );
+    assert_eq!(world.objects().get(car).unwrap(), &before);
+    let record = world
+        .set_vehicle_customization(1, 101, car, custom.clone())
+        .unwrap()
+        .unwrap();
+    let Update::Vehicle { fields, .. } = record.update else {
+        panic!()
+    };
+    assert!(fields[0].is_none());
+    let Some(vehicle::Update::Chassis(delta)) = &fields[1] else {
+        panic!()
+    };
+    assert_eq!(delta.custom, Some(custom.clone()));
+    assert!(delta.physics.is_none() && delta.flag.is_none() && delta.pair.is_none());
+    let after = world.objects().get(car).unwrap();
+    assert_eq!(after.initial, before.initial);
+    let Update::Vehicle { fields, .. } = &after.current else {
+        panic!()
+    };
+    let Some(vehicle::Update::Chassis(current)) = &fields[1] else {
+        panic!()
+    };
+    assert_eq!(current.physics, chassis.physics);
+    assert_eq!(current.flag, chassis.flag);
+    assert_eq!(current.pair, chassis.pair);
+    assert!(
+        world
+            .set_vehicle_customization(1, 101, car, custom)
+            .unwrap()
+            .is_none()
+    );
+}
 #[test]
 fn marker_moves_clears_and_rebinds_to_three_car_lifetimes() {
     let mut world = Players::default();

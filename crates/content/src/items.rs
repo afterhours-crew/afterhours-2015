@@ -14,7 +14,7 @@
 use crate::Error;
 use crate::scan::Assets;
 use nfs_frostbite::ebx::{Fields, Object, Value};
-use nfs_services::item_content::{FORMAT, INVENTORY_VERSION, ItemContent};
+use nfs_services::item_content::{FORMAT, ItemContent, PURCHASE_VERSION};
 use nfs_world_core::items::{DefinitionClass, Layout};
 use serde_json::{Value as Json, json};
 
@@ -210,7 +210,41 @@ fn definition(assets: &mut Assets, object: &Object) -> Result<Json, Error> {
     }))
 }
 
-/// Build the canonical `nfs-item-definitions` version 2 document.
+/// Initial purchase scope: unrestricted leaf air filters available without REP
+/// progression. Unknown requirements never become an implicit unlocked offer.
+fn initial_offer(object: &Object) -> Result<bool, Error> {
+    if object.class != "AirFilterItemData" {
+        return Ok(false);
+    }
+    let f = &object.fields;
+    let empty = |name: &str| {
+        f.get(name)
+            .and_then(Value::as_array)
+            .map(|v| v.is_empty())
+            .ok_or_else(|| missing(&object.class, name))
+    };
+    let flag = |name: &str| {
+        f.get(name)
+            .and_then(Value::as_bool)
+            .ok_or_else(|| missing(&object.class, name))
+    };
+    Ok(flag("Purchasable")?
+        && !flag("Deprecated")?
+        && flag("RequiresOwner")?
+        && !flag("UsesScope")?
+        && word(f, &object.class, "Quantity")? == 1
+        && word(f, &object.class, "UnlocksAtRepLevel")? == 0
+        && f.get("UnlockCriteriaDescriptionID")
+            .and_then(Value::as_str)
+            .ok_or_else(|| missing(&object.class, "UnlockCriteriaDescriptionID"))?
+            .is_empty()
+        && empty("SortedScope")?
+        && empty("SortedRestrictions")?
+        && empty("SubItems")?
+        && empty("AdditionalItems")?)
+}
+
+/// Build the canonical `nfs-item-definitions` version 3 document.
 pub fn build(assets: &mut Assets) -> Result<Vec<u8>, Error> {
     let system = assets
         .objects(ITEM_SYSTEM)?
@@ -219,6 +253,7 @@ pub fn build(assets: &mut Assets) -> Result<Vec<u8>, Error> {
         .filter(|o| o.class == "ItemSystemData")
         .ok_or_else(|| Error::Content(format!("{ITEM_SYSTEM} is not an item system")))?;
     let mut definitions = Vec::new();
+    let mut purchase_offers = Vec::new();
     for value in system
         .fields
         .get("Items")
@@ -226,19 +261,95 @@ pub fn build(assets: &mut Assets) -> Result<Vec<u8>, Error> {
         .ok_or_else(|| missing("ItemSystemData", "Items"))?
     {
         let (_, object) = assets.resolve(value.as_pointer())?;
+        if initial_offer(&object)? {
+            purchase_offers.push(nfs_frostbite::hex(
+                &object
+                    .guid
+                    .ok_or_else(|| Error::Content("offer definition is not exported".into()))?,
+            ));
+        }
         definitions.push(definition(assets, &object)?);
     }
     let initial = references(assets, &system, "Inventory")?;
     let document = json!({
         "format": FORMAT,
-        "version": INVENTORY_VERSION,
+        "version": PURCHASE_VERSION,
         "build_sha256": nfs_services::SUPPORTED_BUILD_SHA256,
         "definitions": definitions,
         "initial_definitions": initial,
+        "purchase_offers": purchase_offers,
     });
     // The consuming loader validates classes, layouts, references and bounds;
     // its export is the canonical form written to the cache.
     let content = ItemContent::from_json(&document)
         .map_err(|e| Error::Content(format!("item definitions rejected: {e}")))?;
     serde_json::to_vec(&content.to_json()).map_err(|_| Error::Content("item encoding".into()))
+}
+
+#[cfg(test)]
+mod offer_tests {
+    use super::*;
+    #[test]
+    fn only_explicit_unrestricted_entry_parts_become_offers() {
+        let mut fields = std::collections::BTreeMap::new();
+        for name in ["Purchasable", "RequiresOwner"] {
+            fields.insert(name.into(), Value::Bool(true));
+        }
+        for name in ["Deprecated", "UsesScope"] {
+            fields.insert(name.into(), Value::Bool(false));
+        }
+        for name in [
+            "SortedScope",
+            "SortedRestrictions",
+            "SubItems",
+            "AdditionalItems",
+        ] {
+            fields.insert(name.into(), Value::Array(vec![]));
+        }
+        fields.insert("Quantity".into(), Value::UInt32(1));
+        fields.insert("UnlocksAtRepLevel".into(), Value::UInt32(0));
+        fields.insert(
+            "UnlockCriteriaDescriptionID".into(),
+            Value::String(String::new()),
+        );
+        let original = Object {
+            class: "AirFilterItemData".into(),
+            guid: Some([1; 16]),
+            fields: Fields(fields.into_iter().collect()),
+        };
+        assert!(initial_offer(&original).unwrap());
+        for (key, value) in [
+            ("UnlocksAtRepLevel", Value::UInt32(2)),
+            ("Purchasable", Value::Bool(false)),
+            ("UsesScope", Value::Bool(true)),
+            ("Deprecated", Value::Bool(true)),
+            (
+                "UnlockCriteriaDescriptionID",
+                Value::String("special requirement".into()),
+            ),
+            ("SortedRestrictions", Value::Array(vec![Value::UInt32(1)])),
+            (
+                "SubItems",
+                Value::Array(vec![Value::Pointer(nfs_frostbite::ebx::Pointer::Internal(
+                    0,
+                ))]),
+            ),
+        ] {
+            let mut changed = original.clone();
+            changed
+                .fields
+                .0
+                .iter_mut()
+                .find(|(name, _)| name == key)
+                .unwrap()
+                .1 = value;
+            assert!(!initial_offer(&changed).unwrap(), "accepted {key}");
+        }
+        let mut missing = original;
+        missing
+            .fields
+            .0
+            .retain(|(name, _)| name != "UnlocksAtRepLevel");
+        assert!(initial_offer(&missing).is_err());
+    }
 }

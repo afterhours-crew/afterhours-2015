@@ -2,13 +2,16 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! The item builder's begin-update call has no server-side effects or reply.
-//! Its current scene binding and player ownership still require validation.
-//! Commit and customization mutation methods are deliberately not accepted here.
+//! Typed begin, equip and commit calls, bound to the current scene and player.
+//! Parsing never mutates inventory; the account-owned equipment model stages
+//! and commits the supported leaf-part edit separately.
 use nfs_protocol::world::{
     BitSpan,
     rpc::{Envelope, Limits, RouteProfile},
 };
+
+mod requests;
+pub use requests::{Call, Operation};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -80,7 +83,13 @@ mod tests {
     use super::*;
     use nfs_world_core::bits::BitWriter;
 
-    fn wire(scene: u16, selector: u16, method: u32, references: &[u16], pad: u8) -> BitWriter {
+    pub(super) fn wire(
+        scene: u16,
+        selector: u16,
+        method: u32,
+        references: &[u16],
+        pad: u8,
+    ) -> BitWriter {
         let mut payload = BitWriter::new();
         payload
             .put(selector.into(), 9)

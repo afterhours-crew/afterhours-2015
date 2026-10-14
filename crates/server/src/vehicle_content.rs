@@ -173,6 +173,9 @@ impl Content {
     pub fn definition(&self, guid: &Guid) -> Option<&Definition> {
         self.definitions.get(guid).map(Arc::as_ref)
     }
+    pub fn customization(&self, items: &Collection, vehicle: u64) -> Result<Customization, Error> {
+        Customization::from_vehicle(items, &self.custom, vehicle)
+    }
     pub fn construct(
         &self,
         request: Request<'_>,

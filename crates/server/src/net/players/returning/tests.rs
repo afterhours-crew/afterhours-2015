@@ -244,6 +244,7 @@ fn return_handlers_publish_valid_frames_restore_loading_and_allow_three_exits() 
         streaming_gate: dummy,
         spawn_points: None,
         free_roam: None,
+        bank: None,
     };
     let mut ghosts = BTreeMap::new();
     let mut presence = nfs_world::garage::presence::Presence::default();

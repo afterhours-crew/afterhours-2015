@@ -46,6 +46,99 @@ fn request(sequence: u32) -> Vec<u8> {
     .encode()
     .to_vec()
 }
+
+#[tokio::test]
+async fn purchase_wire_reply_contains_only_purchased_item_and_retry_preserves_cash() {
+    let repo = Arc::new(MemoryRepository::default());
+    let car = Definition {
+        class: DefinitionClass::RaceVehicleItemData,
+        buy_price: 100,
+        sell_price: 50,
+        quantity: 1,
+        ownership_level: OwnershipLevel::Owned,
+        flags: DefinitionFlags::default(),
+        sub_items: vec![],
+        additional_items: vec![],
+        default_derived: Some(Derived::decode(items::Layout::RaceVehicle, &[0; 68]).unwrap()),
+    };
+    let part = Definition {
+        class: DefinitionClass::AirFilterItemData,
+        buy_price: 23,
+        sell_price: 10,
+        default_derived: Some(Derived::Empty),
+        flags: DefinitionFlags {
+            purchasable: true,
+            requires_owner: true,
+            ..Default::default()
+        },
+        ..car.clone()
+    };
+    let catalog =
+        Arc::new(InventoryCatalog::new([([1; 16], car), ([2; 16], part)], vec![[1; 16]]).unwrap());
+    let profile = Service::new(repo.clone(), catalog.clone())
+        .with_purchase_offers(nfs_services::purchase::Offers::new([[2; 16]]).unwrap())
+        .bind(account(19));
+    profile
+        .answer(request(2), Timestamp(1))
+        .await
+        .unwrap()
+        .unwrap();
+    repo.apply(
+        account(19),
+        &Batch {
+            id: 77,
+            expected_generation: 1,
+            ops: vec![nfs_services::bank::Balance(30).store()],
+        },
+        Timestamp(2),
+    )
+    .unwrap();
+    let purchase = items::PurchaseRequest {
+        sequence: 3,
+        owner: 1,
+        selection: items::PurchaseSelection::Definitions(vec![[2; 16]]),
+    };
+    let bought = profile
+        .answer(purchase.encode().unwrap(), Timestamp(3))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(bought.kind, ReplyKind::Purchase);
+    let wire = items::PurchaseReply::decode(&bought.reply.bytes, catalog.bindings()).unwrap();
+    assert_eq!(wire.sequence, 3);
+    assert_eq!(wire.purchased.unwrap().roots, [2]);
+    assert_eq!(bought.items.items.len(), 2);
+    let before = repo.snapshot(account(19)).unwrap();
+    assert_eq!(
+        nfs_services::bank::Balance::from_snapshot(&before)
+            .unwrap()
+            .0,
+        7
+    );
+    let retry = profile
+        .answer(purchase.encode().unwrap(), Timestamp(4))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(retry.reply.bytes, bought.reply.bytes);
+    assert_eq!(repo.snapshot(account(19)).unwrap(), before);
+    let rejected = profile
+        .answer(
+            items::PurchaseRequest {
+                owner: 77,
+                ..purchase
+            }
+            .encode()
+            .unwrap(),
+            Timestamp(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(rejected.kind, ReplyKind::Rejected);
+    assert_eq!(rejected.reply.bytes, [3, 0, 0, 0, 3]);
+    assert_eq!(repo.snapshot(account(19)).unwrap(), before);
+}
 fn deliver(
     listener: &mut PlayerListener,
     index: usize,

@@ -165,9 +165,24 @@ pub(crate) fn build(index: &mut AssetIndex, scenes: &scenes::Catalog) -> Result<
         );
     }
     Bindings::from_messages(&messages).map_err(|_| bad("invalid registration topology"))?;
-    let roles = json!({"level":level_asset,"gameplay":gameplay.1,"startup":startup.1,"garage":garage.1,
+    let mut roles = json!({"level":level_asset,"gameplay":gameplay.1,"startup":startup.1,"garage":garage.1,
         "progression":progression.1,"spawn_points":spawn.1,"traffic":traffic,
         "customization_timer":timer,"streaming_gate":gate});
+    let mut bank = None;
+    for entry in entries.iter().filter(|e| e.kind == StartupKind::SubLevel) {
+        for binding in index.scene_bindings(&entry.name)? {
+            if binding.class == "BankEntityData" {
+                if bank.is_some() {
+                    return Err(bad("ambiguous bank entity"));
+                }
+                bank =
+                    Some(json!({"scene":scene_key(&entry.name),"serializer":binding.serializer}));
+            }
+        }
+    }
+    if let Some(bank) = bank {
+        roles["bank"] = bank;
+    }
     let value = json!({"format":"nfs-world-content","version":5,"build_sha256":nfs_services::SUPPORTED_BUILD_SHA256,
         "level":{"level":level.level,"attributes":level.attributes,"word":level.word,"text":level.text,
             "flags":level.flags,"entries":level.entries,"final_word":level.final_word},

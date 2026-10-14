@@ -11,15 +11,18 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod derived;
 mod inventory;
+mod purchase;
 pub use derived::{DefinitionClass, Derived, Layout};
 pub use inventory::{
     Definition, DefinitionFlags, InitialInventory, InventoryCatalog, OwnershipLevel,
 };
+pub use purchase::{PurchaseReply, PurchaseRequest, PurchaseSelection};
 
 /// Owned and Purchasable construction paths, respectively.
 pub const OWNED: u8 = 2;
 pub const PURCHASABLE: u8 = 4;
 pub const LOAD_INVENTORY: u8 = 0x10;
+pub const PURCHASE_ITEMS: u8 = 0x02;
 
 impl Derived {
     /// Exact typed suffix codec, also used at the persistence boundary.

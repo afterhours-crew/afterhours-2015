@@ -62,6 +62,34 @@ pub struct Inventory {
     pub items: Arc<Collection>,
 }
 impl Population {
+    /// Refresh the owned inventory used for later garage/world lifetimes after
+    /// a validated purchase or equipment commit. No spawn or authority changes.
+    pub fn refresh_inventory(
+        &mut self,
+        players: &Players,
+        connection: u8,
+        persona: u64,
+        previous: &Inventory,
+        next: &Inventory,
+    ) -> Result<(), Error> {
+        if previous.slots != next.slots {
+            return Err(Error::Shape);
+        }
+        for (&participant, spawned) in &self.spawned {
+            if players.owns_participant(connection, persona, participant)
+                && (spawned.slots != previous.slots || spawned.items != previous.items)
+            {
+                return Err(Error::Shape);
+            }
+        }
+        for (&participant, spawned) in &mut self.spawned {
+            if players.owns_participant(connection, persona, participant) {
+                spawned.items = next.items.clone();
+            }
+        }
+        Ok(())
+    }
+
     pub fn new(messages: &[Message]) -> Result<Self, Error> {
         Ok(Self {
             registrations: registrations::Registry::from_messages(messages)

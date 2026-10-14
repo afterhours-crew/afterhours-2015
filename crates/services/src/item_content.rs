@@ -4,7 +4,8 @@
 
 //! Versioned static item definitions. V1 contains GUID/class bindings; V2 adds
 //! asset prices, links, constructor defaults and an explicit initial recipe.
-//! Neither format accepts captured instances, player ids or reply envelopes.
+//! V3 adds explicit supported purchase offers. No format accepts captured
+//! instances, player ids or reply envelopes.
 use crate::{ContentError, SUPPORTED_BUILD_SHA256 as BUILD};
 use nfs_world_core::items::{
     Catalog, Definition, DefinitionClass, DefinitionFlags, Derived, Guid, InventoryCatalog,
@@ -16,12 +17,14 @@ use std::{fs::File, io::Read, path::Path};
 pub const FORMAT: &str = "nfs-item-definitions";
 pub const VERSION: u8 = 1;
 pub const INVENTORY_VERSION: u8 = 2;
+pub const PURCHASE_VERSION: u8 = 3;
 pub const MAX_STORE_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ItemContent {
     pub catalog: Catalog,
     inventory: Option<InventoryCatalog>,
+    purchase_offers: Option<crate::purchase::Offers>,
 }
 
 fn fields(value: &Value, names: &[&str]) -> Result<(), ContentError> {
@@ -83,7 +86,7 @@ impl ItemContent {
         Self::from_json(&serde_json::from_slice(&bytes).map_err(|_| ContentError::Invalid)?)
     }
     pub fn from_json(value: &Value) -> Result<Self, ContentError> {
-        if value["version"] == INVENTORY_VERSION {
+        if value["version"] == INVENTORY_VERSION || value["version"] == PURCHASE_VERSION {
             return Self::inventory_from_json(value);
         }
         fields(value, &["format", "version", "build_sha256", "definitions"])?;
@@ -112,22 +115,27 @@ impl ItemContent {
         Ok(Self {
             catalog: Catalog::new(definitions).map_err(|_| ContentError::Invalid)?,
             inventory: None,
+            purchase_offers: None,
         })
     }
     pub fn inventory(&self) -> Option<&InventoryCatalog> {
         self.inventory.as_ref()
     }
+    pub fn purchase_offers(&self) -> Option<&crate::purchase::Offers> {
+        self.purchase_offers.as_ref()
+    }
     fn inventory_from_json(value: &Value) -> Result<Self, ContentError> {
-        fields(
-            value,
-            &[
-                "format",
-                "version",
-                "build_sha256",
-                "definitions",
-                "initial_definitions",
-            ],
-        )?;
+        let mut expected = vec![
+            "format",
+            "version",
+            "build_sha256",
+            "definitions",
+            "initial_definitions",
+        ];
+        if value["version"] == PURCHASE_VERSION {
+            expected.push("purchase_offers");
+        }
+        fields(value, &expected)?;
         if value["format"] != FORMAT || value["build_sha256"] != BUILD {
             return Err(ContentError::Invalid);
         }
@@ -209,9 +217,27 @@ impl ItemContent {
         }
         let inventory = InventoryCatalog::new(definitions, guids(&value["initial_definitions"])?)
             .map_err(|_| ContentError::Invalid)?;
+        let purchase_offers = if value["version"] == PURCHASE_VERSION {
+            let offers = crate::purchase::Offers::new(guids(&value["purchase_offers"])?)
+                .map_err(|_| ContentError::Invalid)?;
+            for guid in offers.definitions() {
+                let definition = inventory
+                    .definition(guid)
+                    .map_err(|_| ContentError::Invalid)?;
+                if definition.class != DefinitionClass::AirFilterItemData
+                    || !definition.flags.purchasable
+                {
+                    return Err(ContentError::Invalid);
+                }
+            }
+            Some(offers)
+        } else {
+            None
+        };
         Ok(Self {
             catalog: inventory.bindings().clone(),
             inventory: Some(inventory),
+            purchase_offers,
         })
     }
     pub fn to_json(&self) -> Value {
@@ -228,8 +254,14 @@ impl ItemContent {
                     "sub_items":d.sub_items.iter().map(|g|hex(g)).collect::<Vec<_>>(),
                     "additional_items":d.additional_items.iter().map(|g|hex(g)).collect::<Vec<_>>(),"default_derived_hex":derived})
             }).collect::<Vec<_>>();
-            return json!({"format":FORMAT,"version":INVENTORY_VERSION,"build_sha256":BUILD,"definitions":definitions,
+            let mut document = json!({"format":FORMAT,"version":INVENTORY_VERSION,"build_sha256":BUILD,"definitions":definitions,
                 "initial_definitions":inventory.initial_definitions().iter().map(|g|hex(g)).collect::<Vec<_>>()});
+            if let Some(offers) = &self.purchase_offers {
+                document["version"] = json!(PURCHASE_VERSION);
+                document["purchase_offers"] =
+                    json!(offers.definitions().map(|g| hex(g)).collect::<Vec<_>>());
+            }
+            return document;
         }
         let definitions: Vec<_> = self
             .catalog
@@ -314,6 +346,7 @@ mod tests {
     fn v2_is_static_typed_content_with_an_explicit_initial_recipe() {
         let value = inventory_document();
         let content = ItemContent::from_json(&value).unwrap();
+        assert!(content.purchase_offers().is_none());
         assert_eq!(content.to_json(), value);
         let generated = content
             .inventory()
@@ -332,6 +365,29 @@ mod tests {
             unknown.inventory().unwrap().instantiate_initial(19),
             Err(nfs_world_core::items::Error::UnsupportedDefault)
         );
+    }
+    #[test]
+    fn v3_offers_are_explicit_bounded_and_resolve_to_purchasable_parts() {
+        let mut value = inventory_document();
+        value["version"] = json!(PURCHASE_VERSION);
+        value["definitions"][0]["class"] = json!("AirFilterItemData");
+        value["purchase_offers"] = json!(["11111111111111111111111111111111"]);
+        let content = ItemContent::from_json(&value).unwrap();
+        assert_eq!(content.to_json(), value);
+        assert_eq!(content.purchase_offers().unwrap().definitions().count(), 1);
+        for offers in [
+            json!(["22222222222222222222222222222222"]),
+            json!([
+                "11111111111111111111111111111111",
+                "11111111111111111111111111111111"
+            ]),
+        ] {
+            let mut invalid = value.clone();
+            invalid["purchase_offers"] = offers;
+            assert!(ItemContent::from_json(&invalid).is_err());
+        }
+        value["definitions"][0]["flags"]["purchasable"] = json!(false);
+        assert!(ItemContent::from_json(&value).is_err());
     }
     #[test]
     fn v2_rejects_profile_fields_bad_scalars_layouts_and_unknown_links() {

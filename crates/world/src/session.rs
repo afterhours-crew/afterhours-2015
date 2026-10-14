@@ -19,6 +19,7 @@ mod files;
 fn rpc_message(rpc: crate::participants::HostRpc) -> frame::Message<'static> {
     use crate::participants::HostRpc;
     match rpc {
+        HostRpc::Bank(v) => frame::Message::BankBalance(v),
         HostRpc::Launcher(v) => frame::Message::LauncherEnabled(v),
         HostRpc::Participant(v) => frame::Message::ParticipantNotification(v),
         HostRpc::Garage(v) => frame::Message::GarageBinding(v),
@@ -450,6 +451,7 @@ impl Host {
             crate::participants::HostRpc::Actor(v) => Some(v.participant),
             crate::participants::HostRpc::Vehicle(v) => Some(v.participant),
             crate::participants::HostRpc::Launcher(_)
+            | crate::participants::HostRpc::Bank(_)
             | crate::participants::HostRpc::GaragePresence(_)
             | crate::participants::HostRpc::SpawnOccupied(_)
             | crate::participants::HostRpc::LevelPoll(_)

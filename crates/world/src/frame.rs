@@ -115,6 +115,7 @@ pub enum Message<'a> {
     SequenceStop(crate::sequences::Stop),
     LogicEvent(crate::logic::Fire),
     WorldActivation(crate::world_activation::Notification),
+    BankBalance(crate::bank::Balance),
     Opaque {
         index: u8,
         body: BitSpan<'a>,
@@ -131,6 +132,7 @@ impl Message<'_> {
             Self::Empty => 26,
             Self::State(_) => EX_STATE,
             Self::LauncherEnabled(_)
+            | Self::BankBalance(_)
             | Self::ParticipantNotification(_)
             | Self::GarageBinding(_)
             | Self::ActorBinding(_)
@@ -750,6 +752,9 @@ impl Builder {
                 w.put_span(value.encode().map_err(|_| Error::Shape)?.span());
             }
             Message::GaragePresence(value) => {
+                w.put_span(value.encode().map_err(|_| Error::Shape)?.span());
+            }
+            Message::BankBalance(value) => {
                 w.put_span(value.encode().map_err(|_| Error::Shape)?.span());
             }
             Message::WorldActivation(value) => {
