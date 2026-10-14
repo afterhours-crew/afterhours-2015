@@ -38,6 +38,16 @@ pub struct Scene {
     pub level_references: Vec<String>,
 }
 
+/// Installed definition behind one constructed scene serializer. Repeated
+/// blueprint occurrences retain distinct serializer indexes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Binding {
+    pub serializer: usize,
+    pub asset: String,
+    pub object: usize,
+    pub class: String,
+}
+
 /// Static definition identity at one occurrence in a scene's construction tree.
 /// Non-serializing objects still own links needed by other content builders.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -394,6 +404,29 @@ impl AssetIndex {
     /// Derive one LevelData or SubWorldData asset's server serializer order.
     pub fn scene(&mut self, name: &str) -> Result<Scene, Error> {
         profile(&mut self.assets, &self.identity.scenes, name)
+    }
+    /// Resolve service roles by installed definition, without fixed wire indexes.
+    pub fn scene_bindings(&mut self, name: &str) -> Result<Vec<Binding>, Error> {
+        let (_, instances) = construct(&mut self.assets, &self.identity.scenes, name, true)?;
+        instances
+            .into_iter()
+            .filter_map(|i| i.serializer.map(|s| (i, s)))
+            .map(|(i, serializer)| {
+                let class = self
+                    .assets
+                    .objects(&i.asset)?
+                    .get(i.index)
+                    .ok_or_else(|| Error::Content("scene binding definition missing".into()))?
+                    .class
+                    .clone();
+                Ok(Binding {
+                    serializer,
+                    asset: i.asset,
+                    object: i.index,
+                    class,
+                })
+            })
+            .collect()
     }
 }
 

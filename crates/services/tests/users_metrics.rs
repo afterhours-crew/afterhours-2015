@@ -193,6 +193,72 @@ fn unresolved() -> Followup {
 }
 
 #[test]
+fn local_and_bounded_site_sets_keep_order_identity_and_retry_rules() {
+    let aliases: [&[u8]; 16] = [
+        b"a", b"b", b"c", b"d", b"e", b"f", b"g", b"h", b"i", b"j", b"k", b"l", b"m", b"n", b"o",
+        b"p",
+    ];
+    for count in [1, 3, 16] {
+        let mut n = network(0xc0000201);
+        n.network_info.as_mut().unwrap().ping_site_latency_by_alias = Some(PingSiteLatencyMap(
+            aliases[..count].iter().map(|a| (*a, -1)).collect(),
+        ));
+        let mut h = handler();
+        let first = wire(20, 0, 5, &n.encode(body_limits()).unwrap());
+        let output = h.response(&first).unwrap().unwrap();
+        assert_eq!(
+            h.response(&first).unwrap().unwrap(),
+            vec![output[0].clone()]
+        );
+        h.response(&hardware(6, 0)).unwrap().unwrap();
+        n.opts = Some(4);
+        n.network_info.as_mut().unwrap().qos_data = Some(qos(6));
+        for (_, ms) in &mut n
+            .network_info
+            .as_mut()
+            .unwrap()
+            .ping_site_latency_by_alias
+            .as_mut()
+            .unwrap()
+            .0
+        {
+            *ms = 0;
+        }
+        let request = metrics_wire(&n);
+        let output = h.response(&request).unwrap().unwrap();
+        let update =
+            UserSessionExtendedDataUpdate::decode(decode(&output[1]).body, body_limits()).unwrap();
+        let data = update.extended_data.unwrap();
+        assert_eq!(data.latency_list.unwrap().0.len(), count);
+        assert_eq!(data.best_ping_site_alias, Some(&b"a"[..]));
+        assert_eq!(
+            h.response(&request).unwrap().unwrap(),
+            vec![output[0].clone()]
+        );
+        assert!(h.complete());
+    }
+    for entries in [
+        vec![],
+        aliases
+            .iter()
+            .copied()
+            .chain([b"q".as_slice()])
+            .map(|a| (a, 0))
+            .collect(),
+    ] {
+        let mut n = network(1);
+        n.network_info.as_mut().unwrap().ping_site_latency_by_alias =
+            Some(PingSiteLatencyMap(entries));
+        let mut h = handler();
+        assert!(
+            h.response(&wire(20, 0, 5, &n.encode(body_limits()).unwrap()))
+                .is_err()
+        );
+        assert!(!h.complete());
+    }
+}
+
+#[test]
 fn first_qos_discovery_resolves_external_endpoint_and_retries_only_ack() {
     let mut h = unresolved();
     let request = metrics_wire(&metrics([0; 4]));

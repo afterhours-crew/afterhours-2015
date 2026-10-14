@@ -44,6 +44,52 @@ pub struct AssetIndex {
 }
 
 impl AssetIndex {
+    /// Challenge enum names and IDs from the installed localization catalog.
+    /// Counts, rewards, dates and progression remain server policy.
+    pub fn challenge_types(&mut self) -> Result<BTreeMap<String, u32>, Error> {
+        let asset = "gameplay/static/challengemetadataasset";
+        let root = self
+            .assets
+            .objects(asset)?
+            .first()
+            .cloned()
+            .filter(|o| o.class == "ChallengeMetaDataCollection")
+            .ok_or_else(|| Error::Content("missing challenge metadata collection".into()))?;
+        let entries = root
+            .fields
+            .get("Challenges")
+            .and_then(Value::as_array)
+            .filter(|v| !v.is_empty() && v.len() <= 128)
+            .ok_or_else(|| Error::Content("challenge metadata collection bound".into()))?;
+        let mut result = BTreeMap::new();
+        for entry in entries {
+            let (name, index) = self
+                .assets
+                .target(
+                    asset,
+                    entry
+                        .as_pointer()
+                        .ok_or_else(|| Error::Content("challenge metadata pointer".into()))?,
+                )?
+                .ok_or_else(|| Error::Content("null challenge metadata".into()))?;
+            let object = &self.assets.objects(&name)?[index];
+            if object.class != "ChallengeInstanceMetaData" {
+                return Err(Error::Content("challenge metadata class".into()));
+            }
+            let Some(Value::Enum {
+                value,
+                name: Some(name),
+            }) = object.fields.get("ChallengeTypeEntry")
+            else {
+                return Err(Error::Content("challenge type enum".into()));
+            };
+            if *value < 0 || result.insert(name.clone(), *value as u32).is_some() {
+                return Err(Error::Content("invalid or duplicate challenge type".into()));
+            }
+        }
+        Ok(result)
+    }
+
     /// Exact object identities of a non-blueprint class in registry order.
     /// Embedded objects may share a partition and have no asset name of their own.
     pub(crate) fn registered_objects(
@@ -200,6 +246,63 @@ impl AssetIndex {
 mod tests {
     use super::*;
     use crate::synthetic;
+
+    #[test]
+    fn installed_challenge_ids_are_read_and_invalid_collections_are_rejected() {
+        use synthetic::{Asset, Field, PartitionWriter};
+        for (value, copies, valid) in [
+            (42, 1, true),
+            (-1, 1, false),
+            (42, 2, false),
+            (42, 0, false),
+        ] {
+            let dir = TempDir(std::env::temp_dir().join(format!(
+                    "afterhours-challenge-test-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                )));
+            let assets = vec![
+                Asset {
+                    name: "gameplay/static/challengemetadataasset".into(),
+                    partition: PartitionWriter::default().build(
+                        [1; 16],
+                        "ChallengeMetaDataCollection",
+                        [2; 16],
+                        vec![(
+                            "Challenges",
+                            Field::Imports(vec![([3; 16], [4; 16]); copies]),
+                        )],
+                    ),
+                },
+                Asset {
+                    name: "test/challenge".into(),
+                    partition: PartitionWriter::default().build(
+                        [3; 16],
+                        "ChallengeInstanceMetaData",
+                        [4; 16],
+                        vec![(
+                            "ChallengeTypeEntry",
+                            Field::Enum("ChallengeType", "ChallengeType_Constructed", value),
+                        )],
+                    ),
+                },
+            ];
+            let (options, _) = synthetic::write(&dir.0, &assets).unwrap();
+            let mut index = AssetIndex::open(&dir.0, &options).unwrap();
+            let result = index.challenge_types();
+            if valid {
+                assert_eq!(
+                    result.unwrap(),
+                    BTreeMap::from([("ChallengeType_Constructed".into(), 42)])
+                );
+            } else {
+                assert!(result.is_err());
+            }
+        }
+    }
 
     struct TempDir(std::path::PathBuf);
     impl Drop for TempDir {

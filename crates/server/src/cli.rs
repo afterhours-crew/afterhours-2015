@@ -9,6 +9,7 @@ struct Args {
     root: PathBuf,
     world_mac_template: Option<PathBuf>,
     output: PathBuf,
+    record_protocol: bool,
     redirector_port: u16,
     lsx_port: Option<u16>,
     idle_seconds: u64,
@@ -61,6 +62,7 @@ fn parse() -> Result<Args, String> {
 fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args, String> {
     let mut root = std::env::current_dir().map_err(|e| e.to_string())?;
     let (mut output, mut stop_file, mut world_content) = (None, None, None);
+    let mut record_protocol = false;
     let (mut redirector_port, mut idle_seconds, mut qos_seconds) = (0, 120, 900);
     let (mut item_content, mut state_directory, mut local_account) = (None, None, None);
     let mut lsx_port = None;
@@ -98,6 +100,7 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
                 .ok_or_else(|| format!("missing value for {flag:?}"))
         };
         match flag.to_str() {
+            Some("--record-protocol") if !record_protocol => record_protocol = true,
             Some("--root") => root = value()?.into(),
             Some("--output") => output = Some(PathBuf::from(value()?)),
             Some("--stop-file") => stop_file = Some(PathBuf::from(value()?)),
@@ -271,6 +274,7 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
         root,
         world_mac_template,
         output: output.ok_or("--output is required")?,
+        record_protocol,
         redirector_port,
         lsx_port,
         idle_seconds,
@@ -421,6 +425,12 @@ fn inventory_config(args: &Args) -> Result<Option<net::InventoryProfile>, Failur
 pub fn main() -> std::process::ExitCode {
     if std::env::args_os()
         .nth(1)
+        .is_some_and(|a| a == "prepare-local")
+    {
+        return nfs_server::local_setup::main(std::env::args_os().skip(2));
+    }
+    if std::env::args_os()
+        .nth(1)
         .is_some_and(|a| a == "prepare-content")
     {
         return nfs_server::prepare_content::main(std::env::args_os().skip(2));
@@ -436,7 +446,7 @@ pub fn main() -> std::process::ExitCode {
         .is_some_and(|a| a == "--help" || a == "-h")
     {
         println!(
-            "nfs-server: owned local NFS 2015 services\n\nUsage: nfs-server --root <data-directory> --output <new-recording-directory> [configuration options]\n\nPrepare game content: nfs-server prepare-content --game-dir <installation>\n[--root <data-directory>] [--content-cache <directory>]\n\nCreate account: nfs-server create-account --name <name> --state-directory <new-directory>\n--account-policy <policy.json> --item-content <items.json> --persistent-content <tables.json>\n\nRequired control configuration: --bootstrap-config, --auth-config,\n--group-policy, --matchmaking-admission, --matchmaking-policy, --world-policy,\n--control-catalogs, --stat-definitions, --challenge-content, --item-licenses,\n--owned-local-social and --owned-menu-awards.\n\nGarage configuration: --world-content (version 4 or 5), --world-mac-template,\n--item-content, --state-directory, --local-account, --persistent-content,\n--progression-content, --vehicle-content, --garage-layout, --sequence-content,\n--garage-logic.\n\nGame content: --game-dir <installation> builds --item-content,\n--persistent-content and --world-mac-template on first start, supplies\n--stat-definitions, --item-licenses, --control-catalogs and\n--reputation-thresholds, --scene-catalog, --world-content, --garage-layout,\n--vehicle-content, --vehicle-parts, --progression-content and --sequence-content unless explicitly overridden, and caches the outputs\n(--content-cache, default artifacts/content under --root).\n\nAccount state is read from SQLite. Optional one-time imports: --local-identity,\n--entitlement-state, --kickback-state, --speedwall-state, --user-settings.\n\nOptional: --lsx-port (3216 for the game), --redirector-port, --idle-seconds, --qos-seconds, --stop-file.\nAll listeners are loopback. No manifest, captured reply store or external\nauthentication is used. See crates/server/README.md for schemas and limitations."
+            "nfs-server: owned local NFS 2015 services\n\nUsage: nfs-server --root <data-directory> --output <new-recording-directory> [configuration options]\n\nPrepare complete local policy: nfs-server prepare-local --game-dir <installation> --root <data-directory>\n\nPrepare game content: nfs-server prepare-content --game-dir <installation>\n[--root <data-directory>] [--content-cache <directory>]\n\nCreate account: nfs-server create-account --name <name> --state-directory <new-directory>\n--account-policy <policy.json> --item-content <items.json> --persistent-content <tables.json>\n\nRequired control configuration: --bootstrap-config, --auth-config,\n--group-policy, --matchmaking-admission, --matchmaking-policy, --world-policy,\n--control-catalogs, --stat-definitions, --challenge-content, --item-licenses,\n--owned-local-social and --owned-menu-awards.\n\nGarage configuration: --world-content (version 4 or 5), --world-mac-template,\n--item-content, --state-directory, --local-account, --persistent-content,\n--progression-content, --vehicle-content, --garage-layout, --sequence-content,\n--garage-logic.\n\nGame content: --game-dir <installation> builds --item-content,\n--persistent-content and --world-mac-template on first start, supplies\n--stat-definitions, --item-licenses, --control-catalogs and\n--reputation-thresholds, --scene-catalog, --world-content, --garage-layout,\n--vehicle-content, --vehicle-parts, --progression-content and --sequence-content unless explicitly overridden, and caches the outputs\n(--content-cache, default artifacts/content under --root).\n\nAccount state is read from SQLite. Optional one-time imports: --local-identity,\n--entitlement-state, --kickback-state, --speedwall-state, --user-settings.\n\nOptional: --lsx-port (3216 for the game), --redirector-port, --idle-seconds, --qos-seconds, --stop-file, --record-protocol.\nRaw protocol recording is disabled by default and bounded when enabled.\nAll listeners are loopback. No manifest, captured reply store or external\nauthentication is used. See crates/server/README.md for schemas and limitations."
         );
         return std::process::ExitCode::SUCCESS;
     }
@@ -677,7 +687,14 @@ async fn run(args: Args) -> Result<(), Failure> {
         .map(|listener| listener.local_addr())
         .transpose()
         .map_err(|_| Failure::Io)?;
-    let (recorder, thread) = record::start(&args.root, &args.output)?;
+    let (recorder, thread) = record::start_with_options(
+        &args.root,
+        &args.output,
+        record::Options {
+            raw: args.record_protocol,
+            ..record::Options::default()
+        },
+    )?;
     let features = pack.features();
     let mut ready = serde_json::json!({"ready":true,"pid":std::process::id(),
             "redirector":a.redirector.to_string(),"blaze":a.blaze.to_string(),
@@ -833,6 +850,24 @@ mod tests {
             "--owned-local-social".into(),
         ]);
         args
+    }
+
+    #[test]
+    fn protocol_capture_requires_an_explicit_single_opt_in() {
+        assert!(
+            !parse_from(configured().into_iter())
+                .unwrap()
+                .record_protocol
+        );
+        let mut args = configured();
+        args.push("--record-protocol".into());
+        assert!(
+            parse_from(args.clone().into_iter())
+                .unwrap()
+                .record_protocol
+        );
+        args.push("--record-protocol".into());
+        assert!(parse_from(args.into_iter()).is_err());
     }
 
     #[test]

@@ -11,6 +11,8 @@ use nfs_protocol::users::{
 };
 
 const DMAP_KEYS: [u32; 6] = [1, 0x70001, 0x70002, 0xe0001, 0xe0002, 0x78020001];
+/// Bounded deployment-owned QoS site set. A loopback host advertises one site.
+pub const MAX_PING_SITES: usize = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum State {
@@ -181,7 +183,13 @@ impl Followup {
                     .as_ref()
                     .is_none_or(|q| !fixed_qos(q, 5, &[0, 0xa083_fffe]))
                     || info.ping_site_latency_by_alias.as_ref().is_none_or(|m| {
-                        m.0.len() != 4
+                        !(1..=MAX_PING_SITES).contains(&m.0.len())
+                            || m.0
+                                .iter()
+                                .map(|(alias, _)| *alias)
+                                .collect::<std::collections::BTreeSet<_>>()
+                                .len()
+                                != m.0.len()
                             || m.0.iter().any(|(alias, _)| {
                                 alias.is_empty()
                                     || alias.len() > 64

@@ -409,6 +409,9 @@ fn foreign_repeats_stale_ack_and_changed_inventory_do_not_mutate_the_owner() {
 }
 
 pub(crate) fn world_layout(layout: &Layout) -> Layout {
+    exit_layout(layout, "world_spawn")
+}
+fn exit_layout(layout: &Layout, pose_key: &str) -> Layout {
     let slots = (0..5).map(|i| {
         let mut bits=[0u32;16];
         for j in [0,5,10] {bits[j]=1f32.to_bits()}
@@ -425,15 +428,61 @@ pub(crate) fn world_layout(layout: &Layout) -> Layout {
     let world = Layout::from_json(
         &json!({"format":"nfs-garage-population","version":1,"build_sha256":crate::content::BUILD,
         "blueprint":"garage/test","item_blueprint":"test/gameplay","main":slots,
-        "world_spawn":{"transform_bits":spawn}}),
+        pose_key:{"transform_bits":spawn}}),
     )
     .unwrap();
     assert_eq!(world.scene_key, layout.scene_key);
     assert_eq!(
-        world.world_spawn().unwrap().locator(),
+        world
+            .world_spawn()
+            .or_else(|| world.exit_teleport())
+            .unwrap()
+            .locator(),
         [959.5, -26.75, -506.5]
     );
     world
+}
+
+#[test]
+fn installed_exit_destination_swaps_at_the_owned_garage_pose_without_a_recorded_spawn() {
+    let (mut population, mut players, content, layout, items, p) = fixture();
+    let layout = exit_layout(&layout, "exit_teleport");
+    assert!(layout.world_spawn().is_none());
+    let inventory = inventory(items);
+    let garage = population
+        .spawn(
+            &mut players,
+            owner(p),
+            inventory.clone(),
+            &content,
+            &layout,
+            [0.; 3],
+        )
+        .unwrap();
+    let garage_car = garage
+        .records
+        .iter()
+        .find(|r| matches!(r.initial, Some(Initial::Vehicle { .. })))
+        .unwrap();
+    let world = population
+        .spawn_world(&mut players, owner(p), &inventory, &content, &layout)
+        .unwrap();
+    assert_eq!(world.deleted, [garage_car.id]);
+    assert!(world.messages.is_empty());
+    let root = |record: &nfs_world::replication::Record| {
+        let Some(Initial::Vehicle { creation, .. }) = &record.initial else {
+            panic!("vehicle")
+        };
+        let Some(vehicle::Initial::Root(root)) = creation.fields.first() else {
+            panic!("root")
+        };
+        root.position.clone()
+    };
+    assert_eq!(root(&world.records[0]), root(garage_car));
+    assert_eq!(
+        players.owned_vehicle(3, 0x100000002, p, 1),
+        Some(world.records[0].id)
+    );
 }
 
 #[test]

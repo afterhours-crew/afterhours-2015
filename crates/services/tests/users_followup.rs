@@ -399,7 +399,7 @@ fn request_gates_require_complete_canonical_nested_address_and_metrics() {
         .as_mut()
         .unwrap()
         .0
-        .pop();
+        .clear();
     invalid.push(n);
     let mut n = network(1);
     n.network_info

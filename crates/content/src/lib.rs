@@ -40,6 +40,7 @@ mod tables;
 pub mod vehicle_parts;
 pub mod vehicle_profiles;
 pub mod world;
+mod world_services;
 
 pub use fingerprint::{Fingerprint, Input, InputKind, fingerprint};
 pub use nfs_frostbite::Limits;

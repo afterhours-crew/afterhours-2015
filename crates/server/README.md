@@ -10,11 +10,17 @@ state and static content. This is an incremental implementation: unsupported
 routes are reported rather than answered with invented success. A successful
 start or automated test does not establish complete gameplay or launcher
 independence. The repository does not distribute game content or an account
-profile; running a compatible garage requires the operator's separately
-prepared content and state. The local account creation command is available;
+profile. The [Windows launcher](../../docs/LOCAL-LAUNCHER.md) derives content from
+the owner's supported installation and creates a separate local account;
 the complete prologue and several garage mutations are still incomplete.
 
 ## Build and start
+
+For ordinary Windows startup, follow the [launcher instructions](../../docs/LOCAL-LAUNCHER.md).
+The options below document the server interface for developers and custom hosts.
+`prepare-local --game-dir <installation> --root <data-directory>` generates the
+launcher's policies and installed garage lifecycle without starting services or
+modifying an account. Account creation remains a separate transaction.
 
 Use the toolchain selected by the workspace. The vendored OpenSSL build needs a
 C compiler and Perl; Windows also needs MSVC Build Tools and NASM. Run from this
@@ -225,7 +231,9 @@ catalog; race/event filters require progression eligibility. The loader validate
 all sites against registered scene profiles before startup. Activation follows
 the owned FreeRoam lifecycle after completion creations and binding refreshes;
 without this catalog the additional subscriptions remain unsupported. Installed
-content preparation does not yet derive this optional catalog. Owned participants
+preparation derives the presence, streaming and location services for the public
+launcher. It leaves additional world-volume subscriptions empty until their
+eligibility is modeled. Owned participants
 already in FreeRoam may report their location before the activation queue drains;
 this records readiness without bypassing subscription ordering.
 
@@ -235,8 +243,8 @@ assignment, and completion of the queued world handoff, respectively. These
 batches use the existing `events` format and may not create/delete objects or
 change properties. They complement `exit`, `arrive` and `arrived` presentation
 batches. Event targets resolve to current per-participant objects; queue pressure
-retains the entire phase for retry. Installed preparation does not yet derive
-these optional event phases. Live driving acceptance remains open.
+retains the entire phase for retry. Public `prepare-local` derives these event
+phases from installed bindings. See the launcher guide for live validation scope.
 
 Garage return requires the installed entry sequence and all three garage logic
 phases: `return_requested`, `returning`, and `returned`. The entry definition
@@ -266,8 +274,13 @@ are unsupported.
 
 The first stdout JSON line with `ready: true` includes the actual listener
 addresses and configured capabilities. Logs go to stderr. Each run writes
-bounded-queue diagnostic recordings below its output directory. Recordings can
-contain account data and client authentication inputs: keep them private.
+bounded-queue metadata below its output directory: service, direction, length,
+route and status, without request bodies. Pass `--record-protocol` explicitly
+to also record raw payloads for local diagnostics. These can contain account
+data and authentication inputs; do not share them without content review.
+Recording stops at 64 MiB, 100,000 events, or 256 raw streams per run, while the
+server continues serving. A raw chunk over 1 MiB also stops recording without
+writing a partial chunk. The final metadata marker identifies exhaustion.
 Structured status logs contain route/error summaries, not request bodies.
 
 ## Integration and tests

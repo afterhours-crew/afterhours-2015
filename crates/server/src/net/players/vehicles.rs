@@ -245,7 +245,7 @@ impl PlayerListener {
         else {
             return Ok(None);
         };
-        if content.layout.world_spawn().is_none() {
+        if content.layout.world_spawn().is_none() && content.layout.exit_teleport().is_none() {
             return Ok(None);
         }
         let mut spawned = population.spawn_world(

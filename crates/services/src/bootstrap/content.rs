@@ -274,6 +274,65 @@ impl Config {
     }
 }
 
+/// Authored loopback deployment policy. No remote URLs or account data are inputs.
+/// Timers are deliberately local policy, not measurements of a public service.
+pub fn local_configuration() -> Json {
+    use serde_json::json;
+    let mut settings = Vec::new();
+    for name in SCALAR_KEYS {
+        let value = match *name {
+            "associationListSkipInitialSet" | "autoReconnectEnabled" => "false",
+            "gameManagerPreventMultipleGameMembership" => "true",
+            "connIdleTimeout" | "xlspConnectionIdleTimeout" => "5m",
+            "defaultRequestTimeout" => "60s",
+            "pingPeriod" => "20s",
+            "maximumNumberOfVehiclesInWarehouse" => "100",
+            "userManagerMaxCachedUsers" => "128",
+            "providerOnlineUserRefresh"
+            | "playersYouMayKnowScreenUpdateRate"
+            | "recommendationsUpdateRate" => "60s",
+            "voipHeadsetUpdateRate" => "5s",
+            "statsAndAwardsCacheSecondsEveryoneElse" | "statsAndAwardsCacheSecondsLocalPlayer" => {
+                "30"
+            }
+            _ => "0",
+        };
+        settings.push(json!({"name":name,"value":value}));
+    }
+    for table in TABLES {
+        for suffix in ["_Time", "_PendingChanges"] {
+            settings.push(json!({"name":format!("{table}{suffix}"),"value":"0"}));
+        }
+    }
+    for name in URL_KEYS.iter().copied().chain([
+        "bytevaultHostname",
+        "bytevaultPort",
+        "bytevaultSecure",
+        "telemetryPinServerPort",
+        "xblTokenUrn",
+    ]) {
+        settings.push(json!({"name":name,"value":null}));
+    }
+    let metadata: BTreeMap<_, _> = METADATA
+        .into_iter()
+        .map(|name| {
+            (
+                name,
+                match name {
+                    "service_name" => "nfs-2016-pc",
+                    "client_id" => "NFS16-PC-Server",
+                    "persona_namespace" => "cem_ea_id",
+                    "platform" => "pc",
+                    _ => "afterhours-local",
+                },
+            )
+        })
+        .collect();
+    json!({"version":1,"build_sha256":SUPPORTED_BUILD_SHA256,"metadata":metadata,
+        "components":[1,4,7,9,15,25,28,30720,30722],"underage_supported":false,"settings":settings,
+        "qos":{"probes":3,"service_id":1,"timeout":3000000,"sites":[{"alias":"bio-dub","name":"Afterhours loopback"}]}})
+}
+
 #[cfg(test)]
 pub(super) fn constructed() -> Json {
     use serde_json::json;

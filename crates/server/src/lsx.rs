@@ -94,12 +94,28 @@ async fn connection(mut stream: TcpStream, config: Config, entropy: [u8; 48], id
         return;
     }
     let mut buffer = [0; 8192];
+    let mut deadline = Some(tokio::time::Instant::now() + idle);
     loop {
-        let count = match tokio::time::timeout(idle, stream.read(&mut buffer)).await {
-            Ok(Ok(n)) if n != 0 => n,
+        // Established SDK connections have no periodic heartbeat. Bound the
+        // handshake and each partial frame, not the time between requests.
+        let read = match deadline {
+            Some(end) => tokio::time::timeout_at(end, stream.read(&mut buffer))
+                .await
+                .unwrap_or_else(|_| Err(std::io::ErrorKind::TimedOut.into())),
+            None => stream.read(&mut buffer).await,
+        };
+        let count = match read {
+            Ok(n) if n != 0 => n,
             _ => break,
         };
         let output = launcher.receive(&buffer[..count]);
+        if launcher.phase() == Phase::Established {
+            if buffer[count - 1] == 0 {
+                deadline = None;
+            } else if deadline.is_none() || buffer[..count].contains(&0) {
+                deadline = Some(tokio::time::Instant::now() + idle);
+            }
+        }
         for event in &output.events {
             match event {
                 Event::HandshakeAccepted { .. } => info!("LSX handshake accepted"),
@@ -318,6 +334,49 @@ mod tests {
         assert_eq!(
             Envelope::parse(&greeting).unwrap().payload.name,
             "Challenge"
+        );
+        stop.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn established_idle_survives_but_partial_frame_has_a_deadline() {
+        let listener = bind(0).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (stop, shutdown) = watch::channel(false);
+        let server = tokio::spawn(serve(
+            listener,
+            Profile {
+                user_id: 1,
+                persona_id: 2,
+                persona: "Test".into(),
+                avatar_id: String::new(),
+            },
+            Duration::from_millis(200),
+            shutdown,
+        ));
+        let (mut stream, cipher) = connect(address).await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let reply = request(
+            &mut stream,
+            &cipher,
+            Element::new("GetProfile").attribute("index", "0"),
+            2,
+        )
+        .await;
+        assert_eq!(reply.payload.attr("Persona"), Some("Test"));
+        stream.write_all(b"aa").await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), stream.read_u8())
+                .await
+                .unwrap()
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::UnexpectedEof
         );
         stop.send(true).unwrap();
         tokio::time::timeout(Duration::from_secs(2), server)

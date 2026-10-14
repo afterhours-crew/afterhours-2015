@@ -1179,7 +1179,20 @@
       "UnlockItemTransactionEntityData": null,
       "ValuesPersistenceEntityData": null,
       "VoipControlEntityData": null,
-      "SyncedFloatEntityData": "float"
+      "SyncedFloatEntityData": "float",
+      "BankBalanceQueryEntityData": null,
+      "ConditionalFloatEntityData": null,
+      "FloatAccumulatorEntityData": null,
+      "FloatEntityData": null,
+      "RaceVehiclePhysicsQueryEntityData": null,
+      "TransformSplitterEntityData": null,
+      "Vec3BuilderEntityData": null,
+      "Vec3SplitterEntityData": null,
+      "Vector3CacheEntityData": null,
+      "VectorMathOpEntityData": null,
+      "CurveEntityData": null,
+      "DynamicKeyFloatValueData": null,
+      "RaceVehicleDriftQueryEntityData": null
     },
     "spawners": [
       "ParticipantLogicSpawnerEntityData",

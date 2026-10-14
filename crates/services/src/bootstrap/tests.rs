@@ -11,6 +11,26 @@ fn profile(port: u16) -> Profile {
     )
     .unwrap()
 }
+
+#[test]
+fn local_deployment_accepts_the_installed_client_service_identifier() {
+    let config = Config::from_json(&local_configuration()).unwrap();
+    let profile = Profile::new(
+        &config,
+        "127.0.0.1:2345".parse().unwrap(),
+        "127.0.0.1:2346".parse().unwrap(),
+    )
+    .unwrap();
+    let mut session = Session::new(&profile);
+    assert!(
+        session
+            .response(&preauth(b"nfs-2016-pc"), 5)
+            .unwrap()
+            .is_some()
+    );
+    let mut session = Session::new(&profile);
+    assert!(session.response(&preauth(b"afterhours-local"), 5).is_err());
+}
 fn wire(command: u16, body: &[u8], correlation: u32) -> Vec<u8> {
     nfs_fire2::encode(
         Frame {
