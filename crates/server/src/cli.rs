@@ -415,7 +415,9 @@ fn inventory_config(args: &Args) -> Result<Option<net::InventoryProfile>, Failur
         .transpose()?;
     let repository = nfs_storage::SqliteRepository::open_owned_directory(&directory)
         .map_err(|_| Failure::Output)?;
-    let mut service = net::InventoryService::new(Arc::new(repository), Arc::new(catalog));
+    let records = nfs_storage::records::SqliteRecords(repository.clone());
+    let mut service = net::InventoryService::new(Arc::new(repository), Arc::new(catalog))
+        .with_records(Arc::new(records));
     if let Some(offers) = content.purchase_offers() {
         service = service.with_purchase_offers(offers.clone());
     }

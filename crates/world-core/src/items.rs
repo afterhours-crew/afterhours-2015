@@ -128,6 +128,21 @@ pub struct Item {
     pub sell_price: u32,
     pub derived: Derived,
 }
+impl Item {
+    /// Library liveries are account-owned leaves. Installing one retains its
+    /// ID and zero owner; ordinary vehicle parts must belong to their parent.
+    pub fn is_account_livery(&self) -> bool {
+        self.owner == 0
+            && self.state == OWNED
+            && self.defaults.is_empty()
+            && self.children.is_empty()
+            && matches!(self.derived, Derived::LiveryCustomization { .. })
+    }
+
+    pub fn belongs_under(&self, parent: u64) -> bool {
+        self.owner == parent || (parent != 0 && self.is_account_livery())
+    }
+}
 impl std::fmt::Debug for Item {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Item")

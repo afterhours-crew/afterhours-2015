@@ -214,6 +214,44 @@ fn fixture() -> (
     car.defaults.push(6);
     car.defaults.push(8);
     car.defaults.extend([2, 3, 4, 5]);
+    let livery = Item {
+        id: 11,
+        definition: [11; 16],
+        owner: 0,
+        defaults: vec![],
+        children: vec![],
+        state: OWNED,
+        buy_price: 0,
+        sell_price: 0,
+        derived: Derived::LiveryCustomization {
+            byte_vault_data_id: 0,
+            library_preset_id: u32::MAX,
+            dynamic_flags: 1,
+        },
+    };
+    definitions.push((
+        [11; 16],
+        Definition {
+            class: DefinitionClass::LiveryCustomizationItemData,
+            flags: DefinitionFlags::default(),
+            default_derived: Some(livery.derived.clone()),
+            ..definitions[0].1.clone()
+        },
+    ));
+    items.items.insert(11, livery);
+    document["parts"]["customization"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+        "guid":"0b".repeat(16),"class_name":"LiveryCustomizationItemData",
+        "tuning":{},"chassis":{"family":"other"}}));
+    document["parts"]["mesh"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+        "guid":"0b".repeat(16),"class_name":"LiveryCustomizationItemData","kind":"ignore"}));
+    document["parts"]["appearance"].as_array_mut().unwrap().push(json!({
+        "guid":"0b".repeat(16),"class_name":"LiveryCustomizationItemData","data_id":"0","version":-1}));
     items.roots = items.items.keys().copied().collect();
     let catalog = Arc::new(InventoryCatalog::new(definitions, vec![]).unwrap());
     let vehicles =

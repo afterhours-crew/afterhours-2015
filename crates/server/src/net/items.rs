@@ -25,6 +25,7 @@ pub struct Service {
     persistent: Option<Arc<crate::persistent::Catalog>>,
     offers: Option<Arc<nfs_services::purchase::Offers>>,
     category_unlocks: Option<Arc<nfs_services::category_unlocks::Policy>>,
+    records: Option<Arc<dyn nfs_storage::records::Repository>>,
     workers: Arc<Semaphore>,
 }
 impl Service {
@@ -35,11 +36,16 @@ impl Service {
             persistent: None,
             offers: None,
             category_unlocks: None,
+            records: None,
             workers: Arc::new(Semaphore::new(WORKERS)),
         }
     }
     pub fn with_persistent(mut self, catalog: Arc<crate::persistent::Catalog>) -> Self {
         self.persistent = Some(catalog);
+        self
+    }
+    pub fn with_records(mut self, records: Arc<dyn nfs_storage::records::Repository>) -> Self {
+        self.records = Some(records);
         self
     }
     pub fn with_purchase_offers(mut self, offers: nfs_services::purchase::Offers) -> Self {
@@ -105,6 +111,15 @@ fn supported_request(bytes: &[u8]) -> Result<bool, nfs_world::items::Error> {
     }
 }
 impl Profile {
+    pub(super) fn bind_records(
+        &self,
+        records: crate::auxiliary::LocalRecords,
+    ) -> crate::auxiliary::LocalRecords {
+        match &self.service.records {
+            Some(repository) => records.with_storage(repository.clone(), self.account),
+            None => records,
+        }
+    }
     async fn equip(&self, request: &EquipmentRequest, now: Timestamp) -> Result<Equipped, Error> {
         let service = self.service.clone();
         let account = self.account;
@@ -130,6 +145,17 @@ impl Profile {
                 for operation in &request.part_edits {
                     use nfs_services::item_builder::Operation;
                     edit = match *operation {
+                        Operation::Livery {
+                            item,
+                            data_id,
+                            preset,
+                        } => edit.with_livery(
+                            &request.items,
+                            &service.catalog,
+                            item,
+                            data_id,
+                            preset,
+                        ),
                         Operation::Equip { item, .. } => edit.with_part(
                             &request.items,
                             item,

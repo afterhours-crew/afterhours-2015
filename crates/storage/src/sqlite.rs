@@ -34,9 +34,9 @@ use std::{
 /// `NFSD`: one file per account, domains
 /// added by schema version.
 const APPLICATION_ID: i64 = 0x4e46_5344;
-/// Version 4 consolidates service state into the inventory account database.
-pub const VERSION: i64 = 4;
-const TABLES: i64 = 9;
+/// Version 5 adds account-owned opaque livery records.
+pub const VERSION: i64 = 5;
+const TABLES: i64 = 10;
 /// 4096-byte pages: 64 MiB, above the worst-case item set.
 const MAX_PAGES: i64 = 16384;
 const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
@@ -134,7 +134,8 @@ impl SqliteRepository {
         let expected_tables = match expected {
             1 | 2 => 3,
             3 => 4,
-            4 => TABLES,
+            4 => 9,
+            5 => TABLES,
             _ => return Err(Error::Version),
         };
         if tables != expected_tables {
@@ -389,8 +390,8 @@ impl InventoryRepository for SqliteRepository {
             Self::migrate_v3(&tx, account)?;
         } else if version == 2 {
             Self::migrate_v3(&tx, account)?;
-        } else if version == 3 {
-            Self::check_version(&tx, account, 3)?;
+        } else if version == 3 || version == 4 {
+            Self::check_version(&tx, account, version)?;
         } else if version > VERSION {
             return Err(Error::Version);
         } else {
@@ -405,6 +406,11 @@ impl InventoryRepository for SqliteRepository {
             }
             Self::read_tables(&tx)?;
             crate::account::create_tables(&tx)?;
+            tx.pragma_update(None, "user_version", 4)?;
+        }
+        if version < 5 {
+            Self::check_version(&tx, account, 4)?;
+            crate::records::create_table(&tx)?;
             tx.pragma_update(None, "user_version", VERSION)?;
         }
         tx.commit()?;

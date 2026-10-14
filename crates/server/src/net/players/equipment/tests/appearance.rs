@@ -4,6 +4,83 @@
 
 use super::*;
 
+fn livery_wire(scene: u16, player: u16, item: u64, data_id: u32) -> BitWriter {
+    let mut payload = BitWriter::new();
+    payload
+        .put(2, 9)
+        .put(9, 32)
+        .put(item as u32 as u64, 32)
+        .put(item >> 32, 32)
+        .put(data_id.into(), 32)
+        .put(u32::MAX.into(), 32)
+        .put(0, 7);
+    let mut body = BitWriter::new();
+    body.put(0, 64)
+        .put(2, 8)
+        .put(scene.into(), 13)
+        .put(player.into(), 13)
+        .put(payload.bytes().len() as u64, 9)
+        .put_span(payload.span());
+    body
+}
+
+#[tokio::test]
+async fn livery_edit_paint_equip_and_commit_deliver_the_owned_inventory() {
+    let (mut listener, mut jobs, repo, account, scene, player, car) = fixture();
+    let before = repo.snapshot(account).unwrap();
+    accept(&mut listener, &livery_wire(scene, player, 11, 3)).unwrap();
+    accept(
+        &mut listener,
+        &appearance_wire(scene, player, Some(0), 0, 0),
+    )
+    .unwrap();
+    accept(&mut listener, &wire(scene, player, Some(car), 0, 11)).unwrap();
+    assert_eq!(repo.snapshot(account).unwrap(), before);
+    accept(&mut listener, &wire(scene, player, None, 5, 0)).unwrap();
+    jobs.start(&mut listener, 3, Timestamp(3));
+    assert!(jobs.completed(&mut listener).await);
+    let update = crate::net::items::tests::deliver_notification(&mut jobs);
+    assert!(update.items.items[&1].children.contains(&11));
+    assert_eq!(update.items.items[&11].owner, 0);
+    assert_eq!(
+        update.items.items[&11].derived,
+        Derived::LiveryCustomization {
+            byte_vault_data_id: 3,
+            library_preset_id: u32::MAX,
+            dynamic_flags: 0
+        }
+    );
+    let saved = repo.snapshot(account).unwrap();
+    assert_eq!(saved.generation, before.generation + 1);
+    assert_eq!(saved.tables, before.tables);
+    assert_eq!(listener.pending[0].records[0].id, car);
+    // An unrelated part change still constructs all components with this livery.
+    accept(&mut listener, &wire(scene, player, Some(car), 0, 7)).unwrap();
+    accept(&mut listener, &wire(scene, player, None, 5, 0)).unwrap();
+    jobs.start(&mut listener, 4, Timestamp(4));
+    assert!(jobs.completed(&mut listener).await);
+    let update = crate::net::items::tests::deliver_notification(&mut jobs);
+    assert!(update.items.items[&1].children.contains(&11));
+    assert_eq!(
+        repo.snapshot(account).unwrap().items[&ItemId::new(11).unwrap()],
+        saved.items[&ItemId::new(11).unwrap()]
+    );
+}
+
+#[tokio::test]
+async fn canceled_or_foreign_livery_edits_do_not_mutate_inventory() {
+    let (mut listener, mut jobs, repo, account, scene, player, _) = fixture();
+    let before = repo.snapshot(account).unwrap();
+    assert!(accept(&mut listener, &livery_wire(scene, player + 1000, 11, 3)).is_err());
+    assert!(accept(&mut listener, &livery_wire(scene, player, 1000, 3)).is_err());
+    accept(&mut listener, &livery_wire(scene, player, 11, 3)).unwrap();
+    accept(&mut listener, &wire(scene, player, None, 4, 0)).unwrap();
+    accept(&mut listener, &wire(scene, player, None, 5, 0)).unwrap();
+    jobs.start(&mut listener, 3, Timestamp(3));
+    assert!(!jobs.working());
+    assert_eq!(repo.snapshot(account).unwrap(), before);
+}
+
 fn appearance_wire(scene: u16, player: u16, paint: Option<u8>, item: u64, size: u8) -> BitWriter {
     let mut payload = BitWriter::new();
     payload

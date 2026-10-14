@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 const BATCH_NAMESPACE: u64 = 1 << 61;
 
 mod appearance;
+mod livery;
 pub use appearance::Paint;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -71,6 +72,9 @@ impl Edit {
     ) -> Result<Self, Error> {
         let preview = self.preview(items)?;
         let selected = preview.items.get(&part).ok_or(Error::Ownership)?;
+        if matches!(selected.derived, Derived::LiveryCustomization { .. }) {
+            return self.with_livery_selection(items, part, catalog);
+        }
         if selected.owner != self.vehicle() || selected.state != OWNED {
             return Err(Error::Ownership);
         }
@@ -89,7 +93,7 @@ impl Edit {
         let mut installed = Vec::new();
         for &id in &self.after.children {
             let child = preview.items.get(&id).ok_or(Error::Shape)?;
-            if child.owner != self.vehicle() || child.state != OWNED {
+            if !child.belongs_under(self.vehicle()) || child.state != OWNED {
                 return Err(Error::Ownership);
             }
             if offers
@@ -140,7 +144,7 @@ impl Edit {
                 return Err(Error::Shape);
             }
             let item = preview.items.get(&id).ok_or(Error::Shape)?;
-            if item.owner != owner || item.state != OWNED {
+            if !item.belongs_under(owner) || item.state != OWNED {
                 return Err(Error::Ownership);
             }
             installed.push((

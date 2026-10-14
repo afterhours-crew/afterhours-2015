@@ -58,7 +58,7 @@ impl Edit {
             let mut targets = Vec::new();
             for id in &self.after.children {
                 let part = preview.items.get(id).ok_or(Error::Shape)?;
-                if part.owner != self.vehicle() || part.state != OWNED {
+                if !part.belongs_under(self.vehicle()) || part.state != OWNED {
                     return Err(Error::Ownership);
                 }
                 if catalog

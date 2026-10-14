@@ -26,6 +26,11 @@ pub enum Operation {
         item: u64,
         size: u8,
     },
+    Livery {
+        item: u64,
+        data_id: u32,
+        preset: u32,
+    },
     Commit,
 }
 
@@ -57,7 +62,7 @@ impl Binding {
             .map_err(|_| Error::Shape)?;
         if envelope.references().first() != Some(&self.scene)
             || route.selector() != self.selector
-            || !matches!(route.method_index(), 0 | 1 | 3 | 4 | 5 | 8 | 10)
+            || !matches!(route.method_index(), 0 | 1 | 3 | 4 | 5 | 8 | 9 | 10)
         {
             return Ok(None);
         }
@@ -73,6 +78,22 @@ impl Binding {
             return Err(Error::Ownership);
         }
         let operation = match route.method_index() {
+            9 => {
+                let args = route.arguments();
+                if args.len() != 135 {
+                    return Err(Error::Shape);
+                }
+                let item = u64::from(args.read_u32(0, 32).map_err(|_| Error::Shape)?)
+                    | (u64::from(args.read_u32(32, 32).map_err(|_| Error::Shape)?) << 32);
+                if item == 0 {
+                    return Err(Error::Shape);
+                }
+                Operation::Livery {
+                    item,
+                    data_id: args.read_u32(64, 32).map_err(|_| Error::Shape)?,
+                    preset: args.read_u32(96, 32).map_err(|_| Error::Shape)?,
+                }
+            }
             1 => {
                 let args = route.arguments();
                 if args.len() != 207 {

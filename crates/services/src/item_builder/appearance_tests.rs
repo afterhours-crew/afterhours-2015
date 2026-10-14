@@ -120,3 +120,32 @@ fn rim_size_preserves_high_item_word_and_has_an_eight_bit_selection() {
         Err(Error::Shape)
     );
 }
+
+#[test]
+fn livery_preserves_item_words_and_both_unsigned_fields() {
+    let item = 0xfedcba98_12345678u64;
+    for (data_id, preset) in [(0, 0), (3, u32::MAX), (u32::MAX, 19)] {
+        let mut args = BitWriter::new();
+        args.put(item as u32 as u64, 32)
+            .put(item >> 32, 32)
+            .put(data_id.into(), 32)
+            .put(preset.into(), 32);
+        check(
+            9,
+            &args,
+            Operation::Livery {
+                item,
+                data_id,
+                preset,
+            },
+        );
+    }
+    let mut args = BitWriter::new();
+    args.put(0, 64).put(0, 64);
+    assert_eq!(
+        Binding::new(10, 6)
+            .unwrap()
+            .read(wire(9, &args, &[10, 12]).span(), |_| true),
+        Err(Error::Shape)
+    );
+}

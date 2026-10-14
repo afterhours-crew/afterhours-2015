@@ -734,8 +734,12 @@ pub async fn serve(
                             inventory.clone().zip(garage_logic.as_ref().and_then(|l| l.reputation_thresholds()).cloned())
                         } else { None },
                     };
+                    let records = match &inventory {
+                        Some(profile) => profile.bind_records(profiles.records.clone()),
+                        None => profiles.records.clone(),
+                    };
                     worlds.spawn(crate::auxiliary::listener(
-                        auxiliary, profiles.records.clone(), token_seed, connections, recorder.clone(),
+                        auxiliary, records, token_seed, connections, recorder.clone(),
                     ));
                     worlds.spawn(world_host(
                         world_socket,

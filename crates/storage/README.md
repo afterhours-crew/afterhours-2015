@@ -11,7 +11,7 @@ async workers. `MemoryRepository` and `SqliteRepository` implement the same
   atomically. Failed batches leave the previous state intact.
 - Batch IDs provide retry detection within a bounded history; generations reject
   stale updates. Callers must keep a batch ID associated with the same operation.
-- SQLite schema version 4 migrates earlier inventory/garage/table layouts. Ownership
+- SQLite schema version 5 migrates earlier inventory/garage/table layouts. Ownership
   and version checks precede adoption; successful writes commit before returning.
 - Identity, entitlement, kickback, speedwall and settings each have a bounded,
   revisioned table in the same account file. Domain codecs validate their named
@@ -21,6 +21,14 @@ async workers. `MemoryRepository` and `SqliteRepository` implement the same
 - Fresh-account publication combines all five service domains with the initial
   inventory/garage/table batch in one transaction. Only a wholly untouched store
   is eligible; retries cannot reset existing state or leave half the domains saved.
+- Livery records use a separate table in the same account database. Each complete
+  upload commits atomically; an identical retry preserves its bytes and timestamps.
+  Names are bounded database keys, never file paths. Limits are 256 records,
+  512 KiB per record and 16 MiB of payload per account. Replacements enforce the
+  final size, and failed writes preserve prior records. Payloads remain opaque.
+  These writes do not advance the inventory generation or alter progression.
+  Record metadata uses `records::UnixMicros`; inventory timestamps remain in
+  milliseconds. Callers must supply the appropriate clock units explicitly.
 - The legacy `settings-<account>.sqlite` file is a read-only migration input.
   Its value and revision are preserved; new settings writes use `<account>.sqlite`.
   Stop older servers before migration. Keep the old file as a backup, but do not

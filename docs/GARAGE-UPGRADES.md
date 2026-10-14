@@ -10,8 +10,9 @@ in the catalog. Recorded stock defaults remain available to restore.
 The candidate also stages the 31 handling controls against installed parts and
 the car's transmission flag. REP-only offers use the account's saved score and
 installed thresholds. Visual parts match exact class and, where applicable,
-front/rear location. Composite parts, separate story/build restrictions, selling
-and wraps remain unsupported. The live checks below cover selected performance
+front/rear location. Composite parts, separate story/build restrictions and selling
+remain unsupported. Saved wraps can be restored from the local library and
+equipped. The live checks below cover selected performance
 and visual parts; broader customization acceptance is still pending.
 See the [gameplay checklist](GAMEPLAY-CHECKLIST.md).
 
@@ -56,11 +57,37 @@ The paint-library loading wait was caused by an unanswered speed-wall read on
 an empty account. Supported reads now return the defined not-found error when
 there is no saved row, allowing the client's shared download queue to continue.
 A live test reached the library and body-paint editor with all header downloads
-completed. Saving then reached the unsupported wrap upload and displayed a save
-error. Body-paint and wrap persistence are therefore still unvalidated.
+completed. The first save exposed the missing wrap upload handler.
+
+The current candidate adds durable livery uploads, downloads, metadata reads
+and deletion. It preserves complete client-generated payloads in the account
+database and returns upload success only after commit. Partial uploads, foreign
+owners, unsupported addresses, quota failures and storage errors cannot produce
+a successful save. Portable tests cover fragmented HTTP, exact retries, reopen
+and account isolation. A live test saved a body-paint wrap and a rear-window
+decal wrap: all six header, recipe and baked-image payloads matched durable
+storage byte for byte. A follow-up loaded both entries after restarting game and
+server, applied the newer saved wrap, and committed its body paint and livery
+together. Its rear-window stripe was visible in free roam and the body paint
+survived garage return. A further restart retained the yellow body paint in the
+garage and the rear-window stripe in free roam. These checks cover restoring
+and applying a saved library entry; saving
+a newly edited wrap through the new livery-field handler still needs a live check.
+It migrates storage to schema 5; back up the stopped account directory before
+testing. Older server builds cannot open the upgraded database.
+
+The follow-up candidate models livery edits and equip in the same transaction
+as body paint. Library livery leaves retain their account ownership and item ID;
+normal parts still require their car owner. The two livery fields and changed
+flag are stored without inventing a resource hash. A library item referenced by
+another car is currently refused to avoid changing that car through a shared
+record. Portable tests cover combined edits, retries, cancellation, account
+isolation, unrelated part changes and restart. The live library-apply path
+retains the account-owned livery ID and its installed resource hash. It does not
+exercise the separate request that changes a livery's two stored fields.
 
 These checks cover the tested starting car, not every supported definition or
-menu path. Broader visual parts, body paint and wraps remain unfinished. Client
+menu path. Broader visual parts and the complete wrap-edit workflow remain unfinished. Client
 performance numbers changing immediately after purchase are only a local preview;
 the return/restart checks are needed to establish that they were saved.
 

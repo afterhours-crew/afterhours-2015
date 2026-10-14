@@ -9,6 +9,7 @@ use nfs_world_core::items::DefinitionClass;
 use nfs_world_core::items::{Definition, DefinitionFlags, Layout, OwnershipLevel};
 
 mod appearance;
+mod livery;
 
 fn catalog() -> InventoryCatalog {
     let part = Definition {

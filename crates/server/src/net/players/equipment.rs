@@ -67,6 +67,7 @@ impl PlayerListener {
             | Operation::Dyno { .. }
             | Operation::Handling { .. }
             | Operation::Paint { .. }
+            | Operation::Livery { .. }
             | Operation::RimSize { .. } => {
                 let vehicle = match call.operation {
                     Operation::Equip { vehicle, .. }
@@ -130,13 +131,14 @@ impl PlayerListener {
                 else {
                     return Err(replication::Error::UnknownObject);
                 };
-                if let Operation::Equip { item, .. } | Operation::RimSize { item, .. } =
-                    call.operation
-                    && !inventory
-                        .items
-                        .items
-                        .get(&item)
-                        .is_some_and(|p| p.owner == car)
+                if let Operation::Equip { item, .. }
+                | Operation::RimSize { item, .. }
+                | Operation::Livery { item, .. } = call.operation
+                    && !inventory.items.items.get(&item).is_some_and(|p| {
+                        p.owner == car
+                            || (!matches!(call.operation, Operation::RimSize { .. })
+                                && p.is_account_livery())
+                    })
                 {
                     return Err(replication::Error::UnknownObject);
                 }
@@ -169,7 +171,10 @@ impl PlayerListener {
                 }
                 if matches!(
                     call.operation,
-                    Operation::Equip { .. } | Operation::Paint { .. } | Operation::RimSize { .. }
+                    Operation::Equip { .. }
+                        | Operation::Paint { .. }
+                        | Operation::RimSize { .. }
+                        | Operation::Livery { .. }
                 ) && edit.part_edits.last() != Some(&call.operation)
                 {
                     if edit.part_edits.len() >= 128 {
@@ -194,7 +199,9 @@ impl PlayerListener {
                         }
                         edit.handling.merge(changes);
                     }
-                    Operation::Paint { .. } | Operation::RimSize { .. } => (),
+                    Operation::Paint { .. }
+                    | Operation::RimSize { .. }
+                    | Operation::Livery { .. } => (),
                     _ => unreachable!(),
                 }
             }
