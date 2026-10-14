@@ -58,6 +58,7 @@ build tools may. No private checkout, copied profile or database service is need
 For custom build output paths, saved data, setup checks and troubleshooting, see
 the [running instructions](docs/LOCAL-LAUNCHER.md#build-from-source).
 Developers can also [run just the server](crates/server/README.md#run-only-the-server-on-windows).
+For menu automation, [change the game's Back key to F9 without a mod](docs/MENU-KEYBINDING.md).
 
 ## Build and test
 

@@ -7,11 +7,16 @@ owned item IDs are never copied from a saved account or hardcoded in the server.
 Other performance parts, visual customization, selling, handling and wraps remain
 unsupported. See the [gameplay checklist](GAMEPLAY-CHECKLIST.md).
 
-The purchase and cash deduction have been accepted by the game. The new equip
-and save path passes portable tests and still needs live driving, garage return
-and a game/server restart before this feature can be marked complete. Client
+The purchase, cash deduction and durable equip have been accepted by the game.
+Live garage return still shows the old filter, while restarting restores the
+saved filter label but retains stock performance figures. This candidate is
+incomplete and must not be treated as a working upgrade feature. Client
 performance numbers changing immediately after purchase are a local preview;
 they alone do not prove that the server saved or applied the part.
+
+For unattended menu testing, [change the game's Back key to F9](MENU-KEYBINDING.md)
+through its user profile. This works without a mod and leaves Computer Use's
+Escape stop control available.
 
 ## Build and start
 
