@@ -217,13 +217,39 @@ screenshots do not establish frame-by-frame timing throughout every cinematic.
 Normal quit closed the game, server and listener. The actual EA app was absent,
 its service was already stopped, and the launcher changed no machine settings.
 
+The standalone release also reached free roam after the owner completed the
+installed game's activation dialog. The same original game process continued
+after activation. PageDown returned from the garage approach, the next exit
+displayed the prompt and player arrow, and PageDown returned again from the
+spawn. Normal quit cleaned up the game, server and listener. An immediate
+game/server restart required no further sign-in, restored the same account's
+Mustang garage and quit normally. The owner reported a delay before the approach
+prompt appeared; its latency and cause remain under investigation.
+
 Rust formatting, Clippy and 1,107 tests pass, along with the Windows launcher
-and disposable process-cleanup checks above. The standalone release builds, but
-the next-day live attempt opened the installed activation sign-in dialog before
-local routing. It has not passed release gameplay or next-day activation-cache
-acceptance. Cold external-network
+and disposable process-cleanup checks above. The next-day launch initially
+required manual activation; the successful release gameplay and immediate
+restart do not establish next-day activation-cache acceptance. Cold external-network
 isolation through final exit, and fresh-install/cache-lifetime acceptance remain
 separate gates. Earlier local research runs do not substitute for these checks.
+
+### Manual disconnected test without administrator access
+
+Build and run the script successfully while connected first, then quit normally
+and back up the stopped data directory. Keep the EA app closed. Disconnect the
+machine's external network yourself (unplug Ethernet and disconnect Wi-Fi),
+restart Windows while remaining disconnected, and run the same Start command
+from an ordinary PowerShell window. No firewall or service changes are required.
+Wait for `ready`, then reach the menu, garage and free roam, return with PageDown,
+and quit normally. Start again while still disconnected and verify the same
+saved garage. Keep the network disconnected through both complete shutdowns.
+
+Record the two session IDs, any activation dialog or failure, the visible game
+results and both final statuses. Repeat with a separate new `-DataDirectory` to
+cover a freshly generated local account without replacing the existing one.
+An activation dialog while disconnected is a failed cold-start gate; reconnect
+before any owner-performed activation and label subsequent tests accordingly.
+Retained installed licenses remain a prerequisite even if this test passes.
 
 The LSX API remains available separately with `--lsx-port 3216` on a configured
 server. The [server guide](../crates/server/README.md) describes the underlying
