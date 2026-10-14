@@ -15,6 +15,10 @@ pub enum Operation {
         vehicle: u16,
         stats: nfs_world_core::items::DynoStats,
     },
+    Handling {
+        vehicle: u16,
+        changes: nfs_world_core::items::HandlingChanges,
+    },
     Commit,
 }
 
@@ -46,11 +50,11 @@ impl Binding {
             .map_err(|_| Error::Shape)?;
         if envelope.references().first() != Some(&self.scene)
             || route.selector() != self.selector
-            || !matches!(route.method_index(), 0 | 3 | 4 | 5)
+            || !matches!(route.method_index(), 0 | 3 | 4 | 5 | 8)
         {
             return Ok(None);
         }
-        let vehicle_call = matches!(route.method_index(), 0 | 3);
+        let vehicle_call = matches!(route.method_index(), 0 | 3 | 8);
         if envelope.words() != [0, 0]
             || !envelope.remaining().is_empty()
             || envelope.references().len() != if vehicle_call { 3 } else { 2 }
@@ -95,6 +99,27 @@ impl Binding {
                 }
                 Operation::Dyno { vehicle, stats }
             }
+            8 => {
+                let vehicle = envelope.references()[2];
+                let args = route.arguments();
+                let count = args.read_u32(0, 8).map_err(|_| Error::Shape)? as usize;
+                if vehicle == 0 || count > 31 || args.len() != 8 + 16 * count + 7 {
+                    return Err(Error::Shape);
+                }
+                let mut changes = Vec::with_capacity(count);
+                for index in 0..count {
+                    changes.push((
+                        args.read_u32(8 + 16 * index, 8).map_err(|_| Error::Shape)? as u8,
+                        args.read_u32(16 + 16 * index, 8)
+                            .map_err(|_| Error::Shape)? as u8,
+                    ));
+                }
+                Operation::Handling {
+                    vehicle,
+                    changes: nfs_world_core::items::HandlingChanges::new(changes)
+                        .map_err(|_| Error::Shape)?,
+                }
+            }
             4 | 5 => {
                 if route.arguments().len() != 7 {
                     return Err(Error::Shape);
@@ -116,6 +141,68 @@ impl Binding {
 mod tests {
     use super::*;
     use nfs_world_core::bits::BitWriter;
+
+    fn handling(changes: &[(u8, u8)], vehicle: u16) -> BitWriter {
+        let mut payload = BitWriter::new();
+        payload.put(6, 9).put(8, 32).put(changes.len() as u64, 8);
+        for &(category, value) in changes {
+            payload.put(category.into(), 8).put(value.into(), 8);
+        }
+        payload.put(127, 7);
+        let mut body = BitWriter::new();
+        body.put(0, 64)
+            .put(3, 8)
+            .put(10, 13)
+            .put(12, 13)
+            .put(vehicle.into(), 13)
+            .put(payload.bytes().len() as u64, 9)
+            .put_span(payload.span());
+        body
+    }
+
+    #[test]
+    fn handling_requires_bounded_pairs_current_vehicle_and_exact_extent() {
+        let binding = Binding::new(10, 6).unwrap();
+        for changes in [vec![], vec![(26, 6)], (0..31).map(|c| (c, 10)).collect()] {
+            let body = handling(&changes, 15);
+            assert_eq!(
+                binding.read(body.span(), |p| p == 12),
+                Ok(Some(Call {
+                    player: 12,
+                    operation: Operation::Handling {
+                        vehicle: 15,
+                        changes: nfs_world_core::items::HandlingChanges::new(changes).unwrap()
+                    }
+                }))
+            );
+            for end in 0..body.len() {
+                assert!(
+                    binding
+                        .read(body.span().slice(0, end).unwrap(), |_| true)
+                        .is_err()
+                );
+            }
+            let mut extra = body.clone();
+            extra.put(0, 8);
+            assert!(binding.read(extra.span(), |_| true).is_err());
+            assert_eq!(binding.read(body.span(), |_| false), Err(Error::Ownership));
+        }
+        for changes in [
+            vec![(31, 5)],
+            vec![(26, 11)],
+            vec![(26, 5), (26, 6)],
+            vec![(0, 5); 32],
+        ] {
+            assert_eq!(
+                binding.read(handling(&changes, 15).span(), |_| true),
+                Err(Error::Shape)
+            );
+        }
+        assert_eq!(
+            binding.read(handling(&[(26, 5)], 0).span(), |_| true),
+            Err(Error::Shape)
+        );
+    }
 
     fn equip(item: u64) -> BitWriter {
         let mut payload = BitWriter::new();

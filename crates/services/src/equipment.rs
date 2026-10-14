@@ -2,12 +2,13 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! One car-owned leaf air-filter edit. Preparation is transient; commit updates
-//! the car's installed-child list and optional client-calculated dyno cache,
+//! Account-owned garage edits. Preparation is transient; one commit updates the
+//! car, its selected installed parts and optional client-calculated dyno cache,
 //! retaining purchased and default spares.
 use crate::{inventory, purchase::Offers};
 use nfs_storage::{AccountId, Batch, InventoryRepository, ItemId, Op, Snapshot, Timestamp};
 use nfs_world_core::items::{Collection, DefinitionClass, Derived, InventoryCatalog, Item, OWNED};
+use std::collections::{BTreeMap, BTreeSet};
 
 const BATCH_NAMESPACE: u64 = 1 << 61;
 
@@ -18,6 +19,7 @@ pub struct Edit {
     before: Item,
     after: Item,
     part: Option<Item>,
+    parts: BTreeMap<u64, (Item, Item)>,
 }
 impl Edit {
     pub fn vehicle(&self) -> u64 {
@@ -40,12 +42,98 @@ impl Edit {
         }
         let mut next = items.clone();
         next.items.insert(self.after.id, self.after.clone());
+        for (id, (before, after)) in &self.parts {
+            if items.items.get(id) != Some(before) {
+                return Err(Error::Conflict);
+            }
+            next.items.insert(*id, after.clone());
+        }
         Ok(next)
     }
     pub fn with_dyno(mut self, stats: nfs_world_core::items::DynoStats) -> Result<Self, Error> {
         stats
             .apply(&mut self.after.derived)
             .map_err(|_| Error::Shape)?;
+        Ok(self)
+    }
+
+    fn saved(&self, items: &Collection) -> bool {
+        items.items.get(&self.after.id) == Some(&self.after)
+            && self
+                .parts
+                .iter()
+                .all(|(id, (_, after))| items.items.get(id) == Some(after))
+    }
+
+    /// Resolve current children in preorder; defaults and owned spares are not
+    /// installed targets. All edited parts and the car commit in one batch.
+    pub fn with_handling(
+        mut self,
+        items: &Collection,
+        catalog: &InventoryCatalog,
+        changes: nfs_world_core::items::HandlingChanges,
+        transmission: Option<[u8; 2]>,
+    ) -> Result<Self, Error> {
+        let preview = self.preview(items)?;
+        let mut installed = Vec::new();
+        let mut visited = BTreeSet::new();
+        let mut pending = vec![(self.vehicle(), 0, 0)];
+        while let Some((id, owner, depth)) = pending.pop() {
+            if depth > nfs_world_core::items::MAX_DEPTH || !visited.insert(id) {
+                return Err(Error::Shape);
+            }
+            let item = preview.items.get(&id).ok_or(Error::Shape)?;
+            if item.owner != owner || item.state != OWNED {
+                return Err(Error::Ownership);
+            }
+            installed.push((
+                id,
+                catalog
+                    .bindings()
+                    .class(&item.definition)
+                    .map_err(inventory::Error::from)?,
+            ));
+            pending.extend(
+                item.children
+                    .iter()
+                    .rev()
+                    .map(|&child| (child, id, depth + 1)),
+            );
+        }
+        for (category, value) in changes.iter() {
+            let class = nfs_world_core::items::HandlingChanges::class(category)
+                .map_err(|_| Error::Shape)?;
+            let id = installed
+                .iter()
+                .find(|(_, kind)| *kind == class)
+                .map(|(id, _)| *id)
+                .ok_or(Error::Unsupported)?;
+            if category == 30 {
+                let values = transmission.ok_or(Error::Unsupported)?;
+                if !values.contains(&value) {
+                    return Err(Error::Unsupported);
+                }
+                let Derived::RaceVehicle {
+                    vehicle_item_flags, ..
+                } = &mut self.after.derived
+                else {
+                    return Err(Error::Shape);
+                };
+                *vehicle_item_flags =
+                    (*vehicle_item_flags & !4) | if value == values[0] { 4 } else { 0 };
+            } else {
+                let part = preview.items.get(&id).ok_or(Error::Shape)?;
+                let (_, next) = self
+                    .parts
+                    .entry(id)
+                    .or_insert_with(|| (part.clone(), part.clone()));
+                nfs_world_core::items::HandlingChanges::apply(category, value, &mut next.derived)
+                    .map_err(|_| Error::Shape)?;
+            }
+        }
+        self.preview(items)?
+            .encode(catalog.bindings())
+            .map_err(inventory::Error::from)?;
         Ok(self)
     }
 }
@@ -140,6 +228,7 @@ pub fn prepare(
         before: car.clone(),
         after,
         part: Some(selected.clone()),
+        parts: BTreeMap::new(),
     };
     edit.preview(items)?
         .encode(catalog.bindings())
@@ -157,6 +246,16 @@ pub fn prepare_dyno(
     stats: nfs_world_core::items::DynoStats,
     catalog: &InventoryCatalog,
 ) -> Result<Edit, Error> {
+    prepare_vehicle(account, generation, items, vehicle, catalog)?.with_dyno(stats)
+}
+
+pub fn prepare_vehicle(
+    account: AccountId,
+    generation: u64,
+    items: &Collection,
+    vehicle: u64,
+    catalog: &InventoryCatalog,
+) -> Result<Edit, Error> {
     items
         .encode(catalog.bindings())
         .map_err(inventory::Error::from)?;
@@ -164,14 +263,14 @@ pub fn prepare_dyno(
     if car.owner != 0 || car.state != OWNED || !matches!(car.derived, Derived::RaceVehicle { .. }) {
         return Err(Error::Ownership);
     }
-    Edit {
+    Ok(Edit {
         account,
         generation,
         before: car.clone(),
         after: car.clone(),
         part: None,
-    }
-    .with_dyno(stats)
+        parts: BTreeMap::new(),
+    })
 }
 
 /// Commit with optimistic concurrency. Repeating an already committed edit is
@@ -193,39 +292,38 @@ pub fn commit(
     if snapshot
         .garage
         .is_none_or(|slots| !slots.0.contains(&Some(vehicle)))
-        || edit
-            .part
-            .as_ref()
-            .is_some_and(|part| current.items.get(&part.id) != Some(part))
+        || edit.part.as_ref().is_some_and(|part| {
+            !edit.parts.contains_key(&part.id) && current.items.get(&part.id) != Some(part)
+        })
     {
         return Err(Error::Ownership);
     }
-    if current.items.get(&edit.vehicle()) == Some(&edit.after) {
+    if edit.saved(&current) {
         return Ok(snapshot);
     }
     if snapshot.generation != edit.generation || snapshot.generation >= BATCH_NAMESPACE {
         return Err(Error::Conflict);
     }
     let preview = edit.preview(&current)?;
-    let record = inventory::records(&preview, catalog.bindings())?
+    let records = inventory::records(&preview, catalog.bindings())?
         .into_iter()
-        .find(|record| record.id == vehicle)
-        .ok_or(Error::Shape)?;
+        .filter(|record| record.id == vehicle || edit.parts.contains_key(&record.id.get()))
+        .filter(|record| snapshot.items.get(&record.id) != Some(record))
+        .map(Op::Update)
+        .collect();
     let batch = Batch {
         id: BATCH_NAMESPACE | snapshot.generation,
         expected_generation: snapshot.generation,
-        ops: vec![Op::Update(record)],
+        ops: records,
     };
     let applied = repository.apply(account, &batch, now)?;
     if applied.replayed {
         let current = repository.snapshot(account)?;
         let collection = inventory::collection(&current, catalog.bindings())?;
-        return if collection.items.get(&edit.vehicle()) == Some(&edit.after)
-            && edit
-                .part
-                .as_ref()
-                .is_none_or(|part| collection.items.get(&part.id) == Some(part))
-        {
+        return if edit.saved(&collection)
+            && edit.part.as_ref().is_none_or(|part| {
+                edit.parts.contains_key(&part.id) || collection.items.get(&part.id) == Some(part)
+            }) {
             Ok(current)
         } else {
             Err(Error::Conflict)

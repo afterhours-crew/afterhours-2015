@@ -4,15 +4,18 @@ This candidate models one unrestricted, REP-zero air-filter purchase, its equip
 and save requests, and restoring the stock filter. The install-content builder
 selects supported offers from the installed definitions. Prices, part GUIDs and
 owned item IDs are never copied from a saved account or hardcoded in the server.
-Other performance parts, visual customization, selling, handling and wraps remain
-unsupported. See the [gameplay checklist](GAMEPLAY-CHECKLIST.md).
+The candidate also stages the 31 handling controls against installed parts and
+the car's transmission flag. Other performance parts, visual customization,
+selling and wraps remain unsupported. See the [gameplay checklist](GAMEPLAY-CHECKLIST.md).
 
 The purchase, cash deduction and durable equip have been accepted by the game.
 The latest combined live test restored stock, re-equipped the upgrade, drove and
 returned to the garage with the correct filter label and unchanged cash. The
-performance figures still reverted to the initial values; the client did not
-send a dyno-result message in that run. Restart testing of this candidate is
-deferred until that failure is resolved. This candidate is incomplete and must
+performance figures still reverted to the initial values. A subsequent saved
+traffic comparison found the dyno result inside split world messages; the server
+now assembles those messages before processing the save. This fix and handling
+changes have passed automated checks but await combined live validation and
+restart testing. This candidate is incomplete and must
 not be treated as a working upgrade feature. Client
 performance numbers changing immediately after purchase are a local preview;
 they alone do not prove that the server saved or applied the part.
@@ -92,7 +95,7 @@ The candidate also accepts the client's bounded dyno-result message for the
 active garage car. Its seven performance fields can commit with the selected
 part, or as a separate result for the current inventory generation. These are
 client-calculated cached figures; the server does not invent them or simulate a
-dyno. Paint, license plate, vehicle flags, other items and cash are preserved.
+dyno. Paint, license plate, unrelated vehicle flags, other items and cash are preserved.
 After a successful commit the server sends an inventory update on the Items
 File channel. Delivery must finish before the next account write starts, so a
 later edit cannot replace a pending update.
@@ -102,6 +105,16 @@ of equip, dyno and commit even when a result spans handler frames. Reliable
 message retries do not repeat a committed edit. Each connection/channel has a
 bounded assembly buffer and a deadline; gaps or incomplete mutations cannot be
 silently skipped before processing their commit.
+
+Handling requests accept up to 31 distinct category/value pairs with slider
+values from 0 through 10. Repeated requests in one edit keep the latest value
+for each category. The server resolves the current installed part in child
+order, excluding stock defaults and unequipped spares. Transmission mode uses
+the installed persistent-tuning asset's values and preserves other car flags.
+All changed part records and any accompanying equip/dyno result save atomically;
+the inventory notification and chassis tuning are refreshed from that same state.
+Beginning another edit cancels the pending changes. Missing or unsupported
+installed targets refuse the save instead of changing an unrelated item.
 
 Portable tests cover malformed/truncated requests, invalid owner references,
 insufficient funds, repeated purchases/commits, competing edits, account
@@ -113,6 +126,9 @@ combined part/result commits, stale generations and preservation of unrelated
 vehicle data. Inventory update tests cover record closure, resource bounds and
 delivery ordering. These checks do not establish that the game sends dyno results
 in every menu path; that remains part of live acceptance.
+Handling checks cover all category layouts, malformed and duplicate settings,
+combined part changes, transmission selection, cancellation, stale edits,
+account isolation, notification/chassis refresh and SQLite restart persistence.
 
 The runtime validates the active player's garage-car binding before accepting
 an edit. Unsupported or failed commit paths do not send invented success replies;

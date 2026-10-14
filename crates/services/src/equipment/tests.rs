@@ -226,6 +226,207 @@ fn dyno() -> nfs_world_core::items::DynoStats {
     nfs_world_core::items::DynoStats::new([180, 400, 500, 120], [4.5, 10., 12.5]).unwrap()
 }
 
+fn handling_fixture(
+    repo: &dyn InventoryRepository,
+    account: AccountId,
+) -> (InventoryCatalog, Snapshot) {
+    let before = setup(repo, account);
+    let base = catalog();
+    let mut definitions: Vec<_> = base
+        .definitions()
+        .map(|(guid, d)| (*guid, d.clone()))
+        .collect();
+    for (guid, class, words) in [
+        (4, DefinitionClass::PersistantTuningItemData, 5),
+        (5, DefinitionClass::BrakesItemData, 2),
+        (6, DefinitionClass::BrakeDiscsItemData, 2),
+    ] {
+        definitions.push((
+            [guid; 16],
+            Definition {
+                class,
+                default_derived: Some(
+                    Derived::decode(class.layout(), &vec![0; words * 4]).unwrap(),
+                ),
+                ..base.definition(&[2; 16]).unwrap().clone()
+            },
+        ));
+    }
+    let catalog = InventoryCatalog::new(definitions, vec![]).unwrap();
+    let mut car = before.items[&ItemId::new(10).unwrap()].clone();
+    car.sub_items
+        .extend([14, 15, 16].map(|id| ItemId::new(id).unwrap()));
+    car.default_items.push(ItemId::new(17).unwrap());
+    let mut ops = vec![Op::Update(car)];
+    for (id, guid, words) in [(14, 4, 5), (15, 5, 2), (16, 6, 2), (17, 4, 5)] {
+        ops.push(Op::Insert(ItemRecord {
+            id: ItemId::new(id).unwrap(),
+            definition: DefinitionGuid([guid; 16]),
+            derived: (0..words).flat_map(|_| 5u32.to_le_bytes()).collect(),
+            ..before.items[&ItemId::new(11).unwrap()].clone()
+        }));
+    }
+    repo.apply(
+        account,
+        &Batch {
+            id: 2,
+            expected_generation: before.generation,
+            ops,
+        },
+        Timestamp(2),
+    )
+    .unwrap();
+    (catalog, repo.snapshot(account).unwrap())
+}
+
+#[test]
+fn handling_changes_installed_parts_and_car_atomically_without_touching_spares_or_cosmetics() {
+    use nfs_world_core::items::HandlingChanges;
+    let repo = MemoryRepository::default();
+    let account = who(1);
+    let (catalog, before) = handling_fixture(&repo, account);
+    let (_, other) = handling_fixture(&repo, who(2));
+    let items = inventory::collection(&before, catalog.bindings()).unwrap();
+    let changes = HandlingChanges::new([(1, 7), (26, 6), (30, 10)]).unwrap();
+    let pending = prepare(
+        account,
+        before.generation,
+        &items,
+        10,
+        12,
+        &catalog,
+        &Offers::new([[3; 16]]).unwrap(),
+    )
+    .unwrap()
+    .with_handling(&items, &catalog, changes, Some([10, 0]))
+    .unwrap()
+    .with_dyno(dyno())
+    .unwrap();
+    assert_eq!(repo.snapshot(account).unwrap(), before);
+    let saved = commit(&repo, account, &catalog, &pending, Timestamp(3)).unwrap();
+    assert_eq!(saved.generation, before.generation + 1);
+    assert_eq!(saved.tables, before.tables);
+    assert_eq!(
+        &saved.items[&ItemId::new(14).unwrap()].derived[12..16],
+        &6u32.to_le_bytes()
+    );
+    assert_eq!(
+        &saved.items[&ItemId::new(15).unwrap()].derived[..4],
+        &7u32.to_le_bytes()
+    );
+    assert_eq!(
+        &saved.items[&ItemId::new(10).unwrap()].derived[64..68],
+        &4u32.to_le_bytes()
+    );
+    for id in [11, 12, 16, 17] {
+        assert_eq!(
+            saved.items[&ItemId::new(id).unwrap()],
+            before.items[&ItemId::new(id).unwrap()]
+        );
+    }
+    assert_eq!(repo.snapshot(who(2)).unwrap(), other);
+    assert_eq!(
+        commit(&repo, account, &catalog, &pending, Timestamp(4)).unwrap(),
+        saved
+    );
+    assert_eq!(
+        commit(&repo, who(2), &catalog, &pending, Timestamp(4)),
+        Err(Error::Ownership)
+    );
+    let late = prepare_vehicle(account, before.generation, &items, 10, &catalog)
+        .unwrap()
+        .with_handling(
+            &items,
+            &catalog,
+            HandlingChanges::new([(26, 4)]).unwrap(),
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        commit(&repo, account, &catalog, &late, Timestamp(5)),
+        Err(Error::Conflict)
+    );
+    assert_eq!(repo.snapshot(account).unwrap(), saved);
+}
+
+#[test]
+fn handling_rejects_wrong_owner_missing_parts_and_invalid_transmission_without_partial_writes() {
+    use nfs_world_core::items::HandlingChanges;
+    let repo = MemoryRepository::default();
+    let account = who(1);
+    let (catalog, before) = handling_fixture(&repo, account);
+    let items = inventory::collection(&before, catalog.bindings()).unwrap();
+    for (changes, transmission) in [
+        (vec![(26, 6), (0, 7)], None), // no installed spoiler
+        (vec![(30, 10)], None),
+        (vec![(30, 5)], Some([10, 0])),
+    ] {
+        assert!(
+            prepare_vehicle(account, before.generation, &items, 10, &catalog)
+                .unwrap()
+                .with_handling(
+                    &items,
+                    &catalog,
+                    HandlingChanges::new(changes).unwrap(),
+                    transmission
+                )
+                .is_err()
+        );
+        assert_eq!(repo.snapshot(account).unwrap(), before);
+    }
+    let mut wrong = items.clone();
+    wrong.items.get_mut(&14).unwrap().owner = 12;
+    let result =
+        prepare_vehicle(account, before.generation, &wrong, 10, &catalog).and_then(|edit| {
+            edit.with_handling(
+                &wrong,
+                &catalog,
+                HandlingChanges::new([(26, 6)]).unwrap(),
+                None,
+            )
+        });
+    assert!(result.is_err());
+}
+
+#[test]
+fn multiple_handling_parts_survive_sqlite_reopen() {
+    let directory = std::env::temp_dir().join(format!(
+        "afterhours-handling-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&directory).unwrap();
+    let account = who(1);
+    let (catalog, pending, saved) = {
+        let repo = nfs_storage::SqliteRepository::open_owned_directory(&directory).unwrap();
+        let (catalog, before) = handling_fixture(&repo, account);
+        let items = inventory::collection(&before, catalog.bindings()).unwrap();
+        let edit = prepare_vehicle(account, before.generation, &items, 10, &catalog)
+            .unwrap()
+            .with_handling(
+                &items,
+                &catalog,
+                nfs_world_core::items::HandlingChanges::new([(1, 0), (26, 10), (27, 0)]).unwrap(),
+                None,
+            )
+            .unwrap();
+        let saved = commit(&repo, account, &catalog, &edit, Timestamp(3)).unwrap();
+        (catalog, edit, saved)
+    };
+    {
+        let repo = nfs_storage::SqliteRepository::open_owned_directory(&directory).unwrap();
+        assert_eq!(repo.open(account).unwrap(), saved);
+        assert_eq!(
+            commit(&repo, account, &catalog, &pending, Timestamp(4)).unwrap(),
+            saved
+        );
+    }
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
 #[test]
 fn part_and_dyno_commit_together_and_late_stale_results_cannot_replace_a_new_setup() {
     let repo = MemoryRepository::default();

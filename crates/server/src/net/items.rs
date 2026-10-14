@@ -87,6 +87,7 @@ struct Equipped {
     loaded: Arc<crate::persistent::Loaded>,
     items: Arc<nfs_world::items::Collection>,
     notification: Vec<u8>,
+    edit: nfs_services::equipment::Edit,
 }
 
 fn supported_request(bytes: &[u8]) -> Result<bool, nfs_world::items::Error> {
@@ -110,34 +111,40 @@ impl Profile {
                 .map_err(|_| Error::Worker)?;
             tokio::task::spawn_blocking(move || {
                 let _permit = permit;
-                let offers = service.offers.as_deref().ok_or(Error::Worker)?;
                 let tables = service.persistent.as_ref().ok_or(Error::Worker)?;
                 let edit = if let Some(item) = request.item {
-                    let edit = nfs_services::equipment::prepare(
+                    nfs_services::equipment::prepare(
                         account,
                         request.generation,
                         &request.items,
                         request.car,
                         item,
                         &service.catalog,
-                        offers,
+                        service.offers.as_deref().ok_or(Error::Worker)?,
                     )
-                    .map_err(Error::Equipment)?;
-                    if let Some(stats) = request.dyno {
-                        edit.with_dyno(stats).map_err(Error::Equipment)?
-                    } else {
-                        edit
-                    }
+                    .map_err(Error::Equipment)?
                 } else {
-                    nfs_services::equipment::prepare_dyno(
+                    nfs_services::equipment::prepare_vehicle(
                         account,
                         request.generation,
                         &request.items,
                         request.car,
-                        request.dyno.ok_or(Error::Worker)?,
                         &service.catalog,
                     )
                     .map_err(Error::Equipment)?
+                };
+                let edit = edit
+                    .with_handling(
+                        &request.items,
+                        &service.catalog,
+                        request.handling,
+                        request.transmission,
+                    )
+                    .map_err(Error::Equipment)?;
+                let edit = if let Some(stats) = request.dyno {
+                    edit.with_dyno(stats).map_err(Error::Equipment)?
+                } else {
+                    edit
                 };
                 // Validate the exact outbound update before the durable write.
                 let notification = nfs_world::items::UpdateNotification {
@@ -167,6 +174,7 @@ impl Profile {
                     loaded: Arc::new(loaded),
                     items: Arc::new(items),
                     notification,
+                    edit,
                 })
             })
             .await
@@ -505,9 +513,10 @@ impl Exchanges {
                     loaded,
                     items,
                     notification,
+                    edit,
                 }) => {
                     let generation = loaded.generation();
-                    match listener.equipped_inventory(&request, loaded, items) {
+                    match listener.equipped_inventory(&request, loaded, items, &edit) {
                         Ok(()) => {
                             self.pending[0] = Some(Completed {
                                 name: b"Items".to_vec(),
@@ -519,6 +528,7 @@ impl Exchanges {
                                 car = request.car,
                                 item = ?request.item,
                                 dyno = request.dyno.is_some(),
+                                handling = request.handling.iter().count(),
                                 "owned equipment committed"
                             );
                             true

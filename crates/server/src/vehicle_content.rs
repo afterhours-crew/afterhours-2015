@@ -56,6 +56,9 @@ pub struct Request<'a> {
 }
 
 impl Content {
+    pub fn transmission_values(&self, items: &Collection, vehicle: u64) -> Result<[u8; 2], Error> {
+        self.custom.tuning().transmission_values(items, vehicle)
+    }
     pub fn load(path: &Path, classes: &Catalog) -> Result<Self, Failure> {
         Self::load_with_parts(path, classes, None)
     }

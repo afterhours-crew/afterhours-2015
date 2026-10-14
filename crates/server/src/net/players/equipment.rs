@@ -13,6 +13,8 @@ pub(in crate::net) struct EquipmentRequest {
     pub car: u64,
     pub item: Option<u64>,
     pub dyno: Option<nfs_world::items::DynoStats>,
+    pub handling: nfs_world::items::HandlingChanges,
+    pub transmission: Option<[u8; 2]>,
     pub player_index: u32,
     pub generation: u64,
     pub items: Arc<nfs_world::items::Collection>,
@@ -58,7 +60,9 @@ impl PlayerListener {
             Operation::Begin => {
                 state.edits.remove(&call.player);
             }
-            Operation::Equip { vehicle, .. } | Operation::Dyno { vehicle, .. } => {
+            Operation::Equip { vehicle, .. }
+            | Operation::Dyno { vehicle, .. }
+            | Operation::Handling { vehicle, .. } => {
                 let (_, car) = players
                     .player_vehicle_item(HOST_SELECTOR as u8, self.persona, call.player, vehicle)
                     .ok_or(replication::Error::UnknownObject)?;
@@ -96,6 +100,8 @@ impl PlayerListener {
                         car,
                         item: None,
                         dyno: None,
+                        handling: nfs_world::items::HandlingChanges::default(),
+                        transmission: None,
                         player_index: u32::from(player.runtime_index),
                         generation: loaded.generation(),
                         items: inventory.items.clone(),
@@ -114,6 +120,21 @@ impl PlayerListener {
                         edit.item = Some(item);
                     }
                     Operation::Dyno { stats, .. } => edit.dyno = Some(stats),
+                    Operation::Handling { changes, .. } => {
+                        if changes.transmission().is_some() {
+                            edit.transmission = Some(
+                                self.vehicles
+                                    .as_ref()
+                                    .ok_or(replication::Error::Shape)?
+                                    .vehicles
+                                    .transmission_values(&inventory.items, car)?,
+                            );
+                        }
+                        if !changes.is_empty() {
+                            edit.dyno = None;
+                        }
+                        edit.handling.merge(changes);
+                    }
                     _ => unreachable!(),
                 }
             }
@@ -134,6 +155,7 @@ impl PlayerListener {
         request: &EquipmentRequest,
         loaded: Arc<crate::persistent::Loaded>,
         items: Arc<nfs_world::items::Collection>,
+        edit: &nfs_services::equipment::Edit,
     ) -> Result<(), replication::Error> {
         let old = self.inventory.as_ref().ok_or(replication::Error::Shape)?;
         let before = self.persistent.as_ref().ok_or(replication::Error::Shape)?;
@@ -153,11 +175,10 @@ impl PlayerListener {
             || loaded.tables() != before.tables()
             || loaded.stores() != before.stores()
             || old.items.items.len() != items.items.len()
-            || old
-                .items
-                .items
-                .iter()
-                .any(|(id, item)| *id != request.car && items.items.get(id) != Some(item))
+            || (*old.items != *request.items && old.items != items)
+            || !edit
+                .preview(&request.items)
+                .is_ok_and(|expected| expected == *items)
         {
             return Err(replication::Error::Shape);
         }

@@ -28,6 +28,9 @@ pub const PURCHASABLE: u8 = 4;
 pub const LOAD_INVENTORY: u8 = 0x10;
 pub const PURCHASE_ITEMS: u8 = 0x02;
 
+mod handling;
+pub use handling::HandlingChanges;
+
 impl Derived {
     /// Exact typed suffix codec, also used at the persistence boundary.
     pub fn decode(layout: Layout, bytes: &[u8]) -> Result<Self, Error> {

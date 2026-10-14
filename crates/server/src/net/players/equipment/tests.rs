@@ -102,8 +102,43 @@ fn fixture() -> (
             .unwrap()
             .push(json!({"guid":guid,"class_name":"AirFilterItemData","kind":"ignore"}));
     }
+    let persistent = Derived::PersistantTuning {
+        abs_setting: 5,
+        stability_control_setting: 5,
+        traction_control_setting: 5,
+        air_pressure_front_setting: 5,
+        air_pressure_rear_setting: 5,
+    };
+    definitions.push((
+        [8; 16],
+        Definition {
+            class: DefinitionClass::PersistantTuningItemData,
+            default_derived: Some(persistent.clone()),
+            ..definitions
+                .iter()
+                .find(|(guid, _)| *guid == [6; 16])
+                .unwrap()
+                .1
+                .clone()
+        },
+    ));
+    items.items.insert(
+        8,
+        Item {
+            id: 8,
+            definition: [8; 16],
+            derived: persistent,
+            ..items.items[&6].clone()
+        },
+    );
+    document["parts"]["customization"].as_array_mut().unwrap().push(json!({"guid":"08".repeat(16),"class_name":"PersistantTuningItemData",
+        "tuning":{"asset_present":true,"transmission_values":[10,0]},"chassis":{"family":"performance","performance_value":0.0,"list_a":0}}));
+    document["parts"]["mesh"].as_array_mut().unwrap().push(
+        json!({"guid":"08".repeat(16),"class_name":"PersistantTuningItemData","kind":"ignore"}),
+    );
     let car = items.items.get_mut(&1).unwrap();
     car.children.push(6);
+    car.children.push(8);
     car.defaults.push(6);
     items.roots = items.items.keys().copied().collect();
     let catalog = Arc::new(InventoryCatalog::new(definitions, vec![]).unwrap());
@@ -333,6 +368,77 @@ fn dyno_wire(scene: u16, player: u16, car: u16, stats: nfs_world::items::DynoSta
         .put(payload.bytes().len() as u64, 9)
         .put_span(payload.span());
     wire
+}
+
+fn handling_wire(scene: u16, player: u16, car: u16, changes: &[(u8, u8)]) -> BitWriter {
+    let mut payload = BitWriter::new();
+    payload.put(2, 9).put(8, 32).put(changes.len() as u64, 8);
+    for &(category, value) in changes {
+        payload.put(category.into(), 8).put(value.into(), 8);
+    }
+    payload.put(0, 7);
+    let mut body = BitWriter::new();
+    body.put(0, 64)
+        .put(3, 8)
+        .put(scene.into(), 13)
+        .put(player.into(), 13)
+        .put(car.into(), 13)
+        .put(payload.bytes().len() as u64, 9)
+        .put_span(payload.span());
+    body
+}
+
+#[tokio::test]
+async fn handling_cancel_and_combined_save_refresh_parts_notification_and_chassis() {
+    let (mut listener, mut jobs, repo, account, scene, player, car) = fixture();
+    let before = repo.snapshot(account).unwrap();
+    let change = handling_wire(scene, player, car, &[(26, 6), (30, 10)]);
+    assert!(
+        accept(
+            &mut listener,
+            &handling_wire(scene, player + 1000, car, &[(26, 6)])
+        )
+        .is_err()
+    );
+    assert!(accept(&mut listener, &change).unwrap());
+    assert!(accept(&mut listener, &wire(scene, player, None, 4, 0)).unwrap());
+    assert!(accept(&mut listener, &wire(scene, player, None, 5, 0)).unwrap());
+    jobs.start(&mut listener, 3, Timestamp(3));
+    assert!(!jobs.working());
+    assert_eq!(repo.snapshot(account).unwrap(), before);
+    assert!(accept(&mut listener, &wire(scene, player, Some(car), 0, 7)).unwrap());
+    assert!(accept(&mut listener, &change).unwrap());
+    let newer = handling_wire(scene, player, car, &[(26, 7)]);
+    assert!(accept(&mut listener, &newer).unwrap());
+    assert!(accept(&mut listener, &wire(scene, player, None, 5, 0)).unwrap());
+    jobs.start(&mut listener, 4, Timestamp(4));
+    assert!(jobs.completed(&mut listener).await);
+    let update = crate::net::items::tests::deliver_notification(&mut jobs);
+    let saved = repo.snapshot(account).unwrap();
+    assert_eq!(saved.generation, before.generation + 1);
+    assert_eq!(
+        &saved.items[&ItemId::new(8).unwrap()].derived[12..16],
+        &7u32.to_le_bytes()
+    );
+    assert_eq!(
+        &saved.items[&ItemId::new(1).unwrap()].derived[64..68],
+        &4u32.to_le_bytes()
+    );
+    assert_eq!(
+        update.items.items[&8],
+        listener.inventory.as_ref().unwrap().items.items[&8]
+    );
+    let settings = listener
+        .vehicles
+        .as_ref()
+        .unwrap()
+        .vehicles
+        .customization(&update.items, 1)
+        .unwrap();
+    assert_eq!(settings.tuning[26], 7);
+    assert_eq!(settings.tuning[31], 10);
+    assert_eq!(listener.pending.len(), 1);
+    assert_eq!(saved.tables, before.tables);
 }
 
 #[tokio::test]
