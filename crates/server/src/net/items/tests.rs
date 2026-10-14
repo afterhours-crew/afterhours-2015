@@ -47,6 +47,33 @@ fn request(sequence: u32) -> Vec<u8> {
     .to_vec()
 }
 
+/// Exercise File framing/acknowledgement for the item update integration tests.
+pub(in crate::net) fn deliver_notification(exchanges: &mut Exchanges) -> items::UpdateNotification {
+    let response = exchanges.pending[0].take().unwrap();
+    let mut sender =
+        nfs_world::files::sender::Sender::new(response.clone(), Default::default(), 0).unwrap();
+    let mut receiver = Receiver::default();
+    for ticket in 0..64 {
+        let Some(record) = sender.offer(ticket).unwrap() else {
+            break;
+        };
+        let wire = record.encode(sender.size()).unwrap();
+        let (decoded, _) = nfs_world::files::decode(wire.span(), receiver.size()).unwrap();
+        receiver.receive(&decoded).unwrap();
+        sender.sent(&record, ticket, ticket).unwrap();
+        sender.acknowledge(ticket, true, ticket).unwrap();
+    }
+    assert!(sender.done());
+    let received = receiver.take_completed().unwrap();
+    assert_eq!(received, response);
+    exchanges.started[0] = None; // accepted FileComplete for this delivery
+    items::UpdateNotification::decode(
+        &received.bytes,
+        exchanges.profile.as_ref().unwrap().bindings(),
+    )
+    .unwrap()
+}
+
 #[tokio::test]
 async fn purchase_wire_reply_contains_only_purchased_item_and_retry_preserves_cash() {
     let repo = Arc::new(MemoryRepository::default());

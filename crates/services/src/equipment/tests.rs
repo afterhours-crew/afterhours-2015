@@ -182,7 +182,7 @@ fn equipment_survives_sqlite_reopen_and_storage_failure_has_no_effect() {
     let (pending, saved) = {
         let repo = SqliteRepository::open_owned_directory(&directory).unwrap();
         let before = setup(&repo, account);
-        let pending = edit(&before, 12);
+        let pending = edit(&before, 12).with_dyno(dyno()).unwrap();
         let saved = commit(&repo, account, &catalog(), &pending, Timestamp(2)).unwrap();
         (pending, saved)
     };
@@ -220,6 +220,60 @@ fn equipment_survives_sqlite_reopen_and_storage_failure_has_no_effect() {
         Err(Error::Store(nfs_storage::Error::Storage))
     );
     assert_eq!(repo.snapshot(account).unwrap(), before);
+}
+
+fn dyno() -> nfs_world_core::items::DynoStats {
+    nfs_world_core::items::DynoStats::new([180, 400, 500, 120], [4.5, 10., 12.5]).unwrap()
+}
+
+#[test]
+fn part_and_dyno_commit_together_and_late_stale_results_cannot_replace_a_new_setup() {
+    let repo = MemoryRepository::default();
+    let account = who(1);
+    let before = setup(&repo, account);
+    let original = inventory::collection(&before, catalog().bindings()).unwrap();
+    let pending = edit(&before, 12).with_dyno(dyno()).unwrap();
+    let saved = commit(&repo, account, &catalog(), &pending, Timestamp(2)).unwrap();
+    assert_eq!(saved.generation, before.generation + 1);
+    assert_eq!(saved.tables, before.tables);
+    let mut expected = original.items[&10].clone();
+    expected.children = vec![12];
+    dyno().apply(&mut expected.derived).unwrap();
+    let items = inventory::collection(&saved, catalog().bindings()).unwrap();
+    assert_eq!(items.items[&10], expected);
+    for id in [11, 12] {
+        assert_eq!(items.items[&id], original.items[&id]);
+    }
+    assert_eq!(
+        commit(&repo, account, &catalog(), &pending, Timestamp(3)).unwrap(),
+        saved
+    );
+    let late = prepare_dyno(
+        account,
+        before.generation,
+        &original,
+        10,
+        dyno(),
+        &catalog(),
+    )
+    .unwrap();
+    assert_eq!(
+        commit(&repo, account, &catalog(), &late, Timestamp(4)),
+        Err(Error::Conflict)
+    );
+    let new_stats =
+        nfs_world_core::items::DynoStats::new([181, 401, 501, 121], [4., 9., 12.]).unwrap();
+    let refreshed =
+        prepare_dyno(account, saved.generation, &items, 10, new_stats, &catalog()).unwrap();
+    assert_eq!(
+        commit(&repo, who(2), &catalog(), &refreshed, Timestamp(5)),
+        Err(Error::Ownership)
+    );
+    let refreshed = commit(&repo, account, &catalog(), &refreshed, Timestamp(5)).unwrap();
+    let updated = inventory::collection(&refreshed, catalog().bindings()).unwrap();
+    new_stats.apply(&mut expected.derived).unwrap();
+    assert_eq!(updated.items[&10], expected);
+    assert_eq!(refreshed.tables, before.tables);
 }
 
 #[test]

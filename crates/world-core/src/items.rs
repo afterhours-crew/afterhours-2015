@@ -10,13 +10,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 mod derived;
+mod dyno;
 mod inventory;
 mod purchase;
+mod update;
 pub use derived::{DefinitionClass, Derived, Layout};
+pub use dyno::DynoStats;
 pub use inventory::{
     Definition, DefinitionFlags, InitialInventory, InventoryCatalog, OwnershipLevel,
 };
 pub use purchase::{PurchaseReply, PurchaseRequest, PurchaseSelection};
+pub use update::UpdateNotification;
 
 /// Owned and Purchasable construction paths, respectively.
 pub const OWNED: u8 = 2;
@@ -235,6 +239,38 @@ impl Envelope {
 }
 
 impl Collection {
+    /// Select complete reachable records for a notification, preserving root order.
+    /// Encoding still validates cycles, definitions and all graph resource bounds.
+    pub fn for_roots(&self, roots: Vec<u64>) -> Result<Self, Error> {
+        if roots.len() > MAX_COLLECTION {
+            return Err(Error::Bound);
+        }
+        let mut pending = roots.clone();
+        let mut items = BTreeMap::new();
+        let mut references = roots.len();
+        while let Some(id) = pending.pop() {
+            if items.contains_key(&id) {
+                continue;
+            }
+            if items.len() >= MAX_ITEMS {
+                return Err(Error::Bound);
+            }
+            let item = self.items.get(&id).ok_or(Error::MissingItem)?;
+            references = references
+                .checked_add(item.defaults.len())
+                .and_then(|count| count.checked_add(item.children.len()))
+                .filter(|&count| count <= MAX_REFERENCES)
+                .ok_or(Error::Bound)?;
+            if item.defaults.len() > MAX_COLLECTION || item.children.len() > MAX_COLLECTION {
+                return Err(Error::Bound);
+            }
+            pending.extend(&item.defaults);
+            pending.extend(&item.children);
+            items.insert(id, item.clone());
+        }
+        Ok(Self { roots, items })
+    }
+
     pub fn decode(bytes: &[u8], catalog: &Catalog) -> Result<Self, Error> {
         let mut decoder = Decoder {
             reader: Reader::new(bytes)?,

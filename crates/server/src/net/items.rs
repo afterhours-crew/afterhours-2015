@@ -86,6 +86,7 @@ struct LoadedReply {
 struct Equipped {
     loaded: Arc<crate::persistent::Loaded>,
     items: Arc<nfs_world::items::Collection>,
+    notification: Vec<u8>,
 }
 
 fn supported_request(bytes: &[u8]) -> Result<bool, nfs_world::items::Error> {
@@ -111,16 +112,44 @@ impl Profile {
                 let _permit = permit;
                 let offers = service.offers.as_deref().ok_or(Error::Worker)?;
                 let tables = service.persistent.as_ref().ok_or(Error::Worker)?;
-                let edit = nfs_services::equipment::prepare(
-                    account,
-                    request.generation,
-                    &request.items,
-                    request.car,
-                    request.item,
-                    &service.catalog,
-                    offers,
-                )
-                .map_err(Error::Equipment)?;
+                let edit = if let Some(item) = request.item {
+                    let edit = nfs_services::equipment::prepare(
+                        account,
+                        request.generation,
+                        &request.items,
+                        request.car,
+                        item,
+                        &service.catalog,
+                        offers,
+                    )
+                    .map_err(Error::Equipment)?;
+                    if let Some(stats) = request.dyno {
+                        edit.with_dyno(stats).map_err(Error::Equipment)?
+                    } else {
+                        edit
+                    }
+                } else {
+                    nfs_services::equipment::prepare_dyno(
+                        account,
+                        request.generation,
+                        &request.items,
+                        request.car,
+                        request.dyno.ok_or(Error::Worker)?,
+                        &service.catalog,
+                    )
+                    .map_err(Error::Equipment)?
+                };
+                // Validate the exact outbound update before the durable write.
+                let notification = nfs_world::items::UpdateNotification {
+                    player_index: request.player_index,
+                    items: edit
+                        .preview(&request.items)
+                        .map_err(Error::Equipment)?
+                        .for_roots(vec![request.car])
+                        .map_err(|e| Error::Inventory(e.into()))?,
+                }
+                .encode(service.catalog.bindings())
+                .map_err(|e| Error::Inventory(e.into()))?;
                 let snapshot = nfs_services::equipment::commit(
                     service.repository.as_ref(),
                     account,
@@ -137,6 +166,7 @@ impl Profile {
                 Ok(Equipped {
                     loaded: Arc::new(loaded),
                     items: Arc::new(items),
+                    notification,
                 })
             })
             .await
@@ -385,7 +415,10 @@ impl Exchanges {
         !self.jobs.is_empty() || !self.equipment.is_empty()
     }
     pub(super) fn start(&mut self, listener: &mut PlayerListener, now: u64, utc: Timestamp) {
-        if self.working() {
+        if self.working()
+            || self.pending.iter().any(Option::is_some)
+            || self.started.iter().any(Option::is_some)
+        {
             return;
         }
         if let Some(request) = listener.take_equipment() {
@@ -468,15 +501,24 @@ impl Exchanges {
                 return false;
             };
             return match result {
-                Ok(Equipped { loaded, items }) => {
+                Ok(Equipped {
+                    loaded,
+                    items,
+                    notification,
+                }) => {
                     let generation = loaded.generation();
                     match listener.equipped_inventory(&request, loaded, items) {
                         Ok(()) => {
+                            self.pending[0] = Some(Completed {
+                                name: b"Items".to_vec(),
+                                bytes: notification,
+                            });
                             info!(
                                 connection = self.connection,
                                 generation,
                                 car = request.car,
-                                item = request.item,
+                                item = ?request.item,
+                                dyno = request.dyno.is_some(),
                                 "owned equipment committed"
                             );
                             true
@@ -579,6 +621,8 @@ impl Exchanges {
                 return false;
             }
             if let Some(reply) = &self.pending[index] {
+                // Unsolicited updates have no incoming request to start the clock.
+                self.started[index].get_or_insert(now);
                 match host.queue_file(index as u8 + 4, reply, now) {
                     Ok(()) => {
                         self.pending[index] = None;

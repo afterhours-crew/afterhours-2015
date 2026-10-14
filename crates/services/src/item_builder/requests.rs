@@ -7,7 +7,14 @@ use super::*;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Operation {
     Begin,
-    Equip { vehicle: u16, item: u64 },
+    Equip {
+        vehicle: u16,
+        item: u64,
+    },
+    Dyno {
+        vehicle: u16,
+        stats: nfs_world_core::items::DynoStats,
+    },
     Commit,
 }
 
@@ -39,15 +46,14 @@ impl Binding {
             .map_err(|_| Error::Shape)?;
         if envelope.references().first() != Some(&self.scene)
             || route.selector() != self.selector
-            || !matches!(route.method_index(), 0 | 4 | 5)
+            || !matches!(route.method_index(), 0 | 3 | 4 | 5)
         {
             return Ok(None);
         }
-        let equip = route.method_index() == 0;
+        let vehicle_call = matches!(route.method_index(), 0 | 3);
         if envelope.words() != [0, 0]
             || !envelope.remaining().is_empty()
-            || envelope.references().len() != if equip { 3 } else { 2 }
-            || route.arguments().len() != if equip { 71 } else { 7 }
+            || envelope.references().len() != if vehicle_call { 3 } else { 2 }
         {
             return Err(Error::Shape);
         }
@@ -57,6 +63,9 @@ impl Binding {
         }
         let operation = match route.method_index() {
             0 => {
+                if route.arguments().len() != 71 {
+                    return Err(Error::Shape);
+                }
                 let vehicle = envelope.references()[2];
                 let low = route
                     .arguments()
@@ -72,11 +81,33 @@ impl Binding {
                 }
                 Operation::Equip { vehicle, item }
             }
-            4 => Operation::Begin,
-            5 => Operation::Commit,
+            3 => {
+                let vehicle = envelope.references()[2];
+                if vehicle == 0 {
+                    return Err(Error::Shape);
+                }
+                let (stats, bits) = nfs_world_core::items::DynoStats::read(route.arguments())
+                    .map_err(|_| Error::Shape)?;
+                // The route is 41 bits; the native RPC pads the entire payload.
+                let padding = (8 - (41 + bits) % 8) % 8;
+                if route.arguments().len() != bits + padding {
+                    return Err(Error::Shape);
+                }
+                Operation::Dyno { vehicle, stats }
+            }
+            4 | 5 => {
+                if route.arguments().len() != 7 {
+                    return Err(Error::Shape);
+                }
+                if route.method_index() == 4 {
+                    Operation::Begin
+                } else {
+                    Operation::Commit
+                }
+            }
             _ => return Err(Error::Shape),
         };
-        // Seven native alignment bits are not a request argument.
+        // Native alignment bits are not request arguments.
         Ok(Some(Call { player, operation }))
     }
 }
@@ -151,6 +182,60 @@ mod tests {
             );
             let bad = super::super::tests::wire(19, 5, method, &[23, 24], 0);
             assert_eq!(binding.read(bad.span(), |_| true), Err(Error::Shape));
+        }
+    }
+
+    #[test]
+    fn dyno_requires_owned_player_vehicle_and_exact_variable_extent() {
+        use nfs_world_core::items::DynoStats;
+        let binding = Binding::new(10, 6).unwrap();
+        for stats in [
+            DynoStats::new([50; 4], [0.; 3]).unwrap(),
+            DynoStats::new([200, 450, 600, 120], [4.5, 0., 12.]).unwrap(),
+            DynoStats::new([300, 1500, 1500, 200], [15., 35., 20.]).unwrap(),
+        ] {
+            let make = |vehicle, extra| {
+                let mut payload = BitWriter::new();
+                payload.put(6, 9).put(3, 32).put_span(stats.encode().span());
+                payload.align();
+                if extra {
+                    payload.put(0, 8);
+                }
+                let mut wire = BitWriter::new();
+                wire.put(0, 32)
+                    .put(0, 32)
+                    .put(3, 8)
+                    .put(10, 13)
+                    .put(12, 13)
+                    .put(vehicle, 13)
+                    .put((payload.len() / 8) as u64, 9)
+                    .put_span(payload.span());
+                wire
+            };
+            let wire = make(15, false);
+            assert_eq!(
+                binding.read(wire.span(), |p| p == 12),
+                Ok(Some(Call {
+                    player: 12,
+                    operation: Operation::Dyno { vehicle: 15, stats },
+                }))
+            );
+            for end in 0..wire.len() {
+                assert!(
+                    binding
+                        .read(wire.span().slice(0, end).unwrap(), |_| true)
+                        .is_err()
+                );
+            }
+            assert_eq!(binding.read(wire.span(), |_| false), Err(Error::Ownership));
+            assert_eq!(
+                binding.read(make(0, false).span(), |_| true),
+                Err(Error::Shape)
+            );
+            assert_eq!(
+                binding.read(make(15, true).span(), |_| true),
+                Err(Error::Shape)
+            );
         }
     }
 }

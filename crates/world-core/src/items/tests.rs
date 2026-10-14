@@ -32,6 +32,50 @@ fn one() -> Collection {
 }
 
 #[test]
+fn selected_roots_include_shared_defaults_and_children_without_unrelated_items() {
+    let mut graph = one();
+    graph.items.get_mut(&7).unwrap().defaults = vec![8];
+    graph.items.get_mut(&7).unwrap().children = vec![9];
+    for id in [8, 9, 10] {
+        graph.items.insert(id, item(id));
+    }
+    graph.items.get_mut(&9).unwrap().children = vec![8];
+    graph.roots.push(10);
+    let selected = graph.for_roots(vec![9, 7, 9]).unwrap();
+    assert_eq!(selected.roots, [9, 7, 9]);
+    assert_eq!(
+        selected.items.keys().copied().collect::<Vec<_>>(),
+        [7, 8, 9]
+    );
+    assert_eq!(
+        Collection::decode(&selected.encode(&catalog()).unwrap(), &catalog()).unwrap(),
+        selected
+    );
+    assert_eq!(graph.for_roots(vec![11]), Err(Error::MissingItem));
+    assert_eq!(
+        graph.for_roots(vec![7; MAX_COLLECTION + 1]),
+        Err(Error::Bound)
+    );
+    graph.items.get_mut(&8).unwrap().children = vec![7];
+    let cycle = graph.for_roots(vec![7]).unwrap();
+    assert_eq!(cycle.encode(&catalog()), Err(Error::Cycle));
+    graph.items.get_mut(&8).unwrap().children = vec![7; MAX_COLLECTION + 1];
+    assert_eq!(graph.for_roots(vec![7]), Err(Error::Bound));
+    // A small pending stack must not allow an unbounded total traversal.
+    let mut wide = Collection {
+        roots: (1..=9).collect(),
+        ..Default::default()
+    };
+    for id in 1..=9 {
+        let mut next = item(id);
+        next.children = vec![10; MAX_COLLECTION];
+        wide.items.insert(id, next);
+    }
+    wide.items.insert(10, item(10));
+    assert_eq!(wide.for_roots(wide.roots.clone()), Err(Error::Bound));
+}
+
+#[test]
 fn e120_common_layout_and_repeated_reference_have_exact_independent_bytes() {
     // Synthetic values in the common field layout.
     // confirms Owner is eight bytes and cache insertion is after suffix.

@@ -259,6 +259,11 @@ async fn equip_commit_updates_repository_live_car_and_return_inventory_only_once
     jobs.start(&mut listener, 3, Timestamp(3));
     assert!(jobs.working());
     assert!(jobs.completed(&mut listener).await);
+    let update = crate::net::items::tests::deliver_notification(&mut jobs);
+    assert_eq!(update.player_index, u32::from(HOST_SELECTOR - 1));
+    assert_eq!(update.items.roots, [1]);
+    assert!(update.items.items[&1].children.contains(&7));
+    assert!(!update.items.items[&1].children.contains(&6));
     let saved = repo.snapshot(account).unwrap();
     assert_eq!(saved.generation, before.generation + 1);
     assert_eq!(saved.tables, before.tables);
@@ -309,4 +314,69 @@ fn invalid_ownership_and_world_car_do_not_stage_or_commit() {
     assert!(listener.equipment.edits.is_empty());
     assert!(listener.equipment.committed.is_empty());
     assert_eq!(repo.snapshot(account).unwrap(), before);
+}
+
+fn dyno_wire(scene: u16, player: u16, car: u16, stats: nfs_world::items::DynoStats) -> BitWriter {
+    let mut payload = BitWriter::new();
+    payload
+        .put(2, 9)
+        .put(3, 32)
+        .put_span(stats.encode().span())
+        .align();
+    let mut wire = BitWriter::new();
+    wire.put(0, 32)
+        .put(0, 32)
+        .put(3, 8)
+        .put(scene.into(), 13)
+        .put(player.into(), 13)
+        .put(car.into(), 13)
+        .put(payload.bytes().len() as u64, 9)
+        .put_span(payload.span());
+    wire
+}
+
+#[tokio::test]
+async fn dyno_is_staged_with_equip_notified_after_commit_and_cancelled_with_a_new_edit() {
+    let (mut listener, mut jobs, repo, account, scene, player, car) = fixture();
+    let before = repo.snapshot(account).unwrap();
+    let stats = nfs_world::items::DynoStats::new([180, 400, 500, 120], [4.5, 10., 12.5]).unwrap();
+    assert!(accept(&mut listener, &dyno_wire(scene, player + 1000, car, stats)).is_err());
+    assert!(accept(&mut listener, &dyno_wire(scene, player, car + 1000, stats)).is_err());
+    assert!(accept(&mut listener, &wire(scene, player, Some(car), 0, 7)).unwrap());
+    assert!(accept(&mut listener, &dyno_wire(scene, player, car, stats)).unwrap());
+    assert_eq!(repo.snapshot(account).unwrap(), before);
+    assert!(accept(&mut listener, &wire(scene, player, None, 4, 0)).unwrap());
+    assert!(accept(&mut listener, &wire(scene, player, None, 5, 0)).unwrap());
+    jobs.start(&mut listener, 3, Timestamp(3));
+    assert!(!jobs.working());
+    assert_eq!(repo.snapshot(account).unwrap(), before);
+    assert!(accept(&mut listener, &wire(scene, player, Some(car), 0, 7)).unwrap());
+    assert!(accept(&mut listener, &dyno_wire(scene, player, car, stats)).unwrap());
+    assert!(accept(&mut listener, &wire(scene, player, None, 5, 0)).unwrap());
+    jobs.start(&mut listener, 4, Timestamp(4));
+    assert!(jobs.completed(&mut listener).await);
+    let saved = repo.snapshot(account).unwrap();
+    assert_eq!(saved.generation, before.generation + 1);
+    let derived = Derived::decode(
+        nfs_world::items::Layout::RaceVehicle,
+        &saved.items[&ItemId::new(1).unwrap()].derived,
+    )
+    .unwrap();
+    let mut expected = listener.inventory.as_ref().unwrap().items.items[&1]
+        .derived
+        .clone();
+    stats.apply(&mut expected).unwrap();
+    assert_eq!(derived, expected);
+    // A new edit remains queued until the previous durable notification is delivered.
+    assert!(accept(&mut listener, &dyno_wire(scene, player, car, stats)).unwrap());
+    assert!(accept(&mut listener, &wire(scene, player, None, 5, 0)).unwrap());
+    jobs.start(&mut listener, 5, Timestamp(5));
+    assert!(!jobs.working());
+    let update = crate::net::items::tests::deliver_notification(&mut jobs);
+    assert_eq!(update.items.items[&1].derived, derived);
+    assert!(update.items.items[&1].children.contains(&7));
+    jobs.start(&mut listener, 6, Timestamp(6));
+    assert!(jobs.completed(&mut listener).await);
+    assert_eq!(repo.snapshot(account).unwrap(), saved);
+    crate::net::items::tests::deliver_notification(&mut jobs);
 }

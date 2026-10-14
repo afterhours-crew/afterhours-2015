@@ -11,7 +11,9 @@ pub(in crate::net) struct EquipmentRequest {
     pub player: u16,
     pub vehicle: u16,
     pub car: u64,
-    pub item: u64,
+    pub item: Option<u64>,
+    pub dyno: Option<nfs_world::items::DynoStats>,
+    pub player_index: u32,
     pub generation: u64,
     pub items: Arc<nfs_world::items::Collection>,
 }
@@ -53,8 +55,10 @@ impl PlayerListener {
             .map_err(|_| replication::Error::Shape)?;
         let Some(call) = call else { return Ok(false) };
         match call.operation {
-            Operation::Begin => {}
-            Operation::Equip { vehicle, item } => {
+            Operation::Begin => {
+                state.edits.remove(&call.player);
+            }
+            Operation::Equip { vehicle, .. } | Operation::Dyno { vehicle, .. } => {
                 let (_, car) = players
                     .player_vehicle_item(HOST_SELECTOR as u8, self.persona, call.player, vehicle)
                     .ok_or(replication::Error::UnknownObject)?;
@@ -63,8 +67,16 @@ impl PlayerListener {
                 }
                 let inventory = self.inventory.as_ref().ok_or(replication::Error::Shape)?;
                 let loaded = self.persistent.as_ref().ok_or(replication::Error::Shape)?;
-                if !inventory.slots.values().contains(&Some(car))
-                    || !inventory
+                if !inventory.slots.values().contains(&Some(car)) {
+                    return Err(replication::Error::UnknownObject);
+                }
+                let Some(replication::Initial::Player(player)) =
+                    players.objects().get(call.player).map(|o| &o.initial)
+                else {
+                    return Err(replication::Error::UnknownObject);
+                };
+                if let Operation::Equip { item, .. } = call.operation
+                    && !inventory
                         .items
                         .items
                         .get(&item)
@@ -75,17 +87,35 @@ impl PlayerListener {
                 if !state.edits.contains_key(&call.player) && state.edits.len() >= 16 {
                     return Err(replication::Error::Bound);
                 }
-                state.edits.insert(
-                    call.player,
-                    EquipmentRequest {
+                let edit = state
+                    .edits
+                    .entry(call.player)
+                    .or_insert_with(|| EquipmentRequest {
                         player: call.player,
                         vehicle,
                         car,
-                        item,
+                        item: None,
+                        dyno: None,
+                        player_index: u32::from(player.runtime_index),
                         generation: loaded.generation(),
                         items: inventory.items.clone(),
-                    },
-                );
+                    });
+                if edit.car != car
+                    || edit.vehicle != vehicle
+                    || edit.generation != loaded.generation()
+                {
+                    return Err(replication::Error::Shape);
+                }
+                match call.operation {
+                    Operation::Equip { item, .. } => {
+                        if edit.item != Some(item) {
+                            edit.dyno = None;
+                        }
+                        edit.item = Some(item);
+                    }
+                    Operation::Dyno { stats, .. } => edit.dyno = Some(stats),
+                    _ => unreachable!(),
+                }
             }
             Operation::Commit => {
                 if let Some(edit) = state.edits.remove(&call.player) {

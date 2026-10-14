@@ -3,7 +3,8 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! One car-owned leaf air-filter edit. Preparation is transient; commit updates
-//! only the car's installed-child list, retaining purchased and default spares.
+//! the car's installed-child list and optional client-calculated dyno cache,
+//! retaining purchased and default spares.
 use crate::{inventory, purchase::Offers};
 use nfs_storage::{AccountId, Batch, InventoryRepository, ItemId, Op, Snapshot, Timestamp};
 use nfs_world_core::items::{Collection, DefinitionClass, Derived, InventoryCatalog, Item, OWNED};
@@ -16,27 +17,36 @@ pub struct Edit {
     generation: u64,
     before: Item,
     after: Item,
-    part: Item,
+    part: Option<Item>,
 }
 impl Edit {
     pub fn vehicle(&self) -> u64 {
         self.before.id
     }
-    pub fn item(&self) -> u64 {
-        self.part.id
+    pub fn item(&self) -> Option<u64> {
+        self.part.as_ref().map(|p| p.id)
     }
     pub fn generation(&self) -> u64 {
         self.generation
     }
     pub fn preview(&self, items: &Collection) -> Result<Collection, Error> {
         if items.items.get(&self.before.id) != Some(&self.before)
-            || items.items.get(&self.part.id) != Some(&self.part)
+            || self
+                .part
+                .as_ref()
+                .is_some_and(|part| items.items.get(&part.id) != Some(part))
         {
             return Err(Error::Conflict);
         }
         let mut next = items.clone();
         next.items.insert(self.after.id, self.after.clone());
         Ok(next)
+    }
+    pub fn with_dyno(mut self, stats: nfs_world_core::items::DynoStats) -> Result<Self, Error> {
+        stats
+            .apply(&mut self.after.derived)
+            .map_err(|_| Error::Shape)?;
+        Ok(self)
     }
 }
 
@@ -129,12 +139,39 @@ pub fn prepare(
         generation,
         before: car.clone(),
         after,
-        part: selected.clone(),
+        part: Some(selected.clone()),
     };
     edit.preview(items)?
         .encode(catalog.bindings())
         .map_err(inventory::Error::from)?;
     Ok(edit)
+}
+
+/// A dyno result can arrive without changing the selected part. It is still
+/// bound to an owned garage car and the exact inventory generation it measured.
+pub fn prepare_dyno(
+    account: AccountId,
+    generation: u64,
+    items: &Collection,
+    vehicle: u64,
+    stats: nfs_world_core::items::DynoStats,
+    catalog: &InventoryCatalog,
+) -> Result<Edit, Error> {
+    items
+        .encode(catalog.bindings())
+        .map_err(inventory::Error::from)?;
+    let car = items.items.get(&vehicle).ok_or(Error::Ownership)?;
+    if car.owner != 0 || car.state != OWNED || !matches!(car.derived, Derived::RaceVehicle { .. }) {
+        return Err(Error::Ownership);
+    }
+    Edit {
+        account,
+        generation,
+        before: car.clone(),
+        after: car.clone(),
+        part: None,
+    }
+    .with_dyno(stats)
 }
 
 /// Commit with optimistic concurrency. Repeating an already committed edit is
@@ -156,7 +193,10 @@ pub fn commit(
     if snapshot
         .garage
         .is_none_or(|slots| !slots.0.contains(&Some(vehicle)))
-        || current.items.get(&edit.part.id) != Some(&edit.part)
+        || edit
+            .part
+            .as_ref()
+            .is_some_and(|part| current.items.get(&part.id) != Some(part))
     {
         return Err(Error::Ownership);
     }
@@ -181,7 +221,10 @@ pub fn commit(
         let current = repository.snapshot(account)?;
         let collection = inventory::collection(&current, catalog.bindings())?;
         return if collection.items.get(&edit.vehicle()) == Some(&edit.after)
-            && collection.items.get(&edit.part.id) == Some(&edit.part)
+            && edit
+                .part
+                .as_ref()
+                .is_none_or(|part| collection.items.get(&part.id) == Some(part))
         {
             Ok(current)
         } else {
