@@ -10,6 +10,35 @@ have been tested on the supported installation, including an owner-run cold
 disconnected test of this public script. Complete progression remains open. The precise
 validation scope and installation limits are listed below.
 
+This is a **source-only distribution**. You must compile `nfs-server.exe` before
+running the script; no executable, installer or game content is shipped. All
+build and runtime source is in this public Afterhours repository.
+
+## Install the build tools
+
+For the Windows game-and-server path, install these tools first:
+
+| Tool | Required setup |
+| --- | --- |
+| [Git for Windows](https://git-scm.com/install/windows) | Provides `git` for cloning and updating this repository. |
+| [Rust via rustup](https://rustup.rs/) | Use the **x86_64-pc-windows-msvc** host. This checkout's `rust-toolchain.toml` selects Rust **1.98.1**, rustfmt and Clippy; rustup downloads them when first needed. |
+| [Visual Studio C++ tools](https://rust-lang.github.io/rustup/installation/windows-msvc.html) | Select **Desktop development with C++**, including the MSVC x64/x86 compiler and a Windows SDK. Visual Studio Build Tools is sufficient; the Visual Studio IDE is optional. |
+| [Strawberry Perl](https://strawberryperl.com/) | Put `perl.exe` on your user `PATH`. The vendored OpenSSL build uses it. |
+| [NASM](https://www.nasm.us/) | Put `nasm.exe` on your user `PATH` for the OpenSSL assembly build. |
+| [PowerShell 7](https://learn.microsoft.com/en-us/powershell/scripting/install/install-powershell-on-windows) | Use **x64 PowerShell 7.5 or later** (`pwsh.exe`), not the built-in Windows PowerShell 5.1. Microsoft's ZIP package is an option for a user-local installation. |
+
+Reopen your terminal after installing tools or changing `PATH`. Installing the
+compiler/SDK may require an administrator; building and running Afterhours use an
+ordinary user account. The launcher rejects an elevated session. There is no
+separate OpenSSL or SQLite service to install: Cargo builds those libraries from
+the locked dependencies. No Python, Node.js or private research tools are required.
+PowerShell compiles the bundled C# helpers itself; there is no separate launcher
+build command or .NET SDK requirement.
+
+Internet access is needed initially to obtain the source, Rust toolchain and Cargo
+dependencies. After caching them, Cargo accepts `--offline` for builds. That build
+cache is separate from the installed game's activation state described below.
+
 ## Requirements
 
 - A legitimately installed, previously activated Need for Speed (2015) PC game.
@@ -20,8 +49,9 @@ validation scope and installation limits are listed below.
 - Existing 32-bit `HKLM\SOFTWARE\Origin\ClientPath` registration. The tested
   registration names `EADesktop.exe`. `Origin.exe` compatibility is implemented
   but has not been tested live. Other names are refused.
-- A built `nfs-server.exe`. Building requires the Rust/native C/Perl prerequisites
-  in the [README](../README.md#build-and-test); launching needs none of those tools.
+- A built `nfs-server.exe`, following [Build from source](#build-from-source).
+  Launching still needs PowerShell, the `launcher/` files and the game installation,
+  but does not invoke Git, Cargo, Perl or NASM.
 - Close the EA app and any running copy of the game. Local TCP port 3216 must be
   available. Afterhours reports conflicts and leaves the other process alone.
 
@@ -33,12 +63,53 @@ validation scope and installation limits are listed below.
 Other builds fail before game launch. Do not replace a digest to bypass a failure:
 content mappings and the routing adapter also depend on that exact executable.
 
-## Start
+## Build from source
 
-From the Afterhours checkout, in an ordinary PowerShell 7 window:
+Open an ordinary, unelevated PowerShell 7 window and clone the public repository:
+
+```powershell
+git clone https://github.com/Afterhours-Crew/afterhours-2015.git
+Set-Location afterhours-2015
+```
+
+Check the tools in that window before building:
+
+```powershell
+$PSVersionTable.PSVersion    # 7.5 or later
+[Environment]::Is64BitProcess    # True
+rustc --version             # 1.98.1, selected by this checkout
+rustc -vV                   # host: x86_64-pc-windows-msvc
+cargo --version
+perl -v
+nasm -v
+```
+
+Build the release server from the repository root:
 
 ```powershell
 cargo build --release -p nfs-server --locked
+if ($LASTEXITCODE -ne 0) { throw 'Server build failed; read the Cargo error above.' }
+./target/release/nfs-server.exe --help
+```
+
+The first build also compiles OpenSSL and SQLite and can take several minutes.
+The resulting executable is `target/release/nfs-server.exe`. Keep the `launcher/`
+directory from the same source revision. If you set `CARGO_TARGET_DIR` or use a
+custom Cargo target, locate that build's executable and pass its full path using
+`-ServerPath` to `Check`, `Setup` and `Start` below.
+
+If Cargo reports a missing linker, `cl.exe`, `nmake` or Windows SDK library, repair
+the C++ workload/SDK installation. For missing `perl` or `nasm`, fix their user
+`PATH` and reopen the terminal. For a build that cannot discover an installed
+compiler, use Visual Studio's **x64 Native Tools Command Prompt** to run Cargo;
+return to an ordinary PowerShell 7 window for game startup. Do not change the
+pinned toolchain or dependency versions merely to get past a setup error.
+
+## Start
+
+From the same Afterhours checkout, with the build complete:
+
+```powershell
 ./launcher/Start-Afterhours.ps1 -GameDirectory 'F:\EA Games\Need for Speed'
 ```
 
@@ -81,7 +152,8 @@ or challenge completion. No remote product entitlements are granted.
 
 For a custom Cargo target/output location, pass `-ServerPath` with your built
 executable. The default is `target/release/nfs-server.exe` inside this checkout.
-No installer or prebuilt binary is included in this source preview.
+For server development without opening the game, see
+[Run only the server](../crates/server/README.md#run-only-the-server-on-windows).
 
 ## Check, setup and stop
 
@@ -241,7 +313,8 @@ A subsequent local release test recorded 1,127 replication sends over two minute
 with no remaining backlog. The approach prompt was visible in the first screenshot
 about 1.4 seconds after the server detected re-entry, and PageDown began the
 transition immediately. These are sampled UI observations, not exact first-visible
-latencies. The garage animation and loading still take their normal time.
+latencies. Garage-return animation and loading follow that response; their
+durations have not been compared with the original service.
 The following exit again showed the prompt and minimap arrow; PageDown at spawn
 returned successfully. Normal quit cleaned up the game, server, listener and test
 console. The EA app was absent and its service remained stopped.

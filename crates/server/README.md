@@ -22,9 +22,10 @@ The options below document the server interface for developers and custom hosts.
 launcher's policies and installed garage lifecycle without starting services or
 modifying an account. Account creation remains a separate transaction.
 
-Use the toolchain selected by the workspace. The vendored OpenSSL build needs a
-C compiler and Perl; Windows also needs MSVC Build Tools and NASM. Run from this
-checkout:
+Install the [build prerequisites](../../docs/LOCAL-LAUNCHER.md#install-the-build-tools)
+and use the toolchain selected by the workspace. The vendored OpenSSL build needs
+a C compiler and Perl; Windows also needs MSVC Build Tools and NASM. No executable
+is shipped. For a development build, run from this checkout:
 
 ```sh
 cargo build -p nfs-server --locked
@@ -64,6 +65,54 @@ On subsequent starts these five import options may be omitted. Database values
 take precedence even when an import path is provided, changed or no longer exists.
 Missing or malformed database state fails startup rather than creating guessed
 defaults.
+
+## Run only the server on Windows
+
+This developer example starts loopback services with generated local policy and
+a saved account. It does not launch or route the game. For playing, use the
+[combined start script](../../docs/LOCAL-LAUNCHER.md#start), which also supplies
+the required game-process routing and launcher compatibility.
+
+Build the release executable first, then run the following from the repository
+root in ordinary PowerShell 7.5 or later. Use a dedicated developer data directory;
+do not open an account already in use by another server or launcher session.
+`Setup` creates an account on the first run and preserves it on later runs.
+
+```powershell
+$ErrorActionPreference = 'Stop'
+$game = 'F:\EA Games\Need for Speed' # Replace with your installation.
+$data = Join-Path $env:LOCALAPPDATA 'Afterhours2015-server-dev'
+$server = (Resolve-Path './target/release/nfs-server.exe').Path
+./launcher/Start-Afterhours.ps1 -Action Setup -GameDirectory $game -DataDirectory $data -ServerPath $server
+
+# Read the generated policy paths; preparation leaves saved accounts untouched.
+$prepared = & $server prepare-local --game-dir $game --root $data | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0) { throw 'Local preparation failed.' }
+$account = Get-Content -LiteralPath (Join-Path $data 'account.json') -Raw | ConvertFrom-Json
+$runs = Join-Path $data 'artifacts/runs'
+New-Item -ItemType Directory -Path $runs -Force | Out-Null
+$output = Join-Path $runs ([Guid]::NewGuid().ToString('N'))
+$serverArgs = @(
+    '--root', $data, '--output', $output, '--game-dir', $game,
+    '--state-directory', 'artifacts/account', '--local-account', $account.local_account,
+    '--owned-local-social', '--owned-menu-awards', '--owned-world-readiness',
+    '--owned-world-attributes', '--owned-world-connection', '--owned-only'
+)
+foreach ($file in $prepared.files.PSObject.Properties) {
+    if ($file.Name -ne 'account-policy') {
+        $serverArgs += @(('--' + $file.Name), [string]$file.Value)
+    }
+}
+& $server @serverArgs
+```
+
+The first JSON output line has `ready: true` and the actual listener addresses;
+diagnostics remain in the terminal. Ports are allocated on loopback, and this
+example leaves LSX disabled. Press **Ctrl+C** to stop the standalone server.
+Launcher `Status`/`Stop` manage launcher-owned sessions, not this direct process.
+Metadata recordings are under the new `artifacts/runs/<id>/` directory; request
+payload recording stays off. Keep the data directory to preserve the account.
+Server readiness alone does not establish that a game can connect or play.
 
 ## Create a local account
 
@@ -328,8 +377,9 @@ inputs and service policy are still required for a complete deployment.
 `--game-dir` supplies a generated `--garage-layout` for the five main parking
 slots, their inventory bindings and the installed exit_teleport destination. The
 initial world_spawn pose remains separate. Deployments using that pose should keep
-their explicit layout while world-exit content generation is completed. Explicit
-layout files take precedence; no existing file is rewritten.
+their explicit layout. `prepare-local` generates the garage lifecycle, including
+its separate world-spawn stage, for the public start script. Explicit layout
+files take precedence; no existing file is rewritten.
 
 `--game-dir` also supplies `vehicle-parts.json` unless `--vehicle-parts` is
 explicitly set. To use it, vehicle content version 2 has exactly `format`,
@@ -337,7 +387,8 @@ explicitly set. To use it, vehicle content version 2 has exactly `format`,
 schema, and the embedded `parts` section is removed. Version 2 requires a parts
 file and validates both inputs against the same item catalog. Vehicle content
 version 1 continues to use its embedded parts, including when `--game-dir` is
-present. Preparation does not yet generate vehicle entity profiles.
+present. The generated `--vehicle-content` includes the installed vehicle entity
+profiles; explicit vehicle content still takes precedence.
 
 ## Local launcher IPC
 
@@ -362,11 +413,14 @@ restart of both game and server recovered the same account and car in the garage
 The second process finished closing just after the temporary block expired, so
 that final shutdown is not claimed to be fully network-isolated.
 
-These runs used a guarded research launch procedure and an existing local account.
-The installed license/cache state was retained; fresh-profile startup, cache
-lifetime, activation independence and a packaged launch path remain unverified.
-Other applications and system DNS stayed online. IPv6 loopback and active block
-rules were checked, but no external IPv6 route was available for a drop test.
+Those earlier runs used a guarded research launch procedure and an existing local
+account. Other applications and system DNS stayed online. IPv6 loopback and active
+block rules were checked, but no external IPv6 route was available for a drop test.
+The public PowerShell script has since passed gameplay, normal quit/restart and an
+owner-run cold disconnected test with existing and fresh local accounts; see the
+[current validation scope](../../docs/LOCAL-LAUNCHER.md#developer-validation-and-current-limits).
+Installed activation state was retained. Fresh game installation, cache lifetime
+and activation independence remain unverified.
 
 Startup QoS may first report an unresolved external endpoint and then resolve it.
 The user-session model accepts that first resolution while preserving the

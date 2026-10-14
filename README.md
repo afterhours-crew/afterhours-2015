@@ -30,6 +30,32 @@ Tests use constructed inputs, standard cryptographic vectors and temporary
 databases. Game files and service access are unnecessary. See the
 [contribution and promotion process](CONTRIBUTING.md).
 
+## Build and run on Windows
+
+Afterhours is distributed as source: **no server executable or installer is
+included**. Start with the [Windows setup guide](docs/LOCAL-LAUNCHER.md), which
+lists the build tools, supported game installation and activation requirements.
+Once those prerequisites are installed, open an ordinary PowerShell 7 window:
+
+```powershell
+git clone https://github.com/Afterhours-Crew/afterhours-2015.git
+Set-Location afterhours-2015
+cargo build --release -p nfs-server --locked
+if ($LASTEXITCODE -ne 0) { throw 'Server build failed; read the Cargo error above.' }
+./launcher/Start-Afterhours.ps1 -GameDirectory 'F:\EA Games\Need for Speed'
+```
+
+Replace the game path with your installation directory. The build produces
+`target/release/nfs-server.exe`. The PowerShell script prepares local content and
+an account, starts both the server and game, and keeps logs visible in the terminal.
+Wait for `ready` before pressing Space. Normal game exit also stops the server.
+Running Afterhours does not require administrator access; installing third-party
+build tools may. No private checkout, copied profile or database service is needed.
+
+For custom build output paths, saved data, setup checks and troubleshooting, see
+the [running instructions](docs/LOCAL-LAUNCHER.md#build-from-source).
+Developers can also [run just the server](crates/server/README.md#run-only-the-server-on-windows).
+
 ## Build and test
 
 Install Rust through rustup and a native C toolchain (MSVC Build Tools on Windows,
@@ -38,6 +64,9 @@ Strawberry Perl on Windows, with `perl` on PATH). Windows also needs NASM on PAT
 for OpenSSL assembly. `rust-toolchain.toml` selects Rust 1.98.1, rustfmt and
 Clippy. SQLite is built from the bundled dependency; no database service is needed.
 Cargo downloads locked dependencies on the first build.
+The [Windows prerequisite checklist](docs/LOCAL-LAUNCHER.md#install-the-build-tools)
+links the installers and names the required components. The commands below build
+and check the entire workspace; they do not start the game.
 
 ```sh
 cargo build --workspace --locked
