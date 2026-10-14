@@ -942,7 +942,9 @@ fn recreated_customization_timer_accepts_new_lifetime_without_reusing_old_measur
             &mut ghosts,
         )
         .unwrap();
+    let next_sequence = std::cell::Cell::new(0u8);
     let deliver = |listener: &mut PlayerListener, ghost, event| {
+        let sequence = next_sequence.get();
         let body = Message::Reached {
             event,
             target: EntityRef { ghost, entity: 2 },
@@ -956,7 +958,7 @@ fn recreated_customization_timer_accepts_new_lifetime_without_reusing_old_measur
             .put(0, 1)
             .put(1, 1)
             .put(0, 3)
-            .put(0, 7)
+            .put(sequence.into(), 7)
             .put(82, 7)
             .put_span(body.span())
             .put(0, 1)
@@ -966,6 +968,9 @@ fn recreated_customization_timer_accepts_new_lifetime_without_reusing_old_measur
             frame: 0,
             data: wire.span(),
         });
+        if accepted {
+            next_sequence.set((sequence + 1) & 127);
+        }
         listener.pending.clear();
         listener.pending_rpcs.clear();
         accepted
@@ -1229,7 +1234,10 @@ fn late_world_reports_from_a_retired_participant_do_not_refuse_the_frame() {
     let objects = listener.players.objects();
     let (scene, volume) = objects.scene_endpoint(501, 5).unwrap();
     let (_, location) = objects.scene_endpoint(501, 28).unwrap();
+    let next_sequence = std::cell::Cell::new(0u8);
     let report = |participant: u16, selector: u16, method: u32, clock: Option<f64>| {
+        let sequence = next_sequence.get();
+        next_sequence.set((sequence + 1) & 127);
         let mut payload = BitWriter::new();
         payload.put(selector.into(), 9).put(method.into(), 32);
         if let Some(clock) = clock {
@@ -1250,7 +1258,7 @@ fn late_world_reports_from_a_retired_participant_do_not_refuse_the_frame() {
             .put(0, 1)
             .put(1, 1)
             .put(0, 3)
-            .put(0, 7)
+            .put(sequence.into(), 7)
             .put(47, 7)
             .put_span(body.span())
             .put(0, 1)

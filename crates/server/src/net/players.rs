@@ -46,6 +46,7 @@ const MAX_HELD_GLASS: usize = 8;
 
 pub(super) struct PlayerListener {
     stats: Accepting,
+    messages: frame::receive::Receiver,
     persona: u64,
     roles: Option<crate::scene_roles::SceneRoles>,
     players: Players,
@@ -547,7 +548,7 @@ impl PlayerListener {
         self.stats.take_file(index)
     }
     pub(super) fn files_alive(&mut self, now: u64) -> bool {
-        self.stats.files_alive(now)
+        self.stats.files_alive(now) && self.messages.alive(now)
     }
     /// The next host teleport due by `world_ms`, oldest first, once the
     /// participant's spawn assignment has left in an earlier tick (official
@@ -585,6 +586,7 @@ impl PlayerListener {
     pub(super) fn new(persona: u64) -> Self {
         Self {
             stats: Accepting::default(),
+            messages: frame::receive::Receiver::default(),
             persona,
             roles: None,
             players: Players::default(),
@@ -800,11 +802,33 @@ impl Listener for PlayerListener {
             Ok(files) => files,
             Err(_) => return self.stats.invalid(),
         };
-        let requests: Vec<_> = parsed
-            .messages
+        let (messages, received) = match &parsed.messages {
+            Some(input) => match self.messages.prepare(input, self.stats.now) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    if refusal::logged(self.stats.errors + 1) {
+                        tracing::warn!(?error, "refused MessageEX ordering or chunk assembly");
+                    }
+                    return self.stats.invalid();
+                }
+            },
+            None => (self.messages.clone(), Vec::new()),
+        };
+        let decoded = match received
             .iter()
-            .flat_map(|m| &m.groups)
-            .flat_map(|g| &g.messages)
+            .map(|m| m.decode())
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                if refusal::logged(self.stats.errors + 1) {
+                    tracing::warn!(?error, "refused reassembled MessageEX body");
+                }
+                return self.stats.invalid();
+            }
+        };
+        let requests: Vec<_> = decoded
+            .iter()
             .filter_map(|m| match m {
                 frame::Message::CreatePlayer { name, flag, slot } => Some(Request {
                     name: name.clone(),
@@ -814,21 +838,15 @@ impl Listener for PlayerListener {
                 _ => None,
             })
             .collect();
-        let rpcs = parsed
-            .messages
+        let rpcs = decoded
             .iter()
-            .flat_map(|m| &m.groups)
-            .flat_map(|g| &g.messages)
             .filter_map(|m| match m {
                 frame::Message::Opaque { index: 47, body } => Some(*body),
                 _ => None,
             })
             .collect::<Vec<_>>();
-        let logic_events = parsed
-            .messages
+        let logic_events = decoded
             .iter()
-            .flat_map(|m| &m.groups)
-            .flat_map(|g| &g.messages)
             .filter_map(|m| match m {
                 frame::Message::Opaque { index: 82, body } => Some(*body),
                 _ => None,
@@ -839,6 +857,7 @@ impl Listener for PlayerListener {
             && logic_events.is_empty()
             && parsed.movement.is_none()
         {
+            self.messages = messages;
             return self.stats.record(&parsed, files);
         }
         let mut players = self.players.clone();
@@ -1917,6 +1936,7 @@ impl Listener for PlayerListener {
         self.pending.extend(sections);
         self.pending.extend(deferred_sections);
         self.pending_entries.extend(entries);
+        self.messages = messages;
         self.stats.record(&parsed, files)
     }
 }

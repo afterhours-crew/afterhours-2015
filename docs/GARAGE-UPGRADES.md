@@ -97,6 +97,12 @@ After a successful commit the server sends an inventory update on the Items
 File channel. Delivery must finish before the next account write starts, so a
 later edit cannot replace a pending update.
 
+Incoming MessageEX chunks are reassembled before dispatch, retaining the order
+of equip, dyno and commit even when a result spans handler frames. Reliable
+message retries do not repeat a committed edit. Each connection/channel has a
+bounded assembly buffer and a deadline; gaps or incomplete mutations cannot be
+silently skipped before processing their commit.
+
 Portable tests cover malformed/truncated requests, invalid owner references,
 insufficient funds, repeated purchases/commits, competing edits, account
 isolation, SQLite reopen and storage failure. They also check that a car update

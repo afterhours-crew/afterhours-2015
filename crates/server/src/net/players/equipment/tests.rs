@@ -380,3 +380,68 @@ async fn dyno_is_staged_with_equip_notified_after_commit_and_cancelled_with_a_ne
     assert_eq!(repo.snapshot(account).unwrap(), saved);
     crate::net::items::tests::deliver_notification(&mut jobs);
 }
+
+#[tokio::test]
+async fn chunked_dyno_between_equip_and_commit_is_persisted_atomically() {
+    let (mut listener, mut jobs, repo, account, scene, player, car) = fixture();
+    let before = repo.snapshot(account).unwrap();
+    let stats = nfs_world::items::DynoStats::new([180, 400, 500, 120], [4.5, 10., 12.5]).unwrap();
+    let equip = wire(scene, player, Some(car), 0, 7);
+    let dyno = dyno_wire(scene, player, car, stats);
+    let commit = wire(scene, player, None, 5, 0);
+    assert!(dyno.bytes().len() > frame::CHUNK_BYTES);
+    let chunks = frame::chunks(47, dyno.bytes()).unwrap();
+    let mut messages = vec![frame::Message::Opaque {
+        index: 47,
+        body: equip.span(),
+    }];
+    for chunk in chunks {
+        messages.push(chunk);
+    }
+    messages.push(frame::Message::Opaque {
+        index: 47,
+        body: commit.span(),
+    });
+    let frame = frame::Builder::new()
+        .messages(
+            None,
+            vec![frame::Group {
+                channel: 0,
+                sequence: Some(0),
+                messages,
+            }],
+        )
+        .build()
+        .unwrap();
+    assert!(listener.frame(Queued {
+        advertised: None,
+        frame: 1,
+        data: frame.span()
+    }));
+    assert_eq!(listener.equipment.committed.len(), 1);
+    assert_eq!(listener.equipment.committed[0].dyno, Some(stats));
+    // A retry in a different application frame does not create a second commit.
+    assert!(listener.frame(Queued {
+        advertised: None,
+        frame: 2,
+        data: frame.span()
+    }));
+    assert_eq!(listener.equipment.committed.len(), 1);
+    jobs.start(&mut listener, 3, Timestamp(3));
+    assert!(jobs.completed(&mut listener).await);
+    assert_eq!(
+        repo.snapshot(account).unwrap().generation,
+        before.generation + 1
+    );
+    let update = crate::net::items::tests::deliver_notification(&mut jobs);
+    let mut expected = before.items[&ItemId::new(1).unwrap()].derived.clone();
+    let mut derived = Derived::decode(nfs_world::items::Layout::RaceVehicle, &expected).unwrap();
+    stats.apply(&mut derived).unwrap();
+    expected = derived.encode().unwrap();
+    assert_eq!(
+        repo.snapshot(account).unwrap().items[&ItemId::new(1).unwrap()].derived,
+        expected
+    );
+    assert_eq!(update.items.items[&1].derived, derived);
+    assert!(update.items.items[&1].children.contains(&7));
+}

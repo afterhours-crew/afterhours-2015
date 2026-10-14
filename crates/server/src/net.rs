@@ -930,7 +930,10 @@ pub async fn world_host(
             return;
         }
         if !listener.files_alive(now_ms()) {
-            warn!(connection, "incoming File deadline; closing world");
+            warn!(
+                connection,
+                "incoming File or MessageEX deadline; closing world"
+            );
             return;
         }
         while let Some(command) = listener.due_teleport(now_ms()) {

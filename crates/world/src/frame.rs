@@ -9,6 +9,8 @@ use nfs_protocol::world::{
 };
 use std::fmt;
 
+pub mod receive;
+
 pub const HANDLERS: usize = 6;
 pub const TIME_SYNC: u8 = 0;
 pub const MESSAGES: u8 = 1;
@@ -352,6 +354,24 @@ fn message<'a>(r: &mut Reader<'a>, index: u8) -> Result<Message<'a>, Error> {
     })
 }
 
+/// Decode one reassembled message, allowing only its final partial byte.
+/// Unknown targets stay opaque so a consumer can explicitly leave them unsupported.
+pub fn assembled_message(index: u8, bytes: &[u8]) -> Result<Message<'_>, Error> {
+    if index >= REGISTRY_SIZE || index == EX_CHUNK || bytes.len() > receive::MAX_BYTES {
+        return Err(Error::Bound);
+    }
+    let span = BitSpan::new(bytes, 0, bytes.len() * 8)?;
+    let mut reader = Reader { span, pos: 0 };
+    match message(&mut reader, index) {
+        Ok(value) if reader.rest()?.len() < 8 => Ok(value),
+        Ok(_) => Err(Error::Shape),
+        Err(Error::Unsupported(target)) if target == index => {
+            Ok(Message::Opaque { index, body: span })
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn collection(r: &mut Reader<'_>, mut each: impl FnMut(u16)) -> Result<(), Error> {
     r.take64(34)?;
     let count = r.take(32)? as usize;
@@ -650,13 +670,13 @@ pub enum TimeSyncOut {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct Builder {
+pub struct Builder<'a> {
     time_sync: Option<TimeSyncOut>,
-    messages: Option<(Option<u16>, Vec<Group<'static>>)>,
+    messages: Option<(Option<u16>, Vec<Group<'a>>)>,
     movement: Option<Vec<(u16, Vec<u8>)>>,
 }
 
-impl Builder {
+impl<'a> Builder<'a> {
     pub fn new() -> Self {
         Self::default()
     }
@@ -671,7 +691,7 @@ impl Builder {
         self
     }
 
-    pub fn messages(mut self, state: Option<u16>, groups: Vec<Group<'static>>) -> Self {
+    pub fn messages(mut self, state: Option<u16>, groups: Vec<Group<'a>>) -> Self {
         self.messages = Some((state, groups));
         self
     }
