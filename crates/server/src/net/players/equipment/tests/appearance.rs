@@ -4,7 +4,12 @@
 
 use super::*;
 
-fn car_finish_wire(scene: u16, player: u16, plate: Option<&[u8]>, tint: f32) -> BitWriter {
+pub(super) fn car_finish_wire(
+    scene: u16,
+    player: u16,
+    plate: Option<&[u8]>,
+    tint: f32,
+) -> BitWriter {
     let mut payload = BitWriter::new();
     payload
         .put(2, 9)
@@ -30,7 +35,7 @@ fn car_finish_wire(scene: u16, player: u16, plate: Option<&[u8]>, tint: f32) -> 
 }
 
 #[tokio::test]
-async fn plate_and_tint_save_together_refresh_appearance_and_survive_later_equipment() {
+async fn plate_submissions_and_tint_commit_preserve_order_and_later_equipment() {
     let (mut listener, mut jobs, repo, account, scene, player, car) = fixture();
     let before = repo.snapshot(account).unwrap();
     accept(
@@ -48,6 +53,11 @@ async fn plate_and_tint_save_together_refresh_appearance_and_survive_later_equip
     }
     assert_eq!(repo.snapshot(account).unwrap(), before);
     accept(&mut listener, &wire(scene, player, None, 5, 0)).unwrap();
+    for time in [1, 2] {
+        jobs.start(&mut listener, time, Timestamp(time));
+        assert!(jobs.completed(&mut listener).await);
+        crate::net::items::tests::deliver_notification(&mut jobs);
+    }
     jobs.start(&mut listener, 3, Timestamp(3));
     assert!(jobs.completed(&mut listener).await);
     let update = crate::net::items::tests::deliver_notification(&mut jobs);
@@ -67,7 +77,7 @@ async fn plate_and_tint_save_together_refresh_appearance_and_survive_later_equip
         &saved.items[&ItemId::new(1).unwrap()].derived[..24],
         &before.items[&ItemId::new(1).unwrap()].derived[..24]
     );
-    assert_eq!(saved.generation, before.generation + 1);
+    assert_eq!(saved.generation, before.generation + 3);
     assert_eq!(saved.tables, before.tables);
     // Exact retransmission after commit is a durable no-op.
     accept(&mut listener, &car_finish_wire(scene, player, None, 0.75)).unwrap();
@@ -77,6 +87,9 @@ async fn plate_and_tint_save_together_refresh_appearance_and_survive_later_equip
     )
     .unwrap();
     accept(&mut listener, &wire(scene, player, None, 5, 0)).unwrap();
+    jobs.start(&mut listener, 4, Timestamp(4));
+    assert!(jobs.completed(&mut listener).await);
+    crate::net::items::tests::deliver_notification(&mut jobs);
     jobs.start(&mut listener, 4, Timestamp(4));
     assert!(jobs.completed(&mut listener).await);
     crate::net::items::tests::deliver_notification(&mut jobs);
@@ -93,7 +106,7 @@ async fn plate_and_tint_save_together_refresh_appearance_and_survive_later_equip
 }
 
 #[tokio::test]
-async fn car_finish_cancellation_and_foreign_or_world_targets_cannot_save() {
+async fn tint_cancellation_and_foreign_or_world_finish_targets_cannot_save() {
     for plate in [None, Some(b"LOCAL".as_slice())] {
         let (mut listener, mut jobs, repo, account, scene, player, car) = fixture();
         let before = repo.snapshot(account).unwrap();
@@ -104,7 +117,7 @@ async fn car_finish_cancellation_and_foreign_or_world_targets_cannot_save() {
             )
             .is_err()
         );
-        accept(&mut listener, &car_finish_wire(scene, player, plate, 0.5)).unwrap();
+        accept(&mut listener, &car_finish_wire(scene, player, None, 0.5)).unwrap();
         accept(&mut listener, &wire(scene, player, None, 4, 0)).unwrap();
         accept(&mut listener, &wire(scene, player, None, 5, 0)).unwrap();
         jobs.start(&mut listener, 3, Timestamp(3));

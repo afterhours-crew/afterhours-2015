@@ -20,6 +20,7 @@ use serde_json::json;
 
 mod appearance;
 mod driving;
+mod plate;
 mod purchases;
 mod reset;
 

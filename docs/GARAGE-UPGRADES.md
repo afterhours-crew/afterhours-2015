@@ -73,8 +73,11 @@ server, applied the newer saved wrap, and committed its body paint and livery
 together. Its rear-window stripe was visible in free roam and the body paint
 survived garage return. A further restart retained the yellow body paint in the
 garage and the rear-window stripe in free roam. These checks cover restoring
-and applying a saved library entry; saving
-a newly edited wrap through the new livery-field handler still needs a live check.
+and applying a saved library entry. A later live test saved a newly edited green
+wrap through the livery-field handler: all three uploaded payloads matched storage,
+and the green body survived free roam, garage return and a game/server restart.
+The newly added rear-body mark was not visually distinguishable, so that check
+does not establish correct decal placement or recipe editing after reload.
 It migrates storage to schema 5; back up the stopped account directory before
 testing. Older server builds cannot open the upgraded database.
 
@@ -85,28 +88,38 @@ flag are stored without inventing a resource hash. A library item referenced by
 another car is currently refused to avoid changing that car through a shared
 record. Portable tests cover combined edits, retries, cancellation, account
 isolation, unrelated part changes and restart. The live library-apply path
-retains the account-owned livery ID and its installed resource hash. It does not
-exercise the separate request that changes a livery's two stored fields.
+retains the account-owned livery ID and its installed resource hash. The later
+new-wrap save also exercised the request that changes the two livery fields.
 
 These checks cover the tested starting car, not every supported definition or
 menu path. Broader visual parts and the complete wrap-edit workflow remain unfinished. Client
 performance numbers changing immediately after purchase are only a local preview;
 the return/restart checks are needed to establish that they were saved.
 
-The next candidate adds plate text, window tint and restoring factory body paint
-to the same ordered transaction. Plate text uses the native seven-byte limit and
-terminator; tint retains finite values from zero through one. Factory paint comes
+The candidate supports plate text, window tint and restoring factory body paint.
+Plate text uses the native seven-byte limit and terminator; tint retains finite
+values from zero through one. Factory paint comes
 from the current car's installed definition and preserves tint, plate, livery and
 wheel finishes. Portable tests cover exact request bounds, cancellation, retries,
-account isolation, stale edits, storage reopen and later equipment changes. These
-menu paths still need full live persistence verification. A later live test changed
-window tint and committed the edit; the slider retained its setting after restarting
+account isolation, stale edits, storage reopen and later equipment changes.
+A later live test changed window tint and committed the edit; the slider retained
+its setting after restarting
 both game and server. The local utility text filter now allows valid UTF-8 text
 without control characters, bounds requests and returns native result codes.
 It makes no external calls and does not implement EA's moderation policy. The
 game accepted a plate edit with this reply, but did not send a commit before the
-next editor began; the plate reverted on entering free roam. Plate persistence
-therefore remains open. The text-filter prerequisite and its live result are
+next editor began; the plate reverted on entering free roam. The fix treats the
+accepted plate RPC as a standalone submission through the existing validated
+transaction queue. Paint and tint
+previews still need their explicit commit; accepting a plate never saves them.
+Tests cover ordered submissions, retry safety, canceled previews, queue bounds
+and refusal of externally stale state. Live tests then retained the accepted text
+through another part editor, free roam, garage return and a full game/server
+restart. Resubmitting identical text did not advance the account generation.
+This is a compatibility policy supported by the observed client sequence; the
+original backend's internal save timing is not established. Factory-paint reset
+and text-dialog cancellation still need live acceptance. The text-filter
+prerequisite and its live result are
 tracked in [issue #68](https://github.com/afterhours-crew/afterhours-2015/issues/68).
 An earlier attempted combined run stopped at the splash because a Windows
 firewall prompt from a completed test covered it.
@@ -129,8 +142,11 @@ Visual reset restores stock appearance and tint, resets installed stance tuning,
 and preserves performance, body paint, plate text and livery; its wheel option
 retains rims, tires, calipers and brake discs. Body kits and plate fittings are
 removed. Portable tests cover ownership, ordering, cancellation, retries, stale
-edits and reopen, and an independent installed-state comparison passes. These
-two operations have not yet been exercised through the game UI; see
+edits and reopen, and an independent installed-state comparison passes. A live
+plate-frame removal sent the modeled request and removed the installed child
+without changing cash, plate text, tint or paint. The frame still appeared in
+free roam and after restart, so visual removal is not accepted. Stock visual
+reset remains untested through the game UI; see
 [issue #66](https://github.com/afterhours-crew/afterhours-2015/issues/66).
 
 Resetting all performance parts is now modeled separately from factory paint.

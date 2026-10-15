@@ -22,6 +22,14 @@ pub(in crate::net) struct EquipmentRequest {
     pub owner: replication::vehicle::Resource,
     pub registrations: crate::vehicle_content::registrations::Registry,
 }
+impl EquipmentRequest {
+    fn is_plate_submission(&self) -> bool {
+        matches!(self.part_edits.as_slice(), [Operation::LicensePlate { .. }])
+            && self.selections.is_empty()
+            && self.dyno.is_none()
+            && self.handling.is_empty()
+    }
+}
 #[derive(Clone, Debug, Default)]
 pub(super) struct State {
     edits: BTreeMap<u16, EquipmentRequest>,
@@ -152,27 +160,38 @@ impl PlayerListener {
                 {
                     return Err(replication::Error::UnknownObject);
                 }
+                let new_request = || EquipmentRequest {
+                    player: call.player,
+                    vehicle,
+                    car,
+                    selections: Vec::new(),
+                    part_edits: Vec::new(),
+                    dyno: None,
+                    handling: nfs_world::items::HandlingChanges::default(),
+                    content: content.clone(),
+                    player_index: u32::from(player.runtime_index),
+                    generation: loaded.generation(),
+                    items: inventory.items.clone(),
+                    owner,
+                    registrations,
+                };
+                if matches!(call.operation, Operation::LicensePlate { .. }) {
+                    // The accepted text arrives without a builder Commit.
+                    // Persist just that submission, never any open preview.
+                    // It still goes through the normal ownership, generation,
+                    // presentation and durable-notification validation.
+                    if state.committed.len() >= 16 {
+                        return Err(replication::Error::Bound);
+                    }
+                    let mut request = new_request();
+                    request.part_edits.push(call.operation);
+                    state.committed.push_back(request);
+                    return Ok(true);
+                }
                 if !state.edits.contains_key(&call.player) && state.edits.len() >= 16 {
                     return Err(replication::Error::Bound);
                 }
-                let edit = state
-                    .edits
-                    .entry(call.player)
-                    .or_insert_with(|| EquipmentRequest {
-                        player: call.player,
-                        vehicle,
-                        car,
-                        selections: Vec::new(),
-                        part_edits: Vec::new(),
-                        dyno: None,
-                        handling: nfs_world::items::HandlingChanges::default(),
-                        content: content.clone(),
-                        player_index: u32::from(player.runtime_index),
-                        generation: loaded.generation(),
-                        items: inventory.items.clone(),
-                        owner,
-                        registrations,
-                    });
+                let edit = state.edits.entry(call.player).or_insert_with(new_request);
                 if edit.car != car
                     || edit.vehicle != vehicle
                     || edit.generation != loaded.generation()
@@ -187,7 +206,6 @@ impl PlayerListener {
                         | Operation::StockVisual { .. }
                         | Operation::StockPaint
                         | Operation::Paint { .. }
-                        | Operation::LicensePlate { .. }
                         | Operation::WindowTint { .. }
                         | Operation::RimSize { .. }
                         | Operation::Livery { .. }
@@ -235,7 +253,6 @@ impl PlayerListener {
                     }
                     Operation::Paint { .. }
                     | Operation::StockPaint
-                    | Operation::LicensePlate { .. }
                     | Operation::WindowTint { .. }
                     | Operation::RimSize { .. }
                     | Operation::Livery { .. } => (),
@@ -314,6 +331,30 @@ impl PlayerListener {
                 old,
                 &inventory,
             )?;
+        }
+        // Only advance work captured against the exact state that this serialized
+        // local write replaced. An external/stale generation is never rebased.
+        // Plate submissions may arrive while a preview is open or an earlier
+        // write is queued; neither ordering should erase an accepted plate.
+        if let Some(population) = &population {
+            for next in self
+                .equipment
+                .edits
+                .values_mut()
+                .chain(self.equipment.committed.iter_mut())
+            {
+                if (request.is_plate_submission() || next.is_plate_submission())
+                    && next.player == request.player
+                    && next.vehicle == request.vehicle
+                    && next.car == request.car
+                    && next.generation == request.generation
+                    && next.items == request.items
+                {
+                    next.generation = loaded.generation();
+                    next.items = inventory.items.clone();
+                    next.registrations = population.registrations().clone();
+                }
+            }
         }
         self.players = players;
         self.population = population;
