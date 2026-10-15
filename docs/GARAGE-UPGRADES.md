@@ -109,8 +109,11 @@ the saved appearance; removing the plate fittings kept the accepted text; changi
 the front tires preserved the finish. A subsequent agent test restarted both game
 and server and confirmed the saved windshield decal in the garage and free roam,
 the plate text and retained fitments, then returned to the garage. All three wrap
-uploads still matched durable storage byte for byte. Intentional wrap overwrite,
-factory-paint reset and editing a reloaded recipe remain separate pending checks.
+uploads still matched durable storage byte for byte. A later test on a separate
+account copy reopened the saved rear-window stripe, moved it, changed body paint
+and intentionally overwrote the same library entry. All three replacement uploads
+matched durable storage. Visual confirmation of that overwrite after restart and
+factory-paint reset remain pending.
 
 Ride height and front/rear camber are saved on the installed control-arm tuning
 item and included in the free-roam car's chassis customization. The owner's new
