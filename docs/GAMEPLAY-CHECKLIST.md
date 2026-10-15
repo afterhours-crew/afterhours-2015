@@ -35,6 +35,8 @@ remains unchecked.
    and the equipped livery across the tested garage/world transitions.
    Plate text, window tint and factory body-paint reset have automated coverage;
    their live menu and persistence checks are pending.
+   Resetting all performance parts has automated coverage; its live check and a
+   controlled comparison of actual driving performance/tuning remain pending.
 2. [ ] **Free-roam REP and unlocks.** Award driving scores, update levels and make
    newly eligible content available. Current stored-score/level read models do
    not implement earning REP.

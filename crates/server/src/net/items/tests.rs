@@ -3,6 +3,14 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 use super::*;
+
+pub(in crate::net) fn reload_inventory(
+    jobs: &Exchanges,
+    snapshot: &nfs_storage::Snapshot,
+) -> nfs_world::items::Collection {
+    nfs_services::inventory::collection(snapshot, jobs.profile.as_ref().unwrap().bindings())
+        .unwrap()
+}
 use nfs_storage::{Batch, MemoryRepository, Op};
 use nfs_world::{
     application::{Listener, Queued},

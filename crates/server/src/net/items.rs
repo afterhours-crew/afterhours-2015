@@ -145,6 +145,9 @@ impl Profile {
                 for operation in &request.part_edits {
                     use nfs_services::item_builder::Operation;
                     edit = match *operation {
+                        Operation::StockPerformance { .. } => {
+                            edit.with_stock_performance(&request.items, &service.catalog)
+                        }
                         Operation::StockPaint => edit.with_stock_paint(&service.catalog),
                         Operation::LicensePlate { plate } => edit.with_license_plate(plate),
                         Operation::WindowTint { tint } => edit.with_window_tint(tint),

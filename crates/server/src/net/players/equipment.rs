@@ -64,6 +64,7 @@ impl PlayerListener {
                 state.edits.remove(&call.player);
             }
             Operation::Equip { .. }
+            | Operation::StockPerformance { .. }
             | Operation::StockPaint
             | Operation::Dyno { .. }
             | Operation::Handling { .. }
@@ -74,6 +75,7 @@ impl PlayerListener {
             | Operation::RimSize { .. } => {
                 let vehicle = match call.operation {
                     Operation::Equip { vehicle, .. }
+                    | Operation::StockPerformance { vehicle }
                     | Operation::Dyno { vehicle, .. }
                     | Operation::Handling { vehicle, .. } => vehicle,
                     _ => {
@@ -175,6 +177,7 @@ impl PlayerListener {
                 if matches!(
                     call.operation,
                     Operation::Equip { .. }
+                        | Operation::StockPerformance { .. }
                         | Operation::StockPaint
                         | Operation::Paint { .. }
                         | Operation::LicensePlate { .. }
@@ -189,6 +192,7 @@ impl PlayerListener {
                     edit.part_edits.push(call.operation);
                 }
                 match call.operation {
+                    Operation::StockPerformance { .. } => edit.dyno = None,
                     Operation::Equip { item, .. } => {
                         if edit.selections.last() != Some(&item) {
                             if edit.selections.len() >= 128 {

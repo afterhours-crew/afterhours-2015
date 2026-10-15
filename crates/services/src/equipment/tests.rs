@@ -11,6 +11,71 @@ use nfs_world_core::items::{Definition, DefinitionFlags, Layout, OwnershipLevel}
 mod appearance;
 mod livery;
 
+#[test]
+fn performance_reset_is_ordered_retry_safe_isolated_and_durable() {
+    let directory = std::env::temp_dir().join(format!(
+        "nfs-reset-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&directory).unwrap();
+    let account = who(1);
+    let (pending, saved) = {
+        let repo = nfs_storage::SqliteRepository::open_owned_directory(&directory).unwrap();
+        let before = setup(&repo, account);
+        let other = setup(&repo, who(2));
+        let upgraded =
+            commit(&repo, account, &catalog(), &edit(&before, 12), Timestamp(2)).unwrap();
+        let items = inventory::collection(&upgraded, catalog().bindings()).unwrap();
+        let pending = prepare_vehicle(account, upgraded.generation, &items, 10, &catalog())
+            .unwrap()
+            .with_stock_performance(&items, &catalog())
+            .unwrap();
+        assert_eq!(pending.preview(&items).unwrap().items[&10].children, [11]);
+        let later_equip = pending
+            .clone()
+            .with_part(&items, 12, &catalog(), &Offers::new([[3; 16]]).unwrap())
+            .unwrap();
+        assert_eq!(
+            later_equip.preview(&items).unwrap().items[&10].children,
+            [12]
+        );
+        assert_eq!(
+            commit(&repo, who(2), &catalog(), &pending, Timestamp(3)),
+            Err(Error::Ownership)
+        );
+        let changed = pending
+            .clone()
+            .with_license_plate(LicensePlate::new(b"RESET"))
+            .unwrap();
+        let saved = commit(&repo, account, &catalog(), &changed, Timestamp(3)).unwrap();
+        // The old reset cannot erase a newer plate change at the stale generation.
+        assert_eq!(
+            commit(&repo, account, &catalog(), &pending, Timestamp(4)),
+            Err(Error::Conflict)
+        );
+        assert_eq!(
+            saved.items[&ItemId::new(12).unwrap()],
+            upgraded.items[&ItemId::new(12).unwrap()]
+        );
+        assert_eq!(saved.tables, before.tables);
+        assert_eq!(repo.snapshot(who(2)).unwrap(), other);
+        (changed, saved)
+    };
+    {
+        let repo = nfs_storage::SqliteRepository::open_owned_directory(&directory).unwrap();
+        assert_eq!(repo.open(account).unwrap(), saved);
+        assert_eq!(
+            commit(&repo, account, &catalog(), &pending, Timestamp(5)).unwrap(),
+            saved
+        );
+    }
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
 fn catalog() -> InventoryCatalog {
     let part = Definition {
         class: DefinitionClass::AirFilterItemData,

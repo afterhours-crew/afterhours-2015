@@ -61,6 +61,43 @@ impl Edit {
         Ok(self)
     }
 
+    /// Restore recorded performance defaults, followed by current nonperformance
+    /// children. Purchased spares and the stored values of default items remain
+    /// owned; restoring parts neither refunds cash nor fabricates dyno results.
+    pub fn with_stock_performance(
+        mut self,
+        items: &Collection,
+        catalog: &InventoryCatalog,
+    ) -> Result<Self, Error> {
+        let preview = self.preview(items)?;
+        let mut children = Vec::new();
+        for (ids, performance) in [(&self.after.defaults, true), (&self.after.children, false)] {
+            for &id in ids {
+                let part = preview.items.get(&id).ok_or(Error::Shape)?;
+                if !part.belongs_under(self.vehicle()) || part.state != OWNED {
+                    return Err(Error::Ownership);
+                }
+                let class = catalog
+                    .bindings()
+                    .class(&part.definition)
+                    .map_err(inventory::Error::from)?;
+                if crate::purchase::performance_class(class) == performance {
+                    if children.contains(&id) {
+                        return Err(Error::Shape);
+                    }
+                    children.push(id);
+                    self.selected
+                        .insert(id, items.items.get(&id).ok_or(Error::Shape)?.clone());
+                }
+            }
+        }
+        self.after.children = children;
+        self.preview(items)?
+            .encode(catalog.bindings())
+            .map_err(inventory::Error::from)?;
+        Ok(self)
+    }
+
     /// Apply leaf selections in request order. Different categories accumulate;
     /// later selections of the same category replace the earlier preview only.
     pub fn with_part(

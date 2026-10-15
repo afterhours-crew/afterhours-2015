@@ -103,6 +103,21 @@ The QoS rejection test now checks invalid addresses without binding wildcard
 sockets. The remaining network integration tests use loopback; no firewall rule
 or administrator access was added.
 
+Resetting all performance parts is now modeled separately from factory paint.
+It restores the car's recorded performance defaults, retains visual parts and
+purchased spares, and does not refund cash. A default part's saved tuning remains
+attached to that item; this operation does not reset every handling slider.
+Request ordering, cancellation, retries, account isolation, stale writes and
+database reopen have automated coverage. The reset menu still needs a live check.
+
+Driving parameters are derived from equipped parts and their saved tuning when
+the world car spawns; cached dyno figures are a separate display record. A server
+regression saves an upgrade and handling changes, reloads inventory, and decodes
+a fresh free-roam spawn to verify its performance contribution and tuning values.
+Changing only the dyno cache leaves those chassis inputs unchanged. This verifies
+the server's driving inputs, but a controlled in-game performance and handling
+comparison is still pending; menu numbers alone do not prove driving behavior.
+
 For unattended menu testing, [change the game's Back key to F9](MENU-KEYBINDING.md)
 through its user profile. This works without a mod and leaves Computer Use's
 Escape stop control available.

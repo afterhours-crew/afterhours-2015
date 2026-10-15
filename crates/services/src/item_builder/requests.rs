@@ -8,6 +8,9 @@ use super::*;
 pub enum Operation {
     Begin,
     StockPaint,
+    StockPerformance {
+        vehicle: u16,
+    },
     Equip {
         vehicle: u16,
         item: u64,
@@ -69,11 +72,11 @@ impl Binding {
             .map_err(|_| Error::Shape)?;
         if envelope.references().first() != Some(&self.scene)
             || route.selector() != self.selector
-            || !matches!(route.method_index(), 0..=5 | 7..=11)
+            || !matches!(route.method_index(), 0..=5 | 7..=11 | 13)
         {
             return Ok(None);
         }
-        let vehicle_call = matches!(route.method_index(), 0 | 3 | 8);
+        let vehicle_call = matches!(route.method_index(), 0 | 3 | 8 | 13);
         if envelope.words() != [0, 0]
             || !envelope.remaining().is_empty()
             || envelope.references().len() != if vehicle_call { 3 } else { 2 }
@@ -85,6 +88,13 @@ impl Binding {
             return Err(Error::Ownership);
         }
         let operation = match route.method_index() {
+            13 => {
+                let vehicle = envelope.references()[2];
+                if vehicle == 0 || route.arguments().len() != 7 {
+                    return Err(Error::Shape);
+                }
+                Operation::StockPerformance { vehicle }
+            }
             2 => {
                 let args = route.arguments();
                 let length = args.read_u32(0, 10).map_err(|_| Error::Shape)? as usize;
@@ -366,6 +376,40 @@ mod tests {
             let bad = super::super::tests::wire(19, 5, method, &[23, 24], 0);
             assert_eq!(binding.read(bad.span(), |_| true), Err(Error::Shape));
         }
+    }
+
+    #[test]
+    fn performance_reset_requires_vehicle_and_exact_empty_arguments() {
+        let binding = Binding::new(19, 5).unwrap();
+        let wire = super::super::tests::wire(19, 5, 13, &[23, 24], 127);
+        assert_eq!(
+            binding.read(wire.span(), |p| p == 23),
+            Ok(Some(Call {
+                player: 23,
+                operation: Operation::StockPerformance { vehicle: 24 }
+            }))
+        );
+        for end in 0..wire.len() {
+            assert!(
+                binding
+                    .read(wire.span().slice(0, end).unwrap(), |_| true)
+                    .is_err()
+            );
+        }
+        for refs in [vec![23], vec![23, 0], vec![23, 24, 25]] {
+            assert!(
+                binding
+                    .read(
+                        super::super::tests::wire(19, 5, 13, &refs, 0).span(),
+                        |_| true
+                    )
+                    .is_err()
+            );
+        }
+        assert_eq!(binding.read(wire.span(), |_| false), Err(Error::Ownership));
+        let mut concat = wire.clone();
+        concat.put_span(wire.span());
+        assert_eq!(binding.read(concat.span(), |_| true), Err(Error::Shape));
     }
 
     #[test]
