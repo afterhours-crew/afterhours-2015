@@ -1112,6 +1112,27 @@ impl Listener for PlayerListener {
         let mut exit_entries = Vec::new();
         let mut equipment = self.equipment.clone();
         for body in rpcs {
+            match nfs_world::vehicle_nitrous::receive(
+                &mut players,
+                HOST_SELECTOR as u8,
+                self.persona,
+                body,
+                |id| world_cars.get(&id).is_some_and(|(_, ready)| *ready),
+            ) {
+                Ok(Some(report)) => {
+                    tracing::debug!(
+                        vehicle = report.vehicle,
+                        active = report.active,
+                        client_seconds = report.client_seconds,
+                        changed = report.record.is_some(),
+                        "owned nitrous transition"
+                    );
+                    records.extend(report.record);
+                    continue;
+                }
+                Ok(None) => {}
+                Err(error) => return self.refuse_rpc(error, body),
+            }
             match self.stage_equipment(&players, body, &mut equipment) {
                 Ok(true) => continue,
                 Ok(false) => {}

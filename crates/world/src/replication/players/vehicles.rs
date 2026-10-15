@@ -5,6 +5,53 @@
 use super::*;
 
 impl Players {
+    /// Acknowledge a driver's nitrous transition without replacing its fuel,
+    /// equipment, motion or binding. Identical repeats produce no new delta.
+    pub fn set_vehicle_nitrous_mode(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        id: u16,
+        active: bool,
+    ) -> Result<Option<Record>, Error> {
+        if !self.owned_vehicles(connection, persona).contains(&id) {
+            return Err(Error::UnknownObject);
+        }
+        let Some(state::Object {
+            current: Update::Vehicle { binding, fields },
+            ..
+        }) = self.objects.get(id)
+        else {
+            return Err(Error::TypeMismatch);
+        };
+        if fields
+            .iter()
+            .filter(|f| matches!(f, Some(vehicle::Update::Index { .. })))
+            .count()
+            != 1
+        {
+            return Err(Error::Shape);
+        }
+        let updates = fields
+            .iter()
+            .map(|field| {
+                matches!(field, Some(vehicle::Update::Index { .. })).then_some(
+                    vehicle::Update::Index {
+                        index: Some(u8::from(active)),
+                        value: None,
+                    },
+                )
+            })
+            .collect();
+        self.objects.change(
+            id,
+            Update::Vehicle {
+                binding: binding.clone(),
+                fields: updates,
+            },
+        )
+    }
+
     /// Publish only inventory-derived equipment fields, validating the complete
     /// delta before changing the owned object. Creation and motion are forbidden.
     pub fn set_vehicle_equipment(

@@ -441,6 +441,18 @@ story/build requirements, nor does it implement currently unsupported parts.
 
 ## Validation scope
 
+The nitrous transition candidate acknowledges the authoritative driver's start
+and stop requests through the current car's nitrous mode. The client waits for
+this update before sending its next transition; omitting it can leave exhaust
+flames active whenever the accelerator is pressed after the first nitrous use.
+The handler resolves the component selector from the live creation, checks
+connection/persona ownership and world-car readiness, and queues its update
+atomically with the vehicle state. It does not replace the fuel level or infer
+nitrous use from throttle. Portable checks cover start/stop/repeats, malformed
+requests, foreign owners, replacement lifetimes and output-queue rollback.
+Fresh live validation of this correction is pending in
+[the exhaust-effect issue](https://github.com/Afterhours-Crew/afterhours-2015/issues/77).
+
 Purchase initializes the part's typed defaults from its installed definition,
 inserts the owned part, deducts cash and records a durable receipt in
 one transaction. Retrying that offer for that car returns the original part

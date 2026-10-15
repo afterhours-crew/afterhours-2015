@@ -19,6 +19,156 @@ fn content() -> WorldContent {
 }
 
 #[test]
+fn nitrous_acknowledgements_commit_with_the_reliable_queue_and_roll_back_when_full() {
+    use crate::vehicle_content::population::{Owner, tests as population_tests};
+    use nfs_world::{
+        bits::BitWriter,
+        replication::{Initial, Update, vehicle},
+    };
+    let persona = 0x100000002;
+    let (mut population, mut players, vehicles, layout, items, _) = population_tests::fixture();
+    let player = players
+        .create(
+            HOST_SELECTOR as u8,
+            persona,
+            Request {
+                name: b"Nitrous driver".to_vec(),
+                flag: false,
+                slot: 0,
+            },
+        )
+        .unwrap()
+        .unwrap()
+        .id;
+    let participant = players
+        .join(HOST_SELECTOR as u8, persona, player)
+        .unwrap()
+        .unwrap()
+        .id;
+    players
+        .create_actor(HOST_SELECTOR as u8, persona, participant)
+        .unwrap();
+    let layout = population_tests::world_layout(&layout);
+    let inventory = population_tests::inventory(items);
+    let owner = || Owner {
+        connection: HOST_SELECTOR as u8,
+        persona,
+        participant,
+    };
+    population
+        .spawn(
+            &mut players,
+            owner(),
+            inventory.clone(),
+            &vehicles,
+            &layout,
+            [0.; 3],
+        )
+        .unwrap();
+    let section = population
+        .spawn_world(&mut players, owner(), &inventory, &vehicles, &layout)
+        .unwrap();
+    let car = section.records[0].id;
+    let Initial::Vehicle { creation, .. } = &players.objects().get(car).unwrap().initial else {
+        panic!()
+    };
+    let selector = creation
+        .fields
+        .iter()
+        .find_map(|field| match field {
+            vehicle::Initial::Index { rpc, .. } => Some(rpc.selector),
+            _ => None,
+        })
+        .unwrap();
+    players.sync_player_views().unwrap();
+    players.sync_player_manager().unwrap();
+    let mut listener = PlayerListener::new(persona);
+    listener.players = players;
+    listener.world_cars.insert(car, (participant, true));
+    let make_frame = |sequence, method: u32| {
+        let mut payload = BitWriter::new();
+        payload
+            .put(selector.into(), 9)
+            .put(method.into(), 32)
+            .put(12.5f32.to_bits().into(), 32)
+            .put(127, 7);
+        let mut rpc = BitWriter::new();
+        rpc.put(0, 32)
+            .put(0, 32)
+            .put(1, 8)
+            .put(car.into(), 13)
+            .put(10, 9)
+            .put_span(payload.span());
+        frame::Builder::new()
+            .messages(
+                None,
+                vec![frame::Group {
+                    channel: 0,
+                    sequence: Some(sequence),
+                    messages: vec![frame::Message::Opaque {
+                        index: 47,
+                        body: rpc.span(),
+                    }],
+                }],
+            )
+            .build()
+            .unwrap()
+    };
+    let first = make_frame(0, 0);
+    let before = listener.players.objects().snapshot();
+    listener.pending.resize(
+        MAX_PENDING,
+        Section {
+            float_bits: None,
+            flag: false,
+            deleted: section.deleted,
+            setup: None,
+            records: section.records,
+        },
+    );
+    assert!(!listener.frame(Queued {
+        advertised: None,
+        frame: 0,
+        data: first.span()
+    }));
+    assert_eq!(listener.players.objects().snapshot(), before);
+    assert_eq!(listener.pending.len(), MAX_PENDING);
+    listener.pending.clear();
+    for (sequence, method) in [(0, 0), (1, 1), (2, 0), (3, 1)] {
+        let wire = make_frame(sequence, method);
+        assert!(listener.frame(Queued {
+            advertised: None,
+            frame: sequence.into(),
+            data: wire.span()
+        }));
+        assert_eq!(listener.pending.len(), 1);
+        let section = listener.pending.pop_front().unwrap();
+        nfs_world::session::replication_frame(&section, &[], 0).unwrap();
+        let record = section.records.iter().find(|r| r.id == car).unwrap();
+        let Update::Vehicle { fields, .. } = &record.update else {
+            panic!()
+        };
+        assert_eq!(
+            fields.iter().flatten().collect::<Vec<_>>(),
+            vec![&vehicle::Update::Index {
+                index: Some(u8::from(method == 0)),
+                value: None,
+            }]
+        );
+        let after = listener.players.objects().snapshot();
+        // Reliable delivery repeats do not execute a transition twice.
+        assert!(listener.frame(Queued {
+            advertised: None,
+            frame: sequence.into(),
+            data: wire.span()
+        }));
+        assert!(listener.pending.is_empty());
+        assert_eq!(listener.players.objects().snapshot(), after);
+    }
+    assert_eq!(listener.unsupported_rpcs, 0);
+}
+
+#[test]
 fn sustained_driving_keeps_physics_and_minimap_in_one_bounded_frame() {
     use crate::vehicle_content::population::{Owner, tests as population_tests};
     use nfs_world::{
