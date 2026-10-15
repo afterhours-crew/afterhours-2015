@@ -10,6 +10,7 @@ use nfs_world_core::items::{Definition, DefinitionFlags, Layout, OwnershipLevel}
 
 mod appearance;
 mod fitment;
+mod kits;
 mod livery;
 mod removal;
 mod reset;

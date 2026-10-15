@@ -74,6 +74,43 @@ fn native_initial_recipe_keeps_parent_owners_shared_lists_and_distinct_instances
 }
 
 #[test]
+fn owned_subtree_indexes_all_records_and_has_bounded_parent_identity() {
+    let catalog = InventoryCatalog::new(
+        [
+            ([1; 16], definition(vec![[2; 16], [3; 16]])),
+            ([2; 16], definition(vec![])),
+            ([3; 16], definition(vec![])),
+        ],
+        vec![],
+    )
+    .unwrap();
+    let built = catalog.instantiate_owned([1; 16], 10, 100).unwrap();
+    assert_eq!(built.next_id, 103);
+    assert_eq!(built.collection.roots, [100, 101, 102]);
+    assert_eq!(built.collection.items[&100].owner, 10);
+    assert_eq!(built.collection.items[&100].defaults, [101, 102]);
+    assert_eq!(built.collection.items[&100].children, [101, 102]);
+    for id in [101, 102] {
+        assert_eq!(built.collection.items[&id].owner, 100);
+    }
+    let bytes = built.collection.encode(catalog.bindings()).unwrap();
+    assert_eq!(
+        Collection::decode(&bytes, catalog.bindings()).unwrap(),
+        built.collection
+    );
+    for (owner, first) in [(0, 100), (10, 0), (100, 100), (101, 100)] {
+        assert_eq!(
+            catalog.instantiate_owned([1; 16], owner, first),
+            Err(Error::Shape)
+        );
+    }
+    assert_eq!(
+        catalog.instantiate_owned([1; 16], 10, u64::MAX - 1),
+        Err(Error::Bound)
+    );
+}
+
+#[test]
 fn rejects_missing_duplicate_cyclic_and_wrong_layout_definitions() {
     let d = definition(vec![]);
     assert_eq!(

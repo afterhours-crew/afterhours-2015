@@ -207,7 +207,9 @@ impl Offers {
         Ok(self)
     }
     pub fn supports(&self, class: DefinitionClass) -> bool {
-        performance_class(class) || (self.part_policy.is_some() && visual_class(class))
+        performance_class(class)
+            || (self.part_policy.is_some() && visual_class(class))
+            || (class == DefinitionClass::BodyKitItemData && !self.body_kits.is_empty())
     }
     /// Installed spatial metadata, including owned stock and spare definitions.
     pub fn location(&self, guid: &Guid) -> Option<u8> {

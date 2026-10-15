@@ -1,6 +1,7 @@
 # Garage upgrade development
 
 This candidate models supported leaf performance and visual-part purchases,
+plus explicit body kits containing supported visual leaves,
 their equip/save requests, and restoring stock parts. The install-content builder
 selects supported offers from the installed definitions. Prices, part GUIDs and
 owned item IDs are never copied from a saved account or hardcoded in the server.
@@ -15,12 +16,44 @@ replacing a conflict earlier in the same edit allows a later compatible selectio
 The candidate also stages the 31 handling controls against installed parts and
 the car's transmission flag. REP-only offers use the account's saved score and
 installed thresholds. Visual parts match exact class and, where applicable,
-front/rear location. Composite parts, separate story/build restrictions and selling
-remain unsupported. Saved wraps can be restored from the local library and
+front/rear location. Nested kits, kits containing library liveries, separate
+story/build restrictions and selling remain unsupported. Saved wraps can be restored from the local library and
 equipped. The live checks below cover selected performance
 and visual parts; broader customization acceptance is still pending.
 Remaining work and live acceptance are tracked in the
 [garage upgrades issue][garage-issue].
+
+Body-kit purchase and equipment support is validated for the tested Mustang Race Kit in
+[#73](https://github.com/Afterhours-Crew/afterhours-2015/issues/73). Content version 8
+explicitly lists eligible kit offers; earlier content formats never enable them.
+The builder regenerates its cache for this version. A purchase allocates the kit
+and its children in one transaction, charging only the kit price. Children belong
+to the kit, which belongs to the car. Retrying returns the existing owned tree.
+Equipping replaces overlapping slots and retains the previous kit and individual
+parts as spares. Replacing a kit restores uncovered mandatory stock visual slots;
+a later individual car-owned part can override a kit slot. Stock-visual reset
+removes the installed kit while retaining its ownership. Direct selection of a
+kit-owned child as a car-owned part is not supported. The tested kit locks covered
+individual-part menus; the game offers stock restoration before changing them.
+Portable tests cover the
+transaction, cancellation, account isolation, concurrent retries, stale edits,
+replacement, stock restoration and database reopen. These tests do not establish
+working behavior for every body kit in the game.
+
+The 2026-10-15 live check canceled the kit purchase without changing the account,
+then bought and equipped it for the installed price. The kit appeared in free
+roam, survived garage return and a full game/server restart, and retained the
+existing wheels and plate text. Restoring stock except wheels removed the installed
+kit while preserving all owned items. A previously owned hood could then be
+equipped; the saved kit could also be re-equipped without another purchase or
+charge. The final balance was unchanged after those equipment operations.
+The supported purchase reply explicitly indexes the kit and every child record.
+Omitting those child index entries caused a client crash after purchase in an
+earlier candidate; the corrected purchase completed successfully. The captured
+request and reply round-trip through the typed codecs, and independent reference
+comparisons check owned kit graphs, defaults and prices. All 1,257 portable tests,
+formatting and Clippy pass. This coverage does not claim nested kits, library
+livery bundles, every kit/part combination, or a way around the game's restrictions.
 
 The combined live test on 2026-10-14 equipped an owned air filter and purchased
 a compatible cooling upgrade in one performance edit. Both parts, the exact

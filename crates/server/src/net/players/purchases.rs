@@ -4,34 +4,34 @@
 
 use nfs_world::items::{Collection, OWNED, PURCHASABLE};
 
-/// Accept one committed leaf purchase, including an unchanged retry. A selected
-/// purchasable instance keeps its ID: only its state and owner may change.
+/// Accept one committed purchase tree, including an unchanged retry. Existing
+/// records stay unchanged except a single purchasable leaf promotion. New kit
+/// children must belong to the new root; unrelated grants are not a purchase.
 pub(super) fn valid_refresh(before: &Collection, after: &Collection) -> bool {
     if before.items.keys().any(|id| !after.items.contains_key(id)) {
         return false;
     }
-    let mut changed = 0;
+    let mut added = std::collections::BTreeSet::new();
+    let mut promoted_id = None;
     for (id, item) in &after.items {
         let previous = before.items.get(id);
         if previous == Some(item) {
             continue;
         }
-        changed += 1;
-        if changed > 1
-            || item.id != *id
-            || item.state != OWNED
-            || !item.children.is_empty()
-            || !item.defaults.is_empty()
-            || item.owner == 0
-            || !before
-                .items
-                .get(&item.owner)
-                .is_some_and(|owner| owner.state == OWNED)
-        {
+        if item.id != *id || item.state != OWNED || item.owner == 0 {
             return false;
         }
         if let Some(previous) = previous {
-            if previous.state != PURCHASABLE || previous.owner != 0 {
+            if previous.state != PURCHASABLE
+                || previous.owner != 0
+                || !item.children.is_empty()
+                || !item.defaults.is_empty()
+                || promoted_id.replace(*id).is_some()
+                || !before
+                    .items
+                    .get(&item.owner)
+                    .is_some_and(|owner| owner.state == OWNED)
+            {
                 return false;
             }
             let mut promoted = previous.clone();
@@ -40,9 +40,45 @@ pub(super) fn valid_refresh(before: &Collection, after: &Collection) -> bool {
             if &promoted != item {
                 return false;
             }
+        } else {
+            added.insert(*id);
         }
     }
-    true
+    if added.is_empty() {
+        return true;
+    }
+    if promoted_id.is_some() || added.len() > nfs_world::items::MAX_COLLECTION {
+        return false;
+    }
+    let roots: Vec<_> = added
+        .iter()
+        .filter(|id| !added.contains(&after.items[id].owner))
+        .copied()
+        .collect();
+    let [root] = roots.as_slice() else {
+        return false;
+    };
+    let item = &after.items[root];
+    if !before
+        .items
+        .get(&item.owner)
+        .is_some_and(|owner| owner.state == OWNED)
+        || item.children != item.defaults
+        || item.children.len() + 1 != added.len()
+    {
+        return false;
+    }
+    added.remove(root);
+    for id in &item.children {
+        if !added.remove(id) {
+            return false;
+        }
+        let child = &after.items[id];
+        if child.owner != *root || !child.children.is_empty() || !child.defaults.is_empty() {
+            return false;
+        }
+    }
+    added.is_empty()
 }
 
 #[cfg(test)]
@@ -119,5 +155,42 @@ mod tests {
         let mut two = inserted;
         two.items.insert(3, after.items[&3].clone());
         assert!(!valid_refresh(&before, &two));
+    }
+
+    #[test]
+    fn purchase_refresh_accepts_one_owned_kit_and_rejects_graph_changes() {
+        let before = fixture();
+        let mut after = before.clone();
+        let mut kit = before.items[&3].clone();
+        kit.id = 4;
+        kit.state = OWNED;
+        kit.owner = 1;
+        let mut child = kit.clone();
+        child.id = 5;
+        child.owner = 4;
+        kit.children = vec![5];
+        kit.defaults = vec![5];
+        after.items.insert(4, kit);
+        after.items.insert(5, child);
+        after.roots.extend([4, 5]);
+        assert!(valid_refresh(&before, &after));
+        assert!(valid_refresh(&after, &after));
+        for mutation in 0..8 {
+            let mut bad = after.clone();
+            match mutation {
+                0 => bad.items.get_mut(&5).unwrap().owner = 1,
+                1 => bad.items.get_mut(&4).unwrap().children.push(3),
+                2 => bad.items.get_mut(&4).unwrap().defaults.clear(),
+                3 => bad.items.get_mut(&5).unwrap().state = PURCHASABLE,
+                4 => bad.items.get_mut(&5).unwrap().children.push(4),
+                5 => bad.items.get_mut(&4).unwrap().owner = 5,
+                6 => {
+                    bad.items.get_mut(&3).unwrap().state = OWNED;
+                    bad.items.get_mut(&3).unwrap().owner = 1;
+                }
+                _ => bad.items.get_mut(&1).unwrap().buy_price += 1,
+            }
+            assert!(!valid_refresh(&before, &bad), "mutation {mutation}");
+        }
     }
 }

@@ -8,6 +8,7 @@
 //! V5 adds visual slot locations and installed REP score requirements.
 //! V6 adds explicit REP item grants; older formats never infer them.
 //! V7 adds installed fitment conflicts for supported leaf selections.
+//! V8 explicitly opts in supported body-kit offers and their owned child trees.
 //! No format accepts captured
 //! instances, player ids or reply envelopes.
 use crate::{ContentError, SUPPORTED_BUILD_SHA256 as BUILD};
@@ -26,6 +27,7 @@ pub const SCOPED_PURCHASE_VERSION: u8 = 4;
 pub const PART_POLICY_VERSION: u8 = 5;
 pub const ITEM_UNLOCK_VERSION: u8 = 6;
 pub const FITMENT_VERSION: u8 = 7;
+pub const BODY_KIT_VERSION: u8 = 8;
 pub const MAX_STORE_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -95,12 +97,9 @@ impl ItemContent {
         Self::from_json(&serde_json::from_slice(&bytes).map_err(|_| ContentError::Invalid)?)
     }
     pub fn from_json(value: &Value) -> Result<Self, ContentError> {
-        if value["version"] == INVENTORY_VERSION
-            || value["version"] == PURCHASE_VERSION
-            || value["version"] == SCOPED_PURCHASE_VERSION
-            || (value["version"] == PART_POLICY_VERSION
-                || (value["version"] == ITEM_UNLOCK_VERSION || value["version"] == FITMENT_VERSION))
-        {
+        if value["version"].as_u64().is_some_and(|v| {
+            (u64::from(INVENTORY_VERSION)..=u64::from(BODY_KIT_VERSION)).contains(&v)
+        }) {
             return Self::inventory_from_json(value);
         }
         fields(value, &["format", "version", "build_sha256", "definitions"])?;
@@ -143,6 +142,7 @@ impl ItemContent {
         self.category_unlocks.as_ref()
     }
     fn inventory_from_json(value: &Value) -> Result<Self, ContentError> {
+        let version = u8::try_from(word(&value["version"])?).map_err(|_| ContentError::Invalid)?;
         let mut expected = vec![
             "format",
             "version",
@@ -150,33 +150,27 @@ impl ItemContent {
             "definitions",
             "initial_definitions",
         ];
-        if value["version"] == PURCHASE_VERSION
-            || value["version"] == SCOPED_PURCHASE_VERSION
-            || (value["version"] == PART_POLICY_VERSION
-                || (value["version"] == ITEM_UNLOCK_VERSION || value["version"] == FITMENT_VERSION))
-        {
+        if version >= PURCHASE_VERSION {
             expected.push("purchase_offers");
         }
-        if value["version"] == SCOPED_PURCHASE_VERSION
-            || (value["version"] == PART_POLICY_VERSION
-                || (value["version"] == ITEM_UNLOCK_VERSION || value["version"] == FITMENT_VERSION))
-        {
+        if version >= SCOPED_PURCHASE_VERSION {
             expected.push("vehicle_scopes");
         }
-        if value["version"] == PART_POLICY_VERSION
-            || (value["version"] == ITEM_UNLOCK_VERSION || value["version"] == FITMENT_VERSION)
-        {
+        if version >= PART_POLICY_VERSION {
             expected.extend([
                 "part_locations",
                 "purchase_requirements",
                 "category_unlocks",
             ]);
         }
-        if value["version"] == ITEM_UNLOCK_VERSION || value["version"] == FITMENT_VERSION {
+        if version >= ITEM_UNLOCK_VERSION {
             expected.push("item_unlocks");
         }
-        if value["version"] == FITMENT_VERSION {
+        if version >= FITMENT_VERSION {
             expected.push("fitment_restrictions");
+        }
+        if version >= BODY_KIT_VERSION {
+            expected.push("body_kits");
         }
         fields(value, &expected)?;
         if value["format"] != FORMAT || value["build_sha256"] != BUILD {
@@ -289,35 +283,35 @@ impl ItemContent {
                 .map_err(|_| ContentError::Invalid)?,
             )
         };
-        let item_unlocks =
-            if value["version"] == ITEM_UNLOCK_VERSION || value["version"] == FITMENT_VERSION {
-                let rows = value["item_unlocks"]
-                    .as_array()
-                    .filter(|r| r.len() <= MAX_COLLECTION)
-                    .ok_or(ContentError::Invalid)?;
-                let rows = rows
-                    .iter()
-                    .map(|row| {
-                        fields(row, &["definition", "minimum_rep_score"])?;
-                        Ok((
-                            guid(&row["definition"])?,
-                            i32::try_from(word(&row["minimum_rep_score"])?)
-                                .map_err(|_| ContentError::Invalid)?,
-                        ))
-                    })
-                    .collect::<Result<Vec<_>, ContentError>>()?;
-                Some(
-                    crate::item_unlocks::Policy::new(&inventory, rows)
-                        .map_err(|_| ContentError::Invalid)?,
-                )
-            } else {
-                None
-            };
-        let purchase_offers = if value["version"] == PURCHASE_VERSION
-            || value["version"] == SCOPED_PURCHASE_VERSION
-            || (value["version"] == PART_POLICY_VERSION
-                || (value["version"] == ITEM_UNLOCK_VERSION || value["version"] == FITMENT_VERSION))
-        {
+        let item_unlocks = if version >= ITEM_UNLOCK_VERSION {
+            let rows = value["item_unlocks"]
+                .as_array()
+                .filter(|r| r.len() <= MAX_COLLECTION)
+                .ok_or(ContentError::Invalid)?;
+            let rows = rows
+                .iter()
+                .map(|row| {
+                    fields(row, &["definition", "minimum_rep_score"])?;
+                    Ok((
+                        guid(&row["definition"])?,
+                        i32::try_from(word(&row["minimum_rep_score"])?)
+                            .map_err(|_| ContentError::Invalid)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, ContentError>>()?;
+            Some(
+                crate::item_unlocks::Policy::new(&inventory, rows)
+                    .map_err(|_| ContentError::Invalid)?,
+            )
+        } else {
+            None
+        };
+        let body_kits = if version >= BODY_KIT_VERSION {
+            guids(&value["body_kits"])?
+        } else {
+            vec![]
+        };
+        let purchase_offers = if version >= PURCHASE_VERSION {
             let mut offers = crate::purchase::Offers::new(guids(&value["purchase_offers"])?)
                 .map_err(|_| ContentError::Invalid)?;
             for guid in offers.definitions() {
@@ -325,10 +319,10 @@ impl ItemContent {
                     .definition(guid)
                     .map_err(|_| ContentError::Invalid)?;
                 if !(crate::purchase::performance_class(definition.class)
-                    || ((value["version"] == PART_POLICY_VERSION
-                        || (value["version"] == ITEM_UNLOCK_VERSION
-                            || value["version"] == FITMENT_VERSION))
-                        && crate::purchase::visual_class(definition.class)))
+                    || (version >= PART_POLICY_VERSION
+                        && crate::purchase::visual_class(definition.class))
+                    || (definition.class == DefinitionClass::BodyKitItemData
+                        && body_kits.contains(guid)))
                     || (!definition.flags.purchasable
                         && !item_unlocks
                             .as_ref()
@@ -337,11 +331,7 @@ impl ItemContent {
                     return Err(ContentError::Invalid);
                 }
             }
-            if value["version"] == SCOPED_PURCHASE_VERSION
-                || (value["version"] == PART_POLICY_VERSION
-                    || (value["version"] == ITEM_UNLOCK_VERSION
-                        || value["version"] == FITMENT_VERSION))
-            {
+            if version >= SCOPED_PURCHASE_VERSION {
                 let rows = value["vehicle_scopes"]
                     .as_array()
                     .ok_or(ContentError::Invalid)?;
@@ -359,9 +349,7 @@ impl ItemContent {
                     .with_vehicle_scopes(&inventory, scopes)
                     .map_err(|_| ContentError::Invalid)?;
             }
-            if value["version"] == PART_POLICY_VERSION
-                || (value["version"] == ITEM_UNLOCK_VERSION || value["version"] == FITMENT_VERSION)
-            {
+            if version >= PART_POLICY_VERSION {
                 let rows = value["part_locations"]
                     .as_array()
                     .filter(|r| r.len() <= MAX_DEFINITIONS)
@@ -401,7 +389,7 @@ impl ItemContent {
                     .with_item_unlocks(policy)
                     .map_err(|_| ContentError::Invalid)?;
             }
-            if value["version"] == FITMENT_VERSION {
+            if version >= FITMENT_VERSION {
                 let rows = value["fitment_restrictions"]
                     .as_array()
                     .filter(|r| r.len() <= MAX_DEFINITIONS)
@@ -415,6 +403,11 @@ impl ItemContent {
                     .collect::<Result<Vec<_>, ContentError>>()?;
                 offers = offers
                     .with_fitment_restrictions(&inventory, restrictions)
+                    .map_err(|_| ContentError::Invalid)?;
+            }
+            if version >= BODY_KIT_VERSION {
+                offers = offers
+                    .with_body_kits(&inventory, body_kits)
                     .map_err(|_| ContentError::Invalid)?;
             }
             Some(offers)
@@ -490,6 +483,16 @@ impl ItemContent {
                     document["fitment_restrictions"] = json!(restrictions.iter().map(|(g, conflicts)| {
                         json!({"definition":hex(g),"conflicts":conflicts.iter().map(|g|hex(g)).collect::<Vec<_>>()})
                     }).collect::<Vec<_>>());
+                }
+                if !offers.body_kits().is_empty() {
+                    document["version"] = json!(BODY_KIT_VERSION);
+                    document["body_kits"] = json!(
+                        offers
+                            .body_kits()
+                            .keys()
+                            .map(|g| hex(g))
+                            .collect::<Vec<_>>()
+                    );
                 }
             }
             return document;
@@ -572,6 +575,53 @@ mod tests {
         row["additional_items"] = json!([]);
         row["default_derived_hex"] = json!("");
         value
+    }
+    #[test]
+    fn v8_kit_offers_require_explicit_safe_subtrees_and_reject_legacy_implicit_support() {
+        let mut value = inventory_document();
+        value["version"] = json!(BODY_KIT_VERSION);
+        value["initial_definitions"] = json!([]);
+        value["definitions"][0]["class"] = json!("HoodItemData");
+        value["definitions"][0]["quantity"] = json!(1);
+        value["definitions"][0]["flags"]["requires_owner"] = json!(true);
+        let mut kit = value["definitions"][0].clone();
+        kit["class"] = json!("BodyKitItemData");
+        kit["guid"] = json!("22222222222222222222222222222222");
+        kit["sub_items"] = json!(["11111111111111111111111111111111"]);
+        value["definitions"].as_array_mut().unwrap().push(kit);
+        value["purchase_offers"] = json!(["22222222222222222222222222222222"]);
+        value["body_kits"] = value["purchase_offers"].clone();
+        value["vehicle_scopes"] = json!([]);
+        value["part_locations"] = json!([]);
+        value["category_unlocks"] = Value::Null;
+        value["purchase_requirements"] =
+            json!([{"definition":"22222222222222222222222222222222","minimum_rep_score":0}]);
+        value["item_unlocks"] = json!([]);
+        value["fitment_restrictions"] = json!([]);
+        assert_eq!(ItemContent::from_json(&value).unwrap().to_json(), value);
+        for mutation in 0..6 {
+            let mut bad = value.clone();
+            match mutation {
+                0 => bad["body_kits"] = json!([]),
+                1 => {
+                    bad["body_kits"] = json!([
+                        "22222222222222222222222222222222",
+                        "22222222222222222222222222222222"
+                    ])
+                }
+                2 => bad["definitions"][0]["class"] = json!("AirFilterItemData"),
+                3 => {
+                    bad["definitions"][1]["additional_items"] =
+                        json!(["11111111111111111111111111111111"])
+                }
+                4 => bad["version"] = json!(FITMENT_VERSION),
+                _ => {
+                    bad["version"] = json!(FITMENT_VERSION);
+                    bad.as_object_mut().unwrap().remove("body_kits");
+                }
+            }
+            assert!(ItemContent::from_json(&bad).is_err(), "mutation {mutation}");
+        }
     }
     #[test]
     fn v7_fitment_restrictions_are_explicit_bounded_and_round_trip() {

@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 const BATCH_NAMESPACE: u64 = 1 << 61;
 
 mod appearance;
+mod kits;
 mod livery;
 mod removal;
 mod reset;
@@ -100,7 +101,7 @@ impl Edit {
         Ok(self)
     }
 
-    /// Apply leaf selections in request order. Different categories accumulate;
+    /// Apply supported selections in request order. Different categories accumulate;
     /// later selections of the same category replace the earlier preview only.
     pub fn with_part(
         mut self,
@@ -113,6 +114,14 @@ impl Edit {
         let selected = preview.items.get(&part).ok_or(Error::Ownership)?;
         if matches!(selected.derived, Derived::LiveryCustomization { .. }) {
             return self.with_livery_selection(items, part, catalog);
+        }
+        if catalog
+            .bindings()
+            .class(&selected.definition)
+            .map_err(inventory::Error::from)?
+            == nfs_world_core::items::DefinitionClass::BodyKitItemData
+        {
+            return self.with_body_kit(items, part, catalog, offers);
         }
         if selected.owner != self.vehicle() || selected.state != OWNED {
             return Err(Error::Ownership);

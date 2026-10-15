@@ -6,6 +6,8 @@ use nfs_storage::{Applied, MemoryRepository, SqliteRepository};
 use nfs_world_core::items::{Definition, DefinitionFlags, Derived, Layout, OwnershipLevel};
 use std::sync::{Arc, Barrier};
 
+mod kits;
+
 fn account(n: u8) -> AccountId {
     AccountId::from_owned_config([n; 16]).unwrap()
 }

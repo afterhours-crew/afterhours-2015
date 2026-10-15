@@ -14,7 +14,7 @@
 use crate::Error;
 use crate::scan::Assets;
 use nfs_frostbite::ebx::{Fields, Object, Value};
-use nfs_services::item_content::{FITMENT_VERSION, FORMAT, ItemContent};
+use nfs_services::item_content::{BODY_KIT_VERSION, FORMAT, ItemContent};
 use nfs_world_core::items::{DefinitionClass, Layout};
 use serde_json::{Value as Json, json};
 
@@ -220,6 +220,10 @@ fn part_offer(object: &Object, granted: bool) -> Result<bool, Error> {
     if !DefinitionClass::from_name(&object.class).is_some_and(nfs_services::purchase::part_class) {
         return Ok(false);
     }
+    offer_flags(object, granted, false)
+}
+
+fn offer_flags(object: &Object, granted: bool, composite: bool) -> Result<bool, Error> {
     let f = &object.fields;
     let empty = |name: &str| {
         f.get(name)
@@ -248,8 +252,55 @@ fn part_offer(object: &Object, granted: bool) -> Result<bool, Error> {
         // UsesScope is false above: an authored but inactive part scope must
         // not suppress shared wheels. The car's active scope still determines
         // compatibility at purchase and equip.
-        && empty("SubItems")?
+        && (composite || empty("SubItems")?)
         && empty("AdditionalItems")?)
+}
+
+fn body_kit_offer(assets: &mut Assets, object: &Object) -> Result<bool, Error> {
+    if object.class != "BodyKitItemData" || !offer_flags(object, false, true)? {
+        return Ok(false);
+    }
+    let children = object
+        .fields
+        .get("SubItems")
+        .and_then(Value::as_array)
+        .ok_or_else(|| missing(&object.class, "SubItems"))?;
+    if children.is_empty() || children.len() > nfs_services::purchase::MAX_KIT_PARTS {
+        return Ok(false);
+    }
+    let mut slots = std::collections::BTreeSet::new();
+    for child in children {
+        let (_, part) = assets.resolve(child.as_pointer())?;
+        let Some(class) = DefinitionClass::from_name(&part.class) else {
+            return Ok(false);
+        };
+        let definition = definition(assets, &part)?;
+        if !nfs_services::purchase::visual_class(class)
+            || definition["flags"]["requires_owner"] != true
+            || definition["flags"]["deprecated"] != false
+            || definition["quantity"] != 1
+            || definition["sub_items"] != json!([])
+            || definition["additional_items"] != json!([])
+            || definition["default_derived_hex"].is_null()
+        {
+            return Ok(false);
+        }
+        let location = if nfs_services::purchase::spatial_class(class) {
+            match part.fields.get("Location") {
+                Some(Value::Enum {
+                    value: value @ 0..=1,
+                    ..
+                }) => *value,
+                _ => return Err(missing(&part.class, "Location")),
+            }
+        } else {
+            0
+        };
+        if !slots.insert((part.class, location)) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn vehicle_scope(object: &Object) -> Result<Option<Json>, Error> {
@@ -303,7 +354,7 @@ fn fitment_restrictions(object: &Object) -> Result<Option<Json>, Error> {
     ))
 }
 
-/// Build the canonical `nfs-item-definitions` version 7 document.
+/// Build the canonical `nfs-item-definitions` document with explicit kit offers.
 pub fn build(assets: &mut Assets) -> Result<Vec<u8>, Error> {
     let thresholds = nfs_services::reputation::Thresholds::from_json(
         &serde_json::from_slice(&crate::reputation::build(assets)?)
@@ -322,6 +373,7 @@ pub fn build(assets: &mut Assets) -> Result<Vec<u8>, Error> {
     let mut part_locations = Vec::new();
     let mut purchase_requirements = Vec::new();
     let mut restrictions = Vec::new();
+    let mut body_kits = Vec::new();
     let item_unlocks = unlocks::items(assets, &thresholds)?;
     for value in system
         .fields
@@ -348,7 +400,18 @@ pub fn build(assets: &mut Assets) -> Result<Vec<u8>, Error> {
         if let Some(row) = fitment_restrictions(&object)? {
             restrictions.push(row);
         }
-        if initial_offer(&object)? || object.guid.is_some_and(|g| item_unlocks.contains_key(&g)) {
+        let kit = body_kit_offer(assets, &object)?;
+        if kit {
+            body_kits.push(nfs_frostbite::hex(
+                &object
+                    .guid
+                    .ok_or_else(|| missing(&object.class, "exported GUID"))?,
+            ));
+        }
+        if kit
+            || initial_offer(&object)?
+            || object.guid.is_some_and(|g| item_unlocks.contains_key(&g))
+        {
             let level = word(&object.fields, &object.class, "UnlocksAtRepLevel")?;
             let score = thresholds.score_for_level(level).map_err(|_| {
                 Error::Content("part REP level exceeds installed thresholds".into())
@@ -365,11 +428,12 @@ pub fn build(assets: &mut Assets) -> Result<Vec<u8>, Error> {
     let initial = references(assets, &system, "Inventory")?;
     let document = json!({
         "format": FORMAT,
-        "version": FITMENT_VERSION,
+        "version": BODY_KIT_VERSION,
         "build_sha256": nfs_services::SUPPORTED_BUILD_SHA256,
         "definitions": definitions,
         "initial_definitions": initial,
         "purchase_offers": purchase_offers,
+        "body_kits": body_kits,
         "vehicle_scopes": vehicle_scopes,
         "part_locations":part_locations,
         "fitment_restrictions":restrictions,

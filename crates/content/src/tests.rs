@@ -61,6 +61,53 @@ impl Install {
 }
 
 #[test]
+fn installed_kit_offers_exclude_unknown_unlocks_and_nonvisual_children() {
+    use synthetic::Field;
+    for (class, criterion, offered) in [
+        ("HoodItemData", "ID_UNLOCKED_AT_REP_LEVEL", true),
+        ("AirFilterItemData", "ID_UNLOCKED_AT_REP_LEVEL", false),
+        ("HoodItemData", "UNKNOWN_STORY_CONDITION", false),
+    ] {
+        let mut content = assets();
+        content[0] = item(
+            1,
+            class,
+            vec![],
+            vec![],
+            vec![
+                ("Quantity", Field::Int(1)),
+                ("UnlocksAtRepLevel", Field::Int(0)),
+                ("UnlockCriteriaDescriptionID", Field::CString(String::new())),
+                ("PerformanceModifier", Field::RawPointer(0)),
+                ("MeshGuids", Field::Guids(vec![])),
+                ("WideCollision", Field::Bool(false)),
+                ("Percent", Field::Float(0.0)),
+            ],
+        );
+        content[1] = item(
+            2,
+            "BodyKitItemData",
+            vec![1],
+            vec![],
+            vec![
+                ("Quantity", Field::Int(1)),
+                ("UnlocksAtRepLevel", Field::Int(0)),
+                (
+                    "UnlockCriteriaDescriptionID",
+                    Field::CString(criterion.into()),
+                ),
+            ],
+        );
+        let install = install_with(&content);
+        let prepared = install.prepare().unwrap();
+        let items = ItemContent::load(&prepared.path(Kind::ItemContent)).unwrap();
+        let kits = items.purchase_offers().unwrap().body_kits();
+        assert_eq!(kits.contains_key(&synthetic::reference(2).1), offered);
+        assert_eq!(kits.len(), usize::from(offered));
+    }
+}
+
+#[test]
 fn installed_fitment_restrictions_round_trip_and_reject_unknown_targets() {
     use synthetic::Field;
     for (target, valid) in [(2, true), (99, false)] {

@@ -84,6 +84,8 @@ pub fn item(
     if !extra.iter().any(|(name, _)| *name == "SortedRestrictions") {
         fields.push(("SortedRestrictions", Field::Guids(vec![])));
     }
+    // Explicit synthetic overrides let tests vary constructor and offer flags.
+    fields.retain(|(name, _)| !extra.iter().any(|(key, _)| key == name));
     fields.extend(extra);
     let (partition, instance) = reference(seed);
     Asset {

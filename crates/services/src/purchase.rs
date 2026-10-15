@@ -2,7 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! Atomic ownership of one unique, car-owned supported part. Equipping is a
+//! Atomic ownership of one unique, car-owned supported part or body kit. Equipping is a
 //! separate ItemBuilder transaction. The caller supplies an explicit offer set;
 //! merely appearing in the item catalog does not authorize an offer or unlock.
 use crate::{bank::Balance, inventory};
@@ -16,6 +16,8 @@ use nfs_world_core::items::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+mod kits;
+pub use kits::MAX_KIT_PARTS;
 mod policy;
 pub use policy::{PartPolicy, part_class, spatial_class, visual_class};
 const MAX_OFFERS: usize = items::MAX_COLLECTION;
@@ -66,6 +68,7 @@ pub struct Offers {
     part_policy: Option<PartPolicy>,
     item_unlocks: Option<crate::item_unlocks::Policy>,
     fitment_restrictions: Option<BTreeMap<Guid, BTreeSet<Guid>>>,
+    body_kits: BTreeMap<Guid, Vec<Guid>>,
 }
 impl Offers {
     pub fn definitions(&self) -> impl Iterator<Item = &Guid> {
@@ -128,6 +131,7 @@ impl Offers {
             part_policy: None,
             item_unlocks: None,
             fitment_restrictions: None,
+            body_kits: BTreeMap::new(),
         })
     }
 }
@@ -245,11 +249,9 @@ fn selected(
                 .items
                 .get(&id)
                 .filter(|i| {
-                    ((i.owner.is_none() && i.state == items::PURCHASABLE)
+                    (i.owner.is_none() && i.state == items::PURCHASABLE)
                         || (i.owner.map(ItemId::get) == Some(request.owner)
-                            && i.state == items::OWNED))
-                        && i.sub_items.is_empty()
-                        && i.default_items.is_empty()
+                            && i.state == items::OWNED)
                 })
                 .ok_or(Error::Rejected(Reason::Shape))?;
             Ok((item.definition.0, Some(id)))
@@ -283,21 +285,35 @@ fn reply(
     id: ItemId,
     replayed: bool,
 ) -> Result<Purchased, Error> {
-    let mut all = inventory::collection(&snapshot, catalog.bindings())?;
-    let item = all
-        .items
-        .remove(&id.get())
-        .ok_or(nfs_storage::Error::Config)?;
-    if !item.children.is_empty() || !item.defaults.is_empty() {
-        return Err(nfs_storage::Error::Config.into());
+    let all = inventory::collection(&snapshot, catalog.bindings())?;
+    let mut pending = vec![id.get()];
+    let mut records = BTreeMap::new();
+    while let Some(id) = pending.pop() {
+        if records.contains_key(&id) {
+            continue;
+        }
+        let item = all.items.get(&id).ok_or(nfs_storage::Error::Config)?;
+        if pending.len() + item.children.len() + item.defaults.len() > items::MAX_REFERENCES {
+            return Err(nfs_storage::Error::Bounds.into());
+        }
+        pending.extend(item.children.iter().chain(&item.defaults).copied());
+        records.insert(id, item.clone());
     }
+    let items = Collection {
+        // The receiving inventory indexes explicit collection entries. Nested
+        // serialization alone does not register a kit's children in that index.
+        // List every purchased record, reusing the wire reference cache for
+        // descendants already encoded through their parent.
+        roots: records.keys().copied().collect(),
+        items: records,
+    };
+    items
+        .encode(catalog.bindings())
+        .map_err(inventory::Error::from)?;
     Ok(Purchased {
         balance: Balance::from_snapshot(&snapshot)?,
         snapshot,
-        items: Collection {
-            roots: vec![id.get()],
-            items: BTreeMap::from([(id.get(), item)]),
-        },
+        items,
         replayed,
     })
 }
@@ -322,15 +338,17 @@ pub fn buy(
             return Err(Error::Rejected(Reason::Offer));
         }
         let definition = catalog.definition(&guid).map_err(inventory::Error::from)?;
+        let body_kit = offers.body_kits.contains_key(&guid);
         // The offer set excludes unknown unlock conditions. Purchase enforces the
-        // supported leaf construction contract, vehicle scope and saved REP score.
+        // supported construction contract, vehicle scope and saved REP score.
         if !offers.supports(definition.class)
+            || (definition.class == DefinitionClass::BodyKitItemData && !body_kit)
             || definition.quantity != 1
             || !definition.flags.requires_owner
             || (!definition.flags.purchasable && !offers.requires_item_unlock(&guid))
             || definition.flags.deprecated
             || definition.flags.uses_scope
-            || !definition.sub_items.is_empty()
+            || (!body_kit && !definition.sub_items.is_empty())
             || !definition.additional_items.is_empty()
             || definition.default_derived.is_none()
         {
@@ -395,7 +413,10 @@ pub fn buy(
         }
         if selected_id.is_some_and(|id| {
             let item = &snapshot.items[&id];
-            item.state != items::PURCHASABLE || item.owner.is_some()
+            item.state != items::PURCHASABLE
+                || item.owner.is_some()
+                || !item.sub_items.is_empty()
+                || !item.default_items.is_empty()
         }) {
             return Err(Error::Rejected(Reason::Shape));
         }
@@ -411,7 +432,23 @@ pub fn buy(
             .debit(definition.buy_price)
             .ok_or(Error::Rejected(Reason::Funds))?;
         let id = selected_id.unwrap_or(ItemId::new(next).ok_or(nfs_storage::Error::Config)?);
-        let following = if selected_id.is_some() {
+        // A kit allocates its root and owned children together. Purchasable kit
+        // grants need a separate promotion contract and are not enabled here.
+        if body_kit && selected_id.is_some() {
+            return Err(Error::Rejected(Reason::Shape));
+        }
+        let subtree = if body_kit {
+            Some(
+                catalog
+                    .instantiate_owned(guid, owner.get(), next)
+                    .map_err(inventory::Error::from)?,
+            )
+        } else {
+            None
+        };
+        let following = if let Some(tree) = &subtree {
+            tree.next_id
+        } else if selected_id.is_some() {
             next
         } else {
             next.checked_add(1).ok_or(nfs_storage::Error::Bounds)?
@@ -453,22 +490,32 @@ pub fn buy(
         // Selecting a purchasable instance promotes that same durable identity.
         // Only a definition purchase allocates a new record. Returning a fresh
         // ID for an instance purchase leaves the client's lookup unresolved.
-        let item_op = if selected_id.is_some() {
-            Op::Update(record)
+        let mut ops = if let Some(tree) = subtree {
+            let mut combined = inventory::collection(&snapshot, catalog.bindings())?;
+            for (&key, item) in &tree.collection.items {
+                if combined.items.insert(key, item.clone()).is_some() {
+                    return Err(nfs_storage::Error::Config.into());
+                }
+            }
+            combined.roots = combined.items.keys().copied().collect();
+            inventory::records(&combined, catalog.bindings())?
+                .into_iter()
+                .filter(|r| tree.collection.items.contains_key(&r.id.get()))
+                .map(Op::Insert)
+                .collect::<Vec<_>>()
+        } else if selected_id.is_some() {
+            vec![Op::Update(record)]
         } else {
-            Op::Insert(record)
+            vec![Op::Insert(record)]
         };
+        ops.extend([balance.store(), Op::SetTable(table_key(), receipts)]);
         // The namespace is reserved for purchase attempts. Competing purchases
         // on this generation may replay a winner: re-read the receipt before
         // acknowledging, rather than mistaking a different purchase for ours.
         let batch = Batch {
             id: BATCH_NAMESPACE | snapshot.generation,
             expected_generation: snapshot.generation,
-            ops: vec![
-                item_op,
-                balance.store(),
-                Op::SetTable(table_key(), receipts),
-            ],
+            ops,
         };
         match repository.apply(account, &batch, now) {
             Ok(applied) if !applied.replayed => {
