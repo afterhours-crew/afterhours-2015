@@ -144,8 +144,10 @@ retains rims, tires, calipers and brake discs. Body kits and plate fittings are
 removed. Portable tests cover ownership, ordering, cancellation, retries, stale
 edits and reopen, and an independent installed-state comparison passes. A live
 plate-frame removal sent the modeled request and removed the installed child
-without changing cash, plate text, tint or paint. The frame still appeared in
-free roam and after restart, so visual removal is not accepted. Stock visual
+without changing cash, plate text, tint or paint. Its appearance was unchanged
+in free roam and after restart; inspection then showed that the selected frame
+uses the same textures as the car's default. That test cannot distinguish a
+correct reset from a rendering failure. A distinct frame needs testing. Stock visual
 reset remains untested through the game UI; see
 [issue #66](https://github.com/afterhours-crew/afterhours-2015/issues/66).
 
