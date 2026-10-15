@@ -52,8 +52,8 @@ the exact paint values and size selection, with no further cash deduction.
 Paint requests omit a vehicle reference. For now they require one unambiguous
 owned garage car; active-car selection across multiple owned cars belongs to
 the separate [car ownership and garage management issue][garage-mgmt].
-Size requests must identify an
-installed owned rim and a size that fits its authored axle dimensions.
+Size requests must identify an installed owned rim and a size that fits its
+authored axle dimensions.
 
 The paint-library loading wait was caused by an unanswered speed-wall read on
 an empty account. Supported reads now return the defined not-found error when
