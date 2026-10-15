@@ -63,3 +63,12 @@ the Play/AllDrive submenu displays F9 Back and F9 returns to the main menu.
 F9 also returns from air-filter details to performance categories, then to
 customization and the main garage. Computer Use remained active throughout.
 Other game builds and arbitrary key assignments have not been validated.
+
+The license-plate text dialog is an exception: it displays **F9 Cancel** but
+ignored F9 in the tested build. Posting a `WM_KEYDOWN`/`WM_KEYUP` Escape pair
+directly to the verified foreground game window canceled an edited draft;
+reopening the dialog showed the original text. This sends no global key event
+and does not disable Computer Use's stop control. The same window-message
+approach was ignored in the performance menu, so it is not a general replacement
+for the binding above. An automation tool using it must verify the game process,
+build and foreground window before each action; do not fall back to global Escape.

@@ -1,6 +1,6 @@
-# Garage upgrade development
+# Garage upgrades and customization
 
-This candidate models supported leaf performance and visual-part purchases,
+The server models supported leaf performance and visual-part purchases,
 plus explicit body kits containing supported visual leaves,
 their equip/save requests, and restoring stock parts. The install-content builder
 selects supported offers from the installed definitions. Prices, part GUIDs and
@@ -13,14 +13,14 @@ when the selected part conflicts with equipment that would remain on the car.
 Restricted parts can still be purchased as spares. Parts in storage and the old
 part in the replaced slot do not block the selection. Front and rear slots are checked separately. Removing or
 replacing a conflict earlier in the same edit allows a later compatible selection.
-The candidate also stages the 31 handling controls against installed parts and
+The server also stages the 31 native handling categories against installed parts and
 the car's transmission flag. REP-only offers use the account's saved score and
 installed thresholds. Visual parts match exact class and, where applicable,
 front/rear location. Nested kits, kits containing library liveries, separate
 story/build restrictions and selling remain unsupported. Saved wraps can be restored from the local library and
 equipped. The live checks below cover selected performance
-and visual parts; broader customization acceptance is still pending.
-Remaining work and live acceptance are tracked in the
+and visual parts, tuning, paint, wraps and stock restoration. The acceptance and
+explicit boundaries of this milestone are tracked in the
 [garage upgrades issue][garage-issue].
 
 Body-kit purchase and equipment support is validated for the tested Mustang Race Kit in
@@ -192,8 +192,8 @@ passed free roam, garage return and restart, as described above.
 
 Ride height and front/rear camber are saved on the installed control-arm tuning
 item and included in the free-roam car's chassis customization. The owner's new
-values survived restart, and the car appeared lowered outside. The night views
-did not establish front and rear camber visually, so that acceptance remains open.
+values survived restart, and the car appeared lowered outside. The early night
+views were inconclusive; the later independent stance checks are recorded below.
 Canard and caliper purchases initially failed because the projection excluded
 all parts with nonempty fitment restrictions. The current candidate models those
 restrictions at equip time. Follow-up live checks bought and fitted two compatible
@@ -221,7 +221,7 @@ after confirmation, respectively. These are sampled upper bounds, not exact
 spinner durations. All three purchases charged the catalog price once, saved the
 selected part and retained the replaced parts as spares. The longer owner-reported
 wait did not recur, so its cause remains unresolved; no timing fix or claim that
-the original wait was normal follows from these measurements. Further work is tracked in
+the original wait was normal follows from these measurements. This investigation is recorded in
 [issue #70](https://github.com/afterhours-crew/afterhours-2015/issues/70).
 
 The candidate supports plate text, window tint and restoring factory body paint.
@@ -246,7 +246,8 @@ through another part editor, free roam, garage return and a full game/server
 restart. Resubmitting identical text did not advance the account generation.
 This is a compatibility policy supported by the observed client sequence; the
 original backend's internal save timing is not established. Factory-paint reset
-has since passed; text-dialog cancellation still needs live acceptance. The text-filter
+has since passed; text-dialog cancellation also retained the saved text when
+the editor was reopened after discarding a draft. The text-filter
 prerequisite and its live result are
 tracked in [issue #68](https://github.com/afterhours-crew/afterhours-2015/issues/68).
 An earlier attempted combined run stopped at the splash because a Windows
@@ -318,7 +319,8 @@ the manual behavior was also observed after restarting game and server.
 The short stock-versus-supercharger acceleration comparison was inconclusive:
 wheelspin and launch control were not controlled. The owner's later driving
 comparison validates a noticeable upgrade effect qualitatively. It does not
-establish measured acceleration figures; broader handling checks remain pending.
+establish measured acceleration figures. The additional handling and stance
+checks below distinguish observed effects from contract coverage.
 
 REP-driven performance unlocks are separate from the visual category mask.
 The candidate reads explicit item-unlock branches from the installed progression
@@ -441,6 +443,55 @@ story/build requirements, nor does it implement currently unsupported parts.
 
 ## Validation scope
 
+The final tuning checks on 2026-10-15 exercised the available handling rows after
+fitting their required parts: tire pressures, steering response/range, braking
+and drift controls, differential, handbrake, sway bars, downforce, nitrous tuning
+and transmission. Saved values survived garage return and full game/server
+restarts without changing unrelated equipment, appearance or cash. The installed
+extreme-grip tire fixed its traction setting; spring stiffness remained locked
+behind Amy's story progression. Those are client restrictions, not missing saves.
+The owner deferred story/build unlocks to [#56](https://github.com/Afterhours-Crew/afterhours-2015/issues/56)
+through [#75](https://github.com/Afterhours-Crew/afterhours-2015/issues/75).
+
+The six exposed stance controls are height, rake, front/rear track and front/rear
+camber. A lowered configuration with negative front and neutral rear camber was
+validated outdoors by the owner. The reverse configuration retained neutral front
+and negative rear camber after restart; the later wider front/rear camera views
+showed the separate wheel angles outside. These are qualitative visual checks,
+not measurements of degrees or suspension travel. Caster and toe have native data
+fields but were not exposed by the tested stance menu.
+
+Separate checks load the two saved configurations through the canonical garage
+and driving-car constructors and round-trip their wire encoding. The creation
+contains the saved performance contributions and all 32 serialized tuning slots;
+an accompanying motion update may omit unchanged customization. This establishes
+the server's active-car inputs, not independently measured physics for every
+slider. Direct driving acceptance remains the owner's grip/upgrade comparisons
+and the observed manual-versus-automatic transmission behavior.
+
+Purchase recovery was tested with two seconds of incoming packet loss during a
+fuel-pump purchase. The client retransmitted the file-transfer start; the purchase
+and equip completed, charged the catalog price once and survived a game/server
+restart. The first attempt exposed an acknowledgement-window bug. The corrected
+sender reuses the current empty-control sequence under pressure and suppresses
+timing traffic that would exceed the receipt window. It retains the strict
+32-position acknowledgement bound. A regression covers extended acknowledgement
+loss and sequence wrap; the live pass covers the stated two-second case, not
+arbitrary outage lengths. See [#80](https://github.com/Afterhours-Crew/afterhours-2015/issues/80)
+and the opt-in [packet-loss diagnostic](../CONTRIBUTING.md#local-packet-loss-diagnostics).
+
+The ordinary purchased-spare menus expose no Sell action in the tested client.
+The conditional selling investigation [#76](https://github.com/Afterhours-Crew/afterhours-2015/issues/76)
+is resolved on that basis; selling is not implemented by this milestone. The
+actual whole-car and claimable-reward selling paths, including their credit and
+deletion rules, remain explicit work in [garage management][garage-mgmt] and
+[progression/inventory](https://github.com/Afterhours-Crew/afterhours-2015/issues/53).
+Nested kits and kits containing library liveries also remain unsupported.
+
+Final runtime validation passed formatting, workspace Clippy and 1,262 tests,
+plus the optional network-test feature checks. Raw reference evidence stays in
+the separate research repository; this checkout builds and runs independently.
+
 The nitrous transition handler acknowledges the authoritative driver's start
 and stop requests through the current car's nitrous mode. The client waits for
 this update before sending its next transition; omitting it can leave exhaust
@@ -538,7 +589,38 @@ The runtime validates the active player's garage-car binding before accepting
 an edit. Unsupported or failed commit paths do not send invented success replies;
 currently an unrecoverable commit/storage conflict ends that world connection.
 Reconnect to load the committed account state. Live acceptance of conflict and
-storage-failure recovery paths remains open.
+storage-failure recovery is distinct: the stale-edit conflict has now passed a
+live check, while arbitrary disk/storage failures have portable coverage only.
+During a running garage edit, an operator update advanced the same account's
+generation. Saving the stale edit rejected it and disconnected the world.
+Restart retained the newer cash balance and discarded the unsaved tuning preview.
+A fresh tuning edit then saved successfully and was visible on reopening the menu.
+
+A separate fresh account bought an air filter and cooling upgrade for exactly
+their displayed prices. Another account database in the same state directory
+remained byte-identical. Restarting game and server retained both installed parts,
+the exact balance and cached dyno values; the account's generation and item records
+were unchanged by that restart. A four-second pause of the server delayed one
+purchase but it completed after resume. The capture contained no repeated purchase
+fragment, so that pause is not evidence of retransmission handling.
+
+The plate text editor's cancel path was also checked separately: deleting the last
+character and canceling restored the original text when the dialog was reopened.
+See [menu key bindings](MENU-KEYBINDING.md) for the native text-dialog exception to
+the normal Back binding. The local filter does not contact an external moderation
+service or claim to reproduce its policy.
+
+For purchase timing, twelve sampled visual purchases completed their server
+replies in 122–173 ms. A combined hood/rim run measured purchase replies of
+170/120/145 ms, inventory delivery in 431–469 ms and acknowledgement in 470–518 ms;
+the first observed completed UI frames bounded the visible waits to at most
+1.40/0.32/0.88 seconds respectively. Durable commits took 15–24 ms. A later six-part
+batch completed replies in 137–171 ms with the exact total debit and retained
+customization. These observations did not reproduce the earlier reported roughly
+ten-second waits. The captures distinguish server reply and inventory delivery
+from later client presentation; they do not isolate asset loading or provide an
+original-backend baseline. No claim that the ten-second delay was normal or fixed
+follows from these measurements.
 
 [garage-issue]: https://github.com/afterhours-crew/afterhours-2015/issues/49
 [garage-mgmt]: https://github.com/afterhours-crew/afterhours-2015/issues/52
