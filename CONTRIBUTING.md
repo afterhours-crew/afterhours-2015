@@ -47,6 +47,11 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
+The [CI workflow](.github/workflows/ci.yml) runs the same three gates on every
+push to a `codex/` branch and every pull request, with tests on Linux and
+Windows, plus the Windows launcher checks from the running instructions. A red
+run must be fixed before a pull request is reviewed.
+
 Review third-party licenses before adding code or dependencies. Current storage
 uses pinned `rusqlite` with bundled SQLite and limits; transitive versions and
 registry checksums are recorded in `Cargo.lock`. XML2 codecs use `quick-xml`

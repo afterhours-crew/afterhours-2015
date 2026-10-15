@@ -1,5 +1,7 @@
 # Afterhours 2015
 
+[![CI](https://github.com/afterhours-crew/afterhours-2015/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/afterhours-crew/afterhours-2015/actions/workflows/ci.yml)
+
 Server implementation for Need for Speed (2015), with offline play and custom
 servers as the goals. This is the canonical home for runtime code and its
 first-party dependencies.
