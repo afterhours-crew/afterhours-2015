@@ -1,0 +1,180 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+//! What the supervisor needs from the operating system.
+//!
+//! The supervisor never calls the OS directly. It asks a [`Platform`] for
+//! processes, privilege checks and conflict checks, and drives the children
+//! it gets back through [`ChildProcess`]. This keeps the decision logic
+//! portable and testable with fakes, and keeps every OS call in one place
+//! per platform.
+//!
+//! Windows additionally places the supervisor and its children in a job
+//! object with kill-on-close, because `start` leaves a routed game process
+//! and a renamed server running and those must not outlive the supervisor.
+//! Unix has no such guarantee by design: `serve` has no game and no memory
+//! lease, so a supervisor crash leaving the server running is ordinary
+//! daemon behavior that `status` reports.
+
+use crate::exit::Result;
+use std::path::{Path, PathBuf};
+
+/// How to start a child.
+#[derive(Debug, Clone)]
+pub struct SpawnSpec {
+    pub executable: PathBuf,
+    pub arguments: Vec<String>,
+    pub working_directory: PathBuf,
+    /// Bounded log file for standard output.
+    pub stdout_log: PathBuf,
+    /// Bounded log file for standard error.
+    pub stderr_log: PathBuf,
+    /// Extra environment variables, such as the launch marker.
+    pub environment: Vec<(String, String)>,
+    /// Whether the first line of standard output is a readiness record.
+    pub capture_first_line: bool,
+}
+
+/// A running child the supervisor owns.
+pub trait ChildProcess {
+    /// Process identifier.
+    fn id(&self) -> u32;
+    /// Whether the process has exited.
+    fn exited(&mut self) -> bool;
+    /// Exit code once exited. `None` while running or when killed by a signal.
+    fn exit_code(&mut self) -> Option<i32>;
+    /// First line of standard output, once seen. `Err` if the process exited
+    /// first or the line exceeded its bound.
+    fn first_line(&mut self) -> Option<Result<String>>;
+    /// Diagnostics (standard error) captured since the last call, bounded.
+    fn drain_diagnostics(&mut self) -> String;
+    /// Whether both log pumps have finished after exit.
+    fn logs_finished(&self) -> bool;
+    /// Whether standard output exceeded the log bound.
+    fn output_truncated(&self) -> bool;
+    /// Any fault in the log pumps.
+    fn check_logs(&self) -> Result<()>;
+    /// Ask the process to close normally: close its main window on Windows,
+    /// `SIGTERM` elsewhere. Returns whether the request was delivered.
+    fn request_close(&mut self) -> bool;
+    /// Terminate the process and its descendants.
+    fn kill(&mut self);
+}
+
+/// A guard around the whole session's process tree.
+pub trait SessionGuard {
+    /// Disarm the guard once every child has exited. On error the guard
+    /// stays armed and process exit performs the cleanup.
+    fn finish(&mut self) -> Result<()>;
+}
+
+/// Operating-system operations, one implementation per platform.
+pub trait Platform {
+    /// Refuse to run with elevated or root privileges.
+    fn refuse_privileged(&self) -> Result<()>;
+    /// Refuse to run inside an existing process job (Windows); no-op elsewhere.
+    fn refuse_inside_job(&self) -> Result<()>;
+    /// The installed client registration, if this platform has one.
+    fn registered_client_path(&self) -> Result<Option<String>>;
+    /// Names of running processes among `names` (without extension).
+    fn running_processes(&self, names: &[&str]) -> Result<Vec<String>>;
+    /// Whether a process with this identifier is alive.
+    fn process_alive(&self, pid: u32) -> bool;
+    /// Attach the current process to a session guard. Call before spawning.
+    fn attach_session_guard(&self) -> Result<Box<dyn SessionGuard>>;
+    /// Start a child with redirected, bounded output.
+    fn spawn(&self, spec: &SpawnSpec) -> Result<Box<dyn ChildProcess>>;
+}
+
+/// Probe whether the loopback TCP port is free by binding it briefly.
+pub fn loopback_port_is_free(port: u16) -> bool {
+    std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).is_ok()
+}
+
+/// Default data directory for this user on this platform.
+pub fn default_data_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("LOCALAPPDATA").map(|base| PathBuf::from(base).join("Afterhours2015"))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::env::var_os("HOME")
+            .map(|home| PathBuf::from(home).join("Library/Application Support/Afterhours2015"))
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share"))
+            })
+            .map(|base| base.join("afterhours2015"))
+    }
+}
+
+/// Default server executable: `nfs-server` next to this executable, since
+/// both are built by the same `cargo build`.
+pub fn default_server_path() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let name = format!("nfs-server{}", std::env::consts::EXE_SUFFIX);
+    let candidate = dir.join(name);
+    candidate.is_file().then_some(candidate)
+}
+
+/// Executable name of the installed game.
+pub const GAME_EXECUTABLE: &str = "NFS16.exe";
+/// Relative path of the installed activation helper.
+pub const ACTIVATION_HELPER: &str = "Core/ActivationUI.exe";
+/// Process names that must not be running when a session starts.
+pub const CONFLICTING_PROCESSES: &[&str] = &[
+    "NFS16",
+    "NFS16_trial",
+    "EADesktop",
+    "Origin",
+    "EADesktopDebug",
+    "OriginDebug",
+];
+/// Loopback port the game expects the launcher services on.
+pub const LSX_PORT: u16 = 3216;
+
+/// Whether this build can start and route the installed game.
+pub fn supports_game_launch() -> bool {
+    cfg!(windows)
+}
+
+/// Shared helper: resolve a path that must exist to an absolute path.
+pub fn existing_absolute(path: &Path, what: &str) -> Result<PathBuf> {
+    let absolute = std::path::absolute(path)?;
+    if !absolute.exists() {
+        return Err(crate::exit::Failure::refused(format!(
+            "{what} not found: {}",
+            absolute.display()
+        )));
+    }
+    Ok(absolute)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_bound_port_is_reported_busy_and_a_free_one_free() {
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(!loopback_port_is_free(port));
+        drop(listener);
+        assert!(loopback_port_is_free(port));
+    }
+
+    #[test]
+    fn default_server_path_only_reports_an_existing_sibling() {
+        // The test binary's directory has no nfs-server next to it.
+        if let Some(path) = default_server_path() {
+            assert!(path.is_file());
+        }
+    }
+}
