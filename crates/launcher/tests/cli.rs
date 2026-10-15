@@ -10,8 +10,10 @@
 //! script. No game installation is needed; the one check that requires the
 //! real game digest is exercised by its refusal.
 
+#[cfg(unix)]
+use std::path::Path;
 use std::{
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::{Command, Output},
     sync::atomic::{AtomicUsize, Ordering},
 };
@@ -53,7 +55,10 @@ fn help_lists_every_public_subcommand_and_the_exit_table() {
             "{sub} missing from:\n{help}"
         );
     }
-    assert!(!help.contains("\n  supervise"), "internal command stays hidden");
+    assert!(
+        !help.contains("\n  supervise"),
+        "internal command stays hidden"
+    );
     assert!(help.contains("Exit codes:"));
     let sub = run(&["start", "--help"]);
     assert_eq!(sub.status.code(), Some(0));
