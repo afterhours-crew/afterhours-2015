@@ -140,8 +140,9 @@ previously locked SC-V2 and cancellation retained the balance. Two failures were
 corrected: returning a new ID for an item-ID purchase, and rejecting its in-place
 promotion when refreshing the live inventory. The follow-up purchased and equipped
 SC-V2 for 10,900, retained the remaining 82,330 balance and existing appearance,
-then passed free roam and garage return. A game/server restart check is in progress
-under [issue #63][rep-item-issue]. Formatting, workspace Clippy and all 1,216 tests
+then passed free roam, garage return and a full game/server restart. The restarted
+garage retained SC-V2, the balance and saved dyno values; see [issue #63][rep-item-issue].
+Formatting, workspace Clippy and all 1,216 tests
 pass, including a regression for the live inventory refresh and bank notification.
 
 For unattended menu testing, [change the game's Back key to F9](MENU-KEYBINDING.md)
