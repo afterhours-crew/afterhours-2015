@@ -20,6 +20,7 @@ pub mod group;
 pub mod inventory;
 pub mod item_builder;
 pub mod item_content;
+pub mod item_unlocks;
 pub mod persistent;
 pub mod purchase;
 pub mod recommendations;

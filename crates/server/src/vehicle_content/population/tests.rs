@@ -13,7 +13,14 @@ use serde_json::json;
 fn purchased_inventory_refresh_keeps_other_players_and_allows_garage_return() {
     let (mut population, mut players, content, layout, items, participant) = fixture();
     let layout = world_layout(&layout);
-    let original = inventory(items);
+    let mut initial = (*items).clone();
+    let mut grant = initial.items[&2].clone();
+    grant.id = 20;
+    grant.owner = 0;
+    grant.state = nfs_world::items::PURCHASABLE;
+    initial.items.insert(20, grant);
+    initial.roots.push(20);
+    let original = inventory(Arc::new(initial));
     let first = population
         .spawn(
             &mut players,
@@ -46,9 +53,10 @@ fn purchased_inventory_refresh_keeps_other_players_and_allows_garage_return() {
         )
         .unwrap();
     let mut bought = (*original.items).clone();
-    let mut spare = bought.items[&2].clone();
-    spare.id = 20;
-    bought.items.insert(20, spare);
+    let car_owner = bought.items[&2].owner;
+    let promoted = bought.items.get_mut(&20).unwrap();
+    promoted.owner = car_owner;
+    promoted.state = nfs_world::items::OWNED;
     let changed = Inventory {
         slots: original.slots,
         items: Arc::new(bought),

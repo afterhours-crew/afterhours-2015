@@ -20,6 +20,7 @@ use serde_json::json;
 
 mod appearance;
 mod driving;
+mod purchases;
 
 fn tables() -> persistent::Catalog {
     let rows:Vec<_>=persistent::required_tables().iter().map(|&(name,secondary,count)|{

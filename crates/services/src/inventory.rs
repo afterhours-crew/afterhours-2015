@@ -261,6 +261,24 @@ pub fn answer_load_with_policy(
     tables: Option<&crate::persistent::Catalog>,
     unlocks: Option<&crate::category_unlocks::Policy>,
 ) -> Result<Option<Reply>, Error> {
+    answer_load_with_unlocks(
+        request, repository, account, catalog, first_id, now, tables, unlocks, None,
+    )
+}
+
+/// Reconcile category and item grants before exposing the final inventory.
+#[allow(clippy::too_many_arguments)]
+pub fn answer_load_with_unlocks(
+    request: &[u8],
+    repository: &dyn InventoryRepository,
+    account: AccountId,
+    catalog: &InventoryCatalog,
+    first_id: u64,
+    now: Timestamp,
+    tables: Option<&crate::persistent::Catalog>,
+    unlocks: Option<&crate::category_unlocks::Policy>,
+    items: Option<&crate::item_unlocks::Policy>,
+) -> Result<Option<Reply>, Error> {
     let request = Request::decode(request)?;
     if request.operation != items::LOAD_INVENTORY {
         return Ok(None);
@@ -277,7 +295,11 @@ pub fn answer_load_with_policy(
         Some(policy) => policy.ensure(repository, account, catalog, snapshot, now)?,
         None => snapshot,
     };
-    let persistent = if unlocks.is_some() {
+    let snapshot = match items {
+        Some(policy) => policy.ensure(repository, account, catalog, snapshot, now)?,
+        None => snapshot,
+    };
+    let persistent = if unlocks.is_some() || items.is_some() {
         tables
             .map(|t| t.view(&snapshot).map(std::sync::Arc::new))
             .transpose()?

@@ -110,15 +110,39 @@ It restores the car's recorded performance defaults, retains visual parts and
 purchased spares, and does not refund cash. A default part's saved tuning remains
 attached to that item; this operation does not reset every handling slider.
 Request ordering, cancellation, retries, account isolation, stale writes and
-database reopen have automated coverage. The reset menu still needs a live check.
+database reopen have automated coverage. A live reset restored the stock filter
+and cooling parts, retained cash and visual customization, and survived a
+garage/world/garage loop. Restart after this reset still needs a live check.
 
 Driving parameters are derived from equipped parts and their saved tuning when
 the world car spawns; cached dyno figures are a separate display record. A server
 regression saves an upgrade and handling changes, reloads inventory, and decodes
 a fresh free-roam spawn to verify its performance contribution and tuning values.
 Changing only the dyno cache leaves those chassis inputs unchanged. This verifies
-the server's driving inputs, but a controlled in-game performance and handling
-comparison is still pending; menu numbers alone do not prove driving behavior.
+the server's driving inputs. A live transmission comparison also confirmed that
+Manual Gears holds first gear under throttle while automatic shifts into second;
+the manual behavior was also observed after restarting game and server.
+The short stock-versus-supercharger acceleration comparison was inconclusive:
+wheelspin and launch control were not controlled. A clearer performance comparison
+and broader handling checks remain pending; menu numbers alone do not prove them.
+
+REP-driven performance unlocks are separate from the visual category mask.
+The candidate reads explicit item-unlock branches from the installed progression
+graph and creates durable purchasable records when their REP score is reached.
+Buying still charges the installed price. Selecting a purchasable inventory item
+promotes that same item ID to car-owned; selecting a definition creates a new
+record. Retries cannot duplicate the grant or charge. Unconsumed grants remain
+available after an operator lowers REP. Debug
+unlock-all and story-award branches are excluded. Item content version 6 and a
+new builder revision rebuild existing caches automatically. Portable tests and
+an independent installed-content comparison pass. Live testing unlocked the
+previously locked SC-V2 and cancellation retained the balance. Two failures were
+corrected: returning a new ID for an item-ID purchase, and rejecting its in-place
+promotion when refreshing the live inventory. The follow-up purchased and equipped
+SC-V2 for 10,900, retained the remaining 82,330 balance and existing appearance,
+then passed free roam and garage return. A game/server restart check is in progress
+under [issue #63][rep-item-issue]. Formatting, workspace Clippy and all 1,216 tests
+pass, including a regression for the live inventory refresh and bank notification.
 
 For unattended menu testing, [change the game's Back key to F9](MENU-KEYBINDING.md)
 through its user profile. This works without a mod and leaves Computer Use's
@@ -297,3 +321,4 @@ storage-failure recovery paths remains open.
 
 [garage-issue]: https://github.com/afterhours-crew/afterhours-2015/issues/49
 [garage-mgmt]: https://github.com/afterhours-crew/afterhours-2015/issues/52
+[rep-item-issue]: https://github.com/afterhours-crew/afterhours-2015/issues/63

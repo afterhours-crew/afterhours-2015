@@ -6,6 +6,7 @@
 //! asset prices, links, constructor defaults and an explicit initial recipe.
 //! V3 adds explicit supported purchase offers; V4 adds vehicle compatibility.
 //! V5 adds visual slot locations and installed REP score requirements.
+//! V6 adds explicit REP item grants; older formats never infer them.
 //! No format accepts captured
 //! instances, player ids or reply envelopes.
 use crate::{ContentError, SUPPORTED_BUILD_SHA256 as BUILD};
@@ -22,6 +23,7 @@ pub const INVENTORY_VERSION: u8 = 2;
 pub const PURCHASE_VERSION: u8 = 3;
 pub const SCOPED_PURCHASE_VERSION: u8 = 4;
 pub const PART_POLICY_VERSION: u8 = 5;
+pub const ITEM_UNLOCK_VERSION: u8 = 6;
 pub const MAX_STORE_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -94,7 +96,7 @@ impl ItemContent {
         if value["version"] == INVENTORY_VERSION
             || value["version"] == PURCHASE_VERSION
             || value["version"] == SCOPED_PURCHASE_VERSION
-            || value["version"] == PART_POLICY_VERSION
+            || (value["version"] == PART_POLICY_VERSION || value["version"] == ITEM_UNLOCK_VERSION)
         {
             return Self::inventory_from_json(value);
         }
@@ -147,19 +149,24 @@ impl ItemContent {
         ];
         if value["version"] == PURCHASE_VERSION
             || value["version"] == SCOPED_PURCHASE_VERSION
-            || value["version"] == PART_POLICY_VERSION
+            || (value["version"] == PART_POLICY_VERSION || value["version"] == ITEM_UNLOCK_VERSION)
         {
             expected.push("purchase_offers");
         }
-        if value["version"] == SCOPED_PURCHASE_VERSION || value["version"] == PART_POLICY_VERSION {
+        if value["version"] == SCOPED_PURCHASE_VERSION
+            || (value["version"] == PART_POLICY_VERSION || value["version"] == ITEM_UNLOCK_VERSION)
+        {
             expected.push("vehicle_scopes");
         }
-        if value["version"] == PART_POLICY_VERSION {
+        if value["version"] == PART_POLICY_VERSION || value["version"] == ITEM_UNLOCK_VERSION {
             expected.extend([
                 "part_locations",
                 "purchase_requirements",
                 "category_unlocks",
             ]);
+        }
+        if value["version"] == ITEM_UNLOCK_VERSION {
+            expected.push("item_unlocks");
         }
         fields(value, &expected)?;
         if value["format"] != FORMAT || value["build_sha256"] != BUILD {
@@ -272,9 +279,32 @@ impl ItemContent {
                 .map_err(|_| ContentError::Invalid)?,
             )
         };
+        let item_unlocks = if value["version"] == ITEM_UNLOCK_VERSION {
+            let rows = value["item_unlocks"]
+                .as_array()
+                .filter(|r| r.len() <= MAX_COLLECTION)
+                .ok_or(ContentError::Invalid)?;
+            let rows = rows
+                .iter()
+                .map(|row| {
+                    fields(row, &["definition", "minimum_rep_score"])?;
+                    Ok((
+                        guid(&row["definition"])?,
+                        i32::try_from(word(&row["minimum_rep_score"])?)
+                            .map_err(|_| ContentError::Invalid)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, ContentError>>()?;
+            Some(
+                crate::item_unlocks::Policy::new(&inventory, rows)
+                    .map_err(|_| ContentError::Invalid)?,
+            )
+        } else {
+            None
+        };
         let purchase_offers = if value["version"] == PURCHASE_VERSION
             || value["version"] == SCOPED_PURCHASE_VERSION
-            || value["version"] == PART_POLICY_VERSION
+            || (value["version"] == PART_POLICY_VERSION || value["version"] == ITEM_UNLOCK_VERSION)
         {
             let mut offers = crate::purchase::Offers::new(guids(&value["purchase_offers"])?)
                 .map_err(|_| ContentError::Invalid)?;
@@ -283,15 +313,20 @@ impl ItemContent {
                     .definition(guid)
                     .map_err(|_| ContentError::Invalid)?;
                 if !(crate::purchase::performance_class(definition.class)
-                    || (value["version"] == PART_POLICY_VERSION
+                    || ((value["version"] == PART_POLICY_VERSION
+                        || value["version"] == ITEM_UNLOCK_VERSION)
                         && crate::purchase::visual_class(definition.class)))
-                    || !definition.flags.purchasable
+                    || (!definition.flags.purchasable
+                        && !item_unlocks
+                            .as_ref()
+                            .is_some_and(|p| p.requirements().contains_key(guid)))
                 {
                     return Err(ContentError::Invalid);
                 }
             }
             if value["version"] == SCOPED_PURCHASE_VERSION
-                || value["version"] == PART_POLICY_VERSION
+                || (value["version"] == PART_POLICY_VERSION
+                    || value["version"] == ITEM_UNLOCK_VERSION)
             {
                 let rows = value["vehicle_scopes"]
                     .as_array()
@@ -310,7 +345,7 @@ impl ItemContent {
                     .with_vehicle_scopes(&inventory, scopes)
                     .map_err(|_| ContentError::Invalid)?;
             }
-            if value["version"] == PART_POLICY_VERSION {
+            if value["version"] == PART_POLICY_VERSION || value["version"] == ITEM_UNLOCK_VERSION {
                 let rows = value["part_locations"]
                     .as_array()
                     .filter(|r| r.len() <= MAX_DEFINITIONS)
@@ -343,6 +378,11 @@ impl ItemContent {
                     .collect::<Result<Vec<_>, ContentError>>()?;
                 offers = offers
                     .with_part_policy(&inventory, locations, requirements)
+                    .map_err(|_| ContentError::Invalid)?;
+            }
+            if let Some(policy) = item_unlocks {
+                offers = offers
+                    .with_item_unlocks(policy)
                     .map_err(|_| ContentError::Invalid)?;
             }
             Some(offers)
@@ -395,6 +435,16 @@ impl ItemContent {
                     document["purchase_requirements"] = json!(
                         policy
                             .minimum_rep_scores
+                            .iter()
+                            .map(|(g, s)| json!({"definition":hex(g),"minimum_rep_score":s}))
+                            .collect::<Vec<_>>()
+                    );
+                }
+                if let Some(unlocks) = offers.item_unlocks() {
+                    document["version"] = json!(ITEM_UNLOCK_VERSION);
+                    document["item_unlocks"] = json!(
+                        unlocks
+                            .requirements()
                             .iter()
                             .map(|(g, s)| json!({"definition":hex(g),"minimum_rep_score":s}))
                             .collect::<Vec<_>>()
@@ -481,6 +531,39 @@ mod tests {
         row["additional_items"] = json!([]);
         row["default_derived_hex"] = json!("");
         value
+    }
+    #[test]
+    fn v6_unlocks_are_explicit_and_consistent_with_offer_requirements() {
+        let mut value = inventory_document();
+        value["version"] = json!(ITEM_UNLOCK_VERSION);
+        value["initial_definitions"] = json!([]);
+        value["definitions"][0]["class"] = json!("AirFilterItemData");
+        value["definitions"][0]["quantity"] = json!(1);
+        value["definitions"][0]["flags"]["requires_owner"] = json!(true);
+        value["definitions"][0]["flags"]["purchasable"] = json!(false);
+        value["purchase_offers"] = json!(["11111111111111111111111111111111"]);
+        value["vehicle_scopes"] = json!([]);
+        value["part_locations"] = json!([]);
+        value["category_unlocks"] = Value::Null;
+        value["purchase_requirements"] =
+            json!([{"definition":"11111111111111111111111111111111","minimum_rep_score":25}]);
+        value["item_unlocks"] = value["purchase_requirements"].clone();
+        assert_eq!(ItemContent::from_json(&value).unwrap().to_json(), value);
+        for score in [0, 24, -1] {
+            let mut invalid = value.clone();
+            invalid["item_unlocks"][0]["minimum_rep_score"] = json!(score);
+            assert!(ItemContent::from_json(&invalid).is_err());
+        }
+        let mut invalid = value.clone();
+        invalid["item_unlocks"] = json!([]);
+        assert!(ItemContent::from_json(&invalid).is_err());
+        let mut invalid = value.clone();
+        invalid["purchase_offers"] = json!([]);
+        invalid["purchase_requirements"] = json!([]);
+        assert!(ItemContent::from_json(&invalid).is_err());
+        value["version"] = json!(PART_POLICY_VERSION);
+        value.as_object_mut().unwrap().remove("item_unlocks");
+        assert!(ItemContent::from_json(&value).is_err());
     }
     #[test]
     fn v2_is_static_typed_content_with_an_explicit_initial_recipe() {

@@ -22,6 +22,7 @@ mod customization;
 mod equipment;
 pub(super) use equipment::EquipmentRequest;
 mod launchers;
+mod purchases;
 mod refusal;
 mod returning;
 mod sequences;
@@ -165,9 +166,9 @@ impl PlayerListener {
         )))
     }
 
-    /// A purchase adds owned records but does not equip them or replace a live
-    /// car. ItemBuilder owns that subsequent transition. Other persistent game
-    /// tables and all previously owned records must remain identical here.
+    /// A purchase adds a leaf or promotes a purchasable leaf in place, without
+    /// equipping it or replacing a live car. ItemBuilder owns that transition.
+    /// Other persistent game tables and previously owned records stay identical.
     pub(super) fn purchased_inventory(
         &mut self,
         garage: [Option<u64>; 5],
@@ -183,11 +184,7 @@ impl PlayerListener {
             || after.generation() < before.generation()
             || after.tables() != before.tables()
             || after.stores() != before.stores()
-            || old
-                .items
-                .items
-                .iter()
-                .any(|(id, item)| items.items.get(id) != Some(item))
+            || !purchases::valid_refresh(&old.items, &items)
         {
             return Err(replication::Error::Shape);
         }

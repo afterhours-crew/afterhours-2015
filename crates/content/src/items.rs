@@ -14,7 +14,7 @@
 use crate::Error;
 use crate::scan::Assets;
 use nfs_frostbite::ebx::{Fields, Object, Value};
-use nfs_services::item_content::{FORMAT, ItemContent, PART_POLICY_VERSION};
+use nfs_services::item_content::{FORMAT, ITEM_UNLOCK_VERSION, ItemContent};
 use nfs_world_core::items::{DefinitionClass, Layout};
 use serde_json::{Value as Json, json};
 
@@ -214,6 +214,9 @@ fn definition(assets: &mut Assets, object: &Object) -> Result<Json, Error> {
 /// Supported leaf performance/visual parts. REP-only requirements are resolved
 /// separately; other unlock conditions never become implicit unlocked offers.
 fn initial_offer(object: &Object) -> Result<bool, Error> {
+    part_offer(object, false)
+}
+fn part_offer(object: &Object, granted: bool) -> Result<bool, Error> {
     if !DefinitionClass::from_name(&object.class).is_some_and(nfs_services::purchase::part_class) {
         return Ok(false);
     }
@@ -229,7 +232,7 @@ fn initial_offer(object: &Object) -> Result<bool, Error> {
             .and_then(Value::as_bool)
             .ok_or_else(|| missing(&object.class, name))
     };
-    Ok(flag("Purchasable")?
+    Ok((flag("Purchasable")? || granted)
         && !flag("Deprecated")?
         && flag("RequiresOwner")?
         && !flag("UsesScope")?
@@ -277,7 +280,7 @@ fn vehicle_scope(object: &Object) -> Result<Option<Json>, Error> {
     ))
 }
 
-/// Build the canonical `nfs-item-definitions` version 5 document.
+/// Build the canonical `nfs-item-definitions` version 6 document.
 pub fn build(assets: &mut Assets) -> Result<Vec<u8>, Error> {
     let thresholds = nfs_services::reputation::Thresholds::from_json(
         &serde_json::from_slice(&crate::reputation::build(assets)?)
@@ -295,6 +298,7 @@ pub fn build(assets: &mut Assets) -> Result<Vec<u8>, Error> {
     let mut vehicle_scopes = Vec::new();
     let mut part_locations = Vec::new();
     let mut purchase_requirements = Vec::new();
+    let item_unlocks = unlocks::items(assets, &thresholds)?;
     for value in system
         .fields
         .get("Items")
@@ -317,7 +321,7 @@ pub fn build(assets: &mut Assets) -> Result<Vec<u8>, Error> {
         if let Some(scope) = vehicle_scope(&object)? {
             vehicle_scopes.push(scope);
         }
-        if initial_offer(&object)? {
+        if initial_offer(&object)? || object.guid.is_some_and(|g| item_unlocks.contains_key(&g)) {
             let level = word(&object.fields, &object.class, "UnlocksAtRepLevel")?;
             let score = thresholds.score_for_level(level).map_err(|_| {
                 Error::Content("part REP level exceeds installed thresholds".into())
@@ -334,7 +338,7 @@ pub fn build(assets: &mut Assets) -> Result<Vec<u8>, Error> {
     let initial = references(assets, &system, "Inventory")?;
     let document = json!({
         "format": FORMAT,
-        "version": PART_POLICY_VERSION,
+        "version": ITEM_UNLOCK_VERSION,
         "build_sha256": nfs_services::SUPPORTED_BUILD_SHA256,
         "definitions": definitions,
         "initial_definitions": initial,
@@ -343,6 +347,7 @@ pub fn build(assets: &mut Assets) -> Result<Vec<u8>, Error> {
         "part_locations":part_locations,
         "purchase_requirements":purchase_requirements,
         "category_unlocks":unlocks::build(assets, &thresholds)?,
+        "item_unlocks": item_unlocks.iter().map(|(g, (_, s))| json!({"definition":nfs_frostbite::hex(g),"minimum_rep_score":s})).collect::<Vec<_>>(),
     });
     // The consuming loader validates classes, layouts, references and bounds;
     // its export is the canonical form written to the cache.

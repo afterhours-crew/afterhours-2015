@@ -454,7 +454,7 @@ impl Profile {
                         kind,
                     }));
                 }
-                let reply = inventory::answer_load_with_policy(
+                let reply = inventory::answer_load_with_unlocks(
                     &request,
                     service.repository.as_ref(),
                     account,
@@ -463,6 +463,10 @@ impl Profile {
                     now,
                     service.persistent.as_deref(),
                     service.category_unlocks.as_deref(),
+                    service
+                        .offers
+                        .as_ref()
+                        .and_then(|offers| offers.item_unlocks()),
                 )
                 .map_err(Error::Inventory)?;
                 reply

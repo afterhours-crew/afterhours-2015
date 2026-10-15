@@ -64,6 +64,7 @@ pub struct Offers {
     definitions: BTreeSet<Guid>,
     vehicle_scopes: Option<BTreeMap<Guid, BTreeSet<Guid>>>,
     part_policy: Option<PartPolicy>,
+    item_unlocks: Option<crate::item_unlocks::Policy>,
 }
 impl Offers {
     pub fn definitions(&self) -> impl Iterator<Item = &Guid> {
@@ -124,6 +125,7 @@ impl Offers {
             definitions: set,
             vehicle_scopes: None,
             part_policy: None,
+            item_unlocks: None,
         })
     }
 }
@@ -226,14 +228,51 @@ fn ledger(snapshot: &Snapshot) -> Result<(Table, u64), Error> {
     Ok((table, next))
 }
 
-fn selected(request: &PurchaseRequest) -> Result<Guid, Error> {
+fn selected(
+    request: &PurchaseRequest,
+    snapshot: &Snapshot,
+) -> Result<(Guid, Option<ItemId>), Error> {
     if request.sequence < 2 {
         return Err(Error::Rejected(Reason::Shape));
     }
     match &request.selection {
-        PurchaseSelection::Definitions(guids) if guids.len() == 1 => Ok(guids[0]),
+        PurchaseSelection::Definitions(guids) if guids.len() == 1 => Ok((guids[0], None)),
+        PurchaseSelection::Items(ids) if ids.len() == 1 => {
+            let id = ItemId::new(ids[0]).ok_or(Error::Rejected(Reason::Shape))?;
+            let item = snapshot
+                .items
+                .get(&id)
+                .filter(|i| {
+                    ((i.owner.is_none() && i.state == items::PURCHASABLE)
+                        || (i.owner.map(ItemId::get) == Some(request.owner)
+                            && i.state == items::OWNED))
+                        && i.sub_items.is_empty()
+                        && i.default_items.is_empty()
+                })
+                .ok_or(Error::Rejected(Reason::Shape))?;
+            Ok((item.definition.0, Some(id)))
+        }
         _ => Err(Error::Rejected(Reason::Shape)),
     }
+}
+
+/// Reserve IDs for non-purchase inventory grants in the same account batch.
+/// Advancing the purchase allocator avoids collisions after a grant or retry.
+pub(crate) fn reserve_ids(
+    snapshot: &Snapshot,
+    count: usize,
+) -> Result<(u64, Op), inventory::Error> {
+    let (mut table, first) = ledger(snapshot).map_err(|_| nfs_storage::Error::Config)?;
+    let next = first
+        .checked_add(u64::try_from(count).map_err(|_| nfs_storage::Error::Bounds)?)
+        .ok_or(nfs_storage::Error::Bounds)?;
+    table
+        .rows
+        .get_mut(&0)
+        .ok_or(nfs_storage::Error::Config)?
+        .insert(1, text(next));
+    table.validate()?;
+    Ok((first, Op::SetTable(table_key(), table)))
 }
 
 fn reply(
@@ -273,28 +312,29 @@ pub fn buy(
     request: &PurchaseRequest,
     now: Timestamp,
 ) -> Result<Purchased, Error> {
-    let guid = selected(request)?;
-    if !offers.definitions.contains(&guid) {
-        return Err(Error::Rejected(Reason::Offer));
-    }
-    let definition = catalog.definition(&guid).map_err(inventory::Error::from)?;
-    // The offer set excludes unknown unlock conditions. Purchase enforces the
-    // supported leaf construction contract, vehicle scope and saved REP score.
-    if !offers.supports(definition.class)
-        || definition.quantity != 1
-        || !definition.flags.requires_owner
-        || !definition.flags.purchasable
-        || definition.flags.deprecated
-        || definition.flags.uses_scope
-        || !definition.sub_items.is_empty()
-        || !definition.additional_items.is_empty()
-        || definition.default_derived.is_none()
-    {
-        return Err(Error::Rejected(Reason::Offer));
-    }
     let owner = ItemId::new(request.owner).ok_or(Error::Rejected(Reason::Owner))?;
     for _ in 0..4 {
         let snapshot = repository.snapshot(account)?;
+        let (guid, selected_id) = selected(request, &snapshot)?;
+        if !offers.definitions.contains(&guid) {
+            return Err(Error::Rejected(Reason::Offer));
+        }
+        let definition = catalog.definition(&guid).map_err(inventory::Error::from)?;
+        // The offer set excludes unknown unlock conditions. Purchase enforces the
+        // supported leaf construction contract, vehicle scope and saved REP score.
+        if !offers.supports(definition.class)
+            || definition.quantity != 1
+            || !definition.flags.requires_owner
+            || (!definition.flags.purchasable && !offers.requires_item_unlock(&guid))
+            || definition.flags.deprecated
+            || definition.flags.uses_scope
+            || !definition.sub_items.is_empty()
+            || !definition.additional_items.is_empty()
+            || definition.default_derived.is_none()
+        {
+            return Err(Error::Rejected(Reason::Offer));
+        }
+
         inventory::collection(&snapshot, catalog.bindings())?;
         let vehicle = snapshot
             .items
@@ -332,6 +372,11 @@ pub fn buy(
         }
         if let Some(id) = matches.first().map(|(id, _)| **id) {
             let id = ItemId::new(id).ok_or(nfs_storage::Error::Config)?;
+            // The client looks up each requested item ID in the returned
+            // collection. A different owned item is not a valid reply to it.
+            if selected_id.is_some_and(|selected| selected != id) {
+                return Err(Error::Rejected(Reason::AlreadyOwned));
+            }
             let record = snapshot.items.get(&id).ok_or(nfs_storage::Error::Config)?;
             if record.owner != Some(owner)
                 || record.definition.0 != guid
@@ -346,6 +391,12 @@ pub fn buy(
         }) {
             return Err(Error::Rejected(Reason::AlreadyOwned));
         }
+        if selected_id.is_some_and(|id| {
+            let item = &snapshot.items[&id];
+            item.state != items::PURCHASABLE || item.owner.is_some()
+        }) {
+            return Err(Error::Rejected(Reason::Shape));
+        }
         // Check the committed score on each retry, in the same generation as
         // the debit. Previously completed purchases remain replayable even if
         // an operator later resets REP; no second item or debit is generated.
@@ -355,15 +406,19 @@ pub fn buy(
         let balance = Balance::from_snapshot(&snapshot)?
             .debit(definition.buy_price)
             .ok_or(Error::Rejected(Reason::Funds))?;
-        let id = ItemId::new(next).ok_or(nfs_storage::Error::Config)?;
-        let following = next.checked_add(1).ok_or(nfs_storage::Error::Bounds)?;
+        let id = selected_id.unwrap_or(ItemId::new(next).ok_or(nfs_storage::Error::Config)?);
+        let following = if selected_id.is_some() {
+            next
+        } else {
+            next.checked_add(1).ok_or(nfs_storage::Error::Bounds)?
+        };
         receipts
             .rows
             .get_mut(&0)
             .ok_or(nfs_storage::Error::Config)?
             .insert(1, text(following));
         receipts.rows.insert(
-            next,
+            id.get(),
             BTreeMap::from([
                 (0, Value::Int(1)),
                 (1, text(owner.get())),
@@ -391,6 +446,14 @@ pub fn buy(
                 .encode()
                 .map_err(inventory::Error::from)?,
         };
+        // Selecting a purchasable instance promotes that same durable identity.
+        // Only a definition purchase allocates a new record. Returning a fresh
+        // ID for an instance purchase leaves the client's lookup unresolved.
+        let item_op = if selected_id.is_some() {
+            Op::Update(record)
+        } else {
+            Op::Insert(record)
+        };
         // The namespace is reserved for purchase attempts. Competing purchases
         // on this generation may replay a winner: re-read the receipt before
         // acknowledging, rather than mistaking a different purchase for ours.
@@ -398,7 +461,7 @@ pub fn buy(
             id: BATCH_NAMESPACE | snapshot.generation,
             expected_generation: snapshot.generation,
             ops: vec![
-                Op::Insert(record),
+                item_op,
                 balance.store(),
                 Op::SetTable(table_key(), receipts),
             ],

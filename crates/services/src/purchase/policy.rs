@@ -51,6 +51,28 @@ pub struct PartPolicy {
     pub minimum_rep_scores: BTreeMap<Guid, i32>,
 }
 impl Offers {
+    pub fn item_unlocks(&self) -> Option<&crate::item_unlocks::Policy> {
+        self.item_unlocks.as_ref()
+    }
+    pub fn with_item_unlocks(mut self, policy: crate::item_unlocks::Policy) -> Result<Self, Error> {
+        let parts = self
+            .part_policy
+            .as_ref()
+            .ok_or(Error::Rejected(Reason::Offer))?;
+        for (guid, score) in policy.requirements() {
+            if !self.definitions.contains(guid) || parts.minimum_rep_scores.get(guid) != Some(score)
+            {
+                return Err(Error::Rejected(Reason::Offer));
+            }
+        }
+        self.item_unlocks = Some(policy);
+        Ok(self)
+    }
+    pub(super) fn requires_item_unlock(&self, guid: &Guid) -> bool {
+        self.item_unlocks
+            .as_ref()
+            .is_some_and(|p| p.requirements().contains_key(guid))
+    }
     pub fn part_policy(&self) -> Option<&PartPolicy> {
         self.part_policy.as_ref()
     }
@@ -132,6 +154,9 @@ impl Offers {
             == locations.get(b).ok_or(Error::Rejected(Reason::Offer))?)
     }
     pub(super) fn unlocked(&self, snapshot: &Snapshot, guid: &Guid) -> Result<bool, Error> {
+        if self.requires_item_unlock(guid) {
+            return Ok(crate::item_unlocks::Policy::granted(snapshot, guid));
+        }
         let required = self
             .part_policy
             .as_ref()
