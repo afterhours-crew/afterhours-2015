@@ -10,8 +10,12 @@ use nfs_storage::{
 };
 use std::{
     path::PathBuf,
-    sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
+    sync::{
+        Arc, Barrier,
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 struct Temp(PathBuf);
 impl Temp {
@@ -199,10 +203,13 @@ fn migration_preserves_inventory_and_failed_storage_never_claims_success() {
 #[test]
 fn concurrent_distinct_keys_are_not_lost() {
     let (_temp, r) = setup();
+    let start = Arc::new(Barrier::new(4));
     let threads: Vec<_> = (0..4)
         .map(|i| {
             let r = r.clone();
+            let start = start.clone();
             std::thread::spawn(move || {
+                start.wait();
                 r.put(
                     account(1),
                     &format!("R{i}"),
@@ -223,4 +230,69 @@ fn concurrent_distinct_keys_are_not_lost() {
             vec![i]
         );
     }
+}
+
+#[test]
+fn brief_account_lock_waits_for_commit_without_blocking_another_account() {
+    let (_temp, r) = setup();
+    let mut conn = rusqlite::Connection::open(r.0.path(account(1))).unwrap();
+    let lock = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (result_tx, result_rx) = mpsc::channel();
+    let writer = r.clone();
+    let thread = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        let result = writer.put(account(1), "Waited", "image/jpeg", b"saved", UnixMicros(1));
+        result_tx.send(result).unwrap();
+    });
+    started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    // The original 100ms policy fails while this real SQLite writer lock is held.
+    let early = result_rx.recv_timeout(Duration::from_millis(300));
+    let independent = r.put(account(2), "Other", "image/jpeg", b"other", UnixMicros(1));
+    lock.commit().unwrap();
+    let result = match early {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            result_rx.recv_timeout(Duration::from_secs(5)).unwrap()
+        }
+        Err(e) => panic!("writer disconnected: {e}"),
+    };
+    thread.join().unwrap();
+    assert_eq!(independent.unwrap().bytes, b"other");
+    assert_eq!(result.unwrap().bytes, b"saved");
+    assert_eq!(
+        r.get(account(1), "Waited").unwrap().unwrap().bytes,
+        b"saved"
+    );
+    assert_eq!(r.get(account(2), "Waited").unwrap(), None);
+}
+
+#[test]
+fn persistent_lock_returns_busy_preserving_record_and_retry_identity() {
+    let (_temp, r) = setup();
+    let a = account(1);
+    let prior = r
+        .put(a, "A", "image/jpeg", b"prior", UnixMicros(1))
+        .unwrap();
+    let mut conn = rusqlite::Connection::open(r.0.path(a)).unwrap();
+    let lock = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    let started = Instant::now();
+    let result = r.put(a, "A", "image/jpeg", b"next", UnixMicros(2));
+    let elapsed = started.elapsed();
+    lock.rollback().unwrap();
+    assert_eq!(result, Err(Error::Busy));
+    // Allow scheduling overhead; a lock cannot cause an unlimited retry loop.
+    assert!(elapsed < Duration::from_secs(8), "{elapsed:?}");
+    assert_eq!(r.get(a, "A").unwrap(), Some(prior));
+    let saved = r.put(a, "A", "image/jpeg", b"next", UnixMicros(2)).unwrap();
+    assert_eq!(
+        r.put(a, "A", "image/jpeg", b"next", UnixMicros(3)).unwrap(),
+        saved
+    );
+    assert_eq!(saved.created, UnixMicros(1));
+    assert_eq!(saved.updated, UnixMicros(2));
 }

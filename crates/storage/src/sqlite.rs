@@ -41,7 +41,10 @@ const TABLES: i64 = 10;
 const MAX_PAGES: i64 = 16384;
 const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const JOURNAL_SIZE_LIMIT: i64 = 1024 * 1024;
-const BUSY_TIMEOUT: Duration = Duration::from_millis(100);
+// A short filesystem stall must not discard concurrent livery uploads. Wait
+// within the socket adapter's 10-second deadline, on its bounded blocking
+// workers. This is SQLite's per-lock wait, not an unlimited operation retry.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_VALUE_BYTES: i32 = 512 * 1024 + 1024;
 const MAX_SQL_BYTES: i32 = 16 * 1024;
 const MAX_LIST_BYTES: usize = MAX_NESTED * 8;

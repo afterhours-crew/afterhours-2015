@@ -29,6 +29,12 @@ async workers. `MemoryRepository` and `SqliteRepository` implement the same
   These writes do not advance the inventory generation or alter progression.
   Record metadata uses `records::UnixMicros`; inventory timestamps remain in
   milliseconds. Callers must supply the appropriate clock units explicitly.
+- SQLite waits up to two seconds of busy-handler sleep for each contended lock.
+  This tolerates brief concurrent writes and filesystem stalls. It is not an
+  overall operation deadline; callers retain their bounded blocking workers and
+  request deadlines. Persistent contention returns `Error::Busy`, without a
+  success acknowledgement or a partially applied transaction. Retry the original
+  operation using its existing identity after the contention has cleared.
 - The legacy `settings-<account>.sqlite` file is a read-only migration input.
   Its value and revision are preserved; new settings writes use `<account>.sqlite`.
   Stop older servers before migration. Keep the old file as a backup, but do not
