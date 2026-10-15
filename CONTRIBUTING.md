@@ -49,8 +49,9 @@ cargo test --workspace --locked
 
 The [CI workflow](.github/workflows/ci.yml) runs the same three gates on every
 push to a `codex/` branch and every pull request, with tests on Linux and
-Windows, plus the Windows launcher checks from the running instructions. A red
-run must be fixed before a pull request is reviewed.
+Windows, plus the Windows launcher transaction checks. The session cleanup
+script refuses elevated sessions and hosted runners are elevated, so run it
+locally. A red run must be fixed before a pull request is reviewed.
 
 Review third-party licenses before adding code or dependencies. Current storage
 uses pinned `rusqlite` with bundled SQLite and limits; transitive versions and
