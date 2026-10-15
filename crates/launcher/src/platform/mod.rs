@@ -178,3 +178,22 @@ mod tests {
         }
     }
 }
+
+pub mod child;
+
+#[cfg(unix)]
+pub mod unix;
+#[cfg(windows)]
+pub mod windows;
+
+/// The platform this binary runs on.
+#[cfg(windows)]
+pub fn native() -> impl Platform {
+    windows::WindowsPlatform
+}
+
+/// The platform this binary runs on.
+#[cfg(unix)]
+pub fn native() -> impl Platform {
+    unix::UnixPlatform
+}

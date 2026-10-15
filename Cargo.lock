@@ -247,9 +247,18 @@ name = "nfs-afterhours"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "nfs-afterhours-sys",
  "serde",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "nfs-afterhours-sys"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "windows-sys",
 ]
 
 [[package]]

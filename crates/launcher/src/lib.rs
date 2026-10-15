@@ -32,3 +32,29 @@ pub mod paths;
 pub mod platform;
 pub mod records;
 pub mod session;
+
+/// Test support shared by the unit tests: unique scratch directories.
+#[cfg(test)]
+pub(crate) mod testing {
+    use std::{
+        path::PathBuf,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    /// A fresh, empty directory under the system temporary directory, as a
+    /// real path. The temporary directory may sit under a symlink (`/var`
+    /// on macOS) and the path rules refuse links, so tests use the
+    /// canonical form. The name carries the process id and a counter so
+    /// tests running in parallel never share a directory.
+    pub(crate) fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "afterhours-{name}-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.canonicalize().unwrap()
+    }
+}

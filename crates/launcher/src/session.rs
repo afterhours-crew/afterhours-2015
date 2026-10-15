@@ -157,19 +157,18 @@ pub fn request_stop(data: &Path) -> Result<StopOutcome> {
 mod tests {
     use super::*;
 
-    fn scratch() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "afterhours-session-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        // The temporary directory may sit under a symlink (/var on macOS);
-        // the path rules refuse links, so tests work from the real path.
-        dir.canonicalize().unwrap()
+    /// Wait until no process holds the lock. Another test may be spawning a
+    /// child at the same moment, and on Unix a forked child shares the open
+    /// file description, and so the lock, until it executes its program.
+    fn wait_released(data: &Path) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while lock_is_held(data).unwrap() != Some(false) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "lock was never released"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
     }
 
     fn write_status(data: &Path, id: &str, state: State) {
@@ -193,19 +192,19 @@ mod tests {
 
     #[test]
     fn the_lock_is_exclusive_and_observable() {
-        let data = scratch();
+        let data = crate::testing::scratch("session");
         assert_eq!(lock_is_held(&data).unwrap(), None);
         let held = Lock::acquire(&data).unwrap();
         assert_eq!(lock_is_held(&data).unwrap(), Some(true));
         assert!(Lock::acquire(&data).is_err());
         drop(held);
-        assert_eq!(lock_is_held(&data).unwrap(), Some(false));
+        wait_released(&data);
         std::fs::remove_dir_all(data).unwrap();
     }
 
     #[test]
     fn status_derives_interrupted_when_no_supervisor_holds_the_lock() {
-        let data = scratch();
+        let data = crate::testing::scratch("session");
         assert_eq!(current_status(&data).unwrap(), None);
         let id = "f".repeat(32);
         point_current_session(&data, &id).unwrap();
@@ -216,6 +215,7 @@ mod tests {
         let held = Lock::acquire(&data).unwrap();
         assert_eq!(current_status(&data).unwrap().unwrap().state, State::Ready);
         drop(held);
+        wait_released(&data);
         assert_eq!(
             current_status(&data).unwrap().unwrap().state,
             State::Interrupted
@@ -230,7 +230,7 @@ mod tests {
 
     #[test]
     fn stop_writes_a_file_only_for_a_live_session() {
-        let data = scratch();
+        let data = crate::testing::scratch("session");
         assert_eq!(request_stop(&data).unwrap(), StopOutcome::NoSession);
         let id = "e".repeat(32);
         point_current_session(&data, &id).unwrap();
@@ -256,7 +256,7 @@ mod tests {
 
     #[test]
     fn mismatched_pointer_and_status_are_refused() {
-        let data = scratch();
+        let data = crate::testing::scratch("session");
         point_current_session(&data, &"a".repeat(32)).unwrap();
         write_status(&data, &"a".repeat(32), State::Ready);
         let run = paths::session_dir(&data, &"a".repeat(32));

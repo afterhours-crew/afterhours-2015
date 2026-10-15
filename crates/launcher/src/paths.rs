@@ -157,24 +157,9 @@ pub fn session_dir(data: &Path, id: &str) -> PathBuf {
 mod tests {
     use super::*;
 
-    fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "afterhours-paths-{name}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        // The temporary directory may sit under a symlink (/var on macOS);
-        // the path rules refuse links, so tests work from the real path.
-        dir.canonicalize().unwrap()
-    }
-
     #[test]
     fn normalization_resolves_dots_without_touching_disk() {
-        let base = scratch("normalize");
+        let base = crate::testing::scratch("normalize");
         let nested = base.join("a").join("..").join("b").join(".").join("c");
         assert_eq!(normalize(&nested).unwrap(), base.join("b").join("c"));
         let root = normalize(Path::new("/")).unwrap();
@@ -184,7 +169,7 @@ mod tests {
 
     #[test]
     fn roots_installation_and_files_in_the_path_are_refused() {
-        let base = scratch("refuse");
+        let base = crate::testing::scratch("refuse");
         let game = base.join("Game");
         std::fs::create_dir(&game).unwrap();
         let root: PathBuf = normalize(&base)
@@ -207,7 +192,7 @@ mod tests {
 
     #[test]
     fn spaces_and_non_ascii_are_accepted_and_returned_normalized() {
-        let base = scratch("unicode");
+        let base = crate::testing::scratch("unicode");
         let data = base.join("data space å");
         let checked = checked_data_path(&data, None).unwrap();
         assert_eq!(checked, normalize(&data).unwrap());
@@ -217,7 +202,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn links_in_the_path_or_under_the_tree_are_refused() {
-        let base = scratch("links");
+        let base = crate::testing::scratch("links");
         let game = base.join("Game");
         let data = base.join("data");
         std::fs::create_dir(&game).unwrap();
@@ -241,7 +226,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_paths_compare_case_insensitively_and_shares_are_refused() {
-        let base = scratch("windows");
+        let base = crate::testing::scratch("windows");
         let game = base.join("Game");
         std::fs::create_dir(&game).unwrap();
         assert!(checked_data_path(&base.join("GAME").join("x"), Some(&game)).is_err());

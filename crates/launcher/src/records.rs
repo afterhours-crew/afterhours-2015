@@ -227,21 +227,6 @@ pub struct Preflight {
 mod tests {
     use super::*;
 
-    fn scratch() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "afterhours-records-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        // The temporary directory may sit under a symlink (/var on macOS);
-        // the path rules refuse links, so tests work from the real path.
-        dir.canonicalize().unwrap()
-    }
-
     #[test]
     fn records_written_by_the_powershell_launcher_still_parse() {
         let status: Status = serde_json::from_str(
@@ -272,7 +257,7 @@ mod tests {
 
     #[test]
     fn create_new_refuses_to_overwrite_and_replace_is_atomic() {
-        let dir = scratch();
+        let dir = crate::testing::scratch("records");
         let path = dir.join("record.json");
         let first = SessionPointer {
             version: 1,
@@ -306,7 +291,7 @@ mod tests {
 
     #[test]
     fn oversized_or_non_file_records_are_refused() {
-        let dir = scratch();
+        let dir = crate::testing::scratch("records");
         let big = dir.join("big.json");
         std::fs::write(&big, vec![b' '; MAX_RECORD_BYTES as usize + 1]).unwrap();
         assert!(read_bounded(&big).is_err());

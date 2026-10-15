@@ -113,24 +113,9 @@ fn copy_verified(from: &Path, directory: &Path, target: &Path, expected: &str) -
 mod tests {
     use super::*;
 
-    fn scratch() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "afterhours-install-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        // The temporary directory may sit under a symlink (/var on macOS);
-        // the path rules refuse links, so tests work from the real path.
-        dir.canonicalize().unwrap()
-    }
-
     #[test]
     fn copy_is_verified_repeatable_and_never_overwrites_a_changed_file() {
-        let base = scratch();
+        let base = crate::testing::scratch("install");
         let game = base.join("game");
         let data = base.join("data space å");
         std::fs::create_dir_all(&game).unwrap();
@@ -175,7 +160,7 @@ mod tests {
 
     #[test]
     fn bad_digests_and_changed_sources_are_refused_before_copying() {
-        let base = scratch();
+        let base = crate::testing::scratch("install");
         let data = base.join("data");
         let server = base.join("server.exe");
         std::fs::write(&server, [1]).unwrap();

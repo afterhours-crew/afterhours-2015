@@ -39,7 +39,14 @@ from recordings. Local operation must not require public authentication,
 telemetry or hosted storage.
 
 Commit `Cargo.lock`; change dependency versions deliberately. First-party Rust
-forbids unsafe code. Every code change must pass:
+forbids unsafe code, with one exception: `nfs-afterhours-sys`
+(`crates/launcher-sys`) wraps the operating-system calls the launcher needs
+(job objects, process memory, thread lookup, the TCP ownership table, a
+registry read, console events, Unix signals). It is the only crate allowed
+`unsafe`; every block carries a `SAFETY` comment, Clippy rejects one without,
+and the crate exposes only safe functions over bounded buffers. Keep new OS
+calls there, and keep the launcher itself (`crates/launcher`) safe.
+Every code change must pass:
 
 ```sh
 cargo fmt --all -- --check
@@ -62,6 +69,12 @@ typenum, cfg-if, libc), all MIT OR Apache-2.0.
 Content loaders use serde_json 1.0.151 (MIT OR Apache-2.0); all registry
 versions and checksums are locked. Main/master/default require pull requests
 and reject force pushes/deletion, including for administrators.
+
+The launcher uses clap 4.6.7 (MIT OR Apache-2.0) with default features off
+(`std`, `derive`, `help`, `usage`, `error-context`); its tree adds clap_builder,
+clap_derive, clap_lex, anstyle and heck, all MIT OR Apache-2.0. The
+operating-system crate uses windows-sys 0.61.2 and libc 0.2.190, both
+MIT OR Apache-2.0 and already locked by other crates.
 
 Loopback discovery and QoS support uses httparse 1.10.1 (MIT OR Apache-2.0)
 and openssl 0.10.81 (Apache-2.0). Its vendored build uses openssl-src
