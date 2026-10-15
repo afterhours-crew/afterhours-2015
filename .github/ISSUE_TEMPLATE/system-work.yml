@@ -1,0 +1,34 @@
+name: System work
+description: Implementation, live check or bug within one gameplay system
+title: "<system>: <short description>"
+labels: ["kind:feature"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Add the matching `system:*` label after opening, then link this issue as a sub-issue of that system's tracking issue (see the pinned Gameplay roadmap). Change `kind:feature` to `kind:live-check` or `bug` if that fits better.
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: What must work in the running game for this to close.
+    validations:
+      required: true
+  - type: textarea
+    id: state
+    attributes:
+      label: Current state
+      description: What already exists (codecs, storage, tests, partial live results) and what is missing.
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance
+      description: Task list. Tick items only after a live check and say exactly what was tested.
+      value: |
+        - [ ] 
+        - [ ] Restart game and server; state remains correct.
+  - type: textarea
+    id: limits
+    attributes:
+      label: Known limitations and unknowns
+      description: Anything that should become its own issue if it grows.

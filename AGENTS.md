@@ -18,8 +18,21 @@ Stage explicit paths and review the complete diff before pushing.
 
 Owner override, 2026-10-14: use local changes for fast testing and push checkpoint
 commits to the feature branch for backup. Do not open a pull request until the
-entire requested checklist item is implemented, tested and documented.
+entire requested tracking issue, or the sub-issue you were asked to deliver, is
+implemented, tested and documented.
 
 Follow CONTRIBUTING.md for architecture, ownership, dependency and testing rules.
 Run all three listed Cargo gates for code changes. State exactly what has been
 tested; passing library tests does not establish game or offline-play acceptance.
+
+Remaining gameplay systems are tracked in GitHub issues, not in docs. The pinned
+[gameplay roadmap][roadmap] holds the priority order; each system has a
+`kind:tracking` issue with a `system:` label that owns its acceptance list.
+Work against that issue and reference it in commits and pull requests. When you
+find an unknown, bug or extra task, open a new issue with the same `system:`
+label and a `kind:` label (`feature`, `research`, `live-check` or `bug`), and
+add it as a sub-issue of the tracker. Tick acceptance items only after a live
+check in the game and state exactly what was tested; do not fold unknowns into
+documentation or treat library tests as game acceptance.
+
+[roadmap]: https://github.com/afterhours-crew/afterhours-2015/issues/62

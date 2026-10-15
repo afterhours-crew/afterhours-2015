@@ -14,7 +14,8 @@ front/rear location. Composite parts, separate story/build restrictions and sell
 remain unsupported. Saved wraps can be restored from the local library and
 equipped. The live checks below cover selected performance
 and visual parts; broader customization acceptance is still pending.
-See the [gameplay checklist](GAMEPLAY-CHECKLIST.md).
+Remaining work and live acceptance are tracked in the
+[garage upgrades issue][garage-issue].
 
 The combined live test on 2026-10-14 equipped an owned air filter and purchased
 a compatible cooling upgrade in one performance edit. Both parts, the exact
@@ -50,7 +51,8 @@ the exact paint values and size selection, with no further cash deduction.
 
 Paint requests omit a vehicle reference. For now they require one unambiguous
 owned garage car; active-car selection across multiple owned cars belongs to
-the separate garage-management checklist item. Size requests must identify an
+the separate [car ownership and garage management issue][garage-mgmt].
+Size requests must identify an
 installed owned rim and a size that fits its authored axle dimensions.
 
 The paint-library loading wait was caused by an unanswered speed-wall read on
@@ -292,3 +294,6 @@ an edit. Unsupported or failed commit paths do not send invented success replies
 currently an unrecoverable commit/storage conflict ends that world connection.
 Reconnect to load the committed account state. Live acceptance of conflict and
 storage-failure recovery paths remains open.
+
+[garage-issue]: https://github.com/afterhours-crew/afterhours-2015/issues/49
+[garage-mgmt]: https://github.com/afterhours-crew/afterhours-2015/issues/52

@@ -78,3 +78,12 @@ All code here is under the [Mozilla Public License 2.0](LICENSE). Contributions
 are accepted under the same license, with no separate contributor agreement.
 Start every new source file with the three-line MPL notice used throughout the
 tree, and keep `license.workspace = true` in each crate manifest.
+
+## Tracking work
+
+Gameplay coverage and remaining systems live in GitHub issues. Start from the
+pinned [gameplay roadmap][roadmap]: pick a `kind:tracking` issue, work against
+its acceptance list, and open linked sub-issues for anything new you discover.
+Pull requests reference the issue they advance and state what was live-tested.
+
+[roadmap]: https://github.com/afterhours-crew/afterhours-2015/issues/62

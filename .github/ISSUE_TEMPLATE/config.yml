@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Gameplay roadmap
+    url: https://github.com/afterhours-crew/afterhours-2015/issues/62
+    about: Priority order and one tracking issue per remaining gameplay system. Start here before opening something new.
