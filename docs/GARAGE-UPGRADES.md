@@ -441,7 +441,7 @@ story/build requirements, nor does it implement currently unsupported parts.
 
 ## Validation scope
 
-The nitrous transition candidate acknowledges the authoritative driver's start
+The nitrous transition handler acknowledges the authoritative driver's start
 and stop requests through the current car's nitrous mode. The client waits for
 this update before sending its next transition; omitting it can leave exhaust
 flames active whenever the accelerator is pressed after the first nitrous use.
@@ -450,7 +450,14 @@ connection/persona ownership and world-car readiness, and queues its update
 atomically with the vehicle state. It does not replace the fuel level or infer
 nitrous use from throttle. Portable checks cover start/stop/repeats, malformed
 requests, foreign owners, replacement lifetimes and output-queue rollback.
-Fresh live validation of this correction is pending in
+A fresh game/server run on 2026-10-15 validated accelerator alone, repeated
+nitrous use, release of nitrous while retaining the accelerator, and release of
+both controls. Blue jets appeared during nitrous use and disappeared after
+release even while the accelerator stayed held. Subsequent acceleration alone
+did not restore them. Gauge depletion and time refill remained functional with
+the tested Time Refill NOS 5 lb kit. The recorded client sent alternating start
+and stop requests, where the failing run had sent only the first start. The
+owner also reported the correction working. See
 [the exhaust-effect issue](https://github.com/Afterhours-Crew/afterhours-2015/issues/77).
 
 Purchase initializes the part's typed defaults from its installed definition,
