@@ -59,6 +59,17 @@ pub(crate) mod testing {
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        dir.canonicalize().unwrap()
+        plain(dir.canonicalize().unwrap())
+    }
+
+    /// `canonicalize` on Windows returns a `\\?\` verbatim path, which
+    /// `cmd.exe` and most tools cannot open. Tests pass paths to such tools,
+    /// so strip the prefix; the launcher itself never canonicalizes.
+    pub(crate) fn plain(path: PathBuf) -> PathBuf {
+        let text = path.to_string_lossy();
+        match text.strip_prefix(r"\\?\") {
+            Some(stripped) => PathBuf::from(stripped),
+            None => path,
+        }
     }
 }

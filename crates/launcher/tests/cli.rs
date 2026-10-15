@@ -27,7 +27,14 @@ fn scratch(name: &str) -> PathBuf {
         COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
     std::fs::create_dir_all(&dir).unwrap();
-    dir.canonicalize().unwrap()
+    // Windows canonical paths carry a `\\?\` prefix that other programs
+    // cannot open; the binary under test is handed plain paths like a user would.
+    let canonical = dir.canonicalize().unwrap();
+    let text = canonical.to_string_lossy();
+    match text.strip_prefix(r"\\?\") {
+        Some(stripped) => PathBuf::from(stripped),
+        None => canonical,
+    }
 }
 
 fn bin() -> Command {
