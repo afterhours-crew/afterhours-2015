@@ -34,7 +34,10 @@ On 2026-10-15 the owner reported a noticeable difference while driving compared
 with the car before performance parts were installed, and accepted that the parts
 affect actual driving. This is a qualitative owner-validated result for the tested
 configuration; it does not measure the displayed performance figures or validate
-every handling control. Stock-performance-reset restart remains pending.
+every handling control. Stock-performance reset subsequently passed a full restart:
+the garage retained the stock parts and displayed 257 hp, 5.66 s 0–60 and 144 mph.
+The purchased upgrades and nitrous remained owned spares, with appearance and cash
+preserved. These displayed figures are saved client dyno values, not road measurements.
 The owner then restored stock performance and selected full-grip tuning, reporting
 less sliding while driving. This validates the observed combined configuration;
 the test changed parts and tuning together, so it does not isolate either change
@@ -133,7 +136,8 @@ retains the account-owned livery ID and its installed resource hash. The later
 new-wrap save also exercised the request that changes the two livery fields.
 
 These checks cover the tested starting car, not every supported definition or
-menu path. Broader visual parts and the complete wrap-edit workflow remain unfinished. Client
+menu path. The later visual and wrap checks below complete the recorded scope;
+untested definitions and menus are not implied to work. Client
 performance numbers changing immediately after purchase are only a local preview;
 the return/restart checks are needed to establish that they were saved.
 
@@ -150,7 +154,8 @@ account copy reopened the saved rear-window stripe, moved it, changed body paint
 and intentionally overwrote the same library entry. All three replacement uploads
 matched durable storage. A full game/server restart then retained the green paint,
 original windshield logo and moved rear-window stripe. Reopening the decal editor
-confirmed the saved position and scale. Factory-paint reset remains pending.
+confirmed the saved position and scale. The subsequent factory-paint reset also
+passed free roam, garage return and restart, as described above.
 
 Ride height and front/rear camber are saved on the installed control-arm tuning
 item and included in the free-roam car's chassis customization. The owner's new
@@ -175,7 +180,15 @@ restart and conflicting-fitment checks, they complete the acceptance recorded in
 For twelve captured visual-part requests, complete purchase replies were sent
 122–173 ms after request completion; successful purchases' subsequent inventory
 updates were sent after 432–529 ms. These measurements do not establish how long
-the visible loading indicator lasted. Further timing work is tracked in
+the visible loading indicator lasted. A later combined run timed a hood and two
+front-rim purchases. Request-to-complete-reply intervals were 170, 120 and 145 ms;
+inventory updates completed within 431–469 ms and were acknowledged within
+470–518 ms. The UI had returned to the part editor by 1.40, 0.32 and 0.88 seconds
+after confirmation, respectively. These are sampled upper bounds, not exact
+spinner durations. All three purchases charged the catalog price once, saved the
+selected part and retained the replaced parts as spares. The longer owner-reported
+wait did not recur, so its cause remains unresolved; no timing fix or claim that
+the original wait was normal follows from these measurements. Further work is tracked in
 [issue #70](https://github.com/afterhours-crew/afterhours-2015/issues/70).
 
 The candidate supports plate text, window tint and restoring factory body paint.
@@ -200,7 +213,7 @@ through another part editor, free roam, garage return and a full game/server
 restart. Resubmitting identical text did not advance the account generation.
 This is a compatibility policy supported by the observed client sequence; the
 original backend's internal save timing is not established. Factory-paint reset
-and text-dialog cancellation still need live acceptance. The text-filter
+has since passed; text-dialog cancellation still needs live acceptance. The text-filter
 prerequisite and its live result are
 tracked in [issue #68](https://github.com/afterhours-crew/afterhours-2015/issues/68).
 An earlier attempted combined run stopped at the splash because a Windows
@@ -236,10 +249,11 @@ The first stock visual reset test exposed a request-width bug: the wheel option
 is one bit, but the decoder required a byte. The local preview reset while the
 server rejected the request, preventing the following garage exit from progressing.
 The decoder is corrected, with portable tests for both options and the following
-commit, plus an exact captured-request comparison. The follow-up live test stopped
-when screen capture failed during loading, so corrected reset persistence remains
-unverified. The subsequent factory-paint preview in the failed run is not valid
-acceptance either. See [issue #71](https://github.com/afterhours-crew/afterhours-2015/issues/71)
+commit, plus an exact captured-request comparison. The first follow-up stopped
+when screen capture failed during loading and did not establish persistence.
+Later combined tests verified both reset options, following edits, garage exits
+and the final state after full restart. The factory-paint reset also passed in
+those later tests. See [issue #71](https://github.com/afterhours-crew/afterhours-2015/issues/71)
 and [issue #66](https://github.com/afterhours-crew/afterhours-2015/issues/66).
 
 Resetting all performance parts is now modeled separately from factory paint.
@@ -249,7 +263,16 @@ attached to that item; this operation does not reset every handling slider.
 Request ordering, cancellation, retries, account isolation, stale writes and
 database reopen have automated coverage. A live reset restored the stock filter
 and cooling parts, retained cash and visual customization, and survived a
-garage/world/garage loop. Restart after this reset still needs a live check.
+garage/world/garage loop. A later reset from eight installed upgrades and nitrous
+passed full game/server restart; stock equipment and dyno values persisted, and
+the purchased parts remained owned spares.
+
+A zero-cash live test displayed Insufficient Funds for an unowned sway-bar offer.
+Attempting to select it left the account generation and inventory unchanged;
+the normal client did not send a purchase. Purchase cancellation and discarding
+an appearance preview also passed. These checks validate the normal UI paths;
+server-side rejection of insufficient funds, retries and concurrent stale edits
+has separate automated coverage.
 
 Driving parameters are derived from equipped parts and their saved tuning when
 the world car spawns; cached dyno figures are a separate display record. A server
