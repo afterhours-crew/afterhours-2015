@@ -48,20 +48,28 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   test:
-    name: Test (${{ matrix.os }})
-    # Windows builds are slow and billed at a higher rate, so they run for
-    # pull requests and main only; codex/ checkpoint pushes test on Linux.
-    if: matrix.os != 'windows-latest' || github.event_name != 'push' || github.ref == 'refs/heads/main'
-    runs-on: ${{ matrix.os }}
+    name: Test (Linux)
+    runs-on: ubuntu-latest
     timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned toolchain
-        # rustup reads the channel and components from rust-toolchain.toml.
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --locked
+
+  test-windows:
+    name: Test (Windows)
+    # Windows builds are slow and billed at a higher rate, so they run for
+    # pull requests and main only; codex/ checkpoint pushes test on Linux.
+    if: github.event_name != 'push' || github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
         run: |
           rustup toolchain install
           rustup show active-toolchain
