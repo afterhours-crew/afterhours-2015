@@ -297,6 +297,7 @@ struct Sequenced {
     own_request: Option<(u64, u64)>,
     last_request_ms: Option<u64>,
     last_control_ms: Option<u64>,
+    last_was_empty_control: bool,
 }
 
 /// The application layer of one world connection, host side.
@@ -592,6 +593,7 @@ impl Application {
             own_request: None,
             last_request_ms: None,
             last_control_ms: None,
+            last_was_empty_control: false,
         }));
         Ok(Received {
             event: Some(Event::Client5 { repeated: false }),
@@ -711,22 +713,25 @@ impl Application {
             } if rest.is_empty() => {
                 // The native reply writer runs before this input commits, so the
                 // reply reports the frontier and history as they were.
-                let reply = timing::Decoded::new(
-                    s.outbound,
-                    s.next_number,
-                    before.0,
-                    before.1,
-                    Control::Reply {
-                        echo: timestamp,
-                        clock: elapsed_bits(s.origin_ms, now_ms),
-                    },
-                )
-                .map_err(|_| Error::Shape)?
-                .encode();
-                s.deliveries.sent(s.next_number, 1);
-                s.next_number = (s.next_number + 1) & 1023;
-                self.stats.timing_replies_sent += 1;
-                send.push(reply);
+                if outstanding(s) < WINDOW - 1 {
+                    let reply = timing::Decoded::new(
+                        s.outbound,
+                        s.next_number,
+                        before.0,
+                        before.1,
+                        Control::Reply {
+                            echo: timestamp,
+                            clock: elapsed_bits(s.origin_ms, now_ms),
+                        },
+                    )
+                    .map_err(|_| Error::Shape)?
+                    .encode();
+                    s.deliveries.sent(s.next_number, 1);
+                    s.next_number = (s.next_number + 1) & 1023;
+                    s.last_was_empty_control = false;
+                    self.stats.timing_replies_sent += 1;
+                    send.push(reply);
+                }
                 (Event::TimingRequest, true)
             }
             Route::Control {
@@ -765,7 +770,10 @@ impl Application {
             .commit(header.number(), accepted)
             .map_err(|_| Error::Shape)?;
         // First timing request once the client's queued data starts.
-        if matches!(event, Event::Queued { .. }) && s.last_request_ms.is_none() {
+        if matches!(event, Event::Queued { .. })
+            && s.last_request_ms.is_none()
+            && outstanding(s) < WINDOW - 1
+        {
             send.push(Self::timing_request(s, now_ms));
             self.stats.timing_requests_sent += 1;
         }
@@ -788,6 +796,7 @@ impl Application {
         .encode();
         s.deliveries.sent(s.next_number, 1);
         s.next_number = (s.next_number + 1) & 1023;
+        s.last_was_empty_control = false;
         s.own_request = Some((timestamp, now_ms));
         s.last_request_ms = Some(now_ms);
         body
@@ -804,6 +813,7 @@ impl Application {
         let mut send = Vec::new();
         if let Some(last) = s.last_request_ms
             && now_ms.saturating_sub(last) >= policy.timing_interval_ms
+            && outstanding(s) < WINDOW - 1
         {
             send.push(Self::timing_request(s, now_ms));
             self.stats.timing_requests_sent += 1;
@@ -812,15 +822,25 @@ impl Application {
             && s.last_control_ms
                 .is_none_or(|last| now_ms.saturating_sub(last) >= policy.control_interval_ms)
         {
+            // Window-pressure probes reuse the preceding empty control's wire
+            // number. Allocating a fresh number on every timer tick can move
+            // the peer's next report beyond the 32-position acceptance window.
+            let number = if s.last_was_empty_control {
+                s.next_number.wrapping_sub(1) & 1023
+            } else {
+                s.deliveries.sent(s.next_number, 1);
+                let number = s.next_number;
+                s.next_number = (s.next_number + 1) & 1023;
+                number
+            };
             let body = sequenced(
                 s.outbound,
-                s.next_number,
+                number,
                 s.history.frontier().value(),
                 s.history.bits(),
                 &control_payload(CONTROL_EMPTY, &[]),
             );
-            s.deliveries.sent(s.next_number, 1);
-            s.next_number = (s.next_number + 1) & 1023;
+            s.last_was_empty_control = true;
             s.last_control_ms = Some(now_ms);
             self.stats.empty_controls_sent += 1;
             send.push(body);
@@ -925,6 +945,7 @@ impl Application {
         }
         s.deliveries.sent(s.next_number, count);
         s.next_number = (s.next_number + count as u16) & 1023;
+        s.last_was_empty_control = false;
         s.next_frame = s.next_frame.wrapping_add(1);
         self.stats.sent += count;
         Ok(bodies)

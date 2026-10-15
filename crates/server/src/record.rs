@@ -88,6 +88,8 @@ pub struct Recorder {
     sender: mpsc::Sender<Message>,
     origin: Instant,
     raw: bool,
+    #[cfg(feature = "network-test")]
+    test_directory: Option<PathBuf>,
 }
 
 pub struct RecorderThread {
@@ -127,6 +129,8 @@ pub fn start_with_options(
     let mut events =
         File::create_new(directory.join("events.jsonl")).map_err(|_| Failure::Output)?;
     let (sender, mut receiver) = mpsc::channel::<Message>(CHANNEL_CAPACITY);
+    #[cfg(feature = "network-test")]
+    let test_directory = options.raw.then(|| directory.clone());
     let handle = thread::Builder::new()
         .name("nfs-server-recorder".into())
         .spawn(move || {
@@ -207,12 +211,21 @@ pub fn start_with_options(
             sender,
             origin: Instant::now(),
             raw: options.raw,
+            #[cfg(feature = "network-test")]
+            test_directory,
         },
         RecorderThread { handle },
     ))
 }
 
 impl Recorder {
+    #[cfg(feature = "network-test")]
+    pub(crate) fn loss_trigger(&self, connection: u32) -> Option<PathBuf> {
+        self.test_directory
+            .as_ref()
+            .map(|directory| directory.join(format!("world-{connection}-loss.txt")))
+    }
+
     pub async fn chunk(
         &self,
         service: &'static str,

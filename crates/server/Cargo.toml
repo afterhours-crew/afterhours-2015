@@ -11,6 +11,10 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Explicit local reliability testing; absent from normal builds.
+network-test = ["tokio/fs"]
+
 [dependencies]
 nfs-lsx = { path = "../lsx" }
 httparse = "=1.10.1"

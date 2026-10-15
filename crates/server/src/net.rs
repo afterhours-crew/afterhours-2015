@@ -95,6 +95,8 @@ pub struct WorldServe {
 mod items;
 mod players;
 mod qos;
+#[cfg(feature = "network-test")]
+mod test_loss;
 pub use items::{Profile as InventoryProfile, Service as InventoryService};
 const FILE_RECEIVE_MS: u64 = 60_000;
 #[derive(Debug, Default)]
@@ -910,6 +912,8 @@ pub async fn world_host(
     let mut proof_sent = false;
     let mut last_input = Instant::now();
     let mut tick = tokio::time::interval(WORLD_TICK);
+    #[cfg(feature = "network-test")]
+    let mut test_loss = test_loss::Loss::new(recorder.loss_trigger(connection));
     info!(connection, "world host ready");
     loop {
         if let Err(error) = listener.advance_sequences(now_ms()) {
@@ -984,12 +988,20 @@ pub async fn world_host(
                 }
                 last_input = Instant::now();
                 let raw = buffer[..n].to_vec();
-                if recorder.chunk("world", connection, Direction::In, &raw, None).await.is_err() {
+                #[cfg(feature = "network-test")]
+                let dropped = test_loss.drop_input(now_ms());
+                #[cfg(not(feature = "network-test"))]
+                let dropped = false;
+                let note = dropped.then_some("diagnostic packet loss before transport");
+                if recorder.chunk("world", connection, Direction::In, &raw, note).await.is_err() {
                     return;
                 }
+                if dropped { continue; }
                 host.receive(&raw, now_ms(), &mut listener)
             }
             _ = tick.tick() => {
+                #[cfg(feature = "network-test")]
+                test_loss.poll(now_ms()).await;
                 if last_input.elapsed() > WORLD_IDLE {
                     info!(connection, "world host idle; closing");
                     return;
