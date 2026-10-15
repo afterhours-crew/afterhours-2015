@@ -313,7 +313,12 @@ answers are recorded. Configured arrival sequences, vehicle bindings and world
 membership then complete the handoff; this does not yet establish drivable play.
 
 `--redirector-port 0` chooses an ephemeral port (the default).
-`--idle-seconds` accepts 1–3600, and `--qos-seconds` accepts 1–86400.
+`--idle-seconds` accepts 1–3600. `--qos-seconds` bounds each QoS TLS request
+(default 10 seconds, accepts 1–86400); it no longer expires the listeners after
+time spent at activation or the splash. QoS remains available until server
+shutdown, with at most four concurrent TLS workers, bounded request buffers and
+no accumulated request history. UDP probes have a fixed buffer and no lifetime
+request quota. Shutdown cancels incomplete TLS reads and releases both listeners.
 `--stop-file <path>` requests graceful shutdown when that path appears; Ctrl+C
 also stops the server. Relative stop paths follow the process working directory.
 Legacy `--owned-only`, `--owned-world-connection`, `--owned-world-readiness` and

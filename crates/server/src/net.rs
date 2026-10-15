@@ -13,7 +13,7 @@ use crate::{
     seeds::{OsRandom, OsSeeds, fresh},
 };
 use crate::{world_handshake, world_readiness};
-use nfs_server_support::{discovery, qos_service, qos_tls};
+use nfs_server_support::{discovery, qos_tls};
 use nfs_world::{
     application::{self, Policy},
     session::{Event, Host, Ids, StageName},
@@ -53,6 +53,7 @@ pub struct Config {
     pub root: std::path::PathBuf,
     pub redirector_port: u16,
     pub idle: Duration,
+    /// Deadline for one QoS TLS request; idle listeners follow server shutdown.
     pub qos_lifetime: Duration,
     pub world_content: Option<Arc<crate::content::WorldContent>>,
     pub inventory: Option<InventoryProfile>,
@@ -93,6 +94,7 @@ pub struct WorldServe {
 
 mod items;
 mod players;
+mod qos;
 pub use items::{Profile as InventoryProfile, Service as InventoryService};
 const FILE_RECEIVE_MS: u64 = 60_000;
 #[derive(Debug, Default)]
@@ -642,44 +644,32 @@ pub async fn serve(
     let connections = Arc::new(AtomicU32::new(0));
     let mut tasks = JoinSet::new();
 
-    {
-        let identity = identity.clone();
-        let deadline = Instant::now() + config.qos_lifetime;
-        let (qos_tcp, qos_udp) = (listeners.qos_tcp, listeners.qos_udp);
-        tasks.spawn(async move {
-            let observed = tokio::task::spawn_blocking(move || {
-                qos_service::run(qos_tcp, qos_udp, deadline, &identity)
-            })
-            .await;
-            match observed {
-                Ok(o) => info!(
-                    stop = ?o.status,
-                    accepted = o.accepted_connections,
-                    datagrams = o.udp.received_datagrams,
-                    replies = o.udp.replies_sent,
-                    "qos service ended"
-                ),
-                Err(_) => warn!("qos service task failed"),
-            }
-        });
-    }
+    let mut qos = tokio::spawn(qos::serve(
+        listeners.qos_tcp,
+        listeners.qos_udp,
+        identity.clone(),
+        config.qos_lifetime,
+        shutdown.clone(),
+    ));
 
     loop {
-        if tasks.len() >= MAX_CONNECTIONS {
-            tasks.join_next().await;
-            continue;
-        }
         tokio::select! {
             _ = shutdown.changed() => break,
+            ended = &mut qos => {
+                tasks.shutdown().await;
+                if *shutdown.borrow() { return Ok(()); }
+                warn!(?ended, "qos service ended before server shutdown");
+                return Err(Failure::Io);
+            }
             Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
-            accepted = listeners.redirector.accept() => {
+            accepted = listeners.redirector.accept(), if tasks.len() < MAX_CONNECTIONS => {
                 let Ok((stream, peer)) = accepted else { continue };
                 let n = connections.fetch_add(1, Ordering::Relaxed);
                 let reply = redirector_reply.clone();
                 let recorder = recorder.clone();
                 tasks.spawn(async move { redirector(stream, peer, n, &reply, &recorder).await });
             }
-            accepted = listeners.blaze.accept() => {
+            accepted = listeners.blaze.accept(), if tasks.len() < MAX_CONNECTIONS => {
                 let Ok((mut stream, peer)) = accepted else { continue };
                 let n = connections.fetch_add(1, Ordering::Relaxed);
                 let pack = pack.clone();
@@ -800,6 +790,7 @@ pub async fn serve(
         }
     }
     tasks.shutdown().await;
+    qos.await.map_err(|_| Failure::Io)??;
     Ok(())
 }
 pub async fn world_host(

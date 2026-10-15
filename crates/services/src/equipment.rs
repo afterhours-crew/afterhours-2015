@@ -14,6 +14,8 @@ const BATCH_NAMESPACE: u64 = 1 << 61;
 
 mod appearance;
 mod livery;
+mod removal;
+mod reset;
 pub use appearance::{LicensePlate, Paint, WindowTint};
 
 #[derive(Clone, Debug, Eq, PartialEq)]

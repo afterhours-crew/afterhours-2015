@@ -50,6 +50,40 @@ fn fixture(repo: &dyn InventoryRepository, account: AccountId) -> (InventoryCata
 }
 
 #[test]
+fn removing_library_livery_keeps_the_library_item_and_its_saved_fields() {
+    let repo = MemoryRepository::default();
+    let account = who(1);
+    let (catalog, before) = fixture(&repo, account);
+    let offers = Offers::new([[3; 16]]).unwrap();
+    let items = inventory::collection(&before, catalog.bindings()).unwrap();
+    let equipped = prepare_vehicle(account, before.generation, &items, 10, &catalog)
+        .unwrap()
+        .with_part(&items, 20, &catalog, &offers)
+        .unwrap();
+    let installed = commit(&repo, account, &catalog, &equipped, Timestamp(3)).unwrap();
+    let items = inventory::collection(&installed, catalog.bindings()).unwrap();
+    let removal = prepare_vehicle(account, installed.generation, &items, 10, &catalog)
+        .unwrap()
+        .without_part(&items, 20, &catalog, &offers)
+        .unwrap();
+    let saved = commit(&repo, account, &catalog, &removal, Timestamp(4)).unwrap();
+    assert!(
+        !saved.items[&ItemId::new(10).unwrap()]
+            .sub_items
+            .contains(&ItemId::new(20).unwrap())
+    );
+    assert_eq!(
+        saved.items[&ItemId::new(20).unwrap()],
+        installed.items[&ItemId::new(20).unwrap()]
+    );
+    assert_eq!(saved.tables, installed.tables);
+    assert_eq!(
+        commit(&repo, account, &catalog, &removal, Timestamp(5)).unwrap(),
+        saved
+    );
+}
+
+#[test]
 fn library_livery_and_body_paint_commit_together_and_survive_reopen() {
     let directory = std::env::temp_dir().join(format!(
         "afterhours-livery-{}-{}",

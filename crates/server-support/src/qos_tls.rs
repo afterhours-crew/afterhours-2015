@@ -7,6 +7,10 @@ use std::{
     io::{self, Read, Write},
     mem,
     net::{Ipv4Addr, SocketAddrV4, TcpStream},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -137,6 +141,7 @@ pub enum Stop {
     ResponseComplete,
     UnsupportedRequest,
     Deadline,
+    Cancelled,
     Eof,
     WireLimit,
     HeaderLimit,
@@ -193,7 +198,7 @@ impl Observation {
 }
 
 pub fn capture(socket: TcpStream, deadline: Instant, identity: &Identity) -> Observation {
-    capture_inner(socket, deadline, identity, None)
+    capture_inner(socket, deadline, identity, None, None)
 }
 
 pub fn serve_latency(
@@ -205,7 +210,22 @@ pub fn serve_latency(
     if *udp.ip() != Ipv4Addr::LOCALHOST || udp.port() == 0 {
         return Observation::empty(Stop::NonLoopback);
     }
-    capture_inner(socket, deadline, identity, Some(udp))
+    capture_inner(socket, deadline, identity, Some(udp), None)
+}
+
+/// Serve one bounded request with cancellation checked at most every 100 ms
+/// while blocked on socket I/O. No async runtime is required by this adapter.
+pub fn serve_latency_cancellable(
+    socket: TcpStream,
+    deadline: Instant,
+    identity: &Identity,
+    udp: SocketAddrV4,
+    cancelled: Arc<AtomicBool>,
+) -> Observation {
+    if *udp.ip() != Ipv4Addr::LOCALHOST || udp.port() == 0 {
+        return Observation::empty(Stop::NonLoopback);
+    }
+    capture_inner(socket, deadline, identity, Some(udp), Some(cancelled))
 }
 
 fn capture_inner(
@@ -213,6 +233,7 @@ fn capture_inner(
     deadline: Instant,
     identity: &Identity,
     udp: Option<SocketAddrV4>,
+    cancelled: Option<Arc<AtomicBool>>,
 ) -> Observation {
     let mut result = Observation::empty(Stop::Setup);
     let addresses = socket
@@ -246,6 +267,7 @@ fn capture_inner(
         client: Vec::new(),
         server: Vec::new(),
         stopped: None,
+        cancelled,
     };
     let Ok(mut stream) = SslStream::new(ssl, io) else {
         return result;
@@ -289,7 +311,7 @@ fn respond_latency(stream: &mut SslStream<CaptureIo>, result: &mut Observation, 
     result.http_response = response;
     while result.http_response_bytes < result.http_response.len() {
         if stream.get_mut().remaining().is_err() {
-            result.status = Stop::Deadline;
+            result.status = stream.get_ref().stopped.unwrap_or(Stop::Deadline);
             return;
         }
         match stream.ssl_write(&result.http_response[result.http_response_bytes..]) {
@@ -359,7 +381,7 @@ fn observe_header(stream: &mut SslStream<CaptureIo>, result: &mut Observation) {
     }
     while result.http_header.len() < MAX_HTTP_HEADER_BYTES {
         if stream.get_mut().remaining().is_err() {
-            result.status = Stop::Deadline;
+            result.status = stream.get_ref().stopped.unwrap_or(Stop::Deadline);
             return;
         }
         let mut byte = [0];
@@ -451,9 +473,18 @@ struct CaptureIo {
     client: Vec<u8>,
     server: Vec<u8>,
     stopped: Option<Stop>,
+    cancelled: Option<Arc<AtomicBool>>,
 }
 impl CaptureIo {
     fn remaining(&mut self) -> io::Result<Duration> {
+        if self
+            .cancelled
+            .as_ref()
+            .is_some_and(|c| c.load(Ordering::Relaxed))
+        {
+            self.stopped = Some(Stop::Cancelled);
+            return Err(io::ErrorKind::Interrupted.into());
+        }
         self.deadline
             .checked_duration_since(Instant::now())
             .filter(|d| !d.is_zero())
@@ -461,6 +492,22 @@ impl CaptureIo {
                 self.stopped = Some(Stop::Deadline);
                 io::ErrorKind::TimedOut.into()
             })
+    }
+
+    fn wait_slice(&self, left: Duration) -> Duration {
+        if self.cancelled.is_some() {
+            left.min(Duration::from_millis(100))
+        } else {
+            left
+        }
+    }
+
+    fn polling_timeout(&self, error: &io::Error) -> bool {
+        self.cancelled.is_some()
+            && matches!(
+                error.kind(),
+                io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+            )
     }
 
     fn capacity(&mut self, requested: usize) -> io::Result<usize> {
@@ -500,7 +547,7 @@ impl Read for CaptureIo {
                 io::Error::other("TLS observation allocation")
             })?;
             self.socket
-                .set_read_timeout(Some(left))
+                .set_read_timeout(Some(self.wait_slice(left)))
                 .map_err(|e| self.failed(e))?;
             match self.socket.read(&mut bytes[..wanted]) {
                 Ok(n) => {
@@ -511,6 +558,7 @@ impl Read for CaptureIo {
                     return Ok(n);
                 }
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) if self.polling_timeout(&e) => {}
                 Err(e) => return Err(self.failed(e)),
             }
         }
@@ -529,7 +577,7 @@ impl Write for CaptureIo {
                 io::Error::other("TLS observation allocation")
             })?;
             self.socket
-                .set_write_timeout(Some(left))
+                .set_write_timeout(Some(self.wait_slice(left)))
                 .map_err(|e| self.failed(e))?;
             match self.socket.write(&bytes[..wanted]) {
                 Ok(0) => return Err(self.failed(io::ErrorKind::WriteZero.into())),
@@ -538,6 +586,7 @@ impl Write for CaptureIo {
                     return Ok(n);
                 }
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) if self.polling_timeout(&e) => {}
                 Err(e) => return Err(self.failed(e)),
             }
         }

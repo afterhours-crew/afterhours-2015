@@ -64,7 +64,9 @@ impl PlayerListener {
                 state.edits.remove(&call.player);
             }
             Operation::Equip { .. }
+            | Operation::RemovePart { .. }
             | Operation::StockPerformance { .. }
+            | Operation::StockVisual { .. }
             | Operation::StockPaint
             | Operation::Dyno { .. }
             | Operation::Handling { .. }
@@ -75,7 +77,9 @@ impl PlayerListener {
             | Operation::RimSize { .. } => {
                 let vehicle = match call.operation {
                     Operation::Equip { vehicle, .. }
+                    | Operation::RemovePart { vehicle, .. }
                     | Operation::StockPerformance { vehicle }
+                    | Operation::StockVisual { vehicle, .. }
                     | Operation::Dyno { vehicle, .. }
                     | Operation::Handling { vehicle, .. } => vehicle,
                     _ => {
@@ -137,6 +141,7 @@ impl PlayerListener {
                     return Err(replication::Error::UnknownObject);
                 };
                 if let Operation::Equip { item, .. }
+                | Operation::RemovePart { item, .. }
                 | Operation::RimSize { item, .. }
                 | Operation::Livery { item, .. } = call.operation
                     && !inventory.items.items.get(&item).is_some_and(|p| {
@@ -177,7 +182,9 @@ impl PlayerListener {
                 if matches!(
                     call.operation,
                     Operation::Equip { .. }
+                        | Operation::RemovePart { .. }
                         | Operation::StockPerformance { .. }
+                        | Operation::StockVisual { .. }
                         | Operation::StockPaint
                         | Operation::Paint { .. }
                         | Operation::LicensePlate { .. }
@@ -192,7 +199,24 @@ impl PlayerListener {
                     edit.part_edits.push(call.operation);
                 }
                 match call.operation {
-                    Operation::StockPerformance { .. } => edit.dyno = None,
+                    Operation::StockVisual { .. } => {
+                        // A reset supersedes earlier stance settings, while
+                        // later handling calls can tune the restored stance.
+                        let retained = nfs_world::items::HandlingChanges::new(
+                            edit.handling.iter().filter(|(category, _)| {
+                                nfs_world::items::HandlingChanges::class(*category)
+                                    != Ok(
+                                        nfs_world::items::DefinitionClass::ControlArmTuningItemData,
+                                    )
+                            }),
+                        )
+                        .map_err(|_| replication::Error::Shape)?;
+                        edit.handling = retained;
+                        edit.dyno = None;
+                    }
+                    Operation::StockPerformance { .. } | Operation::RemovePart { .. } => {
+                        edit.dyno = None;
+                    }
                     Operation::Equip { item, .. } => {
                         if edit.selections.last() != Some(&item) {
                             if edit.selections.len() >= 128 {

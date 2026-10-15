@@ -99,11 +99,35 @@ terminator; tint retains finite values from zero through one. Factory paint come
 from the current car's installed definition and preserves tint, plate, livery and
 wheel finishes. Portable tests cover exact request bounds, cancellation, retries,
 account isolation, stale edits, storage reopen and later equipment changes. These
-three menu paths still need live verification; the attempted combined run stopped
-at the splash because a Windows firewall prompt from a completed test covered it.
+menu paths still need full live persistence verification. A later live test changed
+window tint and committed the edit; garage return and restart remain pending.
+Plate editing exposed a preceding utility text-filter request that is still
+unsupported; the client restored the old text without saving. This prerequisite
+is tracked in [issue #68](https://github.com/afterhours-crew/afterhours-2015/issues/68).
+An earlier attempted combined run stopped at the splash because a Windows
+firewall prompt from a completed test covered it.
 The QoS rejection test now checks invalid addresses without binding wildcard
 sockets. The remaining network integration tests use loopback; no firewall rule
 or administrator access was added.
+
+An activation wait also exposed a startup delay: the finite QoS listener expired
+before the player reached the splash. The server now keeps QoS listeners alive
+until shutdown, with four concurrent TLS workers and a separate deadline for each
+request. Tests cover idle waits, repeated TLS and UDP requests, stalled clients
+and prompt shutdown. The next live run completed startup requests in about three
+seconds, reached the garage and closed normally. This run did not repeat the
+long activation wait; that lifetime regression has automated coverage. See
+[issue #67](https://github.com/afterhours-crew/afterhours-2015/issues/67).
+
+The candidate also models removing the installed part in a selected class/location
+and restoring stock visual parts. Removal retains the owned record and cash.
+Visual reset restores stock appearance and tint, resets installed stance tuning,
+and preserves performance, body paint, plate text and livery; its wheel option
+retains rims, tires, calipers and brake discs. Body kits and plate fittings are
+removed. Portable tests cover ownership, ordering, cancellation, retries, stale
+edits and reopen, and an independent installed-state comparison passes. These
+two operations have not yet been exercised through the game UI; see
+[issue #66](https://github.com/afterhours-crew/afterhours-2015/issues/66).
 
 Resetting all performance parts is now modeled separately from factory paint.
 It restores the car's recorded performance defaults, retains visual parts and

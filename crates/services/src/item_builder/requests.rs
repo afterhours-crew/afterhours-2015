@@ -11,7 +11,15 @@ pub enum Operation {
     StockPerformance {
         vehicle: u16,
     },
+    StockVisual {
+        vehicle: u16,
+        keep_wheels: bool,
+    },
     Equip {
+        vehicle: u16,
+        item: u64,
+    },
+    RemovePart {
         vehicle: u16,
         item: u64,
     },
@@ -72,11 +80,11 @@ impl Binding {
             .map_err(|_| Error::Shape)?;
         if envelope.references().first() != Some(&self.scene)
             || route.selector() != self.selector
-            || !matches!(route.method_index(), 0..=5 | 7..=11 | 13)
+            || !matches!(route.method_index(), 0..=13)
         {
             return Ok(None);
         }
-        let vehicle_call = matches!(route.method_index(), 0 | 3 | 8 | 13);
+        let vehicle_call = matches!(route.method_index(), 0 | 3 | 6 | 8 | 12 | 13);
         if envelope.words() != [0, 0]
             || !envelope.remaining().is_empty()
             || envelope.references().len() != if vehicle_call { 3 } else { 2 }
@@ -88,6 +96,21 @@ impl Binding {
             return Err(Error::Ownership);
         }
         let operation = match route.method_index() {
+            6 => {
+                let vehicle = envelope.references()[2];
+                let args = route.arguments();
+                if vehicle == 0 || args.len() != 15 {
+                    return Err(Error::Shape);
+                }
+                let keep_wheels = args.read_u32(0, 8).map_err(|_| Error::Shape)?;
+                if keep_wheels > 1 {
+                    return Err(Error::Shape);
+                }
+                Operation::StockVisual {
+                    vehicle,
+                    keep_wheels: keep_wheels != 0,
+                }
+            }
             13 => {
                 let vehicle = envelope.references()[2];
                 if vehicle == 0 || route.arguments().len() != 7 {
@@ -172,7 +195,7 @@ impl Binding {
                     size: args.read_u32(64, 8).map_err(|_| Error::Shape)? as u8,
                 }
             }
-            0 => {
+            0 | 12 => {
                 if route.arguments().len() != 71 {
                     return Err(Error::Shape);
                 }
@@ -189,7 +212,11 @@ impl Binding {
                 if vehicle == 0 || item == 0 {
                     return Err(Error::Shape);
                 }
-                Operation::Equip { vehicle, item }
+                if route.method_index() == 0 {
+                    Operation::Equip { vehicle, item }
+                } else {
+                    Operation::RemovePart { vehicle, item }
+                }
             }
             3 => {
                 let vehicle = envelope.references()[2];
@@ -311,10 +338,13 @@ mod tests {
     }
 
     fn equip(item: u64) -> BitWriter {
+        part_call(0, item, 15)
+    }
+    fn part_call(method: u32, item: u64, vehicle: u16) -> BitWriter {
         let mut payload = BitWriter::new();
         payload
             .put(6, 9)
-            .put(0, 32)
+            .put(method.into(), 32)
             .put(item as u32 as u64, 32)
             .put(item >> 32, 32)
             .put(127, 7);
@@ -324,10 +354,85 @@ mod tests {
             .put(3, 8)
             .put(10, 13)
             .put(12, 13)
-            .put(15, 13)
+            .put(vehicle.into(), 13)
             .put(14, 9)
             .put_span(payload.span());
         body
+    }
+    #[test]
+    fn removal_has_owned_player_vehicle_u64_and_exact_extent() {
+        let binding = Binding::new(10, 6).unwrap();
+        let item = 0x12345678_90abcdef;
+        let wire = part_call(12, item, 15);
+        assert_eq!(
+            binding.read(wire.span(), |p| p == 12),
+            Ok(Some(Call {
+                player: 12,
+                operation: Operation::RemovePart { vehicle: 15, item },
+            }))
+        );
+        for end in 0..wire.len() {
+            assert!(
+                binding
+                    .read(wire.span().slice(0, end).unwrap(), |_| true)
+                    .is_err()
+            );
+        }
+        for bad in [part_call(12, 0, 15), part_call(12, item, 0)] {
+            assert_eq!(binding.read(bad.span(), |_| true), Err(Error::Shape));
+        }
+        assert_eq!(binding.read(wire.span(), |_| false), Err(Error::Ownership));
+        let mut concat = wire.clone();
+        concat.put_span(wire.span());
+        assert_eq!(binding.read(concat.span(), |_| true), Err(Error::Shape));
+    }
+    #[test]
+    fn visual_reset_requires_one_bounded_option_and_the_owned_vehicle() {
+        let binding = Binding::new(10, 6).unwrap();
+        let wire = |option: u8, vehicle: u16| {
+            let mut payload = BitWriter::new();
+            payload
+                .put(6, 9)
+                .put(6, 32)
+                .put(option.into(), 8)
+                .put(127, 7);
+            let mut body = BitWriter::new();
+            body.put(0, 64)
+                .put(3, 8)
+                .put(10, 13)
+                .put(12, 13)
+                .put(vehicle.into(), 13)
+                .put(payload.bytes().len() as u64, 9)
+                .put_span(payload.span());
+            body
+        };
+        for option in [0, 1] {
+            let body = wire(option, 15);
+            assert_eq!(
+                binding.read(body.span(), |p| p == 12),
+                Ok(Some(Call {
+                    player: 12,
+                    operation: Operation::StockVisual {
+                        vehicle: 15,
+                        keep_wheels: option != 0
+                    }
+                }))
+            );
+            for end in 0..body.len() {
+                assert!(
+                    binding
+                        .read(body.span().slice(0, end).unwrap(), |_| true)
+                        .is_err()
+                );
+            }
+            assert_eq!(binding.read(body.span(), |_| false), Err(Error::Ownership));
+            let mut extra = body.clone();
+            extra.put(0, 1);
+            assert_eq!(binding.read(extra.span(), |_| true), Err(Error::Shape));
+        }
+        for bad in [wire(2, 15), wire(255, 15), wire(0, 0)] {
+            assert_eq!(binding.read(bad.span(), |_| true), Err(Error::Shape));
+        }
     }
     #[test]
     fn equip_low_word_precedes_high_word_and_every_extent_is_checked() {

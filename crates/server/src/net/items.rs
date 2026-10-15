@@ -148,6 +148,9 @@ impl Profile {
                         Operation::StockPerformance { .. } => {
                             edit.with_stock_performance(&request.items, &service.catalog)
                         }
+                        Operation::StockVisual { keep_wheels, .. } => {
+                            edit.with_stock_visual(&request.items, &service.catalog, keep_wheels)
+                        }
                         Operation::StockPaint => edit.with_stock_paint(&service.catalog),
                         Operation::LicensePlate { plate } => edit.with_license_plate(plate),
                         Operation::WindowTint { tint } => edit.with_window_tint(tint),
@@ -163,6 +166,12 @@ impl Profile {
                             preset,
                         ),
                         Operation::Equip { item, .. } => edit.with_part(
+                            &request.items,
+                            item,
+                            &service.catalog,
+                            service.offers.as_deref().ok_or(Error::Worker)?,
+                        ),
+                        Operation::RemovePart { item, .. } => edit.without_part(
                             &request.items,
                             item,
                             &service.catalog,

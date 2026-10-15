@@ -10,6 +10,8 @@ use nfs_world_core::items::{Definition, DefinitionFlags, Layout, OwnershipLevel}
 
 mod appearance;
 mod livery;
+mod removal;
+mod reset;
 
 #[test]
 fn performance_reset_is_ordered_retry_safe_isolated_and_durable() {
