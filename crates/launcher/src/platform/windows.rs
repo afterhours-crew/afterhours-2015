@@ -10,6 +10,8 @@ use crate::exit::{Failure, Result};
 use nfs_afterhours_sys::windows as sys;
 use std::time::{Duration, Instant};
 
+pub mod lease;
+
 /// The Windows platform.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct WindowsPlatform;
@@ -42,6 +44,16 @@ impl SessionGuard for JobGuard {
 }
 
 impl JobGuard {
+    /// Create the session job and place this process in it. Refuses when the
+    /// process is already inside a job, because kill-on-close would then
+    /// apply to a tree we do not own.
+    pub fn attach() -> Result<JobGuard> {
+        WindowsPlatform.refuse_inside_job()?;
+        Ok(JobGuard {
+            job: sys::Job::attach_current_process()?,
+        })
+    }
+
     /// Whether a process is in this session's job.
     pub fn owns(&self, pid: u32) -> Result<bool> {
         let process = sys::Process::open(pid, false)?;

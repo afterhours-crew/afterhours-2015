@@ -77,16 +77,19 @@ jobs:
       - run: cargo test --workspace --locked
 
   launcher:
-    name: Launcher checks (Windows)
+    name: Launcher tests (Windows)
+    # The launcher's own crates build quickly (no OpenSSL or SQLite), so their
+    # Windows tests, including the job-object and process-memory wrappers,
+    # run on every push rather than only on pull requests.
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: PowerShell version
-        shell: pwsh
-        run: $PSVersionTable.PSVersion
-      - name: Launcher tests
-        shell: pwsh
-        run: ./launcher/Test-Launcher.ps1
-      # Test-Session.ps1 refuses elevated sessions by design and GitHub-hosted
-      # Windows runners are always elevated, so it stays a local developer check.
+      - name: Install pinned toolchain
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: launcher
+      - run: cargo test -p nfs-afterhours -p nfs-afterhours-sys --locked

@@ -22,16 +22,20 @@
 //! `docs/LOCAL-LAUNCHER.md` for how to run the game.
 
 pub mod cli;
+pub mod clock;
 pub mod commands;
 pub mod compat;
 pub mod digest;
+pub mod endpoint;
 pub mod exit;
 pub mod install;
 pub mod marker;
 pub mod paths;
 pub mod platform;
+pub mod preflight;
 pub mod records;
 pub mod session;
+pub mod supervisor;
 
 /// Test support shared by the unit tests: unique scratch directories.
 #[cfg(test)]
