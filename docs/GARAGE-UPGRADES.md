@@ -188,8 +188,15 @@ uses the same textures as the car's default. That test cannot distinguish a
 correct reset from a rendering failure. The later owner test fitted a different
 frame and background, removed them, and confirmed stock appearance with the new
 plate text retained through garage return; the subsequent restart preserved it.
-Stock visual reset remains untested through the game UI; see
-[issue #66](https://github.com/afterhours-crew/afterhours-2015/issues/66).
+The first stock visual reset test exposed a request-width bug: the wheel option
+is one bit, but the decoder required a byte. The local preview reset while the
+server rejected the request, preventing the following garage exit from progressing.
+The decoder is corrected, with portable tests for both options and the following
+commit, plus an exact captured-request comparison. The follow-up live test stopped
+when screen capture failed during loading, so corrected reset persistence remains
+unverified. The subsequent factory-paint preview in the failed run is not valid
+acceptance either. See [issue #71](https://github.com/afterhours-crew/afterhours-2015/issues/71)
+and [issue #66](https://github.com/afterhours-crew/afterhours-2015/issues/66).
 
 Resetting all performance parts is now modeled separately from factory paint.
 It restores the car's recorded performance defaults, retains visual parts and

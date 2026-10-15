@@ -99,13 +99,12 @@ impl Binding {
             6 => {
                 let vehicle = envelope.references()[2];
                 let args = route.arguments();
-                if vehicle == 0 || args.len() != 15 {
+                // The option is one bit, followed by the payload's six alignment
+                // bits. Its native return type does not imply a byte on the wire.
+                if vehicle == 0 || args.len() != 7 {
                     return Err(Error::Shape);
                 }
-                let keep_wheels = args.read_u32(0, 8).map_err(|_| Error::Shape)?;
-                if keep_wheels > 1 {
-                    return Err(Error::Shape);
-                }
+                let keep_wheels = args.read_u32(0, 1).map_err(|_| Error::Shape)?;
                 Operation::StockVisual {
                     vehicle,
                     keep_wheels: keep_wheels != 0,
@@ -389,13 +388,13 @@ mod tests {
     #[test]
     fn visual_reset_requires_one_bounded_option_and_the_owned_vehicle() {
         let binding = Binding::new(10, 6).unwrap();
-        let wire = |option: u8, vehicle: u16| {
+        let wire = |option: bool, vehicle: u16, width: usize| {
             let mut payload = BitWriter::new();
-            payload
-                .put(6, 9)
-                .put(6, 32)
-                .put(option.into(), 8)
-                .put(127, 7);
+            payload.put(6, 9).put(6, 32).put(u64::from(option), width);
+            // Alignment bits are not an additional option or required zeroes.
+            while !payload.len().is_multiple_of(8) {
+                payload.put(1, 1);
+            }
             let mut body = BitWriter::new();
             body.put(0, 64)
                 .put(3, 8)
@@ -406,15 +405,15 @@ mod tests {
                 .put_span(payload.span());
             body
         };
-        for option in [0, 1] {
-            let body = wire(option, 15);
+        for option in [false, true] {
+            let body = wire(option, 15, 1);
             assert_eq!(
                 binding.read(body.span(), |p| p == 12),
                 Ok(Some(Call {
                     player: 12,
                     operation: Operation::StockVisual {
                         vehicle: 15,
-                        keep_wheels: option != 0
+                        keep_wheels: option
                     }
                 }))
             );
@@ -430,7 +429,8 @@ mod tests {
             extra.put(0, 1);
             assert_eq!(binding.read(extra.span(), |_| true), Err(Error::Shape));
         }
-        for bad in [wire(2, 15), wire(255, 15), wire(0, 0)] {
+        // Reject the formerly assumed byte-wide payload and invalid car refs.
+        for bad in [wire(false, 15, 8), wire(true, 15, 8), wire(false, 0, 1)] {
             assert_eq!(binding.read(bad.span(), |_| true), Err(Error::Shape));
         }
     }

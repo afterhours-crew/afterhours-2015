@@ -9,8 +9,8 @@ fn visual_reset(scene: u16, player: u16, car: u16, keep: bool) -> BitWriter {
     payload
         .put(2, 9)
         .put(6, 32)
-        .put(u64::from(keep), 8)
-        .put(0, 7);
+        .put(u64::from(keep), 1)
+        .put(0, 6);
     let mut body = BitWriter::new();
     body.put(0, 64)
         .put(3, 8)
@@ -56,6 +56,26 @@ fn visual_reset_clears_prior_stance_only_and_preserves_later_tuning_order() {
     );
     assert_eq!(repo.snapshot(account).unwrap(), before);
     assert!(accept(&mut listener, &visual_reset(scene, player, car + 1, true)).is_err());
+}
+
+#[test]
+fn both_visual_reset_options_allow_the_following_commit() {
+    for keep in [false, true] {
+        let (mut listener, _, repo, account, scene, player, car) = fixture();
+        let before = repo.snapshot(account).unwrap();
+        assert!(accept(&mut listener, &visual_reset(scene, player, car, keep)).unwrap());
+        assert!(accept(&mut listener, &wire(scene, player, None, 5, 0)).unwrap());
+        let request = listener.take_equipment().unwrap();
+        assert_eq!(
+            request.part_edits,
+            [nfs_services::item_builder::Operation::StockVisual {
+                vehicle: car,
+                keep_wheels: keep,
+            }]
+        );
+        assert!(listener.take_equipment().is_none());
+        assert_eq!(repo.snapshot(account).unwrap(), before);
+    }
 }
 
 #[tokio::test]
