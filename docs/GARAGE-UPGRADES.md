@@ -7,6 +7,11 @@ owned item IDs are never copied from a saved account or hardcoded in the server.
 The car's own installed compatibility list restricts both purchase and equip;
 an offer for a different car cannot be bought or fitted just because it exists
 in the catalog. Recorded stock defaults remain available to restore.
+Installed fitment restrictions also apply to supported leaf parts. Equip is rejected
+when the selected part conflicts with equipment that would remain on the car.
+Restricted parts can still be purchased as spares. Parts in storage and the old
+part in the replaced slot do not block the selection. Front and rear slots are checked separately. Removing or
+replacing a conflict earlier in the same edit allows a later compatible selection.
 The candidate also stages the 31 handling controls against installed parts and
 the car's transmission flag. REP-only offers use the account's saved score and
 installed thresholds. Visual parts match exact class and, where applicable,
@@ -111,9 +116,18 @@ Ride height and front/rear camber are saved on the installed control-arm tuning
 item and included in the free-roam car's chassis customization. The owner's new
 values survived restart, and the car appeared lowered outside. The night views
 did not establish front and rear camber visually, so that acceptance remains open.
-Canard and caliper purchases failed because the current projection excludes
-parts with nonempty compatibility restrictions; this is tracked in
-[issue #69](https://github.com/afterhours-crew/afterhours-2015/issues/69).
+Canard and caliper purchases initially failed because the projection excluded
+all parts with nonempty fitment restrictions. The current candidate models those
+restrictions at equip time. Follow-up live checks bought and fitted two compatible
+canards and an Endless rear caliper, including both definitions that failed in the
+owner's test. The first canard and caliper survived a garage/world/garage loop and
+a game/server restart; both were marked currently equipped after restart. Buying
+a conflicting canard as a spare deducted its price once, kept it owned but
+restricted, and left the installed canard and finish unchanged. Saved records
+retain the original body/wheel finish and stance through these changes. Outdoor
+night views did not establish the small parts visually. These checks cover the
+tested car and combinations, not every restriction edge; follow-up acceptance is
+tracked in [issue #69](https://github.com/afterhours-crew/afterhours-2015/issues/69).
 For twelve captured visual-part requests, complete purchase replies were sent
 122–173 ms after request completion; successful purchases' subsequent inventory
 updates were sent after 432–529 ms. These measurements do not establish how long
@@ -356,8 +370,15 @@ the inventory notification and vehicle equipment are refreshed from that same st
 Beginning another edit cancels the pending changes. Missing or unsupported
 installed targets refuse the save instead of changing an unrelated item.
 
-The version 5 item catalog includes complete front/rear locations for spatial
+The version 7 item catalog includes complete front/rear locations for spatial
 parts, the car's compatibility list and minimum REP scores for every offer.
+It adds the installed definition-to-definition fitment restrictions to the earlier
+catalog formats. Content preparation rebuilds caches produced before this policy;
+older explicit catalog versions retain their original offer policy. Restriction
+rows require known definitions, unique targets and bounded counts. The server
+checks fitment when equipping, using the ordered pending edit. Purchasing a part
+does not install it; conflicting parts remain owned spares until they can be fitted.
+Completed purchase receipts still replay if equipment changes later.
 Unknown unlock conditions are excluded. REP is checked against the same committed
 account generation as the purchase debit; changing a displayed level cannot
 authorize a purchase. An existing purchase receipt remains retry-safe after an

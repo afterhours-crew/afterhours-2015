@@ -65,6 +65,7 @@ pub struct Offers {
     vehicle_scopes: Option<BTreeMap<Guid, BTreeSet<Guid>>>,
     part_policy: Option<PartPolicy>,
     item_unlocks: Option<crate::item_unlocks::Policy>,
+    fitment_restrictions: Option<BTreeMap<Guid, BTreeSet<Guid>>>,
 }
 impl Offers {
     pub fn definitions(&self) -> impl Iterator<Item = &Guid> {
@@ -126,6 +127,7 @@ impl Offers {
             vehicle_scopes: None,
             part_policy: None,
             item_unlocks: None,
+            fitment_restrictions: None,
         })
     }
 }
@@ -403,6 +405,8 @@ pub fn buy(
         if !offers.unlocked(&snapshot, &guid)? {
             return Err(Error::Rejected(Reason::Offer));
         }
+        // Restricted parts can be purchased as spares. Equipment validates
+        // fitment when the owner later attempts to install them.
         let balance = Balance::from_snapshot(&snapshot)?
             .debit(definition.buy_price)
             .ok_or(Error::Rejected(Reason::Funds))?;

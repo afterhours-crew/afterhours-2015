@@ -14,7 +14,7 @@
 use crate::Error;
 use crate::scan::Assets;
 use nfs_frostbite::ebx::{Fields, Object, Value};
-use nfs_services::item_content::{FORMAT, ITEM_UNLOCK_VERSION, ItemContent};
+use nfs_services::item_content::{FITMENT_VERSION, FORMAT, ItemContent};
 use nfs_world_core::items::{DefinitionClass, Layout};
 use serde_json::{Value as Json, json};
 
@@ -248,7 +248,6 @@ fn part_offer(object: &Object, granted: bool) -> Result<bool, Error> {
         // UsesScope is false above: an authored but inactive part scope must
         // not suppress shared wheels. The car's active scope still determines
         // compatibility at purchase and equip.
-        && empty("SortedRestrictions")?
         && empty("SubItems")?
         && empty("AdditionalItems")?)
 }
@@ -280,7 +279,31 @@ fn vehicle_scope(object: &Object) -> Result<Option<Json>, Error> {
     ))
 }
 
-/// Build the canonical `nfs-item-definitions` version 6 document.
+fn fitment_restrictions(object: &Object) -> Result<Option<Json>, Error> {
+    let conflicts = object
+        .fields
+        .get("SortedRestrictions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| missing(&object.class, "SortedRestrictions"))?;
+    let conflicts = conflicts
+        .iter()
+        .map(|v| match v {
+            Value::Guid(guid) => Ok(nfs_frostbite::hex(guid)),
+            _ => Err(missing(&object.class, "SortedRestrictions GUID")),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if conflicts.is_empty() {
+        return Ok(None);
+    }
+    let guid = object
+        .guid
+        .ok_or_else(|| missing(&object.class, "exported GUID"))?;
+    Ok(Some(
+        json!({"definition":nfs_frostbite::hex(&guid),"conflicts":conflicts}),
+    ))
+}
+
+/// Build the canonical `nfs-item-definitions` version 7 document.
 pub fn build(assets: &mut Assets) -> Result<Vec<u8>, Error> {
     let thresholds = nfs_services::reputation::Thresholds::from_json(
         &serde_json::from_slice(&crate::reputation::build(assets)?)
@@ -298,6 +321,7 @@ pub fn build(assets: &mut Assets) -> Result<Vec<u8>, Error> {
     let mut vehicle_scopes = Vec::new();
     let mut part_locations = Vec::new();
     let mut purchase_requirements = Vec::new();
+    let mut restrictions = Vec::new();
     let item_unlocks = unlocks::items(assets, &thresholds)?;
     for value in system
         .fields
@@ -321,6 +345,9 @@ pub fn build(assets: &mut Assets) -> Result<Vec<u8>, Error> {
         if let Some(scope) = vehicle_scope(&object)? {
             vehicle_scopes.push(scope);
         }
+        if let Some(row) = fitment_restrictions(&object)? {
+            restrictions.push(row);
+        }
         if initial_offer(&object)? || object.guid.is_some_and(|g| item_unlocks.contains_key(&g)) {
             let level = word(&object.fields, &object.class, "UnlocksAtRepLevel")?;
             let score = thresholds.score_for_level(level).map_err(|_| {
@@ -338,13 +365,14 @@ pub fn build(assets: &mut Assets) -> Result<Vec<u8>, Error> {
     let initial = references(assets, &system, "Inventory")?;
     let document = json!({
         "format": FORMAT,
-        "version": ITEM_UNLOCK_VERSION,
+        "version": FITMENT_VERSION,
         "build_sha256": nfs_services::SUPPORTED_BUILD_SHA256,
         "definitions": definitions,
         "initial_definitions": initial,
         "purchase_offers": purchase_offers,
         "vehicle_scopes": vehicle_scopes,
         "part_locations":part_locations,
+        "fitment_restrictions":restrictions,
         "purchase_requirements":purchase_requirements,
         "category_unlocks":unlocks::build(assets, &thresholds)?,
         "item_unlocks": item_unlocks.iter().map(|(g, (_, s))| json!({"definition":nfs_frostbite::hex(g),"minimum_rep_score":s})).collect::<Vec<_>>(),
@@ -359,6 +387,29 @@ pub fn build(assets: &mut Assets) -> Result<Vec<u8>, Error> {
 #[cfg(test)]
 mod offer_tests {
     use super::*;
+    #[test]
+    fn fitment_conflicts_preserve_installed_guids_and_reject_malformed_arrays() {
+        let mut object = Object {
+            class: "CanardItemData".into(),
+            guid: Some([1; 16]),
+            fields: Fields(vec![(
+                "SortedRestrictions".into(),
+                Value::Array(vec![Value::Guid([2; 16])]),
+            )]),
+        };
+        assert_eq!(
+            fitment_restrictions(&object).unwrap(),
+            Some(
+                json!({"definition":"01010101010101010101010101010101","conflicts":["02020202020202020202020202020202"]})
+            )
+        );
+        object.fields.0[0].1 = Value::Array(vec![Value::UInt32(2)]);
+        assert!(fitment_restrictions(&object).is_err());
+        object.fields.0[0].1 = Value::Array(vec![]);
+        assert_eq!(fitment_restrictions(&object).unwrap(), None);
+        object.fields.0.clear();
+        assert!(fitment_restrictions(&object).is_err());
+    }
     #[test]
     fn vehicle_scope_comes_only_from_explicit_installed_guid_arrays() {
         let mut object = Object {
@@ -454,7 +505,6 @@ mod offer_tests {
                 "UnlockCriteriaDescriptionID",
                 Value::String("special requirement".into()),
             ),
-            ("SortedRestrictions", Value::Array(vec![Value::UInt32(1)])),
             (
                 "SubItems",
                 Value::Array(vec![Value::Pointer(nfs_frostbite::ebx::Pointer::Internal(

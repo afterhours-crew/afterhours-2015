@@ -61,6 +61,48 @@ impl Install {
 }
 
 #[test]
+fn installed_fitment_restrictions_round_trip_and_reject_unknown_targets() {
+    use synthetic::Field;
+    for (target, valid) in [(2, true), (99, false)] {
+        let mut content = assets();
+        content[0] = item(
+            1,
+            "SpoilerItemData",
+            vec![],
+            vec![],
+            vec![
+                ("DownforceSetting", Field::Int(5)),
+                ("SpoilerTuning", Field::RawPointer(0)),
+                ("WideCollision", Field::Bool(false)),
+                ("PerformanceModifier", Field::RawPointer(0)),
+                ("MeshGuids", Field::Guids(vec![])),
+                (
+                    "SortedRestrictions",
+                    Field::Guids(vec![synthetic::reference(target).1]),
+                ),
+            ],
+        );
+        let install = install_with(&content);
+        let prepared = install.prepare();
+        if valid {
+            let items = ItemContent::load(&prepared.unwrap().path(Kind::ItemContent)).unwrap();
+            let json = items.to_json();
+            assert_eq!(json["version"], nfs_services::item_content::FITMENT_VERSION);
+            assert_eq!(
+                json["fitment_restrictions"],
+                serde_json::json!([{
+                    "definition": nfs_frostbite::hex(&synthetic::reference(1).1),
+                    "conflicts": [nfs_frostbite::hex(&synthetic::reference(2).1)],
+                }])
+            );
+            assert_eq!(ItemContent::from_json(&json).unwrap().to_json(), json);
+        } else {
+            assert!(prepared.is_err());
+        }
+    }
+}
+
+#[test]
 fn builds_outputs_the_service_loaders_accept() {
     let install = install_with(&assets());
     let prepared = install.prepare().unwrap();

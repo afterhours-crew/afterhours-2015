@@ -81,6 +81,9 @@ pub fn item(
             Field::Imports(additional.into_iter().map(reference).collect()),
         ),
     ];
+    if !extra.iter().any(|(name, _)| *name == "SortedRestrictions") {
+        fields.push(("SortedRestrictions", Field::Guids(vec![])));
+    }
     fields.extend(extra);
     let (partition, instance) = reference(seed);
     Asset {

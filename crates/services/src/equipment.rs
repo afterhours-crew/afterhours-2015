@@ -145,6 +145,12 @@ impl Edit {
         if installed.len() > 1 {
             return Err(Error::Unsupported);
         }
+        if !offers
+            .fits(&preview, self.vehicle(), &selected.definition, catalog)
+            .map_err(|_| Error::Unsupported)?
+        {
+            return Err(Error::Unsupported);
+        }
         if installed.first() != Some(&part) {
             self.after.children.retain(|id| !installed.contains(id));
             self.after.children.push(part);
