@@ -30,6 +30,12 @@ and steering response also survived both transitions. Earlier runs exercised
 stock restoration and driving with the filter. The split-message receiver fix
 resolved the previously lost dyno cache.
 
+On 2026-10-15 the owner reported a noticeable difference while driving compared
+with the car before performance parts were installed, and accepted that the parts
+affect actual driving. This is a qualitative owner-validated result for the tested
+configuration; it does not measure the displayed performance figures or validate
+every handling control. Stock-performance-reset restart remains pending.
+
 A later visual test raised the separate test account to REP70, bought a raised
 hood and taped headlights, and verified both on the car in free roam and after
 returning to the garage. Both also survived a full game/server restart.
@@ -112,8 +118,9 @@ the plate text and retained fitments, then returned to the garage. All three wra
 uploads still matched durable storage byte for byte. A later test on a separate
 account copy reopened the saved rear-window stripe, moved it, changed body paint
 and intentionally overwrote the same library entry. All three replacement uploads
-matched durable storage. Visual confirmation of that overwrite after restart and
-factory-paint reset remain pending.
+matched durable storage. A full game/server restart then retained the green paint,
+original windshield logo and moved rear-window stripe. Reopening the decal editor
+confirmed the saved position and scale. Factory-paint reset remains pending.
 
 Ride height and front/rear camber are saved on the installed control-arm tuning
 item and included in the free-roam car's chassis customization. The owner's new
@@ -127,10 +134,14 @@ owner's test. The first canard and caliper survived a garage/world/garage loop a
 a game/server restart; both were marked currently equipped after restart. Buying
 a conflicting canard as a spare deducted its price once, kept it owned but
 restricted, and left the installed canard and finish unchanged. Saved records
-retain the original body/wheel finish and stance through these changes. Outdoor
-night views did not establish the small parts visually. These checks cover the
-tested car and combinations, not every restriction edge; follow-up acceptance is
-tracked in [issue #69](https://github.com/afterhours-crew/afterhours-2015/issues/69).
+retain the original body/wheel finish and stance through these changes. The owner
+then confirmed the canards were clearly visible in free roam. Changing to rims
+with larger openings and red calipers made the calipers clearly visible too;
+the owner explicitly validated their outdoor appearance on 2026-10-15. These are
+owner-reported visual passes for the tested car and combinations, not every
+restriction edge or caliper definition. Together with the earlier transition,
+restart and conflicting-fitment checks, they complete the acceptance recorded in
+[issue #69](https://github.com/afterhours-crew/afterhours-2015/issues/69).
 For twelve captured visual-part requests, complete purchase replies were sent
 122–173 ms after request completion; successful purchases' subsequent inventory
 updates were sent after 432–529 ms. These measurements do not establish how long
@@ -219,8 +230,9 @@ the server's driving inputs. A live transmission comparison also confirmed that
 Manual Gears holds first gear under throttle while automatic shifts into second;
 the manual behavior was also observed after restarting game and server.
 The short stock-versus-supercharger acceleration comparison was inconclusive:
-wheelspin and launch control were not controlled. A clearer performance comparison
-and broader handling checks remain pending; menu numbers alone do not prove them.
+wheelspin and launch control were not controlled. The owner's later driving
+comparison validates a noticeable upgrade effect qualitatively. It does not
+establish measured acceleration figures; broader handling checks remain pending.
 
 REP-driven performance unlocks are separate from the visual category mask.
 The candidate reads explicit item-unlock branches from the installed progression
