@@ -35,6 +35,36 @@ with the car before performance parts were installed, and accepted that the part
 affect actual driving. This is a qualitative owner-validated result for the tested
 configuration; it does not measure the displayed performance figures or validate
 every handling control. Stock-performance-reset restart remains pending.
+The owner then restored stock performance and selected full-grip tuning, reporting
+less sliding while driving. This validates the observed combined configuration;
+the test changed parts and tuning together, so it does not isolate either change
+or every slider's contribution.
+The owner then installed eight performance upgrades and reported that the car was
+definitely faster. The transaction audit accounted for all eight upgrades and the
+two visual purchases, including the exact remaining balance. It found no nitrous
+purchase in that batch. A separate explicit test bought and equipped the 5 lb
+time-refill nitrous kit for its catalog price, retained it through a garage return
+and normal shutdown, and showed blue exhaust jets when activated while moving.
+The installed label and balance survived a full game/server restart. A subsequent
+boost visibly depleted the gauge, which returned to full after release. This
+completes [the nitrous test](https://github.com/Afterhours-Crew/afterhours-2015/issues/72)
+for this kit; exact power gain, refill duration and other variants were not measured.
+
+Both stock-visual reset choices passed a subsequent combined test. “Except
+Wheels” restored the stock body parts while retaining the selected wheels and
+their finish through free roam and garage return. “Including Wheels” selected
+the stock rim, tire and caliper definitions. The final stock parts survived free
+roam, garage return and a full game/server restart. Correcting the reset option's
+one-bit decoding resolved the rejected request that previously stalled later
+garage actions. Portable regression tests and actual-request comparisons cover
+both options and their bounds.
+
+The paint library's Remove action restored factory body paint and removed the
+equipped body decals. The gray body and cleared windshield survived free roam,
+garage return and restart; installed performance parts, nitrous and plate text
+were retained. The stock rear wheel still had its previously saved green finish.
+These checks establish the tested part and body-paint resets, without claiming
+that resetting parts also clears every wheel-finish setting.
 
 A later visual test raised the separate test account to REP70, bought a raised
 hood and taped headlights, and verified both on the car in free roam and after
