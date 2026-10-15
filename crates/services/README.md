@@ -2,6 +2,15 @@
 
 State-owned services built on the storage port and typed protocol models.
 
+The utility text check (`9/20`) uses an explicit local policy for garage text:
+UTF-8 without control characters, up to 512 bytes, passes unchanged. Longer text
+receives the native string-too-long result; invalid text receives the other-error
+result. Each response retains the request's entry order and correlation. The
+service is stateless, does not contact EA and does not implement EA's moderation
+rules. Local ingress limits are 32 entries, 1,024 bytes per input and a 40 KiB body;
+malformed or oversized requests receive no successful reply. Text is not logged.
+The plate editor's seven-byte limit is enforced separately by its item save.
+
 Static control catalogs (`7/15`, `2050/75`, `2050/78`, `2055/1`) consume a
 bounded `nfs-control-catalogs` version-1 document with named key scopes, ordered
 integer pairs, kill-switch names and SpeedList type definitions. Limited features

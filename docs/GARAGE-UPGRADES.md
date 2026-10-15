@@ -100,10 +100,14 @@ from the current car's installed definition and preserves tint, plate, livery an
 wheel finishes. Portable tests cover exact request bounds, cancellation, retries,
 account isolation, stale edits, storage reopen and later equipment changes. These
 menu paths still need full live persistence verification. A later live test changed
-window tint and committed the edit; garage return and restart remain pending.
-Plate editing exposed a preceding utility text-filter request that is still
-unsupported; the client restored the old text without saving. This prerequisite
-is tracked in [issue #68](https://github.com/afterhours-crew/afterhours-2015/issues/68).
+window tint and committed the edit; the slider retained its setting after restarting
+both game and server. The local utility text filter now allows valid UTF-8 text
+without control characters, bounds requests and returns native result codes.
+It makes no external calls and does not implement EA's moderation policy. The
+game accepted a plate edit with this reply, but did not send a commit before the
+next editor began; the plate reverted on entering free roam. Plate persistence
+therefore remains open. The text-filter prerequisite and its live result are
+tracked in [issue #68](https://github.com/afterhours-crew/afterhours-2015/issues/68).
 An earlier attempted combined run stopped at the splash because a Windows
 firewall prompt from a completed test covered it.
 The QoS rejection test now checks invalid addresses without binding wildcard

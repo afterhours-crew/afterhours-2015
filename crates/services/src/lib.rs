@@ -28,6 +28,7 @@ pub mod reputation;
 pub mod shared_wraps;
 pub mod stats;
 pub mod telemetry;
+pub mod text_filter;
 
 /// Build identity required by versioned content documents; no game data is bundled.
 pub const SUPPORTED_BUILD_SHA256: &str =
