@@ -48,8 +48,9 @@ cargo test --workspace --locked
 ```
 
 The [CI workflow](.github/workflows/ci.yml) runs the same three gates on every
-push to a `codex/` branch and every pull request, with tests on Linux and
-Windows, plus the Windows launcher transaction checks. The session cleanup
+push to a `codex/` branch and every pull request. Tests run on Linux for every
+push and additionally on Windows for pull requests and main, alongside the
+Windows launcher transaction checks. The session cleanup
 script refuses elevated sessions and hosted runners are elevated, so run it
 locally. A red run must be fixed before a pull request is reviewed.
 
