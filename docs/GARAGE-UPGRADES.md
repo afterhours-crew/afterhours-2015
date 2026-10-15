@@ -96,6 +96,30 @@ menu path. Broader visual parts and the complete wrap-edit workflow remain unfin
 performance numbers changing immediately after purchase are only a local preview;
 the return/restart checks are needed to establish that they were saved.
 
+A combined owner test on 2026-10-15 changed tint, plate fittings/text, spoiler,
+fenders, splitter, mirrors, body paint and stance, then saved a new wrap with a
+large windshield decal. The owner confirmed the installed appearance survived
+free roam and garage return. Discarding an extra decal and paint preview restored
+the saved appearance; removing the plate fittings kept the accepted text; changing
+the front tires preserved the finish. A subsequent agent test restarted both game
+and server and confirmed the saved windshield decal in the garage and free roam,
+the plate text and retained fitments, then returned to the garage. All three wrap
+uploads still matched durable storage byte for byte. Intentional wrap overwrite,
+factory-paint reset and editing a reloaded recipe remain separate pending checks.
+
+Ride height and front/rear camber are saved on the installed control-arm tuning
+item and included in the free-roam car's chassis customization. The owner's new
+values survived restart, and the car appeared lowered outside. The night views
+did not establish front and rear camber visually, so that acceptance remains open.
+Canard and caliper purchases failed because the current projection excludes
+parts with nonempty compatibility restrictions; this is tracked in
+[issue #69](https://github.com/afterhours-crew/afterhours-2015/issues/69).
+For twelve captured visual-part requests, complete purchase replies were sent
+122–173 ms after request completion; successful purchases' subsequent inventory
+updates were sent after 432–529 ms. These measurements do not establish how long
+the visible loading indicator lasted. Further timing work is tracked in
+[issue #70](https://github.com/afterhours-crew/afterhours-2015/issues/70).
+
 The candidate supports plate text, window tint and restoring factory body paint.
 Plate text uses the native seven-byte limit and terminator; tint retains finite
 values from zero through one. Factory paint comes
@@ -147,8 +171,10 @@ plate-frame removal sent the modeled request and removed the installed child
 without changing cash, plate text, tint or paint. Its appearance was unchanged
 in free roam and after restart; inspection then showed that the selected frame
 uses the same textures as the car's default. That test cannot distinguish a
-correct reset from a rendering failure. A distinct frame needs testing. Stock visual
-reset remains untested through the game UI; see
+correct reset from a rendering failure. The later owner test fitted a different
+frame and background, removed them, and confirmed stock appearance with the new
+plate text retained through garage return; the subsequent restart preserved it.
+Stock visual reset remains untested through the game UI; see
 [issue #66](https://github.com/afterhours-crew/afterhours-2015/issues/66).
 
 Resetting all performance parts is now modeled separately from factory paint.
