@@ -49,6 +49,40 @@ const MAX_VALUE_BYTES: i32 = 512 * 1024 + 1024;
 const MAX_SQL_BYTES: i32 = 16 * 1024;
 const MAX_LIST_BYTES: usize = MAX_NESTED * 8;
 
+#[cfg(windows)]
+fn windows_local_root(canonical: PathBuf) -> Result<PathBuf, Error> {
+    use std::path::{Component, Prefix};
+    let mut components = canonical.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return Err(Error::Config);
+    };
+    let drive = match prefix.kind() {
+        Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => drive,
+        // WAL requires shared memory on a local filesystem. Do not reinterpret
+        // a UNC share or a device namespace as a local drive path.
+        _ => return Err(Error::Config),
+    };
+    if components.next() != Some(Component::RootDir) {
+        return Err(Error::Config);
+    }
+    // SQLite's Windows VFS classifies any leading double backslash as UNC,
+    // including the verbatim drive prefix returned by Rust's canonicalize.
+    // Give it a normal drive path so local WAL connections use local locking.
+    let mut local = PathBuf::from(format!("{}:\\", char::from(drive)));
+    for component in components {
+        if !matches!(component, Component::Normal(_)) {
+            return Err(Error::Config);
+        }
+        local.push(component.as_os_str());
+    }
+    // Removing a verbatim prefix can change Win32 name interpretation (for
+    // example trailing dots/spaces). Never silently choose another directory.
+    if local.canonicalize().map_err(|_| Error::Config)? != canonical {
+        return Err(Error::Config);
+    }
+    Ok(local)
+}
+
 impl From<rusqlite::Error> for Error {
     fn from(e: rusqlite::Error) -> Self {
         match e.sqlite_error_code() {
@@ -66,7 +100,8 @@ pub struct SqliteRepository {
 }
 impl SqliteRepository {
     /// `root` is an owned local directory (created when absent). Symlinks are
-    /// rejected; the canonical path is used from then on.
+    /// rejected; the resolved directory identity is retained. Windows uses an
+    /// equivalent normal drive path for SQLite's local WAL locking.
     pub fn open_owned_directory(root: &Path) -> Result<Self, Error> {
         std::fs::create_dir_all(root).map_err(|_| Error::Storage)?;
         let meta = std::fs::symlink_metadata(root).map_err(|_| Error::Storage)?;
@@ -74,6 +109,8 @@ impl SqliteRepository {
             return Err(Error::Config);
         }
         let root = root.canonicalize().map_err(|_| Error::Storage)?;
+        #[cfg(windows)]
+        let root = windows_local_root(root)?;
         Ok(Self { root })
     }
     /// The account's database file. Exposed for tests and backups.
@@ -512,6 +549,20 @@ impl SqliteRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    #[test]
+    fn local_wal_paths_reject_network_device_and_relative_names() {
+        for path in [
+            r"\\server\share\account",
+            r"\\?\UNC\server\share\account",
+            r"\\.\C:\account",
+            r"\\?\Volume{00000000-0000-0000-0000-000000000000}\account",
+            r"C:account",
+            r"relative",
+        ] {
+            assert_eq!(windows_local_root(PathBuf::from(path)), Err(Error::Config));
+        }
+    }
     #[test]
     fn list_round_trip_and_bounds() {
         let ids: Vec<ItemId> = (1..=3).filter_map(ItemId::new).collect();

@@ -43,6 +43,51 @@ impl Drop for TempDir {
 fn account(seed: u8) -> AccountId {
     AccountId::from_owned_config([seed; 16]).expect("nonzero account")
 }
+
+#[cfg(windows)]
+#[test]
+fn sqlite_uses_a_local_drive_path_and_preserves_the_canonical_directory() {
+    use std::path::{Component, Prefix};
+    let temp = TempDir::new("local-path");
+    let directory = temp.0.join("account space \u{e5}");
+    fs::create_dir(&directory).unwrap();
+    let canonical = directory.canonicalize().unwrap();
+    assert!(
+        matches!(canonical.components().next(), Some(Component::Prefix(p))
+        if matches!(p.kind(), Prefix::VerbatimDisk(_)))
+    );
+    let repo = SqliteRepository::open_owned_directory(&canonical).unwrap();
+    let path = repo.path(account(1));
+    assert!(
+        matches!(path.components().next(), Some(Component::Prefix(p))
+        if matches!(p.kind(), Prefix::Disk(_)))
+    );
+    assert_eq!(path.parent().unwrap().canonicalize().unwrap(), canonical);
+    let before = repo.open(account(1)).unwrap();
+    let reopened = SqliteRepository::open_owned_directory(&directory.join(".")).unwrap();
+    assert_eq!(reopened.path(account(1)), path);
+    assert_eq!(reopened.snapshot(account(1)).unwrap(), before);
+}
+
+#[cfg(windows)]
+#[test]
+fn verbatim_directory_that_would_select_another_win32_name_is_rejected() {
+    let temp = TempDir::new("verbatim-path");
+    let root = temp.0.canonicalize().unwrap();
+    fs::create_dir(root.join("distinct")).unwrap();
+    let unusual = root.join("distinct.");
+    fs::create_dir(&unusual).unwrap();
+    assert_ne!(
+        unusual.canonicalize().unwrap(),
+        root.join("distinct").canonicalize().unwrap()
+    );
+    assert!(matches!(
+        SqliteRepository::open_owned_directory(&unusual),
+        Err(Error::Config)
+    ));
+    assert_eq!(fs::read_dir(root.join("distinct")).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(&unusual).unwrap().count(), 0);
+}
 fn id(v: u64) -> ItemId {
     ItemId::new(v).expect("nonzero id")
 }
