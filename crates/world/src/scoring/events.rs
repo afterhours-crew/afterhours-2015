@@ -7,7 +7,7 @@
 use super::{
     Error,
     math::Value,
-    properties::{Port, Store},
+    properties::{DefaultMode, Port, Registration, Store},
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -132,7 +132,8 @@ pub trait Handler {
 /// Typed property interpreter for the ordinary synchronous publication path.
 /// Read values through the shared Store during the callback; an earlier nested
 /// callback may have changed them. `first` belongs to the outer publication,
-/// not the value's current readiness. Never commit external effects here.
+/// not the value's current readiness. Interface defaults report `first = true`
+/// even when explicitly replacing a ready value. Never commit external effects.
 pub trait PropertyHandler: Handler {
     fn properties(&mut self) -> &mut Store;
     fn property_changed(
@@ -196,7 +197,66 @@ impl<'a> Dispatch<'a> {
         if let Some(error) = self.fault {
             return Err(error);
         }
-        let result = self.publish_inner(state, source, value);
+        let result = self.publish_inner(state, source, value, false);
+        if let Err(error) = result {
+            self.fault = Some(error);
+        }
+        result
+    }
+
+    /// Register in the caller's verified construction order. Registration never
+    /// invokes a callback or forwards an existing value. During a publication,
+    /// new registrations take effect only on subsequent (including nested)
+    /// publications; the current traversal retains its snapshot.
+    pub fn register<H: PropertyHandler>(
+        &mut self,
+        state: &mut H,
+        registration: Registration,
+    ) -> Result<(), Error> {
+        if let Some(error) = self.fault {
+            return Err(error);
+        }
+        let result = (|| {
+            if state.properties().nodes() != self.graph.nodes {
+                return Err(Error::InvalidGraph);
+            }
+            self.step()?;
+            state.properties().register(registration)
+        })();
+        if let Err(error) = result {
+            self.fault = Some(error);
+        }
+        result
+    }
+
+    /// Apply a typed interface default, reporting whether it was published.
+    /// An absent authored default must be skipped by the caller, never replaced
+    /// with zero. The caller selects the verified binding mode: ordinary defaults
+    /// fill unready cells, while explicit overrides also replace ready cells.
+    /// Applied defaults always notify with `first = true`, retain before nested
+    /// callbacks, and share the complete transaction's budgets and rollback.
+    pub fn initialize<H: PropertyHandler>(
+        &mut self,
+        state: &mut H,
+        source: Port,
+        value: Value,
+        mode: DefaultMode,
+    ) -> Result<bool, Error> {
+        if let Some(error) = self.fault {
+            return Err(error);
+        }
+        let result = (|| {
+            if state.properties().nodes() != self.graph.nodes {
+                return Err(Error::InvalidGraph);
+            }
+            self.step()?;
+            let ready = state.properties().read(source)?.is_some();
+            if ready && mode == DefaultMode::IfUnready {
+                return Ok(false);
+            }
+            self.publish_inner(state, source, value, true)?;
+            Ok(true)
+        })();
         if let Err(error) = result {
             self.fault = Some(error);
         }
@@ -208,6 +268,7 @@ impl<'a> Dispatch<'a> {
         state: &mut H,
         source: Port,
         value: Value,
+        initialization: bool,
     ) -> Result<(), Error> {
         if state.properties().nodes() != self.graph.nodes {
             return Err(Error::InvalidGraph);
@@ -223,7 +284,7 @@ impl<'a> Dispatch<'a> {
                 self.step()?;
                 match listener {
                     super::properties::Registration::Notify(target) => {
-                        state.property_changed(target, change.first, self)?
+                        state.property_changed(target, initialization || change.first, self)?
                     }
                     super::properties::Registration::Forward { source, target } => {
                         // Native callbacks receive a pointer into the current

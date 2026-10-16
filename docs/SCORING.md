@@ -207,3 +207,21 @@ conversion, divide-by-zero retention, interpolation, extrapolation, finite
 bounds and malformed assemblies. Installation comparisons are separate from
 live acceptance. No captured output, extracted content or private dependency
 is required to build or test these modules.
+
+`AssetIndex::scoring_interfaces` reads each prefab instance's field declarations,
+including interfaces outside the object list. It preserves field order and signed
+ID bits, distinguishes Source and Target, and accepts empty, Boolean and finite
+Float32 defaults. Empty text leaves the field unready. Unknown types, reference
+defaults, malformed enum/name pairs, duplicate IDs and oversized input fail.
+This is a strict scalar subset, not the engine's general text-value parser.
+
+`Dispatch::register` appends a property listener or forwarder without invoking it
+or copying an existing value. This permits construction-time registration in the
+verified order. A current publication keeps its listener snapshot; a later nested
+publication sees registrations already appended. `Dispatch::initialize` applies
+an interface default either only while unready or as an explicit override, as
+selected by the binding compiler. Applied defaults notify with `first = true`,
+including overrides of a ready value; ordinary publications still derive that
+flag from prior readiness. Both operations share dispatch bounds, error latching
+and rollback. These APIs do not infer the installed binding modes, startup order
+or activation sequence, and do not enable a scoring participant.

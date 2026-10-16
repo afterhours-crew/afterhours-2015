@@ -19,6 +19,7 @@ pub mod arithmetic;
 pub mod boolean_fold;
 pub mod delay;
 pub mod events;
+pub mod interfaces;
 pub mod nodes;
 pub mod property_gate;
 pub mod realms;

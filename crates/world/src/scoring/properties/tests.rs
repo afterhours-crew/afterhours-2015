@@ -192,11 +192,172 @@ impl PropertyHandler for State {
                 4 => {
                     let _ = dispatch.publish(self, port(0), Value::Boolean(true));
                 }
+                5 if value > 0.0 => {
+                    dispatch.register(self, Registration::Notify(port(2)))?;
+                    dispatch.publish(self, port(0), Value::Float(0.0))?;
+                }
+                6 => {
+                    assert!(!dispatch.initialize(
+                        self,
+                        port(0),
+                        Value::Float(9.0),
+                        DefaultMode::IfUnready
+                    )?);
+                }
+                7 => {
+                    let _ = dispatch.register(self, Registration::Notify(port(9)));
+                }
+                8 => {
+                    let _ = dispatch.initialize(
+                        self,
+                        port(0),
+                        Value::Boolean(true),
+                        DefaultMode::Override,
+                    );
+                }
                 _ => {}
             }
         }
         Ok(())
     }
+}
+
+#[test]
+fn defaults_fill_once_and_explicit_override_notifies_as_initialization() {
+    let original = State::new(None, 6);
+    let graph = Graph::new(3, vec![]).unwrap();
+    let (mut next, _) = graph
+        .transaction(&original, |s, d| {
+            assert!(d.initialize(s, port(0), Value::Float(2.0), DefaultMode::IfUnready)?);
+            assert!(!d.initialize(s, port(1), Value::Float(3.0), DefaultMode::IfUnready)?);
+            assert!(d.initialize(s, port(0), Value::Float(2.0), DefaultMode::Override)?);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(next.value(port(0)), 2.0);
+    assert_eq!(
+        next.trace,
+        [
+            (port(1), true, 2.0),
+            (port(2), true, 2.0),
+            (port(1), true, 2.0),
+            (port(2), true, 2.0),
+        ]
+    );
+    next.mode = 0;
+    let (next, _) = graph.publish(&next, port(0), Value::Float(2.0)).unwrap();
+    assert_eq!(
+        &next.trace[4..],
+        &[(port(1), false, 2.0), (port(2), false, 2.0)]
+    );
+    assert_eq!(original.properties.read(port(0)), Ok(None));
+}
+
+#[test]
+fn initialization_retains_before_nested_callbacks_and_latches_failures() {
+    let graph = Graph::new(3, vec![]).unwrap();
+    let original = State::new(Some(Value::Float(7.0)), 1);
+    let (next, _) = graph
+        .transaction(&original, |s, d| {
+            d.initialize(s, port(0), Value::Float(5.0), DefaultMode::Override)?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        next.trace,
+        [
+            (port(1), true, 5.0),
+            (port(1), false, 0.0),
+            (port(2), false, 0.0),
+            (port(2), true, 0.0),
+        ]
+    );
+    assert_eq!(original.value(port(0)), 7.0);
+    for mode in [3, 4, 7, 8] {
+        let original = State::new(None, mode);
+        assert!(
+            graph
+                .transaction(&original, |s, d| {
+                    let _ = d.initialize(s, port(0), Value::Float(5.0), DefaultMode::IfUnready);
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert_eq!(original.properties.read(port(0)), Ok(None));
+        assert!(original.trace.is_empty());
+    }
+}
+
+#[test]
+fn construction_registrations_are_silent_and_publication_snapshots_are_stable() {
+    let mut original = State::new(None, 0);
+    original.properties = Store::new(3, vec![cell(None, vec![])]).unwrap();
+    let graph = Graph::new(3, vec![]).unwrap();
+    let (next, _) = graph
+        .transaction(&original, |s, d| {
+            d.initialize(s, port(0), Value::Float(2.0), DefaultMode::IfUnready)?;
+            d.register(s, Registration::Notify(port(1)))?;
+            assert!(s.trace.is_empty());
+            d.publish(s, port(0), Value::Float(3.0))
+        })
+        .unwrap();
+    assert_eq!(next.trace, [(port(1), false, 3.0)]);
+
+    original.mode = 5;
+    original.properties = Store::new(3, vec![cell(None, vec![port(1)])]).unwrap();
+    let (next, _) = graph
+        .publish(&original, port(0), Value::Float(2.0))
+        .unwrap();
+    assert_eq!(
+        next.trace,
+        [
+            (port(1), true, 2.0),
+            (port(1), false, 0.0),
+            (port(2), false, 0.0),
+        ]
+    );
+}
+
+#[test]
+fn late_forwarding_has_no_catchup_and_registration_limits_include_initial_listeners() {
+    let graph = Graph::new(3, vec![]).unwrap();
+    let mut original = State::new(None, 0);
+    original.properties = Store::new(
+        3,
+        vec![
+            isolated(Some(4.0), vec![port(0)]),
+            isolated(None, vec![port(1)]),
+        ],
+    )
+    .unwrap();
+    let (next, _) = graph
+        .transaction(&original, |s, d| {
+            d.register(s, forward(0, 1))?;
+            assert_eq!(s.properties.read(port(1)), Ok(None));
+            d.initialize(s, port(0), Value::Float(6.0), DefaultMode::Override)?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(next.value(port(1)), 6.0);
+    let mut bounded = original.clone();
+    bounded.properties = Store::new(3, vec![cell(None, vec![port(1); MAX_LISTENERS])]).unwrap();
+    assert_eq!(
+        graph.transaction(&bounded, |s, d| {
+            let _ = d.register(s, Registration::Notify(port(2)));
+            Ok(())
+        }),
+        Err(Error::Bound)
+    );
+    assert!(
+        graph
+            .transaction(&original, |s, d| {
+                for _ in 0..=crate::scoring::events::MAX_STEPS {
+                    d.initialize(s, port(0), Value::Float(1.0), DefaultMode::IfUnready)?;
+                }
+                Ok(())
+            })
+            .is_err()
+    );
 }
 
 #[test]

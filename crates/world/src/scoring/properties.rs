@@ -70,12 +70,20 @@ pub enum Registration {
     Forward { source: Port, target: Port },
 }
 
+/// Interface initialization is distinct from ordinary node publication.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DefaultMode {
+    IfUnready,
+    Override,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Store {
     nodes: usize,
     cells: Vec<Definition>,
     ports: BTreeMap<Port, usize>,
     registrations: Vec<Vec<Registration>>,
+    registration_count: usize,
 }
 
 pub(crate) struct Change {
@@ -137,6 +145,7 @@ impl Store {
                 .collect(),
             cells,
             ports,
+            registration_count: listener_count,
         })
     }
 
@@ -157,19 +166,7 @@ impl Store {
         }
         let mut store = Self::new(nodes, cells)?;
         for &registration in registrations {
-            let source = match registration {
-                Registration::Notify(port) => port,
-                Registration::Forward { source, target } => {
-                    let &src = store.ports.get(&source).ok_or(Error::MissingInput)?;
-                    let &dst = store.ports.get(&target).ok_or(Error::MissingInput)?;
-                    if store.cells[src].kind != store.cells[dst].kind {
-                        return Err(Error::InvalidGraph);
-                    }
-                    source
-                }
-            };
-            let &index = store.ports.get(&source).ok_or(Error::MissingInput)?;
-            store.registrations[index].push(registration);
+            store.register(registration)?;
         }
         Ok(store)
     }
@@ -182,6 +179,28 @@ impl Store {
 
     pub(crate) fn nodes(&self) -> usize {
         self.nodes
+    }
+
+    /// Append without invoking the new listener, even when its source is ready.
+    pub(crate) fn register(&mut self, registration: Registration) -> Result<(), Error> {
+        if self.registration_count >= MAX_LISTENERS {
+            return Err(Error::Bound);
+        }
+        let source = match registration {
+            Registration::Notify(port) => port,
+            Registration::Forward { source, target } => {
+                let &src = self.ports.get(&source).ok_or(Error::MissingInput)?;
+                let &dst = self.ports.get(&target).ok_or(Error::MissingInput)?;
+                if self.cells[src].kind != self.cells[dst].kind {
+                    return Err(Error::InvalidGraph);
+                }
+                source
+            }
+        };
+        let &index = self.ports.get(&source).ok_or(Error::MissingInput)?;
+        self.registrations[index].push(registration);
+        self.registration_count += 1;
+        Ok(())
     }
 
     /// Only the bounded event/property dispatcher may publish. Retain the cell
