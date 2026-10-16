@@ -74,6 +74,15 @@ fn value_kind(value: Value) -> Kind {
 pub fn compile(object: &Object) -> Result<Option<Declaration>, Error> {
     let mut d = Declaration::default();
     match object.class.as_str() {
+        "RaceVehiclePhysicsQueryEntityData" | "RaceVehicleDriftQueryEntityData" => {
+            let query = if object.class == "RaceVehiclePhysicsQueryEntityData" {
+                world::vehicle_query::Query::Physics
+            } else {
+                world::vehicle_query::Query::Drift
+            };
+            d.outputs
+                .extend(query.outputs().iter().map(|o| (o.field, o.kind)));
+        }
         "MathEntityData" | "CurveEntityData" => match super::compile(object)? {
             Calculation::Math { program, .. } => {
                 d.inputs

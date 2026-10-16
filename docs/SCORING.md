@@ -391,3 +391,30 @@ Input changes and activation alone do not load. Each Load publishes OutValue,
 including equal values, before OnLoaded; the event still applies when the output
 is unbound. The interpreter skips only the absent output publication, then runs
 the event. Engine save-state restoration and the full graph remain unimplemented.
+
+`vehicle_query` models scheduled physics and drift measurements from the query
+owner's vehicle. Complete output bindings include explicit equality-suppression
+flags. Physics construction offers an identity transform, zero velocity and
+false Boolean states; the two RPM outputs have no initial value. Drift offers
+zero velocity and angle. These are constructor inputs, not a policy for replacing
+shared cells; the interpreter still owns binding and initialization order.
+
+`Dispatch::vehicle_query` resolves a stable owned vehicle handle once. Missing
+participant/vehicle/physics data preserves all outputs. Physics publishes velocity,
+transform, three Boolean states, maximum RPM and RPM in that order, reading each
+measurement after earlier callbacks finish. Two Boolean states remain identified
+by their port IDs until their gameplay meanings and owned sources are established.
+Drift snapshots transform and velocity before publishing velocity, then publishes
+its signed angle in radians. The formula uses atan(lateral/abs(forward)); below
+f32 epsilon forward speed it uses atan(lateral). It is not an atan2 heading angle.
+
+Ready equal outputs suppress notifications only when the installed binding asks
+for it; signed zeros compare equal. Unready zero/false values still publish.
+Optional outputs, nested callbacks and failures use the graph's existing bounds
+and rollback. Nonfinite values and arithmetic overflow are rejected. Platform
+atan implementations can differ in their final bits from the client CRT.
+
+These APIs do not supply vehicle physics, ownership resolution, participant
+activation, update cadence, replication or REP awards. They must be called only
+for an active, scheduled query. Installed-data and constructed tests do not prove
+live driving support; scoring participants remain disabled.

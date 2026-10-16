@@ -22,6 +22,7 @@ pub mod stopwatch;
 pub mod synced;
 pub mod value;
 pub mod vector_length;
+pub mod vehicle_query;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {

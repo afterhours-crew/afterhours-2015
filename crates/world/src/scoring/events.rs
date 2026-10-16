@@ -458,3 +458,4 @@ mod score;
 mod stopwatches;
 mod synced;
 mod vector_lengths;
+mod vehicle_queries;

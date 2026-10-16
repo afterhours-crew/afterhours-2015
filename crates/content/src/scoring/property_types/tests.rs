@@ -12,6 +12,27 @@ fn object(class: &str, fields: Vec<(&str, Ebx)>) -> Object {
         fields: Fields(fields.into_iter().map(|(k, v)| (k.into(), v)).collect()),
     }
 }
+
+#[test]
+fn owned_vehicle_queries_declare_only_the_verified_output_types() {
+    use nfs_world::scoring::vehicle_query as q;
+    for (class, query) in [
+        ("RaceVehiclePhysicsQueryEntityData", q::Query::Physics),
+        ("RaceVehicleDriftQueryEntityData", q::Query::Drift),
+    ] {
+        let declaration = compile(&object(class, vec![])).unwrap().unwrap();
+        assert!(declaration.inputs.is_empty());
+        let mut expected: Vec<_> = query.outputs().iter().map(|o| (o.field, o.kind)).collect();
+        expected.sort_by_key(|p| p.0);
+        assert_eq!(declaration.outputs, expected);
+    }
+    let physics = compile(&object("RaceVehiclePhysicsQueryEntityData", vec![]))
+        .unwrap()
+        .unwrap();
+    assert!(physics.outputs.contains(&(q::AIRBORNE, Kind::Boolean)));
+    assert!(physics.outputs.contains(&(q::TRANSFORM, Kind::Transform)));
+    assert!(physics.outputs.contains(&(q::VELOCITY, Kind::Vec3)));
+}
 fn instruction(name: &str, code: i32, result: u32, p1: u32, p2: u32) -> Ebx {
     Ebx::Struct(
         object(
