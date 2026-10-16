@@ -3,6 +3,14 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 use super::*;
+
+pub(in crate::net) fn reload_inventory(
+    jobs: &Exchanges,
+    snapshot: &nfs_storage::Snapshot,
+) -> nfs_world::items::Collection {
+    nfs_services::inventory::collection(snapshot, jobs.profile.as_ref().unwrap().bindings())
+        .unwrap()
+}
 use nfs_storage::{Batch, MemoryRepository, Op};
 use nfs_world::{
     application::{Listener, Queued},
@@ -45,6 +53,161 @@ fn request(sequence: u32) -> Vec<u8> {
     }
     .encode()
     .to_vec()
+}
+
+#[test]
+fn unsupported_file_and_items_warn_without_payloads_or_storage_access() {
+    let repo = Arc::new(MemoryRepository::default());
+    let service = Service::new(repo.clone(), catalog());
+    let output = crate::diagnostics::testing::capture(|| {
+        let mut exchanges = Exchanges::new(Some(service.bind(account(3))), 19);
+        let mut listener = PlayerListener::new(999);
+        for _ in 0..2 {
+            transfer(
+                &mut listener,
+                0,
+                b"do-not-log-file-name",
+                b"do-not-log-file-body".to_vec(),
+            );
+            exchanges.start(&mut listener, 0, Timestamp(0));
+        }
+        transfer(&mut listener, 1, b"Items", vec![0; 5]);
+        exchanges.start(&mut listener, 0, Timestamp(0));
+        assert!(!exchanges.working());
+        assert_eq!(repo.snapshot(account(3)), Err(nfs_storage::Error::Absent));
+    });
+    assert_eq!(output.matches("WARN").count(), 2, "{output}");
+    for value in [
+        "connection=19",
+        "handler: 4",
+        "handler: 5",
+        "operation: 0",
+        "unsupported_total=3",
+        "suppressed_total=1",
+    ] {
+        assert!(output.contains(value), "{output}");
+    }
+    assert!(!output.contains("do-not-log"), "{output}");
+}
+
+/// Exercise File framing/acknowledgement for the item update integration tests.
+pub(in crate::net) fn deliver_notification(exchanges: &mut Exchanges) -> items::UpdateNotification {
+    let response = exchanges.pending[0].take().unwrap();
+    let mut sender =
+        nfs_world::files::sender::Sender::new(response.clone(), Default::default(), 0).unwrap();
+    let mut receiver = Receiver::default();
+    for ticket in 0..64 {
+        let Some(record) = sender.offer(ticket).unwrap() else {
+            break;
+        };
+        let wire = record.encode(sender.size()).unwrap();
+        let (decoded, _) = nfs_world::files::decode(wire.span(), receiver.size()).unwrap();
+        receiver.receive(&decoded).unwrap();
+        sender.sent(&record, ticket, ticket).unwrap();
+        sender.acknowledge(ticket, true, ticket).unwrap();
+    }
+    assert!(sender.done());
+    let received = receiver.take_completed().unwrap();
+    assert_eq!(received, response);
+    exchanges.started[0] = None; // accepted FileComplete for this delivery
+    items::UpdateNotification::decode(
+        &received.bytes,
+        exchanges.profile.as_ref().unwrap().bindings(),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn purchase_wire_reply_contains_only_purchased_item_and_retry_preserves_cash() {
+    let repo = Arc::new(MemoryRepository::default());
+    let car = Definition {
+        class: DefinitionClass::RaceVehicleItemData,
+        buy_price: 100,
+        sell_price: 50,
+        quantity: 1,
+        ownership_level: OwnershipLevel::Owned,
+        flags: DefinitionFlags::default(),
+        sub_items: vec![],
+        additional_items: vec![],
+        default_derived: Some(Derived::decode(items::Layout::RaceVehicle, &[0; 68]).unwrap()),
+    };
+    let part = Definition {
+        class: DefinitionClass::AirFilterItemData,
+        buy_price: 23,
+        sell_price: 10,
+        default_derived: Some(Derived::Empty),
+        flags: DefinitionFlags {
+            purchasable: true,
+            requires_owner: true,
+            ..Default::default()
+        },
+        ..car.clone()
+    };
+    let catalog =
+        Arc::new(InventoryCatalog::new([([1; 16], car), ([2; 16], part)], vec![[1; 16]]).unwrap());
+    let profile = Service::new(repo.clone(), catalog.clone())
+        .with_purchase_offers(nfs_services::purchase::Offers::new([[2; 16]]).unwrap())
+        .bind(account(19));
+    profile
+        .answer(request(2), Timestamp(1))
+        .await
+        .unwrap()
+        .unwrap();
+    repo.apply(
+        account(19),
+        &Batch {
+            id: 77,
+            expected_generation: 1,
+            ops: vec![nfs_services::bank::Balance(30).store()],
+        },
+        Timestamp(2),
+    )
+    .unwrap();
+    let purchase = items::PurchaseRequest {
+        sequence: 3,
+        owner: 1,
+        selection: items::PurchaseSelection::Definitions(vec![[2; 16]]),
+    };
+    let bought = profile
+        .answer(purchase.encode().unwrap(), Timestamp(3))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(bought.kind, ReplyKind::Purchase);
+    let wire = items::PurchaseReply::decode(&bought.reply.bytes, catalog.bindings()).unwrap();
+    assert_eq!(wire.sequence, 3);
+    assert_eq!(wire.purchased.unwrap().roots, [2]);
+    assert_eq!(bought.items.items.len(), 2);
+    let before = repo.snapshot(account(19)).unwrap();
+    assert_eq!(
+        nfs_services::bank::Balance::from_snapshot(&before)
+            .unwrap()
+            .0,
+        7
+    );
+    let retry = profile
+        .answer(purchase.encode().unwrap(), Timestamp(4))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(retry.reply.bytes, bought.reply.bytes);
+    assert_eq!(repo.snapshot(account(19)).unwrap(), before);
+    let rejected = profile
+        .answer(
+            items::PurchaseRequest {
+                owner: 77,
+                ..purchase
+            }
+            .encode()
+            .unwrap(),
+            Timestamp(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(rejected.kind, ReplyKind::Rejected);
+    assert_eq!(rejected.reply.bytes, [3, 0, 0, 0, 3]);
+    assert_eq!(repo.snapshot(account(19)).unwrap(), before);
 }
 fn deliver(
     listener: &mut PlayerListener,

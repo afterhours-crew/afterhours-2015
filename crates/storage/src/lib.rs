@@ -26,6 +26,7 @@ pub mod account;
 pub mod memory;
 pub mod model;
 pub mod port;
+pub mod records;
 pub mod settings;
 pub mod sqlite;
 pub mod tables;

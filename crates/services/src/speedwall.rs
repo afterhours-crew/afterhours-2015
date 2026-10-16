@@ -8,8 +8,9 @@
 //!
 //! Rows are named values of a versioned state document. The reply names the
 //! current persona and display name of the connection, never a stored
-//! identity. Walls or stat types the document does not hold, and queries for
-//! other personas, are unsupported (no reply). Score accrual and wall
+//! identity. A supported query without an owned row answers `AUTOLOG_ERR_NOT_FOUND`.
+//! Unknown stat types and queries for other personas remain unsupported.
+//! Score accrual and wall
 //! membership changes are outside this read-only subset.
 use crate::{ContentError, SUPPORTED_BUILD_SHA256};
 use nfs_fire2::{Fields, Frame};
@@ -38,7 +39,7 @@ pub enum Error {
     Ineligible,
     /// Another account, persona or display name than this connection's.
     Identity,
-    /// The document holds no row for this wall and stat type.
+    /// The query selects an unsupported stat type.
     Unsupported,
     Encode,
 }
@@ -286,14 +287,17 @@ impl State {
         {
             return Err(Error::Identity);
         }
-        let row = self
-            .rows
-            .iter()
-            .find(|r| {
-                Some(r.speed_wall_id) == q.speed_wall_id
-                    && Some(r.stat_type) == q.speed_wall_stat_type
-            })
-            .ok_or(Error::Unsupported)?;
+        if !matches!(q.speed_wall_stat_type, Some(0 | 1)) {
+            return Err(Error::Unsupported);
+        }
+        let Some(row) = self.rows.iter().find(|r| {
+            Some(r.speed_wall_id) == q.speed_wall_id && Some(r.stat_type) == q.speed_wall_stat_type
+        }) else {
+            // Completing the read is necessary even for an empty local account:
+            // the client serializes other content requests behind this job.
+            return crate::error_reply(f.fields, nfs_protocol::metadata::AUTOLOG_ERR_NOT_FOUND)
+                .ok_or(Error::Encode);
+        };
         let body = SpeedWallBriefInfoResponse {
             rank: Some(row.rank),
             rating: Some(RatingBits(row.rating_bits)),

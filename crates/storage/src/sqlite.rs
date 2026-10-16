@@ -34,14 +34,17 @@ use std::{
 /// `NFSD`: one file per account, domains
 /// added by schema version.
 const APPLICATION_ID: i64 = 0x4e46_5344;
-/// Version 4 consolidates service state into the inventory account database.
-pub const VERSION: i64 = 4;
-const TABLES: i64 = 9;
+/// Version 5 adds account-owned opaque livery records.
+pub const VERSION: i64 = 5;
+const TABLES: i64 = 10;
 /// 4096-byte pages: 64 MiB, above the worst-case item set.
 const MAX_PAGES: i64 = 16384;
 const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const JOURNAL_SIZE_LIMIT: i64 = 1024 * 1024;
-const BUSY_TIMEOUT: Duration = Duration::from_millis(100);
+// A short filesystem stall must not discard concurrent livery uploads. Wait
+// within the socket adapter's 10-second deadline, on its bounded blocking
+// workers. This is SQLite's per-lock wait, not an unlimited operation retry.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_VALUE_BYTES: i32 = 512 * 1024 + 1024;
 const MAX_SQL_BYTES: i32 = 16 * 1024;
 const MAX_LIST_BYTES: usize = MAX_NESTED * 8;
@@ -134,7 +137,8 @@ impl SqliteRepository {
         let expected_tables = match expected {
             1 | 2 => 3,
             3 => 4,
-            4 => TABLES,
+            4 => 9,
+            5 => TABLES,
             _ => return Err(Error::Version),
         };
         if tables != expected_tables {
@@ -389,8 +393,8 @@ impl InventoryRepository for SqliteRepository {
             Self::migrate_v3(&tx, account)?;
         } else if version == 2 {
             Self::migrate_v3(&tx, account)?;
-        } else if version == 3 {
-            Self::check_version(&tx, account, 3)?;
+        } else if version == 3 || version == 4 {
+            Self::check_version(&tx, account, version)?;
         } else if version > VERSION {
             return Err(Error::Version);
         } else {
@@ -405,6 +409,11 @@ impl InventoryRepository for SqliteRepository {
             }
             Self::read_tables(&tx)?;
             crate::account::create_tables(&tx)?;
+            tx.pragma_update(None, "user_version", 4)?;
+        }
+        if version < 5 {
+            Self::check_version(&tx, account, 4)?;
+            crate::records::create_table(&tx)?;
             tx.pragma_update(None, "user_version", VERSION)?;
         }
         tx.commit()?;

@@ -13,7 +13,7 @@ use crate::{
     seeds::{OsRandom, OsSeeds, fresh},
 };
 use crate::{world_handshake, world_readiness};
-use nfs_server_support::{discovery, qos_service, qos_tls};
+use nfs_server_support::{discovery, qos_tls};
 use nfs_world::{
     application::{self, Policy},
     session::{Event, Host, Ids, StageName},
@@ -53,6 +53,7 @@ pub struct Config {
     pub root: std::path::PathBuf,
     pub redirector_port: u16,
     pub idle: Duration,
+    /// Deadline for one QoS TLS request; idle listeners follow server shutdown.
     pub qos_lifetime: Duration,
     pub world_content: Option<Arc<crate::content::WorldContent>>,
     pub inventory: Option<InventoryProfile>,
@@ -93,6 +94,9 @@ pub struct WorldServe {
 
 mod items;
 mod players;
+mod qos;
+#[cfg(feature = "network-test")]
+mod test_loss;
 pub use items::{Profile as InventoryProfile, Service as InventoryService};
 const FILE_RECEIVE_MS: u64 = 60_000;
 #[derive(Debug, Default)]
@@ -524,7 +528,9 @@ pub async fn run_control(
                         break;
                     }
                     Ok(Outcome::Unsupported) => {
-                        warn!(connection, ?phase, route = ?route, "unsupported request");
+                        // This path closes immediately, so at most one warning
+                        // is emitted for this control connection.
+                        warn!(service = "blaze", connection, ?phase, route = ?route, disposition = "closing", "unsupported operation received");
                         break;
                     }
                     Ok(Outcome::AwaitWorld) => {
@@ -642,44 +648,32 @@ pub async fn serve(
     let connections = Arc::new(AtomicU32::new(0));
     let mut tasks = JoinSet::new();
 
-    {
-        let identity = identity.clone();
-        let deadline = Instant::now() + config.qos_lifetime;
-        let (qos_tcp, qos_udp) = (listeners.qos_tcp, listeners.qos_udp);
-        tasks.spawn(async move {
-            let observed = tokio::task::spawn_blocking(move || {
-                qos_service::run(qos_tcp, qos_udp, deadline, &identity)
-            })
-            .await;
-            match observed {
-                Ok(o) => info!(
-                    stop = ?o.status,
-                    accepted = o.accepted_connections,
-                    datagrams = o.udp.received_datagrams,
-                    replies = o.udp.replies_sent,
-                    "qos service ended"
-                ),
-                Err(_) => warn!("qos service task failed"),
-            }
-        });
-    }
+    let mut qos = tokio::spawn(qos::serve(
+        listeners.qos_tcp,
+        listeners.qos_udp,
+        identity.clone(),
+        config.qos_lifetime,
+        shutdown.clone(),
+    ));
 
     loop {
-        if tasks.len() >= MAX_CONNECTIONS {
-            tasks.join_next().await;
-            continue;
-        }
         tokio::select! {
             _ = shutdown.changed() => break,
+            ended = &mut qos => {
+                tasks.shutdown().await;
+                if *shutdown.borrow() { return Ok(()); }
+                warn!(?ended, "qos service ended before server shutdown");
+                return Err(Failure::Io);
+            }
             Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
-            accepted = listeners.redirector.accept() => {
+            accepted = listeners.redirector.accept(), if tasks.len() < MAX_CONNECTIONS => {
                 let Ok((stream, peer)) = accepted else { continue };
                 let n = connections.fetch_add(1, Ordering::Relaxed);
                 let reply = redirector_reply.clone();
                 let recorder = recorder.clone();
                 tasks.spawn(async move { redirector(stream, peer, n, &reply, &recorder).await });
             }
-            accepted = listeners.blaze.accept() => {
+            accepted = listeners.blaze.accept(), if tasks.len() < MAX_CONNECTIONS => {
                 let Ok((mut stream, peer)) = accepted else { continue };
                 let n = connections.fetch_add(1, Ordering::Relaxed);
                 let pack = pack.clone();
@@ -734,8 +728,12 @@ pub async fn serve(
                             inventory.clone().zip(garage_logic.as_ref().and_then(|l| l.reputation_thresholds()).cloned())
                         } else { None },
                     };
+                    let records = match &inventory {
+                        Some(profile) => profile.bind_records(profiles.records.clone()),
+                        None => profiles.records.clone(),
+                    };
                     worlds.spawn(crate::auxiliary::listener(
-                        auxiliary, profiles.records.clone(), token_seed, connections, recorder.clone(),
+                        auxiliary, records, token_seed, connections, recorder.clone(),
                     ));
                     worlds.spawn(world_host(
                         world_socket,
@@ -796,6 +794,7 @@ pub async fn serve(
         }
     }
     tasks.shutdown().await;
+    qos.await.map_err(|_| Failure::Io)??;
     Ok(())
 }
 pub async fn world_host(
@@ -897,6 +896,7 @@ pub async fn world_host(
         }
     };
     let mut listener = players::PlayerListener::new(persona)
+        .with_connection(connection)
         .with_progression(progression)
         .with_vehicles(vehicles)
         .with_sequences(sequences)
@@ -915,6 +915,8 @@ pub async fn world_host(
     let mut proof_sent = false;
     let mut last_input = Instant::now();
     let mut tick = tokio::time::interval(WORLD_TICK);
+    #[cfg(feature = "network-test")]
+    let mut test_loss = test_loss::Loss::new(recorder.loss_trigger(connection));
     info!(connection, "world host ready");
     loop {
         if let Err(error) = listener.advance_sequences(now_ms()) {
@@ -930,7 +932,10 @@ pub async fn world_host(
             return;
         }
         if !listener.files_alive(now_ms()) {
-            warn!(connection, "incoming File deadline; closing world");
+            warn!(
+                connection,
+                "incoming File or MessageEX deadline; closing world"
+            );
             return;
         }
         while let Some(command) = listener.due_teleport(now_ms()) {
@@ -986,12 +991,20 @@ pub async fn world_host(
                 }
                 last_input = Instant::now();
                 let raw = buffer[..n].to_vec();
-                if recorder.chunk("world", connection, Direction::In, &raw, None).await.is_err() {
+                #[cfg(feature = "network-test")]
+                let dropped = test_loss.drop_input(now_ms());
+                #[cfg(not(feature = "network-test"))]
+                let dropped = false;
+                let note = dropped.then_some("diagnostic packet loss before transport");
+                if recorder.chunk("world", connection, Direction::In, &raw, note).await.is_err() {
                     return;
                 }
+                if dropped { continue; }
                 host.receive(&raw, now_ms(), &mut listener)
             }
             _ = tick.tick() => {
+                #[cfg(feature = "network-test")]
+                test_loss.poll(now_ms()).await;
                 if last_input.elapsed() > WORLD_IDLE {
                     info!(connection, "world host idle; closing");
                     return;
@@ -1085,6 +1098,9 @@ pub async fn world_host(
         }
         for event in &output.events {
             match event {
+                Event::Application(application::Event::UnknownControl(subtype)) => {
+                    listener.unsupported_control(*subtype);
+                }
                 Event::Application(application::Event::Queued { .. })
                 | Event::Application(application::Event::Duplicate) => {
                     debug!(connection, ?event, "world")

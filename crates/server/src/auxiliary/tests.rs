@@ -3,6 +3,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 use super::*;
+mod records;
 
 fn get(authority: &str, user: i64, owner: i64, pictures: bool) -> Vec<u8> {
     let (context, category, kind, name) = if pictures {

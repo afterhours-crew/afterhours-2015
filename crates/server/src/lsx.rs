@@ -43,6 +43,7 @@ pub async fn serve(
 ) -> Result<(), Failure> {
     let config = Config::for_profile(profile);
     let mut tasks = JoinSet::new();
+    let mut next_connection = 1u32;
     let result = loop {
         if *shutdown.borrow() {
             break Ok(());
@@ -63,7 +64,9 @@ pub async fn serve(
                     Err(error) => break Err(error),
                 };
                 let config = config.clone();
-                tasks.spawn(async move { connection(stream, config, entropy, idle).await; });
+                let number = next_connection;
+                next_connection = next_connection.wrapping_add(1);
+                tasks.spawn(async move { connection(stream, config, entropy, idle, number).await; });
             }
         }
     };
@@ -82,7 +85,14 @@ impl nfs_lsx::session::Random for Entropy {
     }
 }
 
-async fn connection(mut stream: TcpStream, config: Config, entropy: [u8; 48], idle: Duration) {
+async fn connection(
+    mut stream: TcpStream,
+    config: Config,
+    entropy: [u8; 48],
+    idle: Duration,
+    number: u32,
+) {
+    let mut unsupported = crate::diagnostics::Unsupported::new("lsx", number);
     let (mut launcher, first) = Launcher::new(
         config,
         &mut Entropy {
@@ -118,10 +128,18 @@ async fn connection(mut stream: TcpStream, config: Config, entropy: [u8; 48], id
         }
         for event in &output.events {
             match event {
-                Event::HandshakeAccepted { .. } => info!("LSX handshake accepted"),
-                Event::Answered { request, id } => info!(request, id, "LSX answered"),
-                Event::Unsupported { name, id } => warn!(name, id, "LSX unsupported"),
-                Event::Malformed(_) | Event::ChallengeMismatch => warn!("LSX rejected input"),
+                Event::HandshakeAccepted { .. } => {
+                    info!(connection = number, "LSX handshake accepted")
+                }
+                Event::Answered { request, id } => {
+                    info!(connection = number, request, id, "LSX answered")
+                }
+                Event::Unsupported { name, id } => {
+                    unsupported.record_correlated(method_label(name), Some(*id))
+                }
+                Event::Malformed(_) | Event::ChallengeMismatch => {
+                    warn!(connection = number, "LSX rejected input")
+                }
                 _ => {}
             }
         }
@@ -129,7 +147,18 @@ async fn connection(mut stream: TcpStream, config: Config, entropy: [u8; 48], id
             break;
         }
     }
-    info!(phase=?launcher.phase(), stats=?launcher.stats(), "LSX disconnected");
+    info!(connection = number, phase=?launcher.phase(), stats=?launcher.stats(), "LSX disconnected");
+}
+
+fn method_label(name: &str) -> String {
+    if !name.is_empty()
+        && name.len() <= 64
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    {
+        name.to_owned()
+    } else {
+        "<invalid-method-name>".to_owned()
+    }
 }
 
 async fn write(stream: &mut TcpStream, frames: &[Vec<u8>]) -> std::io::Result<()> {
@@ -146,6 +175,27 @@ async fn write(stream: &mut TcpStream, frames: &[Vec<u8>]) -> std::io::Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unsupported_method_labels_are_bounded_and_correlated_without_log_injection() {
+        assert_eq!(method_label("QueryFriends"), "QueryFriends");
+        for name in [
+            "",
+            "request\nsecret",
+            "request?token=secret",
+            &"a".repeat(65),
+        ] {
+            assert_eq!(method_label(name), "<invalid-method-name>");
+        }
+        let output = crate::diagnostics::testing::capture(|| {
+            let mut diagnostics = crate::diagnostics::Unsupported::new("lsx", 9);
+            diagnostics.record_correlated(method_label("QueryFriends"), Some(123));
+            diagnostics.record_correlated(method_label("QueryFriends"), Some(124));
+        });
+        assert_eq!(output.matches("WARN").count(), 1, "{output}");
+        assert!(output.contains("correlation=Some(123)"), "{output}");
+        assert!(output.contains("suppressed_total=1"), "{output}");
+    }
     use nfs_lsx::{
         cipher::{self, Aes128},
         frame,

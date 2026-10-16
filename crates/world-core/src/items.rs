@@ -10,16 +10,26 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 mod derived;
+mod dyno;
 mod inventory;
+mod purchase;
+mod update;
 pub use derived::{DefinitionClass, Derived, Layout};
+pub use dyno::DynoStats;
 pub use inventory::{
     Definition, DefinitionFlags, InitialInventory, InventoryCatalog, OwnershipLevel,
 };
+pub use purchase::{PurchaseReply, PurchaseRequest, PurchaseSelection};
+pub use update::UpdateNotification;
 
 /// Owned and Purchasable construction paths, respectively.
 pub const OWNED: u8 = 2;
 pub const PURCHASABLE: u8 = 4;
 pub const LOAD_INVENTORY: u8 = 0x10;
+pub const PURCHASE_ITEMS: u8 = 0x02;
+
+mod handling;
+pub use handling::HandlingChanges;
 
 impl Derived {
     /// Exact typed suffix codec, also used at the persistence boundary.
@@ -117,6 +127,21 @@ pub struct Item {
     pub buy_price: u32,
     pub sell_price: u32,
     pub derived: Derived,
+}
+impl Item {
+    /// Library liveries are account-owned leaves. Installing one retains its
+    /// ID and zero owner; ordinary vehicle parts must belong to their parent.
+    pub fn is_account_livery(&self) -> bool {
+        self.owner == 0
+            && self.state == OWNED
+            && self.defaults.is_empty()
+            && self.children.is_empty()
+            && matches!(self.derived, Derived::LiveryCustomization { .. })
+    }
+
+    pub fn belongs_under(&self, parent: u64) -> bool {
+        self.owner == parent || (parent != 0 && self.is_account_livery())
+    }
 }
 impl std::fmt::Debug for Item {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -232,6 +257,38 @@ impl Envelope {
 }
 
 impl Collection {
+    /// Select complete reachable records for a notification, preserving root order.
+    /// Encoding still validates cycles, definitions and all graph resource bounds.
+    pub fn for_roots(&self, roots: Vec<u64>) -> Result<Self, Error> {
+        if roots.len() > MAX_COLLECTION {
+            return Err(Error::Bound);
+        }
+        let mut pending = roots.clone();
+        let mut items = BTreeMap::new();
+        let mut references = roots.len();
+        while let Some(id) = pending.pop() {
+            if items.contains_key(&id) {
+                continue;
+            }
+            if items.len() >= MAX_ITEMS {
+                return Err(Error::Bound);
+            }
+            let item = self.items.get(&id).ok_or(Error::MissingItem)?;
+            references = references
+                .checked_add(item.defaults.len())
+                .and_then(|count| count.checked_add(item.children.len()))
+                .filter(|&count| count <= MAX_REFERENCES)
+                .ok_or(Error::Bound)?;
+            if item.defaults.len() > MAX_COLLECTION || item.children.len() > MAX_COLLECTION {
+                return Err(Error::Bound);
+            }
+            pending.extend(&item.defaults);
+            pending.extend(&item.children);
+            items.insert(id, item.clone());
+        }
+        Ok(Self { roots, items })
+    }
+
     pub fn decode(bytes: &[u8], catalog: &Catalog) -> Result<Self, Error> {
         let mut decoder = Decoder {
             reader: Reader::new(bytes)?,

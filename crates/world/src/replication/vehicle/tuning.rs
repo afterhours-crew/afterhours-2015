@@ -20,6 +20,23 @@ pub struct Definitions {
     pub(super) parts: BTreeMap<Guid, PartInput>,
 }
 impl Definitions {
+    /// Installed persistent tuning asset values for manual/automatic mode.
+    pub fn transmission_values(
+        &self,
+        collection: &Collection,
+        vehicle: u64,
+    ) -> Result<[u8; 2], Error> {
+        let installed = super::parts::installed(collection, &self.classes, vehicle)?;
+        let (item, _) = installed
+            .into_iter()
+            .find(|(_, class)| *class == DefinitionClass::PersistantTuningItemData)
+            .ok_or(Error::UnknownObject)?;
+        self.parts
+            .get(&item.definition)
+            .filter(|input| input.asset_present)
+            .and_then(|input| input.transmission_values)
+            .ok_or(Error::Unsupported)
+    }
     pub fn new(
         classes: Catalog,
         entries: impl IntoIterator<Item = (Guid, PartInput)>,

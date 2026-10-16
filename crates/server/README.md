@@ -293,7 +293,12 @@ answers are recorded. Configured arrival sequences, vehicle bindings and world
 membership then complete the handoff; this does not yet establish drivable play.
 
 `--redirector-port 0` chooses an ephemeral port (the default).
-`--idle-seconds` accepts 1–3600, and `--qos-seconds` accepts 1–86400.
+`--idle-seconds` accepts 1–3600. `--qos-seconds` bounds each QoS TLS request
+(default 10 seconds, accepts 1–86400); it no longer expires the listeners after
+time spent at activation or the splash. QoS remains available until server
+shutdown, with at most four concurrent TLS workers, bounded request buffers and
+no accumulated request history. UDP probes have a fixed buffer and no lifetime
+request quota. Shutdown cancels incomplete TLS reads and releases both listeners.
 `--stop-file <path>` requests graceful shutdown when that path appears; Ctrl+C
 also stops the server. Relative stop paths follow the process working directory.
 Legacy `--owned-only`, `--owned-world-connection`, `--owned-world-readiness` and
@@ -311,6 +316,42 @@ Recording stops at 64 MiB, 100,000 events, or 256 raw streams per run, while the
 server continues serving. A raw chunk over 1 MiB also stops recording without
 writing a partial chunk. The final metadata marker identifies exhaustion.
 Structured status logs contain route/error summaries, not request bodies.
+
+## Unsupported-operation diagnostics
+
+At the default log level, `WARN unsupported operation received` identifies an
+unhandled operation. These warnings are visible in the Rust launcher's terminal
+and its `server.stderr.log`; `--record-protocol` is not required.
+
+| Service | Identifiers |
+| --- | --- |
+| `blaze` | Connection, phase, component/command/category/correlation route; the connection closes. |
+| `world` | Connection and RPC references, scene content key when known, selector and method; or logic ghost/entity/event, message index, control subtype, or unconsumed client ghost records. |
+| `world-file` | Connection, File handler and name length, or Items operation number. |
+| `lsx` | Service-local connection number, bounded method name and request correlation. |
+| `auxiliary` | Connection and closing disposition; URLs and authentication inputs are omitted. |
+
+Repeated world, File/Items and LSX diagnostics retain at most 64 routes per
+connection/service. The first occurrence is eligible for a warning, subsequent
+warnings for the same route are at least 30 seconds apart, and each tracker
+allows at most 16 warnings per ten-second window. Warnings include `seen` and
+`suppressed` counts. Excess distinct routes share a bounded overflow counter;
+`route_overflow=true` means the route was not retained. A burst can suppress a
+route's first warning until another occurrence arrives with budget available.
+
+`INFO unsupported operation summary` reports total observations, warnings,
+suppressed observations, retained/unreported routes and overflow on disconnect,
+early return or task cancellation. A process crash or forced termination can
+prevent that final line. The launcher's per-file log limit still applies.
+
+These are semantic-dispatch diagnostics, not one line for every network packet.
+Timing, scene readiness/registration, acknowledged reliable duplicates and stale
+transport packets are separate from unsupported gameplay. Malformed frames and
+modeled requests that fail validation are reported as rejected/refused, with
+connection IDs. Protocol acceptance, replies and state transitions are unchanged.
+Raw bodies, player names, arbitrary File names and RPC serials are not included.
+A warning identifies remaining work; its absence does not prove a whole game
+feature is implemented or that every malformed input has a decoded route.
 
 ## Integration and tests
 

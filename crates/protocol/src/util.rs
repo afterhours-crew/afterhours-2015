@@ -16,6 +16,12 @@ pub const USER_SETTINGS_LOAD_ALL: u16 = 12;
 pub const USER_SETTINGS_LOAD: u16 = 10;
 pub const SET_CLIENT_STATE: u16 = 28;
 
+mod text_filter;
+pub use text_filter::{
+    FILTER_FOR_PROFANITY, FilterResult, FilterUserTextResponse, FilteredUserText,
+    FilteredUserTextList,
+};
+
 mod save;
 pub use save::{USER_SETTINGS_SAVE, UserSettingsSaveRequest};
 

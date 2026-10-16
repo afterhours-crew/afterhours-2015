@@ -82,6 +82,7 @@ pub struct Loaded {
     presence: BTreeMap<u32, BTreeMap<u64, BTreeSet<u32>>>,
     stores: BTreeMap<(u32, u32), i32>,
     garage: [Option<u64>; 5],
+    balance: crate::bank::Balance,
 }
 impl std::fmt::Debug for Loaded {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -93,6 +94,9 @@ impl std::fmt::Debug for Loaded {
     }
 }
 impl Loaded {
+    pub fn balance(&self) -> crate::bank::Balance {
+        self.balance
+    }
     pub fn generation(&self) -> u64 {
         self.generation
     }
@@ -402,6 +406,7 @@ impl Catalog {
             presence,
             stores,
             garage,
+            balance: crate::bank::Balance::from_snapshot(snapshot)?,
         })
     }
 }

@@ -8,12 +8,14 @@
 //! state is durable and session/world state is isolated per connection.
 extern crate self as nfs_server;
 pub mod auxiliary;
+pub mod bank_account;
 pub mod cli;
 pub mod client_state;
 pub mod content;
 pub mod control;
 pub mod customization_timer;
 pub mod deployment;
+mod diagnostics;
 pub mod fresh_account;
 pub mod garage_logic;
 pub mod glass;
@@ -31,6 +33,7 @@ pub mod prepare_content;
 pub mod progression;
 pub mod recommendations;
 pub mod record;
+pub mod reputation_account;
 pub mod scene_roles;
 pub mod seeds;
 pub mod sequence_content;

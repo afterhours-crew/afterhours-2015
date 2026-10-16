@@ -1,0 +1,573 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+use super::*;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Operation {
+    Begin,
+    StockPaint,
+    StockPerformance {
+        vehicle: u16,
+    },
+    StockVisual {
+        vehicle: u16,
+        keep_wheels: bool,
+    },
+    Equip {
+        vehicle: u16,
+        item: u64,
+    },
+    RemovePart {
+        vehicle: u16,
+        item: u64,
+    },
+    Dyno {
+        vehicle: u16,
+        stats: nfs_world_core::items::DynoStats,
+    },
+    Handling {
+        vehicle: u16,
+        changes: nfs_world_core::items::HandlingChanges,
+    },
+    Paint {
+        paint: crate::equipment::Paint,
+    },
+    LicensePlate {
+        plate: crate::equipment::LicensePlate,
+    },
+    WindowTint {
+        tint: crate::equipment::WindowTint,
+    },
+    RimSize {
+        item: u64,
+        size: u8,
+    },
+    Livery {
+        item: u64,
+        data_id: u32,
+        preset: u32,
+    },
+    Commit,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Call {
+    pub player: u16,
+    pub operation: Operation,
+}
+
+impl Binding {
+    /// Decode the supported calls at the current scene binding. The caller must
+    /// additionally resolve the equip vehicle to the same player's garage car.
+    pub fn read(
+        self,
+        body: BitSpan<'_>,
+        owns: impl Fn(u16) -> bool,
+    ) -> Result<Option<Call>, Error> {
+        let envelope = Envelope::decode(
+            body,
+            Limits {
+                max_input_bits: 4096,
+                max_references: 32,
+                max_payload_bytes: 256,
+            },
+        )
+        .map_err(|_| Error::Shape)?;
+        let route = envelope
+            .route(RouteProfile::ClientSend)
+            .map_err(|_| Error::Shape)?;
+        if envelope.references().first() != Some(&self.scene)
+            || route.selector() != self.selector
+            || !matches!(route.method_index(), 0..=13)
+        {
+            return Ok(None);
+        }
+        let vehicle_call = matches!(route.method_index(), 0 | 3 | 6 | 8 | 12 | 13);
+        if envelope.words() != [0, 0]
+            || !envelope.remaining().is_empty()
+            || envelope.references().len() != if vehicle_call { 3 } else { 2 }
+        {
+            return Err(Error::Shape);
+        }
+        let player = envelope.references()[1];
+        if player == 0 || !owns(player) {
+            return Err(Error::Ownership);
+        }
+        let operation = match route.method_index() {
+            6 => {
+                let vehicle = envelope.references()[2];
+                let args = route.arguments();
+                // The option is one bit, followed by the payload's six alignment
+                // bits. Its native return type does not imply a byte on the wire.
+                if vehicle == 0 || args.len() != 7 {
+                    return Err(Error::Shape);
+                }
+                let keep_wheels = args.read_u32(0, 1).map_err(|_| Error::Shape)?;
+                Operation::StockVisual {
+                    vehicle,
+                    keep_wheels: keep_wheels != 0,
+                }
+            }
+            13 => {
+                let vehicle = envelope.references()[2];
+                if vehicle == 0 || route.arguments().len() != 7 {
+                    return Err(Error::Shape);
+                }
+                Operation::StockPerformance { vehicle }
+            }
+            2 => {
+                let args = route.arguments();
+                let length = args.read_u32(0, 10).map_err(|_| Error::Shape)? as usize;
+                if args.len() != 10 + 8 * length + 5 {
+                    return Err(Error::Shape);
+                }
+                // Only this prefix can reach the native eight-byte car field.
+                // The envelope bound and exact extent still validate all input.
+                let mut text = [0; 7];
+                for (i, byte) in text.iter_mut().take(length).enumerate() {
+                    *byte = args.read_u32(10 + 8 * i, 8).map_err(|_| Error::Shape)? as u8;
+                }
+                Operation::LicensePlate {
+                    plate: crate::equipment::LicensePlate::new(&text),
+                }
+            }
+            11 => {
+                let args = route.arguments();
+                if args.len() != 39 {
+                    return Err(Error::Shape);
+                }
+                Operation::WindowTint {
+                    tint: crate::equipment::WindowTint::new(
+                        args.read_u32(0, 32).map_err(|_| Error::Shape)?,
+                    )
+                    .map_err(|_| Error::Shape)?,
+                }
+            }
+            9 => {
+                let args = route.arguments();
+                if args.len() != 135 {
+                    return Err(Error::Shape);
+                }
+                let item = u64::from(args.read_u32(0, 32).map_err(|_| Error::Shape)?)
+                    | (u64::from(args.read_u32(32, 32).map_err(|_| Error::Shape)?) << 32);
+                if item == 0 {
+                    return Err(Error::Shape);
+                }
+                Operation::Livery {
+                    item,
+                    data_id: args.read_u32(64, 32).map_err(|_| Error::Shape)?,
+                    preset: args.read_u32(96, 32).map_err(|_| Error::Shape)?,
+                }
+            }
+            1 => {
+                let args = route.arguments();
+                if args.len() != 207 {
+                    return Err(Error::Shape);
+                }
+                let mut words = [0; 6];
+                for (i, word) in words.iter_mut().enumerate() {
+                    *word = args.read_u32(i * 32, 32).map_err(|_| Error::Shape)?;
+                }
+                Operation::Paint {
+                    paint: crate::equipment::Paint::new(
+                        args.read_u32(192, 8).map_err(|_| Error::Shape)? as u8,
+                        words[..3].try_into().map_err(|_| Error::Shape)?,
+                        words[3..].try_into().map_err(|_| Error::Shape)?,
+                    )
+                    .map_err(|_| Error::Shape)?,
+                }
+            }
+            10 => {
+                let args = route.arguments();
+                if args.len() != 79 {
+                    return Err(Error::Shape);
+                }
+                let item = u64::from(args.read_u32(0, 32).map_err(|_| Error::Shape)?)
+                    | (u64::from(args.read_u32(32, 32).map_err(|_| Error::Shape)?) << 32);
+                if item == 0 {
+                    return Err(Error::Shape);
+                }
+                Operation::RimSize {
+                    item,
+                    size: args.read_u32(64, 8).map_err(|_| Error::Shape)? as u8,
+                }
+            }
+            0 | 12 => {
+                if route.arguments().len() != 71 {
+                    return Err(Error::Shape);
+                }
+                let vehicle = envelope.references()[2];
+                let low = route
+                    .arguments()
+                    .read_u32(0, 32)
+                    .map_err(|_| Error::Shape)?;
+                let high = route
+                    .arguments()
+                    .read_u32(32, 32)
+                    .map_err(|_| Error::Shape)?;
+                let item = u64::from(low) | (u64::from(high) << 32);
+                if vehicle == 0 || item == 0 {
+                    return Err(Error::Shape);
+                }
+                if route.method_index() == 0 {
+                    Operation::Equip { vehicle, item }
+                } else {
+                    Operation::RemovePart { vehicle, item }
+                }
+            }
+            3 => {
+                let vehicle = envelope.references()[2];
+                if vehicle == 0 {
+                    return Err(Error::Shape);
+                }
+                let (stats, bits) = nfs_world_core::items::DynoStats::read(route.arguments())
+                    .map_err(|_| Error::Shape)?;
+                // The route is 41 bits; the native RPC pads the entire payload.
+                let padding = (8 - (41 + bits) % 8) % 8;
+                if route.arguments().len() != bits + padding {
+                    return Err(Error::Shape);
+                }
+                Operation::Dyno { vehicle, stats }
+            }
+            8 => {
+                let vehicle = envelope.references()[2];
+                let args = route.arguments();
+                let count = args.read_u32(0, 8).map_err(|_| Error::Shape)? as usize;
+                if vehicle == 0 || count > 31 || args.len() != 8 + 16 * count + 7 {
+                    return Err(Error::Shape);
+                }
+                let mut changes = Vec::with_capacity(count);
+                for index in 0..count {
+                    changes.push((
+                        args.read_u32(8 + 16 * index, 8).map_err(|_| Error::Shape)? as u8,
+                        args.read_u32(16 + 16 * index, 8)
+                            .map_err(|_| Error::Shape)? as u8,
+                    ));
+                }
+                Operation::Handling {
+                    vehicle,
+                    changes: nfs_world_core::items::HandlingChanges::new(changes)
+                        .map_err(|_| Error::Shape)?,
+                }
+            }
+            4 | 5 | 7 => {
+                if route.arguments().len() != 7 {
+                    return Err(Error::Shape);
+                }
+                match route.method_index() {
+                    4 => Operation::Begin,
+                    5 => Operation::Commit,
+                    _ => Operation::StockPaint,
+                }
+            }
+            _ => return Err(Error::Shape),
+        };
+        // Native alignment bits are not request arguments.
+        Ok(Some(Call { player, operation }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nfs_world_core::bits::BitWriter;
+
+    fn handling(changes: &[(u8, u8)], vehicle: u16) -> BitWriter {
+        let mut payload = BitWriter::new();
+        payload.put(6, 9).put(8, 32).put(changes.len() as u64, 8);
+        for &(category, value) in changes {
+            payload.put(category.into(), 8).put(value.into(), 8);
+        }
+        payload.put(127, 7);
+        let mut body = BitWriter::new();
+        body.put(0, 64)
+            .put(3, 8)
+            .put(10, 13)
+            .put(12, 13)
+            .put(vehicle.into(), 13)
+            .put(payload.bytes().len() as u64, 9)
+            .put_span(payload.span());
+        body
+    }
+
+    #[test]
+    fn handling_requires_bounded_pairs_current_vehicle_and_exact_extent() {
+        let binding = Binding::new(10, 6).unwrap();
+        for changes in [vec![], vec![(26, 6)], (0..31).map(|c| (c, 10)).collect()] {
+            let body = handling(&changes, 15);
+            assert_eq!(
+                binding.read(body.span(), |p| p == 12),
+                Ok(Some(Call {
+                    player: 12,
+                    operation: Operation::Handling {
+                        vehicle: 15,
+                        changes: nfs_world_core::items::HandlingChanges::new(changes).unwrap()
+                    }
+                }))
+            );
+            for end in 0..body.len() {
+                assert!(
+                    binding
+                        .read(body.span().slice(0, end).unwrap(), |_| true)
+                        .is_err()
+                );
+            }
+            let mut extra = body.clone();
+            extra.put(0, 8);
+            assert!(binding.read(extra.span(), |_| true).is_err());
+            assert_eq!(binding.read(body.span(), |_| false), Err(Error::Ownership));
+        }
+        for changes in [
+            vec![(31, 5)],
+            vec![(26, 11)],
+            vec![(26, 5), (26, 6)],
+            vec![(0, 5); 32],
+        ] {
+            assert_eq!(
+                binding.read(handling(&changes, 15).span(), |_| true),
+                Err(Error::Shape)
+            );
+        }
+        assert_eq!(
+            binding.read(handling(&[(26, 5)], 0).span(), |_| true),
+            Err(Error::Shape)
+        );
+    }
+
+    fn equip(item: u64) -> BitWriter {
+        part_call(0, item, 15)
+    }
+    fn part_call(method: u32, item: u64, vehicle: u16) -> BitWriter {
+        let mut payload = BitWriter::new();
+        payload
+            .put(6, 9)
+            .put(method.into(), 32)
+            .put(item as u32 as u64, 32)
+            .put(item >> 32, 32)
+            .put(127, 7);
+        let mut body = BitWriter::new();
+        body.put(0, 32)
+            .put(0, 32)
+            .put(3, 8)
+            .put(10, 13)
+            .put(12, 13)
+            .put(vehicle.into(), 13)
+            .put(14, 9)
+            .put_span(payload.span());
+        body
+    }
+    #[test]
+    fn removal_has_owned_player_vehicle_u64_and_exact_extent() {
+        let binding = Binding::new(10, 6).unwrap();
+        let item = 0x12345678_90abcdef;
+        let wire = part_call(12, item, 15);
+        assert_eq!(
+            binding.read(wire.span(), |p| p == 12),
+            Ok(Some(Call {
+                player: 12,
+                operation: Operation::RemovePart { vehicle: 15, item },
+            }))
+        );
+        for end in 0..wire.len() {
+            assert!(
+                binding
+                    .read(wire.span().slice(0, end).unwrap(), |_| true)
+                    .is_err()
+            );
+        }
+        for bad in [part_call(12, 0, 15), part_call(12, item, 0)] {
+            assert_eq!(binding.read(bad.span(), |_| true), Err(Error::Shape));
+        }
+        assert_eq!(binding.read(wire.span(), |_| false), Err(Error::Ownership));
+        let mut concat = wire.clone();
+        concat.put_span(wire.span());
+        assert_eq!(binding.read(concat.span(), |_| true), Err(Error::Shape));
+    }
+    #[test]
+    fn visual_reset_requires_one_bounded_option_and_the_owned_vehicle() {
+        let binding = Binding::new(10, 6).unwrap();
+        let wire = |option: bool, vehicle: u16, width: usize| {
+            let mut payload = BitWriter::new();
+            payload.put(6, 9).put(6, 32).put(u64::from(option), width);
+            // Alignment bits are not an additional option or required zeroes.
+            while !payload.len().is_multiple_of(8) {
+                payload.put(1, 1);
+            }
+            let mut body = BitWriter::new();
+            body.put(0, 64)
+                .put(3, 8)
+                .put(10, 13)
+                .put(12, 13)
+                .put(vehicle.into(), 13)
+                .put(payload.bytes().len() as u64, 9)
+                .put_span(payload.span());
+            body
+        };
+        for option in [false, true] {
+            let body = wire(option, 15, 1);
+            assert_eq!(
+                binding.read(body.span(), |p| p == 12),
+                Ok(Some(Call {
+                    player: 12,
+                    operation: Operation::StockVisual {
+                        vehicle: 15,
+                        keep_wheels: option
+                    }
+                }))
+            );
+            for end in 0..body.len() {
+                assert!(
+                    binding
+                        .read(body.span().slice(0, end).unwrap(), |_| true)
+                        .is_err()
+                );
+            }
+            assert_eq!(binding.read(body.span(), |_| false), Err(Error::Ownership));
+            let mut extra = body.clone();
+            extra.put(0, 1);
+            assert_eq!(binding.read(extra.span(), |_| true), Err(Error::Shape));
+        }
+        // Reject the formerly assumed byte-wide payload and invalid car refs.
+        for bad in [wire(false, 15, 8), wire(true, 15, 8), wire(false, 0, 1)] {
+            assert_eq!(binding.read(bad.span(), |_| true), Err(Error::Shape));
+        }
+    }
+    #[test]
+    fn equip_low_word_precedes_high_word_and_every_extent_is_checked() {
+        let binding = Binding::new(10, 6).unwrap();
+        let item = 0x12345678_90abcdef;
+        let wire = equip(item);
+        assert_eq!(
+            binding.read(wire.span(), |p| p == 12),
+            Ok(Some(Call {
+                player: 12,
+                operation: Operation::Equip { vehicle: 15, item },
+            }))
+        );
+        for length in 0..wire.len() {
+            assert_eq!(
+                binding.read(wire.span().slice(0, length).unwrap(), |_| true),
+                Err(Error::Shape)
+            );
+        }
+        assert_eq!(binding.read(wire.span(), |_| false), Err(Error::Ownership));
+        assert_eq!(binding.read(equip(0).span(), |_| true), Err(Error::Shape));
+        assert_eq!(
+            Binding::new(11, 6).unwrap().read(wire.span(), |_| true),
+            Ok(None)
+        );
+        assert_eq!(
+            Binding::new(10, 7).unwrap().read(wire.span(), |_| true),
+            Ok(None)
+        );
+        let mut trailing = wire.clone();
+        trailing.put(0, 1);
+        assert_eq!(binding.read(trailing.span(), |_| true), Err(Error::Shape));
+    }
+    #[test]
+    fn begin_and_commit_have_only_the_owned_player_reference() {
+        let binding = Binding::new(19, 5).unwrap();
+        for (method, operation) in [(4, Operation::Begin), (5, Operation::Commit)] {
+            let wire = super::super::tests::wire(19, 5, method, &[23], 127);
+            assert_eq!(
+                binding.read(wire.span(), |p| p == 23),
+                Ok(Some(Call {
+                    player: 23,
+                    operation
+                }))
+            );
+            let bad = super::super::tests::wire(19, 5, method, &[23, 24], 0);
+            assert_eq!(binding.read(bad.span(), |_| true), Err(Error::Shape));
+        }
+    }
+
+    #[test]
+    fn performance_reset_requires_vehicle_and_exact_empty_arguments() {
+        let binding = Binding::new(19, 5).unwrap();
+        let wire = super::super::tests::wire(19, 5, 13, &[23, 24], 127);
+        assert_eq!(
+            binding.read(wire.span(), |p| p == 23),
+            Ok(Some(Call {
+                player: 23,
+                operation: Operation::StockPerformance { vehicle: 24 }
+            }))
+        );
+        for end in 0..wire.len() {
+            assert!(
+                binding
+                    .read(wire.span().slice(0, end).unwrap(), |_| true)
+                    .is_err()
+            );
+        }
+        for refs in [vec![23], vec![23, 0], vec![23, 24, 25]] {
+            assert!(
+                binding
+                    .read(
+                        super::super::tests::wire(19, 5, 13, &refs, 0).span(),
+                        |_| true
+                    )
+                    .is_err()
+            );
+        }
+        assert_eq!(binding.read(wire.span(), |_| false), Err(Error::Ownership));
+        let mut concat = wire.clone();
+        concat.put_span(wire.span());
+        assert_eq!(binding.read(concat.span(), |_| true), Err(Error::Shape));
+    }
+
+    #[test]
+    fn dyno_requires_owned_player_vehicle_and_exact_variable_extent() {
+        use nfs_world_core::items::DynoStats;
+        let binding = Binding::new(10, 6).unwrap();
+        for stats in [
+            DynoStats::new([50; 4], [0.; 3]).unwrap(),
+            DynoStats::new([200, 450, 600, 120], [4.5, 0., 12.]).unwrap(),
+            DynoStats::new([300, 1500, 1500, 200], [15., 35., 20.]).unwrap(),
+        ] {
+            let make = |vehicle, extra| {
+                let mut payload = BitWriter::new();
+                payload.put(6, 9).put(3, 32).put_span(stats.encode().span());
+                payload.align();
+                if extra {
+                    payload.put(0, 8);
+                }
+                let mut wire = BitWriter::new();
+                wire.put(0, 32)
+                    .put(0, 32)
+                    .put(3, 8)
+                    .put(10, 13)
+                    .put(12, 13)
+                    .put(vehicle, 13)
+                    .put((payload.len() / 8) as u64, 9)
+                    .put_span(payload.span());
+                wire
+            };
+            let wire = make(15, false);
+            assert_eq!(
+                binding.read(wire.span(), |p| p == 12),
+                Ok(Some(Call {
+                    player: 12,
+                    operation: Operation::Dyno { vehicle: 15, stats },
+                }))
+            );
+            for end in 0..wire.len() {
+                assert!(
+                    binding
+                        .read(wire.span().slice(0, end).unwrap(), |_| true)
+                        .is_err()
+                );
+            }
+            assert_eq!(binding.read(wire.span(), |_| false), Err(Error::Ownership));
+            assert_eq!(
+                binding.read(make(0, false).span(), |_| true),
+                Err(Error::Shape)
+            );
+            assert_eq!(
+                binding.read(make(15, true).span(), |_| true),
+                Err(Error::Shape)
+            );
+        }
+    }
+}

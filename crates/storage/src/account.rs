@@ -134,6 +134,10 @@ impl Repository {
         if history != 0 || snapshot.updated_at != Timestamp(0) {
             return Err(Error::Conflict);
         }
+        let records: i64 = tx.query_row("SELECT count(*) FROM livery_record", [], |r| r.get(0))?;
+        if records != 0 {
+            return Err(Error::Conflict);
+        }
         if snapshot.generation != 0
             || snapshot.garage.is_some()
             || !snapshot.items.is_empty()

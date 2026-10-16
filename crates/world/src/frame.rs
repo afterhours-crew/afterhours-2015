@@ -9,6 +9,8 @@ use nfs_protocol::world::{
 };
 use std::fmt;
 
+pub mod receive;
+
 pub const HANDLERS: usize = 6;
 pub const TIME_SYNC: u8 = 0;
 pub const MESSAGES: u8 = 1;
@@ -115,6 +117,7 @@ pub enum Message<'a> {
     SequenceStop(crate::sequences::Stop),
     LogicEvent(crate::logic::Fire),
     WorldActivation(crate::world_activation::Notification),
+    BankBalance(crate::bank::Balance),
     Opaque {
         index: u8,
         body: BitSpan<'a>,
@@ -131,6 +134,7 @@ impl Message<'_> {
             Self::Empty => 26,
             Self::State(_) => EX_STATE,
             Self::LauncherEnabled(_)
+            | Self::BankBalance(_)
             | Self::ParticipantNotification(_)
             | Self::GarageBinding(_)
             | Self::ActorBinding(_)
@@ -348,6 +352,24 @@ fn message<'a>(r: &mut Reader<'a>, index: u8) -> Result<Message<'a>, Error> {
         }
         other => return Err(Error::Unsupported(other)),
     })
+}
+
+/// Decode one reassembled message, allowing only its final partial byte.
+/// Unknown targets stay opaque so a consumer can explicitly leave them unsupported.
+pub fn assembled_message(index: u8, bytes: &[u8]) -> Result<Message<'_>, Error> {
+    if index >= REGISTRY_SIZE || index == EX_CHUNK || bytes.len() > receive::MAX_BYTES {
+        return Err(Error::Bound);
+    }
+    let span = BitSpan::new(bytes, 0, bytes.len() * 8)?;
+    let mut reader = Reader { span, pos: 0 };
+    match message(&mut reader, index) {
+        Ok(value) if reader.rest()?.len() < 8 => Ok(value),
+        Ok(_) => Err(Error::Shape),
+        Err(Error::Unsupported(target)) if target == index => {
+            Ok(Message::Opaque { index, body: span })
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn collection(r: &mut Reader<'_>, mut each: impl FnMut(u16)) -> Result<(), Error> {
@@ -648,13 +670,13 @@ pub enum TimeSyncOut {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct Builder {
+pub struct Builder<'a> {
     time_sync: Option<TimeSyncOut>,
-    messages: Option<(Option<u16>, Vec<Group<'static>>)>,
+    messages: Option<(Option<u16>, Vec<Group<'a>>)>,
     movement: Option<Vec<(u16, Vec<u8>)>>,
 }
 
-impl Builder {
+impl<'a> Builder<'a> {
     pub fn new() -> Self {
         Self::default()
     }
@@ -669,7 +691,7 @@ impl Builder {
         self
     }
 
-    pub fn messages(mut self, state: Option<u16>, groups: Vec<Group<'static>>) -> Self {
+    pub fn messages(mut self, state: Option<u16>, groups: Vec<Group<'a>>) -> Self {
         self.messages = Some((state, groups));
         self
     }
@@ -750,6 +772,9 @@ impl Builder {
                 w.put_span(value.encode().map_err(|_| Error::Shape)?.span());
             }
             Message::GaragePresence(value) => {
+                w.put_span(value.encode().map_err(|_| Error::Shape)?.span());
+            }
+            Message::BankBalance(value) => {
                 w.put_span(value.encode().map_err(|_| Error::Shape)?.span());
             }
             Message::WorldActivation(value) => {

@@ -2,6 +2,15 @@
 
 State-owned services built on the storage port and typed protocol models.
 
+The utility text check (`9/20`) uses an explicit local policy for garage text:
+UTF-8 without control characters, up to 512 bytes, passes unchanged. Longer text
+receives the native string-too-long result; invalid text receives the other-error
+result. Each response retains the request's entry order and correlation. The
+service is stateless, does not contact EA and does not implement EA's moderation
+rules. Local ingress limits are 32 entries, 1,024 bytes per input and a 40 KiB body;
+malformed or oversized requests receive no successful reply. Text is not logged.
+The plate editor's seven-byte limit is enforced separately by its item save.
+
 Static control catalogs (`7/15`, `2050/75`, `2050/78`, `2055/1`) consume a
 bounded `nfs-control-catalogs` version-1 document with named key scopes, ordered
 integer pairs, kill-switch names and SpeedList type definitions. Limited features
@@ -35,6 +44,10 @@ rotation and gameplay reward policies are not inferred by this service.
   (`2052/23`) likewise require the current persona and supported item system,
   returning a zero total for the empty local catalog. Populated catalogs and
   wrap user-list queries are explicitly unsupported.
+- Speed-wall brief reads (`2050/79`) return the account's saved row, or the
+  defined Autolog not-found error when a supported own-persona query has no row.
+  Empty accounts gain no rank or score. Completing the request allows the
+  client's shared content queue to continue to wrap-header downloads.
 - Inventory loading initializes an empty account once, validates item graphs,
   preserves later progress and produces replies only from committed state.
 - ItemBuilder begin-update validates a complete bounded call against the current

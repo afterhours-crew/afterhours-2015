@@ -10,6 +10,82 @@ use nfs_world::{
 use serde_json::json;
 
 #[test]
+fn purchased_inventory_refresh_keeps_other_players_and_allows_garage_return() {
+    let (mut population, mut players, content, layout, items, participant) = fixture();
+    let layout = world_layout(&layout);
+    let mut initial = (*items).clone();
+    let mut grant = initial.items[&2].clone();
+    grant.id = 20;
+    grant.owner = 0;
+    grant.state = nfs_world::items::PURCHASABLE;
+    initial.items.insert(20, grant);
+    initial.roots.push(20);
+    let original = inventory(Arc::new(initial));
+    let first = population
+        .spawn(
+            &mut players,
+            owner(participant),
+            original.clone(),
+            &content,
+            &layout,
+            [0.; 3],
+        )
+        .unwrap();
+    for binding in first.bindings {
+        population
+            .acknowledge(&players, owner(participant), binding.expected())
+            .unwrap();
+    }
+    let other = join(&mut players, 4, 202);
+    let other_owner = || Owner {
+        connection: 4,
+        persona: 202,
+        participant: other,
+    };
+    population
+        .spawn(
+            &mut players,
+            other_owner(),
+            original.clone(),
+            &content,
+            &layout,
+            [0.; 3],
+        )
+        .unwrap();
+    let mut bought = (*original.items).clone();
+    let car_owner = bought.items[&2].owner;
+    let promoted = bought.items.get_mut(&20).unwrap();
+    promoted.owner = car_owner;
+    promoted.state = nfs_world::items::OWNED;
+    let changed = Inventory {
+        slots: original.slots,
+        items: Arc::new(bought),
+    };
+    population
+        .refresh_inventory(&players, 3, 0x100000002, &original, &changed)
+        .unwrap();
+    assert_eq!(population.spawned[&other].items, original.items);
+    assert_eq!(
+        population.refresh_inventory(&players, 3, 0x100000002, &original, &changed),
+        Err(Error::Shape)
+    );
+    assert_eq!(population.spawned[&participant].items, changed.items);
+    population
+        .spawn_world(
+            &mut players,
+            owner(participant),
+            &changed,
+            &content,
+            &layout,
+        )
+        .unwrap();
+    let returning = population
+        .prepare_return(&mut players, owner(participant), changed, &content, &layout)
+        .unwrap();
+    assert_eq!(returning.bindings.len(), 1);
+}
+
+#[test]
 fn repeated_return_prepares_a_second_lifetime_and_swaps_only_after_detach() {
     let (mut population, mut players, content, layout, items, p) = fixture();
     let layout = world_layout(&layout);

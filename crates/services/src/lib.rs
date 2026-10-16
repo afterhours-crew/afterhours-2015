@@ -7,22 +7,28 @@
 pub mod account_state;
 pub mod authentication;
 pub mod awards;
+pub mod bank;
 pub mod bootstrap;
+pub mod category_unlocks;
 pub mod challenges;
 pub mod client_state;
 pub mod control_catalogs;
 pub mod departure;
+pub mod equipment;
 pub mod fresh_account;
 pub mod group;
 pub mod inventory;
 pub mod item_builder;
 pub mod item_content;
+pub mod item_unlocks;
 pub mod persistent;
+pub mod purchase;
 pub mod recommendations;
 pub mod reputation;
 pub mod shared_wraps;
 pub mod stats;
 pub mod telemetry;
+pub mod text_filter;
 
 /// Build identity required by versioned content documents; no game data is bundled.
 pub const SUPPORTED_BUILD_SHA256: &str =

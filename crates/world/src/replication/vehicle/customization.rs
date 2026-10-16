@@ -93,6 +93,9 @@ pub struct Definitions {
     inputs: BTreeMap<Guid, Input>,
 }
 impl Definitions {
+    pub fn tuning(&self) -> &tuning::Definitions {
+        &self.tuning
+    }
     pub fn new(
         tuning: tuning::Definitions,
         entries: impl IntoIterator<Item = (Guid, Input)>,

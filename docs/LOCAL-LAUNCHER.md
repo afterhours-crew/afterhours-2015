@@ -270,6 +270,12 @@ file retains at most 4 MiB; the server recording has a 64 MiB, 100,000-event
 and 256-stream budget. It stops recording at the limit and continues serving.
 These bounds are per run; old sessions are retained for deliberate user cleanup.
 
+Unimplemented operations produce `WARN unsupported operation received` in the
+terminal and `server.stderr.log`, including safe route identifiers and repeat
+counts. Connection summaries include suppressed observations. See the
+[diagnostic fields and limits](../crates/server/README.md#unsupported-operation-diagnostics).
+Raw packet capture is unnecessary for these warnings.
+
 `--record-protocol` explicitly enables local raw diagnostic capture. Those files
 can contain identities and local authentication inputs. Review/redact them before
 sharing; do not publish saved databases, activation files or extracted game data.
@@ -320,6 +326,19 @@ workspace tests, including 66 launcher and process-wrapper tests. The CLI
 installation-refusal test now uses a Windows executable suffix, so it reaches
 the intended hash check on non-elevated developer machines as well as Unix.
 
+A second ordinary-user run on the combined garage/launcher branch reached the
+saved garage, free roam and PageDown garage return, then quit normally with
+Alt+F4. The launcher stopped its server and supervisor and released port 3216.
+Raw protocol recording was off. Default logs showed unsupported LSX, backend,
+world message, logic and RPC routes; the closing world summary counted 52
+observations, 13 warnings and 39 suppressed repeats. No activation prompt
+appeared and external networking remained connected. This run validates the
+observed diagnostics and normal cleanup, not the unexercised routes below.
+
+The combined workspace passed fmt, Clippy and 1,342 tests; the optional
+network-test build passed Clippy and 193 tests. Unsupported File/Items, unknown
+control/decoder routes, overflow, privacy and cancellation use constructed
+regression tests rather than malformed traffic sent to the game.
 Full acceptance remains tracked in
 [issue 78](https://github.com/afterhours-crew/afterhours-2015/issues/78): standalone
 `setup`, live `recover`, the activation-dialog path, forced supervisor
@@ -459,7 +478,7 @@ not activation independence or fresh-install acceptance.
 The PowerShell launcher that preceded `nfs-afterhours` owned setup, launch,
 routing and cleanup using the existing registration without changing it, and
 its validation included the owner's cold disconnected test. The Rust launcher
-carries the same checks; its own live validation is pending as described
+carries the same checks; its completed live checks and remaining gates are described
 above. Activation-cache lifetime remains a separate acceptance gate.
 The LSX component can be developed and tested independently of installed-game
 validation.

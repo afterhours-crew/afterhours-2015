@@ -2,8 +2,12 @@
 
 `nfs-server-support` owns bounded loopback discovery and latency services.
 Discovery parses a strict HTTP/XML request and advertises the caller's already
-bound local listener. QoS uses a fresh process-local certificate authority, at
-most four TLS connections and 128 UDP datagrams under one absolute deadline.
+bound local listener. QoS uses a fresh process-local certificate authority. Its
+finite observation helper accepts at most four TLS connections and 128 UDP
+datagrams under one absolute deadline. The server uses the bounded TLS request
+adapter inside its own persistent Tokio listener; those observation quotas do
+not limit server lifetime. A cancellation-aware variant checks an atomic flag
+between socket waits of at most 100 ms and retains the same wire/header bounds.
 It does not change the operating-system trust store or contact public services.
 
 These adapters perform blocking I/O. Run them on a blocking worker; protocol

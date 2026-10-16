@@ -576,6 +576,100 @@ fn send_frame_wraps_a_single_fragment_with_the_advertisement_absent() {
 }
 
 #[test]
+fn lost_acknowledgements_reuse_pressure_probe_and_recover_across_wrap() {
+    use delivery::Status;
+    let report = |number, ack, history| {
+        sequenced(
+            HOST_SELECTOR,
+            number,
+            ack,
+            history,
+            &control_payload(CONTROL_EMPTY, &[]),
+        )
+    };
+    let frame = [0xaa];
+    let bits = BitSpan::new(&frame, 0, 8).unwrap();
+    for base in [0_u16, 1000] {
+        let (mut a, _) = admitted(0);
+        let mut listener = Retain::default();
+        // Advance normally to test the same outage across the wire-number wrap.
+        for number in 1..=base {
+            a.send_frame(bits).unwrap();
+            a.receive(
+                &report(number, number, u32::MAX),
+                u64::from(number) + 3,
+                &mut listener,
+            )
+            .unwrap();
+        }
+        a.receive(
+            &queued((base + 1) & 1023, base, u32::MAX, 0, 0, true, 8),
+            1100,
+            &mut listener,
+        )
+        .unwrap(); // First host timing request.
+        let (ticket, _) = a.send_tracked_frame(bits, 8).unwrap();
+        for _ in 0..29 {
+            a.send_frame(bits).unwrap();
+        }
+        for now in (2000..=8000).step_by(500) {
+            let sent = a.poll(now).unwrap();
+            assert_eq!(sent.len(), 1, "no new timing sequence under pressure");
+            let probe = ZeroTail::new(64).unwrap().decode(&sent[0]).unwrap();
+            assert_eq!(
+                probe.sequence().unwrap().number().value(),
+                (base + 32) & 1023
+            );
+            assert!(matches!(
+                Route::decode(probe.payload()).unwrap(),
+                Route::Control {
+                    subtype: CONTROL_EMPTY,
+                    ..
+                }
+            ));
+            assert_eq!(a.delivery_status(ticket), Some(Status::Pending));
+            assert_eq!(a.send_frame(bits), Err(Error::Window));
+        }
+        // A timing request is accepted but its reply must not allocate sequence33.
+        let request = Timing::new(
+            HOST_SELECTOR,
+            (base + 2) & 1023,
+            base,
+            u32::MAX,
+            Control::Request { timestamp: 0x1234 },
+        )
+        .unwrap()
+        .encode();
+        let received = a.receive(&request, 8100, &mut listener).unwrap();
+        assert_eq!(received.event, Some(Event::TimingRequest));
+        assert!(received.send.is_empty());
+        // The first returned report reaches the still-admissible edge. Preserve
+        // its negative receipt for the tracked frame; do not invent acceptance.
+        a.receive(
+            &report((base + 3) & 1023, (base + 32) & 1023, u32::MAX ^ (1 << 30)),
+            8200,
+            &mut listener,
+        )
+        .unwrap();
+        assert_eq!(a.release_delivery(ticket), Some(Status::Rejected));
+        let (retry, sent) = a.send_tracked_frame(bits, 8).unwrap();
+        let envelope = ZeroTail::new(64).unwrap().decode(&sent[0]).unwrap();
+        assert_eq!(
+            envelope.sequence().unwrap().number().value(),
+            (base + 33) & 1023
+        );
+        a.receive(
+            &report((base + 4) & 1023, (base + 33) & 1023, 1),
+            8300,
+            &mut listener,
+        )
+        .unwrap();
+        assert_eq!(a.release_delivery(retry), Some(Status::Accepted));
+        assert_eq!(a.stats().timing_replies_sent, 0);
+    }
+}
+
+#[test]
 fn send_frame_fragments_splits_at_the_e101_size_and_needs_window_room() {
     let (mut a, _) = admitted(0);
     let sent_before = a.stats().sent;

@@ -2,7 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-use super::players::PlayerListener;
+use super::players::{EquipmentRequest, PlayerListener};
 use crate::inventory;
 use nfs_storage::{AccountId, InventoryRepository, Timestamp};
 use nfs_world::{
@@ -23,6 +23,9 @@ pub struct Service {
     repository: Arc<dyn InventoryRepository>,
     catalog: Arc<InventoryCatalog>,
     persistent: Option<Arc<crate::persistent::Catalog>>,
+    offers: Option<Arc<nfs_services::purchase::Offers>>,
+    category_unlocks: Option<Arc<nfs_services::category_unlocks::Policy>>,
+    records: Option<Arc<dyn nfs_storage::records::Repository>>,
     workers: Arc<Semaphore>,
 }
 impl Service {
@@ -31,11 +34,26 @@ impl Service {
             repository,
             catalog,
             persistent: None,
+            offers: None,
+            category_unlocks: None,
+            records: None,
             workers: Arc::new(Semaphore::new(WORKERS)),
         }
     }
     pub fn with_persistent(mut self, catalog: Arc<crate::persistent::Catalog>) -> Self {
         self.persistent = Some(catalog);
+        self
+    }
+    pub fn with_records(mut self, records: Arc<dyn nfs_storage::records::Repository>) -> Self {
+        self.records = Some(records);
+        self
+    }
+    pub fn with_purchase_offers(mut self, offers: nfs_services::purchase::Offers) -> Self {
+        self.offers = Some(Arc::new(offers));
+        self
+    }
+    pub fn with_category_unlocks(mut self, policy: nfs_services::category_unlocks::Policy) -> Self {
+        self.category_unlocks = Some(Arc::new(policy));
         self
     }
     pub fn bind(&self, account: AccountId) -> Profile {
@@ -62,13 +80,203 @@ enum Error {
     Inventory(inventory::Error),
     Worker,
     Deadline,
+    Purchase(nfs_services::purchase::Error),
+    Equipment(nfs_services::equipment::Error),
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReplyKind {
+    Load,
+    Purchase,
+    Rejected,
 }
 #[derive(Debug)]
 struct LoadedReply {
     reply: inventory::Reply,
     items: Arc<nfs_world::items::Collection>,
+    kind: ReplyKind,
+}
+struct Equipped {
+    loaded: Arc<crate::persistent::Loaded>,
+    items: Arc<nfs_world::items::Collection>,
+    notification: Vec<u8>,
+    edit: nfs_services::equipment::Edit,
+    presentation: crate::vehicle_content::EquipmentPresentation,
+}
+
+fn supported_request(bytes: &[u8]) -> Result<bool, nfs_world::items::Error> {
+    use nfs_world::items;
+    match bytes.get(4) {
+        Some(&items::PURCHASE_ITEMS) => items::PurchaseRequest::decode(bytes).map(|_| true),
+        _ => items::Request::decode(bytes).map(|r| r.operation == items::LOAD_INVENTORY),
+    }
 }
 impl Profile {
+    pub(super) fn bind_records(
+        &self,
+        records: crate::auxiliary::LocalRecords,
+    ) -> crate::auxiliary::LocalRecords {
+        match &self.service.records {
+            Some(repository) => records.with_storage(repository.clone(), self.account),
+            None => records,
+        }
+    }
+    async fn equip(&self, request: &EquipmentRequest, now: Timestamp) -> Result<Equipped, Error> {
+        let service = self.service.clone();
+        let account = self.account;
+        let request = request.clone();
+        timeout(JOB_TIMEOUT, async move {
+            let permit = service
+                .workers
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| Error::Worker)?;
+            tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                let tables = service.persistent.as_ref().ok_or(Error::Worker)?;
+                let mut edit = nfs_services::equipment::prepare_vehicle(
+                    account,
+                    request.generation,
+                    &request.items,
+                    request.car,
+                    &service.catalog,
+                )
+                .map_err(Error::Equipment)?;
+                for operation in &request.part_edits {
+                    use nfs_services::item_builder::Operation;
+                    edit = match *operation {
+                        Operation::StockPerformance { .. } => {
+                            edit.with_stock_performance(&request.items, &service.catalog)
+                        }
+                        Operation::StockVisual { keep_wheels, .. } => {
+                            edit.with_stock_visual(&request.items, &service.catalog, keep_wheels)
+                        }
+                        Operation::StockPaint => edit.with_stock_paint(&service.catalog),
+                        Operation::LicensePlate { plate } => edit.with_license_plate(plate),
+                        Operation::WindowTint { tint } => edit.with_window_tint(tint),
+                        Operation::Livery {
+                            item,
+                            data_id,
+                            preset,
+                        } => edit.with_livery(
+                            &request.items,
+                            &service.catalog,
+                            item,
+                            data_id,
+                            preset,
+                        ),
+                        Operation::Equip { item, .. } => edit.with_part(
+                            &request.items,
+                            item,
+                            &service.catalog,
+                            service.offers.as_deref().ok_or(Error::Worker)?,
+                        ),
+                        Operation::RemovePart { item, .. } => edit.without_part(
+                            &request.items,
+                            item,
+                            &service.catalog,
+                            service.offers.as_deref().ok_or(Error::Worker)?,
+                        ),
+                        Operation::Paint { paint } => edit.with_paint(
+                            &request.items,
+                            &service.catalog,
+                            service.offers.as_deref().ok_or(Error::Worker)?,
+                            paint,
+                        ),
+                        Operation::RimSize { item, size } => {
+                            request
+                                .content
+                                .vehicles
+                                .validate_rim_size(
+                                    &edit.preview(&request.items).map_err(Error::Equipment)?,
+                                    request.car,
+                                    item,
+                                    size,
+                                )
+                                .map_err(|_| Error::Worker)?;
+                            edit.with_rim_size(&request.items, &service.catalog, item, size)
+                        }
+                        _ => return Err(Error::Worker),
+                    }
+                    .map_err(Error::Equipment)?;
+                }
+                let transmission = if request.handling.transmission().is_some() {
+                    Some(
+                        request
+                            .content
+                            .vehicles
+                            .transmission_values(
+                                &edit.preview(&request.items).map_err(Error::Equipment)?,
+                                request.car,
+                            )
+                            .map_err(|_| Error::Worker)?,
+                    )
+                } else {
+                    None
+                };
+                let edit = edit
+                    .with_handling(
+                        &request.items,
+                        &service.catalog,
+                        request.handling,
+                        transmission,
+                    )
+                    .map_err(Error::Equipment)?;
+                let edit = if let Some(stats) = request.dyno {
+                    edit.with_dyno(stats).map_err(Error::Equipment)?
+                } else {
+                    edit
+                };
+                // Validate the exact outbound update before the durable write.
+                let preview = edit.preview(&request.items).map_err(Error::Equipment)?;
+                let presentation = request
+                    .content
+                    .vehicles
+                    .equipment(
+                        &preview,
+                        request.car,
+                        request.owner.clone(),
+                        &request.registrations,
+                    )
+                    .map_err(|_| Error::Worker)?;
+                let notification = nfs_world::items::UpdateNotification {
+                    player_index: request.player_index,
+                    items: edit
+                        .preview(&request.items)
+                        .map_err(Error::Equipment)?
+                        .for_roots(vec![request.car])
+                        .map_err(|e| Error::Inventory(e.into()))?,
+                }
+                .encode(service.catalog.bindings())
+                .map_err(|e| Error::Inventory(e.into()))?;
+                let snapshot = nfs_services::equipment::commit(
+                    service.repository.as_ref(),
+                    account,
+                    &service.catalog,
+                    &edit,
+                    now,
+                )
+                .map_err(Error::Equipment)?;
+                let items = inventory::collection(&snapshot, service.catalog.bindings())
+                    .map_err(Error::Inventory)?;
+                let loaded = tables
+                    .view(&snapshot)
+                    .map_err(|e| Error::Inventory(e.into()))?;
+                Ok(Equipped {
+                    loaded: Arc::new(loaded),
+                    items: Arc::new(items),
+                    notification,
+                    edit,
+                    presentation,
+                })
+            })
+            .await
+            .map_err(|_| Error::Worker)?
+        })
+        .await
+        .map_err(|_| Error::Deadline)?
+    }
+
     pub fn bindings(&self) -> &nfs_world::items::Catalog {
         self.service.catalog.bindings()
     }
@@ -178,9 +386,14 @@ impl Profile {
         .map_err(|_| crate::Failure::Io)?
     }
     async fn answer(&self, request: Vec<u8>, now: Timestamp) -> Result<Option<LoadedReply>, Error> {
-        let decoded =
-            nfs_world::items::Request::decode(&request).map_err(|e| Error::Inventory(e.into()))?;
-        if decoded.operation != nfs_world::items::LOAD_INVENTORY {
+        if !supported_request(&request).map_err(|e| Error::Inventory(e.into()))? {
+            return Ok(None);
+        }
+        let purchase = (request[4] == nfs_world::items::PURCHASE_ITEMS)
+            .then(|| nfs_world::items::PurchaseRequest::decode(&request))
+            .transpose()
+            .map_err(|e| Error::Inventory(e.into()))?;
+        if purchase.is_some() && self.service.offers.is_none() {
             return Ok(None);
         }
         let service = self.service.clone();
@@ -193,7 +406,64 @@ impl Profile {
                 .map_err(|_| Error::Worker)?;
             tokio::task::spawn_blocking(move || {
                 let _permit = permit;
-                let reply = inventory::answer_load_with_tables(
+                if let Some(request) = purchase {
+                    let offers = service.offers.as_deref().ok_or(Error::Worker)?;
+                    let (snapshot, purchased, kind) = match nfs_services::purchase::buy(
+                        service.repository.as_ref(),
+                        account,
+                        &service.catalog,
+                        offers,
+                        &request,
+                        now,
+                    ) {
+                        Ok(result) => (result.snapshot, Some(result.items), ReplyKind::Purchase),
+                        Err(nfs_services::purchase::Error::Rejected(reason)) => {
+                            info!(?reason, "owned purchase rejected without mutation");
+                            (
+                                service
+                                    .repository
+                                    .snapshot(account)
+                                    .map_err(|e| Error::Inventory(e.into()))?,
+                                None,
+                                ReplyKind::Rejected,
+                            )
+                        }
+                        Err(error) => return Err(Error::Purchase(error)),
+                    };
+                    let items = inventory::collection(&snapshot, service.catalog.bindings())
+                        .map_err(Error::Inventory)?;
+                    let persistent = service
+                        .persistent
+                        .as_ref()
+                        .map(|tables| {
+                            tables
+                                .view(&snapshot)
+                                .map(Arc::new)
+                                .map_err(|e| Error::Inventory(e.into()))
+                        })
+                        .transpose()?;
+                    let bytes = nfs_world::items::PurchaseReply {
+                        sequence: request.sequence,
+                        purchased,
+                    }
+                    .encode(service.catalog.bindings())
+                    .map_err(|e| Error::Inventory(e.into()))?;
+                    return Ok(Some(LoadedReply {
+                        reply: inventory::Reply {
+                            generation: snapshot.generation,
+                            bytes,
+                            persistent,
+                            garage: snapshot
+                                .garage
+                                .ok_or(Error::Worker)?
+                                .0
+                                .map(|id| id.map(nfs_storage::ItemId::get)),
+                        },
+                        items: Arc::new(items),
+                        kind,
+                    }));
+                }
+                let reply = inventory::answer_load_with_unlocks(
                     &request,
                     service.repository.as_ref(),
                     account,
@@ -201,6 +471,11 @@ impl Profile {
                     1,
                     now,
                     service.persistent.as_deref(),
+                    service.category_unlocks.as_deref(),
+                    service
+                        .offers
+                        .as_ref()
+                        .and_then(|offers| offers.item_unlocks()),
                 )
                 .map_err(Error::Inventory)?;
                 reply
@@ -211,6 +486,7 @@ impl Profile {
                         Ok(LoadedReply {
                             reply,
                             items: Arc::new(items),
+                            kind: ReplyKind::Load,
                         })
                     })
                     .transpose()
@@ -222,28 +498,55 @@ impl Profile {
         .map_err(|_| Error::Deadline)?
     }
 }
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum UnsupportedRoute {
+    File { handler: usize, name_bytes: usize },
+    Items { handler: usize, operation: u8 },
+}
+
 pub(super) struct Exchanges {
     profile: Option<Profile>,
-    jobs: JoinSet<(usize, Result<Option<LoadedReply>, Error>)>,
+    jobs: JoinSet<(usize, u8, Result<Option<LoadedReply>, Error>)>,
+    equipment: JoinSet<(EquipmentRequest, Result<Equipped, Error>)>,
     pending: [Option<Completed>; 2],
     started: [Option<u64>; 2],
     connection: u32,
+    unsupported: crate::diagnostics::Unsupported<UnsupportedRoute>,
 }
 impl Exchanges {
     pub(super) fn new(profile: Option<Profile>, connection: u32) -> Self {
         Self {
             profile,
             jobs: JoinSet::new(),
+            equipment: JoinSet::new(),
             pending: [None, None],
             started: [None, None],
             connection,
+            unsupported: crate::diagnostics::Unsupported::new("world-file", connection),
         }
     }
     pub(super) fn working(&self) -> bool {
-        !self.jobs.is_empty()
+        !self.jobs.is_empty() || !self.equipment.is_empty()
     }
     pub(super) fn start(&mut self, listener: &mut PlayerListener, now: u64, utc: Timestamp) {
-        if self.working() {
+        if self.working()
+            || self.pending.iter().any(Option::is_some)
+            || self.started.iter().any(Option::is_some)
+        {
+            return;
+        }
+        if let Some(request) = listener.take_equipment() {
+            if let Some(profile) = self.profile.clone() {
+                self.equipment.spawn(async move {
+                    let result = profile.equip(&request, utc).await;
+                    (request, result)
+                });
+            } else {
+                warn!(
+                    connection = self.connection,
+                    "equipment service not configured"
+                );
+            }
             return;
         }
         for index in 0..2 {
@@ -255,13 +558,10 @@ impl Exchanges {
             };
             let handler = index + 4;
             if request.name != b"Items" {
-                warn!(
-                    connection = self.connection,
+                self.unsupported.record(UnsupportedRoute::File {
                     handler,
-                    name_bytes = request.name.len(),
-                    bytes = request.bytes.len(),
-                    "unsupported File name"
-                );
+                    name_bytes: request.name.len(),
+                });
                 continue;
             }
             let Some(profile) = self.profile.clone() else {
@@ -271,14 +571,12 @@ impl Exchanges {
                 );
                 continue;
             };
-            match nfs_world::items::Request::decode(&request.bytes) {
-                Ok(request) if request.operation != nfs_world::items::LOAD_INVENTORY => {
-                    warn!(
-                        connection = self.connection,
+            match supported_request(&request.bytes) {
+                Ok(false) => {
+                    self.unsupported.record(UnsupportedRoute::Items {
                         handler,
-                        operation = request.operation,
-                        "unsupported Items operation"
-                    );
+                        operation: request.bytes[4],
+                    });
                     continue;
                 }
                 Err(error) => {
@@ -292,23 +590,90 @@ impl Exchanges {
                 }
                 _ => {}
             }
+            if request.bytes[4] == nfs_world::items::PURCHASE_ITEMS && !listener.purchase_ready() {
+                warn!(
+                    connection = self.connection,
+                    handler, "purchase before owned inventory is ready"
+                );
+                continue;
+            }
             self.started[index] = Some(now);
+            let operation = request.bytes[4];
             self.jobs
-                .spawn(async move { (index, profile.answer(request.bytes, utc).await) });
+                .spawn(async move { (index, operation, profile.answer(request.bytes, utc).await) });
             break;
         }
     }
     pub(super) async fn completed(&mut self, listener: &mut PlayerListener) -> bool {
-        let Some(Ok((index, result))) = self.jobs.join_next().await else {
+        // start() serializes account writes across Files and equipment RPCs.
+        if !self.equipment.is_empty() {
+            let Some(Ok((request, result))) = self.equipment.join_next().await else {
+                return false;
+            };
+            return match result {
+                Ok(Equipped {
+                    loaded,
+                    items,
+                    notification,
+                    edit,
+                    presentation,
+                }) => {
+                    let generation = loaded.generation();
+                    match listener.equipped_inventory(&request, loaded, items, &edit, presentation)
+                    {
+                        Ok(()) => {
+                            self.pending[0] = Some(Completed {
+                                name: b"Items".to_vec(),
+                                bytes: notification,
+                            });
+                            info!(
+                                connection = self.connection,
+                                generation,
+                                car = request.car,
+                                items = ?request.selections,
+                                dyno = request.dyno.is_some(),
+                                handling = request.handling.iter().count(),
+                                "owned equipment committed"
+                            );
+                            true
+                        }
+                        Err(error) => {
+                            warn!(
+                                connection = self.connection,
+                                ?error,
+                                "equipment snapshot rejected"
+                            );
+                            false
+                        }
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        connection = self.connection,
+                        ?error,
+                        "equipment commit failed"
+                    );
+                    false
+                }
+            };
+        }
+        let Some(Ok((index, operation, result))) = self.jobs.join_next().await else {
             return false;
         };
         match result {
-            Ok(Some(LoadedReply { reply, items })) => {
-                if let Err(error) = listener.inventory_with_items(
-                    reply.garage,
-                    reply.persistent.clone(),
-                    Some(items),
-                ) {
+            Ok(Some(LoadedReply { reply, items, kind })) => {
+                let applied = match kind {
+                    ReplyKind::Load => listener.inventory_with_items(
+                        reply.garage,
+                        reply.persistent.clone(),
+                        Some(items),
+                    ),
+                    ReplyKind::Purchase => {
+                        listener.purchased_inventory(reply.garage, reply.persistent.clone(), items)
+                    }
+                    ReplyKind::Rejected => Ok(()),
+                };
+                if let Err(error) = applied {
                     warn!(
                         connection = self.connection,
                         ?error,
@@ -320,6 +685,7 @@ impl Exchanges {
                     connection = self.connection,
                     handler = index + 4,
                     generation = reply.generation,
+                    ?kind,
                     bytes = reply.bytes.len(),
                     persistent_tables = reply.persistent.as_ref().map_or(0, |p| p.tables().len()),
                     persistent_stores = reply.persistent.as_ref().map_or(0, |p| p.stores().len()),
@@ -332,11 +698,10 @@ impl Exchanges {
                 true
             }
             Ok(None) => {
-                warn!(
-                    connection = self.connection,
-                    handler = index + 4,
-                    "unsupported Items operation"
-                );
+                self.unsupported.record(UnsupportedRoute::Items {
+                    handler: index + 4,
+                    operation,
+                });
                 self.started[index] = None;
                 true
             }
@@ -369,6 +734,8 @@ impl Exchanges {
                 return false;
             }
             if let Some(reply) = &self.pending[index] {
+                // Unsolicited updates have no incoming request to start the clock.
+                self.started[index].get_or_insert(now);
                 match host.queue_file(index as u8 + 4, reply, now) {
                     Ok(()) => {
                         self.pending[index] = None;

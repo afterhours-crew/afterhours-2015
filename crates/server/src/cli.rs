@@ -63,7 +63,7 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
     let mut root = std::env::current_dir().map_err(|e| e.to_string())?;
     let (mut output, mut stop_file, mut world_content) = (None, None, None);
     let mut record_protocol = false;
-    let (mut redirector_port, mut idle_seconds, mut qos_seconds) = (0, 120, 900);
+    let (mut redirector_port, mut idle_seconds, mut qos_seconds) = (0, 120, 10);
     let (mut item_content, mut state_directory, mut local_account) = (None, None, None);
     let mut lsx_port = None;
     let mut persistent_content = None;
@@ -415,7 +415,15 @@ fn inventory_config(args: &Args) -> Result<Option<net::InventoryProfile>, Failur
         .transpose()?;
     let repository = nfs_storage::SqliteRepository::open_owned_directory(&directory)
         .map_err(|_| Failure::Output)?;
-    let mut service = net::InventoryService::new(Arc::new(repository), Arc::new(catalog));
+    let records = nfs_storage::records::SqliteRecords(repository.clone());
+    let mut service = net::InventoryService::new(Arc::new(repository), Arc::new(catalog))
+        .with_records(Arc::new(records));
+    if let Some(offers) = content.purchase_offers() {
+        service = service.with_purchase_offers(offers.clone());
+    }
+    if let Some(policy) = content.category_unlocks() {
+        service = service.with_category_unlocks(policy.clone());
+    }
     if let Some(persistent) = persistent {
         service = service.with_persistent(Arc::new(persistent));
     }
@@ -423,6 +431,15 @@ fn inventory_config(args: &Args) -> Result<Option<net::InventoryProfile>, Failur
 }
 
 pub fn main() -> std::process::ExitCode {
+    if std::env::args_os().nth(1).is_some_and(|a| a == "bank") {
+        return nfs_server::bank_account::main(std::env::args_os().skip(2));
+    }
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|a| a == "reputation")
+    {
+        return nfs_server::reputation_account::main(std::env::args_os().skip(2));
+    }
     if std::env::args_os()
         .nth(1)
         .is_some_and(|a| a == "prepare-local")

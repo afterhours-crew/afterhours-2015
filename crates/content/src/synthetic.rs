@@ -69,7 +69,7 @@ pub fn item(
         ),
         ("Deprecated", Field::Bool(false)),
         ("RequiresOwner", Field::Bool(true)),
-        ("UsesScope", Field::Bool(false)),
+        ("UsesScope", Field::Bool(class == "RaceVehicleItemData")),
         ("Purchasable", Field::Bool(true)),
         ("Optional", Field::Bool(seed.is_multiple_of(2))),
         (
@@ -81,6 +81,11 @@ pub fn item(
             Field::Imports(additional.into_iter().map(reference).collect()),
         ),
     ];
+    if !extra.iter().any(|(name, _)| *name == "SortedRestrictions") {
+        fields.push(("SortedRestrictions", Field::Guids(vec![])));
+    }
+    // Explicit synthetic overrides let tests vary constructor and offer flags.
+    fields.retain(|(name, _)| !extra.iter().any(|(key, _)| key == name));
     fields.extend(extra);
     let (partition, instance) = reference(seed);
     Asset {
@@ -170,6 +175,10 @@ pub fn vehicle(plate: &str) -> Asset {
         vec![],
         vec![2],
         vec![
+            (
+                "SortedScope",
+                Field::Guids(vec![reference(1).1, reference(2).1]),
+            ),
             ("DefaultPaint", vector(0.025, 0.11, 0.6)),
             ("RaceVehicle", vehicles::import(1)),
             ("Material", vector(0.76, 0.73, 1.0)),

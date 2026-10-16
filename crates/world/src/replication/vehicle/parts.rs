@@ -35,7 +35,7 @@ pub(super) fn installed<'a>(
             return Err(Error::DuplicateObject);
         }
         let item = collection.items.get(&id).ok_or(Error::UnknownObject)?;
-        if id == 0 || item.id != id || item.owner != parent || item.state != OWNED {
+        if id == 0 || item.id != id || !item.belongs_under(parent) || item.state != OWNED {
             return Err(Error::Shape);
         }
         let class = classes

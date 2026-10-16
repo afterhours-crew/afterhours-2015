@@ -31,6 +31,26 @@ pub struct Definitions {
     parts: BTreeMap<Guid, Input>,
 }
 impl Definitions {
+    /// Validate a requested saved size against this rim and axle's authored
+    /// fit range. Do not silently persist a value that rendering would replace.
+    pub fn allows_size(&self, guid: &Guid, size: u8, baseline: [f32; 2]) -> bool {
+        let Some(Input {
+            rear,
+            geometry: Geometry::Rim(rim),
+        }) = self.parts.get(guid)
+        else {
+            return false;
+        };
+        let base = baseline[usize::from(*rear)];
+        let Some(value) = rim.sizes.get(usize::from(size)) else {
+            return false;
+        };
+        base.is_finite()
+            && base > 0.0
+            && (1.0 / base).is_finite()
+            && (0.6_f32..=0.84_f32).contains(&((1.0 / base) * value))
+            && select_rim(rim, u32::from(size), base) == usize::from(size)
+    }
     pub fn new(
         classes: Catalog,
         entries: impl IntoIterator<Item = (Guid, Input)>,
@@ -356,6 +376,32 @@ mod tests {
             panic!()
         };
         t
+    }
+    #[test]
+    fn saved_size_must_exist_and_fit_the_correct_axle() {
+        let (_, mut definitions) = fixture();
+        let front = 2u128.to_le_bytes();
+        let rear = 3u128.to_le_bytes();
+        for index in 0..=255 {
+            assert_eq!(
+                definitions.allows_size(&front, index, [1., 0.75]),
+                matches!(index, 1 | 2)
+            );
+            assert_eq!(
+                definitions.allows_size(&rear, index, [1., 0.75]),
+                matches!(index, 0 | 1)
+            );
+        }
+        for base in [0., -1., f32::NAN, f32::INFINITY, f32::MIN_POSITIVE / 4.] {
+            assert!(!definitions.allows_size(&front, 1, [base; 2]));
+        }
+        assert!(!definitions.allows_size(&4u128.to_le_bytes(), 0, [1.; 2]));
+        assert!(!definitions.allows_size(&99u128.to_le_bytes(), 0, [1.; 2]));
+        let Geometry::Rim(rim) = &mut definitions.parts.get_mut(&front).unwrap().geometry else {
+            panic!()
+        };
+        rim.sizes = vec![0.1]; // no fitting sizes must not accept fallback index zero
+        assert!(!definitions.allows_size(&front, 0, [1.; 2]));
     }
     #[test]
     fn effective_selection_drives_tires_and_fenders_independently_of_saved_tire_index() {

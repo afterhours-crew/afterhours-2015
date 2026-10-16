@@ -117,6 +117,77 @@ fn request(items: &Collection) -> Request<'_> {
 }
 
 #[test]
+fn equipment_presentation_matches_fresh_inventory_components_and_registers_new_meshes() {
+    let (document, classes, mut items) = fixture();
+    let content = Content::from_json(&document, &classes).unwrap();
+    let mut registrations = registrations::Registry::default();
+    registrations.prepare(&["car/test_bundle"]).unwrap();
+    let before = registrations.clone();
+    let Derived::Rims { primary_paint, .. } = &mut items.items.get_mut(&2).unwrap().derived else {
+        panic!()
+    };
+    *primary_paint = [0.25f32.to_bits(); 3];
+    let ready = content
+        .equipment(&items, 1, request(&items).owner, &registrations)
+        .unwrap();
+    assert_eq!(registrations, before);
+    assert_eq!(ready.messages.len(), 2);
+    assert!(matches!(
+        ready.messages[0],
+        nfs_world::content::Message::Names(_)
+    ));
+    assert!(matches!(
+        ready.messages[1],
+        nfs_world::content::Message::Registrations(_)
+    ));
+    let fresh = content
+        .construct(
+            request(&items),
+            &mut authority::Registry::default(),
+            |name| ready.registrations.mesh_level(name).ok(),
+        )
+        .unwrap();
+    for (delta, full) in ready.body.updates.iter().zip(&fresh.updates) {
+        match delta {
+            Some(Update::Chassis(c)) => {
+                let Some(Initial::Chassis(f)) =
+                    fresh.creation.as_ref().and_then(|c| c.fields.get(1))
+                else {
+                    panic!()
+                };
+                assert_eq!(c.custom, Some(f.custom.clone()));
+                assert!(c.physics.is_none() && c.flag.is_none() && c.pair.is_none());
+            }
+            Some(_) => assert_eq!(delta, full),
+            None => (),
+        }
+    }
+    assert_eq!(ready.body.updates.iter().flatten().count(), 4);
+    // A restarted population has only the car registration; fresh construction
+    // must register the persisted part bundles rather than fail to spawn.
+    let mut restarted = before;
+    let mut messages = Vec::new();
+    let restored = content
+        .construct(
+            request(&items),
+            &mut authority::Registry::default(),
+            |name| restarted.resolve_mesh(name, &mut messages).ok(),
+        )
+        .unwrap();
+    assert_eq!(restored, fresh);
+    assert_eq!(messages, ready.messages);
+    assert_eq!(restarted, ready.registrations);
+    let repeat = content
+        .equipment(&items, 1, request(&items).owner, &ready.registrations)
+        .unwrap();
+    assert_eq!(ready.body, repeat.body);
+    assert!(repeat.messages.is_empty());
+    let mut invalid = document;
+    invalid["vehicles"][0]["meshes"][0]["variants"][0]["bundle"] = json!("");
+    assert!(Content::from_json(&invalid, &classes).is_err());
+}
+
+#[test]
 fn separate_parts_construct_identical_bodies_and_reject_mixed_or_foreign_inputs() {
     let (legacy, classes, items) = fixture();
     let expected = Content::from_json(&legacy, &classes)

@@ -1,0 +1,29 @@
+name: Research question
+description: An unknown to resolve before implementing, such as client/server responsibility
+title: "Research: <question>"
+labels: ["kind:research"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Add the matching `system:*` label if the question belongs to one system, and link it as a sub-issue of that tracker. Record findings in this issue, then open `kind:feature` issues for anything the server turns out to own. Keep private captures, binaries and research notebooks out of this repository; summarize provenance only.
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why it blocks or shapes implementation
+  - type: textarea
+    id: method
+    attributes:
+      label: How to check
+      description: What to run in the game, what to observe, what reference comparison to make.
+  - type: textarea
+    id: findings
+    attributes:
+      label: Findings
+      description: Fill in as the check completes.

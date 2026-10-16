@@ -54,6 +54,13 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
+The [CI workflow](.github/workflows/ci.yml) runs the same three gates on every
+push to a `codex/` branch and every pull request. Tests run on Linux for every
+push and additionally on Windows for pull requests and main, alongside the
+Windows Rust launcher and process-wrapper tests. Hosted runners are elevated,
+so live non-admin session cleanup still needs a local check. A red run must be
+fixed before a pull request is reviewed.
+
 Review third-party licenses before adding code or dependencies. Current storage
 uses pinned `rusqlite` with bundled SQLite and limits; transitive versions and
 registry checksums are recorded in `Cargo.lock`. XML2 codecs use `quick-xml`
@@ -85,9 +92,51 @@ The server edge uses Tokio 1.53.2 (MIT), tracing 0.1.44 (MIT) and
 tracing-subscriber 0.3.23 (MIT). Versions/checksums are locked; these dependencies
 remain at the socket/diagnostic edge rather than in the sans-IO service models.
 
+## Local packet-loss diagnostics
+
+Normal server builds do not include packet-loss controls. For a copied test
+account, build with `cargo build -p nfs-server --features network-test --locked`
+and run `nfs-afterhours start` with `--record-protocol` and `--server` pointing to
+that debug executable. Both the feature and raw recording are needed.
+This diagnostic does not need administrator access or change Windows networking.
+
+After reaching the action being tested, create `world-1-loss.txt` in the current
+run's **protocol recording directory** (`artifacts/runs/<run-id>` under the chosen
+data directory), with exactly `drop-incoming-2000ms`, UTF-8 without a BOM or newline.
+Use the connection number in the `world client` log if it is not 1. For example:
+
+```powershell
+$command = Join-Path $runDirectory 'world-1-loss.txt'
+[IO.File]::WriteAllText(($command + '.tmp'),
+    'drop-incoming-2000ms', [Text.UTF8Encoding]::new($false))
+Move-Item -LiteralPath ($command + '.tmp') -Destination $command
+```
+
+The server checks every 200 ms, logs when armed, then discards incoming datagrams
+from that world's established peer before transport processing, for at most two
+seconds or 256 packets. Recorded incoming bytes are retained with a diagnostic
+loss note. Other connections are unaffected. Each connection consumes only one
+command attempt; an invalid file disables that attempt. The file is left in place
+as evidence, and a new run always has a new recording directory. Compiling the
+feature alone does not drop traffic. Do not use a normal gameplay account for
+fault testing, and do not treat a paused process as evidence of packet loss.
+
+Check the feature separately as well as the normal workspace gates:
+`cargo clippy -p nfs-server --all-targets --features network-test --locked -- -D warnings`
+and `cargo test -p nfs-server --features network-test --locked`.
+
 ## License
 
 All code here is under the [Mozilla Public License 2.0](LICENSE). Contributions
 are accepted under the same license, with no separate contributor agreement.
 Start every new source file with the three-line MPL notice used throughout the
 tree, and keep `license.workspace = true` in each crate manifest.
+
+## Tracking work
+
+Gameplay coverage and remaining systems live in GitHub issues. Start from the
+pinned [gameplay roadmap][roadmap]: pick a `kind:tracking` issue, work against
+its acceptance list, and open linked sub-issues for anything new you discover.
+Pull requests reference the issue they advance and state what was live-tested.
+
+[roadmap]: https://github.com/afterhours-crew/afterhours-2015/issues/62

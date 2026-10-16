@@ -4,7 +4,7 @@
 
 use std::{
     io,
-    net::{Ipv4Addr, SocketAddr, TcpListener, UdpSocket},
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, UdpSocket},
     thread,
     time::{Duration, Instant},
 };
@@ -93,13 +93,10 @@ pub fn run(
         .local_addr()
         .and_then(|tls| udp.local_addr().map(|datagram| (tls, datagram)));
     let advertised = match addresses {
-        Ok((tls, datagram)) if owned_loopback(tls) && owned_loopback(datagram) => {
-            let SocketAddr::V4(datagram) = datagram else {
-                unreachable!("owned_loopback accepts only IPv4");
-            };
-            datagram
-        }
-        Ok(_) => return Observation::empty(Stop::NonLoopback),
+        Ok((tls, datagram)) => match advertised_endpoint(tls, datagram) {
+            Some(address) => address,
+            None => return Observation::empty(Stop::NonLoopback),
+        },
         Err(_) => return result,
     };
     if remaining(deadline).is_none() {
@@ -187,6 +184,13 @@ pub fn run(
 fn owned_loopback(address: SocketAddr) -> bool {
     matches!(address, SocketAddr::V4(address)
         if *address.ip() == Ipv4Addr::LOCALHOST && address.port() != 0)
+}
+
+fn advertised_endpoint(tls: SocketAddr, datagram: SocketAddr) -> Option<SocketAddrV4> {
+    match datagram {
+        SocketAddr::V4(address) if owned_loopback(tls) && owned_loopback(datagram) => Some(address),
+        _ => None,
+    }
 }
 
 fn remaining(deadline: Instant) -> Option<Duration> {
@@ -314,5 +318,34 @@ fn io_stop(error: &io::Error) -> Stop {
         Stop::Deadline
     } else {
         Stop::Io
+    }
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::*;
+
+    #[test]
+    fn only_exact_ipv4_loopback_endpoints_with_ports_can_start_workers() {
+        let valid: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        assert_eq!(
+            advertised_endpoint(valid, valid),
+            Some("127.0.0.1:12345".parse().unwrap())
+        );
+        // Do not bind rejected addresses: even a short wildcard bind can trigger
+        // a Windows firewall prompt. Integration tests bind only loopback.
+        for text in [
+            "0.0.0.0:12345",
+            "127.0.0.1:0",
+            "127.0.0.2:12345",
+            "192.0.2.1:12345",
+            "[::]:12345",
+            "[::1]:12345",
+        ] {
+            let rejected = text.parse().unwrap();
+            assert_eq!(advertised_endpoint(rejected, valid), None);
+            assert_eq!(advertised_endpoint(valid, rejected), None);
+            assert_eq!(advertised_endpoint(rejected, rejected), None);
+        }
     }
 }

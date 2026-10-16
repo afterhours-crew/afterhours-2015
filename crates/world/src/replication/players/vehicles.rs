@@ -5,6 +5,171 @@
 use super::*;
 
 impl Players {
+    /// Acknowledge a driver's nitrous transition without replacing its fuel,
+    /// equipment, motion or binding. Identical repeats produce no new delta.
+    pub fn set_vehicle_nitrous_mode(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        id: u16,
+        active: bool,
+    ) -> Result<Option<Record>, Error> {
+        if !self.owned_vehicles(connection, persona).contains(&id) {
+            return Err(Error::UnknownObject);
+        }
+        let Some(state::Object {
+            current: Update::Vehicle { binding, fields },
+            ..
+        }) = self.objects.get(id)
+        else {
+            return Err(Error::TypeMismatch);
+        };
+        if fields
+            .iter()
+            .filter(|f| matches!(f, Some(vehicle::Update::Index { .. })))
+            .count()
+            != 1
+        {
+            return Err(Error::Shape);
+        }
+        let updates = fields
+            .iter()
+            .map(|field| {
+                matches!(field, Some(vehicle::Update::Index { .. })).then_some(
+                    vehicle::Update::Index {
+                        index: Some(u8::from(active)),
+                        value: None,
+                    },
+                )
+            })
+            .collect();
+        self.objects.change(
+            id,
+            Update::Vehicle {
+                binding: binding.clone(),
+                fields: updates,
+            },
+        )
+    }
+
+    /// Publish only inventory-derived equipment fields, validating the complete
+    /// delta before changing the owned object. Creation and motion are forbidden.
+    pub fn set_vehicle_equipment(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        id: u16,
+        body: vehicle::Body,
+    ) -> Result<Option<Record>, Error> {
+        if !self.owned_vehicles(connection, persona).contains(&id) {
+            return Err(Error::UnknownObject);
+        }
+        let Some(state::Object {
+            current: Update::Vehicle { binding, fields },
+            ..
+        }) = self.objects.get(id)
+        else {
+            return Err(Error::TypeMismatch);
+        };
+        if body.creation.is_some() || body.updates.len() != fields.len() {
+            return Err(Error::Shape);
+        }
+        let mut chassis = 0;
+        for update in body.updates.iter().flatten() {
+            match update {
+                vehicle::Update::Chassis(c)
+                    if c.physics.is_none()
+                        && c.flag.is_none()
+                        && c.custom.is_some()
+                        && c.pair.is_none() =>
+                {
+                    chassis += 1
+                }
+                vehicle::Update::Tuning(Some(_))
+                | vehicle::Update::Appearance(_)
+                | vehicle::Update::Mesh(Some(_)) => (),
+                _ => return Err(Error::Shape),
+            }
+        }
+        if chassis != 1 {
+            return Err(Error::Shape);
+        }
+        self.objects.change(
+            id,
+            Update::Vehicle {
+                binding: binding.clone(),
+                fields: body.updates,
+            },
+        )
+    }
+    /// Resolve a live car through this exact owned player's participant.
+    pub fn player_vehicle_item(
+        &self,
+        connection: u8,
+        persona: u64,
+        player: u16,
+        vehicle: u16,
+    ) -> Option<(u16, u64)> {
+        if !self.owns(connection, persona, player) {
+            return None;
+        }
+        let participant = *self.participants.get(&player)?;
+        self.vehicles.iter().find_map(|(&(owner, item), &ghost)| {
+            (owner == participant && ghost == vehicle).then_some((participant, item))
+        })
+    }
+
+    /// Publish only the owned car's chassis customization. Motion, health,
+    /// authority, identity and every other component remain unchanged.
+    pub fn set_vehicle_customization(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        id: u16,
+        custom: vehicle::Customization,
+    ) -> Result<Option<Record>, Error> {
+        if !self.owned_vehicles(connection, persona).contains(&id) {
+            return Err(Error::UnknownObject);
+        }
+        let Some(state::Object {
+            current: Update::Vehicle { binding, fields },
+            ..
+        }) = self.objects.get(id)
+        else {
+            return Err(Error::TypeMismatch);
+        };
+        if fields
+            .iter()
+            .filter(|f| matches!(f, Some(vehicle::Update::Chassis(_))))
+            .count()
+            != 1
+        {
+            return Err(Error::Shape);
+        }
+        let updates = fields
+            .iter()
+            .map(|field| {
+                if matches!(field, Some(vehicle::Update::Chassis(_))) {
+                    Some(vehicle::Update::Chassis(Box::new(vehicle::ChassisUpdate {
+                        physics: None,
+                        flag: None,
+                        custom: Some(custom.clone()),
+                        pair: None,
+                    })))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        self.objects.change(
+            id,
+            Update::Vehicle {
+                binding: binding.clone(),
+                fields: updates,
+            },
+        )
+    }
+
     /// Current chassis state, only for a car owned by this connection/persona.
     pub fn vehicle_physics(
         &self,

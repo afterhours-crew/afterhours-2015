@@ -179,6 +179,29 @@ impl InventoryCatalog {
         result.collection.encode(&self.bindings)?;
         Ok(result)
     }
+    /// Construct one owned subtree from static defaults, retaining parent owners
+    /// and shared default/installed references. Every record is an explicit
+    /// collection entry so the receiver indexes descendants as well as parents.
+    /// The wire reference cache avoids duplicate bodies. No account is mutated.
+    /// The monotonic allocator must start after the existing owner's identity.
+    pub fn instantiate_owned(
+        &self,
+        guid: Guid,
+        owner: u64,
+        first_id: u64,
+    ) -> Result<InitialInventory, Error> {
+        if owner == 0 || first_id == 0 || owner >= first_id {
+            return Err(Error::Shape);
+        }
+        let mut result = InitialInventory {
+            collection: Collection::default(),
+            next_id: first_id,
+        };
+        self.instantiate(guid, owner, 0, &mut result)?;
+        result.collection.roots = result.collection.items.keys().copied().collect();
+        result.collection.encode(&self.bindings)?;
+        Ok(result)
+    }
     fn instantiate(
         &self,
         guid: Guid,

@@ -3,25 +3,30 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 use crate::record::{Direction, Recorder};
+use nfs_storage::{
+    AccountId,
+    records::{Record, Repository, UnixMicros},
+};
 use std::{
     net::Ipv4Addr,
     sync::{
         Arc,
         atomic::{AtomicU32, Ordering},
     },
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
+    sync::Semaphore,
     task::JoinSet,
     time::{Instant, timeout_at},
 };
-use tracing::info;
+use tracing::{info, warn};
 
 pub const SEED_BYTES: usize = 32;
 pub const MAX_HEADER_BYTES: usize = 8192;
-pub const MAX_BODY_BYTES: usize = 4096;
+pub const MAX_BODY_BYTES: usize = nfs_storage::records::MAX_RECORD_BYTES;
 pub const MAX_REQUEST_BYTES: usize = MAX_HEADER_BYTES + MAX_BODY_BYTES;
 const MAX_HEADERS: usize = 32;
 const MAX_CONNECTIONS: usize = 4;
@@ -32,6 +37,10 @@ pub const NO_MATCHING_RECORD: u32 = 0x0012_001f;
 pub enum Stop {
     Token,
     MissingRecord,
+    Record,
+    Stored,
+    Deleted,
+    Storage,
     Forbidden,
     UnsupportedRequest,
     InvalidHttp,
@@ -51,13 +60,26 @@ pub struct Observation {
     pub response_bytes: usize,
 }
 #[derive(Clone)]
-pub struct EmptyLocalRecords {
+pub struct LocalRecords {
     persona: i64,
     account: i64,
+    storage: Option<(Arc<dyn Repository>, AccountId)>,
+    workers: Arc<Semaphore>,
 }
-impl EmptyLocalRecords {
+/// Compatibility name for callers constructing an explicitly empty catalog.
+pub type EmptyLocalRecords = LocalRecords;
+impl LocalRecords {
     pub fn new(persona: i64, account: i64) -> Option<Self> {
-        (persona > 0 && account > 0 && persona != account).then_some(Self { persona, account })
+        (persona > 0 && account > 0 && persona != account).then_some(Self {
+            persona,
+            account,
+            storage: None,
+            workers: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
+        })
+    }
+    pub fn with_storage(mut self, repository: Arc<dyn Repository>, account: AccountId) -> Self {
+        self.storage = Some((repository, account));
+        self
     }
     fn permits(&self, request: &RecordRequest<'_>) -> bool {
         request.user == self.persona
@@ -74,7 +96,17 @@ struct RecordRequest<'a> {
     user: i64,
     owner: i64,
     owner_type: u8,
-    _name: &'a str,
+    name: &'a str,
+    operation: Operation<'a>,
+}
+enum Operation<'a> {
+    Get,
+    Head,
+    Put {
+        content_type: &'a str,
+        bytes: &'a [u8],
+    },
+    Delete,
 }
 enum Route<'a> {
     Token,
@@ -187,6 +219,9 @@ fn inspect(bytes: &[u8]) -> Result<Option<Request<'_>>, Stop> {
     let path = parsed.path.ok_or(Stop::InvalidHttp)?;
     let route = match parsed.method {
         Some("POST") if path == "/connect/token" => {
+            if length.is_some_and(|n| n > 4096) {
+                return Err(Stop::BodyLimit);
+            }
             if length.is_none() || get("content-type") != Some(b"application/x-www-form-urlencoded")
             {
                 return Err(Stop::UnsupportedRequest);
@@ -194,7 +229,10 @@ fn inspect(bytes: &[u8]) -> Result<Option<Request<'_>>, Stop> {
             token_body(&bytes[end..])?;
             Route::Token
         }
-        Some("GET") if length.unwrap_or(0) == 0 => {
+        Some(method @ ("GET" | "HEAD" | "PUT" | "DELETE")) => {
+            if method != "PUT" && length.unwrap_or(0) != 0 {
+                return Err(Stop::UnsupportedRequest);
+            }
             let (path, query) = path.split_once('?').ok_or(Stop::UnsupportedRequest)?;
             let tail = path
                 .strip_prefix("/1.0/contexts/")
@@ -215,13 +253,14 @@ fn inspect(bytes: &[u8]) -> Result<Option<Request<'_>>, Stop> {
             {
                 return Err(Stop::UnsupportedRequest);
             }
-            let (mut owner, mut kind, mut subrecord) = (None, None, None);
+            let (mut owner, mut kind, mut subrecord, mut update) = (None, None, None, None);
             for field in query.split('&') {
                 let (key, value) = field.split_once('=').ok_or(Stop::InvalidHttp)?;
                 match key {
                     "ownerId" if owner.is_none() => owner = Some(integer(value.as_bytes())?),
                     "ownerType" if kind.is_none() => kind = Some(integer(value.as_bytes())?),
                     "subrecord" if subrecord.is_none() && value.is_empty() => subrecord = Some(()),
+                    "subrecordupdate" if update.is_none() && value == "false" => update = Some(()),
                     _ => return Err(Stop::UnsupportedRequest),
                 }
             }
@@ -232,11 +271,42 @@ fn inspect(bytes: &[u8]) -> Result<Option<Request<'_>>, Stop> {
             {
                 return Err(Stop::UnsupportedRequest);
             }
+            let operation = match method {
+                "GET" | "HEAD" if update.is_none() => {
+                    if method == "GET" {
+                        Operation::Get
+                    } else {
+                        Operation::Head
+                    }
+                }
+                "PUT"
+                    if owner_type == 2
+                        && length.is_some()
+                        && update.is_some()
+                        && subrecord.is_none() =>
+                {
+                    let content_type =
+                        std::str::from_utf8(get("content-type").ok_or(Stop::InvalidHttp)?)
+                            .map_err(|_| Stop::InvalidHttp)?;
+                    if content_type != "image/jpeg" && content_type != "application/octet-stream" {
+                        return Err(Stop::UnsupportedRequest);
+                    }
+                    Operation::Put {
+                        content_type,
+                        bytes: &bytes[end..],
+                    }
+                }
+                "DELETE" if owner_type == 2 && update.is_none() && subrecord.is_none() => {
+                    Operation::Delete
+                }
+                _ => return Err(Stop::UnsupportedRequest),
+            };
             Route::Record(RecordRequest {
                 user: integer(get("x-user-id").ok_or(Stop::InvalidHttp)?)?,
                 owner: owner.ok_or(Stop::InvalidHttp)?,
                 owner_type,
-                _name: name,
+                name,
+                operation,
             })
         }
         _ => return Err(Stop::UnsupportedRequest),
@@ -282,6 +352,15 @@ fn answer(
     records: &EmptyLocalRecords,
     seed: &[u8; SEED_BYTES],
 ) -> Result<(Stop, Vec<u8>), Stop> {
+    answer_at(request, authority, records, seed, None)
+}
+fn answer_at(
+    request: Request<'_>,
+    authority: &str,
+    records: &LocalRecords,
+    seed: &[u8; SEED_BYTES],
+    now: Option<UnixMicros>,
+) -> Result<(Stop, Vec<u8>), Stop> {
     if request.host != authority.as_bytes() {
         return Err(Stop::UnsupportedRequest);
     }
@@ -297,14 +376,90 @@ fn answer(
             }
             Ok((Stop::Token,format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 83\r\nConnection: close\r\n\r\n{{\"access_token\":\"{token}\"}}").into_bytes()))
         }
-        Route::Record(record) if records.permits(&record) => {
-            Ok((Stop::MissingRecord,format!("HTTP/1.1 404 Not Found\r\nX-BLAZE-ERRORCODE: {NO_MATCHING_RECORD}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").into_bytes()))
-        }
+        Route::Record(record) if records.permits(&record) => record_answer(record, records, now),
         Route::Record(_) => Ok((
             Stop::Forbidden,
             b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
         )),
     }
+}
+fn missing_record() -> (Stop, Vec<u8>) {
+    (Stop::MissingRecord,format!("HTTP/1.1 404 Not Found\r\nX-BLAZE-ERRORCODE: {NO_MATCHING_RECORD}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").into_bytes())
+}
+fn record_wire(record: &Record, head: bool) -> Vec<u8> {
+    let mut out = format!("HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nX-CREATION: {}\r\nX-LASTUPDATE: {}\r\nConnection: close\r\n\r\n", record.content_type, record.bytes.len(), record.created.0, record.updated.0).into_bytes();
+    if !head {
+        out.extend_from_slice(&record.bytes);
+    }
+    out
+}
+fn record_answer(
+    record: RecordRequest<'_>,
+    records: &LocalRecords,
+    now: Option<UnixMicros>,
+) -> Result<(Stop, Vec<u8>), Stop> {
+    let storage = records.storage.as_ref().filter(|_| record.owner_type == 2);
+    match record.operation {
+        Operation::Get | Operation::Head => {
+            let Some((store, account)) = storage else {
+                return Ok(missing_record());
+            };
+            match store
+                .get(*account, record.name)
+                .map_err(|_| Stop::Storage)?
+            {
+                Some(value) => Ok((
+                    Stop::Record,
+                    record_wire(&value, matches!(record.operation, Operation::Head)),
+                )),
+                None => Ok(missing_record()),
+            }
+        }
+        Operation::Put {
+            content_type,
+            bytes,
+        } => {
+            let (store, account) = storage.ok_or(Stop::UnsupportedRequest)?;
+            let value = store
+                .put(
+                    *account,
+                    record.name,
+                    content_type,
+                    bytes,
+                    now.ok_or(Stop::InvalidHttp)?,
+                )
+                .map_err(|_| Stop::Storage)?;
+            // The generic client PUT callback consumes status only. A success is
+            // emitted only after the owned repository has committed the payload.
+            Ok((Stop::Stored,format!("HTTP/1.1 200 OK\r\nX-LASTUPDATE: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",value.updated.0).into_bytes()))
+        }
+        Operation::Delete => {
+            let (store, account) = storage.ok_or(Stop::UnsupportedRequest)?;
+            if now.is_none() {
+                return Err(Stop::InvalidHttp);
+            }
+            store
+                .delete(*account, record.name)
+                .map_err(|_| Stop::Storage)?;
+            Ok((
+                Stop::Deleted,
+                b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+            ))
+        }
+    }
+}
+/// Synchronous entry point with explicit time for durable record operations.
+/// Run off async workers; responses contain the stored payload, never a template.
+pub fn response_at(
+    bytes: &[u8],
+    authority: &str,
+    records: &LocalRecords,
+    seed: &[u8; SEED_BYTES],
+    now: UnixMicros,
+) -> Result<Option<(Stop, Vec<u8>)>, Stop> {
+    inspect(bytes)?
+        .map(|request| answer_at(request, authority, records, seed, Some(now)))
+        .transpose()
 }
 pub fn response(
     bytes: &[u8],
@@ -331,7 +486,28 @@ async fn exchange(
     }
     let mut chunk = [0u8; 1024];
     let (stop, response) = loop {
-        if let Some(response) = response(&result.request, &local.to_string(), records, seed)? {
+        if inspect(&result.request)?.is_some() {
+            let permit = records
+                .workers
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| Stop::Storage)?;
+            let bytes = result.request.clone();
+            let records = records.clone();
+            let seed = *seed;
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|_| Stop::Storage)?
+                .as_micros();
+            let now = UnixMicros(u64::try_from(now).map_err(|_| Stop::Storage)?);
+            let response = tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                response_at(&bytes, &local.to_string(), &records, &seed, now)
+            })
+            .await
+            .map_err(|_| Stop::Storage)??
+            .ok_or(Stop::InvalidHttp)?;
             break response;
         }
         let available = (MAX_REQUEST_BYTES - result.request.len()).min(chunk.len());
@@ -400,10 +576,15 @@ pub async fn listener(
                 let recorder=recorder.clone();
                 tasks.spawn(async move {
                     let observed=serve(stream,&records,&seed,Instant::now()+DEADLINE).await;
-                    let note=(!matches!(observed.stop,Stop::Token|Stop::MissingRecord)).then_some("unsupported");
+                    let note=(!matches!(observed.stop,Stop::Token|Stop::MissingRecord|Stop::Record|Stop::Stored|Stop::Deleted)).then_some("unsupported");
                     let _=recorder.chunk("auxiliary",n,Direction::In,&observed.request,note).await;
                     if observed.response_bytes>0 { let _=recorder.chunk("auxiliary",n,Direction::Out,&observed.response[..observed.response_bytes],None).await; }
                     info!(connection=n,%peer,stop=?observed.stop,"auxiliary request");
+                    // One exchange per connection; do not print the URL,
+                    // query, headers or body (they may carry authentication).
+                    if observed.stop == Stop::UnsupportedRequest {
+                        warn!(service="auxiliary",connection=n,disposition="closing","unsupported operation received");
+                    }
                 });
             },
         }

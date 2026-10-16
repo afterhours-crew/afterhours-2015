@@ -19,7 +19,11 @@ use nfs_world::{
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 mod activation;
 mod customization;
+mod diagnostics;
+mod equipment;
+pub(super) use equipment::EquipmentRequest;
 mod launchers;
+mod purchases;
 mod refusal;
 mod returning;
 mod sequences;
@@ -44,6 +48,7 @@ const MAX_HELD_GLASS: usize = 8;
 
 pub(super) struct PlayerListener {
     stats: Accepting,
+    messages: frame::receive::Receiver,
     persona: u64,
     roles: Option<crate::scene_roles::SceneRoles>,
     players: Players,
@@ -90,6 +95,7 @@ pub(super) struct PlayerListener {
     arrivals: Option<nfs_world::arrival::Arrivals>,
     returns: Option<nfs_world::arrival::Arrivals>,
     inventory: Option<Inventory>,
+    equipment: equipment::State,
     logic: Option<std::sync::Arc<crate::garage_logic::GarageLogic>>,
     logic_ghosts: BTreeMap<u16, BTreeMap<u16, u16>>,
     logic_vehicles_fired: BTreeSet<u16>,
@@ -98,6 +104,7 @@ pub(super) struct PlayerListener {
     pub(super) pending_rpcs: VecDeque<nfs_world::participants::HostRpc>,
     unsupported_rpcs: usize,
     unsupported_logic: usize,
+    unsupported: crate::diagnostics::Unsupported<diagnostics::Route>,
     pub(super) pending: VecDeque<Section>,
     pub(super) pending_entries: VecDeque<(Section, Vec<nfs_world::participants::HostRpc>)>,
     refused: usize,
@@ -122,6 +129,89 @@ impl std::fmt::Debug for PlayerListener {
     }
 }
 impl PlayerListener {
+    pub(super) fn purchase_ready(&self) -> bool {
+        self.inventory.is_some()
+            && self.persistent.is_some()
+            && self.bank_notification(0).is_ok_and(|reply| reply.is_some())
+    }
+
+    fn bank_notification(
+        &self,
+        amount: u32,
+    ) -> Result<Option<nfs_world::participants::HostRpc>, replication::Error> {
+        let Some(bank) = self.roles.as_ref().and_then(|roles| roles.bank) else {
+            return Ok(None);
+        };
+        let scene = self
+            .players
+            .objects()
+            .scene(bank.scene)
+            .ok_or(replication::Error::UnknownObject)?;
+        let Some(replication::Initial::SubLevel { fields, .. }) =
+            self.players.objects().get(scene).map(|o| &o.initial)
+        else {
+            return Err(replication::Error::TypeMismatch);
+        };
+        let rpc = fields
+            .get(bank.serializer)
+            .and_then(replication::sublevel::Initial::rpc)
+            .ok_or(replication::Error::TypeMismatch)?;
+        Ok(Some(nfs_world::participants::HostRpc::Bank(
+            nfs_world::bank::Balance {
+                endpoint: nfs_world::participants::Endpoint {
+                    scene,
+                    selector: rpc.selector,
+                    serial: rpc.serial,
+                },
+                amount,
+            },
+        )))
+    }
+
+    /// A purchase adds a leaf or promotes a purchasable leaf in place, without
+    /// equipping it or replacing a live car. ItemBuilder owns that transition.
+    /// Other persistent game tables and previously owned records stay identical.
+    pub(super) fn purchased_inventory(
+        &mut self,
+        garage: [Option<u64>; 5],
+        persistent: Option<std::sync::Arc<crate::persistent::Loaded>>,
+        items: std::sync::Arc<nfs_world::items::Collection>,
+    ) -> Result<(), replication::Error> {
+        let old = self.inventory.as_ref().ok_or(replication::Error::Shape)?;
+        let before = self.persistent.as_ref().ok_or(replication::Error::Shape)?;
+        let after = persistent.as_ref().ok_or(replication::Error::Shape)?;
+        let slots = nfs_world::garage::Slots::new(garage)?;
+        if slots != old.slots
+            || after.garage() != garage
+            || after.generation() < before.generation()
+            || after.tables() != before.tables()
+            || after.stores() != before.stores()
+            || !purchases::valid_refresh(&old.items, &items)
+        {
+            return Err(replication::Error::Shape);
+        }
+        let reply = self
+            .bank_notification(after.balance().0)?
+            .ok_or(replication::Error::Unsupported)?;
+        if self.pending_rpcs.len() >= nfs_world::session::MAX_RPC_QUEUE {
+            return Err(replication::Error::Bound);
+        }
+        let inventory = Inventory { slots, items };
+        if let Some(population) = &mut self.population {
+            population.refresh_inventory(
+                &self.players,
+                HOST_SELECTOR as u8,
+                self.persona,
+                old,
+                &inventory,
+            )?;
+        }
+        self.inventory = Some(inventory);
+        self.persistent = persistent;
+        self.pending_rpcs.push_back(reply);
+        Ok(())
+    }
+
     pub(super) fn inventory_with_items(
         &mut self,
         garage: [Option<u64>; 5],
@@ -298,6 +388,31 @@ impl PlayerListener {
                     .bind_actor(roles.gameplay, HOST_SELECTOR as u8, persona, participant)?
                     .ok_or(replication::Error::Shape)?;
                 replies.extend(participants.enter_garage_with_actor(binding)?);
+                if let Some(bank) = roles.bank {
+                    let scene = players
+                        .objects()
+                        .scene(bank.scene)
+                        .ok_or(replication::Error::UnknownObject)?;
+                    let Some(replication::Initial::SubLevel { fields, .. }) =
+                        players.objects().get(scene).map(|o| &o.initial)
+                    else {
+                        return Err(replication::Error::TypeMismatch);
+                    };
+                    let rpc = fields
+                        .get(bank.serializer)
+                        .and_then(replication::sublevel::Initial::rpc)
+                        .ok_or(replication::Error::TypeMismatch)?;
+                    replies.push(nfs_world::participants::HostRpc::Bank(
+                        nfs_world::bank::Balance {
+                            endpoint: nfs_world::participants::Endpoint {
+                                scene,
+                                selector: rpc.selector,
+                                serial: rpc.serial,
+                            },
+                            amount: loaded.balance().0,
+                        },
+                    ));
+                }
                 if let Some(logic) = logic {
                     let ghosts = logic_ghosts.entry(participant).or_default();
                     if !ghosts.is_empty() {
@@ -432,7 +547,7 @@ impl PlayerListener {
         self.stats.take_file(index)
     }
     pub(super) fn files_alive(&mut self, now: u64) -> bool {
-        self.stats.files_alive(now)
+        self.stats.files_alive(now) && self.messages.alive(now)
     }
     /// The next host teleport due by `world_ms`, oldest first, once the
     /// participant's spawn assignment has left in an earlier tick (official
@@ -470,6 +585,7 @@ impl PlayerListener {
     pub(super) fn new(persona: u64) -> Self {
         Self {
             stats: Accepting::default(),
+            messages: frame::receive::Receiver::default(),
             persona,
             roles: None,
             players: Players::default(),
@@ -501,6 +617,7 @@ impl PlayerListener {
             world_activation: None,
             sequences: None,
             inventory: None,
+            equipment: equipment::State::default(),
             logic: None,
             logic_ghosts: BTreeMap::new(),
             logic_vehicles_fired: BTreeSet::new(),
@@ -509,6 +626,7 @@ impl PlayerListener {
             pending_rpcs: VecDeque::new(),
             unsupported_rpcs: 0,
             unsupported_logic: 0,
+            unsupported: crate::diagnostics::Unsupported::new("world", 0),
             pending: VecDeque::new(),
             pending_entries: VecDeque::new(),
             refused: 0,
@@ -678,17 +796,48 @@ impl Listener for PlayerListener {
     fn frame(&mut self, queued: Queued<'_>) -> bool {
         let parsed = match self.stats.parse(queued) {
             Ok(parsed) => parsed,
-            Err(_) => return self.stats.invalid(),
+            Err(error) => {
+                self.diagnose_decode(error);
+                return self.stats.invalid();
+            }
         };
         let files = match self.stats.file_transition(&parsed) {
             Ok(files) => files,
-            Err(_) => return self.stats.invalid(),
+            Err(error) => {
+                self.diagnose_decode(frame::Error::File(error));
+                return self.stats.invalid();
+            }
         };
-        let requests: Vec<_> = parsed
-            .messages
+        let (messages, received) = match &parsed.messages {
+            Some(input) => match self.messages.prepare(input, self.stats.now) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    if refusal::logged(self.stats.errors + 1) {
+                        tracing::warn!(
+                            connection = self.unsupported.connection(),
+                            ?error,
+                            "refused MessageEX ordering or chunk assembly"
+                        );
+                    }
+                    return self.stats.invalid();
+                }
+            },
+            None => (self.messages.clone(), Vec::new()),
+        };
+        let decoded = match received
             .iter()
-            .flat_map(|m| &m.groups)
-            .flat_map(|g| &g.messages)
+            .map(|m| m.decode())
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                self.diagnose_decode(error);
+                return self.stats.invalid();
+            }
+        };
+        self.diagnose_unconsumed(&parsed, &decoded);
+        let requests: Vec<_> = decoded
+            .iter()
             .filter_map(|m| match m {
                 frame::Message::CreatePlayer { name, flag, slot } => Some(Request {
                     name: name.clone(),
@@ -698,21 +847,15 @@ impl Listener for PlayerListener {
                 _ => None,
             })
             .collect();
-        let rpcs = parsed
-            .messages
+        let rpcs = decoded
             .iter()
-            .flat_map(|m| &m.groups)
-            .flat_map(|g| &g.messages)
             .filter_map(|m| match m {
                 frame::Message::Opaque { index: 47, body } => Some(*body),
                 _ => None,
             })
             .collect::<Vec<_>>();
-        let logic_events = parsed
-            .messages
+        let logic_events = decoded
             .iter()
-            .flat_map(|m| &m.groups)
-            .flat_map(|g| &g.messages)
             .filter_map(|m| match m {
                 frame::Message::Opaque { index: 82, body } => Some(*body),
                 _ => None,
@@ -723,6 +866,7 @@ impl Listener for PlayerListener {
             && logic_events.is_empty()
             && parsed.movement.is_none()
         {
+            self.messages = messages;
             return self.stats.record(&parsed, files);
         }
         let mut players = self.players.clone();
@@ -921,7 +1065,7 @@ impl Listener for PlayerListener {
                     }
                 } else {
                     unsupported_logic += 1;
-                    tracing::debug!(?message, "unsupported client logic event");
+                    self.diagnose_logic(&message);
                 }
             }
             Ok::<(), replication::Error>(())
@@ -978,7 +1122,34 @@ impl Listener for PlayerListener {
         let mut launchers = self.launchers.clone();
         let mut unsupported = 0;
         let mut exit_entries = Vec::new();
+        let mut equipment = self.equipment.clone();
         for body in rpcs {
+            match nfs_world::vehicle_nitrous::receive(
+                &mut players,
+                HOST_SELECTOR as u8,
+                self.persona,
+                body,
+                |id| world_cars.get(&id).is_some_and(|(_, ready)| *ready),
+            ) {
+                Ok(Some(report)) => {
+                    tracing::debug!(
+                        vehicle = report.vehicle,
+                        active = report.active,
+                        client_seconds = report.client_seconds,
+                        changed = report.record.is_some(),
+                        "owned nitrous transition"
+                    );
+                    records.extend(report.record);
+                    continue;
+                }
+                Ok(None) => {}
+                Err(error) => return self.refuse_rpc(error, body),
+            }
+            match self.stage_equipment(&players, body, &mut equipment) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(error) => return self.refuse_rpc(error, body),
+            }
             match Self::item_builder_begin(self.roles.as_ref(), &players, self.persona, body) {
                 Ok(true) => continue,
                 Ok(false) => {}
@@ -1461,7 +1632,10 @@ impl Listener for PlayerListener {
                             }
                         }
                         Ok(nfs_world::participants::Outcome::Repeated) => {}
-                        Ok(nfs_world::participants::Outcome::Unsupported) => unsupported += 1,
+                        Ok(nfs_world::participants::Outcome::Unsupported) => {
+                            unsupported += 1;
+                            self.diagnose_rpc(body, &players);
+                        }
                         Err(error) => {
                             return self.refuse_rpc(error, body);
                         }
@@ -1773,6 +1947,7 @@ impl Listener for PlayerListener {
             );
         }
         self.sequences = sequences;
+        self.equipment = equipment;
         self.logic_ghosts = logic_ghosts;
         self.logic_vehicles_fired = logic_vehicles_fired;
         self.pending_content.extend(spawned.messages);
@@ -1794,6 +1969,7 @@ impl Listener for PlayerListener {
         self.pending.extend(sections);
         self.pending.extend(deferred_sections);
         self.pending_entries.extend(entries);
+        self.messages = messages;
         self.stats.record(&parsed, files)
     }
 }

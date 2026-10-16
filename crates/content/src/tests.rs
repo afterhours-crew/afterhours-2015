@@ -61,6 +61,95 @@ impl Install {
 }
 
 #[test]
+fn installed_kit_offers_exclude_unknown_unlocks_and_nonvisual_children() {
+    use synthetic::Field;
+    for (class, criterion, offered) in [
+        ("HoodItemData", "ID_UNLOCKED_AT_REP_LEVEL", true),
+        ("AirFilterItemData", "ID_UNLOCKED_AT_REP_LEVEL", false),
+        ("HoodItemData", "UNKNOWN_STORY_CONDITION", false),
+    ] {
+        let mut content = assets();
+        content[0] = item(
+            1,
+            class,
+            vec![],
+            vec![],
+            vec![
+                ("Quantity", Field::Int(1)),
+                ("UnlocksAtRepLevel", Field::Int(0)),
+                ("UnlockCriteriaDescriptionID", Field::CString(String::new())),
+                ("PerformanceModifier", Field::RawPointer(0)),
+                ("MeshGuids", Field::Guids(vec![])),
+                ("WideCollision", Field::Bool(false)),
+                ("Percent", Field::Float(0.0)),
+            ],
+        );
+        content[1] = item(
+            2,
+            "BodyKitItemData",
+            vec![1],
+            vec![],
+            vec![
+                ("Quantity", Field::Int(1)),
+                ("UnlocksAtRepLevel", Field::Int(0)),
+                (
+                    "UnlockCriteriaDescriptionID",
+                    Field::CString(criterion.into()),
+                ),
+            ],
+        );
+        let install = install_with(&content);
+        let prepared = install.prepare().unwrap();
+        let items = ItemContent::load(&prepared.path(Kind::ItemContent)).unwrap();
+        let kits = items.purchase_offers().unwrap().body_kits();
+        assert_eq!(kits.contains_key(&synthetic::reference(2).1), offered);
+        assert_eq!(kits.len(), usize::from(offered));
+    }
+}
+
+#[test]
+fn installed_fitment_restrictions_round_trip_and_reject_unknown_targets() {
+    use synthetic::Field;
+    for (target, valid) in [(2, true), (99, false)] {
+        let mut content = assets();
+        content[0] = item(
+            1,
+            "SpoilerItemData",
+            vec![],
+            vec![],
+            vec![
+                ("DownforceSetting", Field::Int(5)),
+                ("SpoilerTuning", Field::RawPointer(0)),
+                ("WideCollision", Field::Bool(false)),
+                ("PerformanceModifier", Field::RawPointer(0)),
+                ("MeshGuids", Field::Guids(vec![])),
+                (
+                    "SortedRestrictions",
+                    Field::Guids(vec![synthetic::reference(target).1]),
+                ),
+            ],
+        );
+        let install = install_with(&content);
+        let prepared = install.prepare();
+        if valid {
+            let items = ItemContent::load(&prepared.unwrap().path(Kind::ItemContent)).unwrap();
+            let json = items.to_json();
+            assert_eq!(json["version"], nfs_services::item_content::FITMENT_VERSION);
+            assert_eq!(
+                json["fitment_restrictions"],
+                serde_json::json!([{
+                    "definition": nfs_frostbite::hex(&synthetic::reference(1).1),
+                    "conflicts": [nfs_frostbite::hex(&synthetic::reference(2).1)],
+                }])
+            );
+            assert_eq!(ItemContent::from_json(&json).unwrap().to_json(), json);
+        } else {
+            assert!(prepared.is_err());
+        }
+    }
+}
+
+#[test]
 fn builds_outputs_the_service_loaders_accept() {
     let install = install_with(&assets());
     let prepared = install.prepare().unwrap();
@@ -368,6 +457,52 @@ fn startup_resolves_roles_by_name_and_traffic_by_construction_order() {
     assert_eq!(names.len(), 16);
     assert_eq!(names[6], "vehicles/runtime/0_bundle");
     assert_eq!(names[15], "vehicles/runtime/9_bundle");
+}
+
+#[test]
+fn startup_derives_bank_position_and_rejects_ambiguous_banks() {
+    use synthetic::Field;
+    for count in [0, 1, 2] {
+        let replacements = synthetic::garage_layout_with(|_, _, fields, objects| {
+            let first = objects.len() as u32 + 2;
+            let Field::RawPointers(pointers) = &mut fields[1].1 else {
+                panic!()
+            };
+            for i in 0..count {
+                objects.push(("BankEntityData", vec![]));
+                // Place the bank before every pre-existing scene child.
+                pointers.insert(0, first + i);
+            }
+        });
+        let mut fixture = assets();
+        fixture.retain(|a| !replacements.iter().any(|b| b.name == a.name));
+        fixture.extend(replacements);
+        let mut install = install_with(&fixture);
+        install.options.identity.scenes.classes.insert(
+            "BankEntityData".into(),
+            Some(nfs_world::replication::sublevel::Kind::Rpc),
+        );
+        let mut index = assets::AssetIndex::open(&install.game(), &install.options()).unwrap();
+        let scenes = scenes::build(&mut index.assets, &install.options.identity.scenes).unwrap();
+        let catalog =
+            scenes::Catalog::from_json(&serde_json::from_slice(&scenes).unwrap()).unwrap();
+        let prepared = startup::build(&mut index, &catalog);
+        if count == 2 {
+            assert!(matches!(prepared, Err(Error::Content(_))));
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_slice(&prepared.unwrap()).unwrap();
+        if count == 0 {
+            assert!(value["roles"].get("bank").is_none());
+        } else {
+            assert_eq!(
+                value["roles"]["bank"],
+                serde_json::json!({
+                    "scene": assets::scene_key("levels/runtime/gameplay"), "serializer":1
+                })
+            );
+        }
+    }
 }
 
 #[test]

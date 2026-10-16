@@ -429,6 +429,13 @@ impl<'p> Startup<'p> {
     ) -> Result<Option<Vec<Vec<u8>>>, Failure> {
         let profile = self.profile;
         let single = |reply: Option<Vec<u8>>| reply.map(|frame| vec![frame]);
+        if self.users.is_none() && nfs_services::text_filter::owns(route.component, route.command) {
+            return match nfs_services::text_filter::reply(request) {
+                Ok(reply) => Ok(Some(vec![reply])),
+                Err(nfs_services::text_filter::Error::Ineligible) => Ok(None),
+                Err(nfs_services::text_filter::Error::Encode) => Err(Failure::Reply),
+            };
+        }
         if self.needs_challenges_view(request) {
             let current = self
                 .current_challenges

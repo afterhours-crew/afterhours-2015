@@ -1,5 +1,7 @@
 # Afterhours 2015
 
+[![CI](https://github.com/afterhours-crew/afterhours-2015/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/afterhours-crew/afterhours-2015/actions/workflows/ci.yml)
+
 Server implementation for Need for Speed (2015), with offline play and custom
 servers as the goals. This is the canonical home for runtime code and its
 first-party dependencies.
@@ -9,8 +11,11 @@ The standalone server and the [`nfs-afterhours` launcher](docs/LOCAL-LAUNCHER.md
 build here. The launcher prepares content from a supported installation,
 creates an independent local account, runs the server on any platform and on
 Windows starts and routes the game. Its current validation scope and installation
-requirements are documented in that guide. The workspace owns
-these implemented components:
+requirements are documented in that guide. Tested gameplay and the prioritized
+remaining systems are tracked in the [gameplay roadmap issue][roadmap] and its
+per-system tracking issues. The tested garage customization scope and local
+test-cash/REP commands are covered in [garage upgrades and customization](docs/GARAGE-UPGRADES.md).
+The workspace owns these implemented components:
 
 | Component | Responsibility |
 | --- | --- |
@@ -60,6 +65,7 @@ For custom build output paths, saved data, setup checks, exit codes and
 troubleshooting, see the [running instructions](docs/LOCAL-LAUNCHER.md#build-from-source)
 and the [launcher crate](crates/launcher/README.md).
 Developers can also [run just the server](crates/server/README.md#run-only-the-server).
+For menu automation, [change the game's Back key to F9 without a mod](docs/MENU-KEYBINDING.md).
 
 ## Build and test
 
@@ -84,8 +90,10 @@ Once the toolchain and dependencies are cached, add `--offline` to Cargo build,
 Clippy and test commands. No private repository, account profile or recording is
 needed. Passing these tests establishes the covered component behavior, not
 offline play or launcher independence. New local accounts start after the
-unsupported scripted prologue; complete progression and garage mutations remain
-unfinished. A guarded local launch procedure
+unsupported scripted prologue; story progression and multi-car garage management
+remain unfinished. The [garage customization guide](docs/GARAGE-UPGRADES.md)
+records supported purchases, tuning, appearance, wraps and resets. A guarded
+local launch procedure
 has reached free roam after a Windows restart without the EA app or service and
 with external game traffic blocked. The launcher supplies setup, process
 ownership and temporary routing without administrator privileges; its
@@ -161,3 +169,5 @@ This repository is licensed under the Mozilla Public License, version 2.0. See
 [LICENSE](LICENSE). Each source file carries the MPL notice, so modified copies
 of those files must stay under the MPL when distributed, while new files that
 only use these crates may carry another license.
+
+[roadmap]: https://github.com/afterhours-crew/afterhours-2015/issues/62
