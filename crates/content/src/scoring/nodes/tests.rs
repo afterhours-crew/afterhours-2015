@@ -136,3 +136,124 @@ fn reject_malformed_and_unsupported_nodes_instead_of_defaulting() {
         assert!(compile(&obj).is_err(), "{}", obj.class);
     }
 }
+
+#[test]
+fn boolean_integer_and_conditional_configuration_preserves_types() {
+    let bool_config = compile(&object(
+        "BoolEntityData",
+        &[("DefaultValue", Value::Bool(true))],
+    ))
+    .unwrap();
+    assert_eq!(
+        bool_config.definition,
+        Definition::Boolean { default: true }
+    );
+    let int_config = compile(&object(
+        "IntEntityData",
+        &[
+            ("DefaultValue", Value::Int32(i32::MIN)),
+            ("IncDecValue", Value::Int32(-3)),
+        ],
+    ))
+    .unwrap();
+    assert_eq!(
+        int_config.definition,
+        Definition::Integer {
+            default: i32::MIN,
+            step: -3
+        }
+    );
+    let cache = compile(&object(
+        "IntCacheEntityData",
+        &[
+            ("InValue", Value::Int32(-7)),
+            ("LoadOnCreate", Value::Bool(true)),
+        ],
+    ))
+    .unwrap();
+    assert_eq!(cache.definition, Definition::IntegerCache);
+    assert_eq!(cache.defaults, [(nodes::CACHE_INPUT, Scalar::Integer(-7))]);
+    let compare = compile(&object(
+        "CompareBoolEntityData",
+        &[
+            ("Bool", Value::Bool(false)),
+            ("TriggerOnStart", Value::Bool(true)),
+            ("TriggerOnPropertyChange", Value::Bool(false)),
+            ("AlwaysSend", Value::Bool(true)),
+        ],
+    ))
+    .unwrap();
+    assert_eq!(
+        compare.definition,
+        Definition::CompareBoolean {
+            on_change: false,
+            on_start: true,
+            always_send: true
+        }
+    );
+    assert_eq!(compare.defaults, [(nodes::BOOL, Scalar::Boolean(false))]);
+    let conditional = compile(&object(
+        "ConditionalFloatEntityData",
+        &[
+            ("Condition", Value::Bool(true)),
+            ("ValueIfTrue", Value::Float32(-3.5)),
+            ("ValueIfFalse", Value::Float32(8.0)),
+        ],
+    ))
+    .unwrap();
+    assert_eq!(conditional.definition, Definition::ConditionalFloat);
+    assert_eq!(
+        conditional.defaults,
+        [
+            (nodes::CONDITION, Scalar::Boolean(true)),
+            (nodes::VALUE_IF_TRUE, Scalar::Float(-3.5)),
+            (nodes::VALUE_IF_FALSE, Scalar::Float(8.0)),
+        ]
+    );
+}
+
+#[test]
+fn new_nodes_reject_unknown_initialization_and_wrong_scalar_types() {
+    for obj in [
+        object("BoolEntityData", &[("DefaultValue", Value::UInt32(1))]),
+        object(
+            "IntEntityData",
+            &[
+                ("DefaultValue", Value::UInt32(1)),
+                ("IncDecValue", Value::Int32(1)),
+            ],
+        ),
+        object(
+            "IntCacheEntityData",
+            &[
+                ("InValue", Value::Int32(0)),
+                ("LoadOnCreate", Value::Bool(false)),
+            ],
+        ),
+        object(
+            "IntCacheEntityData",
+            &[
+                ("InValue", Value::Float32(0.0)),
+                ("LoadOnCreate", Value::Bool(true)),
+            ],
+        ),
+        object(
+            "CompareBoolEntityData",
+            &[
+                ("Bool", Value::Bool(false)),
+                ("TriggerOnStart", Value::Bool(true)),
+                ("TriggerOnPropertyChange", Value::Bool(true)),
+            ],
+        ),
+        object(
+            "ConditionalFloatEntityData",
+            &[
+                ("Condition", Value::Bool(false)),
+                ("ValueIfTrue", Value::Float32(f32::NAN)),
+                ("ValueIfFalse", Value::Float32(1.0)),
+            ],
+        ),
+    ] {
+        assert!(compile(&obj).is_err(), "{}", obj.class);
+    }
+}

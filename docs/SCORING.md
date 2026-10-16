@@ -56,8 +56,9 @@ shape and finite floats, not physical plausibility. The transport must discard
 duplicate reliable messages, and retired participants must lose their bindings.
 No scoring report is registered in the live server yet.
 
-`AssetIndex::scoring_nodes` reads cache, accumulator, float counter, event gate,
-event splitter and float/integer comparator configurations, retaining authored
+`AssetIndex::scoring_nodes` reads float/integer cache, accumulator, float/integer
+counter, Boolean value, conditional float, event gate, event splitter and scalar
+comparator configurations, retaining authored
 defaults and separate prefab occurrences. It does not validate other classes
 or property wiring. Connected input properties take precedence over defaults.
 
@@ -73,6 +74,14 @@ Explicit comparisons emit every currently true condition in order without
 changing the previous property relation. Property changes emit only conditions
 that became true; changes before activation are deferred. Float comparisons emit
 inequalities only, while integer comparisons also emit equality or inequality.
+Boolean comparisons support repeated notifications through `AlwaysSend`;
+explicit evaluation does not change their previous property relation. Integer
+counters wrap at signed 32-bit boundaries. Conditional floats publish only the
+selected branch when that input changes, and reevaluate on condition changes.
+Integer-cache initialization currently requires `LoadOnCreate=true`; unsupported
+initialization modes are rejected. The separate bounded Boolean fold helper
+distinguishes unconnected ports from bound properties that are not ready; it is
+not yet a complete And/Or binding implementation.
 Numeric PropertyCast support publishes float, integer and Boolean values in that
 order; string conversion/formatting is not implemented. Nonfinite values and
 out-of-range casts fail before any effects escape. Engine save-state restoration

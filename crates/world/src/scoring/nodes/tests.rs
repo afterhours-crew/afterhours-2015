@@ -45,15 +45,15 @@ fn comparison_property_transitions_emit_only_new_predicates_in_native_order() {
             for (j, new) in [-1, 0, 1].into_iter().enumerate() {
                 let mut node = compare(kind, true, false);
                 node.apply(Action::Activate, pair(kind, old)).unwrap();
-                node.apply(Action::PropertyChanged, pair(kind, old))
+                node.apply(Action::PropertyChanged(A), pair(kind, old))
                     .unwrap();
                 assert_eq!(
-                    node.apply(Action::PropertyChanged, pair(kind, new))
+                    node.apply(Action::PropertyChanged(A), pair(kind, new))
                         .unwrap(),
                     emits(matrix[i][j])
                 );
                 assert!(
-                    node.apply(Action::PropertyChanged, pair(kind, new))
+                    node.apply(Action::PropertyChanged(A), pair(kind, new))
                         .unwrap()
                         .is_empty()
                 );
@@ -94,7 +94,8 @@ fn explicit_comparison_repeats_without_changing_property_relation() {
         }
         // Explicit comparisons above never established an old relation.
         assert_eq!(
-            node.apply(Action::PropertyChanged, pair(kind, 1)).unwrap(),
+            node.apply(Action::PropertyChanged(A), pair(kind, 1))
+                .unwrap(),
             emits(expected[2])
         );
     }
@@ -105,7 +106,7 @@ fn startup_and_pre_activation_changes_use_latest_inputs_once() {
     for kind in [Comparison::Integer, Comparison::Float] {
         let mut node = compare(kind, true, false);
         assert!(
-            node.apply(Action::PropertyChanged, pair(kind, -1))
+            node.apply(Action::PropertyChanged(A), pair(kind, -1))
                 .unwrap()
                 .is_empty()
         );
@@ -122,7 +123,7 @@ fn startup_and_pre_activation_changes_use_latest_inputs_once() {
         let mut start = compare(kind, false, true);
         assert!(
             start
-                .apply(Action::PropertyChanged, |_| None)
+                .apply(Action::PropertyChanged(A), |_| None)
                 .unwrap()
                 .is_empty()
         );
@@ -132,7 +133,7 @@ fn startup_and_pre_activation_changes_use_latest_inputs_once() {
         );
         assert!(
             start
-                .apply(Action::PropertyChanged, pair(kind, 1))
+                .apply(Action::PropertyChanged(A), pair(kind, 1))
                 .unwrap()
                 .is_empty()
         );
@@ -150,7 +151,7 @@ fn cache_and_accumulator_publish_before_notification_even_when_unchanged() {
     );
     assert!(
         cache
-            .apply(Action::PropertyChanged, |_| None)
+            .apply(Action::PropertyChanged(A), |_| None)
             .unwrap()
             .is_empty()
     );
@@ -266,6 +267,191 @@ fn invalid_input_and_overflow_do_not_partially_mutate_nodes() {
         })
         .is_err()
     );
+}
+
+#[test]
+fn boolean_comparison_always_send_and_explicit_events_preserve_relation() {
+    for always_send in [false, true] {
+        let mut node = Node::new(Definition::CompareBoolean {
+            on_change: true,
+            on_start: false,
+            always_send,
+        })
+        .unwrap();
+        // Pre-activation changes are deferred, even before a value is ready.
+        assert!(
+            node.apply(Action::PropertyChanged(BOOL), |_| None)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            node.apply(Action::Activate, |_| Some(Value::Boolean(true)))
+                .unwrap(),
+            emits(&[ON_TRUE])
+        );
+        assert_eq!(
+            node.apply(Action::PropertyChanged(BOOL), |_| Some(Value::Boolean(
+                true
+            )))
+            .unwrap(),
+            if always_send {
+                emits(&[ON_TRUE])
+            } else {
+                vec![]
+            }
+        );
+        assert_eq!(
+            node.apply(Action::Event(IN), |_| Some(Value::Boolean(false)))
+                .unwrap(),
+            emits(&[ON_FALSE])
+        );
+        assert_eq!(
+            node.apply(Action::PropertyChanged(BOOL), |_| Some(Value::Boolean(
+                false
+            )))
+            .unwrap(),
+            emits(&[ON_FALSE])
+        );
+    }
+    let mut start = Node::new(Definition::CompareBoolean {
+        on_change: false,
+        on_start: true,
+        always_send: true,
+    })
+    .unwrap();
+    assert!(
+        start
+            .apply(Action::PropertyChanged(BOOL), |_| None)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        start
+            .apply(Action::Activate, |_| Some(Value::Boolean(false)))
+            .unwrap(),
+        emits(&[ON_FALSE])
+    );
+    assert!(start.apply(Action::Activate, |_| None).unwrap().is_empty());
+}
+
+#[test]
+fn boolean_and_integer_values_publish_without_explicit_notifications() {
+    let mut b = Node::new(Definition::Boolean { default: true }).unwrap();
+    assert_eq!(
+        b.initial_outputs(|_| None).unwrap(),
+        [Effect::Publish(FLOAT_VALUE, Value::Boolean(true))]
+    );
+    for (event, current, output) in [
+        (SET_FALSE, true, false),
+        (SET_TRUE, false, true),
+        (TOGGLE, true, false),
+        (TOGGLE, false, true),
+    ] {
+        assert_eq!(
+            b.apply(Action::Event(event), |_| Some(Value::Boolean(current)))
+                .unwrap(),
+            [Effect::Publish(FLOAT_VALUE, Value::Boolean(output))]
+        );
+    }
+    let mut i = Node::new(Definition::Integer {
+        default: -3,
+        step: 1,
+    })
+    .unwrap();
+    assert_eq!(
+        i.initial_outputs(|_| None).unwrap(),
+        [Effect::Publish(FLOAT_VALUE, Value::Integer(-3))]
+    );
+    for (event, current, output) in [
+        (INCREMENT, i32::MAX, i32::MIN),
+        (DECREMENT, i32::MIN, i32::MAX),
+        (RESET, 7, -3),
+    ] {
+        assert_eq!(
+            i.apply(Action::Event(event), |_| Some(Value::Integer(current)))
+                .unwrap(),
+            [Effect::Publish(FLOAT_VALUE, Value::Integer(output))]
+        );
+    }
+    let mut cache = Node::new(Definition::IntegerCache).unwrap();
+    assert_eq!(
+        cache.initial_outputs(|_| Some(Value::Integer(7))).unwrap(),
+        [Effect::Publish(CACHE_OUTPUT, Value::Integer(7))]
+    );
+    for _ in 0..2 {
+        assert_eq!(
+            cache
+                .apply(Action::Event(LOAD), |_| Some(Value::Integer(i32::MIN)))
+                .unwrap(),
+            [
+                Effect::Publish(CACHE_OUTPUT, Value::Integer(i32::MIN)),
+                Effect::Emit(CACHE_LOADED)
+            ]
+        );
+    }
+}
+
+#[test]
+fn conditional_float_reads_and_publishes_only_the_selected_branch() {
+    let mut node = Node::new(Definition::ConditionalFloat).unwrap();
+    assert_eq!(
+        node.initial_outputs(|_| None).unwrap(),
+        [Effect::Publish(OUTPUT, Value::Float(0.0))]
+    );
+    for condition in [true, false] {
+        let chosen = if condition {
+            VALUE_IF_TRUE
+        } else {
+            VALUE_IF_FALSE
+        };
+        let other = if condition {
+            VALUE_IF_FALSE
+        } else {
+            VALUE_IF_TRUE
+        };
+        let read = |port| {
+            if port == CONDITION {
+                Some(Value::Boolean(condition))
+            } else if port == chosen {
+                Some(Value::Float(8.25))
+            } else {
+                panic!("read inactive/unknown branch")
+            }
+        };
+        for action in [
+            Action::Activate,
+            Action::PropertyChanged(CONDITION),
+            Action::PropertyChanged(chosen),
+        ] {
+            assert_eq!(
+                node.apply(action, read).unwrap(),
+                [Effect::Publish(OUTPUT, Value::Float(8.25))]
+            );
+        }
+        assert!(
+            node.apply(Action::PropertyChanged(other), read)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(node.apply(Action::Event(IN), |_| None).unwrap().is_empty());
+    }
+}
+
+#[test]
+fn boolean_folds_distinguish_unavailable_bound_inputs_and_short_circuit() {
+    for (inputs, all, any) in [
+        (vec![], Some(true), Some(false)),
+        (vec![None], None, Some(false)),
+        (vec![Some(false), None], Some(false), Some(false)),
+        (vec![None, Some(false)], None, Some(false)),
+        (vec![Some(true), None], None, Some(true)),
+        (vec![None, Some(true)], None, Some(true)),
+        (vec![Some(true), Some(true)], Some(true), Some(true)),
+    ] {
+        assert_eq!(fold_boolean(true, &inputs), Ok(all));
+        assert_eq!(fold_boolean(false, &inputs), Ok(any));
+    }
+    assert_eq!(fold_boolean(true, &[Some(true); 257]), Err(Error::Bound));
 }
 
 #[test]

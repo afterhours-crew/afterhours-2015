@@ -9,7 +9,7 @@ use crate::{
     assets::AssetIndex,
     graph::{Graph, Site, bad},
 };
-use nfs_frostbite::ebx::{Object, Value};
+use nfs_frostbite::ebx::{Fields, Object, Value};
 use nfs_world::scoring::{
     math::Value as Scalar,
     nodes::{self, Comparison, Definition},
@@ -36,7 +36,18 @@ fn supported(class: &str) -> bool {
             | "EventSplitterEntityData"
             | "CompareFloatEntityData"
             | "CompareIntEntityData"
+            | "BoolEntityData"
+            | "IntEntityData"
+            | "IntCacheEntityData"
+            | "CompareBoolEntityData"
+            | "ConditionalFloatEntityData"
     )
+}
+fn integer(fields: &Fields, name: &str) -> Result<i32, Error> {
+    match field(fields, name)? {
+        Value::Int32(value) => Ok(*value),
+        _ => Err(bad("scoring signed integer field")),
+    }
 }
 /// Compile one supported class. This does not validate the composition's
 /// property wiring or instantiate other classes such as queries or MathOp.
@@ -65,6 +76,48 @@ pub fn compile(object: &Object) -> Result<Configuration, Error> {
         "EventSplitterEntityData" => Definition::Splitter {
             run_once: boolean(fields, "RunOnce")?,
         },
+        "BoolEntityData" => Definition::Boolean {
+            default: boolean(fields, "DefaultValue")?,
+        },
+        "IntEntityData" => Definition::Integer {
+            default: integer(fields, "DefaultValue")?,
+            step: integer(fields, "IncDecValue")?,
+        },
+        "IntCacheEntityData" => {
+            if !boolean(fields, "LoadOnCreate")? {
+                return Err(bad("unsupported uninitialized integer cache"));
+            }
+            defaults.push((
+                nodes::CACHE_INPUT,
+                Scalar::Integer(integer(fields, "InValue")?),
+            ));
+            Definition::IntegerCache
+        }
+        "CompareBoolEntityData" => {
+            defaults.push((nodes::BOOL, Scalar::Boolean(boolean(fields, "Bool")?)));
+            Definition::CompareBoolean {
+                on_change: boolean(fields, "TriggerOnPropertyChange")?,
+                on_start: boolean(fields, "TriggerOnStart")?,
+                always_send: boolean(fields, "AlwaysSend")?,
+            }
+        }
+        "ConditionalFloatEntityData" => {
+            defaults.extend([
+                (
+                    nodes::CONDITION,
+                    Scalar::Boolean(boolean(fields, "Condition")?),
+                ),
+                (
+                    nodes::VALUE_IF_TRUE,
+                    Scalar::Float(scalar(fields, "ValueIfTrue")?),
+                ),
+                (
+                    nodes::VALUE_IF_FALSE,
+                    Scalar::Float(scalar(fields, "ValueIfFalse")?),
+                ),
+            ]);
+            Definition::ConditionalFloat
+        }
         "CompareFloatEntityData" | "CompareIntEntityData" => {
             let kind = if object.class == "CompareFloatEntityData" {
                 Comparison::Float

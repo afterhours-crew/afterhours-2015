@@ -33,6 +33,15 @@ pub const EQUAL: u32 = 0x0b87_bd3b;
 pub const NOT_EQUAL: u32 = 0x7c7f_159a;
 pub const LESS_EQUAL: u32 = 0x7c7f_6a47;
 pub const LESS: u32 = 0x0b87_bd1a;
+pub const BOOL: u32 = 2_088_812_747;
+pub const ON_TRUE: u32 = 2_861_454_674;
+pub const ON_FALSE: u32 = 4_213_085_657;
+pub const SET_TRUE: u32 = 2_753_900_881;
+pub const SET_FALSE: u32 = 668_205_626;
+pub const TOGGLE: u32 = 3_236_481_175;
+pub const CONDITION: u32 = 1_800_624_758;
+pub const VALUE_IF_TRUE: u32 = 88_991_863;
+pub const VALUE_IF_FALSE: u32 = 2_915_912_540;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Effect {
@@ -42,7 +51,7 @@ pub enum Effect {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Action {
     Event(u32),
-    PropertyChanged,
+    PropertyChanged(u32),
     Activate,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -69,6 +78,21 @@ pub enum Definition {
         on_change: bool,
         on_start: bool,
     },
+    Boolean {
+        default: bool,
+    },
+    Integer {
+        default: i32,
+        step: i32,
+    },
+    /// The supported LoadOnCreate=true mode; bind the input before seeding.
+    IntegerCache,
+    CompareBoolean {
+        on_change: bool,
+        on_start: bool,
+        always_send: bool,
+    },
+    ConditionalFloat,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct Node {
@@ -79,6 +103,7 @@ pub struct Node {
     active: bool,
     pending: bool,
     relation: Option<Ordering>,
+    boolean_relation: Option<bool>,
 }
 
 fn float(read: &mut impl FnMut(u32) -> Option<Value>, port: u32) -> Result<f32, Error> {
@@ -86,6 +111,37 @@ fn float(read: &mut impl FnMut(u32) -> Option<Value>, port: u32) -> Result<f32, 
         Value::Float(value) => finite(value),
         _ => Err(Error::InvalidGraph),
     }
+}
+fn integer(read: &mut impl FnMut(u32) -> Option<Value>, port: u32) -> Result<i32, Error> {
+    match read(port).ok_or(Error::MissingInput)? {
+        Value::Integer(value) => Ok(value),
+        _ => Err(Error::InvalidGraph),
+    }
+}
+fn boolean(read: &mut impl FnMut(u32) -> Option<Value>, port: u32) -> Result<bool, Error> {
+    match read(port).ok_or(Error::MissingInput)? {
+        Value::Boolean(value) => Ok(value),
+        _ => Err(Error::InvalidGraph),
+    }
+}
+fn boolean_event(value: bool) -> Effect {
+    Effect::Emit(if value { ON_TRUE } else { ON_FALSE })
+}
+fn conditional(
+    read: &mut impl FnMut(u32) -> Option<Value>,
+    condition: bool,
+) -> Result<Effect, Error> {
+    Ok(Effect::Publish(
+        OUTPUT,
+        Value::Float(float(
+            read,
+            if condition {
+                VALUE_IF_TRUE
+            } else {
+                VALUE_IF_FALSE
+            },
+        )?),
+    ))
 }
 fn relation(
     kind: Comparison,
@@ -137,8 +193,13 @@ impl Node {
             open: matches!(definition, Definition::Gate { open: true }),
             fired: false,
             active: false,
-            pending: matches!(definition, Definition::Compare { on_start: true, .. }),
+            pending: matches!(
+                definition,
+                Definition::Compare { on_start: true, .. }
+                    | Definition::CompareBoolean { on_start: true, .. }
+            ),
             relation: None,
+            boolean_relation: None,
         })
     }
 
@@ -158,6 +219,17 @@ impl Node {
             Definition::Float { default, .. } => {
                 vec![Effect::Publish(FLOAT_VALUE, Value::Float(default))]
             }
+            Definition::Boolean { default } => {
+                vec![Effect::Publish(FLOAT_VALUE, Value::Boolean(default))]
+            }
+            Definition::Integer { default, .. } => {
+                vec![Effect::Publish(FLOAT_VALUE, Value::Integer(default))]
+            }
+            Definition::IntegerCache => vec![Effect::Publish(
+                CACHE_OUTPUT,
+                Value::Integer(integer(&mut read, CACHE_INPUT)?),
+            )],
+            Definition::ConditionalFloat => vec![Effect::Publish(OUTPUT, Value::Float(0.0))],
             _ => vec![],
         })
     }
@@ -232,7 +304,7 @@ impl Node {
                     on_change: true,
                     ..
                 },
-                PropertyChanged,
+                PropertyChanged(_),
             ) => {
                 let current = relation(kind, read)?;
                 if self.active {
@@ -251,6 +323,69 @@ impl Node {
                 self.pending = false;
                 Ok(self.transition(kind, current))
             }
+            (Boolean { .. }, Event(event @ (SET_TRUE | SET_FALSE | TOGGLE))) => {
+                let value = match event {
+                    SET_TRUE => true,
+                    SET_FALSE => false,
+                    _ => !boolean(read, FLOAT_VALUE)?,
+                };
+                Ok(vec![Publish(FLOAT_VALUE, Value::Boolean(value))])
+            }
+            (Integer { default, step }, Event(event @ (INCREMENT | DECREMENT | RESET))) => {
+                let value = match event {
+                    RESET => default,
+                    INCREMENT => integer(read, FLOAT_VALUE)?.wrapping_add(step),
+                    _ => integer(read, FLOAT_VALUE)?.wrapping_sub(step),
+                };
+                Ok(vec![Publish(FLOAT_VALUE, Value::Integer(value))])
+            }
+            (IntegerCache, Event(LOAD)) => Ok(vec![
+                Publish(CACHE_OUTPUT, Value::Integer(integer(read, CACHE_INPUT)?)),
+                Emit(CACHE_LOADED),
+            ]),
+            (CompareBoolean { .. }, Event(_)) => Ok(vec![boolean_event(boolean(read, BOOL)?)]),
+            (
+                CompareBoolean {
+                    on_change: true,
+                    always_send,
+                    ..
+                },
+                PropertyChanged(_),
+            ) => {
+                if !self.active {
+                    self.pending = true;
+                    return Ok(vec![]);
+                }
+                let current = boolean(read, BOOL)?;
+                let previous = self.boolean_relation.replace(current);
+                Ok(if always_send || previous != Some(current) {
+                    vec![boolean_event(current)]
+                } else {
+                    vec![]
+                })
+            }
+            (CompareBoolean { .. }, Activate) => {
+                self.active = true;
+                if !self.pending {
+                    return Ok(vec![]);
+                }
+                let current = boolean(read, BOOL)?;
+                self.pending = false;
+                self.boolean_relation = Some(current);
+                Ok(vec![boolean_event(current)])
+            }
+            (ConditionalFloat, Activate | PropertyChanged(CONDITION)) => {
+                let condition = boolean(read, CONDITION)?;
+                Ok(vec![conditional(read, condition)?])
+            }
+            (ConditionalFloat, PropertyChanged(port @ (VALUE_IF_TRUE | VALUE_IF_FALSE))) => {
+                let condition = boolean(read, CONDITION)?;
+                Ok(if condition == (port == VALUE_IF_TRUE) {
+                    vec![conditional(read, condition)?]
+                } else {
+                    vec![]
+                })
+            }
             _ => Ok(vec![]),
         }
     }
@@ -267,6 +402,25 @@ impl Node {
             .map(Effect::Emit)
             .collect()
     }
+}
+
+/// Fold the ordered *bound* inputs of And/Or. Remove unconnected ports during
+/// binding; None here means a bound property is not ready. And aborts without
+/// publishing on such a property, unless an earlier false already decided it.
+/// Or skips unavailable inputs. Both short-circuit; the empty identities are
+/// true/false. No property event is generated by this calculation itself.
+pub fn fold_boolean(all: bool, inputs: &[Option<bool>]) -> Result<Option<bool>, Error> {
+    if inputs.len() > 256 {
+        return Err(Error::Bound);
+    }
+    for input in inputs {
+        match input {
+            Some(value) if *value != all => return Ok(Some(!all)),
+            None if all => return Ok(None),
+            _ => {}
+        }
+    }
+    Ok(Some(all))
 }
 
 /// Numeric PropertyCast publication order only. String input/output and its
