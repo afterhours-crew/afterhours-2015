@@ -57,6 +57,58 @@ impl Policy {
             .values()
             .any(|i| i.definition.0 == *guid && i.state == items::PURCHASABLE && i.owner.is_none())
     }
+    /// Plan grants and their shared ID allocation against one proposed account
+    /// state, so an earned REP update can commit them in the same transaction.
+    pub fn operations(
+        &self,
+        snapshot: &Snapshot,
+        catalog: &InventoryCatalog,
+    ) -> Result<Vec<Op>, inventory::Error> {
+        if self.requirements.is_empty() {
+            return Ok(Vec::new());
+        }
+        let score = match snapshot
+            .tables
+            .get(&key("RepValuesTable"))
+            .and_then(|t| t.rows.get(&0))
+            .and_then(|r| r.get(&key("RepScore")))
+        {
+            Some(Value::Int(score)) => *score,
+            _ => return Err(nfs_storage::Error::Config.into()),
+        };
+        inventory::collection(snapshot, catalog.bindings())?;
+        let missing: Vec<_> = self
+            .requirements
+            .iter()
+            .filter(|(guid, minimum)| score >= **minimum && !Self::granted(snapshot, guid))
+            .map(|(guid, _)| *guid)
+            .collect();
+        if missing.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (first, allocation) = purchase::reserve_ids(snapshot, missing.len())?;
+        let mut ops = vec![allocation];
+        for (offset, guid) in missing.into_iter().enumerate() {
+            let d = catalog.definition(&guid)?;
+            ops.push(Op::Insert(ItemRecord {
+                id: ItemId::new(first + offset as u64).ok_or(nfs_storage::Error::Bounds)?,
+                definition: DefinitionGuid(guid),
+                owner: None,
+                state: items::PURCHASABLE,
+                buy_price: d.buy_price,
+                sell_price: d.sell_price,
+                default_items: vec![],
+                sub_items: vec![],
+                derived: d
+                    .default_derived
+                    .as_ref()
+                    .ok_or(nfs_storage::Error::Config)?
+                    .encode()?,
+            }));
+        }
+        Ok(ops)
+    }
+
     pub fn ensure(
         &self,
         repository: &dyn InventoryRepository,
@@ -70,44 +122,9 @@ impl Policy {
             return Ok(snapshot);
         }
         for _ in 0..4 {
-            let score = match snapshot
-                .tables
-                .get(&key("RepValuesTable"))
-                .and_then(|t| t.rows.get(&0))
-                .and_then(|r| r.get(&key("RepScore")))
-            {
-                Some(Value::Int(score)) => *score,
-                _ => return Err(nfs_storage::Error::Config.into()),
-            };
-            inventory::collection(&snapshot, catalog.bindings())?;
-            let missing: Vec<_> = self
-                .requirements
-                .iter()
-                .filter(|(guid, minimum)| score >= **minimum && !Self::granted(&snapshot, guid))
-                .map(|(guid, _)| *guid)
-                .collect();
-            if missing.is_empty() {
+            let ops = self.operations(&snapshot, catalog)?;
+            if ops.is_empty() {
                 return Ok(snapshot);
-            }
-            let (first, allocation) = purchase::reserve_ids(&snapshot, missing.len())?;
-            let mut ops = vec![allocation];
-            for (offset, guid) in missing.into_iter().enumerate() {
-                let d = catalog.definition(&guid)?;
-                ops.push(Op::Insert(ItemRecord {
-                    id: ItemId::new(first + offset as u64).ok_or(nfs_storage::Error::Bounds)?,
-                    definition: DefinitionGuid(guid),
-                    owner: None,
-                    state: items::PURCHASABLE,
-                    buy_price: d.buy_price,
-                    sell_price: d.sell_price,
-                    default_items: vec![],
-                    sub_items: vec![],
-                    derived: d
-                        .default_derived
-                        .as_ref()
-                        .ok_or(nfs_storage::Error::Config)?
-                        .encode()?,
-                }));
             }
             if snapshot.generation >= NAMESPACE {
                 return Err(nfs_storage::Error::Bounds.into());

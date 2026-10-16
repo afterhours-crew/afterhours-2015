@@ -44,6 +44,56 @@ impl Policy {
         })
     }
 
+    /// Plan additive category grants against one proposed account state. The
+    /// caller may combine these operations with the REP change in one batch.
+    pub fn operations(
+        &self,
+        snapshot: &Snapshot,
+        catalog: &InventoryCatalog,
+    ) -> Result<Vec<Op>, inventory::Error> {
+        let score = match snapshot
+            .tables
+            .get(&key("RepValuesTable"))
+            .and_then(|t| t.rows.get(&0))
+            .and_then(|r| r.get(&key("RepScore")))
+        {
+            Some(Value::Int(score)) => *score,
+            _ => return Err(nfs_storage::Error::Config.into()),
+        };
+        let grants = self
+            .requirements
+            .iter()
+            .filter(|(_, minimum)| score >= *minimum)
+            .fold(0, |m, (bit, _)| m | bit);
+        let collection = inventory::collection(snapshot, catalog.bindings())?;
+        let mut controllers = collection
+            .items
+            .values()
+            .filter(|i| i.definition == self.controller);
+        let item = controllers.next().ok_or(nfs_storage::Error::Config)?;
+        if controllers.next().is_some()
+            || item.owner != 0
+            || item.state != items::OWNED
+            || !item.children.is_empty()
+        {
+            return Err(nfs_storage::Error::Config.into());
+        }
+        let Derived::CategoryUnlockController { unlock_mask } = item.derived else {
+            return Err(nfs_storage::Error::Config.into());
+        };
+        if unlock_mask & grants == grants {
+            return Ok(Vec::new());
+        }
+        let mut record = snapshot.items
+            [&nfs_storage::ItemId::new(item.id).ok_or(nfs_storage::Error::Invalid)?]
+            .clone();
+        record.derived = Derived::CategoryUnlockController {
+            unlock_mask: unlock_mask | grants,
+        }
+        .encode()?;
+        Ok(vec![Op::Update(record)])
+    }
+
     /// Reconcile only the controller's derived mask. Never revoke previously
     /// unlocked categories, award items, or change money/REP/vehicle equipment.
     pub fn ensure(
@@ -56,55 +106,19 @@ impl Policy {
     ) -> Result<Snapshot, inventory::Error> {
         const NAMESPACE: u64 = 1 << 58;
         for _ in 0..4 {
-            let score = match snapshot
-                .tables
-                .get(&key("RepValuesTable"))
-                .and_then(|t| t.rows.get(&0))
-                .and_then(|r| r.get(&key("RepScore")))
-            {
-                Some(Value::Int(score)) => *score,
-                _ => return Err(nfs_storage::Error::Config.into()),
-            };
-            let grants = self
-                .requirements
-                .iter()
-                .filter(|(_, minimum)| score >= *minimum)
-                .fold(0, |m, (bit, _)| m | bit);
-            let collection = inventory::collection(&snapshot, catalog.bindings())?;
-            let mut controllers = collection
-                .items
-                .values()
-                .filter(|i| i.definition == self.controller);
-            let item = controllers.next().ok_or(nfs_storage::Error::Config)?;
-            if controllers.next().is_some()
-                || item.owner != 0
-                || item.state != items::OWNED
-                || !item.children.is_empty()
-            {
-                return Err(nfs_storage::Error::Config.into());
-            }
-            let Derived::CategoryUnlockController { unlock_mask } = item.derived else {
-                return Err(nfs_storage::Error::Config.into());
-            };
-            if unlock_mask & grants == grants {
+            let ops = self.operations(&snapshot, catalog)?;
+            if ops.is_empty() {
                 return Ok(snapshot);
             }
             if snapshot.generation >= NAMESPACE {
                 return Err(nfs_storage::Error::Conflict.into());
             }
-            let mut record = snapshot.items
-                [&nfs_storage::ItemId::new(item.id).ok_or(nfs_storage::Error::Invalid)?]
-                .clone();
-            record.derived = Derived::CategoryUnlockController {
-                unlock_mask: unlock_mask | grants,
-            }
-            .encode()?;
             match repository.apply(
                 account,
                 &Batch {
                     id: NAMESPACE | snapshot.generation,
                     expected_generation: snapshot.generation,
-                    ops: vec![Op::Update(record)],
+                    ops,
                 },
                 now,
             ) {
