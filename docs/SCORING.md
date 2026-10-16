@@ -274,3 +274,25 @@ Dirty state is pending candidate metadata, not an encoded update or delivery
 acknowledgement. A future runtime must commit its state and replication queue
 together. Engine save-state restoration, synchronized wire encoding and the
 complete scoring graph remain outside this operation; no participant is enabled.
+
+`AssetIndex::scoring_awards` follows each server score node to its context, proves
+that its participant provider addresses this participant root, and reads ordered
+keeper-channel references. It validates channel declaration types and server
+realms, rejects missing or ambiguous singular links, and preserves separate prefab
+identities and duplicate keeper occurrences. It supports this own-participant
+channel subset; scene keeper resolution and activation remain the runtime's job.
+
+`Dispatch::score` handles Award by reading the current integer Score once, then
+the context's participant once, and invoking its activated keepers in order.
+An unbound or unready Score input uses the installed authored default. That
+fallback must not be mistaken for a completed driving calculation: initialization
+must be settled before enabling the graph. Repeated awards and zero or negative
+amounts reach the keeper handler unchanged. Other events do nothing; there is no
+invented output notification or implicit sum of category awards into total REP.
+Keeper callbacks finish synchronously, share graph bounds, and may only modify
+the private candidate. Late failures and swallowed nested errors discard it.
+
+This operation does not implement scene keepers, provider rebinding during an
+award, signed overflow behavior or persistence. The durable earned-REP policy
+separately rejects negative credit and overflow. A runtime still needs to resolve
+the owned keeper/channel targets and aggregate a valid credit before committing.

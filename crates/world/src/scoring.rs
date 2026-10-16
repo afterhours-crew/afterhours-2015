@@ -14,6 +14,7 @@ pub mod nodes;
 pub mod properties;
 pub mod property_gate;
 pub mod reports;
+pub mod score;
 pub mod stopwatch;
 pub mod synced;
 pub mod value;
