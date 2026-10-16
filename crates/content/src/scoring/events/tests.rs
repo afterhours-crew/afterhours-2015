@@ -294,6 +294,22 @@ fn set_data_rows(memory: &mut Memory, asset: &str, field: &str, rows: Vec<Value>
         .1 = Value::Array(rows);
 }
 
+fn property(
+    source: usize,
+    source_field: u32,
+    target: usize,
+    target_field: u32,
+    flags: Value,
+) -> Value {
+    structure(&[
+        ("Source", local(source)),
+        ("Target", local(target)),
+        ("SourceFieldId", Value::UInt32(source_field)),
+        ("TargetFieldId", Value::UInt32(target_field)),
+        ("Flags", flags),
+    ])
+}
+
 #[test]
 fn property_and_link_rows_preserve_instance_boundary_order_and_signed_ids() {
     use crate::graph::tests::edge as data;
@@ -303,15 +319,15 @@ fn property_and_link_rows_preserve_instance_boundary_order_and_signed_ids() {
         "a",
         "PropertyConnections",
         vec![
-            data(local(3), u32::MAX, local(2), 91),
-            data(local(3), u32::MAX, local(1), 91),
+            property(3, u32::MAX, 2, 91, Value::UInt32(0x8000_0013)),
+            property(3, u32::MAX, 1, 91, Value::Int32(2)),
         ],
     );
     set_data_rows(
         &mut memory,
         "b",
         "PropertyConnections",
-        vec![data(local(2), 91, local(1), 92)],
+        vec![property(2, 91, 1, 92, Value::UInt32(17))],
     );
     set_data_rows(
         &mut memory,
@@ -322,6 +338,15 @@ fn property_and_link_rows_preserve_instance_boundary_order_and_signed_ids() {
     let composition = read(&mut memory, "a").unwrap();
     assert_eq!(composition.properties.len(), 4);
     assert_eq!(composition.links.len(), 2);
+    assert_eq!(
+        composition
+            .properties
+            .iter()
+            .map(|r| r.flags)
+            .collect::<Vec<_>>(),
+        [Some(0x8000_0013), Some(2), Some(17), Some(17)]
+    );
+    assert!(composition.links.iter().all(|r| r.flags.is_none()));
     let first = composition.properties[0];
     assert_eq!(
         (
@@ -383,7 +408,7 @@ fn malformed_data_connections_and_combined_table_bounds_are_rejected() {
             &mut memory,
             "a",
             field,
-            vec![data(local(3), 1, local(4), 2); events::MAX_CONNECTIONS],
+            vec![property(3, 1, 4, 2, Value::UInt32(3)); events::MAX_CONNECTIONS],
         );
         // Each table alone fits; the event rows push the composition over its bound.
         assert!(
@@ -393,4 +418,31 @@ fn malformed_data_connections_and_combined_table_bounds_are_rejected() {
                 .contains("bound")
         );
     }
+}
+
+#[test]
+fn property_flags_are_required_typed_and_never_defaulted() {
+    for flags in [Value::Bool(true), Value::Float32(3.0), Value::UInt16(3)] {
+        let mut memory = setup();
+        set_data_rows(
+            &mut memory,
+            "a",
+            "PropertyConnections",
+            vec![property(3, 1, 4, 2, flags)],
+        );
+        assert!(read(&mut memory, "a").is_err());
+    }
+    let mut memory = setup();
+    set_data_rows(
+        &mut memory,
+        "a",
+        "PropertyConnections",
+        vec![crate::graph::tests::edge(local(3), 1, local(4), 2)],
+    );
+    assert!(
+        read(&mut memory, "a")
+            .unwrap_err()
+            .to_string()
+            .contains("field missing")
+    );
 }

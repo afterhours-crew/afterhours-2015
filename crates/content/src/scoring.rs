@@ -15,6 +15,7 @@ use nfs_world::scoring::{
     math::{self, FloatOp, Instruction, Operation, Program, Register},
 };
 
+pub mod arithmetic;
 pub mod boolean_fold;
 pub mod delay;
 pub mod events;

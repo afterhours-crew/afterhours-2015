@@ -123,14 +123,42 @@ pub fn activation_window_visible(guard: &JobGuard, helper: &std::path::Path) -> 
         let owned = guard.job.contains(&process).unwrap_or(false);
         let same_path = process
             .image_path()
-            .map(|p| {
-                p.to_string_lossy()
-                    .eq_ignore_ascii_case(&helper.to_string_lossy())
-            })
+            .and_then(|p| activation_image_matches(&p, helper).map_err(std::io::Error::other))
             .unwrap_or(false);
         if owned && same_path && sys::has_visible_window(pid).unwrap_or(false) {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+fn activation_image_matches(image: &std::path::Path, helper: &std::path::Path) -> Result<bool> {
+    // ACTIVATION_HELPER uses a portable slash; Path::join preserves it inside
+    // that component. Windows process queries return backslashes instead.
+    // Normalize lexically without following links or weakening job ownership.
+    let helper = crate::paths::normalize(helper)?;
+    Ok(image
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&helper.to_string_lossy()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn activation_helper_join_matches_windows_image_path() {
+        let helper = Path::new(r"F:\Games\Example Game").join(super::super::ACTIVATION_HELPER);
+        let image = Path::new(r"f:\games\example game\Core\ActivationUI.exe");
+        assert!(activation_image_matches(image, &helper).unwrap());
+        assert!(
+            !activation_image_matches(Path::new(r"F:\Other\Core\ActivationUI.exe"), &helper)
+                .unwrap()
+        );
+        assert!(
+            !activation_image_matches(Path::new(r"F:\Games\Example Game\Core\Other.exe"), &helper)
+                .unwrap()
+        );
+    }
 }

@@ -4,6 +4,7 @@
 
 //! Bounded calculations used by installed driving-score graphs.
 //! These primitives do not accept awards from clients or persist progression.
+pub mod arithmetic;
 pub mod boolean_fold;
 pub mod curve;
 pub mod delay;
@@ -15,6 +16,7 @@ pub mod property_gate;
 pub mod reports;
 pub mod stopwatch;
 pub mod value;
+pub mod vector_length;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {

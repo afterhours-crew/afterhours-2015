@@ -11,7 +11,7 @@ private scripts, copied profile or captured service replies, and no PowerShell.
 **Development preview:** the Rust launcher has passed an ordinary-user Windows
 run through the menu, saved garage and free roam, followed by `stop` and process
 cleanup. Continuation after owner-completed activation also reached the splash.
-Cold disconnected startup and activation waiting/cancellation remain untested;
+Cold disconnected startup, prolonged activation waiting and activation cancellation remain untested;
 see [validation](#developer-validation-and-current-limits). Complete progression
 remains open.
 
@@ -371,13 +371,25 @@ Waiting beyond the normal startup deadline, visible activation-state reporting
 and cancellation while the dialog is open remain unverified. This does not
 establish fresh-install or activation-independent operation.
 
+A subsequent 2026-10-16 run reproduced a path-comparison bug: the joined
+activation-helper path contained a forward slash while Windows reported
+backslashes. The launcher consequently missed the visible owned dialog and
+timed out. [Issue 88](https://github.com/afterhours-crew/afterhours-2015/issues/88)
+normalizes that path without changing process/job ownership checks. With the fix,
+the launcher reported `activation`, waited while the owner completed the dialog,
+then reached `ready` and the splash. Normal Alt+F4 ended with exit code 0 and no
+owned game/server processes left. The observed activation wait was about 62
+seconds, below the normal startup deadline; prolonged waiting and cancellation
+while activation is visible still need a live check. The path regression and
+wrong-directory/executable rejection are also covered by constructed tests.
+
 On 2026-10-16 the owner accepted the Rust CLI milestone in
 [issue 78](https://github.com/afterhours-crew/afterhours-2015/issues/78) for merge
 with these live checks explicitly **untested**, rather than requiring them for
 this checkpoint:
 
-- Leaving the activation dialog open beyond the normal startup deadline,
-  observing the `activation` state and cancelling while the dialog is open.
+- Leaving the activation dialog open beyond the normal startup deadline
+  and cancelling while the dialog is open.
   A repeat launch after owner login/logout opened the game directly, so it did
   not exercise this path. Successful continuation after activation is covered above.
 - Cold disconnected startup and restart using the Rust CLI. The previous

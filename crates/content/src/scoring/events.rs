@@ -58,6 +58,10 @@ pub struct DataConnection {
     pub target: Port,
     pub bus: u16,
     pub index: u16,
+    /// Full authored property flags, including currently uninterpreted bits.
+    /// Provider links have no Flags field and therefore carry None. These are
+    /// distinct from both entity listener realms and event TargetType.
+    pub flags: Option<u32>,
 }
 impl Composition {
     pub fn dispatcher(&self) -> Result<events::Graph, Error> {
@@ -166,6 +170,11 @@ fn data_connections<S: Source>(
                 target: endpoint("Target", "TargetFieldId")?,
                 bus: bus_index,
                 index: index as u16,
+                flags: if name == "PropertyConnections" {
+                    Some(bits32(field(fields, "Flags")?)?)
+                } else {
+                    None
+                },
             })
         })
         .collect()

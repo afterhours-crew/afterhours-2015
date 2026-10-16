@@ -41,6 +41,9 @@ The returned composition also includes raw property and provider-link rows with
 original bus/row identities and separate prefab endpoints. These tables include
 client-side nodes. Property-row order is not listener registration order, and
 provider links must not be interpreted as scalar property aliases.
+Property connections also retain their complete required 32-bit Flags value;
+provider links have no such field. Unknown bits are preserved. Interpreting
+connection realms remains separate from each entity's listener realms.
 
 `nfs_world::scoring::events::Graph` dispatches local events synchronously. Nested
 events finish before the current handler continues or the next sibling runs;
@@ -156,8 +159,32 @@ Graph values now include vectors and transforms, with finite checks on every
 component. `math::Value` reexports that shared value type for compatibility;
 the Math VM and numeric casts still accept only their documented scalar inputs.
 The gate reader preserves all authored defaults but does not compile bindings,
-restore engine save-state or enable a participant. VectorMathOp interpretation
-remains separate and unsupported.
+restore engine save-state or enable a participant.
+
+`AssetIndex::scoring_arithmetic` reads ordered MathOp Add/Multiply/Divide lists
+and VectorMathOp Length from the installed composition. Enum numbers and names
+must agree; other installed operators are rejected. It retains prefab identities
+but does not resolve input/output bindings or activate nodes.
+
+`scoring::arithmetic::Node` folds In0 followed by In1..InN using float32 steps.
+Unbound inputs use zero; bound-but-unready inputs suppress publication. Fresh
+Out starts unready, activation evaluates, and later property changes publish
+even equal results. This MathOp division has different semantics from the Math
+VM above: a divisor whose magnitude is below its small-divisor threshold
+multiplies the accumulator by positive one million, including negative tiny
+divisors and negative zero. The standalone operation evaluator also supports
+subtract/min/max; equal extrema select the right operand's bits. Operations,
+connected slots and finite intermediate values are bounded and validated.
+
+`Dispatch::vector_length` evaluates its ready vector input after activation. Unbound or
+unready input produces nothing. It publishes Length_Float, completes synchronous
+callbacks, then rereads the same input cell for Normal_Vec3 using the original
+length. This matters when a length callback changes the input. Short vectors
+are copied unchanged. Output bindings remain fixed and start unready; unbound
+outputs are skipped. The operation shares the graph's fault latch, depth/work
+bounds and atomic rollback. Tests cover nested feedback, cycles, signed zero,
+threshold boundaries, missing inputs and nonfinite failures. These calculations
+do not establish the full graph startup sequence or live REP support.
 
 `scoring::delay::Manager` keeps an insertion-ordered pending queue, with explicit
 delta and per-node time scale. Expiration removes the entry before forwarding
