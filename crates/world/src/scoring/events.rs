@@ -354,4 +354,5 @@ mod tests;
 mod delays;
 mod property_gates;
 mod stopwatches;
+mod synced;
 mod vector_lengths;

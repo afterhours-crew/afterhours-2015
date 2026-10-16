@@ -15,6 +15,7 @@ pub mod properties;
 pub mod property_gate;
 pub mod reports;
 pub mod stopwatch;
+pub mod synced;
 pub mod value;
 pub mod vector_length;
 

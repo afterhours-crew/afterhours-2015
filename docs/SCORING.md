@@ -255,3 +255,22 @@ This is a creation filter, not proof that a realm has a usable factory or a
 schedule for construction completion and activation. Reading the composition in
 order alone is insufficient to establish those phases. The scoring participants
 remain disabled until the complete runtime contract is integrated and tested.
+
+`AssetIndex::scoring_synchronized` reads Boolean, float and integer synchronized
+node occurrences without inventing authored defaults. `scoring::synced::Node`
+keeps replication dirtiness; its value lives in a separate typed Out cell that
+must exist even when no other node consumes it. Fresh binding copies a ready
+input, otherwise leaves Out unready. Activation makes no publication.
+
+`Dispatch::synchronized` suppresses equal ready values, including opposite signed
+float zeros. The first ready false/zero still publishes. Publication and nested
+callbacks finish before marking dirty and emitting a Boolean OnTrue/OnFalse.
+Input-based actions reread the source cell after callbacks to select that event;
+explicit SetTrue/SetFalse/Toggle commands retain their own value. An unready
+Toggle sets true. Numeric nodes ignore commands. Faults roll back the candidate,
+including dirtiness and nested events. Floats must be finite.
+
+Dirty state is pending candidate metadata, not an encoded update or delivery
+acknowledgement. A future runtime must commit its state and replication queue
+together. Engine save-state restoration, synchronized wire encoding and the
+complete scoring graph remain outside this operation; no participant is enabled.

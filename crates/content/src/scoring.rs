@@ -26,6 +26,7 @@ pub mod nodes;
 pub mod property_gate;
 pub mod realms;
 pub mod stopwatch;
+pub mod synced;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Calculation {
