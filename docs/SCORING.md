@@ -225,3 +225,20 @@ including overrides of a ready value; ordinary publications still derive that
 flag from prior readiness. Both operations share dispatch bounds, error latching
 and rollback. These APIs do not infer the installed binding modes, startup order
 or activation sequence, and do not enable a scoring participant.
+
+`Composition::property_plan` now compiles the installed local connection subset
+for one execution realm. It keeps authored input order, first-row mode metadata,
+distinct two-producer merges, inherited prefab-output realms and implicit
+blueprint outputs. Unused boundary outputs are omitted. Connection flags remain
+separate from entity listener realms. `property_layout` resolves the resulting
+storage identities: child inputs reuse the parent's resolved input, child outputs
+reuse the parent's output, and merge values remain separate from their producers.
+Input and output port namespaces are distinct. Repeated producers are preserved.
+
+The reader rejects unverified networked modes, more than two producers, direct
+interface bridges and conflicting prefab output aliases. The installed scoring
+graphs fit this subset. The result is untyped, per-session topology, not an
+initialized executable graph: value kinds, defaults, construction/listener order,
+provider links and activation still need integration. Cell numbers are stable
+model identities and do not claim the engine's pointer ordering. No live REP
+support follows from a successful layout read.
