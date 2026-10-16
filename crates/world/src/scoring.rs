@@ -10,6 +10,7 @@ pub mod math;
 pub mod nodes;
 pub mod properties;
 pub mod reports;
+pub mod stopwatch;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {

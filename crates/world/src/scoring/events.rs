@@ -85,13 +85,9 @@ impl Graph {
         state: &H,
         source: Endpoint,
     ) -> Result<(H, Vec<RemoteEmission>), Error> {
-        let mut candidate = state.clone();
-        let mut dispatch = Dispatch::new(self);
-        dispatch.emit(&mut candidate, source)?;
-        if let Some(error) = dispatch.fault {
-            return Err(error);
-        }
-        Ok((candidate, dispatch.output))
+        self.transaction(state, |candidate, dispatch| {
+            dispatch.emit(candidate, source)
+        })
     }
 
     /// Publish an external measurement into a private graph candidate. Local
@@ -103,9 +99,22 @@ impl Graph {
         source: Port,
         value: Value,
     ) -> Result<(H, Vec<RemoteEmission>), Error> {
+        self.transaction(state, |candidate, dispatch| {
+            dispatch.publish(candidate, source, value)
+        })
+    }
+
+    /// Run trusted, bounded interpreter work against one private candidate.
+    /// Use Dispatch for every event/property/timer operation; it latches errors
+    /// and shares limits across the complete operation. No external writes.
+    pub fn transaction<H: Clone>(
+        &self,
+        state: &H,
+        action: impl FnOnce(&mut H, &mut Dispatch<'_>) -> Result<(), Error>,
+    ) -> Result<(H, Vec<RemoteEmission>), Error> {
         let mut candidate = state.clone();
         let mut dispatch = Dispatch::new(self);
-        dispatch.publish(&mut candidate, source, value)?;
+        action(&mut candidate, &mut dispatch)?;
         if let Some(error) = dispatch.fault {
             return Err(error);
         }
@@ -267,3 +276,5 @@ impl<'a> Dispatch<'a> {
 
 #[cfg(test)]
 mod tests;
+
+mod stopwatches;

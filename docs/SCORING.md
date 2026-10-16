@@ -109,6 +109,22 @@ runtime rebinding and alternate queued property contexts are not implemented.
 The caller must commit state and network output together after successful
 evaluation. External I/O and durable REP writes do not belong in these callbacks.
 
+`scoring::stopwatch::Manager` models fresh, stopped timers for one realm/update
+pass. Start/Stop change effective membership immediately for repeat suppression,
+but the active update list changes at the next update. Additions append and
+removals swap with the final entry. An update uses a fixed membership snapshot
+and reads each timer's current inputs when its turn arrives. Elapsed time uses
+the supplied delta, multiplier and context scale; no wall-clock read or assumed
+engine scale is hidden in the library.
+
+A positive trigger threshold fires once when elapsed time is strictly greater
+than it. The trigger event completes before the current elapsed value is read
+for publication, so a callback can reset it. Reset publishes zero before clearing
+the trigger latch and does not stop the timer. Timer operations use the same
+candidate, bounds and error latch as property/event dispatch. The installed reader
+preserves authored update-pass identifiers and defaults; it does not schedule
+passes, resolve context scale, restore engine save-state or enable live scoring.
+
 Portable tests use constructed inputs and cover typed register aliasing,
 conversion, divide-by-zero retention, interpolation, extrapolation, finite
 bounds and malformed assemblies. Installation comparisons are separate from
