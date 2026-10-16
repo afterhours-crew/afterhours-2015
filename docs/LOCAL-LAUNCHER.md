@@ -11,7 +11,7 @@ private scripts, copied profile or captured service replies, and no PowerShell.
 **Development preview:** the Rust launcher has passed an ordinary-user Windows
 run through the menu, saved garage and free roam, followed by `stop` and process
 cleanup. Continuation after owner-completed activation also reached the splash.
-Cold disconnected startup and activation waiting/cancellation remain pending;
+Cold disconnected startup and activation waiting/cancellation remain untested;
 see [validation](#developer-validation-and-current-limits). Complete progression
 remains open.
 
@@ -371,11 +371,23 @@ Waiting beyond the normal startup deadline, visible activation-state reporting
 and cancellation while the dialog is open remain unverified. This does not
 establish fresh-install or activation-independent operation.
 
-Full acceptance remains tracked in
-[issue 78](https://github.com/afterhours-crew/afterhours-2015/issues/78): the
-activation wait/cancel path, cold disconnected startup/restart and `serve` on a Linux
-host remain pending. The previous PowerShell launcher's disconnected result does
-not establish those gates for this implementation.
+On 2026-10-16 the owner accepted the Rust CLI milestone in
+[issue 78](https://github.com/afterhours-crew/afterhours-2015/issues/78) for merge
+with these live checks explicitly **untested**, rather than requiring them for
+this checkpoint:
+
+- Leaving the activation dialog open beyond the normal startup deadline,
+  observing the `activation` state and cancelling while the dialog is open.
+  A repeat launch after owner login/logout opened the game directly, so it did
+  not exercise this path. Successful continuation after activation is covered above.
+- Cold disconnected startup and restart using the Rust CLI. The previous
+  PowerShell launcher's disconnected result does not establish this check.
+- Linux `setup` and real `serve` using a copied supported installation, including
+  readiness and the documented orphan/status behavior after supervisor termination.
+  Linux CI and constructed tests do not establish this installed-content check.
+
+Closing the milestone does not mark these checks as passed. The supported
+installation and activation prerequisites above still apply.
 
 ### Manual disconnected test without administrator access
 
