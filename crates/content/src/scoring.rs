@@ -16,6 +16,7 @@ use nfs_world::scoring::{
 };
 
 pub mod events;
+pub mod nodes;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Calculation {

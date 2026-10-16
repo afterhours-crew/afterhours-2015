@@ -56,6 +56,29 @@ shape and finite floats, not physical plausibility. The transport must discard
 duplicate reliable messages, and retired participants must lose their bindings.
 No scoring report is registered in the live server yet.
 
+`AssetIndex::scoring_nodes` reads cache, accumulator, float counter, event gate,
+event splitter and float/integer comparator configurations, retaining authored
+defaults and separate prefab occurrences. It does not validate other classes
+or property wiring. Connected input properties take precedence over defaults.
+
+`scoring::nodes::Node` owns transient node state and returns ordered property
+publications and events. Initialize output properties during binding, then
+activate after inputs are bound. Apply each returned effect synchronously after
+retaining the changed node state, within the enclosing graph transaction. Cache
+loads and accumulator operations publish before notifying, including repeated
+equal values. Counter reset restores its authored default. Run-once splitters
+mark themselves fired before downstream handlers can reenter them.
+
+Explicit comparisons emit every currently true condition in order without
+changing the previous property relation. Property changes emit only conditions
+that became true; changes before activation are deferred. Float comparisons emit
+inequalities only, while integer comparisons also emit equality or inequality.
+Numeric PropertyCast support publishes float, integer and Boolean values in that
+order; string conversion/formatting is not implemented. Nonfinite values and
+out-of-range casts fail before any effects escape. Engine save-state restoration
+is outside these fresh-session nodes. The complete property propagation engine,
+remaining node/query behaviors and durable award integration are still required.
+
 Portable tests use constructed inputs and cover typed register aliasing,
 conversion, divide-by-zero retention, interpolation, extrapolation, finite
 bounds and malformed assemblies. Installation comparisons are separate from

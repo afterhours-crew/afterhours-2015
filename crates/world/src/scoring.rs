@@ -7,6 +7,7 @@
 pub mod curve;
 pub mod events;
 pub mod math;
+pub mod nodes;
 pub mod reports;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
