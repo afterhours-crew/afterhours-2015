@@ -29,6 +29,33 @@ and last segments extrapolate to the header boundaries. The content reader
 retains the curve's default input and apply flag; the graph must publish zero
 when that flag is false. Unsupported traits fail during compilation.
 
+`AssetIndex::scoring_events` reads the server event topology with authored row
+order intact. It retains separate prefab instances and explicit forwarding
+endpoints across their interfaces. Client-only rows are excluded without
+renumbering remote rows. Its composition bus IDs must be bound to the network
+replication profile before encoding; not every composition bus is replicated.
+Unknown realm values, unresolved endpoints and malformed prefab boundaries fail.
+This reader accepts node identities, not their behavior: a complete runtime must
+still validate every active node class and its property/link bindings.
+
+`nfs_world::scoring::events::Graph` dispatches local events synchronously. Nested
+events finish before the current handler continues or the next sibling runs;
+collected remote notifications follow the local traversal. Dispatch evaluates a
+private candidate with bounded depth, work and output. A failure discards that
+candidate even if a node handler ignores a nested error. Handlers must keep all
+mutable state private to that candidate. The caller commits state and bounded
+network output together; handlers must not perform I/O or persist awards.
+
+`scoring::reports::Binding` decodes the near-miss four-float report and the
+accumulated-collision integer report from an explicitly bound query serializer.
+Every matching message checks participant ownership, current entity/serializer
+identity and caller-provided readiness. Report fields are published in order,
+followed by the query event. These are measurements, not REP amounts; graph
+calculations and the durable award transaction remain separate. The codec checks
+shape and finite floats, not physical plausibility. The transport must discard
+duplicate reliable messages, and retired participants must lose their bindings.
+No scoring report is registered in the live server yet.
+
 Portable tests use constructed inputs and cover typed register aliasing,
 conversion, divide-by-zero retention, interpolation, extrapolation, finite
 bounds and malformed assemblies. Installation comparisons are separate from

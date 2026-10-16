@@ -15,6 +15,8 @@ use nfs_world::scoring::{
     math::{self, FloatOp, Instruction, Operation, Program, Register},
 };
 
+pub mod events;
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Calculation {
     Math {

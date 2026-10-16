@@ -5,7 +5,9 @@
 //! Bounded calculations used by installed driving-score graphs.
 //! These primitives do not accept awards from clients or persist progression.
 pub mod curve;
+pub mod events;
 pub mod math;
+pub mod reports;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -16,6 +18,9 @@ pub enum Error {
     MissingInput,
     NonFinite,
     ConversionRange,
+    InvalidGraph,
+    UnknownNode,
+    UnsupportedEvent,
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
