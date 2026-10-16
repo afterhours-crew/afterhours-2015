@@ -4,6 +4,7 @@
 
 //! Validated scalar subset of installed Math assemblies. Evaluation uses fresh
 //! typed registers; state changes occur only when the caller accepts an output.
+pub use super::value::Value;
 use super::{Error, finite};
 
 pub const MAX_INSTRUCTIONS: usize = 256;
@@ -14,12 +15,6 @@ pub enum Type {
     Integer,
     Float,
     Boolean,
-}
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Value {
-    Integer(i32),
-    Float(f32),
-    Boolean(bool),
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Register {

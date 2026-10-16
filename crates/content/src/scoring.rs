@@ -17,6 +17,7 @@ use nfs_world::scoring::{
 
 pub mod events;
 pub mod nodes;
+pub mod property_gate;
 pub mod stopwatch;
 
 #[derive(Clone, Debug, PartialEq)]

@@ -2,7 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! Resolved scalar property cells for a private scoring graph candidate.
+//! Resolved typed property cells for a private scoring graph candidate.
 //! Aliases share one value; publication never copies values into input ports.
 //! Installed binding and listener registration order are the caller's contract.
 use super::{Error, events::MAX_NODES, finite, math::Value};
@@ -23,15 +23,30 @@ pub enum Kind {
     Boolean,
     Integer,
     Float,
+    Vec3,
+    Vec4,
+    Transform,
 }
 impl Kind {
-    fn validate(self, value: Value) -> Result<(), Error> {
+    pub(crate) fn validate(self, value: Value) -> Result<(), Error> {
         match (self, value) {
             (Self::Boolean, Value::Boolean(_)) | (Self::Integer, Value::Integer(_)) => Ok(()),
             (Self::Float, Value::Float(value)) => finite(value).map(|_| ()),
+            (Self::Vec3, Value::Vec3(value)) => validate_components(value),
+            (Self::Vec4, Value::Vec4(value)) => validate_components(value),
+            (Self::Transform, Value::Transform(value)) => {
+                validate_components(value.into_iter().flatten())
+            }
             _ => Err(Error::InvalidGraph),
         }
     }
+}
+
+fn validate_components(values: impl IntoIterator<Item = f32>) -> Result<(), Error> {
+    for value in values {
+        finite(value)?;
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq)]

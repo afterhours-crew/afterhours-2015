@@ -438,6 +438,7 @@ pub fn cast_numeric(input: Value) -> Result<[Effect; 3], Error> {
             }
             (value, value as i32, value != 0.0)
         }
+        Value::Vec3(_) | Value::Vec4(_) | Value::Transform(_) => return Err(Error::InvalidGraph),
     };
     Ok([
         Effect::Publish(936_870_923, Value::Float(float)),

@@ -129,7 +129,7 @@ pub trait Handler {
     fn handle(&mut self, target: Endpoint, dispatch: &mut Dispatch<'_>) -> Result<(), Error>;
 }
 
-/// Scalar property interpreter for the ordinary synchronous publication path.
+/// Typed property interpreter for the ordinary synchronous publication path.
 /// Read values through the shared Store during the callback; an earlier nested
 /// callback may have changed them. `first` belongs to the outer publication,
 /// not the value's current readiness. Never commit external effects here.
@@ -277,4 +277,5 @@ impl<'a> Dispatch<'a> {
 #[cfg(test)]
 mod tests;
 
+mod property_gates;
 mod stopwatches;

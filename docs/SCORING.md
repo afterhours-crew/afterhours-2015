@@ -125,6 +125,22 @@ candidate, bounds and error latch as property/event dispatch. The installed read
 preserves authored update-pass identifiers and defaults; it does not schedule
 passes, resolve context scale, restore engine save-state or enable live scoring.
 
+`scoring::property_gate` forwards six typed channels in Boolean, integer, float,
+Vec3, Vec4 and transform order. Fresh binding publishes ready inputs if the gate
+starts open. An Open transition publishes only when the installed write-on-open
+option is enabled; repeated Open does nothing, and other input events close it.
+Changed properties pass through only while open. Unready inputs and unbound
+outputs produce no publication. Each input is read after the preceding callback;
+a nested Close does not cancel a flush already in progress. Errors discard all
+state and publications in the enclosing transaction.
+
+Graph values now include vectors and transforms, with finite checks on every
+component. `math::Value` reexports that shared value type for compatibility;
+the Math VM and numeric casts still accept only their documented scalar inputs.
+The gate reader preserves all authored defaults but does not compile bindings,
+restore engine save-state or enable a participant. VectorMathOp interpretation
+remains separate and unsupported.
+
 Portable tests use constructed inputs and cover typed register aliasing,
 conversion, divide-by-zero retention, interpolation, extrapolation, finite
 bounds and malformed assemblies. Installation comparisons are separate from
