@@ -242,3 +242,16 @@ initialized executable graph: value kinds, defaults, construction/listener order
 provider links and activation still need integration. Cell numbers are stable
 model identities and do not claim the engine's pointer ordering. No live REP
 support follows from a successful layout read.
+
+`AssetIndex::scoring_creation_realms` reads creation eligibility independently of
+event/property listener Flags and connection delivery modes. It supports the
+known scoring entity classes, including fixed client/server/both rules which can
+override an authored `Realm` field. Authored enum values require matching names;
+unknown classes and the unverified pipeline realm fail. Known blueprints and
+interface descriptors are not entities. Every prefab occurrence keeps its own
+identity, with bounded traversal and cycle rejection.
+
+This is a creation filter, not proof that a realm has a usable factory or a
+schedule for construction completion and activation. Reading the composition in
+order alone is insufficient to establish those phases. The scoring participants
+remain disabled until the complete runtime contract is integrated and tested.
