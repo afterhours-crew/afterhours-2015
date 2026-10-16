@@ -100,7 +100,7 @@ fn status_and_stop_on_an_unused_data_directory() {
 #[test]
 fn check_refuses_a_missing_installation_without_writing() {
     let data = scratch("check");
-    let server = data.join("fake-server");
+    let server = data.join(format!("fake-server{}", std::env::consts::EXE_SUFFIX));
     std::fs::write(&server, b"x").unwrap();
     let game = data.join("no-game");
     let out = run(&[
@@ -134,7 +134,11 @@ fn check_refuses_a_missing_installation_without_writing() {
         server.to_str().unwrap(),
     ]);
     assert_eq!(out.status.code(), Some(1));
-    assert!(text(&out.stderr).contains("Unsupported installed file"));
+    assert!(
+        text(&out.stderr).contains("Unsupported installed file"),
+        "{}",
+        text(&out.stderr)
+    );
     assert!(!data.join("store").exists(), "check never writes");
     std::fs::remove_dir_all(data).unwrap();
 }

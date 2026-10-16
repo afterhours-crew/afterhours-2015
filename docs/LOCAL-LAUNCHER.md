@@ -8,13 +8,11 @@ everything except start the game: `nfs-afterhours serve` runs the server
 against a copied installation directory. It needs no research repository,
 private scripts, copied profile or captured service replies, and no PowerShell.
 
-**Development preview:** local menu, garage, driving and repeated garage
-returns were tested on the supported installation with the previous
-PowerShell launcher, including an owner-run cold disconnected test. The Rust
-launcher reproduces that launcher's checks and behavior and passes its
-automated tests, but **its own live run on the supported installation is
-still pending**; see [validation](#developer-validation-and-current-limits).
-Complete progression remains open.
+**Development preview:** the Rust launcher has passed an ordinary-user Windows
+run through the menu, saved garage and free roam, followed by `stop` and process
+cleanup. Its cold disconnected and activation-dialog checks remain pending;
+see [validation](#developer-validation-and-current-limits). Complete progression
+remains open.
 
 This is a **source-only distribution**. You must compile `nfs-server` and
 `nfs-afterhours` before running; no executable, installer or game content is
@@ -308,15 +306,26 @@ script standing in for the server, watch it from a second process through
 process-layer tests (job object, process pins, thread lookup, memory access,
 TCP ownership, registry) run in CI on a Windows runner.
 
-**Live acceptance of the Rust launcher is pending.** The previous PowerShell
-launcher passed gameplay, normal quit/restart and an owner-run cold
-disconnected test on the supported installation; those results are described
-below and do not transfer automatically. The checklist for the Rust launcher
-(`check`, `setup`, `start` to free roam, `status` from a second terminal,
-`stop`, `recover`, the activation dialog path, a forced supervisor kill, the
-disconnected test, and `serve` on a Linux host) is tracked in
-[issue 78](https://github.com/afterhours-crew/afterhours-2015/issues/78).
-Until it is recorded here, treat `start` as unverified.
+On 2026-10-16 the Rust launcher passed `check`, content preparation and `start`
+on the supported Windows installation without administrator access. The game
+reached the menu, loaded an existing customized car in the garage and entered
+free roam with the HUD, minimap marker and garage-entry prompt. `status` from a
+separate process reported `ready`; `stop` closed the game and server, reported
+`finished`, and left no owned processes or listener on port 3216. This run used
+the garage development server at `1cf3694` and an isolated copy of its account.
+No activation dialog appeared; external networking remained connected.
+
+The same revision passed local non-admin Windows fmt, Clippy and all 1,174
+workspace tests, including 66 launcher and process-wrapper tests. The CLI
+installation-refusal test now uses a Windows executable suffix, so it reaches
+the intended hash check on non-elevated developer machines as well as Unix.
+
+Full acceptance remains tracked in
+[issue 78](https://github.com/afterhours-crew/afterhours-2015/issues/78): standalone
+`setup`, live `recover`, the activation-dialog path, forced supervisor
+termination, cold disconnected startup/restart and `serve` on a Linux host
+remain pending. The previous PowerShell launcher's disconnected result does
+not establish those gates for this implementation.
 
 ### Manual disconnected test without administrator access
 
