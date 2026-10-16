@@ -134,7 +134,7 @@ impl LiveSession {
         {
             let text = child.drain_diagnostics();
             if !text.is_empty() {
-                print!("{text}");
+                eprint!("{text}");
             }
         }
     }
@@ -160,7 +160,7 @@ impl LiveSession {
         while !child.exited() || !child.logs_finished() {
             let text = child.drain_diagnostics();
             if !text.is_empty() {
-                print!("{text}");
+                eprint!("{text}");
             }
             child.check_logs()?;
             if Instant::now() > deadline || self.stop_file_present() {
@@ -172,7 +172,7 @@ impl LiveSession {
             std::thread::sleep(Duration::from_millis(100));
         }
         child.check_logs()?;
-        print!("{}", child.drain_diagnostics());
+        eprint!("{}", child.drain_diagnostics());
         if child.exit_code() != Some(0) || child.output_truncated() {
             return Err(Failure::session(format!(
                 "{name} failed; see its local error log."
@@ -319,7 +319,7 @@ impl LiveSession {
 impl Steps for LiveSession {
     fn status(&mut self, state: State, message: &str) {
         self.echo_diagnostics();
-        println!("[{}] {state} : {message}", clock::now_hms());
+        eprintln!("[{}] {state} : {message}", clock::now_hms());
         let record = Status {
             version: records::VERSION,
             id: self.request.id.clone(),
@@ -409,7 +409,7 @@ impl Steps for LiveSession {
         let mut server = self.platform.spawn(&spec)?;
         let deadline = Instant::now() + SERVER_READY_DEADLINE;
         let line = loop {
-            print!("{}", server.drain_diagnostics());
+            eprint!("{}", server.drain_diagnostics());
             server.check_logs()?;
             if let Some(line) = server.first_line() {
                 break line?;
@@ -449,7 +449,7 @@ impl Steps for LiveSession {
         let date = crate::marker::UtcDate::today();
         let marker = crate::marker::launch_marker(date);
         // This date-derived value is launch context, not an account credential.
-        println!("Launch context: UTC {}, marker {marker}.", date.iso());
+        eprintln!("Launch context: UTC {}, marker {marker}.", date.iso());
         let spec = SpawnSpec {
             executable: game_path.clone(),
             arguments: Vec::new(),
@@ -610,7 +610,7 @@ impl Steps for LiveSession {
                 if text.is_empty() {
                     break;
                 }
-                print!("{text}");
+                eprint!("{text}");
             }
         }
         Ok(())

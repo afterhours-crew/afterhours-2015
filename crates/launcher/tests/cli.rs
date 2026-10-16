@@ -299,7 +299,11 @@ fn a_serve_session_prepares_runs_reports_and_stops() {
         text(&out.stdout),
         text(&out.stderr)
     );
-    let console = text(&out.stdout);
+    assert!(
+        out.stdout.is_empty(),
+        "supervisor diagnostics stay off stdout"
+    );
+    let console = text(&out.stderr);
     for state in ["preparing", "ready", "stopping", "finished"] {
         assert!(
             console.contains(&format!("] {state} :")),
@@ -369,6 +373,10 @@ fn a_session_whose_supervisor_dies_is_reported_interrupted() {
         "{}",
         text(&out.stdout)
     );
+    let stored: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(run_dir.join("status.json")).unwrap()).unwrap();
+    assert!(text(&out.stdout).contains(&format!("server {}", stored["server_pid"])));
+    assert!(text(&out.stdout).contains("Verify identity"));
     // The orphaned fake server is still running; stop it by its stop file,
     // which is exactly what the status message tells the user to look at.
     std::fs::write(run_dir.join("stop-server"), b"stop").unwrap();

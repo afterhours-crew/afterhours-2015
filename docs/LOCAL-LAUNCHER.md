@@ -10,7 +10,8 @@ private scripts, copied profile or captured service replies, and no PowerShell.
 
 **Development preview:** the Rust launcher has passed an ordinary-user Windows
 run through the menu, saved garage and free roam, followed by `stop` and process
-cleanup. Its cold disconnected and activation-dialog checks remain pending;
+cleanup. Continuation after owner-completed activation also reached the splash.
+Cold disconnected startup and activation waiting/cancellation remain untested;
 see [validation](#developer-validation-and-current-limits). Complete progression
 remains open.
 
@@ -339,12 +340,54 @@ The combined workspace passed fmt, Clippy and 1,342 tests; the optional
 network-test build passed Clippy and 193 tests. Unsupported File/Items, unknown
 control/decoder routes, overflow, privacy and cancellation use constructed
 regression tests rather than malformed traffic sent to the game.
-Full acceptance remains tracked in
-[issue 78](https://github.com/afterhours-crew/afterhours-2015/issues/78): standalone
-`setup`, live `recover`, the activation-dialog path, forced supervisor
-termination, cold disconnected startup/restart and `serve` on a Linux host
-remain pending. The previous PowerShell launcher's disconnected result does
-not establish those gates for this implementation.
+
+A further ordinary-user Windows check completed standalone `setup` against the
+supported installation and created a fresh local account. `setup --json` now
+returns one final status object on stdout; progress and child diagnostics go to
+stderr and remain visible in an ordinary terminal. Setup also verifies its
+preparation children have exited before disarming its session job.
+
+Force-terminating only the supervisor of a ready, routed game session closed its
+game and server through the Windows job and released port 3216. Both the frontend
+result and separate `status` reported `interrupted`; the frontend returned exit
+code 3. This was a startup crash test, not an interruption during a gameplay save.
+After moving aside only that stopped test account's `account.json`, `recover`
+restored its pointer and a repeated recovery succeeded without changing any
+database bytes. Recovery during an active session correctly refused to proceed.
+The recovered account subsequently reached the menu and its stock Mustang garage.
+Normal Alt+F4 shutdown then finished with exit code 0 and released all owned
+processes and port 3216. These corrections passed fmt, Clippy and 1,344 workspace
+tests on Windows.
+Plain-text `status` also shows recorded process IDs, which may be stale and must
+be checked before manually stopping a Unix orphan.
+
+During a later Windows launch on 2026-10-16 using `c8db445`, the owner confirmed
+that the EA activation dialog appeared and they completed it. The agent observed
+the subsequent `ready` status and normal Press Space splash; `stop` then finished
+with exit code 0, all owned processes gone and port 3216 free. This validates
+continuation after owner-performed activation on that installation. The agent
+missed the dialog itself, and no `activation` state appeared in the launcher log.
+Waiting beyond the normal startup deadline, visible activation-state reporting
+and cancellation while the dialog is open remain unverified. This does not
+establish fresh-install or activation-independent operation.
+
+On 2026-10-16 the owner accepted the Rust CLI milestone in
+[issue 78](https://github.com/afterhours-crew/afterhours-2015/issues/78) for merge
+with these live checks explicitly **untested**, rather than requiring them for
+this checkpoint:
+
+- Leaving the activation dialog open beyond the normal startup deadline,
+  observing the `activation` state and cancelling while the dialog is open.
+  A repeat launch after owner login/logout opened the game directly, so it did
+  not exercise this path. Successful continuation after activation is covered above.
+- Cold disconnected startup and restart using the Rust CLI. The previous
+  PowerShell launcher's disconnected result does not establish this check.
+- Linux `setup` and real `serve` using a copied supported installation, including
+  readiness and the documented orphan/status behavior after supervisor termination.
+  Linux CI and constructed tests do not establish this installed-content check.
+
+Closing the milestone does not mark these checks as passed. The supported
+installation and activation prerequisites above still apply.
 
 ### Manual disconnected test without administrator access
 
