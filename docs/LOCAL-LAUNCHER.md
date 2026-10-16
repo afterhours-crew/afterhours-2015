@@ -10,7 +10,8 @@ private scripts, copied profile or captured service replies, and no PowerShell.
 
 **Development preview:** the Rust launcher has passed an ordinary-user Windows
 run through the menu, saved garage and free roam, followed by `stop` and process
-cleanup. Its cold disconnected and activation-dialog checks remain pending;
+cleanup. Continuation after owner-completed activation also reached the splash.
+Cold disconnected startup and activation waiting/cancellation remain pending;
 see [validation](#developer-validation-and-current-limits). Complete progression
 remains open.
 
@@ -360,9 +361,19 @@ tests on Windows.
 Plain-text `status` also shows recorded process IDs, which may be stale and must
 be checked before manually stopping a Unix orphan.
 
+During a later Windows launch on 2026-10-16 using `c8db445`, the owner confirmed
+that the EA activation dialog appeared and they completed it. The agent observed
+the subsequent `ready` status and normal Press Space splash; `stop` then finished
+with exit code 0, all owned processes gone and port 3216 free. This validates
+continuation after owner-performed activation on that installation. The agent
+missed the dialog itself, and no `activation` state appeared in the launcher log.
+Waiting beyond the normal startup deadline, visible activation-state reporting
+and cancellation while the dialog is open remain unverified. This does not
+establish fresh-install or activation-independent operation.
+
 Full acceptance remains tracked in
 [issue 78](https://github.com/afterhours-crew/afterhours-2015/issues/78): the
-activation-dialog path, cold disconnected startup/restart and `serve` on a Linux
+activation wait/cancel path, cold disconnected startup/restart and `serve` on a Linux
 host remain pending. The previous PowerShell launcher's disconnected result does
 not establish those gates for this implementation.
 
