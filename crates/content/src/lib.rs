@@ -31,6 +31,7 @@ pub mod progression;
 mod reputation;
 mod scan;
 pub mod scenes;
+pub mod scoring;
 pub mod sequences;
 mod startup;
 mod stats;

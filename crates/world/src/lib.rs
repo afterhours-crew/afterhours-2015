@@ -18,6 +18,7 @@ pub mod level_poll;
 pub mod logic;
 pub mod participants;
 pub mod replication;
+pub mod scoring;
 pub mod sequences;
 pub mod session;
 pub mod spawn_points;
