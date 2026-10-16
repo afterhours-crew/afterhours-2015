@@ -1,18 +1,22 @@
 # Run the local game and server
 
-The foreground PowerShell script starts Afterhours and the supported installed game
-in one ordinary-user session. It generates its configuration from the installation
-and creates a separate local account. It does not need a research repository,
-private scripts, copied profile or captured service replies.
+`nfs-afterhours` is the command-line launcher for Afterhours. On Windows it
+prepares content from the supported installation, creates a separate local
+account, starts the server and the game in one ordinary-user session, routes
+the game to the local server and cleans both up. On Linux and macOS it does
+everything except start the game: `nfs-afterhours serve` runs the server
+against a copied installation directory. It needs no research repository,
+private scripts, copied profile or captured service replies, and no PowerShell.
 
-**Development preview:** local menu, garage, driving and repeated garage returns
-have been tested on the supported installation, including an owner-run cold
-disconnected test of this public script. Complete progression remains open. The precise
-validation scope and installation limits are listed below.
+**Development preview:** the Rust launcher has passed an ordinary-user Windows
+run through the menu, saved garage and free roam, followed by `stop` and process
+cleanup. Its cold disconnected and activation-dialog checks remain pending;
+see [validation](#developer-validation-and-current-limits). Complete progression
+remains open.
 
-This is a **source-only distribution**. You must compile `nfs-server.exe` before
-running the script; no executable, installer or game content is shipped. All
-build and runtime source is in this public Afterhours repository.
+This is a **source-only distribution**. You must compile `nfs-server` and
+`nfs-afterhours` before running; no executable, installer or game content is
+shipped. All build and runtime source is in this public repository.
 
 ## Install the build tools
 
@@ -25,15 +29,16 @@ For the Windows game-and-server path, install these tools first:
 | [Visual Studio C++ tools](https://rust-lang.github.io/rustup/installation/windows-msvc.html) | Select **Desktop development with C++**, including the MSVC x64/x86 compiler and a Windows SDK. Visual Studio Build Tools is sufficient; the Visual Studio IDE is optional. |
 | [Strawberry Perl](https://strawberryperl.com/) | Put `perl.exe` on your user `PATH`. The vendored OpenSSL build uses it. |
 | [NASM](https://www.nasm.us/) | Put `nasm.exe` on your user `PATH` for the OpenSSL assembly build. |
-| [PowerShell 7](https://learn.microsoft.com/en-us/powershell/scripting/install/install-powershell-on-windows) | Use **x64 PowerShell 7.5 or later** (`pwsh.exe`), not the built-in Windows PowerShell 5.1. Microsoft's ZIP package is an option for a user-local installation. |
+
+On Linux or macOS, install rustup, a C compiler and Perl; that is enough for
+`serve`.
 
 Reopen your terminal after installing tools or changing `PATH`. Installing the
 compiler/SDK may require an administrator; building and running Afterhours use an
 ordinary user account. The launcher rejects an elevated session. There is no
 separate OpenSSL or SQLite service to install: Cargo builds those libraries from
-the locked dependencies. No Python, Node.js or private research tools are required.
-PowerShell compiles the bundled C# helpers itself; there is no separate launcher
-build command or .NET SDK requirement.
+the locked dependencies. No Python, Node.js, PowerShell 7 or private research
+tools are required.
 
 Internet access is needed initially to obtain the source, Rust toolchain and Cargo
 dependencies. After caching them, Cargo accepts `--offline` for builds. That build
@@ -44,161 +49,179 @@ cache is separate from the installed game's activation state described below.
 - A legitimately installed, previously activated Need for Speed (2015) PC game.
   Keep the existing installation and license cache. Fresh activation, expired
   caches and running after uninstalling all EA software are not established.
-- 64-bit Windows and 64-bit PowerShell 7.5 or later, running without elevation
-  from an ordinary terminal, outside an IDE or agent process job.
-- Existing 32-bit `HKLM\SOFTWARE\Origin\ClientPath` registration. The tested
-  registration names `EADesktop.exe`. `Origin.exe` compatibility is implemented
-  but has not been tested live. Other names are refused.
-- A built `nfs-server.exe`, following [Build from source](#build-from-source).
-  Launching still needs PowerShell, the `launcher/` files and the game installation,
-  but does not invoke Git, Cargo, Perl or NASM.
-- Close the EA app and any running copy of the game. Local TCP port 3216 must be
-  available. Afterhours reports conflicts and leaves the other process alone.
+- For `start`: 64-bit Windows and an ordinary terminal (Windows Terminal,
+  Command Prompt or PowerShell), running without elevation and outside an IDE
+  or agent process job. `serve` also runs on Linux and macOS as an ordinary
+  user, not root.
+- For `start`: existing 32-bit `HKLM\SOFTWARE\Origin\ClientPath` registration.
+  The tested registration names `EADesktop.exe`. `Origin.exe` compatibility is
+  implemented but has not been tested live. Other names are refused.
+- Built `nfs-server` and `nfs-afterhours` executables, following
+  [Build from source](#build-from-source). Running them does not invoke Git,
+  Cargo, Perl or NASM.
+- For `start`: close the EA app and any running copy of the game. Local TCP
+  port 3216 must be available. Afterhours reports conflicts and leaves the
+  other process alone.
 
 | Installed file | Accepted SHA-256 |
 | --- | --- |
 | `NFS16.exe` | `92aa6ff4b5f8d0f033ca7e88cb86cc64b42b1d2412c4294905eb22950616e4df` |
 | `Core/ActivationUI.exe` | `5901b0ad269e12deecc2bcd2eaa56f8964538a8d6b1a265651d56dbd636daefd` |
 
-Other builds fail before game launch. Do not replace a digest to bypass a failure:
-content mappings and the routing adapter also depend on that exact executable.
+Other builds fail before anything starts. Do not replace a digest to bypass a
+failure: content mappings and the routing lease also depend on that exact
+executable. `serve` checks `NFS16.exe` only; the activation helper matters only
+when the game is started.
 
 ## Build from source
 
-Open an ordinary, unelevated PowerShell 7 window and clone the public repository:
+Open an ordinary, unelevated terminal and clone the public repository:
 
-```powershell
+```sh
 git clone https://github.com/Afterhours-Crew/afterhours-2015.git
-Set-Location afterhours-2015
+cd afterhours-2015
 ```
 
-Check the tools in that window before building:
+Check the tools before building:
 
-```powershell
-$PSVersionTable.PSVersion    # 7.5 or later
-[Environment]::Is64BitProcess    # True
-rustc --version             # 1.98.1, selected by this checkout
-rustc -vV                   # host: x86_64-pc-windows-msvc
+```sh
+rustc --version   # 1.98.1, selected by this checkout
+rustc -vV         # host: x86_64-pc-windows-msvc on Windows
 cargo --version
 perl -v
-nasm -v
+nasm -v           # Windows only
 ```
 
-Build the release server from the repository root:
+Build the release server and launcher from the repository root:
 
-```powershell
-cargo build --release -p nfs-server --locked
-if ($LASTEXITCODE -ne 0) { throw 'Server build failed; read the Cargo error above.' }
-./target/release/nfs-server.exe --help
+```sh
+cargo build --release -p nfs-server -p nfs-afterhours --locked
 ```
 
 The first build also compiles OpenSSL and SQLite and can take several minutes.
-The resulting executable is `target/release/nfs-server.exe`. Keep the `launcher/`
-directory from the same source revision. If you set `CARGO_TARGET_DIR` or use a
-custom Cargo target, locate that build's executable and pass its full path using
-`-ServerPath` to `Check`, `Setup` and `Start` below.
+The executables are `target/release/nfs-server` and `target/release/nfs-afterhours`
+(with `.exe` on Windows). The launcher looks for `nfs-server` next to itself,
+which is where this build puts it. If you set `CARGO_TARGET_DIR`, use a custom
+Cargo target or move the executables apart, pass the server's full path with
+`--server` to `check`, `setup`, `serve` and `start`.
 
 If Cargo reports a missing linker, `cl.exe`, `nmake` or Windows SDK library, repair
 the C++ workload/SDK installation. For missing `perl` or `nasm`, fix their user
 `PATH` and reopen the terminal. For a build that cannot discover an installed
 compiler, use Visual Studio's **x64 Native Tools Command Prompt** to run Cargo;
-return to an ordinary PowerShell 7 window for game startup. Do not change the
-pinned toolchain or dependency versions merely to get past a setup error.
+return to an ordinary terminal for game startup. Do not change the pinned
+toolchain or dependency versions merely to get past a setup error.
 
 ## Start
 
-From the same Afterhours checkout, with the build complete:
+From the same checkout, with the build complete:
 
-```powershell
-./launcher/Start-Afterhours.ps1 -GameDirectory 'F:\EA Games\Need for Speed'
+```sh
+./target/release/nfs-afterhours start --game-dir "F:\EA Games\Need for Speed"
 ```
 
 Use your actual installation path. The default data directory is
-`$env:LOCALAPPDATA\Afterhours2015`; `-DataDirectory 'D:\My Afterhours data'` selects
+`%LOCALAPPDATA%\Afterhours2015`; `--data-dir "D:\My Afterhours data"` selects
 another dedicated local directory. Keep it outside the game installation.
-Spaces and Unicode characters are supported. Do not use junctions, symlinks,
-network shares or a drive root as the data directory.
+Spaces and Unicode characters are supported. Junctions, symlinks, network
+shares and drive roots are refused.
 
 The first start generates and validates content, creates an independent identity
 and saved database, starts loopback services, and opens the game. Subsequent starts
 reuse verified content and the same account. Preparation can take a minute or
-more. The script stays in the foreground and prints preparation, server diagnostics
-and session status in the same terminal. Wait for its `ready` message before
-pressing Space in the game. You can also check from a second PowerShell window:
+more. The command stays in the foreground and prints preparation, server
+diagnostics and session status in the same terminal. Wait for the `ready` line
+before pressing Space in the game. You can also check from a second terminal:
 
-```powershell
-./launcher/Start-Afterhours.ps1 -Action Status
+```sh
+nfs-afterhours status
 ```
 
-Pass the same `-DataDirectory` to every command if you selected a custom location.
+Pass the same `--data-dir` to every command if you selected a custom location.
 `ready` means server listeners and guarded routing are ready; it does not mean the
 game has logged in or reached a playable world. Continue through the normal game
 menus yourself. The launcher never presses keys or accepts agreements.
 
-If the installed activation helper opens a sign-in window, the script prints
+If the installed activation helper opens a sign-in window, the launcher prints
 `activation` and waits for you without a startup timeout. It does not read or
 submit credentials. This is EA's activation requirement, separate from your local
 Afterhours account; local play is not ready while it waits. You can cancel with
-`-Action Stop` from another terminal. If activation replaces the original game
-process, this session ends with an error; start the script again after activation.
-It never adopts a different game process without the original identity guards.
+`nfs-afterhours stop` from another terminal. If activation replaces the original
+game process, this session ends with an error; start again after activation. It
+never adopts a different game process without the original identity guards.
 
-`-PlayerName 'My Driver'` sets the first account's display name. It does not rename
-or replace an existing account. New accounts start **after the scripted prologue**;
-the official prologue and complete progression are not yet supported. The local
-challenge menu uses three fixed preview objectives derived from installed type
-metadata. It grants no challenge rewards and does not implement rotating schedules
-or challenge completion. No remote product entitlements are granted.
+`--player-name "My Driver"` sets the first account's display name. It does not
+rename or replace an existing account. New accounts start **after the scripted
+prologue**; the official prologue and complete progression are not yet supported.
+The local challenge menu uses three fixed preview objectives derived from installed
+type metadata. It grants no challenge rewards and does not implement rotating
+schedules or challenge completion. No remote product entitlements are granted.
 
-For a custom Cargo target/output location, pass `-ServerPath` with your built
-executable. The default is `target/release/nfs-server.exe` inside this checkout.
-For server development without opening the game, see
-[Run only the server](../crates/server/README.md#run-only-the-server-on-windows).
+Every subcommand accepts `--json` to print one JSON object instead of text, and
+exits with a documented code (`nfs-afterhours --help` lists them): 0 success,
+1 refused with nothing changed, 2 bad command line, 3 session failed, 4 nothing
+to act on, 5 input/output error.
 
-## Check, setup and stop
+## Check, setup, serve and stop
 
-```powershell
+```sh
 # Read-only: installation hashes, path safety, registration and port/process conflicts.
-./launcher/Start-Afterhours.ps1 -Action Check -GameDirectory 'F:\EA Games\Need for Speed'
+nfs-afterhours check --game-dir "F:\EA Games\Need for Speed"
 
 # Generate content and account without starting the game or listeners.
-./launcher/Start-Afterhours.ps1 -Action Setup -GameDirectory 'F:\EA Games\Need for Speed'
+nfs-afterhours setup --game-dir "F:\EA Games\Need for Speed"
+
+# Run only the server, on any platform; stop with Ctrl+C or `nfs-afterhours stop`.
+nfs-afterhours serve --game-dir /mnt/games/nfs2015
 
 # Close this session's game, then its server.
-./launcher/Start-Afterhours.ps1 -Action Stop
+nfs-afterhours stop
 ```
+
+`serve` prepares like `setup`, starts `nfs-server` directly on loopback and
+supervises it until it exits, a stop is requested or you press Ctrl+C. On Linux
+and macOS point `--game-dir` at a copy of the installation directory; the
+content readers need its files, not a running game. The server leaves the LSX
+port disabled in this mode. Non-loopback listening for a remote client is not
+yet implemented and is tracked separately.
 
 Quitting normally in the game also shuts down the server. Stop first requests
 normal game closure, then terminates only its owned process tree if closure does
 not complete within 15 seconds. A single data-directory lock prevents concurrent
-supervisors. Global game/process and LSX-port checks reject other active sessions.
+supervisors. Game/process and port checks reject other active sessions.
 
-The script starts a dedicated PowerShell child in the same console and waits for
-it to finish. No shortcuts, desktop automation or background launcher app are
-needed. The session process puts itself and its children in a Windows job with
-kill-on-close. If the supervisor is forcibly terminated, Windows closes that
-owned process tree. If the server dies, the supervisor closes the game. Process
-handles and creation identities prevent cleanup from targeting a reused PID.
-The memory lease lasts for game lifetime; active play has no experiment timer.
-Established idle LSX connections remain open; incomplete handshakes/frames and
-writes still have deadlines. Reboot leaves no registration or service change to
-undo. SQLite crash recovery runs on the next start; this is not a promise against
-hardware failure or an unverified power-loss scenario.
+The command starts a second copy of itself as the session supervisor in the same
+console and waits for it to finish. No shortcuts, desktop automation or
+background launcher app are needed. On Windows the supervisor puts itself and
+its children in a job with kill-on-close: if the supervisor is forcibly
+terminated, Windows closes that owned process tree. If the server dies, the
+supervisor closes the game. Process handles and creation identities prevent
+cleanup from targeting a reused PID. The memory lease lasts for game lifetime;
+active play has no experiment timer. On Linux and macOS there is deliberately
+no equivalent: `serve` has no game to protect, so a supervisor that dies leaves
+an ordinary server process behind, and `status` reports the session as
+`interrupted` with the server's PID so you can stop it. Established idle LSX
+connections remain open; incomplete handshakes/frames and writes still have
+deadlines. Reboot leaves no registration or service change to undo. SQLite
+crash recovery runs on the next start; this is not a promise against hardware
+failure or an unverified power-loss scenario.
 
 ## Data and recovery
 
 Keep `account.json` and `artifacts/account/` together. Stop the session before
 backing up the entire data directory, including SQLite journal files if present.
-The launcher never resets an existing account or imports an EA save.
+The launcher never resets an existing account or imports an EA save. The data
+directory layout and record formats are the ones the previous PowerShell
+launcher used, so an existing directory keeps working.
 
-`Status` reports `interrupted` when a previous live status has no supervising lock.
-Start again after its processes have exited. If setup was interrupted after the
-account database was committed but before `account.json` was written, preserve
+`status` reports `interrupted` when a previous live status has no supervising
+lock. Start again after its processes have exited. If setup was interrupted after
+the account database was committed but before `account.json` was written, preserve
 the directory and recover the small pointer using the account ID from the
 successful creation output or the `<id>.sqlite` filename:
 
-```powershell
-./launcher/Start-Afterhours.ps1 -Action Recover -AccountId '<32 lowercase hex digits>'
+```sh
+nfs-afterhours recover --account-id <32 lowercase hex digits>
 ```
 
 Recovery refuses an existing different pointer and never edits the database.
@@ -224,27 +247,30 @@ server executable** in `data/bin/<server-sha256>/EADesktopDebug.exe` (or the
 untested Origin variant). This is not an EA executable. The SDK recognizes the
 registered client's basename plus `Debug`, allowing the actual EA app to remain
 closed. This compatibility route still requires existing registration and cached
-activation. It does not implement or supply licenses.
+activation. It does not implement or supply licenses. `serve` runs `nfs-server`
+directly and makes no copy.
 
-The C# routing adapter changes 13 startup data bytes in the owned game process.
-It checks executable identity, live code guards, root thread/TLS/provider shape,
+The routing lease changes 13 startup data bytes in the owned game process. It
+checks executable identity, live code guards, root thread/TLS/provider shape,
 original bytes and the owned server's loopback listener. It verifies writes and
 can reverse partial writes without overwriting another writer's data. If the game
 has already consumed its startup routing, preparation fails closed. Once the
 pinned game process exits, its temporary address space is gone. No executable
 instructions, disk patches, debugger attachment or broad process injection API
-are exposed by this adapter.
+are exposed. All operating-system calls live in one crate,
+`nfs-afterhours-sys`, behind safe wrappers; the launcher itself contains no
+unsafe code.
 
 ## Diagnostics and troubleshooting
 
-Each launch gets a unique `artifacts/launcher/<session-id>/` containing status and
-bounded stdout/stderr logs. Default server recordings contain route metadata and
-lengths, not request payloads. Each log sink retains at most 1 MiB of characters
-(up to 4 MiB UTF-8); the server recording has a 64 MiB, 100,000-event and 256-stream
-budget. It stops recording at the limit and continues serving. These bounds are
-per run; old sessions are retained for deliberate user cleanup.
+Each session gets a unique `artifacts/launcher/<session-id>/` containing
+`request.json`, `status.json` and bounded stdout/stderr logs. Default server
+recordings contain route metadata and lengths, not request payloads. Each log
+file retains at most 4 MiB; the server recording has a 64 MiB, 100,000-event
+and 256-stream budget. It stops recording at the limit and continues serving.
+These bounds are per run; old sessions are retained for deliberate user cleanup.
 
-`-RecordProtocol` explicitly enables local raw diagnostic capture. Those files
+`--record-protocol` explicitly enables local raw diagnostic capture. Those files
 can contain identities and local authentication inputs. Review/redact them before
 sharing; do not publish saved databases, activation files or extracted game data.
 There is no upload/export feature that silently sends them anywhere.
@@ -254,91 +280,66 @@ There is no upload/export feature that silently sends them anywhere.
 | Unsupported hash | Use the supported installation; do not weaken guards. |
 | Existing game/EA process or occupied port 3216 | Close the conflicting application yourself, then retry. |
 | Missing/unrecognized registration | This installation is outside the supported launch path. No automatic repair or admin fallback runs. |
-| Already inside a process job | Run from an ordinary PowerShell terminal outside the IDE/agent. No automatic desktop handoff or elevation is attempted. |
-| Early script failure | Read the error in the terminal and inspect the printed session-log directory. |
-| `activation` | Respond to the installed game's dialog yourself, or cancel with Stop. Launcher-free operation still depends on valid installed activation state. |
-| `failed` during preparation | Read that run's preparation log. Preserve existing state. |
-| `failed` during routing | Let owned cleanup finish, then retry from a new process. |
+| Already inside a process job | Run from an ordinary terminal outside the IDE/agent. No automatic desktop handoff or elevation is attempted. |
+| Exit code 1 before a session starts | Read the refusal on standard error; nothing was changed. |
+| Exit code 3 | Read the session's `status.json` and logs in the printed session directory. Preserve existing state. |
+| `activation` | Respond to the installed game's dialog yourself, or cancel with `stop`. Launcher-free operation still depends on valid installed activation state. |
+| `interrupted` | The supervisor is gone. On Windows its children were closed by the job; on Unix stop the listed server PID yourself. Start again to recover. |
 | Game exits with a nonzero code | The status records the code; inspect Windows Application events and local logs. A crash is not a successful launch. |
-| Script execution blocked by local policy/security software | Follow your system's approved script/signing policy; do not disable protections for Afterhours. |
 
 ## Developer validation and current limits
 
-Run the normal three Cargo gates plus these ordinary-user Windows checks:
+Run the normal three Cargo gates plus the launcher's own tests:
 
-```powershell
-./launcher/Test-Launcher.ps1
-./launcher/Test-Session.ps1
+```sh
+cargo test -p nfs-afterhours -p nfs-afterhours-sys --locked
 ```
 
-The first covers memory transactions, partial writes, foreign changes, marker,
-path/link rejection, stale status, executable integrity and bounded UTF-8 output.
-The second starts disposable PowerShell children and
-checks an unelevated worker outside an existing job, paths containing spaces,
-Unicode and apostrophes, forced supervisor death and graceful job cleanup with
-pinned handles. It
-does not start the game or change Windows settings.
+Unit tests cover the path rules, record formats, digests, the verified server
+copy, the lock and stop protocol, the launch marker vectors, the 13-byte
+transaction with injected partial writes, the bounded child log pumps, and the
+session state machine against a recording fake: every state, cancellation at
+every wait, every failing step and the fixed cleanup order. Integration tests
+drive the built binary; on Unix they run a complete `serve` session against a
+script standing in for the server, watch it from a second process through
+`status`, stop it, and kill a supervisor to see `interrupted`. The Windows
+process-layer tests (job object, process pins, thread lookup, memory access,
+TCP ownership, registry) run in CI on a Windows runner.
 
-The public path has reached the menu with an independently created post-intro
-account and recovered that account on subsequent game/server starts. The latest
-debug-build run reached its saved garage, drove outside, displayed the own-car
-minimap arrow, and completed two garage returns. Both exits displayed Enter Garage;
-PageDown worked from the spawn and approach, driving away cleared the prompt,
-and approaching restored it. Loading screens had no HUD/minimap/prompt; individual
-screenshots do not establish frame-by-frame timing throughout every cinematic.
-Normal quit closed the game, server and listener. The actual EA app was absent,
-its service was already stopped, and the launcher changed no machine settings.
+On 2026-10-16 the Rust launcher passed `check`, content preparation and `start`
+on the supported Windows installation without administrator access. The game
+reached the menu, loaded an existing customized car in the garage and entered
+free roam with the HUD, minimap marker and garage-entry prompt. `status` from a
+separate process reported `ready`; `stop` closed the game and server, reported
+`finished`, and left no owned processes or listener on port 3216. This run used
+the garage development server at `1cf3694` and an isolated copy of its account.
+No activation dialog appeared; external networking remained connected.
 
-The standalone release also reached free roam after the owner completed the
-installed game's activation dialog. The same original game process continued
-after activation. PageDown returned from the garage approach, the next exit
-displayed the prompt and player arrow, and PageDown returned again from the
-spawn. Normal quit cleaned up the game, server and listener. An immediate
-game/server restart required no further sign-in, restored the same account's
-Mustang garage and quit normally. The owner reported a delay before the approach
-prompt appeared; the later driving regression below addresses that backlog.
+The same revision passed local non-admin Windows fmt, Clippy and all 1,174
+workspace tests, including 66 launcher and process-wrapper tests. The CLI
+installation-refusal test now uses a Windows executable suffix, so it reaches
+the intended hash check on non-elevated developer machines as well as Unix.
 
-After another Windows reboot, the owner reported successful disconnected launch,
-driving and garage return twice with the existing account and once with a fresh
-local account. Completed session logs corroborate those transitions and normal
-supervisor shutdown. Network disconnection was performed and reported by the
-owner; no independent network sampler ran during that test. The existing installed
-activation cache was retained after earlier online activation. A fresh local
-account is independent server data, not a fresh game installation or license.
-The owner estimated roughly ten seconds for both the approach prompt and the
-response after PageDown. Driving exposed a queue problem: each accepted movement
-sample sent chassis and minimap updates as separate frames. They now share a frame
-when the existing size limit permits; larger batches retain separate framing.
-A subsequent local release test recorded 1,127 replication sends over two minutes
-with no remaining backlog. The approach prompt was visible in the first screenshot
-about 1.4 seconds after the server detected re-entry, and PageDown began the
-transition immediately. These are sampled UI observations, not exact first-visible
-latencies. Garage-return animation and loading follow that response; their
-durations have not been compared with the original service.
-The following exit again showed the prompt and minimap arrow; PageDown at spawn
-returned successfully. Normal quit cleaned up the game, server, listener and test
-console. The EA app was absent and its service remained stopped.
-
-Rust formatting, Clippy and 1,108 tests pass, along with the Windows launcher
-and disposable process-cleanup checks above. The next-day launch initially
-required manual activation; the successful release gameplay and immediate
-restart do not establish next-day activation-cache acceptance. The later owner-run
-cold test establishes the scope described above. Fresh-install/cache-lifetime
-acceptance remains open. Earlier research runs do not substitute for public-script checks.
+Full acceptance remains tracked in
+[issue 78](https://github.com/afterhours-crew/afterhours-2015/issues/78): standalone
+`setup`, live `recover`, the activation-dialog path, forced supervisor
+termination, cold disconnected startup/restart and `serve` on a Linux host
+remain pending. The previous PowerShell launcher's disconnected result does
+not establish those gates for this implementation.
 
 ### Manual disconnected test without administrator access
 
-Build and run the script successfully while connected first, then quit normally
+Build and run `start` successfully while connected first, then quit normally
 and back up the stopped data directory. Keep the EA app closed. Disconnect the
 machine's external network yourself (unplug Ethernet and disconnect Wi-Fi),
-restart Windows while remaining disconnected, and run the same Start command
-from an ordinary PowerShell window. No firewall or service changes are required.
+restart Windows while remaining disconnected, and run the same `start` command
+from an ordinary terminal. No firewall or service changes are required.
 Wait for `ready`, then reach the menu, garage and free roam, return with PageDown,
 and quit normally. Start again while still disconnected and verify the same
 saved garage. Keep the network disconnected through both complete shutdowns.
 
 Record the two session IDs, any activation dialog or failure, the visible game
-results and both final statuses. Repeat with a separate new `-DataDirectory` to
+results and both final statuses. Repeat with a separate new `--data-dir` to
 cover a freshly generated local account without replacing the existing one.
 An activation dialog while disconnected is a failed cold-start gate; reconnect
 before any owner-performed activation and label subsequent tests accordingly.
@@ -347,7 +348,7 @@ Retained installed licenses remain a prerequisite even if this test passes.
 The LSX API remains available separately with `--lsx-port 3216` on a configured
 server. The [server guide](../crates/server/README.md) describes the underlying
 content/state options; `prepare-local --game-dir ... --root ...` creates the
-public launcher's local policies without starting any services.
+launcher's local policies without starting any services.
 
 ## Ownership and extension points
 
@@ -455,9 +456,10 @@ The installed activation helper and existing license/cache state were retained.
 This establishes launcher/service-free gameplay for that installation and account,
 not activation independence or fresh-install acceptance.
 
-The public launcher described above now owns setup, launch, routing and cleanup,
-using the existing registration without changing it. Its validation is reported
-separately from that earlier procedure, including the owner's cold disconnected
-test. Activation-cache lifetime remains a separate acceptance gate.
+The PowerShell launcher that preceded `nfs-afterhours` owned setup, launch,
+routing and cleanup using the existing registration without changing it, and
+its validation included the owner's cold disconnected test. The Rust launcher
+carries the same checks; its own live validation is pending as described
+above. Activation-cache lifetime remains a separate acceptance gate.
 The LSX component can be developed and tested independently of installed-game
 validation.

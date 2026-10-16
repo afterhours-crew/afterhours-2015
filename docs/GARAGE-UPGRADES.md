@@ -354,12 +354,12 @@ the current source, including the changed server:
 ```powershell
 cargo build --release --workspace --locked
 $data = Join-Path $env:LOCALAPPDATA 'Afterhours2015-Upgrades'
-pwsh -NoProfile -File .\launcher\Start-Afterhours.ps1 -Action Start `
-  -GameDirectory 'F:\EA Games\Need for Speed' -DataDirectory $data
+.\target\release\nfs-afterhours.exe start `
+  --game-dir 'F:\EA Games\Need for Speed' --data-dir $data
 ```
 
-The default server path is the release build. A deliberate debug test can use
-`-ServerPath .\target\debug\nfs-server.exe`. Content is rebuilt automatically
+The default server path is the build beside the launcher. A deliberate debug test can use
+`--server .\target\debug\nfs-server.exe`. Content is rebuilt automatically
 when the builder revision changes. Existing accounts are preserved. No private
 scripts, captured replies or administrator access are required.
 
@@ -373,7 +373,7 @@ directory when experimenting. Back up its account directory while stopped.
 Stop the game/server before inspecting and changing the balance:
 
 ```powershell
-pwsh -NoProfile -File .\launcher\Start-Afterhours.ps1 -Action Stop -DataDirectory $data
+.\target\release\nfs-afterhours.exe stop --data-dir $data
 ```
 
 Wait for the original launcher window to report shutdown complete. Then inspect:

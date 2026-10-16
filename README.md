@@ -7,14 +7,14 @@ servers as the goals. This is the canonical home for runtime code and its
 first-party dependencies.
 
 Components arrive incrementally once their behavior is understood and tested.
-The standalone server and [Windows launcher](docs/LOCAL-LAUNCHER.md) build here.
-The launcher prepares content from a supported installation and creates an
-independent local account. Its current validation scope and installation
+The standalone server and the [`nfs-afterhours` launcher](docs/LOCAL-LAUNCHER.md)
+build here. The launcher prepares content from a supported installation,
+creates an independent local account, runs the server on any platform and on
+Windows starts and routes the game. Its current validation scope and installation
 requirements are documented in that guide. Tested gameplay and the prioritized
 remaining systems are tracked in the [gameplay roadmap issue][roadmap] and its
-per-system tracking issues.
-The tested garage customization scope and local test-cash/REP commands are covered
-in [garage upgrades and customization](docs/GARAGE-UPGRADES.md).
+per-system tracking issues. The tested garage customization scope and local
+test-cash/REP commands are covered in [garage upgrades and customization](docs/GARAGE-UPGRADES.md).
 The workspace owns these implemented components:
 
 | Component | Responsibility |
@@ -31,36 +31,40 @@ The workspace owns these implemented components:
 | [nfs-storage](crates/storage/README.md) | Account-owned inventory, garage slots and tables, with memory and SQLite adapters |
 | [nfs-frostbite](crates/frostbite/README.md) | Bounded, read-only reader for an installed game's content containers |
 | [nfs-content](crates/content/README.md) | Builds and caches deployment content from the player's own installation |
+| [nfs-afterhours](crates/launcher/README.md) | Command-line launcher: preflight, content and account preparation, server supervision, and on Windows game launch and routing |
+| [nfs-afterhours-sys](crates/launcher-sys) | The one crate with `unsafe`: Win32 and libc calls behind safe, bounded wrappers |
 
 Tests use constructed inputs, standard cryptographic vectors and temporary
 databases. Game files and service access are unnecessary. See the
 [contribution and promotion process](CONTRIBUTING.md).
 
-## Build and run on Windows
+## Build and run
 
 Afterhours is distributed as source: **no server executable or installer is
-included**. Start with the [Windows setup guide](docs/LOCAL-LAUNCHER.md), which
-lists the build tools, supported game installation and activation requirements.
-Once those prerequisites are installed, open an ordinary PowerShell 7 window:
+included**. Start with the [setup guide](docs/LOCAL-LAUNCHER.md), which lists
+the build tools, supported game installation and activation requirements.
+Once those prerequisites are installed, open an ordinary, unelevated terminal:
 
-```powershell
+```sh
 git clone https://github.com/Afterhours-Crew/afterhours-2015.git
-Set-Location afterhours-2015
-cargo build --release -p nfs-server --locked
-if ($LASTEXITCODE -ne 0) { throw 'Server build failed; read the Cargo error above.' }
-./launcher/Start-Afterhours.ps1 -GameDirectory 'F:\EA Games\Need for Speed'
+cd afterhours-2015
+cargo build --release -p nfs-server -p nfs-afterhours --locked
+./target/release/nfs-afterhours start --game-dir "F:\EA Games\Need for Speed"
 ```
 
 Replace the game path with your installation directory. The build produces
-`target/release/nfs-server.exe`. The PowerShell script prepares local content and
-an account, starts both the server and game, and keeps logs visible in the terminal.
-Wait for `ready` before pressing Space. Normal game exit also stops the server.
-Running Afterhours does not require administrator access; installing third-party
-build tools may. No private checkout, copied profile or database service is needed.
+`target/release/nfs-server` and `target/release/nfs-afterhours` (`.exe` on
+Windows). The launcher prepares local content and an account, starts both the
+server and game, and keeps logs visible in the terminal. Wait for `ready`
+before pressing Space. Normal game exit also stops the server. On Linux or
+macOS, `nfs-afterhours serve` runs the server without a game. Running
+Afterhours does not require administrator access; installing third-party build
+tools may. No private checkout, copied profile or database service is needed.
 
-For custom build output paths, saved data, setup checks and troubleshooting, see
-the [running instructions](docs/LOCAL-LAUNCHER.md#build-from-source).
-Developers can also [run just the server](crates/server/README.md#run-only-the-server-on-windows).
+For custom build output paths, saved data, setup checks, exit codes and
+troubleshooting, see the [running instructions](docs/LOCAL-LAUNCHER.md#build-from-source)
+and the [launcher crate](crates/launcher/README.md).
+Developers can also [run just the server](crates/server/README.md#run-only-the-server).
 For menu automation, [change the game's Back key to F9 without a mod](docs/MENU-KEYBINDING.md).
 
 ## Build and test
@@ -91,9 +95,9 @@ remain unfinished. The [garage customization guide](docs/GARAGE-UPGRADES.md)
 records supported purchases, tuning, appearance, wraps and resets. A guarded
 local launch procedure
 has reached free roam after a Windows restart without the EA app or service and
-with external game traffic blocked. The public source launcher now supplies
-setup, process ownership and temporary routing without administrator privileges;
-its validation is reported separately in the [running instructions](docs/LOCAL-LAUNCHER.md).
+with external game traffic blocked. The launcher supplies setup, process
+ownership and temporary routing without administrator privileges; its
+validation status is reported in the [running instructions](docs/LOCAL-LAUNCHER.md).
 Existing installation registration and activation-cache requirements remain.
 
 The world attribute service consumes a committed readiness permit, validates the

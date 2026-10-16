@@ -10,13 +10,13 @@ state and static content. This is an incremental implementation: unsupported
 routes are reported rather than answered with invented success. A successful
 start or automated test does not establish complete gameplay or launcher
 independence. The repository does not distribute game content or an account
-profile. The [Windows launcher](../../docs/LOCAL-LAUNCHER.md) derives content from
+profile. The [`nfs-afterhours` launcher](../../docs/LOCAL-LAUNCHER.md) derives content from
 the owner's supported installation and creates a separate local account;
 the complete prologue and several garage mutations are still incomplete.
 
 ## Build and start
 
-For ordinary Windows startup, follow the [launcher instructions](../../docs/LOCAL-LAUNCHER.md).
+For ordinary startup, follow the [launcher instructions](../../docs/LOCAL-LAUNCHER.md).
 The options below document the server interface for developers and custom hosts.
 `prepare-local --game-dir <installation> --root <data-directory>` generates the
 launcher's policies and installed garage lifecycle without starting services or
@@ -66,53 +66,33 @@ take precedence even when an import path is provided, changed or no longer exist
 Missing or malformed database state fails startup rather than creating guessed
 defaults.
 
-## Run only the server on Windows
+## Run only the server
 
-This developer example starts loopback services with generated local policy and
-a saved account. It does not launch or route the game. For playing, use the
-[combined start script](../../docs/LOCAL-LAUNCHER.md#start), which also supplies
-the required game-process routing and launcher compatibility.
-
-Build the release executable first, then run the following from the repository
-root in ordinary PowerShell 7.5 or later. Use a dedicated developer data directory;
-do not open an account already in use by another server or launcher session.
-`Setup` creates an account on the first run and preserves it on later runs.
-
-```powershell
-$ErrorActionPreference = 'Stop'
-$game = 'F:\EA Games\Need for Speed' # Replace with your installation.
-$data = Join-Path $env:LOCALAPPDATA 'Afterhours2015-server-dev'
-$server = (Resolve-Path './target/release/nfs-server.exe').Path
-./launcher/Start-Afterhours.ps1 -Action Setup -GameDirectory $game -DataDirectory $data -ServerPath $server
-
-# Read the generated policy paths; preparation leaves saved accounts untouched.
-$prepared = & $server prepare-local --game-dir $game --root $data | ConvertFrom-Json
-if ($LASTEXITCODE -ne 0) { throw 'Local preparation failed.' }
-$account = Get-Content -LiteralPath (Join-Path $data 'account.json') -Raw | ConvertFrom-Json
-$runs = Join-Path $data 'artifacts/runs'
-New-Item -ItemType Directory -Path $runs -Force | Out-Null
-$output = Join-Path $runs ([Guid]::NewGuid().ToString('N'))
-$serverArgs = @(
-    '--root', $data, '--output', $output, '--game-dir', $game,
-    '--state-directory', 'artifacts/account', '--local-account', $account.local_account,
-    '--owned-local-social', '--owned-menu-awards', '--owned-world-readiness',
-    '--owned-world-attributes', '--owned-world-connection', '--owned-only'
-)
-foreach ($file in $prepared.files.PSObject.Properties) {
-    if ($file.Name -ne 'account-policy') {
-        $serverArgs += @(('--' + $file.Name), [string]$file.Value)
-    }
-}
-& $server @serverArgs
+```sh
+nfs-afterhours serve --game-dir <installation> --data-dir <dedicated directory>
 ```
 
+`serve` runs `prepare-local`, creates the account on first use, starts this
+server on loopback with the generated policy and supervises it until it exits,
+a stop is requested (`nfs-afterhours stop`) or Ctrl+C. It works on Windows,
+Linux and macOS and never launches or routes the game. Use a dedicated
+developer data directory; do not open an account already in use by another
+server or launcher session. The LSX port is left disabled in this mode.
+
+To assemble the server command line yourself, read the generated policy paths
+from `prepare-local` and pass each file as `--<name>`, skipping
+`account-policy`, together with `--root`, `--output`, `--game-dir`,
+`--state-directory artifacts/account`, `--local-account <id from account.json>`
+and the `--owned-*` flags. The launcher's `server_arguments` in
+`crates/launcher/src/supervisor/live.rs` is the reference for the exact set.
+
 The first JSON output line has `ready: true` and the actual listener addresses;
-diagnostics remain in the terminal. Ports are allocated on loopback, and this
-example leaves LSX disabled. Press **Ctrl+C** to stop the standalone server.
-Launcher `Status`/`Stop` manage launcher-owned sessions, not this direct process.
-Metadata recordings are under the new `artifacts/runs/<id>/` directory; request
-payload recording stays off. Keep the data directory to preserve the account.
-Server readiness alone does not establish that a game can connect or play.
+diagnostics remain in the terminal. Ports are allocated on loopback. Press
+**Ctrl+C** to stop a standalone server. Launcher `status`/`stop` manage
+launcher-owned sessions, not a server you started by hand. Metadata recordings
+are under the new `artifacts/runs/<id>/` directory; request payload recording
+stays off. Keep the data directory to preserve the account. Server readiness
+alone does not establish that a game can connect or play.
 
 ## Create a local account
 
@@ -421,7 +401,7 @@ that final shutdown is not claimed to be fully network-isolated.
 Those earlier runs used a guarded research launch procedure and an existing local
 account. Other applications and system DNS stayed online. IPv6 loopback and active
 block rules were checked, but no external IPv6 route was available for a drop test.
-The public PowerShell script has since passed gameplay, normal quit/restart and an
+The previous PowerShell launcher passed gameplay, normal quit/restart and an
 owner-run cold disconnected test with existing and fresh local accounts; see the
 [current validation scope](../../docs/LOCAL-LAUNCHER.md#developer-validation-and-current-limits).
 Installed activation state was retained. Fresh game installation, cache lifetime

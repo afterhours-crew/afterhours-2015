@@ -39,7 +39,14 @@ from recordings. Local operation must not require public authentication,
 telemetry or hosted storage.
 
 Commit `Cargo.lock`; change dependency versions deliberately. First-party Rust
-forbids unsafe code. Every code change must pass:
+forbids unsafe code, with one exception: `nfs-afterhours-sys`
+(`crates/launcher-sys`) wraps the operating-system calls the launcher needs
+(job objects, process memory, thread lookup, the TCP ownership table, a
+registry read, console events, Unix signals). It is the only crate allowed
+`unsafe`; every block carries a `SAFETY` comment, Clippy rejects one without,
+and the crate exposes only safe functions over bounded buffers. Keep new OS
+calls there, and keep the launcher itself (`crates/launcher`) safe.
+Every code change must pass:
 
 ```sh
 cargo fmt --all -- --check
@@ -50,9 +57,9 @@ cargo test --workspace --locked
 The [CI workflow](.github/workflows/ci.yml) runs the same three gates on every
 push to a `codex/` branch and every pull request. Tests run on Linux for every
 push and additionally on Windows for pull requests and main, alongside the
-Windows launcher transaction checks. The session cleanup
-script refuses elevated sessions and hosted runners are elevated, so run it
-locally. A red run must be fixed before a pull request is reviewed.
+Windows Rust launcher and process-wrapper tests. Hosted runners are elevated,
+so live non-admin session cleanup still needs a local check. A red run must be
+fixed before a pull request is reviewed.
 
 Review third-party licenses before adding code or dependencies. Current storage
 uses pinned `rusqlite` with bundled SQLite and limits; transitive versions and
@@ -70,6 +77,12 @@ Content loaders use serde_json 1.0.151 (MIT OR Apache-2.0); all registry
 versions and checksums are locked. Main/master/default require pull requests
 and reject force pushes/deletion, including for administrators.
 
+The launcher uses clap 4.6.7 (MIT OR Apache-2.0) with default features off
+(`std`, `derive`, `help`, `usage`, `error-context`); its tree adds clap_builder,
+clap_derive, clap_lex, anstyle and heck, all MIT OR Apache-2.0. The
+operating-system crate uses windows-sys 0.61.2 and libc 0.2.190, both
+MIT OR Apache-2.0 and already locked by other crates.
+
 Loopback discovery and QoS support uses httparse 1.10.1 (MIT OR Apache-2.0)
 and openssl 0.10.81 (Apache-2.0). Its vendored build uses openssl-src
 300.6.1+3.6.3 (MIT OR Apache-2.0 wrapper; OpenSSL 3.6.3 is Apache-2.0).
@@ -83,8 +96,8 @@ remain at the socket/diagnostic edge rather than in the sans-IO service models.
 
 Normal server builds do not include packet-loss controls. For a copied test
 account, build with `cargo build -p nfs-server --features network-test --locked`
-and start the usual PowerShell launcher with `-RecordProtocol` and `-ServerPath`
-pointing to that debug executable. Both the feature and raw recording are needed.
+and run `nfs-afterhours start` with `--record-protocol` and `--server` pointing to
+that debug executable. Both the feature and raw recording are needed.
 This diagnostic does not need administrator access or change Windows networking.
 
 After reaching the action being tested, create `world-1-loss.txt` in the current

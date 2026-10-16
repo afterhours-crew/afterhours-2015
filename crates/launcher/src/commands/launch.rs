@@ -1,0 +1,187 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+//! `check`, `setup`, `serve`, `start` and the hidden `supervise`.
+//!
+//! The front-end command runs preflight, writes a request file into a new
+//! session directory and starts a second copy of this executable with
+//! `supervise`. That child holds the data-directory lock, joins the session
+//! job on Windows and runs the state machine. Keeping the supervisor in a
+//! separate process means the user's terminal is never placed in the job
+//! and a crash of the supervisor still triggers the job's cleanup.
+
+use super::{Context, server_path};
+use crate::{
+    cli::{GameArgs, SessionArgs},
+    exit::{Exit, Failure, Result},
+    paths, platform, preflight,
+    records::{self, Action, Request},
+    session,
+    supervisor::{self, live::LiveSession},
+};
+use std::path::Path;
+
+/// `check`: preflight only.
+pub fn check(context: &Context, args: &GameArgs) -> Result<()> {
+    let server = server_path(args)?;
+    let report = preflight::run(
+        &platform::native(),
+        preflight::Input {
+            game_directory: Some(&args.game_dir),
+            data_directory: &context.data_dir,
+            server_path: &server,
+            for_game: platform::supports_game_launch(),
+        },
+    )?;
+    context.emit(&report, || {
+        let mut lines = vec![
+            format!(
+                "game directory : {}",
+                report
+                    .game_directory
+                    .as_deref()
+                    .map(Path::display)
+                    .map(|d| d.to_string())
+                    .unwrap_or_default()
+            ),
+            format!("data directory : {}", report.data_directory.display()),
+            format!(
+                "server         : {} ({})",
+                report.server_path.display(),
+                report.server_sha256
+            ),
+        ];
+        if let Some(registration) = &report.registered_client_path {
+            lines.push(format!("registration   : {registration}"));
+        }
+        if let Some(name) = &report.compatibility_name {
+            lines.push(format!("compatibility  : {name}"));
+        }
+        lines.push("machine changes: none; no administrator rights required".into());
+        lines.join("\n")
+    })
+}
+
+/// A new session identifier: 32 lowercase hexadecimal characters that are
+/// unique per data directory. Uniqueness, not secrecy, is the requirement.
+fn new_session_id() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let stack = &nanos as *const u128 as usize;
+    let seed = format!("{nanos}-{}-{stack}", std::process::id());
+    crate::digest::sha256_bytes(seed.as_bytes())[..32].to_owned()
+}
+
+/// `setup`, `serve` and `start`: preflight, write the request, supervise.
+pub fn launch(context: &Context, action: Action, args: &SessionArgs) -> Result<()> {
+    if action == Action::Start && !platform::supports_game_launch() {
+        return Err(Failure::refused(
+            "Starting the game is supported on Windows only. Use `nfs-afterhours serve` here.",
+        ));
+    }
+    let server = server_path(&args.game)?;
+    let report = preflight::run(
+        &platform::native(),
+        preflight::Input {
+            game_directory: Some(&args.game.game_dir),
+            data_directory: &context.data_dir,
+            server_path: &server,
+            for_game: action == Action::Start,
+        },
+    )?;
+    let data = report.data_directory.clone();
+    std::fs::create_dir_all(&data)?;
+    let id = new_session_id();
+    let run = paths::session_dir(&data, &id);
+    let (request_path, run) = {
+        // Hold the lock only while creating the session directory; the
+        // supervisor takes it for the session itself.
+        let _lock = session::Lock::acquire(&data)?;
+        paths::checked_data_path(&run, report.game_directory.as_deref())?;
+        std::fs::create_dir_all(&run)?;
+        paths::checked_data_path(&run, report.game_directory.as_deref())?;
+        let request = Request {
+            version: records::VERSION,
+            id: id.clone(),
+            action,
+            game_directory: report.game_directory.clone(),
+            data_directory: data.clone(),
+            server_path: report.server_path.clone(),
+            server_sha256: report.server_sha256.clone(),
+            player_name: args.player_name.clone(),
+            record_protocol: args.record_protocol,
+        };
+        let request_path = run.join("request.json");
+        records::write_new_json(&request_path, &request)?;
+        (request_path, run)
+    };
+    if !context.json {
+        println!("Afterhours {action} - data: {}", data.display());
+        println!("Session logs: {}", run.display());
+    }
+    let status = std::process::Command::new(std::env::current_exe()?)
+        .arg("supervise")
+        .arg("--request")
+        .arg(&request_path)
+        .status()?;
+    if context.json {
+        let record: records::Status = records::read_json(&run.join("status.json"))?;
+        println!("{}", serde_json::to_string(&record)?);
+    }
+    match status.code() {
+        Some(0) => Ok(()),
+        Some(code) => Err(Failure {
+            exit: match code {
+                1 => Exit::Refused,
+                3 => Exit::SessionFailed,
+                _ => Exit::Internal,
+            },
+            message: format!("Afterhours session failed. Inspect {}.", run.display()),
+        }),
+        None => Err(Failure::session(format!(
+            "The supervisor was terminated. Inspect {}.",
+            run.display()
+        ))),
+    }
+}
+
+/// `supervise`: run a session from its request file.
+pub fn supervise(request_path: &Path) -> Result<()> {
+    let (request, data, run) = supervisor::live::load_request(request_path)?;
+    nfs_afterhours_sys::capture_stop_requests()?;
+    let _lock = session::Lock::acquire(&data)?;
+    if run.join(session::STOP_FILE).exists() {
+        return Err(Failure::session("Start cancelled before preparation."));
+    }
+    let digest = crate::digest::sha256_file(&request.server_path)?;
+    if digest != request.server_sha256 {
+        return Err(Failure::refused(
+            "Server changed between request and preflight.",
+        ));
+    }
+    session::point_current_session(&data, &request.id)?;
+    let action = request.action;
+    let mut live = LiveSession::new(request, data, run)?;
+    let outcome = supervisor::run(&mut live, action);
+    if outcome.succeeded() {
+        Ok(())
+    } else {
+        Err(Failure::session(outcome.message))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_ids_are_valid_and_distinct() {
+        let a = new_session_id();
+        let b = new_session_id();
+        assert!(records::is_id(&a));
+        assert_ne!(a, b);
+    }
+}
