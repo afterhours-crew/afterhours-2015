@@ -55,6 +55,41 @@ fn request(sequence: u32) -> Vec<u8> {
     .to_vec()
 }
 
+#[test]
+fn unsupported_file_and_items_warn_without_payloads_or_storage_access() {
+    let repo = Arc::new(MemoryRepository::default());
+    let service = Service::new(repo.clone(), catalog());
+    let output = crate::diagnostics::testing::capture(|| {
+        let mut exchanges = Exchanges::new(Some(service.bind(account(3))), 19);
+        let mut listener = PlayerListener::new(999);
+        for _ in 0..2 {
+            transfer(
+                &mut listener,
+                0,
+                b"do-not-log-file-name",
+                b"do-not-log-file-body".to_vec(),
+            );
+            exchanges.start(&mut listener, 0, Timestamp(0));
+        }
+        transfer(&mut listener, 1, b"Items", vec![0; 5]);
+        exchanges.start(&mut listener, 0, Timestamp(0));
+        assert!(!exchanges.working());
+        assert_eq!(repo.snapshot(account(3)), Err(nfs_storage::Error::Absent));
+    });
+    assert_eq!(output.matches("WARN").count(), 2, "{output}");
+    for value in [
+        "connection=19",
+        "handler: 4",
+        "handler: 5",
+        "operation: 0",
+        "unsupported_total=3",
+        "suppressed_total=1",
+    ] {
+        assert!(output.contains(value), "{output}");
+    }
+    assert!(!output.contains("do-not-log"), "{output}");
+}
+
 /// Exercise File framing/acknowledgement for the item update integration tests.
 pub(in crate::net) fn deliver_notification(exchanges: &mut Exchanges) -> items::UpdateNotification {
     let response = exchanges.pending[0].take().unwrap();

@@ -498,13 +498,20 @@ impl Profile {
         .map_err(|_| Error::Deadline)?
     }
 }
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum UnsupportedRoute {
+    File { handler: usize, name_bytes: usize },
+    Items { handler: usize, operation: u8 },
+}
+
 pub(super) struct Exchanges {
     profile: Option<Profile>,
-    jobs: JoinSet<(usize, Result<Option<LoadedReply>, Error>)>,
+    jobs: JoinSet<(usize, u8, Result<Option<LoadedReply>, Error>)>,
     equipment: JoinSet<(EquipmentRequest, Result<Equipped, Error>)>,
     pending: [Option<Completed>; 2],
     started: [Option<u64>; 2],
     connection: u32,
+    unsupported: crate::diagnostics::Unsupported<UnsupportedRoute>,
 }
 impl Exchanges {
     pub(super) fn new(profile: Option<Profile>, connection: u32) -> Self {
@@ -515,6 +522,7 @@ impl Exchanges {
             pending: [None, None],
             started: [None, None],
             connection,
+            unsupported: crate::diagnostics::Unsupported::new("world-file", connection),
         }
     }
     pub(super) fn working(&self) -> bool {
@@ -550,13 +558,10 @@ impl Exchanges {
             };
             let handler = index + 4;
             if request.name != b"Items" {
-                warn!(
-                    connection = self.connection,
+                self.unsupported.record(UnsupportedRoute::File {
                     handler,
-                    name_bytes = request.name.len(),
-                    bytes = request.bytes.len(),
-                    "unsupported File name"
-                );
+                    name_bytes: request.name.len(),
+                });
                 continue;
             }
             let Some(profile) = self.profile.clone() else {
@@ -568,12 +573,10 @@ impl Exchanges {
             };
             match supported_request(&request.bytes) {
                 Ok(false) => {
-                    warn!(
-                        connection = self.connection,
+                    self.unsupported.record(UnsupportedRoute::Items {
                         handler,
-                        operation = request.bytes[4],
-                        "unsupported Items operation"
-                    );
+                        operation: request.bytes[4],
+                    });
                     continue;
                 }
                 Err(error) => {
@@ -595,8 +598,9 @@ impl Exchanges {
                 continue;
             }
             self.started[index] = Some(now);
+            let operation = request.bytes[4];
             self.jobs
-                .spawn(async move { (index, profile.answer(request.bytes, utc).await) });
+                .spawn(async move { (index, operation, profile.answer(request.bytes, utc).await) });
             break;
         }
     }
@@ -653,7 +657,7 @@ impl Exchanges {
                 }
             };
         }
-        let Some(Ok((index, result))) = self.jobs.join_next().await else {
+        let Some(Ok((index, operation, result))) = self.jobs.join_next().await else {
             return false;
         };
         match result {
@@ -694,11 +698,10 @@ impl Exchanges {
                 true
             }
             Ok(None) => {
-                warn!(
-                    connection = self.connection,
-                    handler = index + 4,
-                    "unsupported Items operation"
-                );
+                self.unsupported.record(UnsupportedRoute::Items {
+                    handler: index + 4,
+                    operation,
+                });
                 self.started[index] = None;
                 true
             }

@@ -22,7 +22,7 @@ use tokio::{
     task::JoinSet,
     time::{Instant, timeout_at},
 };
-use tracing::info;
+use tracing::{info, warn};
 
 pub const SEED_BYTES: usize = 32;
 pub const MAX_HEADER_BYTES: usize = 8192;
@@ -580,6 +580,11 @@ pub async fn listener(
                     let _=recorder.chunk("auxiliary",n,Direction::In,&observed.request,note).await;
                     if observed.response_bytes>0 { let _=recorder.chunk("auxiliary",n,Direction::Out,&observed.response[..observed.response_bytes],None).await; }
                     info!(connection=n,%peer,stop=?observed.stop,"auxiliary request");
+                    // One exchange per connection; do not print the URL,
+                    // query, headers or body (they may carry authentication).
+                    if observed.stop == Stop::UnsupportedRequest {
+                        warn!(service="auxiliary",connection=n,disposition="closing","unsupported operation received");
+                    }
                 });
             },
         }

@@ -19,6 +19,7 @@ use nfs_world::{
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 mod activation;
 mod customization;
+mod diagnostics;
 mod equipment;
 pub(super) use equipment::EquipmentRequest;
 mod launchers;
@@ -103,6 +104,7 @@ pub(super) struct PlayerListener {
     pub(super) pending_rpcs: VecDeque<nfs_world::participants::HostRpc>,
     unsupported_rpcs: usize,
     unsupported_logic: usize,
+    unsupported: crate::diagnostics::Unsupported<diagnostics::Route>,
     pub(super) pending: VecDeque<Section>,
     pub(super) pending_entries: VecDeque<(Section, Vec<nfs_world::participants::HostRpc>)>,
     refused: usize,
@@ -624,6 +626,7 @@ impl PlayerListener {
             pending_rpcs: VecDeque::new(),
             unsupported_rpcs: 0,
             unsupported_logic: 0,
+            unsupported: crate::diagnostics::Unsupported::new("world", 0),
             pending: VecDeque::new(),
             pending_entries: VecDeque::new(),
             refused: 0,
@@ -793,18 +796,28 @@ impl Listener for PlayerListener {
     fn frame(&mut self, queued: Queued<'_>) -> bool {
         let parsed = match self.stats.parse(queued) {
             Ok(parsed) => parsed,
-            Err(_) => return self.stats.invalid(),
+            Err(error) => {
+                self.diagnose_decode(error);
+                return self.stats.invalid();
+            }
         };
         let files = match self.stats.file_transition(&parsed) {
             Ok(files) => files,
-            Err(_) => return self.stats.invalid(),
+            Err(error) => {
+                self.diagnose_decode(frame::Error::File(error));
+                return self.stats.invalid();
+            }
         };
         let (messages, received) = match &parsed.messages {
             Some(input) => match self.messages.prepare(input, self.stats.now) {
                 Ok(prepared) => prepared,
                 Err(error) => {
                     if refusal::logged(self.stats.errors + 1) {
-                        tracing::warn!(?error, "refused MessageEX ordering or chunk assembly");
+                        tracing::warn!(
+                            connection = self.unsupported.connection(),
+                            ?error,
+                            "refused MessageEX ordering or chunk assembly"
+                        );
                     }
                     return self.stats.invalid();
                 }
@@ -818,12 +831,11 @@ impl Listener for PlayerListener {
         {
             Ok(decoded) => decoded,
             Err(error) => {
-                if refusal::logged(self.stats.errors + 1) {
-                    tracing::warn!(?error, "refused reassembled MessageEX body");
-                }
+                self.diagnose_decode(error);
                 return self.stats.invalid();
             }
         };
+        self.diagnose_unconsumed(&parsed, &decoded);
         let requests: Vec<_> = decoded
             .iter()
             .filter_map(|m| match m {
@@ -1053,7 +1065,7 @@ impl Listener for PlayerListener {
                     }
                 } else {
                     unsupported_logic += 1;
-                    tracing::debug!(?message, "unsupported client logic event");
+                    self.diagnose_logic(&message);
                 }
             }
             Ok::<(), replication::Error>(())
@@ -1620,7 +1632,10 @@ impl Listener for PlayerListener {
                             }
                         }
                         Ok(nfs_world::participants::Outcome::Repeated) => {}
-                        Ok(nfs_world::participants::Outcome::Unsupported) => unsupported += 1,
+                        Ok(nfs_world::participants::Outcome::Unsupported) => {
+                            unsupported += 1;
+                            self.diagnose_rpc(body, &players);
+                        }
                         Err(error) => {
                             return self.refuse_rpc(error, body);
                         }

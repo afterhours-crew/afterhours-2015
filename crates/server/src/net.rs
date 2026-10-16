@@ -528,7 +528,9 @@ pub async fn run_control(
                         break;
                     }
                     Ok(Outcome::Unsupported) => {
-                        warn!(connection, ?phase, route = ?route, "unsupported request");
+                        // This path closes immediately, so at most one warning
+                        // is emitted for this control connection.
+                        warn!(service = "blaze", connection, ?phase, route = ?route, disposition = "closing", "unsupported operation received");
                         break;
                     }
                     Ok(Outcome::AwaitWorld) => {
@@ -894,6 +896,7 @@ pub async fn world_host(
         }
     };
     let mut listener = players::PlayerListener::new(persona)
+        .with_connection(connection)
         .with_progression(progression)
         .with_vehicles(vehicles)
         .with_sequences(sequences)
@@ -1095,6 +1098,9 @@ pub async fn world_host(
         }
         for event in &output.events {
             match event {
+                Event::Application(application::Event::UnknownControl(subtype)) => {
+                    listener.unsupported_control(*subtype);
+                }
                 Event::Application(application::Event::Queued { .. })
                 | Event::Application(application::Event::Duplicate) => {
                     debug!(connection, ?event, "world")

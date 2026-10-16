@@ -58,6 +58,7 @@ impl PlayerListener {
         self.last_error = Some(error);
         if logged(self.refused) {
             tracing::warn!(
+                connection = self.unsupported.connection(),
                 ?error,
                 line = site.line(),
                 refused = self.refused,
@@ -75,6 +76,7 @@ impl PlayerListener {
         if logged(self.refused) {
             match route_label(body) {
                 Some(route) => tracing::warn!(
+                    connection = self.unsupported.connection(),
                     ?error,
                     line = site.line(),
                     refused = self.refused,
@@ -84,6 +86,7 @@ impl PlayerListener {
                     "owned world frame refused at client RPC"
                 ),
                 None => tracing::warn!(
+                    connection = self.unsupported.connection(),
                     ?error,
                     line = site.line(),
                     refused = self.refused,

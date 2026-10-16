@@ -317,6 +317,42 @@ server continues serving. A raw chunk over 1 MiB also stops recording without
 writing a partial chunk. The final metadata marker identifies exhaustion.
 Structured status logs contain route/error summaries, not request bodies.
 
+## Unsupported-operation diagnostics
+
+At the default log level, `WARN unsupported operation received` identifies an
+unhandled operation. These warnings are visible in the Rust launcher's terminal
+and its `server.stderr.log`; `--record-protocol` is not required.
+
+| Service | Identifiers |
+| --- | --- |
+| `blaze` | Connection, phase, component/command/category/correlation route; the connection closes. |
+| `world` | Connection and RPC references, scene content key when known, selector and method; or logic ghost/entity/event, message index, control subtype, or unconsumed client ghost records. |
+| `world-file` | Connection, File handler and name length, or Items operation number. |
+| `lsx` | Service-local connection number, bounded method name and request correlation. |
+| `auxiliary` | Connection and closing disposition; URLs and authentication inputs are omitted. |
+
+Repeated world, File/Items and LSX diagnostics retain at most 64 routes per
+connection/service. The first occurrence is eligible for a warning, subsequent
+warnings for the same route are at least 30 seconds apart, and each tracker
+allows at most 16 warnings per ten-second window. Warnings include `seen` and
+`suppressed` counts. Excess distinct routes share a bounded overflow counter;
+`route_overflow=true` means the route was not retained. A burst can suppress a
+route's first warning until another occurrence arrives with budget available.
+
+`INFO unsupported operation summary` reports total observations, warnings,
+suppressed observations, retained/unreported routes and overflow on disconnect,
+early return or task cancellation. A process crash or forced termination can
+prevent that final line. The launcher's per-file log limit still applies.
+
+These are semantic-dispatch diagnostics, not one line for every network packet.
+Timing, scene readiness/registration, acknowledged reliable duplicates and stale
+transport packets are separate from unsupported gameplay. Malformed frames and
+modeled requests that fail validation are reported as rejected/refused, with
+connection IDs. Protocol acceptance, replies and state transitions are unchanged.
+Raw bodies, player names, arbitrary File names and RPC serials are not included.
+A warning identifies remaining work; its absence does not prove a whole game
+feature is implemented or that every malformed input has a decoded route.
+
 ## Integration and tests
 
 `Deployment` validates local policies and builds fresh `SessionProfiles` using
