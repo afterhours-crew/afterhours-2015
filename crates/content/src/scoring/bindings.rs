@@ -16,6 +16,8 @@ use nfs_world::scoring::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+pub mod types;
+
 /// A producer and a multiple-producer input are different storage locations.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum Source {

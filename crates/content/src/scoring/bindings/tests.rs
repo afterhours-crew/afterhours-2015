@@ -282,3 +282,28 @@ fn conflicting_external_output_aliases_fail_instead_of_losing_a_parent_value() {
     assert!(c.property_plan(&interfaces, Realm::Server).is_ok());
     assert!(c.property_layout(&interfaces, Realm::Server).is_err());
 }
+
+#[test]
+fn interface_default_constrains_shared_type_without_seeding_any_value() {
+    use nfs_world::scoring::properties::Kind;
+    use nfs_world::scoring::value::Value;
+    let (c, mut interfaces) = fixture();
+    interfaces[0].fields[0].default = Some(Value::Float(7.0));
+    let typed = c
+        .typed_property_layout(&interfaces, Realm::Server, &[])
+        .unwrap();
+    assert_eq!(
+        typed.kinds[typed.layout.outputs[&port(1, 10)]],
+        Some(Kind::Float)
+    );
+    assert_eq!(
+        typed.kinds[typed.layout.inputs[&port(6, 30)]],
+        Some(Kind::Float)
+    );
+    assert!(typed.kinds.contains(&None));
+    interfaces[0].fields[0].default = None;
+    let untyped = c
+        .typed_property_layout(&interfaces, Realm::Server, &[])
+        .unwrap();
+    assert!(untyped.kinds.iter().all(Option::is_none));
+}

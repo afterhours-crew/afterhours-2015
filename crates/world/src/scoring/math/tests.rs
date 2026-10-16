@@ -28,6 +28,11 @@ fn separate_typed_registers_and_overwrites_preserve_condition_operands() {
         ret(Register::Float(2)),
     ])
     .unwrap();
+    assert_eq!(
+        program.inputs().collect::<Vec<_>>(),
+        [(100, Type::Float), (200, Type::Integer)]
+    );
+    assert_eq!(program.output_type(), Type::Float);
     for (x, expected) in [(1.0, 7.0), (8.0, 8.0)] {
         assert_eq!(
             program.evaluate(|port, kind| match (port, kind) {

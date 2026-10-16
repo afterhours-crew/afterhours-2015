@@ -26,7 +26,7 @@ pub struct Node {
     pub identity: super::events::Identity,
     pub configuration: Configuration,
 }
-fn supported(class: &str) -> bool {
+pub(super) fn supported(class: &str) -> bool {
     matches!(
         class,
         "FloatCacheEntityData"

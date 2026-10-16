@@ -63,6 +63,26 @@ pub struct Program {
     instructions: Vec<Instruction>,
 }
 impl Program {
+    /// Typed input reads in instruction order, including repeated reads. A graph
+    /// binder must reject incompatible types for the same bound property.
+    pub fn inputs(&self) -> impl Iterator<Item = (u32, Type)> + '_ {
+        self.instructions.iter().filter_map(|i| match i.operation {
+            Operation::InputInteger(port) => Some((port, Type::Integer)),
+            Operation::InputFloat(port) => Some((port, Type::Float)),
+            _ => None,
+        })
+    }
+
+    /// The validated final return selects the output's type, not its value.
+    pub fn output_type(&self) -> Type {
+        match self.instructions.last().map(|i| i.operation) {
+            Some(Operation::Return(Register::Integer(_))) => Type::Integer,
+            Some(Operation::Return(Register::Float(_))) => Type::Float,
+            Some(Operation::Return(Register::Boolean(_))) => Type::Boolean,
+            _ => unreachable!("validated final return"),
+        }
+    }
+
     /// Reject unsupported shapes and reads of undefined typed registers before
     /// accepting a program. Return must be its final instruction.
     pub fn new(instructions: Vec<Instruction>) -> Result<Self, Error> {

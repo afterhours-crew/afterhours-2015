@@ -351,3 +351,23 @@ negative durations, nonmonotonic clocks and overflow fail the candidate.
 The installed road database, projection and direction classifier, update manager,
 startup state, participant binding, RPC/event encoding and durable awards remain
 separate work. Constructed transition tests do not establish live road scoring.
+
+`AssetIndex::scoring_property_declarations` derives known input/output types from
+the modeled node contracts. Math inputs and returns come from its validated
+instructions, including integer inputs and Boolean returns. Unsupported classes
+and unmodeled ports stay undeclared. Each prefab occurrence has its own identity.
+
+`Composition::typed_property_layout` matches those declarations to retained
+connections and incorporates typed interface defaults without publishing them.
+`Layout::property_types` propagates type equality across aliases and merge edges.
+Producer and merge values remain separate. Conflicting declarations, foreign
+identities, malformed indices and excessive collections fail. Unresolved cells
+remain `None`; an inferred type does not establish the producer's behavior.
+
+`Layout::unready_definitions` requires every connected cell to have a type and
+preserves the resolved storage identities. It rejects input/output namespace
+collisions that would alias distinct cells in a Store. The returned cells have
+no values or listeners. The caller still needs ordered registrations, forwarding,
+defaults, unconsumed private outputs and activation. Remaining query, telemetry
+and UI bindings prevent constructing the complete installed graphs; participants
+remain disabled. No type inference result establishes a calculated REP award.

@@ -25,6 +25,7 @@ pub mod events;
 pub mod interfaces;
 pub mod nodes;
 pub mod property_gate;
+pub mod property_types;
 pub mod realms;
 pub mod road;
 pub mod stopwatch;
