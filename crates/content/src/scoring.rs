@@ -26,6 +26,7 @@ pub mod interfaces;
 pub mod nodes;
 pub mod property_gate;
 pub mod realms;
+pub mod road;
 pub mod stopwatch;
 pub mod synced;
 

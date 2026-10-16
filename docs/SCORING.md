@@ -325,3 +325,29 @@ These APIs do not enable a participant, encode control/event packets, perform
 query activation, infer output bindings, resolve native collision filters, or
 award REP. The road-driving query needs server-side road/path and vehicle state;
 its RPC serializer alone does not establish an incoming measurement method.
+
+`AssetIndex::scoring_roads` reads each road query's eight typed, finite,
+nonnegative thresholds. `road::Node::from_state` takes explicit state: fresh
+native allocation and save-state initialization are not yet established, so no
+startup defaults are supplied by this API. The caller supplies owned road
+projection/direction measurements, vehicle speed in metres per second, a resolved
+optional speed-limit override, elapsed time and a monotonic double-precision clock.
+
+`Dispatch::road` converts speed to mph, publishes a changed limit first, handles
+speeding/debounce next, and wrong-way distance last. Excessive speeding takes
+precedence over ordinary speeding and retains its signed integer event payload.
+Both speeding duration and debounce comparisons are strict. Wrong-way entry and
+recovery have separate strict distance thresholds; dropping below minimum speed
+ends the state. Only positive speed-limit overrides apply. Missing road data
+preserves query state, while distance at or beyond the road boundary clears
+durations and wrong-way state without emitting an invented not-speeding event.
+
+Callbacks complete between phases; all state, properties, integer/contextual
+events and remote records share transaction bounds and rollback. Integer-context
+events require explicit handler support, just like entity contexts. Native
+out-of-range conversion/NaN behavior is not emulated: invalid measurements,
+negative durations, nonmonotonic clocks and overflow fail the candidate.
+
+The installed road database, projection and direction classifier, update manager,
+startup state, participant binding, RPC/event encoding and durable awards remain
+separate work. Constructed transition tests do not establish live road scoring.

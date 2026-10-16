@@ -87,7 +87,11 @@ fn explicit_forwarding_preserves_context_for_each_sibling_and_remote_row() {
                 .iter()
                 .map(|e| (e.source.node, e.context))
                 .collect::<Vec<_>>(),
-            vec![(3, None), (1, Some(context)), (0, Some(context))]
+            vec![
+                (3, None),
+                (1, Some(context.into())),
+                (0, Some(context.into()))
+            ]
         );
         assert!(original.log.is_empty());
     }
@@ -166,4 +170,52 @@ fn legacy_handlers_reject_even_null_entity_context_instead_of_dropping_it() {
         Err(Error::UnsupportedEvent)
     );
     assert_eq!(state, Legacy(0));
+    assert_eq!(
+        graph.transaction(&state, |s, d| d.emit_integer(s, at(0), 0)),
+        Err(Error::UnsupportedEvent)
+    );
+}
+
+#[test]
+fn signed_integer_context_is_preserved_through_forwarding_and_remote_emissions() {
+    #[derive(Clone, Debug, Default, Eq, PartialEq)]
+    struct Integers(Vec<i32>);
+    impl Handler for Integers {
+        fn handle(&mut self, _: Endpoint, _: &mut Dispatch<'_>) -> Result<(), Error> {
+            Err(Error::UnsupportedEvent)
+        }
+        fn handle_integer(
+            &mut self,
+            target: Endpoint,
+            value: i32,
+            d: &mut Dispatch<'_>,
+        ) -> Result<(), Error> {
+            self.0.push(value);
+            if target.node == 1 {
+                d.emit_integer(self, at(1), value)?;
+            }
+            Ok(())
+        }
+    }
+    let graph = Graph::new(
+        3,
+        vec![
+            edge(0, 1, Delivery::Local),
+            edge(
+                1,
+                2,
+                Delivery::NetworkedClientAndServer(Remote { bus: 1, index: 0 }),
+            ),
+        ],
+    )
+    .unwrap();
+    for value in [i32::MIN, -1, 0, 7, i32::MAX] {
+        let original = Integers::default();
+        let (next, output) = graph
+            .transaction(&original, |s, d| d.emit_integer(s, at(0), value))
+            .unwrap();
+        assert_eq!(next.0, vec![value, value]);
+        assert_eq!(output[0].context, Some(Context::Integer(value)));
+        assert!(original.0.is_empty());
+    }
 }

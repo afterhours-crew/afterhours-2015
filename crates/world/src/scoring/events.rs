@@ -29,6 +29,16 @@ pub struct Endpoint {
 pub struct EntityContext {
     pub object: Option<u16>,
 }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Context {
+    Entity(EntityContext),
+    Integer(i32),
+}
+impl From<EntityContext> for Context {
+    fn from(value: EntityContext) -> Self {
+        Self::Entity(value)
+    }
+}
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct Remote {
     pub bus: u16,
@@ -53,7 +63,7 @@ pub struct RemoteEmission {
     pub connections: Vec<Remote>,
     /// Retained for a future verified encoder; never silently discard it when
     /// encoding an ordinary event message.
-    pub context: Option<EntityContext>,
+    pub context: Option<Context>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Graph {
@@ -150,6 +160,15 @@ pub trait Handler {
     ) -> Result<(), Error> {
         Err(Error::UnsupportedEvent)
     }
+
+    fn handle_integer(
+        &mut self,
+        _target: Endpoint,
+        _value: i32,
+        _dispatch: &mut Dispatch<'_>,
+    ) -> Result<(), Error> {
+        Err(Error::UnsupportedEvent)
+    }
 }
 
 /// Typed property interpreter for the ordinary synchronous publication path.
@@ -207,19 +226,29 @@ impl<'a> Dispatch<'a> {
         source: Endpoint,
         context: EntityContext,
     ) -> Result<(), Error> {
-        self.emit_optional_context(state, source, Some(context))
+        self.emit_optional_context(state, source, Some(context.into()))
+    }
+
+    pub fn emit_integer<H: Handler>(
+        &mut self,
+        state: &mut H,
+        source: Endpoint,
+        value: i32,
+    ) -> Result<(), Error> {
+        self.emit_optional_context(state, source, Some(Context::Integer(value)))
     }
 
     fn emit_optional_context<H: Handler>(
         &mut self,
         state: &mut H,
         source: Endpoint,
-        context: Option<EntityContext>,
+        context: Option<Context>,
     ) -> Result<(), Error> {
         if let Some(error) = self.fault {
             return Err(error);
         }
-        let result = if context.is_some_and(|c| c.object.is_some_and(|id| id == 0 || id > 8191)) {
+        let result = if matches!(context, Some(Context::Entity(c)) if c.object.is_some_and(|id| id == 0 || id > 8191))
+        {
             Err(Error::InvalidGraph)
         } else {
             self.emit_inner(state, source, context)
@@ -355,7 +384,7 @@ impl<'a> Dispatch<'a> {
         &mut self,
         state: &mut H,
         source: Endpoint,
-        context: Option<EntityContext>,
+        context: Option<Context>,
     ) -> Result<(), Error> {
         if usize::from(source.node) >= self.graph.nodes {
             return Err(Error::UnknownNode);
@@ -374,7 +403,7 @@ impl<'a> Dispatch<'a> {
         &mut self,
         state: &mut H,
         source: Endpoint,
-        context: Option<EntityContext>,
+        context: Option<Context>,
     ) -> Result<(), Error> {
         let graph = self.graph;
         let mut remote = Vec::new();
@@ -391,7 +420,12 @@ impl<'a> Dispatch<'a> {
             }
             if !matches!(connection.delivery, Delivery::NetworkedClient(_)) {
                 match context {
-                    Some(context) => state.handle_context(connection.target, context, self)?,
+                    Some(Context::Entity(context)) => {
+                        state.handle_context(connection.target, context, self)?
+                    }
+                    Some(Context::Integer(value)) => {
+                        state.handle_integer(connection.target, value, self)?
+                    }
                     None => state.handle(connection.target, self)?,
                 }
                 if let Some(error) = self.fault {
@@ -418,6 +452,7 @@ mod tests;
 mod collision;
 mod delays;
 mod property_gates;
+mod road;
 mod score;
 mod stopwatches;
 mod synced;
