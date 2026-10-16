@@ -451,6 +451,7 @@ mod tests;
 
 mod collision;
 mod delays;
+mod property_casts;
 mod property_gates;
 mod road;
 mod score;

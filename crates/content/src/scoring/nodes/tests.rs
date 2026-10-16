@@ -14,6 +14,74 @@ fn object(class: &str, rows: &[(&str, Value)]) -> Object {
         ),
     }
 }
+
+#[test]
+fn boolean_cache_load_flag_and_fallback_are_typed_and_kept_separate() {
+    for load_on_create in [false, true] {
+        let config = compile(&object(
+            "BoolCacheEntityData",
+            &[
+                ("LoadOnCreate", Value::Bool(load_on_create)),
+                ("InValue", Value::Bool(true)),
+            ],
+        ))
+        .unwrap();
+        assert_eq!(
+            config.definition,
+            Definition::BooleanCache { load_on_create }
+        );
+        assert_eq!(
+            config.defaults,
+            [(nodes::CACHE_INPUT, Scalar::Boolean(true))]
+        );
+        let d = crate::scoring::property_types::compile(&object(
+            "BoolCacheEntityData",
+            &[
+                ("LoadOnCreate", Value::Bool(load_on_create)),
+                ("InValue", Value::Bool(true)),
+            ],
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            d.inputs,
+            [(
+                nodes::CACHE_INPUT,
+                nfs_world::scoring::properties::Kind::Boolean
+            )]
+        );
+        assert_eq!(
+            d.outputs,
+            [(
+                nodes::CACHE_OUTPUT,
+                nfs_world::scoring::properties::Kind::Boolean
+            )]
+        );
+    }
+    for invalid in [
+        Value::Int32(1),
+        Value::String("true".into()),
+        Value::Float32(0.0),
+    ] {
+        assert!(
+            compile(&object(
+                "BoolCacheEntityData",
+                &[
+                    ("LoadOnCreate", invalid.clone()),
+                    ("InValue", Value::Bool(false))
+                ]
+            ))
+            .is_err()
+        );
+        assert!(
+            compile(&object(
+                "BoolCacheEntityData",
+                &[("LoadOnCreate", Value::Bool(true)), ("InValue", invalid)]
+            ))
+            .is_err()
+        );
+    }
+}
 #[test]
 fn typed_defaults_flags_and_bound_cache_initialization() {
     let cache = compile(&object(

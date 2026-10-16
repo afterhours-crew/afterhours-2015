@@ -3,6 +3,65 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 use super::super::events::{self, Connection, Delivery, Dispatch, Endpoint, Handler};
 use super::*;
+
+#[test]
+fn boolean_cache_seeds_only_when_requested_and_loads_before_its_event() {
+    for load_on_create in [false, true] {
+        let mut node = Node::new(Definition::BooleanCache { load_on_create }).unwrap();
+        let mut reads = 0;
+        let initial = node
+            .initial_outputs(|port| {
+                assert_eq!(port, CACHE_INPUT);
+                reads += 1;
+                Some(Value::Boolean(false))
+            })
+            .unwrap();
+        assert_eq!(reads, usize::from(load_on_create));
+        assert_eq!(
+            initial,
+            if load_on_create {
+                vec![Effect::Publish(CACHE_OUTPUT, Value::Boolean(false))]
+            } else {
+                vec![]
+            }
+        );
+        for value in [true, true, false, false] {
+            assert_eq!(
+                node.apply(Action::PropertyChanged(CACHE_INPUT), |_| panic!(
+                    "input change must not load"
+                ))
+                .unwrap(),
+                []
+            );
+            assert_eq!(
+                node.apply(Action::Activate, |_| panic!("activation must not load"))
+                    .unwrap(),
+                []
+            );
+            assert_eq!(
+                node.apply(Action::Event(LOAD), |port| {
+                    assert_eq!(port, CACHE_INPUT);
+                    Some(Value::Boolean(value))
+                })
+                .unwrap(),
+                [
+                    Effect::Publish(CACHE_OUTPUT, Value::Boolean(value)),
+                    Effect::Emit(CACHE_LOADED)
+                ]
+            );
+        }
+        let before = node.clone();
+        assert_eq!(
+            node.apply(Action::Event(LOAD), |_| None),
+            Err(Error::MissingInput)
+        );
+        assert_eq!(
+            node.apply(Action::Event(LOAD), |_| Some(Value::Integer(1))),
+            Err(Error::InvalidGraph)
+        );
+        assert_eq!(node, before);
+    }
+}
 use std::collections::BTreeMap;
 
 fn emits(events: &[u32]) -> Vec<Effect> {

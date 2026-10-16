@@ -18,7 +18,8 @@ use nfs_world::scoring::{
 #[derive(Clone, Debug, PartialEq)]
 pub struct Configuration {
     pub definition: Definition,
-    /// Fallback values for unconnected inputs. Bound properties take precedence.
+    /// Authored input fallbacks, not output initialization. The interpreter must
+    /// apply each node getter's binding/readiness contract before resolving them.
     pub defaults: Vec<(u32, Scalar)>,
 }
 #[derive(Clone, Debug, PartialEq)]
@@ -39,6 +40,7 @@ pub(super) fn supported(class: &str) -> bool {
             | "BoolEntityData"
             | "IntEntityData"
             | "IntCacheEntityData"
+            | "BoolCacheEntityData"
             | "CompareBoolEntityData"
             | "ConditionalFloatEntityData"
     )
@@ -92,6 +94,15 @@ pub fn compile(object: &Object) -> Result<Configuration, Error> {
                 Scalar::Integer(integer(fields, "InValue")?),
             ));
             Definition::IntegerCache
+        }
+        "BoolCacheEntityData" => {
+            defaults.push((
+                nodes::CACHE_INPUT,
+                Scalar::Boolean(boolean(fields, "InValue")?),
+            ));
+            Definition::BooleanCache {
+                load_on_create: boolean(fields, "LoadOnCreate")?,
+            }
         }
         "CompareBoolEntityData" => {
             defaults.push((nodes::BOOL, Scalar::Boolean(boolean(fields, "Bool")?)));

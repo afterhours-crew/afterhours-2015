@@ -160,13 +160,11 @@ pub fn compile(object: &Object) -> Result<Option<Declaration>, Error> {
             d.outputs.push((1_977_761_241, Kind::Integer));
         }
         "PropertyCastEntityData" => {
-            // Only the modeled numeric outputs. String conversion and the
-            // class's input binding/initialization are still separate work.
-            d.outputs.extend([
-                (936_870_923, Kind::Float),
-                (245_372_264, Kind::Integer),
-                (3_802_618_965, Kind::Boolean),
-            ]);
+            // The numeric subset only; string bindings remain undeclared.
+            for channel in world::property_cast::CHANNELS {
+                d.inputs.push((channel.input(), channel.kind()));
+                d.outputs.push((channel.output(), channel.kind()));
+            }
         }
         "ScoreEntityData" => {
             d.inputs.push((world::score::SCORE, Kind::Integer));
@@ -178,6 +176,7 @@ pub fn compile(object: &Object) -> Result<Option<Declaration>, Error> {
             let output = match config.definition {
                 Definition::Cache => Some((nodes::CACHE_OUTPUT, Kind::Float)),
                 Definition::IntegerCache => Some((nodes::CACHE_OUTPUT, Kind::Integer)),
+                Definition::BooleanCache { .. } => Some((nodes::CACHE_OUTPUT, Kind::Boolean)),
                 Definition::Accumulator | Definition::ConditionalFloat => {
                     Some((nodes::OUTPUT, Kind::Float))
                 }

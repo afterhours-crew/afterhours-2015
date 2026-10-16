@@ -87,6 +87,11 @@ pub enum Definition {
     },
     /// The supported LoadOnCreate=true mode; bind the input before seeding.
     IntegerCache,
+    /// Fresh Boolean cache. Resolve InValue through its authored fallback when
+    /// unbound or unready; LoadOnCreate=false does not seed OutValue at bind.
+    BooleanCache {
+        load_on_create: bool,
+    },
     CompareBoolean {
         on_change: bool,
         on_start: bool,
@@ -206,6 +211,8 @@ impl Node {
     /// Seed output properties during binding, without firing events. Cache
     /// initial output is its *bound* input, not necessarily the authored default.
     /// Call once for a fresh node, before activation or event delivery.
+    /// Boolean-cache inputs use their authored fallback when unbound or unready;
+    /// the caller supplies that resolved value. No-load mode does not read it.
     pub fn initial_outputs(
         &self,
         mut read: impl FnMut(u32) -> Option<Value>,
@@ -228,6 +235,12 @@ impl Node {
             Definition::IntegerCache => vec![Effect::Publish(
                 CACHE_OUTPUT,
                 Value::Integer(integer(&mut read, CACHE_INPUT)?),
+            )],
+            Definition::BooleanCache {
+                load_on_create: true,
+            } => vec![Effect::Publish(
+                CACHE_OUTPUT,
+                Value::Boolean(boolean(&mut read, CACHE_INPUT)?),
             )],
             Definition::ConditionalFloat => vec![Effect::Publish(OUTPUT, Value::Float(0.0))],
             _ => vec![],
@@ -260,6 +273,10 @@ impl Node {
         match (self.definition, action) {
             (Cache, Event(LOAD)) => Ok(vec![
                 Publish(CACHE_OUTPUT, Value::Float(float(read, CACHE_INPUT)?)),
+                Emit(CACHE_LOADED),
+            ]),
+            (BooleanCache { .. }, Event(LOAD)) => Ok(vec![
+                Publish(CACHE_OUTPUT, Value::Boolean(boolean(read, CACHE_INPUT)?)),
                 Emit(CACHE_LOADED),
             ]),
             (Accumulator, Event(event @ (ACCUMULATE | RESET))) => {

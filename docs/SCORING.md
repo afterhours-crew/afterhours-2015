@@ -371,3 +371,23 @@ no values or listeners. The caller still needs ordered registrations, forwarding
 defaults, unconsumed private outputs and activation. Remaining query, telemetry
 and UI bindings prevent constructing the complete installed graphs; participants
 remain disabled. No type inference result establishes a calculated REP award.
+
+`property_cast::Bindings` accepts the complete numeric input/output binding set;
+string, unknown and duplicate ports fail. Binding itself seeds no values.
+`Dispatch::property_cast` activates from the first ready bound input in Boolean,
+integer, then float order. If none is ready, it publishes nothing. A numeric input
+notification works before activation and snapshots that input once. Bound float,
+integer and Boolean outputs publish in that order; nested callbacks finish between
+them without replacing the outer conversion's input. Equal publications repeat.
+Range, type, callback and recursion failures discard the entire candidate.
+The caller must exclude neither unknown ports nor string bindings to make this
+subset appear supported; string conversion requires its own implementation.
+
+Boolean caches now preserve their installed `LoadOnCreate` flag and Boolean input
+fallback. When loading on creation, their initial output uses the resolved input;
+otherwise binding supplies no initial value and preserves any shared cell state.
+The interpreter resolves an unbound or unready input to its authored fallback.
+Input changes and activation alone do not load. Each Load publishes OutValue,
+including equal values, before OnLoaded; the event still applies when the output
+is unbound. The interpreter skips only the absent output publication, then runs
+the event. Engine save-state restoration and the full graph remain unimplemented.
