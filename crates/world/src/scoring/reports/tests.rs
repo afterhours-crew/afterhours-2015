@@ -43,7 +43,16 @@ fn setup(players: &mut Players, connection: u8, persona: u64, kind: Kind) -> Bin
         vec![Catalog::new(3, &[(12, 1)]).unwrap()],
         vec![(
             asset,
-            Profile::new(&[Field::Root, Field::FloatProperty, Field::Rpc]).unwrap(),
+            Profile::new(&[
+                Field::Root,
+                Field::FloatProperty,
+                if kind == Kind::Collision {
+                    Field::RpcBool
+                } else {
+                    Field::Rpc
+                },
+            ])
+            .unwrap(),
         )],
     )
     .unwrap();
@@ -66,10 +75,13 @@ fn setup(players: &mut Players, connection: u8, persona: u64, kind: Kind) -> Bin
                     reference: participant,
                 },
                 entity::Initial::FloatProperty(Some(0)),
-                entity::Initial::Rpc(Rpc {
-                    selector: 1,
-                    serial: Serial::new(2).unwrap(),
-                }),
+                query_initial(
+                    kind,
+                    Rpc {
+                        selector: 1,
+                        serial: Serial::new(2).unwrap(),
+                    },
+                ),
             ]),
             updates: vec![
                 Some(Update::Noop),
@@ -119,7 +131,8 @@ fn near_miss_four_properties_precede_its_event_and_weight_is_not_an_award() {
                 (0xd70a_7f0c, Value::Float(-0.75)),
                 (0xd887_31d6, Value::Float(0.125)),
             ],
-            event: 1_552_797_432
+            event: 1_552_797_432,
+            context: None
         }
     );
     for weight in [0i32, 13, i32::MAX, i32::MIN] {
@@ -133,10 +146,125 @@ fn near_miss_four_properties_precede_its_event_and_weight_is_not_an_award() {
             Publication {
                 properties: vec![(1_977_761_241, Value::Integer(weight))],
                 event: 1_190_559_846,
+                context: None,
             }
         );
     }
     assert_eq!(players.objects().get(near.entity), Some(&before));
+}
+
+fn query_initial(kind: Kind, rpc: Rpc) -> entity::Initial {
+    if kind == Kind::Collision {
+        entity::Initial::RpcBool { rpc, value: false }
+    } else {
+        entity::Initial::Rpc(rpc)
+    }
+}
+
+#[test]
+fn collision_retains_nullable_context_and_is_separate_from_weight_query() {
+    let mut players = Players::default();
+    let query = setup(&mut players, 1, 100, Kind::Collision);
+    let other = setup(&mut players, 2, 200, Kind::NearMiss);
+    assert!(Binding::new(&players, query.entity, 2, Kind::NearMiss).is_err());
+    assert!(Binding::new(&players, other.entity, 2, Kind::Collision).is_err());
+    let before = players.objects().get(query.entity).unwrap().clone();
+    for reference in [0, other.entity] {
+        for value in [i32::MIN, -1, 0, 1, i32::MAX] {
+            let body = wire(&[query.entity, reference], 1, 0, &[value as u32]);
+            let report = query
+                .receive(&players, 1, 100, body.span(), |_| true)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                report,
+                Report::Collision {
+                    value,
+                    reference: (reference != 0).then_some(reference),
+                }
+            );
+            assert_eq!(
+                report.publication(),
+                Publication {
+                    properties: vec![
+                        (0x0372_2f0c, Value::Boolean(false)),
+                        (0x6940_c23b, Value::Integer(value))
+                    ],
+                    event: 0xb240_dbba,
+                    context: Some(crate::scoring::events::EntityContext {
+                        object: (reference != 0).then_some(reference)
+                    }),
+                }
+            );
+            // The other driver's reference does not transfer query ownership.
+            assert_eq!(
+                query.receive(&players, 2, 200, body.span(), |_| true),
+                Err(Error::UnknownObject)
+            );
+        }
+    }
+    assert_eq!(players.objects().get(query.entity), Some(&before));
+}
+
+#[test]
+fn collision_rejects_missing_extra_unready_and_retired_references() {
+    let mut players = Players::default();
+    let query = setup(&mut players, 1, 100, Kind::Collision);
+    let other = setup(&mut players, 2, 200, Kind::NearMiss);
+    let body = wire(&[query.entity, other.entity], 1, 0, &[3]);
+    for length in 0..body.span().len() {
+        assert!(
+            query
+                .receive(
+                    &players,
+                    1,
+                    100,
+                    body.span().slice(0, length).unwrap(),
+                    |_| true
+                )
+                .is_err()
+        );
+    }
+    assert_eq!(
+        query.receive(&players, 1, 100, body.span(), |id| id != other.entity),
+        Err(Error::UnknownObject)
+    );
+    for refs in [vec![query.entity], vec![query.entity, 0, 0]] {
+        let body = wire(&refs, 1, 0, &[3]);
+        assert_eq!(
+            query.receive(&players, 1, 100, body.span(), |_| true),
+            Err(Error::Shape)
+        );
+    }
+    for values in [vec![], vec![3, 4]] {
+        let body = wire(&[query.entity, 0], 1, 0, &values);
+        assert_eq!(
+            query.receive(&players, 1, 100, body.span(), |_| true),
+            Err(Error::Shape)
+        );
+    }
+    let wrong_method = wire(&[query.entity, 0], 1, 1, &[3]);
+    assert_eq!(
+        query.receive(&players, 1, 100, wrong_method.span(), |_| true),
+        Ok(None)
+    );
+    players.remove_entities(&[other.entity]).unwrap();
+    assert_eq!(
+        query.receive(&players, 1, 100, body.span(), |_| true),
+        Err(Error::UnknownObject)
+    );
+    let null = wire(&[query.entity, 0], 1, 0, &[3]);
+    assert!(
+        query
+            .receive(&players, 1, 100, null.span(), |_| true)
+            .unwrap()
+            .is_some()
+    );
+    players.remove_entities(&[query.entity]).unwrap();
+    assert_eq!(
+        query.receive(&players, 1, 100, null.span(), |_| true),
+        Err(Error::UnknownObject)
+    );
 }
 #[test]
 fn ownership_readiness_and_retirement_are_checked_on_every_receive() {

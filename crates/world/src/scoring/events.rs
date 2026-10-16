@@ -22,6 +22,13 @@ pub struct Endpoint {
     pub node: u16,
     pub event: u32,
 }
+/// Nullable replicated-object context, distinct from an ordinary scalar event.
+/// The session interpreter resolves the object's current class and lifetime;
+/// carrying this ID never grants authority over another player's state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EntityContext {
+    pub object: Option<u16>,
+}
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct Remote {
     pub bus: u16,
@@ -44,6 +51,9 @@ pub struct Connection {
 pub struct RemoteEmission {
     pub source: Endpoint,
     pub connections: Vec<Remote>,
+    /// Retained for a future verified encoder; never silently discard it when
+    /// encoding an ordinary event message.
+    pub context: Option<EntityContext>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Graph {
@@ -127,6 +137,19 @@ impl Graph {
 /// subsequent emissions must happen in their native order inside this callback.
 pub trait Handler {
     fn handle(&mut self, target: Endpoint, dispatch: &mut Dispatch<'_>) -> Result<(), Error>;
+
+    /// Explicit opt-in for contextual events. Existing interpreters reject
+    /// them rather than silently treating them as ordinary events. Forwarding
+    /// nodes must pass this context to emit_context; newly constructed scalar
+    /// events use emit and do not inherit a surrounding collision's context.
+    fn handle_context(
+        &mut self,
+        _target: Endpoint,
+        _context: EntityContext,
+        _dispatch: &mut Dispatch<'_>,
+    ) -> Result<(), Error> {
+        Err(Error::UnsupportedEvent)
+    }
 }
 
 /// Typed property interpreter for the ordinary synchronous publication path.
@@ -175,10 +198,32 @@ impl<'a> Dispatch<'a> {
     /// Finish nested emissions before the handler continues or the next sibling
     /// runs. Remote rows are emitted after this source's complete local traversal.
     pub fn emit<H: Handler>(&mut self, state: &mut H, source: Endpoint) -> Result<(), Error> {
+        self.emit_optional_context(state, source, None)
+    }
+
+    pub fn emit_context<H: Handler>(
+        &mut self,
+        state: &mut H,
+        source: Endpoint,
+        context: EntityContext,
+    ) -> Result<(), Error> {
+        self.emit_optional_context(state, source, Some(context))
+    }
+
+    fn emit_optional_context<H: Handler>(
+        &mut self,
+        state: &mut H,
+        source: Endpoint,
+        context: Option<EntityContext>,
+    ) -> Result<(), Error> {
         if let Some(error) = self.fault {
             return Err(error);
         }
-        let result = self.emit_inner(state, source);
+        let result = if context.is_some_and(|c| c.object.is_some_and(|id| id == 0 || id > 8191)) {
+            Err(Error::InvalidGraph)
+        } else {
+            self.emit_inner(state, source, context)
+        };
         if let Err(error) = result {
             self.fault = Some(error);
         }
@@ -306,7 +351,12 @@ impl<'a> Dispatch<'a> {
         result
     }
 
-    fn emit_inner<H: Handler>(&mut self, state: &mut H, source: Endpoint) -> Result<(), Error> {
+    fn emit_inner<H: Handler>(
+        &mut self,
+        state: &mut H,
+        source: Endpoint,
+        context: Option<EntityContext>,
+    ) -> Result<(), Error> {
         if usize::from(source.node) >= self.graph.nodes {
             return Err(Error::UnknownNode);
         }
@@ -315,12 +365,17 @@ impl<'a> Dispatch<'a> {
             return Err(Error::Bound);
         }
         self.depth += 1;
-        let result = self.traverse(state, source);
+        let result = self.traverse(state, source, context);
         self.depth -= 1;
         result
     }
 
-    fn traverse<H: Handler>(&mut self, state: &mut H, source: Endpoint) -> Result<(), Error> {
+    fn traverse<H: Handler>(
+        &mut self,
+        state: &mut H,
+        source: Endpoint,
+        context: Option<EntityContext>,
+    ) -> Result<(), Error> {
         let graph = self.graph;
         let mut remote = Vec::new();
         for connection in graph.edges.get(&source).into_iter().flatten() {
@@ -335,13 +390,20 @@ impl<'a> Dispatch<'a> {
                 remote.push(row);
             }
             if !matches!(connection.delivery, Delivery::NetworkedClient(_)) {
-                state.handle(connection.target, self)?;
+                match context {
+                    Some(context) => state.handle_context(connection.target, context, self)?,
+                    None => state.handle(connection.target, self)?,
+                }
+                if let Some(error) = self.fault {
+                    return Err(error);
+                }
             }
         }
         if !remote.is_empty() {
             self.output.push(RemoteEmission {
                 source,
                 connections: remote,
+                context,
             });
         }
         Ok(())
@@ -349,8 +411,11 @@ impl<'a> Dispatch<'a> {
 }
 
 #[cfg(test)]
+mod context_tests;
+#[cfg(test)]
 mod tests;
 
+mod collision;
 mod delays;
 mod property_gates;
 mod score;

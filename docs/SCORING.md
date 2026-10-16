@@ -296,3 +296,32 @@ This operation does not implement scene keepers, provider rebinding during an
 award, signed overflow behavior or persistence. The durable earned-REP policy
 separately rejects negative credit and overflow. A runtime still needs to resolve
 the owned keeper/channel targets and aggregate a valid credit before committing.
+
+Collision queries now have a separate report binding for their RPC-plus-Boolean
+serializer. Client method 0 carries one signed integer and one additional nullable
+object reference. Receiving checks the current query owner, serializer identity,
+readiness, exact argument/reference shape, and the existence and readiness of any
+non-null context. That context may identify something hit by another player;
+it never changes who owns the query. Class-specific context resolution and
+physical plausibility remain the session interpreter's responsibility.
+
+`Dispatch::collision` retains a query flag independently of its optional outputs.
+Begin/Terminate change the flag and enqueue commands only on a transition, then
+publish querying. Server command methods are 1 and 2, without arguments. A report
+clears the flag, publishes querying and the integer result in order, and emits a
+nullable entity-context event. It sends no Terminate command. Nested callbacks
+finish before proceeding; a callback may restart the query. Repeated reports
+remain measurements, while equal querying values follow the installed binding's
+explicit suppression flag. Integer reports always publish when bound.
+
+`Dispatch::emit_context` preserves context through explicitly opted-in handlers
+and remote output records. Legacy handlers reject contextual events, including
+null contexts. Newly created ordinary events do not inherit surrounding context;
+forwarding handlers must explicitly retain it. Shared limits and transaction
+rollback cover commands, publications, contextual events and swallowed errors.
+The caller commits the candidate and its bounded command queue together.
+
+These APIs do not enable a participant, encode control/event packets, perform
+query activation, infer output bindings, resolve native collision filters, or
+award REP. The road-driving query needs server-side road/path and vehicle state;
+its RPC serializer alone does not establish an incoming measurement method.

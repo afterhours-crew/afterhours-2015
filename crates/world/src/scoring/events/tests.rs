@@ -106,11 +106,13 @@ fn remote_only_skips_local_handler_and_nested_remote_precedes_outer_remote() {
         vec![
             RemoteEmission {
                 source: nested,
-                connections: vec![inner]
+                connections: vec![inner],
+                context: None,
             },
             RemoteEmission {
                 source: root,
-                connections: vec![outer, both]
+                connections: vec![outer, both],
+                context: None,
             },
         ]
     );

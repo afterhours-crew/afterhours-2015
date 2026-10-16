@@ -15,6 +15,7 @@ use nfs_protocol::world::{
 pub enum Kind {
     NearMiss,
     AccumulatedCollisions,
+    Collision,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum Report {
@@ -22,12 +23,22 @@ pub enum Report {
     /// RelativeSpeed name is independently established by the scoring graph.
     NearMiss([f32; 4]),
     CollisionWeight(i32),
+    /// Query result, not an award. A non-null reference identifies another
+    /// ready object in this connection's world, not an account or REP owner.
+    Collision {
+        value: i32,
+        reference: Option<u16>,
+    },
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct Publication {
     /// Publish in this order, then emit event. These are query node port IDs.
     pub properties: Vec<(u32, Value)>,
     pub event: u32,
+    /// Collision events retain their nullable object context. The interpreter
+    /// must resolve its installed class and lifetime before using it. This is
+    /// not permission to mutate the referenced object's participant.
+    pub context: Option<super::events::EntityContext>,
 }
 impl Report {
     pub fn publication(&self) -> Publication {
@@ -38,10 +49,24 @@ impl Report {
                     .zip(values.iter().copied().map(Value::Float))
                     .collect(),
                 event: 1_552_797_432,
+                context: None,
             },
             Self::CollisionWeight(value) => Publication {
                 properties: vec![(1_977_761_241, Value::Integer(*value))],
                 event: 1_190_559_846,
+                context: None,
+            },
+            Self::Collision { value, reference } => Publication {
+                // Clear the query's internal querying flag before publishing.
+                // Apply the bound Boolean cell's equality policy; the integer
+                // publication is unconditional. Nested callbacks finish before
+                // the next publication or event. No terminate RPC is sent here.
+                properties: vec![
+                    (0x0372_2f0c, Value::Boolean(false)),
+                    (0x6940_c23b, Value::Integer(*value)),
+                ],
+                event: 0xb240_dbba,
+                context: Some(super::events::EntityContext { object: *reference }),
             },
         }
     }
@@ -74,7 +99,7 @@ impl Binding {
         else {
             return Err(Error::TypeMismatch);
         };
-        let Some(entity::Initial::Rpc(rpc)) = fields.get(serializer) else {
+        let Some(rpc) = query_rpc(fields.get(serializer), kind) else {
             return Err(Error::TypeMismatch);
         };
         if rpc.selector == root.selector || *participant == 0 {
@@ -121,7 +146,8 @@ impl Binding {
         {
             return Ok(None);
         }
-        if envelope.references() != [self.entity]
+        let reference_count = if self.kind == Kind::Collision { 2 } else { 1 };
+        if envelope.references().len() != reference_count
             || envelope.words() != [0, 0]
             || !envelope.remaining().is_empty()
         {
@@ -137,14 +163,14 @@ impl Binding {
         };
         if prefix.asset != self.asset
             || !matches!(fields.first(), Some(entity::Initial::Root { rpc, reference, .. }) if rpc == &self.root && *reference == self.participant)
-            || fields.get(self.serializer) != Some(&entity::Initial::Rpc(self.rpc.clone()))
+            || query_rpc(fields.get(self.serializer), self.kind) != Some(&self.rpc)
         {
             return Err(Error::UnknownObject);
         }
         let arguments = route.arguments();
         let count = match self.kind {
             Kind::NearMiss => 4,
-            Kind::AccumulatedCollisions => 1,
+            Kind::AccumulatedCollisions | Kind::Collision => 1,
         };
         // Byte-aligned RPC payload includes seven opaque final padding bits.
         if arguments.len() != count * 32 + 7 {
@@ -163,8 +189,32 @@ impl Binding {
                 Report::NearMiss(values)
             }
             Kind::AccumulatedCollisions => Report::CollisionWeight(word(0)? as i32),
+            Kind::Collision => {
+                let id = envelope.references()[1];
+                // Null is an ordinary collision with no replicated context.
+                // A non-null context can belong to another driver; ownership
+                // authorizes the query, not the object hit. Require visibility
+                // and current lifetime, without manufacturing a missing object.
+                if id != 0 && (players.objects().get(id).is_none() || !ready(id)) {
+                    return Err(Error::UnknownObject);
+                }
+                Report::Collision {
+                    value: word(0)? as i32,
+                    reference: (id != 0).then_some(id),
+                }
+            }
         };
         Ok(Some(report))
+    }
+}
+
+fn query_rpc(field: Option<&entity::Initial>, kind: Kind) -> Option<&entity::Rpc> {
+    match (kind, field) {
+        (Kind::Collision, Some(entity::Initial::RpcBool { rpc, .. })) => Some(rpc),
+        (Kind::NearMiss | Kind::AccumulatedCollisions, Some(entity::Initial::Rpc(rpc))) => {
+            Some(rpc)
+        }
+        _ => None,
     }
 }
 

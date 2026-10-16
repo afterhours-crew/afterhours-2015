@@ -6,6 +6,7 @@
 //! These primitives do not accept awards from clients or persist progression.
 pub mod arithmetic;
 pub mod boolean_fold;
+pub mod collision;
 pub mod curve;
 pub mod delay;
 pub mod events;
