@@ -74,6 +74,17 @@ fn value_kind(value: Value) -> Kind {
 pub fn compile(object: &Object) -> Result<Option<Declaration>, Error> {
     let mut d = Declaration::default();
     match object.class.as_str() {
+        "RaceVehicleDraftQueryEntityData" => {
+            super::draft::compile(object)?;
+            d.inputs
+                .extend(world::draft::INPUTS.map(|p| (p, Kind::Float)));
+            d.outputs.extend(
+                world::vehicle_query::Query::Draft
+                    .outputs()
+                    .iter()
+                    .map(|o| (o.field, o.kind)),
+            );
+        }
         "RaceVehiclePhysicsQueryEntityData" | "RaceVehicleDriftQueryEntityData" => {
             let query = if object.class == "RaceVehiclePhysicsQueryEntityData" {
                 world::vehicle_query::Query::Physics
@@ -148,7 +159,7 @@ pub fn compile(object: &Object) -> Result<Option<Declaration>, Error> {
             ]);
             d.outputs.push((world::stopwatch::TIME, Kind::Float));
         }
-        "RaceVehicleRoadQueryEntityData" => {
+        "RaceVehicleRoadDrivingQueryEntityData" => {
             super::road::compile(object)?;
             d.inputs
                 .push((world::road::SPEED_LIMIT_OVERRIDE, Kind::Float));

@@ -9,6 +9,7 @@ pub mod boolean_fold;
 pub mod collision;
 pub mod curve;
 pub mod delay;
+pub mod draft;
 pub mod events;
 pub mod math;
 pub mod nodes;

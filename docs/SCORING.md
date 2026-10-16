@@ -418,3 +418,22 @@ These APIs do not supply vehicle physics, ownership resolution, participant
 activation, update cadence, replication or REP awards. They must be called only
 for an active, scheduled query. Installed-data and constructed tests do not prove
 live driving support; scoring participants remain disabled.
+
+`draft::Configuration::evaluate` calculates drafting from an owned participant
+vehicle snapshot. It excludes the owner's physics identity, skips cars outside
+50 metres and applies strict direction, projected-speed, speed-difference and
+time thresholds. Time falloff and the projected horizontal cone determine draft
+strength. Strength and positive delta speed take independent maxima across cars;
+they can come from different participants. Empty sets produce zero/false, while
+missing own vehicle data preserves the previous outputs.
+
+`AssetIndex::scoring_drafts` reads the five authored scalar fallbacks. The caller
+resolves connected ready inputs before applying these fallbacks and validates the
+resolved configuration. Draft publication uses the same bounded query dispatcher:
+strength, delta speed, then active Boolean, retaining the calculated snapshot
+across callbacks. Query construction supplies zeros/false. The participant-set
+resolver, activation/cadence and live driving acceptance remain outside this API.
+Malformed thresholds, nonfinite calculations and excessive participant sets fail.
+
+The road-query declaration now recognizes the same class as the strict road
+configuration reader, so its verified property ports participate in type checking.

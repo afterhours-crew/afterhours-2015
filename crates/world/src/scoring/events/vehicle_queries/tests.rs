@@ -85,6 +85,56 @@ impl QueryHandler for State {
         self.reads.push((vehicle, query::VELOCITY));
         Ok(self.drift)
     }
+    fn draft_measurement(
+        &mut self,
+        _: u16,
+        vehicle: u16,
+    ) -> Result<crate::scoring::draft::Measurement, Error> {
+        use crate::scoring::draft::{Configuration, Vehicle};
+        self.reads.push((vehicle, crate::scoring::draft::STRENGTH));
+        Configuration {
+            min_other_speed: 5.,
+            max_delta_speed: 25.,
+            cone_scale: 3.,
+            min_draft_time: 0.1,
+            max_draft_time: 1.,
+        }
+        .evaluate(
+            Vehicle {
+                identity: 1,
+                position: [0.; 3],
+                velocity: [0., 0., 20.],
+            },
+            &[Vehicle {
+                identity: 2,
+                position: [0., 0., 1.],
+                velocity: [0., 0., 20.],
+            }],
+        )
+    }
+}
+
+#[test]
+fn draft_publishes_strength_then_delta_then_boolean_and_rolls_back_late_failure() {
+    use crate::scoring::draft;
+    let s = state(Query::Draft, true, false);
+    let result = apply(&s).unwrap();
+    assert_eq!(
+        result.trace,
+        [
+            (draft::STRENGTH, Value::Float(1.), true),
+            (draft::DELTA_SPEED, Value::Float(0.), true),
+            (draft::ACTIVE, Value::Boolean(true), true)
+        ]
+    );
+    assert_eq!(apply(&result).unwrap().trace, result.trace);
+    let mut failed = s.clone();
+    failed.fail = Some(draft::ACTIVE);
+    assert_eq!(apply(&failed), Err(Error::UnsupportedEvent));
+    assert!(failed.trace.is_empty());
+    let mut missing = s;
+    missing.owner = None;
+    assert_eq!(apply(&missing).unwrap(), missing);
 }
 fn state(query: Query, suppression: bool, seeded: bool) -> State {
     let cells = query

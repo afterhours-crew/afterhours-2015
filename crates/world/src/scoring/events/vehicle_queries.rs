@@ -61,6 +61,16 @@ impl Dispatch<'_> {
                             Value::Float(angle),
                         )?;
                     }
+                    Query::Draft => {
+                        let sample = state.draft_measurement(node, vehicle)?;
+                        for (output, value) in Query::Draft.outputs().iter().zip([
+                            Value::Float(sample.strength()),
+                            Value::Float(sample.delta_speed()),
+                            Value::Boolean(sample.active()),
+                        ]) {
+                            self.query_publish(state, node, bindings, output.field, value)?;
+                        }
+                    }
                 }
                 Ok(())
             })();

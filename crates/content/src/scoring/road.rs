@@ -81,6 +81,23 @@ mod tests {
             ),
         };
         let c = compile(&object).unwrap();
+        let declarations = crate::scoring::property_types::compile(&object)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            declarations.inputs,
+            [(
+                nfs_world::scoring::road::SPEED_LIMIT_OVERRIDE,
+                nfs_world::scoring::properties::Kind::Float
+            )]
+        );
+        assert_eq!(
+            declarations.outputs,
+            [(
+                nfs_world::scoring::road::SPEED_LIMIT,
+                nfs_world::scoring::properties::Kind::Float
+            )]
+        );
         assert_eq!(
             [
                 c.max_distance_to_segment,

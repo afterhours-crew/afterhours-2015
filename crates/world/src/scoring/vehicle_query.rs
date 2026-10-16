@@ -23,6 +23,7 @@ pub const IDENTITY: [[f32; 3]; 4] = [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.], [
 pub enum Query {
     Physics,
     Drift,
+    Draft,
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Output {
@@ -81,6 +82,23 @@ const DRIFT: [Output; 2] = [
         initial: Some(Value::Float(0.)),
     },
 ];
+const DRAFT: [Output; 3] = [
+    Output {
+        field: super::draft::STRENGTH,
+        kind: Kind::Float,
+        initial: Some(Value::Float(0.)),
+    },
+    Output {
+        field: super::draft::DELTA_SPEED,
+        kind: Kind::Float,
+        initial: Some(Value::Float(0.)),
+    },
+    Output {
+        field: super::draft::ACTIVE,
+        kind: Kind::Boolean,
+        initial: Some(Value::Boolean(false)),
+    },
+];
 impl Query {
     /// Constructor binding order. Physics update order starts with velocity,
     /// then transform, followed by the remaining outputs in this order.
@@ -88,6 +106,7 @@ impl Query {
         match self {
             Self::Physics => &PHYSICS,
             Self::Drift => &DRIFT,
+            Self::Draft => &DRAFT,
         }
     }
 }
@@ -177,4 +196,11 @@ pub trait Handler: PropertyHandler {
     fn physics_measurement(&mut self, vehicle: Self::Vehicle, field: u32) -> Result<Value, Error>;
     /// Drift snapshots transform and velocity together before any publication.
     fn drift_measurement(&mut self, vehicle: Self::Vehicle) -> Result<DriftSample, Error>;
+    /// Evaluate the current owned participant set with draft::Configuration.
+    /// Resolve its five input properties before falling back to authored values.
+    fn draft_measurement(
+        &mut self,
+        node: u16,
+        vehicle: Self::Vehicle,
+    ) -> Result<super::draft::Measurement, Error>;
 }
