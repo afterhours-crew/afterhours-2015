@@ -219,9 +219,22 @@ impl<'a> Dispatch<'a> {
         let change = state.properties().write(source, value)?;
         self.depth += 1;
         let result = (|| {
-            for target in change.listeners {
+            for listener in change.listeners {
                 self.step()?;
-                state.property_changed(target, change.first, self)?;
+                match listener {
+                    super::properties::Registration::Notify(target) => {
+                        state.property_changed(target, change.first, self)?
+                    }
+                    super::properties::Registration::Forward { source, target } => {
+                        // Native callbacks receive a pointer into the current
+                        // source cell. Earlier nested writes can change it.
+                        let value = state
+                            .properties()
+                            .read(source)?
+                            .ok_or(Error::MissingInput)?;
+                        self.publish(state, target, value)?;
+                    }
+                }
                 if let Some(error) = self.fault {
                     return Err(error);
                 }

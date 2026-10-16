@@ -83,16 +83,20 @@ explicit evaluation does not change their previous property relation. Integer
 counters wrap at signed 32-bit boundaries. Conditional floats publish only the
 selected branch when that input changes, and reevaluate on condition changes.
 Integer-cache initialization currently requires `LoadOnCreate=true`; unsupported
-initialization modes are rejected. The separate bounded Boolean fold helper
-distinguishes unconnected ports from bound properties that are not ready; it is
-not yet a complete And/Or binding implementation.
+initialization modes are rejected. `scoring::boolean_fold::Node` evaluates And/Or
+after activation, reading only connected inputs in numeric In1..InN order. And
+stops at an unready input unless an earlier false already decided it; Or skips
+unready inputs and stops at true. Empty And/Or yield true/false. Equal results
+still publish. The installed reader preserves InputCount and prefab identities;
+the caller must resolve the connected-input mask and output binding.
 Numeric PropertyCast support publishes float, integer and Boolean values in that
 order; string conversion/formatting is not implemented. Nonfinite values and
 out-of-range casts fail before any effects escape. Engine save-state restoration
 is outside these fresh-session nodes. The complete property propagation engine,
 remaining node/query behaviors and durable award integration are still required.
 
-`scoring::properties::Store` holds resolved Boolean, integer and float cells.
+`scoring::properties::Store` holds resolved Boolean, integer, float, vector and
+transform cells.
 All connected port aliases read one shared current value. Bound-but-unready
 properties are distinct from unbound ports. The caller supplies the validated
 cell layout and registered listener order; the store does not infer them from
@@ -108,6 +112,20 @@ a handler swallows a nested error. Fixed property/listener layouts are bounded;
 runtime rebinding and alternate queued property contexts are not implemented.
 The caller must commit state and network output together after successful
 evaluation. External I/O and durable REP writes do not belong in these callbacks.
+
+`Store::with_registrations` accepts an explicit ordered mixture of node callbacks
+and property forwarding. Multiple producers forward into a separate destination
+cell: the latest publication wins there without overwriting the other producers.
+Forwarding reads the current source after earlier nested callbacks and completes
+synchronously before the next registration. It shares the graph's cycle/work
+bounds and atomic rollback. Initialization publications and registration order
+remain the compiler's responsibility; constructing the store does not forward
+initial values or infer wiring from raw rows.
+
+Event composition nodes expose independent event-listener and property-listener
+realms from entity Flags. Blueprint bus flags are separate, and absent metadata
+is not interpreted as a default realm. These listener fields do not by themselves
+decide object construction, event connection delivery, or activation order.
 
 `scoring::stopwatch::Manager` models fresh, stopped timers for one realm/update
 pass. Start/Stop change effective membership immediately for repeat suppression,

@@ -62,16 +62,25 @@ pub struct Definition {
     pub listeners: Vec<Port>,
 }
 
+/// Registration order is significant. Forwarding is a publication into a
+/// distinct cell, not aliasing the producers of a multiple-source input.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Registration {
+    Notify(Port),
+    Forward { source: Port, target: Port },
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Store {
     nodes: usize,
     cells: Vec<Definition>,
     ports: BTreeMap<Port, usize>,
+    registrations: Vec<Vec<Registration>>,
 }
 
 pub(crate) struct Change {
     pub first: bool,
-    pub listeners: Vec<Port>,
+    pub listeners: Vec<Registration>,
 }
 
 impl Store {
@@ -116,9 +125,53 @@ impl Store {
         }
         Ok(Self {
             nodes,
+            registrations: cells
+                .iter()
+                .map(|c| {
+                    c.listeners
+                        .iter()
+                        .copied()
+                        .map(Registration::Notify)
+                        .collect()
+                })
+                .collect(),
             cells,
             ports,
         })
+    }
+
+    /// Build an explicit registration sequence, interleaving forwarding and
+    /// node callbacks. Cell-local listener lists must be empty to avoid two
+    /// competing sources of order. Initial values are not forwarded here:
+    /// publish them in the caller's verified binding/initialization order.
+    pub fn with_registrations(
+        nodes: usize,
+        cells: Vec<Definition>,
+        registrations: &[Registration],
+    ) -> Result<Self, Error> {
+        if registrations.len() > MAX_LISTENERS {
+            return Err(Error::Bound);
+        }
+        if cells.iter().any(|c| !c.listeners.is_empty()) {
+            return Err(Error::InvalidGraph);
+        }
+        let mut store = Self::new(nodes, cells)?;
+        for &registration in registrations {
+            let source = match registration {
+                Registration::Notify(port) => port,
+                Registration::Forward { source, target } => {
+                    let &src = store.ports.get(&source).ok_or(Error::MissingInput)?;
+                    let &dst = store.ports.get(&target).ok_or(Error::MissingInput)?;
+                    if store.cells[src].kind != store.cells[dst].kind {
+                        return Err(Error::InvalidGraph);
+                    }
+                    source
+                }
+            };
+            let &index = store.ports.get(&source).ok_or(Error::MissingInput)?;
+            store.registrations[index].push(registration);
+        }
+        Ok(store)
     }
 
     /// Read the current shared cell, including changes made by nested handlers.
@@ -141,7 +194,7 @@ impl Store {
         let first = cell.initial.replace(value).is_none();
         Ok(Change {
             first,
-            listeners: cell.listeners.clone(),
+            listeners: self.registrations[*index].clone(),
         })
     }
 }

@@ -32,6 +32,7 @@ impl From<&Site> for Identity {
 pub struct Node {
     pub identity: Identity,
     pub class: String,
+    pub listeners: Option<super::realms::Listeners>,
     /// On receiving an event, emit the same event at this node in the adjacent
     /// prefab bus. None means the runtime must supply the class's behavior.
     pub forward: Option<u16>,
@@ -107,9 +108,16 @@ fn insert<S: Source>(
         return Err(bad("event node bound"));
     }
     let id = nodes.len() as u16;
+    let object = graph.object(&site)?;
     nodes.push(Node {
         identity: Identity::from(&site),
-        class: graph.object(&site)?.class,
+        listeners: super::realms::Listeners::read(&object).map_err(|e| {
+            bad(&format!(
+                "{}:{} {}: {e}",
+                site.key.0, site.key.1, object.class
+            ))
+        })?,
+        class: object.class,
         forward: None,
     });
     sites.insert(site, id);

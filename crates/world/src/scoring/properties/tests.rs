@@ -12,6 +12,124 @@ fn port(node: u16) -> Port {
 fn endpoint(node: u16, event: u32) -> Endpoint {
     Endpoint { node, event }
 }
+fn isolated(initial: Option<f32>, ports: Vec<Port>) -> Definition {
+    Definition {
+        kind: Kind::Float,
+        initial: initial.map(Value::Float),
+        ports,
+        listeners: vec![],
+    }
+}
+fn forward(source: u16, target: u16) -> Registration {
+    Registration::Forward {
+        source: port(source),
+        target: port(target),
+    }
+}
+#[test]
+fn multiple_sources_forward_into_a_distinct_cell_without_overwriting_each_other() {
+    let mut original = State::new(None, 0);
+    original.properties = Store::with_registrations(
+        3,
+        vec![
+            isolated(Some(2.0), vec![port(0)]),
+            isolated(Some(8.0), vec![port(1)]),
+            isolated(None, vec![port(2)]),
+        ],
+        &[forward(0, 2), forward(1, 2), Registration::Notify(port(2))],
+    )
+    .unwrap();
+    assert_eq!(original.properties.read(port(2)), Ok(None));
+    let graph = Graph::new(3, vec![]).unwrap();
+    let (a, _) = graph
+        .publish(&original, port(0), Value::Float(4.0))
+        .unwrap();
+    assert_eq!(a.value(port(1)), 8.0);
+    assert_eq!(a.value(port(2)), 4.0);
+    let (b, _) = graph.publish(&a, port(1), Value::Float(-1.0)).unwrap();
+    assert_eq!(b.value(port(0)), 4.0);
+    assert_eq!(b.value(port(2)), -1.0);
+    let (c, _) = graph.publish(&b, port(1), Value::Float(-1.0)).unwrap();
+    assert_eq!(
+        c.trace,
+        [
+            (port(2), true, 4.0),
+            (port(2), false, -1.0),
+            (port(2), false, -1.0)
+        ]
+    );
+    assert!(original.trace.is_empty());
+    assert_eq!(original.value(port(0)), 2.0);
+}
+#[test]
+fn forward_reads_current_source_after_prior_nested_callback_and_failures_rollback() {
+    let mut original = State::new(None, 1);
+    original.properties = Store::with_registrations(
+        3,
+        vec![
+            isolated(None, vec![port(0), port(1)]),
+            isolated(None, vec![port(2)]),
+        ],
+        &[
+            Registration::Notify(port(1)),
+            forward(0, 2),
+            Registration::Notify(port(2)),
+        ],
+    )
+    .unwrap();
+    let graph = Graph::new(3, vec![]).unwrap();
+    let (next, _) = graph
+        .publish(&original, port(0), Value::Float(5.0))
+        .unwrap();
+    assert_eq!(
+        next.trace,
+        [
+            (port(1), true, 5.0),
+            (port(1), false, 0.0),
+            (port(2), true, 0.0),
+            (port(2), false, 0.0)
+        ]
+    );
+    for mode in [3, 4] {
+        original.mode = mode;
+        let before = original.clone();
+        assert!(
+            graph
+                .publish(&original, port(0), Value::Float(5.0))
+                .is_err()
+        );
+        assert_eq!(before, original);
+    }
+}
+#[test]
+fn forwarding_cycles_and_invalid_registrations_are_bounded_and_atomic() {
+    let cells = vec![
+        isolated(None, vec![port(0)]),
+        isolated(None, vec![port(1)]),
+        isolated(None, vec![port(2)]),
+    ];
+    let mut state = State::new(None, 0);
+    state.properties =
+        Store::with_registrations(3, cells.clone(), &[forward(0, 1), forward(1, 0)]).unwrap();
+    assert_eq!(
+        Graph::new(3, vec![])
+            .unwrap()
+            .publish(&state, port(0), Value::Float(1.0)),
+        Err(Error::Bound)
+    );
+    assert_eq!(state.properties.read(port(0)), Ok(None));
+    assert!(Store::with_registrations(3, cells.clone(), &[forward(0, 4)]).is_err());
+    assert!(
+        Store::with_registrations(3, cells.clone(), &vec![forward(0, 1); MAX_LISTENERS + 1])
+            .is_err()
+    );
+    let mut mixed = cells.clone();
+    mixed[1].kind = Kind::Boolean;
+    assert!(Store::with_registrations(3, mixed, &[forward(0, 1)]).is_err());
+    let mut local = cells;
+    local[0].listeners.push(port(0));
+    assert!(Store::with_registrations(3, local, &[]).is_err());
+}
 fn cell(initial: Option<Value>, listeners: Vec<Port>) -> Definition {
     Definition {
         kind: Kind::Float,

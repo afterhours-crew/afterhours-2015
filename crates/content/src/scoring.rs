@@ -15,10 +15,12 @@ use nfs_world::scoring::{
     math::{self, FloatOp, Instruction, Operation, Program, Register},
 };
 
+pub mod boolean_fold;
 pub mod delay;
 pub mod events;
 pub mod nodes;
 pub mod property_gate;
+pub mod realms;
 pub mod stopwatch;
 
 #[derive(Clone, Debug, PartialEq)]

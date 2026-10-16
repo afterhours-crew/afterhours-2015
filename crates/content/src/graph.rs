@@ -281,7 +281,13 @@ impl<'a, S: Source> Graph<'a, S> {
             .cloned()
             .collect();
         if kind == Connections::Property && edges.len() != 1 {
-            return Err(bad("ambiguous or missing property edge"));
+            return Err(bad(&format!(
+                "ambiguous or missing property edge at {}:{} field {} ({} sources)",
+                query.site.key.0,
+                query.site.key.1,
+                query.port,
+                edges.len()
+            )));
         }
         for e in edges {
             *steps += 1;
