@@ -141,6 +141,22 @@ The gate reader preserves all authored defaults but does not compile bindings,
 restore engine save-state or enable a participant. VectorMathOp interpretation
 remains separate and unsupported.
 
+`scoring::delay::Manager` keeps an insertion-ordered pending queue, with explicit
+delta and per-node time scale. Expiration removes the entry before forwarding
+its copied context. Reset removes queued work and clears RunOnce; positive
+retrigger replaces queued work. Nonpositive explicit input emits immediately
+without cancelling existing entries, whereas AutoStart queues even zero delay.
+Repeated input respects RunOnce and the installed duplicate-removal option.
+
+Queue traversal keeps a repairable next-entry cursor, so cancellation and appends
+during callbacks follow the native ordering. An append after the former last
+entry waits until the next update; otherwise it can be visited in this update.
+Pending entries are bounded globally and below the native per-node byte-counter
+overflow. Context is a caller-defined fixed-size Copy value, not a wire schema.
+Recursive engine updates, save-state restoration and time-scale resolution are
+outside the supported contract. The caller routes delayed outputs through the
+same bounded dispatcher and commits state/output together; no REP is written here.
+
 Portable tests use constructed inputs and cover typed register aliasing,
 conversion, divide-by-zero retention, interpolation, extrapolation, finite
 bounds and malformed assemblies. Installation comparisons are separate from

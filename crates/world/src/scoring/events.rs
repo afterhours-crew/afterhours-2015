@@ -277,5 +277,6 @@ impl<'a> Dispatch<'a> {
 #[cfg(test)]
 mod tests;
 
+mod delays;
 mod property_gates;
 mod stopwatches;

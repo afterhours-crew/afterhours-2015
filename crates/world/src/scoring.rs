@@ -5,6 +5,7 @@
 //! Bounded calculations used by installed driving-score graphs.
 //! These primitives do not accept awards from clients or persist progression.
 pub mod curve;
+pub mod delay;
 pub mod events;
 pub mod math;
 pub mod nodes;
