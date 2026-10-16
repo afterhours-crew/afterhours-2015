@@ -37,6 +37,10 @@ replication profile before encoding; not every composition bus is replicated.
 Unknown realm values, unresolved endpoints and malformed prefab boundaries fail.
 This reader accepts node identities, not their behavior: a complete runtime must
 still validate every active node class and its property/link bindings.
+The returned composition also includes raw property and provider-link rows with
+original bus/row identities and separate prefab endpoints. These tables include
+client-side nodes. Property-row order is not listener registration order, and
+provider links must not be interpreted as scalar property aliases.
 
 `nfs_world::scoring::events::Graph` dispatches local events synchronously. Nested
 events finish before the current handler continues or the next sibling runs;
@@ -87,6 +91,23 @@ order; string conversion/formatting is not implemented. Nonfinite values and
 out-of-range casts fail before any effects escape. Engine save-state restoration
 is outside these fresh-session nodes. The complete property propagation engine,
 remaining node/query behaviors and durable award integration are still required.
+
+`scoring::properties::Store` holds resolved Boolean, integer and float cells.
+All connected port aliases read one shared current value. Bound-but-unready
+properties are distinct from unbound ports. The caller supplies the validated
+cell layout and registered listener order; the store does not infer them from
+raw connection rows or choose realms and activation order.
+
+`events::Graph::publish` and `Dispatch::publish` model ordinary synchronous
+publication: store first, then notify each registered listener, including equal
+values. Nested events/property changes complete before the next listener, which
+reads the latest shared value. First-ready metadata belongs to each publication,
+even if a nested update changes that value. Properties and events share depth,
+work and output bounds. Any error discards the complete candidate, including when
+a handler swallows a nested error. Fixed property/listener layouts are bounded;
+runtime rebinding and alternate queued property contexts are not implemented.
+The caller must commit state and network output together after successful
+evaluation. External I/O and durable REP writes do not belong in these callbacks.
 
 Portable tests use constructed inputs and cover typed register aliasing,
 conversion, divide-by-zero retention, interpolation, extrapolation, finite

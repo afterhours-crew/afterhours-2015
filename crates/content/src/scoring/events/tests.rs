@@ -47,6 +47,8 @@ fn setup() -> Memory {
         &[
             ("Objects", Value::Array((1..=4).map(local).collect())),
             ("Interface", Value::Pointer(Pointer::Null)),
+            ("PropertyConnections", Value::Array(vec![])),
+            ("LinkConnections", Value::Array(vec![])),
             (
                 "EventConnections",
                 Value::Array(vec![
@@ -75,6 +77,8 @@ fn setup() -> Memory {
         &[
             ("Objects", Value::Array(vec![local(1), local(3)])),
             ("Interface", local(2)),
+            ("PropertyConnections", Value::Array(vec![])),
+            ("LinkConnections", Value::Array(vec![])),
             (
                 "EventConnections",
                 Value::Array(vec![
@@ -275,4 +279,118 @@ fn malformed_prefabs_and_filtered_connection_flood_are_bounded() {
             .to_string()
             .contains("cycle")
     );
+}
+
+fn set_data_rows(memory: &mut Memory, asset: &str, field: &str, rows: Vec<Value>) {
+    memory
+        .0
+        .get_mut(&(asset.into(), 0))
+        .unwrap()
+        .fields
+        .0
+        .iter_mut()
+        .find(|(key, _)| key == field)
+        .unwrap()
+        .1 = Value::Array(rows);
+}
+
+#[test]
+fn property_and_link_rows_preserve_instance_boundary_order_and_signed_ids() {
+    use crate::graph::tests::edge as data;
+    let mut memory = setup();
+    set_data_rows(
+        &mut memory,
+        "a",
+        "PropertyConnections",
+        vec![
+            data(local(3), u32::MAX, local(2), 91),
+            data(local(3), u32::MAX, local(1), 91),
+        ],
+    );
+    set_data_rows(
+        &mut memory,
+        "b",
+        "PropertyConnections",
+        vec![data(local(2), 91, local(1), 92)],
+    );
+    set_data_rows(
+        &mut memory,
+        "b",
+        "LinkConnections",
+        vec![data(local(1), 93, local(3), 0)],
+    );
+    let composition = read(&mut memory, "a").unwrap();
+    assert_eq!(composition.properties.len(), 4);
+    assert_eq!(composition.links.len(), 2);
+    let first = composition.properties[0];
+    assert_eq!(
+        (
+            first.bus,
+            first.index,
+            first.source.field,
+            first.target.field
+        ),
+        (0, 0, u32::MAX, 91)
+    );
+    assert_eq!(
+        composition.nodes[first.target.node as usize].identity.index,
+        2
+    );
+    assert_eq!(
+        composition.nodes[composition.properties[1].target.node as usize]
+            .identity
+            .index,
+        1
+    );
+    let leaf_a = composition.properties[2].target.node;
+    let leaf_b = composition.properties[3].target.node;
+    assert_ne!(leaf_a, leaf_b);
+    assert_eq!(composition.links[0].source.node, leaf_a);
+    assert_eq!(composition.links[1].source.node, leaf_b);
+    assert_eq!(composition.links[0].target.field, 0);
+    assert_eq!(composition.links[1].bus, 2);
+    assert_eq!(
+        composition.nodes[leaf_a as usize].identity.instances,
+        [("a".into(), 1)]
+    );
+    assert_eq!(
+        composition.nodes[leaf_b as usize].identity.instances,
+        [("a".into(), 2)]
+    );
+}
+
+#[test]
+fn malformed_data_connections_and_combined_table_bounds_are_rejected() {
+    use crate::graph::tests::edge as data;
+    for field in ["PropertyConnections", "LinkConnections"] {
+        for row in [
+            data(Value::Pointer(Pointer::Null), 1, local(4), 2),
+            data(local(99), 1, local(4), 2),
+            structure(&[
+                ("Source", local(3)),
+                ("Target", local(4)),
+                ("SourceFieldId", Value::Float32(1.0)),
+                ("TargetFieldId", Value::Int32(2)),
+            ]),
+        ] {
+            let mut memory = setup();
+            memory.put("a", 99, "Outside", &[]);
+            set_data_rows(&mut memory, "a", field, vec![row]);
+            assert!(read(&mut memory, "a").is_err());
+        }
+        let mut memory = setup();
+        set_data_rows(
+            &mut memory,
+            "a",
+            field,
+            vec![data(local(3), 1, local(4), 2); events::MAX_CONNECTIONS],
+        );
+        // Each table alone fits; the event rows push the composition over its bound.
+        assert!(
+            read(&mut memory, "a")
+                .unwrap_err()
+                .to_string()
+                .contains("bound")
+        );
+    }
 }

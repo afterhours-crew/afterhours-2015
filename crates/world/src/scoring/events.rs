@@ -4,7 +4,11 @@
 
 //! Synchronous, bounded scoring event dispatch. Callers compile installed
 //! connections and own node behavior; this module does not interpret RPCs.
-use super::Error;
+use super::{
+    Error,
+    math::Value,
+    properties::{Port, Store},
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const MAX_NODES: usize = 4096;
@@ -82,15 +86,26 @@ impl Graph {
         source: Endpoint,
     ) -> Result<(H, Vec<RemoteEmission>), Error> {
         let mut candidate = state.clone();
-        let mut dispatch = Dispatch {
-            graph: self,
-            steps: 0,
-            depth: 0,
-            remote_count: 0,
-            output: Vec::new(),
-            fault: None,
-        };
+        let mut dispatch = Dispatch::new(self);
         dispatch.emit(&mut candidate, source)?;
+        if let Some(error) = dispatch.fault {
+            return Err(error);
+        }
+        Ok((candidate, dispatch.output))
+    }
+
+    /// Publish an external measurement into a private graph candidate. Local
+    /// property callbacks and nested events share one work/depth/output budget.
+    /// The caller commits candidate state and remote output together.
+    pub fn publish<H: PropertyHandler + Clone>(
+        &self,
+        state: &H,
+        source: Port,
+        value: Value,
+    ) -> Result<(H, Vec<RemoteEmission>), Error> {
+        let mut candidate = state.clone();
+        let mut dispatch = Dispatch::new(self);
+        dispatch.publish(&mut candidate, source, value)?;
         if let Some(error) = dispatch.fault {
             return Err(error);
         }
@@ -105,6 +120,20 @@ pub trait Handler {
     fn handle(&mut self, target: Endpoint, dispatch: &mut Dispatch<'_>) -> Result<(), Error>;
 }
 
+/// Scalar property interpreter for the ordinary synchronous publication path.
+/// Read values through the shared Store during the callback; an earlier nested
+/// callback may have changed them. `first` belongs to the outer publication,
+/// not the value's current readiness. Never commit external effects here.
+pub trait PropertyHandler: Handler {
+    fn properties(&mut self) -> &mut Store;
+    fn property_changed(
+        &mut self,
+        target: Port,
+        first: bool,
+        dispatch: &mut Dispatch<'_>,
+    ) -> Result<(), Error>;
+}
+
 pub struct Dispatch<'a> {
     graph: &'a Graph,
     steps: usize,
@@ -113,7 +142,17 @@ pub struct Dispatch<'a> {
     output: Vec<RemoteEmission>,
     fault: Option<Error>,
 }
-impl Dispatch<'_> {
+impl<'a> Dispatch<'a> {
+    fn new(graph: &'a Graph) -> Self {
+        Self {
+            graph,
+            steps: 0,
+            depth: 0,
+            remote_count: 0,
+            output: Vec::new(),
+            fault: None,
+        }
+    }
     fn step(&mut self) -> Result<(), Error> {
         self.steps += 1;
         if self.steps > MAX_STEPS {
@@ -133,6 +172,54 @@ impl Dispatch<'_> {
         if let Err(error) = result {
             self.fault = Some(error);
         }
+        result
+    }
+
+    /// Store before notifying, including equal values. Callbacks run one at a
+    /// time in supplied registration order; nested work completes before the
+    /// next listener. Any error poisons this whole event/property transaction.
+    pub fn publish<H: PropertyHandler>(
+        &mut self,
+        state: &mut H,
+        source: Port,
+        value: Value,
+    ) -> Result<(), Error> {
+        if let Some(error) = self.fault {
+            return Err(error);
+        }
+        let result = self.publish_inner(state, source, value);
+        if let Err(error) = result {
+            self.fault = Some(error);
+        }
+        result
+    }
+
+    fn publish_inner<H: PropertyHandler>(
+        &mut self,
+        state: &mut H,
+        source: Port,
+        value: Value,
+    ) -> Result<(), Error> {
+        if state.properties().nodes() != self.graph.nodes {
+            return Err(Error::InvalidGraph);
+        }
+        self.step()?;
+        if self.depth >= MAX_DEPTH {
+            return Err(Error::Bound);
+        }
+        let change = state.properties().write(source, value)?;
+        self.depth += 1;
+        let result = (|| {
+            for target in change.listeners {
+                self.step()?;
+                state.property_changed(target, change.first, self)?;
+                if let Some(error) = self.fault {
+                    return Err(error);
+                }
+            }
+            Ok(())
+        })();
+        self.depth -= 1;
         result
     }
 

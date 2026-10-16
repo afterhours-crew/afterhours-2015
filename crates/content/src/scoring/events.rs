@@ -10,6 +10,7 @@ use crate::{
 };
 use nfs_frostbite::ebx::{Fields, Value};
 use nfs_world::scoring::events::{self, Connection, Delivery, Endpoint, Remote};
+use nfs_world::scoring::properties::Port;
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -43,6 +44,19 @@ pub struct Composition {
     /// before encoding Remote rows; these indices alone are not wire selectors.
     pub buses: Vec<Identity>,
     pub connections: Vec<Connection>,
+    /// Authored property rows, including client-side nodes. These are wiring,
+    /// not listener registration order or proof that a node runs on the server.
+    pub properties: Vec<DataConnection>,
+    /// Object/provider links have distinct semantics from scalar properties.
+    pub links: Vec<DataConnection>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DataConnection {
+    pub source: Port,
+    pub target: Port,
+    pub bus: u16,
+    pub index: u16,
 }
 impl Composition {
     pub fn dispatcher(&self) -> Result<events::Graph, Error> {
@@ -100,6 +114,53 @@ fn insert<S: Source>(
     });
     sites.insert(site, id);
     Ok(id)
+}
+
+fn data_connections<S: Source>(
+    graph: &mut Graph<'_, S>,
+    sites: &BTreeMap<Site, u16>,
+    bus: &Site,
+    bus_index: u16,
+    fields: &Fields,
+    name: &str,
+    visited: &mut usize,
+) -> Result<Vec<DataConnection>, Error> {
+    let rows = field(fields, name)?
+        .as_array()
+        .ok_or_else(|| bad("data connection array"))?;
+    *visited = visited
+        .checked_add(rows.len())
+        .filter(|n| *n <= events::MAX_CONNECTIONS)
+        .ok_or_else(|| bad("composition connection bound"))?;
+    rows.iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let fields = row.as_fields().ok_or_else(|| bad("data connection row"))?;
+            let mut endpoint = |side: &str, port: &str| -> Result<Port, Error> {
+                let pointer = field(fields, side)?
+                    .as_pointer()
+                    .ok_or_else(|| bad("data pointer"))?;
+                let key = graph
+                    .source
+                    .target(&bus.key.0, pointer)?
+                    .ok_or_else(|| bad("null data endpoint"))?;
+                let site = Site { key, ..bus.clone() };
+                let &node = sites
+                    .get(&site)
+                    .ok_or_else(|| bad("data endpoint outside composition"))?;
+                Ok(Port {
+                    node,
+                    field: bits32(field(fields, port)?)?,
+                })
+            };
+            Ok(DataConnection {
+                source: endpoint("Source", "SourceFieldId")?,
+                target: endpoint("Target", "TargetFieldId")?,
+                bus: bus_index,
+                index: index as u16,
+            })
+        })
+        .collect()
 }
 pub(crate) fn read<S: Source>(source: &mut S, blueprint: &str) -> Result<Composition, Error> {
     if blueprint.is_empty() || blueprint.len() > 512 {
@@ -163,9 +224,29 @@ pub(crate) fn read<S: Source>(source: &mut S, blueprint: &str) -> Result<Composi
         }
     }
     let mut connections = Vec::new();
+    let mut properties = Vec::new();
+    let mut links = Vec::new();
     let mut visited_rows = 0usize;
     for (bus_index, bus) in buses.iter().enumerate() {
         let object = graph.object(bus)?;
+        properties.extend(data_connections(
+            &mut graph,
+            &sites,
+            bus,
+            bus_index as u16,
+            &object.fields,
+            "PropertyConnections",
+            &mut visited_rows,
+        )?);
+        links.extend(data_connections(
+            &mut graph,
+            &sites,
+            bus,
+            bus_index as u16,
+            &object.fields,
+            "LinkConnections",
+            &mut visited_rows,
+        )?);
         let rows = field(&object.fields, "EventConnections")?
             .as_array()
             .ok_or_else(|| bad("event connection array"))?;
@@ -218,6 +299,8 @@ pub(crate) fn read<S: Source>(source: &mut S, blueprint: &str) -> Result<Composi
         nodes,
         buses: buses.iter().map(Identity::from).collect(),
         connections,
+        properties,
+        links,
     };
     result.dispatcher()?;
     Ok(result)

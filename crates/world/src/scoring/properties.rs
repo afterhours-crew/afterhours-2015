@@ -1,0 +1,135 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+//! Resolved scalar property cells for a private scoring graph candidate.
+//! Aliases share one value; publication never copies values into input ports.
+//! Installed binding and listener registration order are the caller's contract.
+use super::{Error, events::MAX_NODES, finite, math::Value};
+use std::collections::BTreeMap;
+
+pub const MAX_PROPERTIES: usize = 16_384;
+pub const MAX_PORTS: usize = 65_536;
+pub const MAX_LISTENERS: usize = 16_384;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub struct Port {
+    pub node: u16,
+    pub field: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Kind {
+    Boolean,
+    Integer,
+    Float,
+}
+impl Kind {
+    fn validate(self, value: Value) -> Result<(), Error> {
+        match (self, value) {
+            (Self::Boolean, Value::Boolean(_)) | (Self::Integer, Value::Integer(_)) => Ok(()),
+            (Self::Float, Value::Float(value)) => finite(value).map(|_| ()),
+            _ => Err(Error::InvalidGraph),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Definition {
+    pub kind: Kind,
+    /// None means bound but not ready. An unbound port is a separate error.
+    /// Initialization does not notify; subsequent equal publications still do.
+    pub initial: Option<Value>,
+    /// Output and input aliases already resolved to this single property cell.
+    pub ports: Vec<Port>,
+    /// Registered listener ports in their registration order. Each must alias
+    /// this cell. Repeated registrations are preserved, not deduplicated.
+    pub listeners: Vec<Port>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Store {
+    nodes: usize,
+    cells: Vec<Definition>,
+    ports: BTreeMap<Port, usize>,
+}
+
+pub(crate) struct Change {
+    pub first: bool,
+    pub listeners: Vec<Port>,
+}
+
+impl Store {
+    /// Build a fixed binding layout. This does not infer aliases, types,
+    /// listeners, realms or startup ordering from installed connection rows.
+    pub fn new(nodes: usize, cells: Vec<Definition>) -> Result<Self, Error> {
+        if nodes == 0 || nodes > MAX_NODES || cells.len() > MAX_PROPERTIES {
+            return Err(Error::Bound);
+        }
+        let mut ports = BTreeMap::new();
+        let mut port_count = 0usize;
+        let mut listener_count = 0usize;
+        for (index, cell) in cells.iter().enumerate() {
+            port_count = port_count
+                .checked_add(cell.ports.len())
+                .ok_or(Error::Bound)?;
+            listener_count = listener_count
+                .checked_add(cell.listeners.len())
+                .ok_or(Error::Bound)?;
+            if port_count > MAX_PORTS || listener_count > MAX_LISTENERS {
+                return Err(Error::Bound);
+            }
+            if cell.ports.is_empty() {
+                return Err(Error::InvalidGraph);
+            }
+            if let Some(value) = cell.initial {
+                cell.kind.validate(value)?;
+            }
+            for &port in &cell.ports {
+                if usize::from(port.node) >= nodes {
+                    return Err(Error::UnknownNode);
+                }
+                if ports.insert(port, index).is_some() {
+                    return Err(Error::InvalidGraph);
+                }
+            }
+            for listener in &cell.listeners {
+                if ports.get(listener) != Some(&index) {
+                    return Err(Error::InvalidGraph);
+                }
+            }
+        }
+        Ok(Self {
+            nodes,
+            cells,
+            ports,
+        })
+    }
+
+    /// Read the current shared cell, including changes made by nested handlers.
+    pub fn read(&self, port: Port) -> Result<Option<Value>, Error> {
+        let index = self.ports.get(&port).ok_or(Error::MissingInput)?;
+        Ok(self.cells[*index].initial)
+    }
+
+    pub(crate) fn nodes(&self) -> usize {
+        self.nodes
+    }
+
+    /// Only the bounded event/property dispatcher may publish. Retain the cell
+    /// before callbacks, snapshot listeners and preserve first-ready metadata
+    /// for this publication even if a nested publication happens meanwhile.
+    pub(crate) fn write(&mut self, port: Port, value: Value) -> Result<Change, Error> {
+        let index = self.ports.get(&port).ok_or(Error::MissingInput)?;
+        let cell = &mut self.cells[*index];
+        cell.kind.validate(value)?;
+        let first = cell.initial.replace(value).is_none();
+        Ok(Change {
+            first,
+            listeners: cell.listeners.clone(),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests;
