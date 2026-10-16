@@ -14,6 +14,12 @@ traffic slots, gameplay/startup roles and garage scene selection belong to
 deployment configuration; the library contains no game content-key table or asset
 files. Codecs reject unsupported shapes instead of guessing successful replies.
 
+Entity profiles include RPC initialization with one Boolean or a 16-bit-counted
+list of 13-bit object references. Both have empty update bodies. Lists are capped
+at 1,024 entries and owned state checks every reference before accepting the
+creation. These codecs support driving-query composition; they do not calculate
+or award REP by themselves.
+
 Portable tests construct their inputs. They cover connection ownership, retries,
 disconnect cleanup, object allocation, transactional updates, resource limits,
 replication pacing, files and vehicle initialization. These tests establish the
