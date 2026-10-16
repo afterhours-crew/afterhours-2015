@@ -254,7 +254,9 @@ fn wait_for_routing(steps: &mut impl Steps) -> Result<()> {
 
 fn cleanup(steps: &mut impl Steps, action: Action) -> Result<()> {
     if action == Action::Setup {
-        return Ok(());
+        // Preparation owns short-lived children too. Check that all of them
+        // have exited before disarming the job, just as for start and serve.
+        return steps.finish_guard();
     }
     if action == Action::Start {
         if steps.game_exited().is_none() {
@@ -404,10 +406,21 @@ mod tests {
                 "status:preparing",
                 "stop_requested",
                 "prepare",
+                "finish_guard",
                 "status:finished"
             ]
         );
         assert!(outcome.message.contains("Setup complete"));
+    }
+
+    #[test]
+    fn setup_reports_cleanup_failure_and_keeps_the_job_armed() {
+        let mut f = fake();
+        f.fail = Some(("finish_guard", "preparation child still running"));
+        let outcome = run(&mut f, Action::Setup);
+        assert_eq!(outcome.state, State::Failed);
+        assert!(outcome.message.contains("preparation child still running"));
+        assert!(outcome.message.contains("job remains armed"));
     }
 
     #[test]

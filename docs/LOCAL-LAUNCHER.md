@@ -339,11 +339,31 @@ The combined workspace passed fmt, Clippy and 1,342 tests; the optional
 network-test build passed Clippy and 193 tests. Unsupported File/Items, unknown
 control/decoder routes, overflow, privacy and cancellation use constructed
 regression tests rather than malformed traffic sent to the game.
+
+A further ordinary-user Windows check completed standalone `setup` against the
+supported installation and created a fresh local account. `setup --json` now
+returns one final status object on stdout; progress and child diagnostics go to
+stderr and remain visible in an ordinary terminal. Setup also verifies its
+preparation children have exited before disarming its session job.
+
+Force-terminating only the supervisor of a ready, routed game session closed its
+game and server through the Windows job and released port 3216. Both the frontend
+result and separate `status` reported `interrupted`; the frontend returned exit
+code 3. This was a startup crash test, not an interruption during a gameplay save.
+After moving aside only that stopped test account's `account.json`, `recover`
+restored its pointer and a repeated recovery succeeded without changing any
+database bytes. Recovery during an active session correctly refused to proceed.
+The recovered account subsequently reached the menu and its stock Mustang garage.
+Normal Alt+F4 shutdown then finished with exit code 0 and released all owned
+processes and port 3216. These corrections passed fmt, Clippy and 1,344 workspace
+tests on Windows.
+Plain-text `status` also shows recorded process IDs, which may be stale and must
+be checked before manually stopping a Unix orphan.
+
 Full acceptance remains tracked in
-[issue 78](https://github.com/afterhours-crew/afterhours-2015/issues/78): standalone
-`setup`, live `recover`, the activation-dialog path, forced supervisor
-termination, cold disconnected startup/restart and `serve` on a Linux host
-remain pending. The previous PowerShell launcher's disconnected result does
+[issue 78](https://github.com/afterhours-crew/afterhours-2015/issues/78): the
+activation-dialog path, cold disconnected startup/restart and `serve` on a Linux
+host remain pending. The previous PowerShell launcher's disconnected result does
 not establish those gates for this implementation.
 
 ### Manual disconnected test without administrator access

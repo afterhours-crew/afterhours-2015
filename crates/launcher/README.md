@@ -18,6 +18,13 @@ Every subcommand accepts `--data-dir <DIR>` and `--json`. `--help` on any
 subcommand explains it. For installation requirements and the full
 walkthrough see [docs/LOCAL-LAUNCHER.md](../../docs/LOCAL-LAUNCHER.md).
 
+Progress and child diagnostics go to stderr; command results go to stdout.
+With `--json`, a completed session prints one final status object on stdout,
+including `interrupted` if its supervisor died. Errors still have a nonzero
+exit code and a message on stderr. Observe an active session with a separate
+`status --json` command. Recorded process IDs may be stale; verify process
+identity before stopping an orphan after a Unix supervisor crash.
+
 ## What it does
 
 A session is one run of `setup`, `serve` or `start`. The front-end command

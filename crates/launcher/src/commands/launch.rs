@@ -127,12 +127,33 @@ pub fn launch(context: &Context, action: Action, args: &SessionArgs) -> Result<(
         .arg("--request")
         .arg(&request_path)
         .status()?;
-    if context.json {
-        let record: records::Status = records::read_json(&run.join("status.json"))?;
-        println!("{}", serde_json::to_string(&record)?);
+    let record = completed_status(&run)?;
+    if context.json
+        && let Some(record) = &record
+    {
+        println!("{}", serde_json::to_string(record)?);
+    }
+    if record
+        .as_ref()
+        .is_some_and(|r| r.state == records::State::Interrupted)
+    {
+        return Err(Failure::session(format!(
+            "The supervisor was terminated. Inspect {}.",
+            run.display()
+        )));
     }
     match status.code() {
-        Some(0) => Ok(()),
+        Some(0)
+            if record
+                .as_ref()
+                .is_some_and(|r| r.state == records::State::Finished) =>
+        {
+            Ok(())
+        }
+        Some(0) => Err(Failure::session(format!(
+            "Supervisor exited without successful completion. Inspect {}.",
+            run.display()
+        ))),
         Some(code) => Err(Failure {
             exit: match code {
                 1 => Exit::Refused,
@@ -146,6 +167,22 @@ pub fn launch(context: &Context, action: Action, args: &SessionArgs) -> Result<(
             run.display()
         ))),
     }
+}
+
+/// Once our supervisor has exited, its last live record is interrupted even
+/// if Windows terminated it with exit code zero. Read this session's record,
+/// not current-session.json, which another invocation may already have moved.
+fn completed_status(run: &Path) -> Result<Option<records::Status>> {
+    let path = run.join("status.json");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let mut record: records::Status = records::read_json(&path)?;
+    if record.state.is_live() {
+        record.state = records::State::Interrupted;
+        record.message = "Supervisor exited before recording completion. Inspect owned processes before restarting; account data is preserved.".into();
+    }
+    Ok(Some(record))
 }
 
 /// `supervise`: run a session from its request file.
@@ -183,5 +220,39 @@ mod tests {
         let b = new_session_id();
         assert!(records::is_id(&a));
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn exited_supervisor_cannot_report_a_live_session() {
+        let run = crate::testing::scratch("completed-status");
+        assert!(completed_status(&run).unwrap().is_none());
+        let mut record = records::Status {
+            version: records::VERSION,
+            id: "a".repeat(32),
+            utc: "2026-10-16T06:00:00Z".into(),
+            state: records::State::Ready,
+            message: "ready".into(),
+            worker_pid: 123,
+            game_pid: Some(456),
+            server_pid: Some(789),
+        };
+        for state in [
+            records::State::Preparing,
+            records::State::Activation,
+            records::State::Ready,
+            records::State::Stopping,
+        ] {
+            record.state = state;
+            records::replace_json(&run.join("status.json"), &record).unwrap();
+            let result = completed_status(&run).unwrap().unwrap();
+            assert_eq!(result.state, records::State::Interrupted);
+            assert_eq!(result.game_pid, record.game_pid);
+        }
+        for state in [records::State::Finished, records::State::Failed] {
+            record.state = state;
+            records::replace_json(&run.join("status.json"), &record).unwrap();
+            assert_eq!(completed_status(&run).unwrap(), Some(record.clone()));
+        }
+        std::fs::remove_dir_all(run).unwrap();
     }
 }

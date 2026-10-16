@@ -18,8 +18,11 @@ pub fn status(context: &Context) -> Result<()> {
         }),
         Some(status) => context.emit(&status, || {
             format!(
-                "{} : {} (session {}, {})",
-                status.state, status.message, status.id, status.utc
+                "{} : {} (session {}, {})\nRecorded process IDs: supervisor {}, server {}, game {}. Verify identity before stopping a recorded process.",
+                status.state, status.message, status.id, status.utc,
+                status.worker_pid,
+                status.server_pid.map_or_else(|| "none".into(), |id| id.to_string()),
+                status.game_pid.map_or_else(|| "none".into(), |id| id.to_string())
             )
         }),
     }
