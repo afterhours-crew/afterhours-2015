@@ -28,7 +28,6 @@ use std::collections::{BTreeMap, BTreeSet};
 /// them as unsupported. Adding a class here is a documented decision, not a
 /// silent default.
 pub const UNSUPPORTED: &[&str] = &[
-    "RaceVehicleNosBuildupEntityData",
     "RaceVehicleSlamAParticipantCollisionEvaluatorEntityData",
     "ParticipantSetCounterEntityData",
     "PlayerInfoAccessorEntityData",
@@ -68,6 +67,7 @@ pub struct Sources {
     pub drafts: Vec<draft::Node>,
     pub donuts: Vec<donut::Node>,
     pub proximities: Vec<proximity::Node>,
+    pub buildups: Vec<super::buildup::Node>,
 }
 
 fn identity(identity: &Identity) -> program::Identity {
@@ -437,6 +437,15 @@ pub fn compile(sources: &Sources) -> Result<Program, Error> {
                 ),
                 "VehicleStatsProviderEntityData" => Behavior::Stats,
                 "RaceVehicleNosQueryEntityData" => Behavior::Nos,
+                "RaceVehicleNosBuildupEntityData" => {
+                    let buildup = sources
+                        .buildups
+                        .iter()
+                        .find(|b| b.identity == n.identity)
+                        .ok_or_else(|| bad("nitrous buildup defaults missing"))?;
+                    defaults[i].extend(buildup.defaults.iter().copied());
+                    Behavior::NosBuildup
+                }
                 "RaceVehicleAccumulatingCollisionsQueryEntityData" => {
                     Behavior::AccumulatedCollisions
                 }
@@ -696,6 +705,7 @@ impl AssetIndex {
             drafts: self.scoring_drafts(blueprint)?,
             donuts: self.scoring_donuts(blueprint)?,
             proximities: self.scoring_proximities(blueprint)?,
+            buildups: self.scoring_buildups(blueprint)?,
         })
     }
 

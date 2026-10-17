@@ -15,7 +15,7 @@
 use super::*;
 use crate::scoring::{Content, TIME_SCALE, Which};
 use nfs_world::items::Derived;
-use nfs_world::nitrous_fuel::{Change, Fuel, Kind as NitrousKind, Tier};
+use nfs_world::nitrous_fuel::{Buildup, Fuel};
 use nfs_world::scoring::nos::Sample as NitrousSample;
 use nfs_world::{
     logic::{EntityRef, Fire},
@@ -121,10 +121,26 @@ pub(super) struct State {
 }
 
 /// One car's nitrous fuel and the world time it was last advanced to.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(in crate::net) struct Nitrous {
     pub fuel: Fuel,
-    pub last_ms: u64,
+    pub buildup: Buildup,
+    pub transitions: VecDeque<NitrousSample>,
+}
+impl Nitrous {
+    pub fn sample(&self) -> NitrousSample {
+        NitrousSample {
+            engaged: self.fuel.engaged(),
+            level: self.fuel.fraction(),
+            capacity: self.fuel.capacity(),
+        }
+    }
+    pub fn request(&mut self, active: bool) {
+        if active != self.fuel.engaged() && self.transitions.len() < MAX_QUEUED_REPORTS {
+            self.fuel.request(active);
+            self.transitions.push_back(self.sample());
+        }
+    }
 }
 
 /// Owned airborne estimate (E916, inferred): the replicated chassis carries no
@@ -256,6 +272,58 @@ mod flush_tests {
         assert_eq!(listener.pending.len(), 1);
         assert_eq!(listener.pending[0].records.len(), 1);
         assert_eq!(listener.pending[0].records[0].id, 8);
+    }
+}
+
+#[cfg(test)]
+mod nitrous_tests {
+    use super::*;
+    use nfs_world::nitrous_fuel::{Boosts, Configuration, Curve};
+    #[test]
+    fn brief_taps_and_repeated_requests_preserve_transition_order() {
+        let config = Arc::new(
+            Configuration::new(
+                8.0,
+                Curve::new(vec![[0.0, 1.0], [2.0, 1.0]]).unwrap(),
+                Curve::new(vec![[0.0, 0.0], [2.0, 0.0]]).unwrap(),
+                Boosts::default(),
+            )
+            .unwrap(),
+        );
+        let mut n = Nitrous {
+            fuel: Fuel::full(config, 5).unwrap(),
+            buildup: Buildup::default(),
+            transitions: VecDeque::new(),
+        };
+        n.request(true);
+        n.request(true);
+        n.fuel.tick(0.5, Buildup::default()).unwrap();
+        n.request(false);
+        n.request(false);
+        assert_eq!(n.transitions.len(), 2);
+        let start = n.transitions.pop_front().unwrap();
+        let stop = n.transitions.pop_front().unwrap();
+        assert!(start.engaged);
+        assert!(!stop.engaged);
+        assert_eq!(start.level, 1.0);
+        assert_eq!(stop.level, 7.5 / 8.0);
+        let mut query = nfs_world::scoring::nos::Node::default();
+        assert!(
+            query
+                .step(start)
+                .unwrap()
+                .contains(&nfs_world::scoring::nos::Effect::Emit(
+                    nfs_world::scoring::nos::ENGAGED
+                ))
+        );
+        assert!(
+            query
+                .step(stop)
+                .unwrap()
+                .contains(&nfs_world::scoring::nos::Effect::Emit(
+                    nfs_world::scoring::nos::DISENGAGED
+                ))
+        );
     }
 }
 
@@ -512,11 +580,7 @@ impl PlayerListener {
         let motion = physics.decode([0.; 3]).map_err(fail("physics decode"))?;
         let mut vehicle =
             Vehicle::from_motion(u32::from(car), &motion).map_err(fail("vehicle basis"))?;
-        vehicle.nos = nitrous.map(|n| NitrousSample {
-            engaged: n.fuel.engaged(),
-            level: n.fuel.fraction(),
-            capacity: n.fuel.tier().capacity(),
-        });
+        vehicle.nos = nitrous.map(Nitrous::sample);
         // Road measurements from the installed network (E916); absent without
         // a network or off the network, which preserves the query state.
         let road = match content.road() {
@@ -534,16 +598,8 @@ impl PlayerListener {
         })
     }
 
-    /// Tier and refill kind of the nitrous item installed on the participant's
-    /// car (E920: tier from the definition's buy price, kind from its guid);
-    /// None without nitrous.
-    fn nitrous_tier(
-        &self,
-        content: &Content,
-        players: &Players,
-        car: u16,
-    ) -> Option<(Tier, NitrousKind)> {
-        let catalog = content.items()?;
+    /// Installed fuel configuration and the persisted handling setting.
+    fn nitrous_fuel(&self, content: &Content, players: &Players, car: u16) -> Option<Fuel> {
         let items = &self.inventory.as_ref()?.items;
         let vehicle = players.vehicle_item_of(HOST_SELECTOR as u8, self.persona, car)?;
         // The installed nitrous is the one the car replicates (a car may own
@@ -553,13 +609,12 @@ impl PlayerListener {
             .as_deref()?
             .vehicles
             .nitrous_definition(items, vehicle)?;
-        let definition = catalog.definition(&guid).ok()?;
-        let tier = Tier::from_buy_price(definition.buy_price)?;
-        let kind = NitrousKind::from_definition(&guid).unwrap_or_else(|| {
-            tracing::warn!(car, "nitrous item kind unknown; refilling on a clock");
-            NitrousKind::Time
-        });
-        Some((tier, kind))
+        let setting = self
+            .vehicles
+            .as_deref()?
+            .vehicles
+            .nitrous_setting(items, vehicle)?;
+        Fuel::full(content.nitrous(&guid)?, setting).ok()
     }
 
     /// Current and stock figures of the participant's car (E916): the dyno
@@ -655,6 +710,14 @@ impl PlayerListener {
             which,
             ghost,
         } = scope;
+        if let Some(live) = state.live.get(&participant)
+            && let Some(nitrous) = state.nitrous.get_mut(&live.car)
+        {
+            nitrous
+                .buildup
+                .merge(output.buildup)
+                .map_err(fail("nitrous buildup"))?;
+        }
         // Boolean synchronized changes are the HUD flags (category and
         // sub-event popups); log them to time the popups against the drive.
         // With NFS_SCORING_TRACE set, every synchronized change is logged for
@@ -779,13 +842,19 @@ impl PlayerListener {
         if state.live.len() >= MAX_LIVE {
             return Err(replication::Error::Bound);
         }
-        if let Some((tier, kind)) = self.nitrous_tier(content, players, car) {
-            tracing::info!(participant, car, ?tier, ?kind, "owned nitrous fuel seeded");
+        if let Some(fuel) = self.nitrous_fuel(content, players, car) {
+            tracing::info!(
+                participant,
+                car,
+                capacity = fuel.capacity(),
+                "owned nitrous fuel seeded"
+            );
             state.nitrous.insert(
                 car,
                 Nitrous {
-                    fuel: Fuel::full(tier, kind),
-                    last_ms: now_ms,
+                    fuel,
+                    buildup: Buildup::default(),
+                    transitions: VecDeque::new(),
                 },
             );
         }
@@ -1015,29 +1084,45 @@ impl PlayerListener {
                     vehicle.airborne = Some(airborne);
                 }
             }
-            if let Some(nitrous) = state.nitrous.get_mut(&car) {
-                let elapsed = now_ms.saturating_sub(nitrous.last_ms).min(500);
-                nitrous.last_ms = now_ms;
-                // Style that refills a skill tank (hypothesis, E921): a slide,
-                // airborne, wrong way or high speed.
-                let building = inputs.vehicle.is_some_and(|v| {
-                    let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-                    let speed = dot(v.velocity, v.velocity).sqrt();
-                    let lateral = dot(v.velocity, v.transform[0]).abs();
-                    v.airborne == Some(true)
-                        || speed > 40.0
-                        || (speed > 5.0 && lateral / speed > 0.2)
-                }) || inputs.road.is_some_and(|r| r.wrong_direction);
-                // The fuel is kept for the scoring input only: the client predicts
-                // its own gauge from the mode acknowledgement (E921: level pushes
-                // fought that prediction), so no level or stop is replicated.
-                for change in nitrous
-                    .fuel
-                    .tick(std::time::Duration::from_millis(elapsed), building)
-                {
-                    if let Change::Stopped = change {
-                        tracing::info!(car, "owned nitrous model empty");
-                    }
+            // Preserve transitions even when start and release arrive between
+            // scheduler passes. Component notifications deliver their snapshots
+            // without advancing unrelated queries, timers or fuel.
+            let transitions = state
+                .nitrous
+                .get_mut(&car)
+                .map(|n| std::mem::take(&mut n.transitions))
+                .unwrap_or_default();
+            for sample in transitions {
+                if let Some(vehicle) = inputs.vehicle.as_mut() {
+                    vehicle.nos = Some(sample);
+                }
+                for which in Which::ALL {
+                    let (output, ghost) = {
+                        let live = state
+                            .live
+                            .get_mut(&participant)
+                            .ok_or(replication::Error::Shape)?;
+                        let entity = &mut live.entities[which as usize];
+                        (
+                            entity
+                                .session
+                                .update_nitrous(&inputs)
+                                .map_err(fail("nitrous transition"))?,
+                            entity.ghost,
+                        )
+                    };
+                    Self::collect_output(
+                        &content,
+                        &mut players,
+                        &mut state,
+                        Scope {
+                            participant,
+                            which,
+                            ghost,
+                        },
+                        output,
+                        &mut collected,
+                    )?;
                 }
             }
             let start = inputs.now - f64::from(covered);
@@ -1071,6 +1156,20 @@ impl PlayerListener {
                 let step = remaining.min(TICK_SECONDS);
                 remaining -= step;
                 inputs.now = start + f64::from(covered - remaining);
+                if let Some(nitrous) = state.nitrous.get_mut(&car) {
+                    let buildup = if nitrous.fuel.engaged() {
+                        nitrous.buildup
+                    } else {
+                        std::mem::take(&mut nitrous.buildup)
+                    };
+                    nitrous
+                        .fuel
+                        .tick(step, buildup)
+                        .map_err(fail("nitrous fuel"))?;
+                    if let Some(vehicle) = inputs.vehicle.as_mut() {
+                        vehicle.nos = Some(nitrous.sample());
+                    }
+                }
                 for which in Which::ALL {
                     let (output, ghost) = {
                         let live = state

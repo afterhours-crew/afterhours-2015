@@ -19,6 +19,7 @@ pub mod arithmetic;
 pub mod awards;
 pub mod bindings;
 pub mod boolean_fold;
+pub mod buildup;
 pub mod content;
 pub mod creation;
 pub mod delay;
@@ -182,7 +183,24 @@ fn compile_curve(fields: &Fields) -> Result<Calculation, Error> {
         } if name == "CURVE_ENTITY_TRAIT_DEFAULT" => {}
         _ => return Err(bad("unsupported scoring curve trait")),
     }
-    let rows = field(fields, "ReactionCurve")?
+    let curve = compile_curve_rows(
+        field(fields, "ReactionCurve")?,
+        scalar(fields, "InputScale")?,
+        scalar(fields, "OutputScale")?,
+    )?;
+    Ok(Calculation::Curve {
+        curve,
+        apply: boolean(fields, "ApplyReactionCurve")?,
+        default_input: scalar(fields, "Input")?,
+    })
+}
+
+pub(crate) fn compile_curve_rows(
+    value: &Value,
+    input_scale: f32,
+    output_scale: f32,
+) -> Result<Curve, Error> {
+    let rows = value
         .as_array()
         .filter(|rows| (4..=MAX_KNOTS + 2).contains(&rows.len()))
         .ok_or_else(|| bad("scoring curve count"))?;
@@ -204,8 +222,8 @@ fn compile_curve(fields: &Fields) -> Result<Calculation, Error> {
     let curve = Curve::new(
         [vectors[0][0], vectors[1][0]],
         [vectors[0][1], vectors[1][1]],
-        scalar(fields, "InputScale")?,
-        scalar(fields, "OutputScale")?,
+        input_scale,
+        output_scale,
         interpolation,
         vectors[2..]
             .iter()
@@ -217,11 +235,7 @@ fn compile_curve(fields: &Fields) -> Result<Calculation, Error> {
             .collect(),
     )
     .map_err(|e| bad(&e.to_string()))?;
-    Ok(Calculation::Curve {
-        curve,
-        apply: boolean(fields, "ApplyReactionCurve")?,
-        default_input: scalar(fields, "Input")?,
-    })
+    Ok(curve)
 }
 
 /// Compile one explicitly supported object. Unknown classes, enum values and

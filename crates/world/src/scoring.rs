@@ -6,6 +6,7 @@
 //! These primitives do not accept awards from clients or persist progression.
 pub mod arithmetic;
 pub mod boolean_fold;
+pub mod buildup;
 pub mod collision;
 pub mod curve;
 pub mod delay;
@@ -52,7 +53,7 @@ impl std::fmt::Display for Error {
 }
 impl std::error::Error for Error {}
 
-fn finite(value: f32) -> Result<f32, Error> {
+pub(crate) fn finite(value: f32) -> Result<f32, Error> {
     if value.is_finite() {
         Ok(value)
     } else {

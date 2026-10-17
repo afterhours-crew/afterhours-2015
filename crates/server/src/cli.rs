@@ -644,12 +644,13 @@ async fn run(args: Args) -> Result<(), Failure> {
                 )?;
                 let scoring = index.scoring_content("levels/genesis01/gameplay")?;
                 let road = index.road_network();
-                Ok::<_, nfs_content::Error>((scoring, road))
+                let nitrous = index.nitrous_configurations()?;
+                Ok::<_, nfs_content::Error>((scoring, road, nitrous))
             })
             .await
             .map_err(|_| Failure::Output)?;
             match content {
-                Ok((content, road)) => {
+                Ok((content, road, nitrous)) => {
                     let mut content = nfs_server::scoring::Content::new(Arc::new(content))
                         .map_err(|_| Failure::ProfileConfig)?
                         .with_items(
@@ -657,7 +658,8 @@ async fn run(args: Args) -> Result<(), Failure> {
                                 .as_ref()
                                 .ok_or(Failure::ProfileConfig)?
                                 .item_catalog(),
-                        );
+                        )
+                        .with_nitrous(nitrous);
                     match road {
                         Ok(network) => {
                             tracing::info!(

@@ -25,6 +25,7 @@ use super::{
     vector_length,
     vehicle_query::{self, DriftSample, Query},
 };
+use crate::nitrous_fuel::Buildup;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -122,6 +123,7 @@ pub struct Award {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Output {
+    pub buildup: Buildup,
     pub remote: Vec<RemoteEmission>,
     pub commands: Vec<(u16, collision::Command)>,
     pub awards: Vec<Award>,
@@ -142,6 +144,8 @@ struct State {
     roads: BTreeMap<u16, road::Node>,
     proximity: BTreeMap<u16, proximity::Node>,
     nos: BTreeMap<u16, nos::Node>,
+    buildup_counts: BTreeMap<u16, [u32; 2]>,
+    buildup: Buildup,
     donuts: BTreeMap<u16, donut::Node>,
     /// Stats nodes with the figures they last published.
     stats: BTreeMap<u16, Option<stats::Stats>>,
@@ -191,6 +195,8 @@ impl Session {
             roads: BTreeMap::new(),
             proximity: BTreeMap::new(),
             nos: BTreeMap::new(),
+            buildup_counts: BTreeMap::new(),
+            buildup: Buildup::default(),
             donuts: BTreeMap::new(),
             stats: BTreeMap::new(),
             stopwatches: stopwatch::Manager::new(count, &[])?,
@@ -255,6 +261,9 @@ impl Session {
                 }
                 Behavior::Nos => {
                     state.nos.insert(id, nos::Node::default());
+                }
+                Behavior::NosBuildup => {
+                    state.buildup_counts.insert(id, [0; 2]);
                 }
                 Behavior::Donut(_) => {
                     state.donuts.insert(id, donut::Node::default());
@@ -349,6 +358,7 @@ impl Session {
         }
         self.state = next.state;
         Ok(Output {
+            buildup: std::mem::take(&mut self.state.buildup),
             remote,
             commands,
             awards,
@@ -422,6 +432,7 @@ impl Session {
                     Behavior::Proximity => candidate.proximity(node, dispatch)?,
                     Behavior::Stats => candidate.stats(node, dispatch)?,
                     Behavior::Nos => candidate.nos(node, dispatch)?,
+                    Behavior::NosBuildup => candidate.buildup(node)?,
                     Behavior::Donut(configuration) => {
                         let configuration = *configuration;
                         candidate.donut(node, configuration, delta, dispatch)?;
@@ -431,6 +442,22 @@ impl Session {
             }
             dispatch.update_stopwatches(candidate, delta)?;
             dispatch.update_delays(candidate, delta)
+        })
+    }
+
+    /// Deliver a component transition immediately, without ticking unrelated
+    /// physics queries, timers or buildup observers. Multiple transitions in
+    /// one network batch remain separate notifications.
+    pub fn update_nitrous(&mut self, inputs: &Inputs) -> Result<Output, Error> {
+        if !self.started {
+            return Err(Error::InvalidGraph);
+        }
+        self.transaction(inputs, |candidate, dispatch| {
+            let nodes: Vec<_> = candidate.state.nos.keys().copied().collect();
+            for node in nodes {
+                candidate.nos(node, dispatch)?;
+            }
+            Ok(())
         })
     }
 
@@ -741,6 +768,10 @@ impl Candidate<'_> {
                 }
                 Ok(())
             }
+            Behavior::NosBuildup => {
+                self.state.scheduled.push(node);
+                self.buildup(node)
+            }
             Behavior::Road { .. } | Behavior::Proximity | Behavior::Nos | Behavior::Donut(_) => {
                 self.state.scheduled.push(node);
                 Ok(())
@@ -760,6 +791,38 @@ impl Candidate<'_> {
 }
 
 impl Candidate<'_> {
+    fn buildup(&mut self, node: u16) -> Result<(), Error> {
+        use super::buildup::*;
+        if self.inputs.vehicle.and_then(|v| v.nos).is_none() {
+            return Ok(());
+        }
+        let boolean = |field| match self.resolve(Port { node, field })? {
+            Some(Value::Boolean(v)) => Ok(v),
+            _ => Err(Error::MissingInput),
+        };
+        let float = |field| match self.resolve(Port { node, field })? {
+            Some(Value::Float(v)) => Ok(v),
+            _ => Err(Error::MissingInput),
+        };
+        let counts = *self
+            .state
+            .buildup_counts
+            .get(&node)
+            .ok_or(Error::UnknownNode)?;
+        let value = Buildup {
+            drifting: boolean(DRIFTING)?,
+            drafting: boolean(DRAFTING)?,
+            oncoming: boolean(ONCOMING)?,
+            airborne: boolean(AIRBORNE)?,
+            speed: float(SPEED)?,
+            pacing: float(PACING)?,
+            near_misses: counts[0],
+            cop_slams: counts[1],
+        };
+        self.state.buildup.merge(value)?;
+        self.state.buildup_counts.insert(node, [0; 2]);
+        Ok(())
+    }
     /// Publish a scheduled node's output when its port has a typed cell.
     fn publish_bound(
         &mut self,
@@ -954,6 +1017,25 @@ impl Candidate<'_> {
         let id = target.node;
         let event = target.event;
         match behavior {
+            Behavior::NosBuildup => {
+                use super::buildup::{COP_SLAM, NEAR_MISS};
+                if self.inputs.vehicle.and_then(|v| v.nos).is_some() {
+                    let counts = self
+                        .state
+                        .buildup_counts
+                        .get_mut(&id)
+                        .ok_or(Error::UnknownNode)?;
+                    let slot = match event {
+                        NEAR_MISS => Some(0),
+                        COP_SLAM => Some(1),
+                        _ => None,
+                    };
+                    if let Some(slot) = slot {
+                        counts[slot] = counts[slot].checked_add(1).ok_or(Error::Bound)?;
+                    }
+                }
+                Ok(())
+            }
             Behavior::Scalar(definition) => {
                 // Gates and splitters forward the event they received, so a
                 // contextual event keeps its context through them.

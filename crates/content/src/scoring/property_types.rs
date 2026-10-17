@@ -201,6 +201,20 @@ pub fn compile(object: &Object) -> Result<Option<Declaration>, Error> {
                 .map(|p| (p, Kind::Float)),
             );
         }
+        "RaceVehicleNosBuildupEntityData" => {
+            super::buildup::compile(object)?;
+            d.inputs.extend(
+                [
+                    world::buildup::DRIFTING,
+                    world::buildup::DRAFTING,
+                    world::buildup::ONCOMING,
+                    world::buildup::AIRBORNE,
+                ]
+                .map(|p| (p, Kind::Boolean)),
+            );
+            d.inputs
+                .extend([world::buildup::SPEED, world::buildup::PACING].map(|p| (p, Kind::Float)));
+        }
         "RaceVehicleDonutQueryEntityData" => {
             super::donut::compile(object)?;
         }

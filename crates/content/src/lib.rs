@@ -26,6 +26,7 @@ mod graph;
 mod items;
 mod licenses;
 pub mod logic_events;
+pub mod nitrous;
 pub mod participant_logic;
 pub mod progression;
 mod reputation;

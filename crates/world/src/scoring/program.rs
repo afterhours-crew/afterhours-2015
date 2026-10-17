@@ -97,6 +97,7 @@ pub enum Behavior {
     Stats,
     /// Nitrous query from the owned inputs (E916).
     Nos,
+    NosBuildup,
     /// Doughnut detection from the owned motion (E916).
     Donut(donut::Configuration),
     Collision(collision::Outputs),

@@ -52,6 +52,86 @@ fn inputs() -> Inputs {
     }
 }
 
+#[test]
+fn buildup_uses_ready_inputs_merges_observers_and_consumes_event_counts_once() {
+    use crate::scoring::buildup::*;
+    let mut nodes = vec![node(0, Behavior::NosBuildup), node(1, Behavior::NosBuildup)];
+    for node in &mut nodes {
+        node.defaults = vec![
+            (DRIFTING, Value::Boolean(false)),
+            (DRAFTING, Value::Boolean(false)),
+            (ONCOMING, Value::Boolean(true)),
+            (AIRBORNE, Value::Boolean(false)),
+            (SPEED, Value::Float(10.0)),
+            (PACING, Value::Float(0.25)),
+        ];
+    }
+    nodes.push(node(2, Behavior::Inert));
+    let program = Program {
+        nodes,
+        cells: vec![cell(Kind::Float, &[port(0, SPEED)])],
+        connections: [(100, 0, NEAR_MISS), (101, 1, NEAR_MISS), (102, 1, COP_SLAM)]
+            .into_iter()
+            .map(|(event, node, target)| Connection {
+                source: Endpoint { node: 2, event },
+                target: Endpoint {
+                    node,
+                    event: target,
+                },
+                delivery: Delivery::Local,
+            })
+            .collect(),
+        startup: vec![
+            Step::Default {
+                port: port(0, SPEED),
+                value: Value::Float(20.0),
+                mode: super::super::properties::DefaultMode::Override,
+            },
+            Step::Activate(0),
+            Step::Activate(1),
+        ],
+        unmodeled: vec![],
+    };
+    let mut session = Session::new(Arc::new(program)).unwrap();
+    let mut owned = inputs();
+    owned.vehicle = Some(Vehicle {
+        identity: 1,
+        transform: [[0.0; 3]; 4],
+        velocity: [0.0; 3],
+        angular_velocity: [0.0; 3],
+        airborne: None,
+        state_3c230e35: None,
+        state_cd5ae2f0: None,
+        max_rpm: None,
+        rpm: None,
+        nos: Some(nos::Sample {
+            engaged: false,
+            level: 1.0,
+            capacity: 8.0,
+        }),
+    });
+    let startup = session.start(&owned).unwrap();
+    assert_eq!(startup.buildup.speed, 20.0);
+    assert!(startup.buildup.oncoming);
+    session.event(2, 100, &owned).unwrap();
+    session.event(2, 100, &owned).unwrap();
+    session.event(2, 101, &owned).unwrap();
+    session.event(2, 102, &owned).unwrap();
+    let mut independent = session.clone();
+    let out = session.tick(0.1, &owned).unwrap();
+    assert_eq!(out.buildup.near_misses, 2);
+    assert_eq!(out.buildup.cop_slams, 1);
+    assert_eq!(session.tick(0.1, &owned).unwrap().buildup.near_misses, 0);
+    assert_eq!(
+        independent.tick(0.1, &owned).unwrap().buildup.near_misses,
+        2
+    );
+    let mut absent = owned.clone();
+    absent.vehicle = None;
+    session.event(2, 100, &absent).unwrap();
+    assert_eq!(session.tick(0.1, &owned).unwrap().buildup.near_misses, 0);
+}
+
 /// Float(1) -> Accumulator(2) input; Accumulator output -> SyncedFloat(3);
 /// event 0x100 at root(0) -> Accumulate; Accumulator OnOutputChanged -> Score(4)
 /// Award through context(5) with one keeper.

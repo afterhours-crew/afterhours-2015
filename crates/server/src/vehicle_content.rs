@@ -278,6 +278,10 @@ impl Content {
         let state = nos::State::from_vehicle(items, &self.nos, vehicle).ok()?;
         self.nos.guid_for_variant(state.variant?)
     }
+    pub fn nitrous_setting(&self, items: &Collection, vehicle: u64) -> Option<u8> {
+        let state = nos::State::from_vehicle(items, &self.nos, vehicle).ok()?;
+        state.variant.map(|_| state.setting)
+    }
     pub fn customization(&self, items: &Collection, vehicle: u64) -> Result<Customization, Error> {
         Customization::from_vehicle(items, &self.custom, vehicle)
     }

@@ -56,6 +56,7 @@ pub struct Content {
     road: Option<Arc<nfs_world::scoring::road_network::Network>>,
     /// Item definitions with the stock vehicle figures for the stats provider.
     items: Option<Arc<nfs_world::items::InventoryCatalog>>,
+    nitrous: nfs_content::nitrous::Catalog,
 }
 
 impl Content {
@@ -94,6 +95,7 @@ impl Content {
             bindings,
             road: None,
             items: None,
+            nitrous: Default::default(),
         })
     }
     /// Attach the item definitions (stock vehicle figures).
@@ -103,6 +105,16 @@ impl Content {
     }
     pub fn items(&self) -> Option<&nfs_world::items::InventoryCatalog> {
         self.items.as_deref()
+    }
+    pub fn with_nitrous(mut self, nitrous: nfs_content::nitrous::Catalog) -> Self {
+        self.nitrous = nitrous;
+        self
+    }
+    pub fn nitrous(
+        &self,
+        guid: &nfs_world::items::Guid,
+    ) -> Option<Arc<nfs_world::nitrous_fuel::Configuration>> {
+        self.nitrous.get(guid).cloned()
     }
     /// Attach the installed road network.
     pub fn with_road(mut self, road: Arc<nfs_world::scoring::road_network::Network>) -> Self {

@@ -497,19 +497,34 @@ figures (current top speed and 0-60 time) and the item definition's defaults
 (stock figures); without the item catalog, the inventory or a car item it
 publishes nothing. The airborne flag is a free-fall detector: the vertical velocity of the
 chassis reports, timed by the chassis clock, falling at about gravity over
-the last tenth of a second for two successive estimates (the replicated
+the last tenth of a second for four successive estimates and at least 3 m/s
+lost vertical speed (the replicated
 chassis carries no wheel-contact flag; E916, E919). Every report with a
 notable vertical speed is logged (`free-fall sample`), every Boolean
 synchronized change is logged (`scoring flag`), and `NFS_SCORING_TRACE` in
 the server's environment logs every synchronized change for comparisons
-with the official stream. The nitrous measurement comes from the owned fuel
-(`nfs_world::nitrous_fuel`, E920): the engage/release handshake the client
-already sends selects the mode, the host burns the tank while engaged (4, 6
-or 8 s from full for the 5, 10 and 15 lb tiers, read from the installed
-item's buy price), ends the burn when empty, refuses to engage an empty
-tank and refills a released tank in 30 s; the replicated level follows. The
-burn and refill figures are a hypothesis until an official comparison; the
-query receives the engaged state, the remaining share and the tier's lb. The proximity filter counts the other cars inside
+with the official stream. The airborne estimate has not yet detected the
+recorded jump and is not accepted as an airtime implementation.
+
+The nitrous measurement comes from per-car fuel (`nfs_world::nitrous_fuel`).
+The installed item selects its actual upgrade configuration and buildup
+configuration through asset references. Capacity, flow and recharge curves,
+action boosts and speed thresholds come from that configuration; the persisted
+handling setting scales consumption. Vehicle curves expand eight normalized
+knots into physical coordinates and interpolate linearly, independently of the
+scoring graph's curve evaluator. Fuel consumption integrates the start and end
+flow over each bounded update. Empty tanks remain engaged until a release
+request; the existing handshake still acknowledges mode only, leaving the
+client's predicted gauge alone.
+
+The installed buildup observer supplies drift, draft, wrong-way, airborne,
+speed, pacing and discrete near-miss/cop-slam counts. Multiple observers merge
+by OR/maximum; released fuel consumes and clears the aggregate. Start/release
+snapshots reach the nitrous query in order even between scheduler passes.
+This implementation passes installed-configuration reference comparisons and
+constructed graph tests. Client timestamp compensation and fuel spent during
+a tap contained within one scheduler interval still need completion; gauge
+timing and nitrous REP require a live check. The proximity filter counts the other cars inside
 its bound radius, the doughnut query accumulates yaw while the car slides
 sideways inside its speed window and fires on every full turn, and the
 Boolean participant-property accessor publishes its authored value once (no
@@ -576,6 +591,8 @@ cannot be refreshed the spawn-time collection is kept and the next garage load
 reads the committed one. The return also forwards the content its staged
 garage car needs instead of refusing the frame (run e911q: a tuned car with
 unlock grants from two credits had every return frame refused as unsupported). Speeding, wrong way, slipstream, speed match, drift train, airtime,
-doughnuts, acceleration and continuous max speed now have inputs; their live
-validation and the nitrous input are outstanding. A level-up's unlocks reach
+doughnuts, acceleration and continuous max speed now have inputs. Live runs
+have credited speed, style, outlaw, build and doughnuts. Airtime, nitrous and
+popup stacking remain under validation; crew and police-dependent scoring
+are tracked separately. A level-up's unlocks reach
 the client during the session; see [GARAGE-UPGRADES](GARAGE-UPGRADES.md).

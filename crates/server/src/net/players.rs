@@ -2038,7 +2038,8 @@ impl Listener for PlayerListener {
         self.scoring_state.reports.extend(scoring_reports);
         for (car, active) in nitrous_requests {
             if let Some(nitrous) = self.scoring_state.nitrous.get_mut(&car) {
-                nitrous.fuel.request(active);
+                nitrous.request(active);
+                self.scoring_state.reported.insert(car);
             }
         }
         if !records.is_empty() {
