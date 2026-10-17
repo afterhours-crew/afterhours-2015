@@ -22,7 +22,7 @@ pub const DISENGAGED: u32 = 0x970b_3e90;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Sample {
     pub engaged: bool,
-    /// Current nitrous level in the capacity's unit.
+    /// Current nitrous fraction; capacity supplies its physical unit separately.
     pub level: f32,
     pub capacity: f32,
 }

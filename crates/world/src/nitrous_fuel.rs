@@ -163,6 +163,34 @@ impl Fuel {
             self.elapsed = 0.0;
         }
     }
+    /// Snapshot the transition before its timestamp compensation, as the
+    /// component observers do. A late engage burns the missed interval; a
+    /// late release refunds it after sampling. Repeats do not reapply either.
+    pub fn request_late(&mut self, engaged: bool, late: f32) -> Result<Option<f32>, Error> {
+        if !(0.0..=0.5).contains(&finite(late)?) {
+            return Err(Error::Bound);
+        }
+        if self.engaged == engaged {
+            return Ok(None);
+        }
+        let level = self.fraction();
+        let amount = if engaged {
+            (self.amount - self.consumption(0.0, late, late)?.max(0.0)).max(0.0)
+        } else {
+            finite(self.amount + self.consumption(self.elapsed - late, self.elapsed, late)?)?
+                .clamp(0.0, self.capacity())
+        };
+        self.amount = amount;
+        self.elapsed = if engaged { late } else { 0.0 };
+        self.engaged = engaged;
+        Ok(Some(level))
+    }
+    fn consumption(&self, start: f32, end: f32, seconds: f32) -> Result<f32, Error> {
+        let start_rate = self.config.flow.evaluate(start)?;
+        let end_rate = self.config.flow.evaluate(end)?;
+        let scale = (10.0 - f32::from(self.setting)) * 0.1 + 0.5;
+        finite((start_rate + end_rate) * 0.5 * seconds * scale)
+    }
     /// One bounded engine step. Failed evaluation leaves all state unchanged.
     /// This does not publish network corrections or choose scoring thresholds.
     pub fn tick(&mut self, seconds: f32, input: Buildup) -> Result<(), Error> {
@@ -320,5 +348,23 @@ mod tests {
                 .is_err()
         );
         assert_eq!(merged, before);
+    }
+
+    #[test]
+    fn delayed_transitions_sample_before_correction_and_repeats_are_idempotent() {
+        let mut fuel = Fuel::full(config(), 5).unwrap();
+        assert_eq!(fuel.request_late(true, 0.5).unwrap(), Some(1.0));
+        assert_eq!(fuel.amount, 7.75);
+        fuel.tick(0.5, Buildup::default()).unwrap();
+        assert_eq!(fuel.amount, 7.0);
+        assert_eq!(fuel.request_late(false, 0.25).unwrap(), Some(7.0 / 8.0));
+        // Flow is 2*t: refund the trapezoid from t=.75 to 1, after sampling.
+        assert_eq!(fuel.amount, 7.4375);
+        let before = fuel.clone();
+        assert_eq!(fuel.request_late(false, 0.25).unwrap(), None);
+        assert_eq!(fuel, before);
+        assert!(fuel.request_late(true, f32::NAN).is_err());
+        assert!(fuel.request_late(true, 0.51).is_err());
+        assert_eq!(fuel, before);
     }
 }

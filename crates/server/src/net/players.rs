@@ -926,8 +926,9 @@ impl Listener for PlayerListener {
         let mut vehicle_reports = self.vehicle_reports.clone();
         let mut scoring_reported = BTreeSet::new();
         let mut scoring_reports = Vec::new();
-        // Nitrous engage/release requests, applied to the owned fuel on commit.
-        let mut nitrous_requests: Vec<(u16, bool)> = Vec::new();
+        // Fuel, clock anchors and transition snapshots commit with this frame.
+        let mut nitrous = self.scoring_state.nitrous.clone();
+        let mut nitrous_reported = BTreeSet::new();
         let mut trigger_volumes = self.trigger_volumes.clone();
         let mut world_activation = self.world_activation.clone();
         if let Some(movement) = &parsed.movement {
@@ -942,6 +943,21 @@ impl Listener for PlayerListener {
             ) {
                 Ok(reports) if !reports.is_empty() => {
                     scoring_reported.extend(reports.iter().map(|r| r.id));
+                    for report in &reports {
+                        if let Some(fuel) = nitrous.get_mut(&report.id)
+                            && let Ok(physics) = players.vehicle_physics(
+                                HOST_SELECTOR as u8,
+                                self.persona,
+                                report.id,
+                            )
+                        {
+                            let [high, low, _] = physics.identity_words;
+                            fuel.observe_clock(
+                                f64::from_bits((u64::from(high) << 32) | u64::from(low)),
+                                self.world_ms,
+                            );
+                        }
+                    }
                     movement_section = Some(Section {
                         float_bits: None,
                         flag: false,
@@ -1200,7 +1216,15 @@ impl Listener for PlayerListener {
                         "owned nitrous transition"
                     );
                     records.extend(report.record);
-                    nitrous_requests.push((report.vehicle, report.active));
+                    if let Some(fuel) = nitrous.get_mut(&report.vehicle) {
+                        if fuel
+                            .request(report.active, report.client_seconds, self.world_ms)
+                            .is_err()
+                        {
+                            return self.refuse_rpc(replication::Error::Bound, body);
+                        }
+                        nitrous_reported.insert(report.vehicle);
+                    }
                     continue;
                 }
                 Ok(None) => {}
@@ -2036,12 +2060,8 @@ impl Listener for PlayerListener {
         self.unsupported_logic += unsupported_logic;
         self.scoring_state.reported.extend(scoring_reported);
         self.scoring_state.reports.extend(scoring_reports);
-        for (car, active) in nitrous_requests {
-            if let Some(nitrous) = self.scoring_state.nitrous.get_mut(&car) {
-                nitrous.request(active);
-                self.scoring_state.reported.insert(car);
-            }
-        }
+        self.scoring_state.nitrous = nitrous;
+        self.scoring_state.reported.extend(nitrous_reported);
         if !records.is_empty() {
             self.pending.push_back(Section {
                 float_bits: None,

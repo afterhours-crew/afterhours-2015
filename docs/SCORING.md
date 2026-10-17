@@ -522,9 +522,13 @@ speed, pacing and discrete near-miss/cop-slam counts. Multiple observers merge
 by OR/maximum; released fuel consumes and clears the aggregate. Start/release
 snapshots reach the nitrous query in order even between scheduler passes.
 This implementation passes installed-configuration reference comparisons and
-constructed graph tests. Client timestamp compensation and fuel spent during
-a tap contained within one scheduler interval still need completion; gauge
-timing and nitrous REP require a live check. The proximity filter counts the other cars inside
+constructed graph tests. Fuel advances to each request's arrival before its
+snapshot is taken. Timestamp compensation uses a recent accepted movement
+clock from that same car: a late engage burns the missed interval and a late
+release refunds it after sampling. Correction is bounded to half a second;
+missing or stale anchors use arrival timing alone. Repeats are idempotent and
+queue overflow rejects the candidate frame atomically. Gauge timing and
+nitrous REP still require a live check. The proximity filter counts the other cars inside
 its bound radius, the doughnut query accumulates yaw while the car slides
 sideways inside its speed window and fires on every full turn, and the
 Boolean participant-property accessor publishes its authored value once (no

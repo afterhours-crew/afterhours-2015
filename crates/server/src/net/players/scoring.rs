@@ -124,6 +124,8 @@ pub(in crate::net) struct Nitrous {
     pub fuel: Fuel,
     pub buildup: Buildup,
     pub transitions: VecDeque<NitrousSample>,
+    pub last_ms: f64,
+    pub clock: Option<(f64, u64)>,
 }
 impl Nitrous {
     pub fn sample(&self) -> NitrousSample {
@@ -133,11 +135,75 @@ impl Nitrous {
             capacity: self.fuel.capacity(),
         }
     }
-    pub fn request(&mut self, active: bool) {
-        if active != self.fuel.engaged() && self.transitions.len() < MAX_QUEUED_REPORTS {
-            self.fuel.request(active);
-            self.transitions.push_back(self.sample());
+    pub fn observe_clock(&mut self, clock: f64, now_ms: u64) {
+        if clock.is_finite() && clock >= 0.0 {
+            self.clock = Some((clock, now_ms));
         }
+    }
+    pub fn advance_to(&mut self, now_ms: f64) -> Result<(), nfs_world::scoring::Error> {
+        if !now_ms.is_finite() {
+            return Err(nfs_world::scoring::Error::NonFinite);
+        }
+        if now_ms <= self.last_ms {
+            return Ok(());
+        }
+        let mut remaining =
+            ((now_ms - self.last_ms) / 1000.0).min(f64::from(MAX_TICK_SECONDS)) as f32;
+        let mut fuel = self.fuel.clone();
+        let mut buildup = self.buildup;
+        while remaining > 0.0 {
+            let step = remaining.min(TICK_SECONDS);
+            fuel.tick(step, buildup)?;
+            if !fuel.engaged() {
+                buildup.near_misses = 0;
+                buildup.cop_slams = 0;
+            }
+            remaining -= step;
+        }
+        self.fuel = fuel;
+        self.last_ms = now_ms;
+        if !self.fuel.engaged() {
+            self.buildup = Buildup::default();
+        }
+        Ok(())
+    }
+    pub fn request(
+        &mut self,
+        active: bool,
+        client_seconds: f32,
+        now_ms: u64,
+    ) -> Result<(), nfs_world::scoring::Error> {
+        if !client_seconds.is_finite() || client_seconds < 0.0 {
+            return Err(nfs_world::scoring::Error::Bound);
+        }
+        if active == self.fuel.engaged() {
+            return Ok(());
+        }
+        if self.transitions.len() >= MAX_QUEUED_REPORTS {
+            return Err(nfs_world::scoring::Error::Bound);
+        }
+        let mut next = self.clone();
+        next.advance_to(now_ms as f64)?;
+        // Anchor the game clock to this car's last accepted chassis report.
+        // An old/missing anchor uses arrival time only. Compensation is bounded
+        // independently of arbitrary finite timestamps in a client request.
+        let late = next
+            .clock
+            .filter(|&(_, at)| now_ms >= at && now_ms - at <= 500)
+            .map(|(clock, at)| {
+                ((clock + (now_ms - at) as f64 / 1000.0) as f32 - client_seconds)
+                    .clamp(0.0, MAX_TICK_SECONDS)
+            })
+            .unwrap_or(0.0);
+        if let Some(level) = next.fuel.request_late(active, late)? {
+            next.transitions.push_back(NitrousSample {
+                engaged: active,
+                level,
+                capacity: next.fuel.capacity(),
+            });
+        }
+        *self = next;
+        Ok(())
     }
 }
 
@@ -197,8 +263,7 @@ mod flush_tests {
 mod nitrous_tests {
     use super::*;
     use nfs_world::nitrous_fuel::{Boosts, Configuration, Curve};
-    #[test]
-    fn brief_taps_and_repeated_requests_preserve_transition_order() {
+    fn tank() -> Nitrous {
         let config = Arc::new(
             Configuration::new(
                 8.0,
@@ -208,23 +273,28 @@ mod nitrous_tests {
             )
             .unwrap(),
         );
-        let mut n = Nitrous {
+        Nitrous {
             fuel: Fuel::full(config, 5).unwrap(),
             buildup: Buildup::default(),
             transitions: VecDeque::new(),
-        };
-        n.request(true);
-        n.request(true);
-        n.fuel.tick(0.5, Buildup::default()).unwrap();
-        n.request(false);
-        n.request(false);
+            last_ms: 0.0,
+            clock: None,
+        }
+    }
+    #[test]
+    fn brief_taps_and_repeated_requests_preserve_transition_order() {
+        let mut n = tank();
+        n.request(true, 0.0, 0).unwrap();
+        n.request(true, 0.0, 0).unwrap();
+        n.request(false, 0.5, 500).unwrap();
+        n.request(false, 0.5, 500).unwrap();
         assert_eq!(n.transitions.len(), 2);
         let start = n.transitions.pop_front().unwrap();
         let stop = n.transitions.pop_front().unwrap();
         assert!(start.engaged);
         assert!(!stop.engaged);
         assert_eq!(start.level, 1.0);
-        assert_eq!(stop.level, 7.5 / 8.0);
+        assert!((stop.level - 7.5 / 8.0).abs() < 1e-6);
         let mut query = nfs_world::scoring::nos::Node::default();
         assert!(
             query
@@ -242,6 +312,38 @@ mod nitrous_tests {
                     nfs_world::scoring::nos::DISENGAGED
                 ))
         );
+    }
+
+    #[test]
+    fn same_batch_tap_uses_client_clock_and_samples_before_refund() {
+        let mut n = tank();
+        n.observe_clock(10.5, 500);
+        n.request(true, 10.25, 500).unwrap();
+        n.request(false, 10.375, 500).unwrap();
+        assert_eq!(n.transitions.len(), 2);
+        assert_eq!(n.transitions[0].level, 1.0);
+        assert_eq!(n.transitions[1].level, 7.75 / 8.0);
+        assert_eq!(n.fuel.fraction(), 7.875 / 8.0);
+        let before = n.clone();
+        n.advance_to(400.0).unwrap();
+        n.advance_to(500.0).unwrap();
+        assert_eq!(n, before, "scheduler must not burn the interval again");
+    }
+
+    #[test]
+    fn missing_clock_counts_arrival_time_and_overflow_preserves_state() {
+        let mut n = tank();
+        n.request(true, 100.0, 100).unwrap();
+        n.request(false, 100.1, 200).unwrap();
+        assert!((n.transitions[1].level - 7.9 / 8.0).abs() < 1e-6);
+        for i in 2..MAX_QUEUED_REPORTS {
+            n.request(i % 2 == 0, 100.1, 200).unwrap();
+        }
+        let before = n.clone();
+        assert!(n.request(true, 100.2, 300).is_err());
+        assert_eq!(n, before);
+        assert!(n.request(true, f32::NAN, 300).is_err());
+        assert_eq!(n, before);
     }
 }
 
@@ -733,6 +835,8 @@ impl PlayerListener {
                     fuel,
                     buildup: Buildup::default(),
                     transitions: VecDeque::new(),
+                    last_ms: now_ms as f64,
+                    clock: None,
                 },
             );
         }
@@ -1021,14 +1125,8 @@ impl PlayerListener {
                 remaining -= step;
                 inputs.now = start + f64::from(covered - remaining);
                 if let Some(nitrous) = state.nitrous.get_mut(&car) {
-                    let buildup = if nitrous.fuel.engaged() {
-                        nitrous.buildup
-                    } else {
-                        std::mem::take(&mut nitrous.buildup)
-                    };
                     nitrous
-                        .fuel
-                        .tick(step, buildup)
+                        .advance_to(inputs.now * 1000.0)
                         .map_err(fail("nitrous fuel"))?;
                     if let Some(vehicle) = inputs.vehicle.as_mut() {
                         vehicle.nos = Some(nitrous.sample());
