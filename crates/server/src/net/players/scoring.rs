@@ -81,6 +81,9 @@ pub(in crate::net) struct AwardRequest {
     /// without a second mutation.
     pub batch_id: u64,
     pub thresholds: nfs_services::reputation::Thresholds,
+    /// The participant's runtime player index, the context of the inventory
+    /// notifications that announce the credit's unlocks.
+    pub player_index: Option<u32>,
 }
 
 /// A committed credit: the refreshed account view and item collection.
@@ -89,6 +92,11 @@ pub(in crate::net) struct Credited {
     pub loaded: Arc<crate::persistent::Loaded>,
     pub items: Arc<nfs_world::items::Collection>,
     pub replayed: bool,
+    /// Encoded Items notifications for what the credit changed, in order.
+    pub notifications: Vec<Vec<u8>>,
+    /// Changed roots no notification describes; the client sees them at the
+    /// next inventory load.
+    pub unannounced: usize,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1142,6 +1150,9 @@ impl PlayerListener {
                 credit,
                 batch_id,
                 thresholds,
+                player_index: players
+                    .runtime_index(HOST_SELECTOR as u8, self.persona, participant)
+                    .map(u32::from),
             });
         }
         if collected.replies.len()

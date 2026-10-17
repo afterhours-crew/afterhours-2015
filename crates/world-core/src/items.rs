@@ -20,7 +20,7 @@ pub use inventory::{
     Definition, DefinitionFlags, InitialInventory, InventoryCatalog, OwnershipLevel,
 };
 pub use purchase::{PurchaseReply, PurchaseRequest, PurchaseSelection};
-pub use update::UpdateNotification;
+pub use update::{ChangeNotification, UpdateNotification};
 
 /// Owned and Purchasable construction paths, respectively.
 pub const OWNED: u8 = 2;
@@ -256,7 +256,51 @@ impl Envelope {
     }
 }
 
+/// What a later collection adds to or changes in an earlier one, by root,
+/// in the later collection's root order.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Changes {
+    /// Roots whose records did not exist before.
+    pub added: Vec<u64>,
+    /// Roots that existed before whose reachable records now differ.
+    pub changed: Vec<u64>,
+    /// Earlier roots whose records no longer exist.
+    pub removed: Vec<u64>,
+}
+
 impl Collection {
+    /// Compare with an earlier state of the same inventory. A root is added
+    /// when its record is new, changed when it or any record it reaches
+    /// differs from before. Bounded like [`Self::for_roots`].
+    pub fn changes_since(&self, before: &Self) -> Result<Changes, Error> {
+        let mut changes = Changes::default();
+        if self == before {
+            return Ok(changes);
+        }
+        for &root in &self.roots {
+            if !before.items.contains_key(&root) {
+                changes.added.push(root);
+                continue;
+            }
+            let reached = self.for_roots(vec![root])?;
+            if reached
+                .items
+                .iter()
+                .any(|(id, item)| before.items.get(id) != Some(item))
+                || reached.items.len() != before.for_roots(vec![root])?.items.len()
+            {
+                changes.changed.push(root);
+            }
+        }
+        changes.removed = before
+            .roots
+            .iter()
+            .copied()
+            .filter(|id| !self.items.contains_key(id))
+            .collect();
+        Ok(changes)
+    }
+
     /// Select complete reachable records for a notification, preserving root order.
     /// Encoding still validates cycles, definitions and all graph resource bounds.
     pub fn for_roots(&self, roots: Vec<u64>) -> Result<Self, Error> {

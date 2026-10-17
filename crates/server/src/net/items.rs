@@ -10,13 +10,53 @@ use nfs_world::{
     items::InventoryCatalog,
     session::{Event, Host},
 };
-use std::{sync::Arc, time::Duration};
+use std::{collections::VecDeque, sync::Arc, time::Duration};
 use tokio::{sync::Semaphore, task::JoinSet, time::timeout};
 use tracing::{info, warn};
 
 const WORKERS: usize = 4;
 const JOB_TIMEOUT: Duration = Duration::from_secs(5);
 const EXCHANGE_MS: u64 = 60_000;
+/// Separate notifications per kind and credit; more changes share them.
+const MAX_SEPARATE: usize = 16;
+
+/// Notifications for what a committed credit changed, in the official order
+/// (E926): every new record in its own change notification (one per part a
+/// level-up unlocked), then every changed root (the category unlock
+/// controller) in its own update notification. Also returns the changed
+/// roots no notification describes: removals, which a credit never makes,
+/// and updates beyond the bound.
+fn credit_notifications(
+    player_index: u32,
+    before: &nfs_world::items::Collection,
+    after: &nfs_world::items::Collection,
+    catalog: &nfs_world::items::Catalog,
+) -> Result<(Vec<Vec<u8>>, usize), nfs_world::items::Error> {
+    let changes = after.changes_since(before)?;
+    let mut notifications = Vec::new();
+    let per = changes.added.len().div_ceil(MAX_SEPARATE).max(1);
+    for roots in changes.added.chunks(per) {
+        notifications.push(
+            nfs_world::items::ChangeNotification {
+                player_index,
+                added: after.for_roots(roots.to_vec())?,
+                removed: Default::default(),
+            }
+            .encode(catalog)?,
+        );
+    }
+    for &root in changes.changed.iter().take(MAX_SEPARATE) {
+        notifications.push(
+            nfs_world::items::UpdateNotification {
+                player_index,
+                items: after.for_roots(vec![root])?,
+            }
+            .encode(catalog)?,
+        );
+    }
+    let unannounced = changes.removed.len() + changes.changed.len().saturating_sub(MAX_SEPARATE);
+    Ok((notifications, unannounced))
+}
 
 #[derive(Clone)]
 pub struct Service {
@@ -399,6 +439,7 @@ impl Profile {
         let credit = request.credit;
         let batch_id = request.batch_id;
         let thresholds = request.thresholds.clone();
+        let player_index = request.player_index;
         timeout(JOB_TIMEOUT, async move {
             let permit = service
                 .workers
@@ -426,6 +467,8 @@ impl Profile {
                         .as_ref()
                         .and_then(|offers| offers.item_unlocks()),
                 };
+                let before = inventory::collection(&snapshot, service.catalog.bindings())
+                    .map_err(Error::Inventory)?;
                 let batch = policy
                     .prepare(&snapshot, credit, batch_id)
                     .map_err(Error::Inventory)?;
@@ -442,10 +485,20 @@ impl Profile {
                     .map_err(|e| Error::Inventory(e.into()))?;
                 let items = inventory::collection(&snapshot, service.catalog.bindings())
                     .map_err(Error::Inventory)?;
+                // The commit stands whatever happens here; an unannounced
+                // change still reaches the client at its next load.
+                let (notifications, unannounced) = player_index
+                    .and_then(|index| {
+                        credit_notifications(index, &before, &items, service.catalog.bindings())
+                            .ok()
+                    })
+                    .unwrap_or_else(|| (Vec::new(), usize::from(before != items)));
                 Ok(Credited {
                     loaded: Arc::new(loaded),
                     items: Arc::new(items),
                     replayed: applied.replayed,
+                    notifications,
+                    unannounced,
                 })
             })
             .await
@@ -580,6 +633,8 @@ pub(super) struct Exchanges {
     awards: JoinSet<(AwardRequest, Result<Credited, Error>)>,
     pending: [Option<Completed>; 2],
     started: [Option<u64>; 2],
+    /// Unsolicited notifications awaiting the request handler, in order.
+    notifications: VecDeque<Completed>,
     connection: u32,
     unsupported: crate::diagnostics::Unsupported<UnsupportedRoute>,
 }
@@ -592,6 +647,7 @@ impl Exchanges {
             awards: JoinSet::new(),
             pending: [None, None],
             started: [None, None],
+            notifications: VecDeque::new(),
             connection,
             unsupported: crate::diagnostics::Unsupported::new("world-file", connection),
         }
@@ -603,6 +659,7 @@ impl Exchanges {
         if self.working()
             || self.pending.iter().any(Option::is_some)
             || self.started.iter().any(Option::is_some)
+            || !self.notifications.is_empty()
         {
             return;
         }
@@ -696,18 +753,45 @@ impl Exchanges {
                 return false;
             };
             return match result {
-                Ok(credited) => match listener.awarded(&request, credited) {
-                    Ok(()) => true,
-                    Err(error) => {
-                        warn!(
-                            connection = self.connection,
-                            ?error,
-                            batch_id = request.batch_id,
-                            "reputation credit snapshot rejected"
-                        );
-                        false
+                Ok(mut credited) => {
+                    let notifications = std::mem::take(&mut credited.notifications);
+                    let unannounced = credited.unannounced;
+                    match listener.awarded(&request, credited) {
+                        Ok(()) => {
+                            if unannounced > 0 {
+                                warn!(
+                                    connection = self.connection,
+                                    batch_id = request.batch_id,
+                                    unannounced,
+                                    "credited inventory changes left for the next load"
+                                );
+                            }
+                            if !notifications.is_empty() {
+                                info!(
+                                    connection = self.connection,
+                                    batch_id = request.batch_id,
+                                    count = notifications.len(),
+                                    "credited inventory changes queued"
+                                );
+                            }
+                            self.notifications
+                                .extend(notifications.into_iter().map(|bytes| Completed {
+                                    name: b"Items".to_vec(),
+                                    bytes,
+                                }));
+                            true
+                        }
+                        Err(error) => {
+                            warn!(
+                                connection = self.connection,
+                                ?error,
+                                batch_id = request.batch_id,
+                                "reputation credit snapshot rejected"
+                            );
+                            false
+                        }
                     }
-                },
+                }
                 Err(error) => {
                     warn!(
                         connection = self.connection,
@@ -829,6 +913,14 @@ impl Exchanges {
             }
         }
     }
+    /// Unsolicited notifications use the request handler one at a time, each
+    /// after the previous transfer completed (E926: an official level-up sent
+    /// its notifications about 0.3 s apart).
+    fn promote(&mut self) {
+        if self.pending[0].is_none() && self.started[0].is_none() {
+            self.pending[0] = self.notifications.pop_front();
+        }
+    }
     pub(super) fn advance(&mut self, host: &mut Host, events: &[Event], now: u64) -> bool {
         for event in events {
             match event {
@@ -837,6 +929,7 @@ impl Exchanges {
                 _ => {}
             }
         }
+        self.promote();
         for index in 0..2 {
             if self.started[index].is_some_and(|start| now.saturating_sub(start) >= EXCHANGE_MS) {
                 warn!(

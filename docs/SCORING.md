@@ -577,4 +577,5 @@ reads the committed one. The return also forwards the content its staged
 garage car needs instead of refusing the frame (run e911q: a tuned car with
 unlock grants from two credits had every return frame refused as unsupported). Speeding, wrong way, slipstream, speed match, drift train, airtime,
 doughnuts, acceleration and continuous max speed now have inputs; their live
-validation, the nitrous input and the unlock check are outstanding.
+validation and the nitrous input are outstanding. A level-up's unlocks reach
+the client during the session; see [GARAGE-UPGRADES](GARAGE-UPGRADES.md).

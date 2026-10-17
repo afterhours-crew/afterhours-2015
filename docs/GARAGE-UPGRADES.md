@@ -338,6 +338,23 @@ promotion when refreshing the live inventory. The follow-up purchased and equipp
 SC-V2 for 10,900, retained the remaining 82,330 balance and existing appearance,
 then passed free roam, garage return and a full game/server restart. The restarted
 garage retained SC-V2, the balance and saved dyno values; see [issue #63][rep-item-issue].
+
+The client loads Items once per session, so a level-up's grants are announced
+when the credit commits. The server compares the account's item collection
+before and after the credit and sends, one transfer at a time on the Items
+handler, a change notification per new record (sequence 1: a state byte, the
+runtime player index, then the added and the removed collections), followed by
+an update notification per changed root (the category unlock controller). The
+client builds the added records as new items and inserts them into its live
+inventory (receiver `0x14406f9e0`, insert `0x14407d0c0`, erase `0x14408ae70`
+in the supported build). An official host sent the same notifications at a
+level-up, one record each about 0.3 s apart, and both codecs reproduce those
+bytes exactly. Live, a level-up to 3 made both level-3 tire compositions
+buyable in the garage without a restart, and one was bought and fitted. Buying
+promotes the offer; the next credit or load creates a fresh offer for the same
+part and announces it, as the official host did straight after a purchase.
+Removals are never announced, and an official level-up also granted an owned
+decal pack that the installed unlock branches do not describe.
 Formatting, workspace Clippy and all 1,216 tests
 pass, including a regression for the live inventory refresh and bank notification.
 
