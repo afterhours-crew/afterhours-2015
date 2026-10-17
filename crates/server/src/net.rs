@@ -937,6 +937,7 @@ pub async fn world_host(
             warn!(connection, ?error, "world car settlement rejected");
             return;
         }
+        listener.session_backlog = host.replication_progress().1;
         if let Err(error) = listener.advance_scoring(now_ms()) {
             // Scoring is best effort: a fault disables it for this session
             // and never closes the world host.
@@ -1101,6 +1102,11 @@ pub async fn world_host(
                         connection,
                         notifications = before.len(),
                         records = section.records.len(),
+                        deleted = section.deleted.len(),
+                        calls = ?before
+                            .iter()
+                            .map(players::describe_host_rpc)
+                            .collect::<Vec<_>>(),
                         "owned entry notifications and replication queued together"
                     );
                     listener.pending_entries.pop_front();

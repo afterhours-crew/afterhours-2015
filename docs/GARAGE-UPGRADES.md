@@ -448,7 +448,10 @@ if ($LASTEXITCODE -ne 0) { throw 'REP adjustment failed; inspect before retrying
 
 Restart to load the new score. The JSON report shows the old/new score, level
 and generation. `--set-level 1` with a freshly inspected generation resets REP
-to the first level threshold. On inventory load, authored REP rules add eligible
+to the first level threshold. `--set-score <total>` (instead of `--set-level`)
+stores an exact total and derives the level from the installed thresholds, for
+example a total a few thousand points under the next threshold so a live
+drive reaches the next level. On inventory load, authored REP rules add eligible
 visual-category unlocks to the account's category controller. Existing unlocks
 remain unlocked if REP is later lowered. Restore the stopped account backup to
 recover the earlier category state and exact score within its level. A stale generation fails without

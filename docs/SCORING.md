@@ -495,11 +495,21 @@ the world's vehicle objects with decodable chassis physics (traffic is
 client-side and absent). The stats provider publishes the car item's dyno
 figures (current top speed and 0-60 time) and the item definition's defaults
 (stock figures); without the item catalog, the inventory or a car item it
-publishes nothing. The airborne flag is a free-fall detector: three consecutive
-chassis reports whose vertical velocity fell at about gravity (the replicated
-chassis carries no wheel-contact flag; E916). The nitrous measurement is still
-absent, so the nitrous query stays silent until the control field that
-carries it is identified. The proximity filter counts the other cars inside
+publishes nothing. The airborne flag is a free-fall detector: the vertical velocity of the
+chassis reports, timed by the chassis clock, falling at about gravity over
+the last tenth of a second for two successive estimates (the replicated
+chassis carries no wheel-contact flag; E916, E919). Every report with a
+notable vertical speed is logged (`free-fall sample`), every Boolean
+synchronized change is logged (`scoring flag`), and `NFS_SCORING_TRACE` in
+the server's environment logs every synchronized change for comparisons
+with the official stream. The nitrous measurement comes from the owned fuel
+(`nfs_world::nitrous_fuel`, E920): the engage/release handshake the client
+already sends selects the mode, the host burns the tank while engaged (4, 6
+or 8 s from full for the 5, 10 and 15 lb tiers, read from the installed
+item's buy price), ends the burn when empty, refuses to engage an empty
+tank and refills a released tank in 30 s; the replicated level follows. The
+burn and refill figures are a hypothesis until an official comparison; the
+query receives the engaged state, the remaining share and the tier's lb. The proximity filter counts the other cars inside
 its bound radius, the doughnut query accumulates yaw while the car slides
 sideways inside its speed window and fires on every full turn, and the
 Boolean participant-property accessor publishes its authored value once (no
@@ -512,7 +522,12 @@ fire once per step as they do in the client's fixed update; the step clock
 advances with each step. Dirty synchronized values are applied to the world
 immediately and coalesced per entity; one packed section carries them at most
 every 100 ms and only when the send queue has room, so scoring never starves
-the driving traffic. Collision query controls become host calls on the entity
+the driving traffic. A periodic flush also waits while the world session
+still holds queued sections, so at most one scoring section is in flight
+and later changes keep merging per entity (E923: flushing whenever the
+listener's own queue was empty kept the session's 32-entry queue at 31 all
+session; every later section, garage-return events included, waited about
+2.6 s while the client answered each one within 17 ms once it arrived). Collision query controls become host calls on the entity
 serializer, and near-miss, accumulated-collision and collision reports are
 decoded against the created serializers and delivered to their query nodes.
 Leaving free roam fires the root disable event, which banks every category,

@@ -23,6 +23,7 @@ impl PlayerListener {
         }
         self.advance_binding_refreshes(world_ms)?;
         self.advance_world_activation()?;
+        self.advance_returns(world_ms);
         if let Some(returns) = &mut self.returns {
             let capacity =
                 nfs_world::session::MAX_RPC_QUEUE.saturating_sub(self.pending_rpcs.len());
@@ -329,13 +330,32 @@ impl PlayerListener {
         participant: u16,
         logic_ghosts: &mut BTreeMap<u16, BTreeMap<u16, u16>>,
     ) -> Result<crate::garage_logic::Output, replication::Error> {
+        Self::arrive_logic_part(
+            logic,
+            which,
+            players,
+            participant,
+            logic_ghosts,
+            crate::garage_logic::Part::All,
+        )
+    }
+    /// One part of an arrive point's batch (the garage return is staged).
+    pub(super) fn arrive_logic_part(
+        logic: Option<&crate::garage_logic::GarageLogic>,
+        which: crate::garage_logic::Which,
+        players: &mut Players,
+        participant: u16,
+        logic_ghosts: &mut BTreeMap<u16, BTreeMap<u16, u16>>,
+        part: crate::garage_logic::Part,
+    ) -> Result<crate::garage_logic::Output, replication::Error> {
         match logic.filter(|l| l.has(which)) {
             None => Ok(crate::garage_logic::Output::default()),
-            Some(logic) => logic.produce(
+            Some(logic) => logic.produce_part(
                 which,
                 players,
                 participant,
                 logic_ghosts.entry(participant).or_default(),
+                part,
             ),
         }
     }

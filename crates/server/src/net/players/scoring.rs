@@ -15,6 +15,8 @@
 use super::*;
 use crate::scoring::{Content, TIME_SCALE, Which};
 use nfs_world::items::Derived;
+use nfs_world::nitrous_fuel::{Change, Fuel, Kind as NitrousKind, Tier};
+use nfs_world::scoring::nos::Sample as NitrousSample;
 use nfs_world::{
     logic::{EntityRef, Fire},
     participants::HostRpc,
@@ -104,40 +106,81 @@ pub(super) struct State {
     pub last_flush_ms: u64,
     /// Per-car free-fall detectors for the owned airborne measurement.
     pub free_fall: BTreeMap<u16, FreeFall>,
+    /// Log every synchronized change (`NFS_SCORING_TRACE`), not only flags.
+    pub trace: bool,
+    /// Owned nitrous fuel per world car (E920), ticked with the car's reports.
+    pub nitrous: BTreeMap<u16, Nitrous>,
+}
+
+/// One car's nitrous fuel and the world time it was last advanced to.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(in crate::net) struct Nitrous {
+    pub fuel: Fuel,
+    pub last_ms: u64,
 }
 
 /// Owned airborne estimate (E916, inferred): the replicated chassis carries no
 /// wheel-contact flag, so a car is taken as airborne while its vertical
-/// velocity has fallen at about gravity for at least three consecutive
-/// reports (0.1 s at the 30 Hz report rate). Driving over crests or slopes
-/// changes the vertical velocity far more slowly; a landing resets the run.
-#[derive(Clone, Copy, Debug, Default)]
+/// velocity has fallen at about gravity for at least four consecutive
+/// estimates (about 0.4 s at the 10 Hz report spacing) and has lost at least
+/// [`Self::MIN_DROP`] since the run began. Crests reach two or three
+/// near-gravity estimates while losing little speed (E921: two crests of run
+/// e911v, runs of two and three, 2.5 m/s lost); a landing resets the run.
+#[derive(Clone, Debug, Default)]
 pub(super) struct FreeFall {
-    /// Chassis clock (seconds, from the report's identity words) and the
-    /// vertical velocity of the last report; the client clock keeps the
-    /// acceleration estimate free of server arrival jitter (E918).
-    last: Option<(f64, f32)>,
+    /// Recent reports: chassis clock (seconds, from the report's identity
+    /// words) and vertical velocity. The client clock keeps the acceleration
+    /// estimate free of server arrival jitter (E918); the window averages the
+    /// 1/32 m/s velocity quantization over about a tenth of a second (E919).
+    recent: std::collections::VecDeque<(f64, f32)>,
     run: u8,
+    /// Vertical velocity at the base of the run's first estimate.
+    run_start: f32,
 }
 impl FreeFall {
-    const MIN_RUN: u8 = 3;
+    const MIN_RUN: u8 = 4;
+    /// Vertical velocity lost over the run before the car counts as airborne, m/s.
+    const MIN_DROP: f32 = 3.0;
+    /// Shortest span the estimate is taken over, seconds.
+    const SPAN: f64 = 0.09;
+    const WINDOW: usize = 8;
+    /// Vertical acceleration of a fall, m/s²: gravity with the quantization
+    /// noise; the suspension's kick at a crest's lip reaches -14 (E921).
+    const BAND: std::ops::RangeInclusive<f32> = -13.0..=-6.5;
     pub fn observe(&mut self, clock: f64, vertical: f32) -> bool {
         let mut acceleration = None;
-        if let Some((last_clock, last_vertical)) = self.last
-            && clock > last_clock
-            && clock - last_clock <= 0.5
+        if self
+            .recent
+            .back()
+            .is_some_and(|&(last, _)| clock <= last || clock - last > 0.5)
         {
-            let seconds = (clock - last_clock) as f32;
-            let estimate = (vertical - last_vertical) / seconds;
+            self.recent.clear();
+            self.run = 0;
+        }
+        self.recent.push_back((clock, vertical));
+        while self.recent.len() > Self::WINDOW {
+            self.recent.pop_front();
+        }
+        // The oldest report at least SPAN before this one.
+        let base = self
+            .recent
+            .iter()
+            .rev()
+            .find(|&&(at, _)| clock - at >= Self::SPAN)
+            .copied();
+        if let Some((at, old)) = base {
+            let estimate = (vertical - old) / (clock - at) as f32;
             acceleration = Some(estimate);
-            if (-13.5..=-6.5).contains(&estimate) {
+            if Self::BAND.contains(&estimate) {
+                if self.run == 0 {
+                    self.run_start = old;
+                }
                 self.run = self.run.saturating_add(1);
             } else {
                 self.run = 0;
             }
-        } else {
-            self.run = 0;
         }
+        let airborne = self.run >= Self::MIN_RUN && self.run_start - vertical >= Self::MIN_DROP;
         // Diagnostic for the airtime calibration (E919): every report with a
         // notable vertical speed or a fall in progress.
         if vertical.abs() > 1.5 || self.run > 0 {
@@ -146,12 +189,105 @@ impl FreeFall {
                 vertical,
                 acceleration,
                 run = self.run,
-                last = ?self.last,
+                drop = self.run_start - vertical,
+                airborne,
+                window = self.recent.len(),
                 "free-fall sample"
             );
         }
-        self.last = Some((clock, vertical));
-        self.run >= Self::MIN_RUN
+        airborne
+    }
+}
+
+#[cfg(test)]
+mod flush_tests {
+    use super::super::PlayerListener;
+    use nfs_world::replication::{Record, Update, player_view};
+
+    fn record(id: u16) -> Record {
+        Record {
+            id,
+            initial: None,
+            update: Update::PlayerView(player_view::Update {
+                base: None,
+                view: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn periodic_flush_waits_for_the_session_queue_and_a_fired_event_does_not() {
+        let mut listener = PlayerListener::new(806_588_082);
+        listener.scoring_state.dirty.insert(7, record(7));
+        listener.scoring_state.last_flush_ms = 0;
+        // Interval passed, listener queue empty, but the session still holds
+        // a section: the periodic flush waits and the change stays merged.
+        listener.session_backlog = 1;
+        listener.flush_scoring(1_000, false);
+        assert!(listener.pending.is_empty());
+        assert_eq!(listener.scoring_state.dirty.len(), 1);
+        // A fired graph event flushes behind the queued sections anyway.
+        listener.flush_scoring(1_000, true);
+        assert_eq!(listener.pending.len(), 1);
+        assert!(listener.scoring_state.dirty.is_empty());
+        // Structure never waits for the session queue: a deletion (like a
+        // creation) flushes at once, so no host call overtakes its object.
+        listener.pending.clear();
+        listener.scoring_state.dirty_deleted.push(9);
+        listener.session_backlog = 3;
+        listener.flush_scoring(1_000, false);
+        assert_eq!(listener.pending.len(), 1);
+        assert_eq!(listener.pending[0].deleted, vec![9]);
+        // With the session queue empty again the periodic flush resumes.
+        listener.pending.clear();
+        listener.scoring_state.dirty.insert(8, record(8));
+        listener.session_backlog = 0;
+        listener.flush_scoring(1_050, false);
+        assert!(listener.pending.is_empty(), "interval not yet passed");
+        listener.flush_scoring(1_100, false);
+        assert_eq!(listener.pending.len(), 1);
+        assert_eq!(listener.pending[0].records.len(), 1);
+        assert_eq!(listener.pending[0].records[0].id, 8);
+    }
+}
+
+#[cfg(test)]
+mod free_fall_tests {
+    use super::FreeFall;
+    #[test]
+    fn a_jump_counts_after_four_estimates_and_a_crest_never_does() {
+        // Launch at 6 m/s up, gravity thereafter, reports every 0.1 s.
+        let mut fall = FreeFall::default();
+        let mut flagged_at = None;
+        for step in 0..12 {
+            let clock = 10.0 + 0.1 * f64::from(step);
+            let vertical = 6.0 - 0.981 * step as f32;
+            if fall.observe(clock, vertical) && flagged_at.is_none() {
+                flagged_at = Some(step);
+            }
+        }
+        assert_eq!(flagged_at, Some(4));
+        // A crest of run e911v (E921, 14:22:22): three near-gravity estimates
+        // while the road levels out, then a flat road.
+        let mut fall = FreeFall::default();
+        let crest = [
+            (179.133, 1.71875),
+            (179.267, 2.375),
+            (179.400, 3.09375),
+            (179.532, 3.5625),
+            (179.666, 3.90625),
+            (179.801, 4.4375),
+            (179.900, 3.84375),
+            (180.033, 2.34375),
+            (180.167, 1.375),
+            (180.267, 1.0),
+            (180.367, 0.9),
+        ];
+        assert!(
+            crest
+                .iter()
+                .all(|&(clock, vertical)| !fall.observe(clock, vertical))
+        );
     }
 }
 
@@ -294,6 +430,36 @@ fn merge_record(
                 }
                 Ok(())
             }
+            (
+                replication::Update::Vehicle { fields, .. },
+                replication::Update::Vehicle {
+                    fields: changed, ..
+                },
+            ) => {
+                // A car's later field change replaces the earlier one; the
+                // nitrous index keeps whichever half the later change omits.
+                for (slot, change) in fields.iter_mut().zip(changed) {
+                    match (slot.as_mut(), change) {
+                        (_, None) => {}
+                        (
+                            Some(nfs_world::replication::vehicle::Update::Index { index, value }),
+                            Some(nfs_world::replication::vehicle::Update::Index {
+                                index: new_index,
+                                value: new_value,
+                            }),
+                        ) => {
+                            if new_index.is_some() {
+                                *index = new_index;
+                            }
+                            if new_value.is_some() {
+                                *value = new_value;
+                            }
+                        }
+                        (_, change) => *slot = change,
+                    }
+                }
+                Ok(())
+            }
             _ => Err(replication::Error::TypeMismatch),
         },
     }
@@ -330,13 +496,19 @@ impl PlayerListener {
         players: &Players,
         car: u16,
         now_ms: u64,
+        nitrous: Option<&Nitrous>,
     ) -> Result<Inputs, replication::Error> {
         let physics = players
             .vehicle_physics(HOST_SELECTOR as u8, self.persona, car)
             .map_err(fail("vehicle physics"))?;
         let motion = physics.decode([0.; 3]).map_err(fail("physics decode"))?;
-        let vehicle =
+        let mut vehicle =
             Vehicle::from_motion(u32::from(car), &motion).map_err(fail("vehicle basis"))?;
+        vehicle.nos = nitrous.map(|n| NitrousSample {
+            engaged: n.fuel.engaged(),
+            level: n.fuel.fraction(),
+            capacity: n.fuel.tier().capacity(),
+        });
         // Road measurements from the installed network (E916); absent without
         // a network or off the network, which preserves the query state.
         let road = match content.road() {
@@ -352,6 +524,34 @@ impl PlayerListener {
             stats: self.vehicle_stats(content, players, car),
             ..idle_inputs(self.persona, now_ms)
         })
+    }
+
+    /// Tier and refill kind of the nitrous item installed on the participant's
+    /// car (E920: tier from the definition's buy price, kind from its guid);
+    /// None without nitrous.
+    fn nitrous_tier(
+        &self,
+        content: &Content,
+        players: &Players,
+        car: u16,
+    ) -> Option<(Tier, NitrousKind)> {
+        let catalog = content.items()?;
+        let items = &self.inventory.as_ref()?.items;
+        let vehicle = players.vehicle_item_of(HOST_SELECTOR as u8, self.persona, car)?;
+        // The installed nitrous is the one the car replicates (a car may own
+        // several nitrous items; E921).
+        let guid = self
+            .vehicles
+            .as_deref()?
+            .vehicles
+            .nitrous_definition(items, vehicle)?;
+        let definition = catalog.definition(&guid).ok()?;
+        let tier = Tier::from_buy_price(definition.buy_price)?;
+        let kind = NitrousKind::from_definition(&guid).unwrap_or_else(|| {
+            tracing::warn!(car, "nitrous item kind unknown; refilling on a clock");
+            NitrousKind::Time
+        });
+        Some((tier, kind))
     }
 
     /// Current and stock figures of the participant's car (E916): the dyno
@@ -449,15 +649,19 @@ impl PlayerListener {
         } = scope;
         // Boolean synchronized changes are the HUD flags (category and
         // sub-event popups); log them to time the popups against the drive.
+        // With NFS_SCORING_TRACE set, every synchronized change is logged for
+        // the frame-by-frame comparison with the official stream (E920).
+        let trace = state.trace;
         for (node, value) in &output.synced {
-            if let nfs_world::scoring::value::Value::Boolean(flag) = value {
+            if trace || matches!(value, nfs_world::scoring::value::Value::Boolean(_)) {
+                let flag = value;
                 let identity = content
                     .participant(which)
                     .program
                     .nodes
                     .get(usize::from(*node))
                     .map(|n| (n.identity.asset.as_str(), n.identity.index));
-                tracing::info!(participant, ?which, node, ?identity, flag, "scoring flag");
+                tracing::info!(participant, ?which, node, ?identity, ?flag, "scoring flag");
             }
         }
         if let Some(update) = content.update(which, &output.synced)?
@@ -526,6 +730,7 @@ impl PlayerListener {
             .remove(&participant)
             .ok_or(replication::Error::Shape)?;
         state.free_fall.remove(&live.car);
+        state.nitrous.remove(&live.car);
         let inputs = idle_inputs(self.persona, now_ms);
         let mut ghosts = Vec::with_capacity(2);
         for (which, entity) in Which::ALL.into_iter().zip(live.entities) {
@@ -566,7 +771,17 @@ impl PlayerListener {
         if state.live.len() >= MAX_LIVE {
             return Err(replication::Error::Bound);
         }
-        let inputs = self.scoring_inputs(content, players, car, now_ms)?;
+        if let Some((tier, kind)) = self.nitrous_tier(content, players, car) {
+            tracing::info!(participant, car, ?tier, ?kind, "owned nitrous fuel seeded");
+            state.nitrous.insert(
+                car,
+                Nitrous {
+                    fuel: Fuel::full(tier, kind),
+                    last_ms: now_ms,
+                },
+            );
+        }
+        let inputs = self.scoring_inputs(content, players, car, now_ms, state.nitrous.get(&car))?;
         let mut entities = Vec::with_capacity(2);
         for which in Which::ALL {
             let (session, output) = content
@@ -620,7 +835,11 @@ impl PlayerListener {
     }
 
     /// Queue one section with everything coalesced so far, when the queue
-    /// has room and the flush interval has passed.
+    /// has room and the flush interval has passed. A periodic flush also
+    /// waits while the world session still holds queued sections, so at most
+    /// one scoring section is in flight and later changes keep merging per
+    /// entity (E923: flushing whenever the listener's own queue was empty
+    /// kept the session queue full and delayed every later section).
     /// `force` flushes ahead of the interval and behind queued sections, so a
     /// fired graph event never overtakes the property values it refers to
     /// (sections drain before RPC notifications; E914 shows the official
@@ -633,8 +852,17 @@ impl PlayerListener {
         if self.pending.len() >= MAX_PENDING {
             return;
         }
+        // Creations and deletions never wait: host calls on these objects
+        // move to the session as soon as the listener queue is empty, and a
+        // call ahead of its object's creation is refused (E925: deferring
+        // the scoring creation behind the session backlog made the session
+        // refuse the scoring calls and close the world connection).
+        let structural = !state.dirty_deleted.is_empty()
+            || state.dirty.values().any(|record| record.initial.is_some());
+        let force = force || structural;
         if !force
             && (!self.pending.is_empty()
+                || self.session_backlog > 0
                 || now_ms.saturating_sub(state.last_flush_ms) < FLUSH_INTERVAL_MS)
         {
             return;
@@ -719,7 +947,13 @@ impl PlayerListener {
             let Some(live) = state.live.get(&queued.participant) else {
                 continue;
             };
-            let inputs = self.scoring_inputs(&content, &players, live.car, now_ms)?;
+            let inputs = self.scoring_inputs(
+                &content,
+                &players,
+                live.car,
+                now_ms,
+                state.nitrous.get(&live.car),
+            )?;
             let (output, ghost) = {
                 let live = state
                     .live
@@ -757,7 +991,8 @@ impl PlayerListener {
             }
             let covered = ((now_ms - last_ms) as f32 / 1000.0).min(MAX_TICK_SECONDS);
             let mut remaining = covered;
-            let mut inputs = self.scoring_inputs(&content, &players, car, now_ms)?;
+            let mut inputs =
+                self.scoring_inputs(&content, &players, car, now_ms, state.nitrous.get(&car))?;
             if let Some(vehicle) = inputs.vehicle.as_mut()
                 && let Ok(physics) = players.vehicle_physics(HOST_SELECTOR as u8, self.persona, car)
             {
@@ -770,6 +1005,31 @@ impl PlayerListener {
                         .or_default()
                         .observe(clock, vehicle.velocity[1]);
                     vehicle.airborne = Some(airborne);
+                }
+            }
+            if let Some(nitrous) = state.nitrous.get_mut(&car) {
+                let elapsed = now_ms.saturating_sub(nitrous.last_ms).min(500);
+                nitrous.last_ms = now_ms;
+                // Style that refills a skill tank (hypothesis, E921): a slide,
+                // airborne, wrong way or high speed.
+                let building = inputs.vehicle.is_some_and(|v| {
+                    let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+                    let speed = dot(v.velocity, v.velocity).sqrt();
+                    let lateral = dot(v.velocity, v.transform[0]).abs();
+                    v.airborne == Some(true)
+                        || speed > 40.0
+                        || (speed > 5.0 && lateral / speed > 0.2)
+                }) || inputs.road.is_some_and(|r| r.wrong_direction);
+                // The fuel is kept for the scoring input only: the client predicts
+                // its own gauge from the mode acknowledgement (E921: level pushes
+                // fought that prediction), so no level or stop is replicated.
+                for change in nitrous
+                    .fuel
+                    .tick(std::time::Duration::from_millis(elapsed), building)
+                {
+                    if let Change::Stopped = change {
+                        tracing::info!(car, "owned nitrous model empty");
+                    }
                 }
             }
             let start = inputs.now - f64::from(covered);
