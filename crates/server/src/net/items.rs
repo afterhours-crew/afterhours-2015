@@ -2,7 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-use super::players::{EquipmentRequest, PlayerListener};
+use super::players::{AwardRequest, Credited, EquipmentRequest, PlayerListener};
 use crate::inventory;
 use nfs_storage::{AccountId, InventoryRepository, Timestamp};
 use nfs_world::{
@@ -280,6 +280,10 @@ impl Profile {
     pub fn bindings(&self) -> &nfs_world::items::Catalog {
         self.service.catalog.bindings()
     }
+    /// The item definitions (stock vehicle figures for free-roam scoring).
+    pub fn item_catalog(&self) -> Arc<InventoryCatalog> {
+        self.service.catalog.clone()
+    }
     pub async fn current_tables(
         &self,
         now: Timestamp,
@@ -384,6 +388,71 @@ impl Profile {
         })
         .await
         .map_err(|_| crate::Failure::Io)?
+    }
+    /// Apply one banked driving credit as a single retry-safe batch: the
+    /// score columns, the derived level and every newly eligible category
+    /// and item grant commit together. The refreshed account view and item
+    /// collection come back for the listener to adopt.
+    async fn credit(&self, request: &AwardRequest, now: Timestamp) -> Result<Credited, Error> {
+        let service = self.service.clone();
+        let account = self.account;
+        let credit = request.credit;
+        let batch_id = request.batch_id;
+        let thresholds = request.thresholds.clone();
+        timeout(JOB_TIMEOUT, async move {
+            let permit = service
+                .workers
+                .acquire_owned()
+                .await
+                .map_err(|_| Error::Worker)?;
+            tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                let tables = service.persistent.as_deref().ok_or(Error::Worker)?;
+                let snapshot = inventory::load(
+                    service.repository.as_ref(),
+                    account,
+                    &service.catalog,
+                    1,
+                    now,
+                )
+                .map_err(Error::Inventory)?;
+                let policy = nfs_services::reputation::earned::Policy {
+                    tables,
+                    inventory: &service.catalog,
+                    thresholds: &thresholds,
+                    categories: service.category_unlocks.as_deref(),
+                    items: service
+                        .offers
+                        .as_ref()
+                        .and_then(|offers| offers.item_unlocks()),
+                };
+                let batch = policy
+                    .prepare(&snapshot, credit, batch_id)
+                    .map_err(Error::Inventory)?;
+                let applied = service
+                    .repository
+                    .apply(account, &batch, now)
+                    .map_err(|e| Error::Inventory(e.into()))?;
+                let snapshot = service
+                    .repository
+                    .snapshot(account)
+                    .map_err(|e| Error::Inventory(e.into()))?;
+                let loaded = tables
+                    .view(&snapshot)
+                    .map_err(|e| Error::Inventory(e.into()))?;
+                let items = inventory::collection(&snapshot, service.catalog.bindings())
+                    .map_err(Error::Inventory)?;
+                Ok(Credited {
+                    loaded: Arc::new(loaded),
+                    items: Arc::new(items),
+                    replayed: applied.replayed,
+                })
+            })
+            .await
+            .map_err(|_| Error::Worker)?
+        })
+        .await
+        .map_err(|_| Error::Deadline)?
     }
     async fn answer(&self, request: Vec<u8>, now: Timestamp) -> Result<Option<LoadedReply>, Error> {
         if !supported_request(&request).map_err(|e| Error::Inventory(e.into()))? {
@@ -508,6 +577,7 @@ pub(super) struct Exchanges {
     profile: Option<Profile>,
     jobs: JoinSet<(usize, u8, Result<Option<LoadedReply>, Error>)>,
     equipment: JoinSet<(EquipmentRequest, Result<Equipped, Error>)>,
+    awards: JoinSet<(AwardRequest, Result<Credited, Error>)>,
     pending: [Option<Completed>; 2],
     started: [Option<u64>; 2],
     connection: u32,
@@ -519,6 +589,7 @@ impl Exchanges {
             profile,
             jobs: JoinSet::new(),
             equipment: JoinSet::new(),
+            awards: JoinSet::new(),
             pending: [None, None],
             started: [None, None],
             connection,
@@ -526,7 +597,7 @@ impl Exchanges {
         }
     }
     pub(super) fn working(&self) -> bool {
-        !self.jobs.is_empty() || !self.equipment.is_empty()
+        !self.jobs.is_empty() || !self.equipment.is_empty() || !self.awards.is_empty()
     }
     pub(super) fn start(&mut self, listener: &mut PlayerListener, now: u64, utc: Timestamp) {
         if self.working()
@@ -545,6 +616,20 @@ impl Exchanges {
                 warn!(
                     connection = self.connection,
                     "equipment service not configured"
+                );
+            }
+            return;
+        }
+        if let Some(request) = listener.take_award() {
+            if let Some(profile) = self.profile.clone() {
+                self.awards.spawn(async move {
+                    let result = profile.credit(&request, utc).await;
+                    (request, result)
+                });
+            } else {
+                warn!(
+                    connection = self.connection,
+                    "reputation credit dropped: inventory service not configured"
                 );
             }
             return;
@@ -605,7 +690,35 @@ impl Exchanges {
         }
     }
     pub(super) async fn completed(&mut self, listener: &mut PlayerListener) -> bool {
-        // start() serializes account writes across Files and equipment RPCs.
+        // start() serializes account writes across Files, equipment and credits.
+        if !self.awards.is_empty() {
+            let Some(Ok((request, result))) = self.awards.join_next().await else {
+                return false;
+            };
+            return match result {
+                Ok(credited) => match listener.awarded(&request, credited) {
+                    Ok(()) => true,
+                    Err(error) => {
+                        warn!(
+                            connection = self.connection,
+                            ?error,
+                            batch_id = request.batch_id,
+                            "reputation credit snapshot rejected"
+                        );
+                        false
+                    }
+                },
+                Err(error) => {
+                    warn!(
+                        connection = self.connection,
+                        ?error,
+                        batch_id = request.batch_id,
+                        "reputation credit failed"
+                    );
+                    false
+                }
+            };
+        }
         if !self.equipment.is_empty() {
             let Some(Ok((request, result))) = self.equipment.join_next().await else {
                 return false;

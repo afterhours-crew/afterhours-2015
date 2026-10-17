@@ -202,6 +202,13 @@ fn migration_preserves_inventory_and_failed_storage_never_claims_success() {
 
 #[test]
 fn concurrent_distinct_keys_are_not_lost() {
+    // Repeated cold WAL opens expose a Windows locking race hidden by a warm
+    // connection. Keep this bounded and use a fresh owned directory each round.
+    for _ in 0..128 {
+        concurrent_case();
+    }
+}
+fn concurrent_case() {
     let (_temp, r) = setup();
     let start = Arc::new(Barrier::new(4));
     let threads: Vec<_> = (0..4)
@@ -221,8 +228,9 @@ fn concurrent_distinct_keys_are_not_lost() {
             })
         })
         .collect();
-    for thread in threads {
-        thread.join().unwrap();
+    let results: Vec<_> = threads.into_iter().map(|thread| thread.join()).collect();
+    for result in results {
+        result.unwrap();
     }
     for i in 0..4 {
         assert_eq!(

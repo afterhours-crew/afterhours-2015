@@ -118,6 +118,8 @@ pub enum Message<'a> {
     LogicEvent(crate::logic::Fire),
     WorldActivation(crate::world_activation::Notification),
     BankBalance(crate::bank::Balance),
+    /// Host control call on a scoring query serializer of an owned entity.
+    QueryControl(crate::participants::EntityCall),
     Opaque {
         index: u8,
         body: BitSpan<'a>,
@@ -141,7 +143,8 @@ impl Message<'_> {
             | Self::VehicleBinding(_)
             | Self::GaragePresence(_)
             | Self::SequenceStop(_)
-            | Self::WorldActivation(_) => 47,
+            | Self::WorldActivation(_)
+            | Self::QueryControl(_) => 47,
             Self::LogicEvent(v) => v.index(),
             Self::Opaque { index, .. } => *index,
         }
@@ -778,6 +781,9 @@ impl<'a> Builder<'a> {
                 w.put_span(value.encode().map_err(|_| Error::Shape)?.span());
             }
             Message::WorldActivation(value) => {
+                w.put_span(value.encode().map_err(|_| Error::Shape)?.span());
+            }
+            Message::QueryControl(value) => {
                 w.put_span(value.encode().map_err(|_| Error::Shape)?.span());
             }
             Message::SequenceStop(value) => {

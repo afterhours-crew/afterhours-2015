@@ -22,10 +22,12 @@ mod customization;
 mod diagnostics;
 mod equipment;
 pub(super) use equipment::EquipmentRequest;
+pub(super) use scoring::{AwardRequest, Credited};
 mod launchers;
 mod purchases;
 mod refusal;
 mod returning;
+mod scoring;
 mod sequences;
 
 #[cfg(test)]
@@ -100,6 +102,8 @@ pub(super) struct PlayerListener {
     logic_ghosts: BTreeMap<u16, BTreeMap<u16, u16>>,
     logic_vehicles_fired: BTreeSet<u16>,
     free_roam_presented: BTreeSet<u16>,
+    scoring: Option<std::sync::Arc<crate::scoring::Content>>,
+    scoring_state: scoring::State,
     pub(super) pending_content: VecDeque<nfs_world::content::Message>,
     pub(super) pending_rpcs: VecDeque<nfs_world::participants::HostRpc>,
     unsupported_rpcs: usize,
@@ -622,6 +626,8 @@ impl PlayerListener {
             logic_ghosts: BTreeMap::new(),
             logic_vehicles_fired: BTreeSet::new(),
             free_roam_presented: BTreeSet::new(),
+            scoring: None,
+            scoring_state: scoring::State::default(),
             pending_content: VecDeque::new(),
             pending_rpcs: VecDeque::new(),
             unsupported_rpcs: 0,
@@ -881,6 +887,8 @@ impl Listener for PlayerListener {
         let mut deferred_sections = Vec::new();
         let mut movement_section = None;
         let mut vehicle_reports = self.vehicle_reports.clone();
+        let mut scoring_reported = BTreeSet::new();
+        let mut scoring_reports = Vec::new();
         let mut trigger_volumes = self.trigger_volumes.clone();
         let mut world_activation = self.world_activation.clone();
         if let Some(movement) = &parsed.movement {
@@ -894,6 +902,7 @@ impl Listener for PlayerListener {
                 self.world_ms,
             ) {
                 Ok(reports) if !reports.is_empty() => {
+                    scoring_reported.extend(reports.iter().map(|r| r.id));
                     movement_section = Some(Section {
                         float_bits: None,
                         flag: false,
@@ -1122,6 +1131,8 @@ impl Listener for PlayerListener {
         let mut launchers = self.launchers.clone();
         let mut unsupported = 0;
         let mut exit_entries = Vec::new();
+        // Content the garage return stages (part meshes first seen on the car).
+        let mut return_messages: Vec<nfs_world::content::Message> = Vec::new();
         let mut equipment = self.equipment.clone();
         for body in rpcs {
             match nfs_world::vehicle_nitrous::receive(
@@ -1132,7 +1143,7 @@ impl Listener for PlayerListener {
                 |id| world_cars.get(&id).is_some_and(|(_, ready)| *ready),
             ) {
                 Ok(Some(report)) => {
-                    tracing::debug!(
+                    tracing::info!(
                         vehicle = report.vehicle,
                         active = report.active,
                         client_seconds = report.client_seconds,
@@ -1140,6 +1151,17 @@ impl Listener for PlayerListener {
                         "owned nitrous transition"
                     );
                     records.extend(report.record);
+                    continue;
+                }
+                Ok(None) => {}
+                Err(error) => return self.refuse_rpc(error, body),
+            }
+            match self.scoring_report(&players, body) {
+                Ok(Some(queued)) => {
+                    if scoring_reports.len() >= scoring::MAX_QUEUED_REPORTS {
+                        return self.refuse_rpc(replication::Error::Bound, body);
+                    }
+                    scoring_reports.push(queued);
                     continue;
                 }
                 Ok(None) => {}
@@ -1497,7 +1519,10 @@ impl Listener for PlayerListener {
                                     *participant,
                                     chain,
                                 ) {
-                                    Ok(entries) => exit_entries.extend(entries),
+                                    Ok((entries, messages)) => {
+                                        exit_entries.extend(entries);
+                                        return_messages.extend(messages);
+                                    }
                                     Err(error) => {
                                         return self.refuse_rpc(error, body);
                                     }
@@ -1845,7 +1870,8 @@ impl Listener for PlayerListener {
         if let Some(section) = movement_section {
             deferred_sections.insert(0, section);
         }
-        if spawned.messages.len() > MAX_PENDING.saturating_sub(self.pending_content.len())
+        if spawned.messages.len() + return_messages.len()
+            > MAX_PENDING.saturating_sub(self.pending_content.len())
             || responses.len() > nfs_world::session::MAX_RPC_QUEUE - self.pending_rpcs.len()
             || sections.len() + deferred_sections.len() + usize::from(!records.is_empty())
                 > MAX_PENDING - self.pending.len()
@@ -1950,9 +1976,12 @@ impl Listener for PlayerListener {
         self.equipment = equipment;
         self.logic_ghosts = logic_ghosts;
         self.logic_vehicles_fired = logic_vehicles_fired;
+        self.pending_content.extend(return_messages);
         self.pending_content.extend(spawned.messages);
         self.unsupported_rpcs += unsupported;
         self.unsupported_logic += unsupported_logic;
+        self.scoring_state.reported.extend(scoring_reported);
+        self.scoring_state.reports.extend(scoring_reports);
         if !records.is_empty() {
             self.pending.push_back(Section {
                 float_bits: None,

@@ -250,6 +250,15 @@ impl Players {
             .map(|(_, id)| *id)
             .collect()
     }
+    /// The item of a live car owned through this connection and persona.
+    pub fn vehicle_item_of(&self, connection: u8, persona: u64, vehicle: u16) -> Option<u64> {
+        self.vehicles
+            .iter()
+            .find(|((participant, _), ghost)| {
+                **ghost == vehicle && self.owns_participant(connection, persona, *participant)
+            })
+            .map(|((_, item), _)| *item)
+    }
     pub fn owned_identity(
         &self,
         connection: u8,

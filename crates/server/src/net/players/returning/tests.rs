@@ -297,7 +297,7 @@ fn return_handlers_publish_valid_frames_restore_loading_and_allow_three_exits() 
         // Exercise the production queue's reference validation, not only wire
         // encoding: a slot binding must follow its replacement car's creation.
         let mut transport = transport_with_snapshot(&players);
-        let entries = PlayerListener::begin_return(
+        let (entries, messages) = PlayerListener::begin_return(
             &mut players,
             &mut returns,
             &mut population,
@@ -310,6 +310,8 @@ fn return_handlers_publish_valid_frames_restore_loading_and_allow_three_exits() 
             chain.into_iter().map(HostRpc::Participant).collect(),
         )
         .unwrap();
+        // A car already shown in the garage needs no new content on its return.
+        assert!(messages.is_empty());
         for (section, rpcs) in &entries {
             transport
                 .queue_replication_after(section.clone(), rpcs.clone())

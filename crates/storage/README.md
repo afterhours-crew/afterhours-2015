@@ -35,6 +35,12 @@ async workers. `MemoryRepository` and `SqliteRepository` implement the same
   request deadlines. Persistent contention returns `Error::Busy`, without a
   success acknowledgement or a partially applied transaction. Retry the original
   operation using its existing identity after the contention has cleared.
+- Keep account databases on a local filesystem. On Windows, the adapter converts
+  canonical verbatim drive paths to normal drive paths before passing them to
+  SQLite, and verifies that both resolve to the same directory. This prevents
+  SQLite from treating a local drive as a UNC share during concurrent WAL opens.
+  Network/device paths and names whose meaning changes under that conversion
+  are rejected. Lock waits and transaction durability settings are unchanged.
 - The legacy `settings-<account>.sqlite` file is a read-only migration input.
   Its value and revision are preserved; new settings writes use `<account>.sqlite`.
   Stop older servers before migration. Keep the old file as a backup, but do not

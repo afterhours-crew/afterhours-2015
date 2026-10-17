@@ -727,6 +727,35 @@ impl GarageLogic {
             Which::Returned => &self.returned,
         }
     }
+    /// Every integer serializer that presents a reputation value, as
+    /// (capture id, field index, reputation field), across all batches.
+    pub fn reputation_fields(&self) -> Vec<(u16, usize, ReputationField)> {
+        let mut fields = Vec::new();
+        for which in [
+            Which::Spawn,
+            Which::Vehicles,
+            Which::Entry,
+            Which::Exit,
+            Which::Arrive,
+            Which::Arrived,
+            Which::WorldReady,
+            Which::WorldSpawn,
+            Which::WorldSettled,
+            Which::FreeRoam,
+            Which::Returning,
+            Which::ReturnRequested,
+            Which::Returned,
+        ] {
+            for definition in &self.batch(which).entities {
+                for (index, role) in definition.roles.iter().enumerate() {
+                    if let Role::Reputation(field) = role {
+                        fields.push((definition.capture_id, index, *field));
+                    }
+                }
+            }
+        }
+        fields
+    }
     /// Whether deployment content describes a batch for this point.
     pub fn has(&self, which: Which) -> bool {
         *self.batch(which) != Batch::default()

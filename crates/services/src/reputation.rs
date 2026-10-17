@@ -6,6 +6,7 @@
 //! score thresholds. No captured account values belong to this model.
 use crate::persistent::{Loaded, key};
 mod content;
+pub mod earned;
 mod operator;
 pub use operator::set_for_operator;
 pub const MAX_THRESHOLDS: usize = 256;

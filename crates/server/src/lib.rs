@@ -35,6 +35,7 @@ pub mod recommendations;
 pub mod record;
 pub mod reputation_account;
 pub mod scene_roles;
+pub mod scoring;
 pub mod seeds;
 pub mod sequence_content;
 pub mod shared_wraps;

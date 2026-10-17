@@ -632,6 +632,66 @@ async fn run(args: Args) -> Result<(), Failure> {
         })
         .transpose()?
         .map(Arc::new);
+    // Free-roam scoring compiles the installed driving participants directly
+    // from the installation; without it (or without garage logic) scoring stays off.
+    let scoring = match (&args.game_dir, garage_logic.is_some()) {
+        (Some(game_dir), true) => {
+            let game_dir = game_dir.clone();
+            let content = tokio::task::spawn_blocking(move || {
+                let mut index = nfs_content::assets::AssetIndex::open(
+                    &game_dir,
+                    &nfs_content::Options::default(),
+                )?;
+                let scoring = index.scoring_content("levels/genesis01/gameplay")?;
+                let road = index.road_network();
+                Ok::<_, nfs_content::Error>((scoring, road))
+            })
+            .await
+            .map_err(|_| Failure::Output)?;
+            match content {
+                Ok((content, road)) => {
+                    let mut content = nfs_server::scoring::Content::new(Arc::new(content))
+                        .map_err(|_| Failure::ProfileConfig)?
+                        .with_items(
+                            inventory
+                                .as_ref()
+                                .ok_or(Failure::ProfileConfig)?
+                                .item_catalog(),
+                        );
+                    match road {
+                        Ok(network) => {
+                            tracing::info!(
+                                segments = network.segments().len(),
+                                "road network read from the installation"
+                            );
+                            content = content.with_road(Arc::new(network));
+                        }
+                        Err(error) => tracing::warn!(
+                            ?error,
+                            "road network unavailable; road-driven scoring stays off"
+                        ),
+                    }
+                    tracing::info!(
+                        acquisition_nodes = content.installed().acquisition.program.nodes.len(),
+                        scoring_nodes = content.installed().scoring.program.nodes.len(),
+                        unmodeled = content.installed().scoring.program.unmodeled.len(),
+                        keepers = ?content.installed().categories,
+                        bus_entities = ?content.installed().scoring.bus_entities,
+                        "free-roam scoring programs compiled from the installation"
+                    );
+                    Some(Arc::new(content))
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        ?error,
+                        "free-roam scoring unavailable; participants stay disabled"
+                    );
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
     let entitlements = Some((account, Arc::new(owned.entitlements)));
     let kickback = Some((account, Arc::new(owned.kickback)));
     let speedwall = Some((account, Arc::new(owned.speedwall)));
@@ -768,6 +828,7 @@ async fn run(args: Args) -> Result<(), Failure> {
         vehicles,
         sequences,
         garage_logic,
+        scoring,
         catalogs,
         entitlements,
         user_settings,

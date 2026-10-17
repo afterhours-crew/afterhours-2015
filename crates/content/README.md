@@ -95,6 +95,13 @@ installed spawner. Participant-owned children bind only to compatible channels
 inside the explicitly supplied parent. Repeated prefab instances retain separate
 contexts; missing, ambiguous and unsupported composition fails.
 
+The supported build's rules cover the driving-data and driving-style scoring
+compositions, including the distinct RPC-only, single-Boolean and reference-list
+query serializers. Server-only queries and local evaluators remain explicit
+non-serializing classes. Unknown classes still fail extraction. This enables
+layout inspection; driving awards and live scoring acceptance remain tracked in
+[#50](https://github.com/afterhours-crew/afterhours-2015/issues/50).
+
 This extraction API supplies static layout only. It does not choose which logic
 to activate, initialize account-dependent values or publish another prepared file.
 The server's remaining garage lifecycle policy still needs those integrations.

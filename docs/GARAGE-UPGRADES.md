@@ -404,6 +404,20 @@ the game/server to load the new balance.
 
 ## Give a local test account REP
 
+For server development, `nfs_services::reputation::earned::Policy::prepare`
+builds a single generation-guarded storage batch containing a calculated REP
+credit, its derived level, category masks and newly eligible purchasable items.
+It leaves unrelated tables, money and equipment unchanged. The caller owns the
+scoring decision and retry ID; retain the original batch and generation on a
+retry, and include any additional reward in that same transaction. Never rebase
+an acknowledged credit onto a later snapshot. Repository replay history is
+bounded, so the original generation is also necessary to reject expired retries.
+
+This domain API is covered by constructed transaction and SQLite restart tests.
+It is not yet connected to driving actions and does not establish live REP
+earning; that integration is tracked by [#50](https://github.com/Afterhours-Crew/afterhours-2015/issues/50).
+The operator command below remains a separate stopped-account testing tool.
+
 Use a separate test account, stop its game and server, and back up the account
 directory as above. REP is calculated from total score; changing only a saved
 level is insufficient. The operator command sets the total score to the
