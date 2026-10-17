@@ -13,7 +13,7 @@ use nfs_world::scoring::events::{self, Connection, Delivery, Endpoint, Remote};
 use nfs_world::scoring::properties::Port;
 use std::collections::BTreeMap;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct Identity {
     pub asset: String,
     pub index: usize,

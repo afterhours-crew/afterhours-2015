@@ -437,3 +437,37 @@ Malformed thresholds, nonfinite calculations and excessive participant sets fail
 
 The road-query declaration now recognizes the same class as the strict road
 configuration reader, so its verified property ports participate in type checking.
+
+`AssetIndex::scoring_program` compiles one composition's server realm into a
+`scoring::program::Program`: per-node behaviors from the strict class readers,
+typed unready cells from the property layout, the authored event edges and the
+startup sequence in the observed native order (bus construction with merge
+forwarders and interface defaults, then each created entity's bind and its
+listener registrations sorted by signed field ID, then insertion-order
+activation). Every server-created class must be modeled, inert or in the
+explicit unsupported list; an unknown class fails. Listener registration honours
+the entity's property realm and the connection mode bit; prefab references
+register nothing. A synchronized node owns a private Out cell even without a
+consumer. The 28 scoring cells whose kind is not modeled touch only telemetry
+and channel sinks; the compiler reports them as `unmodeled` and rejects an
+untyped cell that any modeled node reads or writes. Unsupported nodes keep their
+outputs unready, so consumers fall back to authored values; they are not awards.
+
+`scoring::interpreter::Session` executes a Program for one participant. It is
+sans-IO: `start` runs the compiled startup once; `tick` updates every active
+query at interval one, then the stopwatch pass, then the delay pass, with the
+caller's delta, clock, owned vehicle state, other vehicles, road sample and
+time scale; `report` delivers a decoded, ownership-checked query report; `event`
+emits a lifecycle event such as the root's disable notification. Each call runs
+on a private candidate and commits only on success, returning remote emissions,
+collision commands, keeper award requests and dirty synchronized values for the
+caller to commit together with its own state. Reads use the native getter
+contract: a ready bound cell, otherwise the authored fallback. Math evaluates at
+activation and on input changes unless `EvaluateOnEvent` is set, and on any
+received event; an input that is not ready suppresses evaluation as a modeling
+decision. Curves evaluate at bind and on input changes. Physics measurements
+the server cannot supply preserve that output. Road counters start at zero and
+missing road data preserves road state. An award carries the installed keeper
+link ID; mapping it to a category and persisting credit belong to the server.
+Running the installed programs against constructed vehicle profiles is a model
+check, not live acceptance; neither participant is enabled by this change.

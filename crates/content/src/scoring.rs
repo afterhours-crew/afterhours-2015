@@ -25,6 +25,7 @@ pub mod draft;
 pub mod events;
 pub mod interfaces;
 pub mod nodes;
+pub mod program;
 pub mod property_gate;
 pub mod property_types;
 pub mod realms;

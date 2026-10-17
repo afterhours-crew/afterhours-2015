@@ -73,12 +73,12 @@ impl QueryHandler for State {
     fn query_vehicle(&mut self, _: u16) -> Result<Option<u16>, Error> {
         Ok(self.owner)
     }
-    fn physics_measurement(&mut self, vehicle: u16, field: u32) -> Result<Value, Error> {
+    fn physics_measurement(&mut self, vehicle: u16, field: u32) -> Result<Option<Value>, Error> {
         self.reads.push((vehicle, field));
         self.physics
             .iter()
             .find(|p| p.0 == field)
-            .map(|p| p.1)
+            .map(|p| Some(p.1))
             .ok_or(Error::MissingInput)
     }
     fn drift_measurement(&mut self, vehicle: u16) -> Result<DriftSample, Error> {

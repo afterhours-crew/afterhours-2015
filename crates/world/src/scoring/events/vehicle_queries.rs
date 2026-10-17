@@ -38,8 +38,9 @@ impl Dispatch<'_> {
                         // The constructor binds transform first; updates publish velocity first.
                         for index in [1, 0, 2, 3, 4, 5, 6] {
                             let field = Query::Physics.outputs()[index].field;
-                            let value = state.physics_measurement(vehicle, field)?;
-                            self.query_publish(state, node, bindings, field, value)?;
+                            if let Some(value) = state.physics_measurement(vehicle, field)? {
+                                self.query_publish(state, node, bindings, field, value)?;
+                            }
                         }
                     }
                     Query::Drift => {

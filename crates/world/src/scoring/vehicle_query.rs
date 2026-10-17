@@ -193,7 +193,13 @@ pub trait Handler: PropertyHandler {
     /// Read each physics field in update order, after earlier callbacks finish.
     /// Unknown state flags must come from established owned measurements; this
     /// API does not infer them from acceleration, contacts or input keys.
-    fn physics_measurement(&mut self, vehicle: Self::Vehicle, field: u32) -> Result<Value, Error>;
+    /// `None` means the owned state has no such measurement: that output is
+    /// preserved (unready stays unready), never replaced with a guessed value.
+    fn physics_measurement(
+        &mut self,
+        vehicle: Self::Vehicle,
+        field: u32,
+    ) -> Result<Option<Value>, Error>;
     /// Drift snapshots transform and velocity together before any publication.
     fn drift_measurement(&mut self, vehicle: Self::Vehicle) -> Result<DriftSample, Error>;
     /// Evaluate the current owned participant set with draft::Configuration.
