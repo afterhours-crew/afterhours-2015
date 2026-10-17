@@ -99,6 +99,7 @@ pub(crate) fn fixture() -> Sources {
     ];
     let composition = Composition {
         buses: vec![root(0), child(0)],
+        bus_entities: vec![],
         connections: vec![],
         links: vec![],
         properties: vec![

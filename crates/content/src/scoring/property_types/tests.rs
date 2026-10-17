@@ -181,6 +181,7 @@ fn fixture() -> (Composition, Vec<Node>) {
             })
             .collect(),
         buses: vec![identity(0)],
+        bus_entities: vec![],
         connections: vec![],
         links: vec![],
         properties: vec![

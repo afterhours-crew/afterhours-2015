@@ -15,8 +15,10 @@
 use super::*;
 use crate::scoring::{Content, TIME_SCALE, Which};
 use nfs_world::{
+    logic::{EntityRef, Fire},
     participants::HostRpc,
     replication::{Record, section::Setup},
+    scoring::events::RemoteEmission,
     scoring::{
         interpreter::{Award, Inputs, Output, Session, Vehicle},
         reports::{Binding as ReportBinding, Report},
@@ -133,6 +135,34 @@ fn packed(records: Vec<Record>, deleted: Vec<u16>) -> Section {
     }
 }
 
+/// Entity event messages for one remote emission: the official host fires
+/// registry 86 on the participant ghost with the authored row index as the
+/// event and the row's networked bus ordinal as the entity (E914: style row
+/// 27 on entity 3, speed 37 on 5, outlaw 57 on 12). Rows on buses without
+/// a client entity are counted, not fabricated.
+fn remote_fires(
+    bus_entities: &[Option<u16>],
+    ghost: u16,
+    emission: &RemoteEmission,
+) -> (Vec<Fire>, usize) {
+    let mut fires = Vec::with_capacity(emission.connections.len());
+    let mut skipped = 0;
+    for remote in &emission.connections {
+        match bus_entities.get(usize::from(remote.bus)).copied().flatten() {
+            Some(entity) => fires.push(Fire {
+                event: u32::from(remote.index),
+                player: None,
+                target: EntityRef {
+                    ghost,
+                    entity: u32::from(entity),
+                },
+            }),
+            None => skipped += 1,
+        }
+    }
+    (fires, skipped)
+}
+
 /// Log the failing stage and map it to the listener's replication error.
 fn fail<E: std::fmt::Debug>(stage: &'static str) -> impl Fn(E) -> replication::Error {
     move |error| {
@@ -246,6 +276,13 @@ impl PlayerListener {
                         |id| players.objects().get(id).is_some(),
                     )?;
                     if let Some(report) = report {
+                        tracing::info!(
+                            participant,
+                            ?which,
+                            node,
+                            ?report,
+                            "scoring report received"
+                        );
                         return Ok(Some(QueuedReport {
                             participant,
                             which,
@@ -284,13 +321,32 @@ impl PlayerListener {
                 content.command(which, players, ghost, node, command)?,
             ));
         }
-        if !output.remote.is_empty() {
-            tracing::debug!(
-                participant,
-                ?which,
-                remote = output.remote.len(),
-                "scoring remote events are not encoded yet"
-            );
+        for emission in &output.remote {
+            let (fires, skipped) =
+                remote_fires(&content.participant(which).bus_entities, ghost, emission);
+            if skipped > 0 {
+                tracing::warn!(
+                    participant,
+                    ?which,
+                    source = ?emission.source,
+                    skipped,
+                    "scoring remote rows on buses without a client entity were dropped"
+                );
+            }
+            for fire in &fires {
+                tracing::info!(
+                    participant,
+                    ?which,
+                    source = ?emission.source,
+                    row = fire.event,
+                    entity = fire.target.entity,
+                    ghost = fire.target.ghost,
+                    "scoring remote row fired"
+                );
+            }
+            collected
+                .replies
+                .extend(fires.into_iter().map(HostRpc::Event));
         }
         for award in &output.awards {
             tracing::info!(
@@ -415,14 +471,21 @@ impl PlayerListener {
 
     /// Queue one section with everything coalesced so far, when the queue
     /// has room and the flush interval has passed.
-    fn flush_scoring(&mut self, now_ms: u64) {
+    /// `force` flushes ahead of the interval and behind queued sections, so a
+    /// fired graph event never overtakes the property values it refers to
+    /// (sections drain before RPC notifications; E914 shows the official
+    /// popup reads the amount the row refers to at once).
+    fn flush_scoring(&mut self, now_ms: u64, force: bool) {
         let state = &mut self.scoring_state;
         if state.dirty.is_empty() && state.dirty_deleted.is_empty() {
             return;
         }
-        if !self.pending.is_empty()
-            || self.pending.len() >= MAX_PENDING
-            || now_ms.saturating_sub(state.last_flush_ms) < FLUSH_INTERVAL_MS
+        if self.pending.len() >= MAX_PENDING {
+            return;
+        }
+        if !force
+            && (!self.pending.is_empty()
+                || now_ms.saturating_sub(state.last_flush_ms) < FLUSH_INTERVAL_MS)
         {
             return;
         }
@@ -473,7 +536,7 @@ impl PlayerListener {
             && self.scoring_state.reports.is_empty()
             && self.scoring_state.reported.is_empty();
         if idle {
-            self.flush_scoring(now_ms);
+            self.flush_scoring(now_ms, false);
             return Ok(());
         }
         let mut state = self.scoring_state.clone();
@@ -654,10 +717,14 @@ impl PlayerListener {
         {
             return Err(replication::Error::Bound);
         }
-        self.pending_rpcs.extend(collected.replies);
+        let fired = collected
+            .replies
+            .iter()
+            .any(|reply| matches!(reply, HostRpc::Event(_)));
         self.players = players;
         self.scoring_state = state;
-        self.flush_scoring(now_ms);
+        self.flush_scoring(now_ms, fired);
+        self.pending_rpcs.extend(collected.replies);
         Ok(())
     }
 
@@ -741,5 +808,58 @@ impl PlayerListener {
         self.scoring_state.dirty = dirty;
         self.players = players;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod remote_tests {
+    use super::remote_fires;
+    use nfs_world::scoring::events::{Endpoint, Remote, RemoteEmission};
+
+    #[test]
+    fn remote_rows_fire_on_the_networked_bus_ordinal_and_others_are_counted() {
+        let emission = RemoteEmission {
+            source: Endpoint {
+                node: 81,
+                event: 0x4a75_7ba6,
+            },
+            connections: vec![
+                Remote { bus: 2, index: 27 },
+                Remote { bus: 3, index: 5 },
+                Remote { bus: 9, index: 37 },
+            ],
+            context: None,
+        };
+        let entities = [
+            Some(1),
+            Some(2),
+            Some(3),
+            None,
+            Some(4),
+            None,
+            None,
+            None,
+            None,
+            Some(5),
+        ];
+        let (fires, skipped) = remote_fires(&entities, 598, &emission);
+        assert_eq!(skipped, 1);
+        assert_eq!(fires.len(), 2);
+        assert_eq!(
+            (
+                fires[0].event,
+                fires[0].target.ghost,
+                fires[0].target.entity
+            ),
+            (27, 598, 3)
+        );
+        assert_eq!((fires[1].event, fires[1].target.entity), (37, 5));
+        assert!(fires.iter().all(|f| f.player.is_none()));
+        // A bus beyond the table is also counted, never fired.
+        let beyond = RemoteEmission {
+            connections: vec![Remote { bus: 40, index: 1 }],
+            ..emission
+        };
+        assert_eq!(remote_fires(&entities, 598, &beyond), (Vec::new(), 1));
     }
 }

@@ -68,6 +68,7 @@ fn fixture() -> (Composition, Vec<Interface>) {
         Composition {
             nodes,
             buses,
+            bus_entities: vec![],
             connections: Vec::new(),
             links: Vec::new(),
             properties: vec![

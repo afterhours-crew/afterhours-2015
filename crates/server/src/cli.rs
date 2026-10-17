@@ -655,6 +655,7 @@ async fn run(args: Args) -> Result<(), Failure> {
                         scoring_nodes = content.installed().scoring.program.nodes.len(),
                         unmodeled = content.installed().scoring.program.unmodeled.len(),
                         keepers = ?content.installed().categories,
+                        bus_entities = ?content.installed().scoring.bus_entities,
                         "free-roam scoring programs compiled from the installation"
                     );
                     Some(Arc::new(content))

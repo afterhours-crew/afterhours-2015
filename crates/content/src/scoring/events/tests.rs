@@ -47,6 +47,7 @@ fn setup() -> Memory {
         &[
             ("Objects", Value::Array((1..=4).map(local).collect())),
             ("Interface", Value::Pointer(Pointer::Null)),
+            ("Flags", Value::UInt16(1)),
             ("PropertyConnections", Value::Array(vec![])),
             ("LinkConnections", Value::Array(vec![])),
             (
@@ -77,6 +78,7 @@ fn setup() -> Memory {
         &[
             ("Objects", Value::Array(vec![local(1), local(3)])),
             ("Interface", local(2)),
+            ("Flags", Value::UInt16(15)),
             ("PropertyConnections", Value::Array(vec![])),
             ("LinkConnections", Value::Array(vec![])),
             (
@@ -135,6 +137,8 @@ impl Handler for State {
 fn prefab_roundtrip_is_synchronous_and_repeated_instances_keep_distinct_remote_rows() {
     let composition = read(&mut setup(), "a").unwrap();
     assert_eq!(composition.buses.len(), 3);
+    // Every bus here is networked (Flags bit 0): entity indexes 1..=3 in order.
+    assert_eq!(composition.bus_entities, vec![Some(1), Some(2), Some(3)]);
     let find = |asset: &str, index, instance: Option<usize>| -> u16 {
         composition
             .nodes

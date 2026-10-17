@@ -40,6 +40,9 @@ pub struct Participant {
     pub program: Arc<Program>,
     pub layout: Layout,
     pub fields: Vec<Field>,
+    /// Composition bus to the client's entity index for that bus (see
+    /// `Composition::bus_entities`); remote event rows are fired on it.
+    pub bus_entities: Vec<Option<u16>>,
 }
 
 #[derive(Clone, Debug)]
@@ -214,6 +217,7 @@ impl AssetIndex {
                 program: Arc::new(program),
                 layout,
                 fields,
+                bus_entities: sources.composition.bus_entities.clone(),
             },
             sources.composition,
         ))
@@ -459,6 +463,7 @@ mod tests {
         let composition = Composition {
             nodes: composition_nodes,
             buses: vec![],
+            bus_entities: vec![],
             connections: vec![],
             properties,
             links: vec![],

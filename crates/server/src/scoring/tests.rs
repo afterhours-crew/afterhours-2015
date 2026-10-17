@@ -91,6 +91,7 @@ fn participant(local_index: u16) -> Participant {
                 kind: *kind,
             })
             .collect(),
+        bus_entities: vec![Some(1)],
     }
 }
 

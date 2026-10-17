@@ -516,10 +516,15 @@ item collection is kept for later purchases, and every live garage-logic
 integer field that presents a reputation value is updated through the same
 coalesced flush. The collision serializer's Boolean and the slam evaluator's
 reference list use the official creation's values (true and empty) until
-their contracts are established. Remote graph events are logged but not yet
-encoded; each category prefab has one client-targeted row that fires at its
-bank, so the client currently learns of a bank only from the reputation
-field refresh. Live driving has credited style, outlaw and total and carried
+their contracts are established. Remote graph events (rows whose target type
+is NetworkedClient or NetworkedClientAndServer) are sent as entity event
+messages (registry 86) on the participant ghost: the event is the authored
+row index inside its bus and the entity is the bus's 1-based ordinal among
+the networked buses (blueprint `Flags` bit 0) in composition order, which is
+what the official host sends (E914: the style, speed and outlaw category
+rows 27, 37 and 57 fire on entities 3, 5 and 12 every few seconds while
+driving). Rows on buses without a client entity are counted and dropped,
+never fabricated. Live driving has credited style, outlaw and total and carried
 the total across a server restart; road speed limits, other vehicles,
 airborne, engine and nitrous inputs are still absent, so speeding,
 slipstream, airtime, drift train, speed match and nitrous cannot earn. The

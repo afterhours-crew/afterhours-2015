@@ -44,6 +44,12 @@ pub struct Composition {
     /// Composition-order bus identities. Bind these to the replication profile
     /// before encoding Remote rows; these indices alone are not wire selectors.
     pub buses: Vec<Identity>,
+    /// Per bus, its 1-based ordinal among the networked buses (blueprint
+    /// `Flags` bit 0) in composition order, or None for a bus that is not
+    /// networked. This is the entity index the client resolves in an entity
+    /// event message (registry 86) for a node of that bus (official E914:
+    /// style 3, speed 5, outlaw 12).
+    pub bus_entities: Vec<Option<u16>>,
     pub connections: Vec<Connection>,
     /// Authored property rows, including client-side nodes. These are wiring,
     /// not listener registration order or proof that a node runs on the server.
@@ -312,9 +318,26 @@ pub(crate) fn read<S: Source>(source: &mut S, blueprint: &str) -> Result<Composi
             });
         }
     }
+    let mut bus_entities = Vec::with_capacity(buses.len());
+    let mut networked = 0u16;
+    for bus in &buses {
+        let flags = match field(&graph.object(bus)?.fields, "Flags")? {
+            Value::UInt16(v) => u32::from(*v),
+            other => bits32(other)?,
+        };
+        bus_entities.push(if flags & 1 != 0 {
+            networked = networked
+                .checked_add(1)
+                .ok_or_else(|| bad("networked bus count"))?;
+            Some(networked)
+        } else {
+            None
+        });
+    }
     let result = Composition {
         nodes,
         buses: buses.iter().map(Identity::from).collect(),
+        bus_entities,
         connections,
         properties,
         links,
