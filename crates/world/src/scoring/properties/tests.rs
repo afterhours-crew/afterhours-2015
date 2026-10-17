@@ -509,8 +509,15 @@ fn malformed_layout_and_publication_fail_without_mutation() {
 
 #[test]
 fn publication_fanout_consumes_the_shared_dispatch_budget() {
+    // A forwarding cycle re-publishes without end; the shared budget stops
+    // it and the whole candidate, including the first write, is discarded.
     let mut original = State::new(None, 0);
-    original.properties = Store::new(3, vec![cell(None, vec![port(2); MAX_LISTENERS])]).unwrap();
+    original.properties = Store::with_registrations(
+        3,
+        vec![isolated(None, vec![port(0)]), isolated(None, vec![port(2)])],
+        &[forward(0, 2), forward(2, 0)],
+    )
+    .unwrap();
     let graph = Graph::new(3, vec![]).unwrap();
     assert_eq!(
         graph.publish(&original, port(0), Value::Float(1.0)),

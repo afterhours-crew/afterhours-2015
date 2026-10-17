@@ -14,7 +14,9 @@ impl SparseVector {
         let result = match self {
             Self::FloatBits(bits) => bits.map(f32::from_bits),
             Self::Packed { mode, values } => {
-                if values.iter().any(Option::is_some) && mode.is_none_or(|m| m == 0) {
+                // Mode 0 is the narrowest legal width; only a value without any
+                // mode is malformed.
+                if values.iter().any(Option::is_some) && mode.is_none() {
                     return Err(Error::Shape);
                 }
                 values.map(|v| v.unwrap_or(0) as f32 / (1u32 << fractional) as f32)
@@ -223,6 +225,11 @@ mod decode_tests {
             values: [Some(3), None, None],
         };
         assert!(broken.to_vector(5).is_err());
+        let narrow = SparseVector::Packed {
+            mode: Some(0),
+            values: [None, Some(1), None],
+        };
+        assert_eq!(narrow.to_vector(5).unwrap(), [0.0, 1.0 / 32.0, 0.0]);
         assert!(SparseVector::FloatBits([0; 3]).to_vector(17).is_err());
     }
 }

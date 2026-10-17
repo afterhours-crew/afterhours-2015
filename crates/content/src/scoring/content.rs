@@ -75,11 +75,92 @@ pub fn serializer_fields(composition: &Composition, rules: &Rules) -> Result<Vec
     Ok(fields)
 }
 
-/// Resolve each Score node's keeper link to a category from the installed
-/// prefab that owns the node. Total scores live in the top scoring prefab.
-pub fn keeper_categories(program: &Program) -> Result<BTreeMap<u32, Category>, Error> {
+/// Longest authored value path from a Score node back to its category source.
+const MAX_SCORE_PATH: usize = 8;
+
+/// The category prefab a node belongs to, by its blueprint name.
+fn category_prefab(asset: &str) -> Option<Category> {
+    match asset.rsplit('/').next().unwrap_or_default() {
+        "speedcategoryscoringlogic" => Some(Category::Speed),
+        "stylecategoryscoringlogic" => Some(Category::Style),
+        "crewcategoryscoringlogic" => Some(Category::Crew),
+        "buildcategoryscoringlogic" => Some(Category::Build),
+        "outlawcategoryscoringlogic" => Some(Category::Outlaw),
+        _ => None,
+    }
+}
+
+/// The blueprint a prefab reference instantiates: the composition flattens
+/// prefabs, so the reference's children carry it as the last instance step.
+fn referenced_prefab(
+    composition: &Composition,
+    reference: &super::events::Identity,
+) -> Result<String, Error> {
+    let key = (reference.asset.clone(), reference.index);
+    let assets: std::collections::BTreeSet<&str> = composition
+        .nodes
+        .iter()
+        .filter(|node| node.identity.instances.last() == Some(&key))
+        .map(|node| node.identity.asset.as_str())
+        .collect();
+    let mut assets = assets.into_iter();
+    match (assets.next(), assets.next()) {
+        (Some(blueprint), None) => Ok(blueprint.to_string()),
+        (None, _) => Err(bad("score prefab reference has no children")),
+        (Some(_), Some(_)) => Err(bad("score prefab reference children disagree")),
+    }
+}
+
+/// Follow one Score node's authored value path backwards through the
+/// composition's property rows (E887 topology: Score, PropertyCast,
+/// FloatCache, FloatAccumulator, then the prefab reference whose blueprint is
+/// the category; the total's cache is fed by the MathOp sum of the
+/// categories). Every node on the path has one upstream row.
+fn score_category(
+    program: &Program,
+    composition: &Composition,
+    score: u16,
+) -> Result<Category, Error> {
+    let mut current = score;
+    for _ in 0..MAX_SCORE_PATH {
+        let mut upstream = composition
+            .properties
+            .iter()
+            .filter(|row| row.target.node == current)
+            .map(|row| row.source.node);
+        let (Some(source), None) = (upstream.next(), upstream.next()) else {
+            return Err(bad("score value path is not singular"));
+        };
+        let node = composition
+            .nodes
+            .get(usize::from(source))
+            .ok_or_else(|| bad("score value path node"))?;
+        program.node(source).map_err(|e| bad(&e.to_string()))?;
+        match node.class.as_str() {
+            "MathOpEntityData" => return Ok(Category::Total),
+            "LogicPrefabReferenceObjectData" => {
+                let blueprint = referenced_prefab(composition, &node.identity)?;
+                return category_prefab(&blueprint)
+                    .ok_or_else(|| bad(&format!("score source prefab {blueprint}")));
+            }
+            _ => current = source,
+        }
+    }
+    Err(bad("score value path depth bound"))
+}
+
+/// Resolve each Score node's keeper link to the category whose value it
+/// awards. All six Score nodes live in the top scoring prefab; the category
+/// is the prefab that produces the score, not the prefab that owns the node.
+pub fn keeper_categories(
+    program: &Program,
+    composition: &Composition,
+) -> Result<BTreeMap<u32, Category>, Error> {
+    if program.nodes.len() != composition.nodes.len() {
+        return Err(bad("scoring program and composition disagree"));
+    }
     let mut categories = BTreeMap::new();
-    for node in &program.nodes {
+    for (id, node) in program.nodes.iter().enumerate() {
         let Behavior::Score { context, .. } = node.behavior else {
             continue;
         };
@@ -90,15 +171,7 @@ pub fn keeper_categories(program: &Program) -> Result<BTreeMap<u32, Category>, E
         else {
             return Err(bad("score context behavior"));
         };
-        let category = match node.identity.asset.rsplit('/').next().unwrap_or_default() {
-            "speedcategoryscoringlogic" => Category::Speed,
-            "stylecategoryscoringlogic" => Category::Style,
-            "crewcategoryscoringlogic" => Category::Crew,
-            "buildcategoryscoringlogic" => Category::Build,
-            "outlawcategoryscoringlogic" => Category::Outlaw,
-            "drivingstylescoringlogic" => Category::Total,
-            other => return Err(bad(&format!("unknown score owner {other}"))),
-        };
+        let category = score_category(program, composition, id as u16)?;
         for keeper in keepers {
             if categories
                 .insert(keeper.field, category)
@@ -108,14 +181,19 @@ pub fn keeper_categories(program: &Program) -> Result<BTreeMap<u32, Category>, E
             }
         }
     }
-    if categories.len() != 6 {
-        return Err(bad("expected six scoring keepers"));
+    let distinct: std::collections::BTreeSet<Category> = categories.values().copied().collect();
+    if categories.len() != 6 || distinct.len() != 6 {
+        return Err(bad("expected six scoring keepers, one per category"));
     }
     Ok(categories)
 }
 
 impl AssetIndex {
-    fn scoring_participant(&mut self, scene: &str, blueprint: &str) -> Result<Participant, Error> {
+    fn scoring_participant(
+        &mut self,
+        scene: &str,
+        blueprint: &str,
+    ) -> Result<(Participant, Composition), Error> {
         let sources: Sources = self.scoring_sources(blueprint)?;
         let program = compile(&sources)?;
         let layout = self.participant_layout(scene, blueprint, Owner::Scene)?;
@@ -130,20 +208,24 @@ impl AssetIndex {
                 "scoring serializer fields disagree with the participant layout",
             ));
         }
-        Ok(Participant {
-            blueprint: blueprint.into(),
-            program: Arc::new(program),
-            layout,
-            fields,
-        })
+        Ok((
+            Participant {
+                blueprint: blueprint.into(),
+                program: Arc::new(program),
+                layout,
+                fields,
+            },
+            sources.composition,
+        ))
     }
 
     /// Read both installed driving participants for one gameplay scene.
     pub fn scoring_content(&mut self, scene: &str) -> Result<ScoringContent, Error> {
-        let acquisition = self.scoring_participant(scene, ACQUISITION)?;
-        let scoring = self.scoring_participant(scene, SCORING)?;
-        let categories = keeper_categories(&scoring.program)?;
-        if keeper_categories(&acquisition.program).is_ok() {
+        let (acquisition, acquisition_composition) =
+            self.scoring_participant(scene, ACQUISITION)?;
+        let (scoring, composition) = self.scoring_participant(scene, SCORING)?;
+        let categories = keeper_categories(&scoring.program, &composition)?;
+        if keeper_categories(&acquisition.program, &acquisition_composition).is_ok() {
             return Err(bad("acquisition participant must not award"));
         }
         Ok(ScoringContent {
@@ -220,50 +302,152 @@ mod tests {
     }
 
     #[test]
-    fn keeper_categories_resolve_from_owning_prefabs() {
-        let identity = |asset: &str| nfs_world::scoring::program::Identity {
+    fn keeper_categories_follow_the_score_value_path() {
+        use crate::scoring::events::DataConnection;
+        use nfs_world::scoring::properties::Port;
+        let top = "gameplay/scoring/drivingstylescoringlogic";
+        let identity = |asset: &str, index: usize| Identity {
             asset: asset.into(),
-            index: 1,
+            index,
             instances: vec![],
         };
-        let node = |asset: &str, behavior| Node {
-            identity: identity(asset),
-            class: "Test".into(),
-            created: true,
-            events: true,
-            properties: true,
-            forward: None,
-            defaults: vec![],
-            behavior,
+        let mut nodes = vec![];
+        let mut composition_nodes = vec![];
+        let mut properties = vec![];
+        let push = |nodes: &mut Vec<Node>,
+                    composition_nodes: &mut Vec<EventNode>,
+                    asset: &str,
+                    class: &str,
+                    behavior| {
+            let id = nodes.len() as u16;
+            let identity = identity(asset, nodes.len());
+            nodes.push(Node {
+                identity: nfs_world::scoring::program::Identity {
+                    asset: asset.into(),
+                    index: nodes.len() as u32,
+                    instances: vec![],
+                },
+                class: class.into(),
+                created: true,
+                events: true,
+                properties: true,
+                forward: None,
+                defaults: vec![],
+                behavior,
+            });
+            composition_nodes.push(EventNode {
+                identity,
+                class: class.into(),
+                listeners: None,
+                forward: None,
+            });
+            id
         };
-        let mut nodes = vec![node("x", Behavior::Inert)];
-        let owners = [
+        let channel = push(
+            &mut nodes,
+            &mut composition_nodes,
+            top,
+            "LinkedSchematicChannelReferenceEntityData",
+            Behavior::Inert,
+        );
+        let mut score_node = |asset: &str, class: &str, keeper: u32| {
+            // Score <- cast <- cache <- source: a prefab reference whose
+            // children come from the category blueprint, or the MathOp sum.
+            let source = push(
+                &mut nodes,
+                &mut composition_nodes,
+                top,
+                class,
+                Behavior::Inert,
+            );
+            if class == "LogicPrefabReferenceObjectData" {
+                let child = push(
+                    &mut nodes,
+                    &mut composition_nodes,
+                    asset,
+                    "FloatEntityData",
+                    Behavior::Inert,
+                );
+                composition_nodes[usize::from(child)].identity.instances =
+                    vec![(top.to_string(), usize::from(source))];
+            }
+            let cache = push(
+                &mut nodes,
+                &mut composition_nodes,
+                top,
+                "FloatCacheEntityData",
+                Behavior::Inert,
+            );
+            let cast = push(
+                &mut nodes,
+                &mut composition_nodes,
+                top,
+                "PropertyCastEntityData",
+                Behavior::Inert,
+            );
+            let context = push(
+                &mut nodes,
+                &mut composition_nodes,
+                top,
+                "ScoreContextEntityData",
+                Behavior::ScoreContext {
+                    participant_provider: 0,
+                    keepers: vec![Keeper {
+                        node: channel,
+                        field: keeper,
+                    }],
+                },
+            );
+            let score = push(
+                &mut nodes,
+                &mut composition_nodes,
+                top,
+                "ScoreEntityData",
+                Behavior::Score {
+                    default: 0,
+                    context,
+                },
+            );
+            for (from, to) in [(source, cache), (cache, cast), (cast, score)] {
+                properties.push(DataConnection {
+                    source: Port {
+                        node: from,
+                        field: 1,
+                    },
+                    target: Port { node: to, field: 2 },
+                    bus: 0,
+                    index: properties.len() as u16,
+                    flags: None,
+                });
+            }
+            (source, score)
+        };
+        let mut sources = vec![];
+        for (asset, keeper) in [
             ("gameplay/scoring/speedcategoryscoringlogic", 10),
             ("gameplay/scoring/stylecategoryscoringlogic", 11),
             ("gameplay/scoring/crewcategoryscoringlogic", 12),
             ("gameplay/scoring/buildcategoryscoringlogic", 13),
             ("gameplay/scoring/outlawcategoryscoringlogic", 14),
-            ("gameplay/scoring/drivingstylescoringlogic", 15),
-        ];
-        for (asset, keeper) in owners {
-            let context = nodes.len() as u16 + 1;
-            nodes.push(node(
-                asset,
-                Behavior::Score {
-                    default: 0,
-                    context,
+        ] {
+            sources.push(score_node(asset, "LogicPrefabReferenceObjectData", keeper).0);
+        }
+        let (sum, total_score) = score_node(top, "MathOpEntityData", 15);
+        // The total sums the five category values; the walk stops at the sum.
+        for source in sources {
+            properties.push(DataConnection {
+                source: Port {
+                    node: source,
+                    field: 1,
                 },
-            ));
-            nodes.push(node(
-                asset,
-                Behavior::ScoreContext {
-                    participant_provider: 0,
-                    keepers: vec![Keeper {
-                        node: 0,
-                        field: keeper,
-                    }],
+                target: Port {
+                    node: sum,
+                    field: 3,
                 },
-            ));
+                bus: 0,
+                index: properties.len() as u16,
+                flags: None,
+            });
         }
         let program = Program {
             nodes,
@@ -272,15 +456,55 @@ mod tests {
             startup: vec![],
             unmodeled: vec![],
         };
-        let categories = keeper_categories(&program).unwrap();
+        let composition = Composition {
+            nodes: composition_nodes,
+            buses: vec![],
+            connections: vec![],
+            properties,
+            links: vec![],
+        };
+        let categories = keeper_categories(&program, &composition).unwrap();
         assert_eq!(categories[&10], Category::Speed);
+        assert_eq!(categories[&14], Category::Outlaw);
         assert_eq!(categories[&15], Category::Total);
         assert_eq!(categories.len(), 6);
-        let mut fewer = program.clone();
-        fewer.nodes.truncate(11);
-        assert!(keeper_categories(&fewer).is_err());
-        let mut foreign = program;
-        foreign.nodes[1].identity.asset = "gameplay/scoring/other".into();
-        assert!(keeper_categories(&foreign).is_err());
+
+        // A second upstream row makes the path ambiguous.
+        let mut ambiguous = composition.clone();
+        ambiguous.properties.push(DataConnection {
+            source: Port {
+                node: sum,
+                field: 1,
+            },
+            target: Port {
+                node: total_score,
+                field: 2,
+            },
+            bus: 0,
+            index: 99,
+            flags: None,
+        });
+        assert!(keeper_categories(&program, &ambiguous).is_err());
+
+        // A path that never reaches a category prefab or the sum fails.
+        let mut unresolved = composition.clone();
+        unresolved.nodes[usize::from(sum)].class = "FloatEntityData".into();
+        assert!(keeper_categories(&program, &unresolved).is_err());
+
+        // Two keepers on one category are rejected: the second reference's
+        // child (node 8) now comes from the speed blueprint.
+        let mut duplicated = composition.clone();
+        duplicated.nodes[8].identity.asset = "gameplay/scoring/speedcategoryscoringlogic".into();
+        assert!(keeper_categories(&program, &duplicated).is_err());
+
+        // A reference without children cannot name its blueprint.
+        let mut orphan = composition.clone();
+        orphan.nodes[2].identity.instances.clear();
+        assert!(keeper_categories(&program, &orphan).is_err());
+
+        // Program and composition must describe the same nodes.
+        let mut shorter = composition.clone();
+        shorter.nodes.pop();
+        assert!(keeper_categories(&program, &shorter).is_err());
     }
 }

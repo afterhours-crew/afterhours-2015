@@ -40,7 +40,8 @@ impl Quaternion14 {
     pub fn to_quaternion(&self) -> Result<[f32; 4], Error> {
         let axes = self.axes.map(|a| f32::from(a.unwrap_or(0)) / 8191.0);
         let squares = (axes[0] * axes[0] + axes[1] * axes[1]) + axes[2] * axes[2];
-        if !squares.is_finite() || squares > 1.0 + 1.0 / 4096.0 {
+        // Three quantized axes can exceed one by a few steps of 1/8191.
+        if !squares.is_finite() || squares > 1.0 + 1.0 / 256.0 {
             return Err(Error::Shape);
         }
         let w = (1.0 - squares).max(0.0).sqrt();

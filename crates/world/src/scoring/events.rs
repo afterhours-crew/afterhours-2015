@@ -13,8 +13,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub const MAX_NODES: usize = 4096;
 pub const MAX_CONNECTIONS: usize = 16384;
-pub const MAX_STEPS: usize = 16384;
-pub const MAX_DEPTH: usize = 32;
+pub const MAX_STEPS: usize = 262_144;
+pub const MAX_DEPTH: usize = 256;
 pub const MAX_REMOTE: usize = 4096;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]

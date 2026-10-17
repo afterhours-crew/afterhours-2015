@@ -654,6 +654,7 @@ async fn run(args: Args) -> Result<(), Failure> {
                         acquisition_nodes = content.installed().acquisition.program.nodes.len(),
                         scoring_nodes = content.installed().scoring.program.nodes.len(),
                         unmodeled = content.installed().scoring.program.unmodeled.len(),
+                        keepers = ?content.installed().categories,
                         "free-roam scoring programs compiled from the installation"
                     );
                     Some(Arc::new(content))

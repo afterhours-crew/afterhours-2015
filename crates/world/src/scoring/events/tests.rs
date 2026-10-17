@@ -158,12 +158,10 @@ fn cycles_bounds_unknown_targets_and_handler_failure_discard_the_candidate() {
         Graph::new(1, vec![repeated; MAX_CONNECTIONS + 1]),
         Err(Error::Bound)
     );
-    let wide = Graph::new(
-        1,
-        vec![edge(root, endpoint(0, 3), Delivery::Local); MAX_CONNECTIONS],
-    )
-    .unwrap();
-    assert_eq!(wide.apply(&state, root), Err(Error::Bound));
+    // Unbounded recursion (event 4 re-emits the root) exhausts the shared
+    // depth/work budget and discards the candidate.
+    let recursive = Graph::new(2, vec![edge(root, endpoint(1, 4), Delivery::Local)]).unwrap();
+    assert_eq!(recursive.apply(&state, root), Err(Error::Bound));
     let remote = Graph::new(
         1,
         (0..=MAX_REMOTE)

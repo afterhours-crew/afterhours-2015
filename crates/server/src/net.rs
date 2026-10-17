@@ -908,7 +908,7 @@ pub async fn world_host(
         .with_arrivals(arrivals)
         .with_returns(returns)
         .with_garage_logic(garage_logic)
-        .with_scoring(scoring);
+        .with_scoring(scoring, unix_micros().max(0) as u64);
     let mut items = items::Exchanges::new(inventory, connection);
     if let Some(content) = &content
         && let Err(error) = listener.initialize_world(content)
@@ -938,8 +938,14 @@ pub async fn world_host(
             return;
         }
         if let Err(error) = listener.advance_scoring(now_ms()) {
-            warn!(connection, ?error, "owned scoring rejected");
-            return;
+            // Scoring is best effort: a fault disables it for this session
+            // and never closes the world host.
+            warn!(
+                connection,
+                ?error,
+                "owned scoring rejected; scoring disabled for this session"
+            );
+            listener.disable_scoring();
         }
         if !listener.files_alive(now_ms()) {
             warn!(

@@ -8,6 +8,10 @@
 //! retired with the root disable event when it leaves free roam. Keeper
 //! awards become one category credit per bank, committed by the storage
 //! exchange; the committed snapshot refreshes the REP presentation fields.
+//!
+//! Replication of scoring state is coalesced: property changes are merged per
+//! entity and flushed as one section at a bounded rate when the queue has
+//! room, so the driving traffic and the send window are never starved.
 use super::*;
 use crate::scoring::{Content, TIME_SCALE, Which};
 use nfs_world::{
@@ -27,8 +31,16 @@ pub const ROOT_DISABLED: u32 = 0xfc4b_bbb4;
 const MAX_LIVE: usize = 16;
 pub(super) const MAX_QUEUED_REPORTS: usize = 64;
 const MAX_PENDING_AWARDS: usize = 32;
-/// Longest elapsed time one scheduler update may cover.
+/// One engine update. Elapsed time is covered in steps of this size, like
+/// the client's fixed update, so short periodic delays fire once per step.
+const TICK_SECONDS: f32 = 1.0 / 30.0;
+/// Longest elapsed time one advance may cover; older time is dropped.
 const MAX_TICK_SECONDS: f32 = 0.5;
+/// Minimum interval between replication flushes of coalesced scoring state.
+const FLUSH_INTERVAL_MS: u64 = 100;
+/// Coalesced records waiting for a flush (one per live entity at most, plus
+/// reputation fields); more than this means the queue never drains.
+const MAX_DIRTY: usize = 64;
 
 #[derive(Clone, Debug)]
 pub(super) struct Entity {
@@ -78,13 +90,17 @@ pub(super) struct State {
     pub reports: Vec<QueuedReport>,
     pub pending_awards: VecDeque<AwardRequest>,
     pub sequence: u64,
+    pub batch_base: u64,
+    /// Records already applied to the committed world, merged per object,
+    /// waiting for the next flush. A creation keeps its initial fields.
+    pub dirty: BTreeMap<u16, Record>,
+    pub dirty_deleted: Vec<u16>,
+    pub last_flush_ms: u64,
 }
 
-/// Everything one advance queues for the frame, collected across sessions.
+/// Everything one advance produces, collected across sessions.
 #[derive(Default)]
 struct Collected {
-    records: Vec<Record>,
-    deleted: Vec<u16>,
     replies: Vec<HostRpc>,
     awards: Vec<(u16, Award)>,
 }
@@ -93,6 +109,14 @@ struct Collected {
 struct Target {
     participant: u16,
     car: u16,
+}
+
+/// One live session's identity: its participant, program and ghost.
+#[derive(Clone, Copy)]
+struct Scope {
+    participant: u16,
+    which: Which,
+    ghost: u16,
 }
 
 fn packed(records: Vec<Record>, deleted: Vec<u16>) -> Section {
@@ -109,6 +133,14 @@ fn packed(records: Vec<Record>, deleted: Vec<u16>) -> Section {
     }
 }
 
+/// Log the failing stage and map it to the listener's replication error.
+fn fail<E: std::fmt::Debug>(stage: &'static str) -> impl Fn(E) -> replication::Error {
+    move |error| {
+        tracing::warn!(stage, ?error, "scoring fault");
+        replication::Error::Shape
+    }
+}
+
 fn idle_inputs(persona: u64, now_ms: u64) -> Inputs {
     Inputs {
         participant: persona,
@@ -120,44 +152,62 @@ fn idle_inputs(persona: u64, now_ms: u64) -> Inputs {
     }
 }
 
-fn collect_output(
-    content: &Content,
-    players: &Players,
-    participant: u16,
-    which: Which,
-    ghost: u16,
-    output: Output,
-    collected: &mut Collected,
+/// Merge a record into the coalesced set: one record per object, later field
+/// changes replacing earlier ones, a creation keeping its initial fields.
+fn merge_record(
+    dirty: &mut BTreeMap<u16, Record>,
+    record: Record,
 ) -> Result<(), replication::Error> {
-    if let Some(update) = content.update(which, &output.synced)? {
-        let mut world = players.clone();
-        if let Some(record) = world.change(ghost, update)? {
-            collected.records.push(record);
+    match dirty.get_mut(&record.id) {
+        None => {
+            if dirty.len() >= MAX_DIRTY {
+                return Err(replication::Error::Bound);
+            }
+            dirty.insert(record.id, record);
+            Ok(())
         }
+        Some(existing) => match (&mut existing.update, record.update) {
+            (
+                replication::Update::Entity { fields, .. },
+                replication::Update::Entity {
+                    fields: changed, ..
+                },
+            ) => {
+                for (slot, change) in fields.iter_mut().zip(changed) {
+                    if change.is_some() {
+                        *slot = change;
+                    }
+                }
+                Ok(())
+            }
+            _ => Err(replication::Error::TypeMismatch),
+        },
     }
-    for (node, command) in output.commands {
-        collected.replies.push(HostRpc::Query(
-            content.command(which, players, ghost, node, command)?,
-        ));
-    }
-    if !output.remote.is_empty() {
-        tracing::debug!(
-            participant,
-            ?which,
-            remote = output.remote.len(),
-            "scoring remote events are not encoded yet"
-        );
-    }
-    collected
-        .awards
-        .extend(output.awards.into_iter().map(|award| (participant, award)));
-    Ok(())
 }
 
 impl PlayerListener {
-    pub(in crate::net) fn with_scoring(mut self, scoring: Option<Arc<Content>>) -> Self {
+    /// `session_micros` is the host's wall clock at world start; credit batch
+    /// ids are unique per session and sequence so a repeated id only ever
+    /// means a retry of the same credit.
+    pub(in crate::net) fn with_scoring(
+        mut self,
+        scoring: Option<Arc<Content>>,
+        session_micros: u64,
+    ) -> Self {
         self.scoring = scoring;
+        self.scoring_state.batch_base = (session_micros & 0x0000_0FFF_FFFF_FFFF) << 20;
         self
+    }
+
+    /// Stop scoring for this session after a fault. Created entities stay in
+    /// the client world unchanged; no further ticks, reports or credits.
+    pub(in crate::net) fn disable_scoring(&mut self) {
+        let base = self.scoring_state.batch_base;
+        self.scoring = None;
+        self.scoring_state = State {
+            batch_base: base,
+            ..State::default()
+        };
     }
 
     fn scoring_inputs(
@@ -166,10 +216,12 @@ impl PlayerListener {
         car: u16,
         now_ms: u64,
     ) -> Result<Inputs, replication::Error> {
-        let physics = players.vehicle_physics(HOST_SELECTOR as u8, self.persona, car)?;
-        let motion = physics.decode([0.; 3])?;
+        let physics = players
+            .vehicle_physics(HOST_SELECTOR as u8, self.persona, car)
+            .map_err(fail("vehicle physics"))?;
+        let motion = physics.decode([0.; 3]).map_err(fail("physics decode"))?;
         let vehicle =
-            Vehicle::from_motion(u32::from(car), &motion).map_err(|_| replication::Error::Shape)?;
+            Vehicle::from_motion(u32::from(car), &motion).map_err(fail("vehicle basis"))?;
         Ok(Inputs {
             vehicle: Some(vehicle),
             ..idle_inputs(self.persona, now_ms)
@@ -207,6 +259,54 @@ impl PlayerListener {
         Ok(None)
     }
 
+    /// Apply one session output: property changes go to the world copy and
+    /// the coalesced record set, commands become entity calls, awards queue.
+    fn collect_output(
+        content: &Content,
+        players: &mut Players,
+        state: &mut State,
+        scope: Scope,
+        output: Output,
+        collected: &mut Collected,
+    ) -> Result<(), replication::Error> {
+        let Scope {
+            participant,
+            which,
+            ghost,
+        } = scope;
+        if let Some(update) = content.update(which, &output.synced)?
+            && let Some(record) = players.change(ghost, update)?
+        {
+            merge_record(&mut state.dirty, record)?;
+        }
+        for (node, command) in output.commands {
+            collected.replies.push(HostRpc::Query(
+                content.command(which, players, ghost, node, command)?,
+            ));
+        }
+        if !output.remote.is_empty() {
+            tracing::debug!(
+                participant,
+                ?which,
+                remote = output.remote.len(),
+                "scoring remote events are not encoded yet"
+            );
+        }
+        for award in &output.awards {
+            tracing::info!(
+                participant,
+                ?which,
+                keeper = award.keeper,
+                amount = award.amount,
+                "scoring award"
+            );
+        }
+        collected
+            .awards
+            .extend(output.awards.into_iter().map(|award| (participant, award)));
+        Ok(())
+    }
+
     fn retire(
         &self,
         content: &Content,
@@ -232,14 +332,17 @@ impl PlayerListener {
             let mut session = entity.session;
             let output = session
                 .event(root, ROOT_DISABLED, &inputs)
-                .map_err(|_| replication::Error::Shape)?;
+                .map_err(fail("root disable"))?;
             collected
                 .awards
                 .extend(output.awards.into_iter().map(|award| (participant, award)));
             ghosts.push(entity.ghost);
         }
         players.remove_entities(&ghosts)?;
-        collected.deleted.extend(ghosts);
+        for ghost in ghosts {
+            state.dirty.remove(&ghost);
+            state.dirty_deleted.push(ghost);
+        }
         tracing::info!(participant, "owned scoring participants retired");
         Ok(())
     }
@@ -262,13 +365,15 @@ impl PlayerListener {
         for which in Which::ALL {
             let (session, output) = content
                 .start(which, &inputs)
-                .map_err(|_| replication::Error::Shape)?;
-            let creation = content.creation(which, &session, participant, players)?;
+                .map_err(fail("session start"))?;
+            let creation = content
+                .creation(which, &session, participant, players)
+                .map_err(fail("creation record"))?;
             let record = players
                 .spawn_entities(vec![creation], content.creation_content())?
                 .remove(0);
             let ghost = record.id;
-            collected.records.push(record);
+            merge_record(&mut state.dirty, record)?;
             let reports = content.report_bindings(which, players, ghost)?;
             // Startup publications are already in the creation; only its
             // commands and awards remain to queue.
@@ -276,12 +381,15 @@ impl PlayerListener {
                 synced: Vec::new(),
                 ..output
             };
-            collect_output(
+            Self::collect_output(
                 content,
                 players,
-                participant,
-                which,
-                ghost,
+                state,
+                Scope {
+                    participant,
+                    which,
+                    ghost,
+                },
                 startup,
                 collected,
             )?;
@@ -305,9 +413,28 @@ impl PlayerListener {
         Ok(())
     }
 
+    /// Queue one section with everything coalesced so far, when the queue
+    /// has room and the flush interval has passed.
+    fn flush_scoring(&mut self, now_ms: u64) {
+        let state = &mut self.scoring_state;
+        if state.dirty.is_empty() && state.dirty_deleted.is_empty() {
+            return;
+        }
+        if !self.pending.is_empty()
+            || self.pending.len() >= MAX_PENDING
+            || now_ms.saturating_sub(state.last_flush_ms) < FLUSH_INTERVAL_MS
+        {
+            return;
+        }
+        let records = std::mem::take(&mut state.dirty).into_values().collect();
+        let deleted = std::mem::take(&mut state.dirty_deleted);
+        state.last_flush_ms = now_ms;
+        self.pending.push_back(packed(records, deleted));
+    }
+
     /// Create, tick, report into and retire scoring sessions. Runs between
-    /// frames with the committed world; its output is queued like any other
-    /// owned replication and reply traffic, bounded by the same queues.
+    /// frames with the committed world; property changes are applied to the
+    /// world immediately and replicated by the bounded flush.
     pub(in crate::net) fn advance_scoring(
         &mut self,
         now_ms: u64,
@@ -315,24 +442,43 @@ impl PlayerListener {
         let Some(content) = self.scoring.clone() else {
             return Ok(());
         };
-        if !self.pending.is_empty() || !self.pending_entries.is_empty() {
+        if !self.pending_entries.is_empty() {
             return Ok(());
         }
-        let mut state = self.scoring_state.clone();
-        let mut players = self.players.clone();
-        let mut collected = Collected::default();
         let active: BTreeSet<u16> = self
             .participants
             .in_free_roam()
             .into_iter()
             .filter(|p| self.free_roam_presented.contains(p))
             .collect();
-        let retiring: Vec<u16> = state
+        let retiring: Vec<u16> = self
+            .scoring_state
             .live
             .keys()
             .copied()
             .filter(|p| !active.contains(p))
             .collect();
+        let creating: Vec<Target> = active
+            .iter()
+            .filter(|p| !self.scoring_state.live.contains_key(p))
+            .filter_map(|&participant| {
+                self.world_cars
+                    .iter()
+                    .find(|(_, (owner, ready))| *owner == participant && *ready)
+                    .map(|(&car, _)| Target { participant, car })
+            })
+            .collect();
+        let idle = retiring.is_empty()
+            && creating.is_empty()
+            && self.scoring_state.reports.is_empty()
+            && self.scoring_state.reported.is_empty();
+        if idle {
+            self.flush_scoring(now_ms);
+            return Ok(());
+        }
+        let mut state = self.scoring_state.clone();
+        let mut players = self.players.clone();
+        let mut collected = Collected::default();
         for participant in retiring {
             self.retire(
                 &content,
@@ -343,49 +489,45 @@ impl PlayerListener {
                 &mut collected,
             )?;
         }
-        for participant in &active {
-            if state.live.contains_key(participant) {
-                continue;
-            }
-            let Some((&car, _)) = self
-                .world_cars
-                .iter()
-                .find(|(_, (owner, ready))| *owner == *participant && *ready)
-            else {
-                continue;
-            };
+        for target in creating {
             self.create(
                 &content,
                 &mut players,
                 &mut state,
-                Target {
-                    participant: *participant,
-                    car,
-                },
+                target,
                 now_ms,
                 &mut collected,
             )?;
         }
         // Deliver queued reports, then tick every live session whose car
-        // reported movement since the last advance.
+        // reported movement since the last advance, in fixed engine steps.
         let reports = std::mem::take(&mut state.reports);
         for queued in reports {
-            let Some(live) = state.live.get_mut(&queued.participant) else {
+            let Some(live) = state.live.get(&queued.participant) else {
                 continue;
             };
             let inputs = self.scoring_inputs(&players, live.car, now_ms)?;
-            let entity = &mut live.entities[queued.which as usize];
-            let output = entity
-                .session
-                .report(queued.node, &queued.report, &inputs)
-                .map_err(|_| replication::Error::Shape)?;
-            let ghost = entity.ghost;
-            collect_output(
+            let (output, ghost) = {
+                let live = state
+                    .live
+                    .get_mut(&queued.participant)
+                    .ok_or(replication::Error::Shape)?;
+                let entity = &mut live.entities[queued.which as usize];
+                let output = entity
+                    .session
+                    .report(queued.node, &queued.report, &inputs)
+                    .map_err(fail("query report"))?;
+                (output, entity.ghost)
+            };
+            Self::collect_output(
                 &content,
-                &players,
-                queued.participant,
-                queued.which,
-                ghost,
+                &mut players,
+                &mut state,
+                Scope {
+                    participant: queued.participant,
+                    which: queued.which,
+                    ghost,
+                },
                 output,
                 &mut collected,
             )?;
@@ -400,37 +542,61 @@ impl PlayerListener {
             if !reported.contains(&car) || now_ms <= last_ms {
                 continue;
             }
-            let delta = ((now_ms - last_ms) as f32 / 1000.0).min(MAX_TICK_SECONDS);
-            let inputs = self.scoring_inputs(&players, car, now_ms)?;
-            for which in Which::ALL {
-                let live = state
-                    .live
-                    .get_mut(&participant)
-                    .ok_or(replication::Error::Shape)?;
-                let entity = &mut live.entities[which as usize];
-                let output = entity
-                    .session
-                    .tick(delta, &inputs)
-                    .map_err(|_| replication::Error::Shape)?;
-                let ghost = entity.ghost;
-                collect_output(
-                    &content,
-                    &players,
+            let covered = ((now_ms - last_ms) as f32 / 1000.0).min(MAX_TICK_SECONDS);
+            let mut remaining = covered;
+            let mut inputs = self.scoring_inputs(&players, car, now_ms)?;
+            let start = inputs.now - f64::from(covered);
+            if now_ms / 1000 != last_ms / 1000
+                && let Some(vehicle) = &inputs.vehicle
+            {
+                let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+                let [right, up, forward, position] = vehicle.transform;
+                let v = vehicle.velocity;
+                tracing::info!(
                     participant,
-                    which,
-                    ghost,
-                    output,
-                    &mut collected,
-                )?;
+                    car,
+                    speed = dot(v, v).sqrt(),
+                    forward = dot(v, forward),
+                    lateral = dot(v, right),
+                    vertical = dot(v, up),
+                    ?position,
+                    ?forward,
+                    "scoring vehicle sample"
+                );
+            }
+            while remaining > 0.0 {
+                let step = remaining.min(TICK_SECONDS);
+                remaining -= step;
+                inputs.now = start + f64::from(covered - remaining);
+                for which in Which::ALL {
+                    let (output, ghost) = {
+                        let live = state
+                            .live
+                            .get_mut(&participant)
+                            .ok_or(replication::Error::Shape)?;
+                        let entity = &mut live.entities[which as usize];
+                        let output = entity
+                            .session
+                            .tick(step, &inputs)
+                            .map_err(fail("session tick"))?;
+                        (output, entity.ghost)
+                    };
+                    Self::collect_output(
+                        &content,
+                        &mut players,
+                        &mut state,
+                        Scope {
+                            participant,
+                            which,
+                            ghost,
+                        },
+                        output,
+                        &mut collected,
+                    )?;
+                }
             }
             if let Some(live) = state.live.get_mut(&participant) {
                 live.last_ms = now_ms;
-            }
-        }
-        // Apply the recorded property changes to the committed world copy.
-        for record in &collected.records {
-            if players.objects().get(record.id).is_some() {
-                let _ = players.change(record.id, record.update.clone())?;
             }
         }
         // Bank awards into durable credits, one per participant.
@@ -461,7 +627,10 @@ impl PlayerListener {
                 .sequence
                 .checked_add(1)
                 .ok_or(replication::Error::Bound)?;
-            let batch_id = (self.persona.rotate_left(17) ^ state.sequence) | 1;
+            if state.sequence >= 1 << 20 {
+                return Err(replication::Error::Bound);
+            }
+            let batch_id = state.batch_base | state.sequence;
             tracing::info!(
                 participant,
                 total = credit.total,
@@ -480,20 +649,15 @@ impl PlayerListener {
                 thresholds,
             });
         }
-        let changes = !collected.records.is_empty() || !collected.deleted.is_empty();
         if collected.replies.len()
             > nfs_world::session::MAX_RPC_QUEUE.saturating_sub(self.pending_rpcs.len())
-            || (changes && self.pending.len() >= MAX_PENDING)
         {
             return Err(replication::Error::Bound);
-        }
-        if changes {
-            self.pending
-                .push_back(packed(collected.records, collected.deleted));
         }
         self.pending_rpcs.extend(collected.replies);
         self.players = players;
         self.scoring_state = state;
+        self.flush_scoring(now_ms);
         Ok(())
     }
 
@@ -503,6 +667,7 @@ impl PlayerListener {
 
     /// Accept a committed credit: adopt the account view, keep the item
     /// collection for later purchases and refresh the presented REP fields.
+    /// Field changes join the coalesced scoring flush.
     pub(in crate::net) fn awarded(
         &mut self,
         request: &AwardRequest,
@@ -517,7 +682,8 @@ impl PlayerListener {
             .map_err(|_| replication::Error::Shape)?;
         let values = request.thresholds.evaluate(scores);
         let mut players = self.players.clone();
-        let mut records = Vec::new();
+        let mut dirty = self.scoring_state.dirty.clone();
+        let mut changed = 0usize;
         if let Some(logic) = self.logic.as_deref() {
             for (participant, ghosts) in &self.logic_ghosts {
                 if !self
@@ -551,13 +717,11 @@ impl PlayerListener {
                     if let Some(record) =
                         players.change(ghost, replication::Update::Entity { binding, fields })?
                     {
-                        records.push(record);
+                        merge_record(&mut dirty, record)?;
+                        changed += 1;
                     }
                 }
             }
-        }
-        if !records.is_empty() && self.pending.len() >= MAX_PENDING {
-            return Err(replication::Error::Bound);
         }
         if let Some(inventory) = &mut self.inventory
             && inventory.items.items.len() <= credited.items.items.len()
@@ -571,12 +735,10 @@ impl PlayerListener {
             replayed = credited.replayed,
             total = scores.total,
             level = values.get(nfs_services::reputation::Field::Level),
-            fields = records.len(),
+            fields = changed,
             "owned reputation credit committed"
         );
-        if !records.is_empty() {
-            self.pending.push_back(packed(records, Vec::new()));
-        }
+        self.scoring_state.dirty = dirty;
         self.players = players;
         Ok(())
     }

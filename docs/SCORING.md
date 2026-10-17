@@ -484,21 +484,43 @@ started interpreter session. Each accepted movement report of the participant's
 car ticks both sessions with the decoded chassis state (position, rotation and
 velocity; airborne, engine speed and nitrous are not replicated and stay
 absent), road data and other vehicles are not supplied yet, and the time scale
-is one. Dirty synchronized values become entity property updates, collision
-query controls become host calls on the entity serializer, and near-miss,
-accumulated-collision and collision reports are decoded against the created
-serializers and delivered to their query nodes. Leaving free roam fires the
-root disable event, which banks every category, then deletes both entities.
+is one. Elapsed time between two advances is covered in fixed 1/30 s engine
+steps (at most 0.5 s per advance, older time dropped) so that periodic delays
+fire once per step as they do in the client's fixed update; the step clock
+advances with each step. Dirty synchronized values are applied to the world
+immediately and coalesced per entity; one packed section carries them at most
+every 100 ms and only when the send queue has room, so scoring never starves
+the driving traffic. Collision query controls become host calls on the entity
+serializer, and near-miss, accumulated-collision and collision reports are
+decoded against the created serializers and delivered to their query nodes.
+Leaving free roam fires the root disable event, which banks every category,
+then deletes both entities. A scoring fault (decode, start, tick, report)
+is logged with its stage and disables scoring for that session; driving
+continues and the created entities stay in the client world unchanged.
 
-Keeper awards are summed per category into one credit per bank. A negative
-category total or an undeclared keeper rejects the batch; all-zero credits
-produce no transaction. The credit commits through the existing inventory
-service as one retry-safe storage batch (`reputation::earned::Policy`): score
-columns, derived level and eligible category and item grants together. The
-committed account view replaces the listener's snapshot, the item collection is
-kept for later purchases, and every live garage-logic integer field that
-presents a reputation value is updated. The collision serializer's Boolean and
-the slam evaluator's reference list use the official creation's values (true
-and empty) until their contracts are established. Remote graph events are
-counted but not yet encoded. None of this is live acceptance: the combined
-driving, level-up, unlock and restart check is still outstanding.
+Every bank fires one award per keeper. The keeper's category comes from the
+installed value path of its Score node, not from the prefab that owns the
+node (all six Score nodes live in the top scoring prefab): the compiler
+follows the Score's property rows back through the cast and cache to the
+prefab reference whose instance path names the category blueprint, while
+the total's cache is fed by the MathOp sum of the categories. Six keepers
+with six distinct categories are required. Awards are summed per category
+into one credit per bank. A negative category total or an undeclared keeper
+rejects the batch; all-zero credits produce no transaction. The credit
+commits through the existing inventory service as one retry-safe storage
+batch (`reputation::earned::Policy`): score columns, derived level and
+eligible category and item grants together. Batch ids are unique per world
+session and sequence, so a repeated id only ever means a retry of the same
+credit. The committed account view replaces the listener's snapshot, the
+item collection is kept for later purchases, and every live garage-logic
+integer field that presents a reputation value is updated through the same
+coalesced flush. The collision serializer's Boolean and the slam evaluator's
+reference list use the official creation's values (true and empty) until
+their contracts are established. Remote graph events are logged but not yet
+encoded; each category prefab has one client-targeted row that fires at its
+bank, so the client currently learns of a bank only from the reputation
+field refresh. Live driving has credited style, outlaw and total and carried
+the total across a server restart; road speed limits, other vehicles,
+airborne, engine and nitrous inputs are still absent, so speeding,
+slipstream, airtime, drift train, speed match and nitrous cannot earn. The
+level-up and unlock checks are still outstanding.
