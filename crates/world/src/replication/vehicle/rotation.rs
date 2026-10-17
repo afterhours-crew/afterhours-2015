@@ -34,6 +34,23 @@ impl Quaternion25 {
 }
 
 impl Quaternion14 {
+    /// Reconstruct the unit quaternion: the three transmitted axes with the
+    /// writer's 13-bit scale and the scalar recovered from unit length with
+    /// the transmitted sign. Axes whose squares exceed one are rejected.
+    pub fn to_quaternion(&self) -> Result<[f32; 4], Error> {
+        let axes = self.axes.map(|a| f32::from(a.unwrap_or(0)) / 8191.0);
+        let squares = (axes[0] * axes[0] + axes[1] * axes[1]) + axes[2] * axes[2];
+        if !squares.is_finite() || squares > 1.0 + 1.0 / 4096.0 {
+            return Err(Error::Shape);
+        }
+        let w = (1.0 - squares).max(0.0).sqrt();
+        Ok([
+            axes[0],
+            axes[1],
+            axes[2],
+            if self.negative_w { -w } else { w },
+        ])
+    }
     pub fn from_quaternion(quaternion: [f32; 4]) -> Result<Self, Error> {
         if quaternion.iter().any(|v| !v.is_finite()) {
             return Err(Error::Shape);
@@ -130,5 +147,31 @@ mod tests {
             Quaternion25::from_quaternion([f32::MAX; 4]),
             Err(Error::Shape)
         );
+    }
+}
+
+#[cfg(test)]
+mod decode_tests {
+    use super::*;
+    #[test]
+    fn quaternion14_round_trips_within_its_precision_and_rejects_overflow() {
+        for q in [
+            [0.0, 0.0, 0.0, 1.0],
+            [0.0, 0.70710677, 0.0, -0.70710677],
+            [0.5, -0.5, 0.5, 0.5],
+        ] {
+            let decoded = Quaternion14::from_quaternion(q)
+                .unwrap()
+                .to_quaternion()
+                .unwrap();
+            for (a, b) in q.iter().zip(decoded) {
+                assert!((a - b).abs() < 2e-4, "{q:?} vs {decoded:?}");
+            }
+        }
+        let overflow = Quaternion14 {
+            negative_w: false,
+            axes: [Some(8191), Some(8191), None],
+        };
+        assert!(overflow.to_quaternion().is_err());
     }
 }

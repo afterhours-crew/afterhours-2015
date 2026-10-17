@@ -81,7 +81,7 @@ fn created(id: Identity, class: &str) -> creation::Node {
 /// bus has Float(5), Float(6) merged into Float(7)'s value through an
 /// interface (8) with a Source default, plus an unsupported telemetry sink (9)
 /// fed by an inert provider (10) through an untyped cell.
-fn fixture() -> Sources {
+pub(crate) fn fixture() -> Sources {
     let root = |i| identity("root", i, &[]);
     let child = |i| identity("child", i, &[("root", 3)]);
     let nodes = vec![

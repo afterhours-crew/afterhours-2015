@@ -15,7 +15,7 @@ use super::{
     events::{
         Context, Dispatch, Endpoint, EntityContext, Graph, Handler, PropertyHandler, RemoteEmission,
     },
-    nodes,
+    finite, nodes,
     program::{Behavior, Program, Step},
     properties::{Definition, Port, Store},
     property_cast, property_gate,
@@ -46,6 +46,34 @@ pub struct Vehicle {
     pub rpm: Option<f32>,
 }
 
+impl Vehicle {
+    /// Owned measurements from a decoded chassis report. Airborne, the two
+    /// unlabeled state flags and engine speed are not replicated, so they are
+    /// absent; the query preserves those outputs.
+    pub fn from_motion(
+        identity: u32,
+        motion: &crate::replication::vehicle::chassis::Motion,
+    ) -> Result<Self, Error> {
+        let basis =
+            crate::replication::vehicle::orientation::basis_from_quaternion(motion.quaternion)
+                .map_err(|_| Error::NonFinite)?;
+        let transform = [basis[0], basis[1], basis[2], motion.position];
+        for component in transform.iter().flatten().chain(&motion.velocity) {
+            finite(*component)?;
+        }
+        Ok(Self {
+            identity,
+            transform,
+            velocity: motion.velocity,
+            airborne: None,
+            state_3c230e35: None,
+            state_cd5ae2f0: None,
+            max_rpm: None,
+            rpm: None,
+        })
+    }
+}
+
 /// Per-tick inputs. `now` is a monotonic clock in seconds; `time_scale` is the
 /// engine context scale supplied by the caller's policy (never assumed here).
 #[derive(Clone, Debug, PartialEq)]
@@ -56,6 +84,18 @@ pub struct Inputs {
     pub road: Option<road::Sample>,
     pub now: f64,
     pub time_scale: f32,
+}
+
+/// Reputation category credited by a keeper. Total is separate from the five
+/// categories; the installed graph wires it through its own keeper.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Category {
+    Total,
+    Build,
+    Crew,
+    Outlaw,
+    Speed,
+    Style,
 }
 
 /// A keeper award request produced by a Score node. `keeper` is the link ID

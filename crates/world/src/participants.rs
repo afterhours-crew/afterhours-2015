@@ -64,6 +64,37 @@ impl Call {
         }
     }
 }
+/// A host call on one serializer of an entity the client already holds, with
+/// no arguments: the collision query's Begin (1) and Terminate (2) controls.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EntityCall {
+    pub entity: u16,
+    pub selector: u16,
+    pub serial: Serial,
+    pub method: u32,
+}
+impl EntityCall {
+    pub fn encode(self) -> Result<BitWriter, Error> {
+        if self.entity == 0 || self.entity > 8191 || self.selector > 511 {
+            return Err(Error::Bound);
+        }
+        let mut payload = BitWriter::new();
+        payload
+            .put(self.selector.into(), 9)
+            .put(self.serial.value().into(), 10)
+            .put(self.method.into(), 32)
+            .align();
+        let mut body = BitWriter::new();
+        body.put(0, 32)
+            .put(0, 32)
+            .put(1, 8)
+            .put(self.entity.into(), 13)
+            .put(payload.bytes().len() as u64, 9)
+            .put_span(payload.span());
+        Ok(body)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Notification {
     pub endpoint: Endpoint,
@@ -1049,6 +1080,8 @@ pub enum HostRpc {
     SequenceStop(crate::sequences::Stop),
     Event(crate::logic::Fire),
     WorldActivation(crate::world_activation::Notification),
+    /// Scoring query control on a participant-owned entity serializer.
+    Query(EntityCall),
 }
 impl HostRpc {
     /// Every object the notification names; the client must hold each one
@@ -1071,6 +1104,7 @@ impl HostRpc {
                 ids.extend(v.participant);
                 ids
             }
+            Self::Query(v) => vec![v.entity],
         }
     }
     pub fn scene(self) -> u16 {
@@ -1087,6 +1121,7 @@ impl HostRpc {
             Self::SequenceStop(v) => v.sequence,
             Self::Event(v) => v.target.ghost,
             Self::WorldActivation(v) => v.endpoint.scene,
+            Self::Query(v) => v.entity,
         }
     }
     pub fn encode(self) -> Result<BitWriter, Error> {
@@ -1101,6 +1136,7 @@ impl HostRpc {
             Self::SequenceStop(v) => v.encode(),
             Self::Event(v) => v.encode().map_err(|_| Error::Shape),
             Self::WorldActivation(v) => v.encode(),
+            Self::Query(v) => v.encode(),
         }
     }
 }

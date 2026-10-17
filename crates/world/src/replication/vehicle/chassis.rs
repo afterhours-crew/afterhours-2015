@@ -110,6 +110,20 @@ fn signed(value: f32, width: u8) -> u16 {
     let value = value.clamp(-1., 1.);
     ((value.is_sign_negative() as u16) << (width - 1)) | unsigned(value.abs(), width - 1)
 }
+impl Physics {
+    /// Decode a replicated chassis state back to floats with the precision
+    /// the encoder used (position 7, velocity 5, angular velocity 8 bits).
+    pub fn decode(&self, origin: [f32; 3]) -> Result<Motion, Error> {
+        Ok(Motion {
+            identity: (u64::from(self.identity_words[0]) << 32) | u64::from(self.identity_words[1]),
+            revision: self.identity_words[2],
+            position: self.position.to_position(origin, 7)?,
+            quaternion: self.rotation.to_quaternion()?,
+            velocity: self.velocity.to_vector(5)?,
+            angular_velocity: self.angular_velocity.to_vector(8)?,
+        })
+    }
+}
 impl Motion {
     pub fn encode(&self, origin: [f32; 3], controls: &Controls) -> Result<Physics, Error> {
         Ok(Physics {
@@ -403,6 +417,38 @@ mod tests {
                 body
             );
             assert_eq!(wire, body.encode(&profile).unwrap());
+        }
+    }
+}
+
+#[cfg(test)]
+mod decode_tests {
+    use super::*;
+    #[test]
+    fn physics_decode_inverts_motion_encode_within_precision() {
+        let motion = Motion {
+            identity: 1.25f64.to_bits(),
+            revision: 38,
+            position: [-30.5, 20.25, 400.125],
+            quaternion: [0.0, 0.70710677, 0.0, 0.70710677],
+            velocity: [4.0, 0.0, -2.0],
+            angular_velocity: [0.0, 0.5, 0.0],
+        };
+        let physics = motion.encode([0.; 3], &Controls::new(3).unwrap()).unwrap();
+        let decoded = physics.decode([0.; 3]).unwrap();
+        assert_eq!(decoded.identity, motion.identity);
+        assert_eq!(decoded.revision, motion.revision);
+        for (a, b) in motion.position.iter().zip(decoded.position) {
+            assert!((a - b).abs() <= 1.0 / 128.0);
+        }
+        for (a, b) in motion.quaternion.iter().zip(decoded.quaternion) {
+            assert!((a - b).abs() < 2e-4);
+        }
+        for (a, b) in motion.velocity.iter().zip(decoded.velocity) {
+            assert!((a - b).abs() <= 1.0 / 32.0);
+        }
+        for (a, b) in motion.angular_velocity.iter().zip(decoded.angular_velocity) {
+            assert!((a - b).abs() <= 1.0 / 256.0);
         }
     }
 }

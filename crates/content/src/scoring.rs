@@ -19,6 +19,7 @@ pub mod arithmetic;
 pub mod awards;
 pub mod bindings;
 pub mod boolean_fold;
+pub mod content;
 pub mod creation;
 pub mod delay;
 pub mod draft;

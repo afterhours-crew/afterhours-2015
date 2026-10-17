@@ -5,6 +5,26 @@
 use super::{Error, SparseVector, Vector};
 
 impl SparseVector {
+    /// Decode with the writer's precision. Absent packed components are zero;
+    /// the float escape already carries absolute components.
+    pub fn to_vector(&self, fractional: u8) -> Result<[f32; 3], Error> {
+        if fractional > 16 {
+            return Err(Error::Shape);
+        }
+        let result = match self {
+            Self::FloatBits(bits) => bits.map(f32::from_bits),
+            Self::Packed { mode, values } => {
+                if values.iter().any(Option::is_some) && mode.is_none_or(|m| m == 0) {
+                    return Err(Error::Shape);
+                }
+                values.map(|v| v.unwrap_or(0) as f32 / (1u32 << fractional) as f32)
+            }
+        };
+        if result.iter().any(|v| !v.is_finite()) {
+            return Err(Error::Shape);
+        }
+        Ok(result)
+    }
     pub fn from_vector(value: [f32; 3], fractional: u8) -> Result<Self, Error> {
         Ok(match Vector::from_position(value, [0.; 3], fractional)? {
             Vector::FloatBits(bits) => Self::FloatBits(bits),
@@ -180,5 +200,29 @@ mod inverse_tests {
         };
         assert_eq!(vector.to_position([f32::INFINITY; 3], 7), Err(Error::Shape));
         assert_eq!(vector.to_position([0.; 3], 17), Err(Error::Shape));
+    }
+}
+
+#[cfg(test)]
+mod decode_tests {
+    use super::*;
+    #[test]
+    fn sparse_vector_round_trips_and_rejects_values_without_a_mode() {
+        for v in [[0.0, 0.0, 0.0], [4.0, 0.0, -2.0], [1.5, -0.25, 300.0]] {
+            let encoded = SparseVector::from_vector(v, 5).unwrap();
+            let decoded = encoded.to_vector(5).unwrap();
+            for (a, b) in v.iter().zip(decoded) {
+                assert!((a - b).abs() <= 1.0 / 32.0, "{v:?} vs {decoded:?}");
+            }
+        }
+        let escaped = SparseVector::from_vector([1.0e7, 0.0, 0.0], 5).unwrap();
+        assert!(matches!(escaped, SparseVector::FloatBits(_)));
+        assert_eq!(escaped.to_vector(5).unwrap(), [1.0e7, 0.0, 0.0]);
+        let broken = SparseVector::Packed {
+            mode: None,
+            values: [Some(3), None, None],
+        };
+        assert!(broken.to_vector(5).is_err());
+        assert!(SparseVector::FloatBits([0; 3]).to_vector(17).is_err());
     }
 }

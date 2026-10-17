@@ -471,3 +471,34 @@ missing road data preserves road state. An award carries the installed keeper
 link ID; mapping it to a category and persisting credit belong to the server.
 Running the installed programs against constructed vehicle profiles is a model
 check, not live acceptance; neither participant is enabled by this change.
+
+## Server integration
+
+With `--game-dir` and garage logic configured, the server compiles both installed
+driving participants from the installation at startup
+(`AssetIndex::scoring_content`) and logs the node counts; without them scoring
+stays off. When an owned participant drives in free roam (after its free-roam
+presentation), the world host creates the acquisition and scoring participants
+as replicated entities whose initial synchronized values come from a freshly
+started interpreter session. Each accepted movement report of the participant's
+car ticks both sessions with the decoded chassis state (position, rotation and
+velocity; airborne, engine speed and nitrous are not replicated and stay
+absent), road data and other vehicles are not supplied yet, and the time scale
+is one. Dirty synchronized values become entity property updates, collision
+query controls become host calls on the entity serializer, and near-miss,
+accumulated-collision and collision reports are decoded against the created
+serializers and delivered to their query nodes. Leaving free roam fires the
+root disable event, which banks every category, then deletes both entities.
+
+Keeper awards are summed per category into one credit per bank. A negative
+category total or an undeclared keeper rejects the batch; all-zero credits
+produce no transaction. The credit commits through the existing inventory
+service as one retry-safe storage batch (`reputation::earned::Policy`): score
+columns, derived level and eligible category and item grants together. The
+committed account view replaces the listener's snapshot, the item collection is
+kept for later purchases, and every live garage-logic integer field that
+presents a reputation value is updated. The collision serializer's Boolean and
+the slam evaluator's reference list use the official creation's values (true
+and empty) until their contracts are established. Remote graph events are
+counted but not yet encoded. None of this is live acceptance: the combined
+driving, level-up, unlock and restart check is still outstanding.

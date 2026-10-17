@@ -657,10 +657,9 @@ fn startup(
 }
 
 impl AssetIndex {
-    /// Read every installed input of one composition and compile its server
-    /// realm. See [`compile`] for the contract; this adds no behavior.
-    pub fn scoring_program(&mut self, blueprint: &str) -> Result<Program, Error> {
-        let sources = Sources {
+    /// Read every installed input of one composition without compiling it.
+    pub fn scoring_sources(&mut self, blueprint: &str) -> Result<Sources, Error> {
+        Ok(Sources {
             composition: self.scoring_events(blueprint)?,
             interfaces: self.scoring_interfaces(blueprint)?,
             declarations: self.scoring_property_declarations(blueprint)?,
@@ -676,10 +675,15 @@ impl AssetIndex {
             awards: self.scoring_awards(blueprint)?,
             roads: self.scoring_roads(blueprint)?,
             drafts: self.scoring_drafts(blueprint)?,
-        };
-        compile(&sources)
+        })
+    }
+
+    /// Compile the server realm of one composition. See [`compile`] for the
+    /// contract; this adds no behavior.
+    pub fn scoring_program(&mut self, blueprint: &str) -> Result<Program, Error> {
+        compile(&self.scoring_sources(blueprint)?)
     }
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
