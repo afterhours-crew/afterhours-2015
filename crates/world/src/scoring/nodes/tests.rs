@@ -245,6 +245,48 @@ fn cache_and_accumulator_publish_before_notification_even_when_unchanged() {
 }
 
 #[test]
+fn accumulator_output_tracks_input_between_events_without_notification() {
+    // E914: the official category score follows its gated input every frame
+    // (sum 0 + input), folds on Accumulate, then holds the sum.
+    let mut acc = Node::new(Definition::Accumulator).unwrap();
+    assert_eq!(
+        acc.apply(Action::PropertyChanged(INPUT), |_| Some(Value::Float(
+            26.42
+        )))
+        .unwrap(),
+        [Effect::Publish(OUTPUT, Value::Float(26.42))]
+    );
+    assert_eq!(
+        acc.apply(Action::Event(ACCUMULATE), |_| Some(Value::Float(60.65)))
+            .unwrap(),
+        [
+            Effect::Publish(OUTPUT, Value::Float(60.65)),
+            Effect::Emit(OUTPUT_CHANGED)
+        ]
+    );
+    // A later input change adds to the stored sum.
+    assert_eq!(
+        acc.apply(Action::PropertyChanged(INPUT), |_| Some(Value::Float(1.5)))
+            .unwrap(),
+        [Effect::Publish(OUTPUT, Value::Float(62.15))]
+    );
+    // Other property changes are ignored; invalid input leaves the node alone.
+    assert!(
+        acc.apply(Action::PropertyChanged(A), |_| Some(Value::Float(1.0)))
+            .unwrap()
+            .is_empty()
+    );
+    let original = acc.clone();
+    assert!(
+        acc.apply(Action::PropertyChanged(INPUT), |_| Some(Value::Float(
+            f32::NAN
+        )))
+        .is_err()
+    );
+    assert_eq!(acc, original);
+}
+
+#[test]
 fn float_reads_current_output_and_reset_uses_authored_default() {
     let mut node = Node::new(Definition::Float {
         default: -2.0,

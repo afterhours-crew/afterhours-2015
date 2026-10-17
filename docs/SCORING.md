@@ -524,7 +524,13 @@ the networked buses (blueprint `Flags` bit 0) in composition order, which is
 what the official host sends (E914: the style, speed and outlaw category
 rows 27, 37 and 57 fire on entities 3, 5 and 12 every few seconds while
 driving). Rows on buses without a client entity are counted and dropped,
-never fabricated. Live driving has credited style, outlaw and total and carried
+never fabricated. A FloatAccumulator publishes its stored sum plus the current
+input whenever the input changes (no event), folds the input into the sum on
+Accumulate and clears on Reset: the official host's category score, which is
+such an accumulator fed by the gated drift score, rises every frame while a
+drift runs and holds the folded value afterwards (E915), so the client's
+popup shows the running number from the moment the category flag flips.
+Live driving has credited style, outlaw and total and carried
 the total across a server restart; road speed limits, other vehicles,
 airborne, engine and nitrous inputs are still absent, so speeding,
 slipstream, airtime, drift train, speed match and nitrous cannot earn. The

@@ -290,6 +290,15 @@ impl Node {
                     Emit(OUTPUT_CHANGED),
                 ])
             }
+            // The output tracks the stored sum plus the current input between
+            // events: the official host's category score (fed by the gated
+            // drift score) rises every frame while the drift runs and holds
+            // the folded sum afterwards (E914 ghost 598). No event is emitted
+            // for a tracked change; Accumulate and Reset emit as before.
+            (Accumulator, PropertyChanged(INPUT)) => Ok(vec![Publish(
+                OUTPUT,
+                Value::Float(finite(float(read, INPUT)? + self.sum)?),
+            )]),
             (Float { default, step }, Event(event @ (INCREMENT | DECREMENT | RESET))) => {
                 let value = match event {
                     RESET => default,
