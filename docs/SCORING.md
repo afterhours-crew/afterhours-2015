@@ -484,7 +484,7 @@ started interpreter session. Each accepted movement report of the participant's
 car ticks both sessions with the decoded chassis state (position, rotation and
 velocity and angular velocity), the road measurements of the installed road
 network, every other replicated car, the car's dyno figures and an owned
-airborne estimate, and the time scale is one. The road network is read from the
+airborne state, and the time scale is one. The road network is read from the
 `layer6_roadnetwork_schematic` partition (`AssetIndex::road_network`): each
 `LaneSegment` keeps its sampled spline, integer speed limit (mph), lane width
 and lane direction; a uniform grid finds the nearest segment within 40 m, and
@@ -495,16 +495,16 @@ the world's vehicle objects with decodable chassis physics (traffic is
 client-side and absent). The stats provider publishes the car item's dyno
 figures (current top speed and 0-60 time) and the item definition's defaults
 (stock figures); without the item catalog, the inventory or a car item it
-publishes nothing. The airborne flag is a free-fall detector: the vertical velocity of the
-chassis reports, timed by the chassis clock, falling at about gravity over
-the last tenth of a second for four successive estimates and at least 3 m/s
-lost vertical speed (the replicated
-chassis carries no wheel-contact flag; E916, E919). Every report with a
-notable vertical speed is logged (`free-fall sample`), every Boolean
+publishes nothing. Airborne comes from the first four-bit physical-state enum
+in the accepted, ownership-checked chassis report: state 1 is airborne, as in
+the native physics query. Other enum values are false. This replaces the
+provisional vertical-acceleration detector; the trailing Boolean flags and
+wheel-slip pairs are different measurements. Every Boolean
 synchronized change is logged (`scoring flag`), and `NFS_SCORING_TRACE` in
 the server's environment logs every synchronized change for comparisons
-with the official stream. The airborne estimate has not yet detected the
-recorded jump and is not accepted as an airtime implementation.
+with the official stream. The recorded jump carries the explicit airborne
+state for about 0.73 seconds. This reference check does not establish a new
+local live airtime result.
 
 The nitrous measurement comes from per-car fuel (`nfs_world::nitrous_fuel`).
 The installed item selects its actual upgrade configuration and buildup

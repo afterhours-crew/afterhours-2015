@@ -23,6 +23,7 @@ pub struct Controls {
     pub mode_time: f32,
     pub auxiliary_time: Option<f32>,
     pub flag: bool,
+    /// First value is physical state (1 = airborne); second is unresolved.
     pub counters: [u8; 2],
     pub scaled_value: f32,
     pub selector: u8,
@@ -288,6 +289,25 @@ mod tests {
         assert_eq!(c.encode().unwrap().wheel_pairs, None);
         c.driving_mode = 6;
         assert!(c.encode().unwrap().wheel_pairs.is_some());
+    }
+
+    #[test]
+    fn airborne_enum_survives_movement_codec_independently_of_flags_and_wheel_slip() {
+        use super::super::movement::Sample;
+        for physical_state in 0..16 {
+            let mut s = state();
+            s.controls.counters = [physical_state, 1];
+            s.controls.flags = [true; 4];
+            s.controls.wheels = [[5.0, 1.0]; 4];
+            let physics = value(&s, 1).physics.unwrap();
+            let original = Sample {
+                physics,
+                flag: true,
+            };
+            let (header, body) = original.encode().unwrap();
+            let decoded = Sample::decode(header.span(), body.span()).unwrap();
+            assert_eq!(decoded.physics.controls.is_airborne(), physical_state == 1);
+        }
     }
 
     #[test]

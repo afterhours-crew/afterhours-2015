@@ -112,8 +112,6 @@ pub(super) struct State {
     pub dirty: BTreeMap<u16, Record>,
     pub dirty_deleted: Vec<u16>,
     pub last_flush_ms: u64,
-    /// Per-car free-fall detectors for the owned airborne measurement.
-    pub free_fall: BTreeMap<u16, FreeFall>,
     /// Log every synchronized change (`NFS_SCORING_TRACE`), not only flags.
     pub trace: bool,
     /// Owned nitrous fuel per world car (E920), ticked with the car's reports.
@@ -140,86 +138,6 @@ impl Nitrous {
             self.fuel.request(active);
             self.transitions.push_back(self.sample());
         }
-    }
-}
-
-/// Owned airborne estimate (E916, inferred): the replicated chassis carries no
-/// wheel-contact flag, so a car is taken as airborne while its vertical
-/// velocity has fallen at about gravity for at least four consecutive
-/// estimates (about 0.4 s at the 10 Hz report spacing) and has lost at least
-/// [`Self::MIN_DROP`] since the run began. Crests reach two or three
-/// near-gravity estimates while losing little speed (E921: two crests of run
-/// e911v, runs of two and three, 2.5 m/s lost); a landing resets the run.
-#[derive(Clone, Debug, Default)]
-pub(super) struct FreeFall {
-    /// Recent reports: chassis clock (seconds, from the report's identity
-    /// words) and vertical velocity. The client clock keeps the acceleration
-    /// estimate free of server arrival jitter (E918); the window averages the
-    /// 1/32 m/s velocity quantization over about a tenth of a second (E919).
-    recent: std::collections::VecDeque<(f64, f32)>,
-    run: u8,
-    /// Vertical velocity at the base of the run's first estimate.
-    run_start: f32,
-}
-impl FreeFall {
-    const MIN_RUN: u8 = 4;
-    /// Vertical velocity lost over the run before the car counts as airborne, m/s.
-    const MIN_DROP: f32 = 3.0;
-    /// Shortest span the estimate is taken over, seconds.
-    const SPAN: f64 = 0.09;
-    const WINDOW: usize = 8;
-    /// Vertical acceleration of a fall, m/s²: gravity with the quantization
-    /// noise; the suspension's kick at a crest's lip reaches -14 (E921).
-    const BAND: std::ops::RangeInclusive<f32> = -13.0..=-6.5;
-    pub fn observe(&mut self, clock: f64, vertical: f32) -> bool {
-        let mut acceleration = None;
-        if self
-            .recent
-            .back()
-            .is_some_and(|&(last, _)| clock <= last || clock - last > 0.5)
-        {
-            self.recent.clear();
-            self.run = 0;
-        }
-        self.recent.push_back((clock, vertical));
-        while self.recent.len() > Self::WINDOW {
-            self.recent.pop_front();
-        }
-        // The oldest report at least SPAN before this one.
-        let base = self
-            .recent
-            .iter()
-            .rev()
-            .find(|&&(at, _)| clock - at >= Self::SPAN)
-            .copied();
-        if let Some((at, old)) = base {
-            let estimate = (vertical - old) / (clock - at) as f32;
-            acceleration = Some(estimate);
-            if Self::BAND.contains(&estimate) {
-                if self.run == 0 {
-                    self.run_start = old;
-                }
-                self.run = self.run.saturating_add(1);
-            } else {
-                self.run = 0;
-            }
-        }
-        let airborne = self.run >= Self::MIN_RUN && self.run_start - vertical >= Self::MIN_DROP;
-        // Diagnostic for the airtime calibration (E919): every report with a
-        // notable vertical speed or a fall in progress.
-        if vertical.abs() > 1.5 || self.run > 0 {
-            tracing::info!(
-                clock,
-                vertical,
-                acceleration,
-                run = self.run,
-                drop = self.run_start - vertical,
-                airborne,
-                window = self.recent.len(),
-                "free-fall sample"
-            );
-        }
-        airborne
     }
 }
 
@@ -323,46 +241,6 @@ mod nitrous_tests {
                 .contains(&nfs_world::scoring::nos::Effect::Emit(
                     nfs_world::scoring::nos::DISENGAGED
                 ))
-        );
-    }
-}
-
-#[cfg(test)]
-mod free_fall_tests {
-    use super::FreeFall;
-    #[test]
-    fn a_jump_counts_after_four_estimates_and_a_crest_never_does() {
-        // Launch at 6 m/s up, gravity thereafter, reports every 0.1 s.
-        let mut fall = FreeFall::default();
-        let mut flagged_at = None;
-        for step in 0..12 {
-            let clock = 10.0 + 0.1 * f64::from(step);
-            let vertical = 6.0 - 0.981 * step as f32;
-            if fall.observe(clock, vertical) && flagged_at.is_none() {
-                flagged_at = Some(step);
-            }
-        }
-        assert_eq!(flagged_at, Some(4));
-        // A crest of run e911v (E921, 14:22:22): three near-gravity estimates
-        // while the road levels out, then a flat road.
-        let mut fall = FreeFall::default();
-        let crest = [
-            (179.133, 1.71875),
-            (179.267, 2.375),
-            (179.400, 3.09375),
-            (179.532, 3.5625),
-            (179.666, 3.90625),
-            (179.801, 4.4375),
-            (179.900, 3.84375),
-            (180.033, 2.34375),
-            (180.167, 1.375),
-            (180.267, 1.0),
-            (180.367, 0.9),
-        ];
-        assert!(
-            crest
-                .iter()
-                .all(|&(clock, vertical)| !fall.observe(clock, vertical))
         );
     }
 }
@@ -580,6 +458,7 @@ impl PlayerListener {
         let motion = physics.decode([0.; 3]).map_err(fail("physics decode"))?;
         let mut vehicle =
             Vehicle::from_motion(u32::from(car), &motion).map_err(fail("vehicle basis"))?;
+        vehicle.airborne = Some(physics.controls.is_airborne());
         vehicle.nos = nitrous.map(Nitrous::sample);
         // Road measurements from the installed network (E916); absent without
         // a network or off the network, which preserves the query state.
@@ -800,7 +679,6 @@ impl PlayerListener {
             .live
             .remove(&participant)
             .ok_or(replication::Error::Shape)?;
-        state.free_fall.remove(&live.car);
         state.nitrous.remove(&live.car);
         let inputs = idle_inputs(self.persona, now_ms);
         let mut ghosts = Vec::with_capacity(2);
@@ -1070,20 +948,6 @@ impl PlayerListener {
             let mut remaining = covered;
             let mut inputs =
                 self.scoring_inputs(&content, &players, car, now_ms, state.nitrous.get(&car))?;
-            if let Some(vehicle) = inputs.vehicle.as_mut()
-                && let Ok(physics) = players.vehicle_physics(HOST_SELECTOR as u8, self.persona, car)
-            {
-                let [high, low, _] = physics.identity_words;
-                let clock = f64::from_bits((u64::from(high) << 32) | u64::from(low));
-                if clock.is_finite() {
-                    let airborne = state
-                        .free_fall
-                        .entry(car)
-                        .or_default()
-                        .observe(clock, vehicle.velocity[1]);
-                    vehicle.airborne = Some(airborne);
-                }
-            }
             // Preserve transitions even when start and release arrive between
             // scheduler passes. Component notifications deliver their snapshots
             // without advancing unrelated queries, timers or fuel.

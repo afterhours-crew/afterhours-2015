@@ -52,9 +52,9 @@ pub struct Vehicle {
 }
 
 impl Vehicle {
-    /// Owned measurements from a decoded chassis report. Airborne, the two
-    /// unlabeled state flags and engine speed are not replicated, so they are
-    /// absent; the query preserves those outputs.
+    /// Motion measurements from a decoded chassis report. Control state is
+    /// supplied separately by the caller, including the airborne enum; fields
+    /// not present in Motion remain absent until that input is supplied.
     pub fn from_motion(
         identity: u32,
         motion: &crate::replication::vehicle::chassis::Motion,
