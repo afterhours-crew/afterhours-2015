@@ -7,7 +7,7 @@
 //! installed composition; the interpreter executes it for one session.
 //! A Program is data. It performs no I/O, awards nothing and encodes no packet.
 use super::{
-    Error, arithmetic, collision, delay,
+    Error, arithmetic, collision, delay, donut,
     events::{Connection, MAX_CONNECTIONS, MAX_NODES},
     math, nodes,
     properties::{DefaultMode, Definition, MAX_PROPERTIES, Port, Registration},
@@ -91,6 +91,14 @@ pub enum Behavior {
         configuration: road::Configuration,
         limit_bound: bool,
     },
+    /// Participant-proximity count from the other cars (E916).
+    Proximity,
+    /// Vehicle figures from the owned inputs (E916).
+    Stats,
+    /// Nitrous query from the owned inputs (E916).
+    Nos,
+    /// Doughnut detection from the owned motion (E916).
+    Donut(donut::Configuration),
     Collision(collision::Outputs),
     NearMiss,
     AccumulatedCollisions,
@@ -216,6 +224,7 @@ impl Program {
                     property_gate::Gate::new(*definition, outputs)?;
                 }
                 Behavior::Road { configuration, .. } => configuration.validate()?,
+                Behavior::Donut(configuration) => configuration.validate()?,
                 Behavior::Scalar(definition) => {
                     nodes::Node::new(*definition)?;
                 }

@@ -7,10 +7,10 @@
 //! property layout and derives the verified startup order. It does not run the
 //! graph, award REP or enable a participant.
 use super::{
-    Calculation, arithmetic, awards, bindings, boolean_fold, creation, delay, draft,
+    Calculation, arithmetic, awards, bindings, boolean_fold, creation, delay, donut, draft,
     events::{Composition, Identity},
     interfaces::{Access, Interface},
-    nodes, property_gate, property_types, realms, road, stopwatch, synced,
+    nodes, property_gate, property_types, proximity, realms, road, stopwatch, synced,
 };
 use crate::{Error, assets::AssetIndex, graph::bad};
 use nfs_world::scoring::{
@@ -28,14 +28,9 @@ use std::collections::{BTreeMap, BTreeSet};
 /// them as unsupported. Adding a class here is a documented decision, not a
 /// silent default.
 pub const UNSUPPORTED: &[&str] = &[
-    "RaceVehicleNosQueryEntityData",
     "RaceVehicleNosBuildupEntityData",
-    "RaceVehicleDonutQueryEntityData",
     "RaceVehicleSlamAParticipantCollisionEvaluatorEntityData",
-    "VehicleStatsProviderEntityData",
-    "VehicleProximitySetFilterEntityData",
     "ParticipantSetCounterEntityData",
-    "BoolParticipantPropertyAccessorEntityData",
     "PlayerInfoAccessorEntityData",
     "TelemetryHookEntityData",
     "PropertyEncodeEntityData",
@@ -71,6 +66,8 @@ pub struct Sources {
     pub awards: Vec<awards::Award>,
     pub roads: Vec<road::Node>,
     pub drafts: Vec<draft::Node>,
+    pub donuts: Vec<donut::Node>,
+    pub proximities: Vec<proximity::Node>,
 }
 
 fn identity(identity: &Identity) -> program::Identity {
@@ -365,6 +362,14 @@ pub fn compile(sources: &Sources) -> Result<Program, Error> {
     for n in &sources.drafts {
         drafts.insert(index.lookup(&n.identity)?, n.configuration);
     }
+    let mut donuts = BTreeMap::new();
+    for n in &sources.donuts {
+        donuts.insert(index.lookup(&n.identity)?, n.configuration);
+    }
+    let mut proximities = BTreeMap::new();
+    for n in &sources.proximities {
+        proximities.insert(index.lookup(&n.identity)?, n.radius);
+    }
     let eligible: BTreeMap<&Identity, bool> = sources
         .creation
         .iter()
@@ -418,6 +423,20 @@ pub fn compile(sources: &Sources) -> Result<Program, Error> {
                     })
                 }
                 "RaceVehicleNearMissQueryEntityData" => Behavior::NearMiss,
+                "VehicleProximitySetFilterEntityData" => {
+                    let radius = proximities
+                        .get(&id)
+                        .ok_or_else(|| bad("proximity radius missing"))?;
+                    defaults[i].push((world::proximity::RADIUS, Value::Float(*radius)));
+                    Behavior::Proximity
+                }
+                "RaceVehicleDonutQueryEntityData" => Behavior::Donut(
+                    *donuts
+                        .get(&id)
+                        .ok_or_else(|| bad("donut configuration missing"))?,
+                ),
+                "VehicleStatsProviderEntityData" => Behavior::Stats,
+                "RaceVehicleNosQueryEntityData" => Behavior::Nos,
                 "RaceVehicleAccumulatingCollisionsQueryEntityData" => {
                     Behavior::AccumulatedCollisions
                 }
@@ -675,6 +694,8 @@ impl AssetIndex {
             awards: self.scoring_awards(blueprint)?,
             roads: self.scoring_roads(blueprint)?,
             drafts: self.scoring_drafts(blueprint)?,
+            donuts: self.scoring_donuts(blueprint)?,
+            proximities: self.scoring_proximities(blueprint)?,
         })
     }
 

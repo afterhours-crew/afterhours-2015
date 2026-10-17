@@ -202,6 +202,8 @@ pub(crate) fn fixture() -> Sources {
         awards: vec![],
         roads: vec![],
         drafts: vec![],
+        donuts: vec![],
+        proximities: vec![],
         composition,
     }
 }

@@ -51,6 +51,11 @@ pub struct Content {
     installed: Arc<ScoringContent>,
     creation: Arc<CreationContent>,
     bindings: [Arc<Binding>; 2],
+    /// Installed road network for the road-driving query (E916); None keeps
+    /// road inputs absent, which preserves the query state.
+    road: Option<Arc<nfs_world::scoring::road_network::Network>>,
+    /// Item definitions with the stock vehicle figures for the stats provider.
+    items: Option<Arc<nfs_world::items::InventoryCatalog>>,
 }
 
 impl Content {
@@ -87,7 +92,25 @@ impl Content {
             installed,
             creation: Arc::new(creation),
             bindings,
+            road: None,
+            items: None,
         })
+    }
+    /// Attach the item definitions (stock vehicle figures).
+    pub fn with_items(mut self, items: Arc<nfs_world::items::InventoryCatalog>) -> Self {
+        self.items = Some(items);
+        self
+    }
+    pub fn items(&self) -> Option<&nfs_world::items::InventoryCatalog> {
+        self.items.as_deref()
+    }
+    /// Attach the installed road network.
+    pub fn with_road(mut self, road: Arc<nfs_world::scoring::road_network::Network>) -> Self {
+        self.road = Some(road);
+        self
+    }
+    pub fn road(&self) -> Option<&nfs_world::scoring::road_network::Network> {
+        self.road.as_deref()
     }
     pub fn installed(&self) -> &ScoringContent {
         &self.installed

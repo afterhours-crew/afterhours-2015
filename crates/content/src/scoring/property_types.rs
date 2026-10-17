@@ -176,6 +176,34 @@ pub fn compile(object: &Object) -> Result<Option<Declaration>, Error> {
                 [0xad59_4576, 0x445f_266b, 0xd70a_7f0c, 0xd887_31d6].map(|p| (p, Kind::Float)),
             );
         }
+        "VehicleProximitySetFilterEntityData" => {
+            super::proximity::compile(object)?;
+            d.inputs.push((world::proximity::RADIUS, Kind::Float));
+            d.outputs.push((world::proximity::COUNT, Kind::Integer));
+        }
+        "VehicleStatsProviderEntityData" => {
+            d.outputs.extend([
+                (world::stats::TOP_SPEED, Kind::Integer),
+                (world::stats::STOCK_TOP_SPEED, Kind::Integer),
+                (world::stats::ZERO_TO_SIXTY, Kind::Float),
+                (world::stats::STOCK_ZERO_TO_SIXTY, Kind::Float),
+            ]);
+            d.outputs
+                .extend(world::stats::UNPUBLISHED_FLOATS.map(|p| (p, Kind::Float)));
+        }
+        "RaceVehicleNosQueryEntityData" => {
+            d.outputs.extend(
+                [
+                    world::nos::ENGAGED_LEVEL,
+                    world::nos::DISENGAGED_LEVEL,
+                    world::nos::CAPACITY,
+                ]
+                .map(|p| (p, Kind::Float)),
+            );
+        }
+        "RaceVehicleDonutQueryEntityData" => {
+            super::donut::compile(object)?;
+        }
         "RaceVehicleAccumulatingCollisionsQueryEntityData" => {
             d.outputs.push((1_977_761_241, Kind::Integer));
         }
@@ -203,6 +231,9 @@ pub fn compile(object: &Object) -> Result<Option<Declaration>, Error> {
                 Definition::Float { .. } => Some((nodes::FLOAT_VALUE, Kind::Float)),
                 Definition::Boolean { .. } => Some((nodes::FLOAT_VALUE, Kind::Boolean)),
                 Definition::Integer { .. } => Some((nodes::FLOAT_VALUE, Kind::Integer)),
+                Definition::ParticipantProperty { .. } => {
+                    Some((nodes::OUTPUT_VALUE, Kind::Boolean))
+                }
                 Definition::Gate { .. }
                 | Definition::Splitter { .. }
                 | Definition::Compare { .. }

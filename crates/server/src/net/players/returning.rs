@@ -38,7 +38,7 @@ impl PlayerListener {
         persona: u64,
         participant: u16,
         mut chain: Vec<HostRpc>,
-    ) -> Result<Vec<Entry>, replication::Error> {
+    ) -> Result<(Vec<Entry>, Vec<nfs_world::content::Message>), replication::Error> {
         let owner = Owner {
             connection: HOST_SELECTOR as u8,
             persona,
@@ -70,9 +70,10 @@ impl PlayerListener {
             &content.vehicles,
             &content.layout,
         )?;
-        if !staged.messages.is_empty() {
-            return Err(replication::Error::Unsupported);
-        }
+        // Content the staged garage car needs (meshes of parts first seen on
+        // this car) goes out ahead of the entry, as the garage exit does for the
+        // world car; the caller queues it before the entry sections (E917).
+        let messages = staged.messages;
         let produced = Self::arrive_logic(
             logic,
             crate::garage_logic::Which::Returning,
@@ -99,7 +100,7 @@ impl PlayerListener {
                 staged.bindings.into_iter().map(HostRpc::Vehicle).collect(),
             ));
         }
-        Ok(out)
+        Ok((out, messages))
     }
 
     #[allow(clippy::too_many_arguments)]

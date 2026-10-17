@@ -43,6 +43,7 @@ pub(super) fn supported(class: &str) -> bool {
             | "BoolCacheEntityData"
             | "CompareBoolEntityData"
             | "ConditionalFloatEntityData"
+            | "BoolParticipantPropertyAccessorEntityData"
     )
 }
 fn integer(fields: &Fields, name: &str) -> Result<i32, Error> {
@@ -80,6 +81,9 @@ pub fn compile(object: &Object) -> Result<Configuration, Error> {
         },
         "BoolEntityData" => Definition::Boolean {
             default: boolean(fields, "DefaultValue")?,
+        },
+        "BoolParticipantPropertyAccessorEntityData" => Definition::ParticipantProperty {
+            value: boolean(fields, "Value")?,
         },
         "IntEntityData" => Definition::Integer {
             default: integer(fields, "DefaultValue")?,

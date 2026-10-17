@@ -11,16 +11,16 @@
 //! commits completely or leaves the session unchanged. Nothing here persists
 //! REP, encodes packets or trusts a client-supplied award.
 use super::{
-    Error, arithmetic, boolean_fold, collision, curve, delay, draft,
+    Error, arithmetic, boolean_fold, collision, curve, delay, donut, draft,
     events::{
         Context, Dispatch, Endpoint, EntityContext, Graph, Handler, PropertyHandler, RemoteEmission,
     },
-    finite, nodes,
+    finite, nodes, nos,
     program::{Behavior, Program, Step},
     properties::{Definition, Port, Store},
-    property_cast, property_gate,
+    property_cast, property_gate, proximity,
     reports::Report,
-    road, score, stopwatch, synced,
+    road, score, stats, stopwatch, synced,
     value::Value,
     vector_length,
     vehicle_query::{self, DriftSample, Query},
@@ -39,11 +39,15 @@ pub struct Vehicle {
     /// Right, up, forward and translation vectors.
     pub transform: [[f32; 3]; 4],
     pub velocity: [f32; 3],
+    /// World-frame angular velocity, rad/s (doughnut detection).
+    pub angular_velocity: [f32; 3],
     pub airborne: Option<bool>,
     pub state_3c230e35: Option<bool>,
     pub state_cd5ae2f0: Option<bool>,
     pub max_rpm: Option<f32>,
     pub rpm: Option<f32>,
+    /// Owned nitrous measurement; absent keeps the nitrous query silent.
+    pub nos: Option<nos::Sample>,
 }
 
 impl Vehicle {
@@ -58,18 +62,25 @@ impl Vehicle {
             crate::replication::vehicle::orientation::basis_from_quaternion(motion.quaternion)
                 .map_err(|_| Error::NonFinite)?;
         let transform = [basis[0], basis[1], basis[2], motion.position];
-        for component in transform.iter().flatten().chain(&motion.velocity) {
+        for component in transform
+            .iter()
+            .flatten()
+            .chain(&motion.velocity)
+            .chain(&motion.angular_velocity)
+        {
             finite(*component)?;
         }
         Ok(Self {
             identity,
             transform,
             velocity: motion.velocity,
+            angular_velocity: motion.angular_velocity,
             airborne: None,
             state_3c230e35: None,
             state_cd5ae2f0: None,
             max_rpm: None,
             rpm: None,
+            nos: None,
         })
     }
 }
@@ -82,6 +93,8 @@ pub struct Inputs {
     pub vehicle: Option<Vehicle>,
     pub others: Vec<draft::Vehicle>,
     pub road: Option<road::Sample>,
+    /// Owned vehicle figures for the stats provider; absent publishes nothing.
+    pub stats: Option<stats::Stats>,
     pub now: f64,
     pub time_scale: f32,
 }
@@ -127,6 +140,11 @@ struct State {
     synced: BTreeMap<u16, synced::Node>,
     collisions: BTreeMap<u16, collision::Node>,
     roads: BTreeMap<u16, road::Node>,
+    proximity: BTreeMap<u16, proximity::Node>,
+    nos: BTreeMap<u16, nos::Node>,
+    donuts: BTreeMap<u16, donut::Node>,
+    /// Stats nodes with the figures they last published.
+    stats: BTreeMap<u16, Option<stats::Stats>>,
     stopwatches: stopwatch::Manager,
     delays: delay::Manager<Option<Context>>,
     contexts: BTreeMap<u16, score::Context>,
@@ -171,6 +189,10 @@ impl Session {
             synced: BTreeMap::new(),
             collisions: BTreeMap::new(),
             roads: BTreeMap::new(),
+            proximity: BTreeMap::new(),
+            nos: BTreeMap::new(),
+            donuts: BTreeMap::new(),
+            stats: BTreeMap::new(),
             stopwatches: stopwatch::Manager::new(count, &[])?,
             delays: delay::Manager::new(count, &[])?,
             contexts: BTreeMap::new(),
@@ -227,6 +249,18 @@ impl Session {
                 }
                 Behavior::Collision(outputs) => {
                     state.collisions.insert(id, collision::Node::new(*outputs));
+                }
+                Behavior::Proximity => {
+                    state.proximity.insert(id, proximity::Node::default());
+                }
+                Behavior::Nos => {
+                    state.nos.insert(id, nos::Node::default());
+                }
+                Behavior::Donut(_) => {
+                    state.donuts.insert(id, donut::Node::default());
+                }
+                Behavior::Stats => {
+                    state.stats.insert(id, None);
                 }
                 Behavior::Road {
                     configuration,
@@ -384,6 +418,13 @@ impl Session {
                             elapsed: delta,
                         };
                         dispatch.road(candidate, node, frame, candidate.inputs.road)?;
+                    }
+                    Behavior::Proximity => candidate.proximity(node, dispatch)?,
+                    Behavior::Stats => candidate.stats(node, dispatch)?,
+                    Behavior::Nos => candidate.nos(node, dispatch)?,
+                    Behavior::Donut(configuration) => {
+                        let configuration = *configuration;
+                        candidate.donut(node, configuration, delta, dispatch)?;
                     }
                     _ => return Err(Error::InvalidGraph),
                 }
@@ -700,15 +741,157 @@ impl Candidate<'_> {
                 }
                 Ok(())
             }
-            Behavior::Road { .. } => {
+            Behavior::Road { .. } | Behavior::Proximity | Behavior::Nos | Behavior::Donut(_) => {
                 self.state.scheduled.push(node);
                 Ok(())
+            }
+            Behavior::Stats => {
+                // Figures are constant for the session: publish them at activation
+                // and again only if the owned inputs change.
+                self.state.scheduled.push(node);
+                self.stats(node, dispatch)
             }
             _ => Ok(()),
         }
     }
     fn vehicle(&self) -> Result<Vehicle, Error> {
         self.inputs.vehicle.ok_or(Error::MissingInput)
+    }
+}
+
+impl Candidate<'_> {
+    /// Publish a scheduled node's output when its port has a typed cell.
+    fn publish_bound(
+        &mut self,
+        node: u16,
+        field: u32,
+        value: Value,
+        dispatch: &mut Dispatch<'_>,
+    ) -> Result<(), Error> {
+        let port = Port { node, field };
+        if self.bound(port) {
+            dispatch.publish(self, port, value)?;
+        }
+        Ok(())
+    }
+    /// Participant-proximity count of the other cars inside the bound radius.
+    fn proximity(&mut self, node: u16, dispatch: &mut Dispatch<'_>) -> Result<(), Error> {
+        let Some(vehicle) = self.inputs.vehicle else {
+            return Ok(());
+        };
+        let radius = match self.resolve(Port {
+            node,
+            field: proximity::RADIUS,
+        })? {
+            Some(Value::Float(value)) => value,
+            Some(_) => return Err(Error::InvalidGraph),
+            None => return Err(Error::MissingInput),
+        };
+        let own = draft::Vehicle {
+            identity: vehicle.identity,
+            position: vehicle.transform[3],
+            velocity: vehicle.velocity,
+        };
+        let count = proximity::count(own, &self.inputs.others, radius)?;
+        let changed = self
+            .state
+            .proximity
+            .get_mut(&node)
+            .ok_or(Error::UnknownNode)?
+            .update(count);
+        if let Some(count) = changed {
+            self.publish_bound(node, proximity::COUNT, Value::Integer(count), dispatch)?;
+        }
+        Ok(())
+    }
+    /// Vehicle figures, published when they first appear or change.
+    fn stats(&mut self, node: u16, dispatch: &mut Dispatch<'_>) -> Result<(), Error> {
+        let Some(figures) = self.inputs.stats else {
+            return Ok(());
+        };
+        figures.validate()?;
+        let last = self.state.stats.get_mut(&node).ok_or(Error::UnknownNode)?;
+        if *last == Some(figures) {
+            return Ok(());
+        }
+        *last = Some(figures);
+        let top = i32::try_from(figures.top_speed_mph).map_err(|_| Error::ConversionRange)?;
+        let stock_top =
+            i32::try_from(figures.stock_top_speed_mph).map_err(|_| Error::ConversionRange)?;
+        self.publish_bound(node, stats::TOP_SPEED, Value::Integer(top), dispatch)?;
+        self.publish_bound(
+            node,
+            stats::STOCK_TOP_SPEED,
+            Value::Integer(stock_top),
+            dispatch,
+        )?;
+        self.publish_bound(
+            node,
+            stats::ZERO_TO_SIXTY,
+            Value::Float(figures.zero_to_sixty),
+            dispatch,
+        )?;
+        self.publish_bound(
+            node,
+            stats::STOCK_ZERO_TO_SIXTY,
+            Value::Float(figures.stock_zero_to_sixty),
+            dispatch,
+        )
+    }
+    /// Nitrous transitions of the owned car.
+    fn nos(&mut self, node: u16, dispatch: &mut Dispatch<'_>) -> Result<(), Error> {
+        let Some(sample) = self.inputs.vehicle.and_then(|v| v.nos) else {
+            return Ok(());
+        };
+        let effects = self
+            .state
+            .nos
+            .get_mut(&node)
+            .ok_or(Error::UnknownNode)?
+            .step(sample)?;
+        for effect in effects {
+            match effect {
+                nos::Effect::Publish(field, value) => {
+                    self.publish_bound(node, field, Value::Float(value), dispatch)?;
+                }
+                nos::Effect::Emit(event) => dispatch.emit(self, Endpoint { node, event })?,
+            }
+        }
+        Ok(())
+    }
+    /// Doughnut detection from the owned motion over `elapsed` seconds.
+    fn donut(
+        &mut self,
+        node: u16,
+        configuration: donut::Configuration,
+        elapsed: f32,
+        dispatch: &mut Dispatch<'_>,
+    ) -> Result<(), Error> {
+        let Some(vehicle) = self.inputs.vehicle else {
+            return Ok(());
+        };
+        let [right, up, forward, _] = vehicle.transform;
+        let sample = donut::Sample {
+            basis: [right, up, forward],
+            velocity: vehicle.velocity,
+            angular_velocity: vehicle.angular_velocity,
+        };
+        let completed = self
+            .state
+            .donuts
+            .get_mut(&node)
+            .ok_or(Error::UnknownNode)?
+            .step(configuration, sample, elapsed)?;
+        if completed {
+            dispatch.emit(
+                self,
+                Endpoint {
+                    node,
+                    event: donut::ON_DONUT_COMPLETED,
+                },
+            )?;
+        }
+        Ok(())
     }
 }
 

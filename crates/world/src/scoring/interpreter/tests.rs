@@ -46,6 +46,7 @@ fn inputs() -> Inputs {
         vehicle: None,
         others: vec![],
         road: None,
+        stats: None,
         now: 0.0,
         time_scale: 1.0,
     }

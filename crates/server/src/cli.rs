@@ -642,14 +642,35 @@ async fn run(args: Args) -> Result<(), Failure> {
                     &game_dir,
                     &nfs_content::Options::default(),
                 )?;
-                index.scoring_content("levels/genesis01/gameplay")
+                let scoring = index.scoring_content("levels/genesis01/gameplay")?;
+                let road = index.road_network();
+                Ok::<_, nfs_content::Error>((scoring, road))
             })
             .await
             .map_err(|_| Failure::Output)?;
             match content {
-                Ok(content) => {
-                    let content = nfs_server::scoring::Content::new(Arc::new(content))
-                        .map_err(|_| Failure::ProfileConfig)?;
+                Ok((content, road)) => {
+                    let mut content = nfs_server::scoring::Content::new(Arc::new(content))
+                        .map_err(|_| Failure::ProfileConfig)?
+                        .with_items(
+                            inventory
+                                .as_ref()
+                                .ok_or(Failure::ProfileConfig)?
+                                .item_catalog(),
+                        );
+                    match road {
+                        Ok(network) => {
+                            tracing::info!(
+                                segments = network.segments().len(),
+                                "road network read from the installation"
+                            );
+                            content = content.with_road(Arc::new(network));
+                        }
+                        Err(error) => tracing::warn!(
+                            ?error,
+                            "road network unavailable; road-driven scoring stays off"
+                        ),
+                    }
                     tracing::info!(
                         acquisition_nodes = content.installed().acquisition.program.nodes.len(),
                         scoring_nodes = content.installed().scoring.program.nodes.len(),

@@ -22,6 +22,8 @@ pub const OUTPUT_CHANGED: u32 = 2_625_023_801;
 pub const INCREMENT: u32 = 0x6788_1204;
 pub const DECREMENT: u32 = 0xe86a_d562;
 pub const FLOAT_VALUE: u32 = 225_375_086;
+/// `OutputValue` of a participant property accessor (hash of the name).
+pub const OUTPUT_VALUE: u32 = 731_416_433;
 pub const OPEN: u32 = 0x7c83_beb1;
 pub const CLOSE: u32 = 0x0cac_8853;
 pub const SPLITTER_OUTPUT: u32 = 4_157_476_991;
@@ -63,6 +65,13 @@ pub enum Comparison {
 pub enum Definition {
     Cache,
     Accumulator,
+    /// A Boolean participant property read by an accessor. Free roam on the
+    /// owned host has no cop pursuit, so the authored `Value` is published
+    /// once and never changes (E916 policy; the native accessor reads the
+    /// participant property store).
+    ParticipantProperty {
+        value: bool,
+    },
     Float {
         default: f32,
         step: f32,
@@ -223,6 +232,9 @@ impl Node {
                 Value::Float(float(&mut read, CACHE_INPUT)?),
             )],
             Definition::Accumulator => vec![Effect::Publish(OUTPUT, Value::Float(0.0))],
+            Definition::ParticipantProperty { value } => {
+                vec![Effect::Publish(OUTPUT_VALUE, Value::Boolean(value))]
+            }
             Definition::Float { default, .. } => {
                 vec![Effect::Publish(FLOAT_VALUE, Value::Float(default))]
             }

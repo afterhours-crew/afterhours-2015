@@ -482,9 +482,31 @@ presentation), the world host creates the acquisition and scoring participants
 as replicated entities whose initial synchronized values come from a freshly
 started interpreter session. Each accepted movement report of the participant's
 car ticks both sessions with the decoded chassis state (position, rotation and
-velocity; airborne, engine speed and nitrous are not replicated and stay
-absent), road data and other vehicles are not supplied yet, and the time scale
-is one. Elapsed time between two advances is covered in fixed 1/30 s engine
+velocity and angular velocity), the road measurements of the installed road
+network, every other replicated car, the car's dyno figures and an owned
+airborne estimate, and the time scale is one. The road network is read from the
+`layer6_roadnetwork_schematic` partition (`AssetIndex::road_network`): each
+`LaneSegment` keeps its sampled spline, integer speed limit (mph), lane width
+and lane direction; a uniform grid finds the nearest segment within 40 m, and
+the sample carries the segment's limit, the signed lateral distance and an
+owned wrong-direction classification (velocity against the lane tangent beyond
+the native -0.4 cosine; `Any` lanes are never wrong way). Other cars come from
+the world's vehicle objects with decodable chassis physics (traffic is
+client-side and absent). The stats provider publishes the car item's dyno
+figures (current top speed and 0-60 time) and the item definition's defaults
+(stock figures); without the item catalog, the inventory or a car item it
+publishes nothing. The airborne flag is a free-fall detector: three consecutive
+chassis reports whose vertical velocity fell at about gravity (the replicated
+chassis carries no wheel-contact flag; E916). The nitrous measurement is still
+absent, so the nitrous query stays silent until the control field that
+carries it is identified. The proximity filter counts the other cars inside
+its bound radius, the doughnut query accumulates yaw while the car slides
+sideways inside its speed window and fires on every full turn, and the
+Boolean participant-property accessor publishes its authored value once (no
+cop pursuit exists in owned free roam). These four queries are owned models of
+the installed thresholds, not native readings; their port roles are inferred
+from the prefab wiring (docs in `nfs_world::scoring::{proximity, stats, nos,
+donut}`). Elapsed time between two advances is covered in fixed 1/30 s engine
 steps (at most 0.5 s per advance, older time dropped) so that periodic delays
 fire once per step as they do in the client's fixed update; the step clock
 advances with each step. Dirty synchronized values are applied to the world
@@ -531,7 +553,13 @@ such an accumulator fed by the gated drift score, rises every frame while a
 drift runs and holds the folded value afterwards (E915), so the client's
 popup shows the running number from the moment the category flag flips.
 Live driving has credited style, outlaw and total and carried
-the total across a server restart; road speed limits, other vehicles,
-airborne, engine and nitrous inputs are still absent, so speeding,
-slipstream, airtime, drift train, speed match and nitrous cannot earn. The
-level-up and unlock checks are still outstanding.
+the total across a server restart and the owned account crossed level 2 while
+driving. A committed credit adopts the refreshed item collection (unlock
+grants join a credit) through the garage population's inventory refresh, so
+the garage return still matches its spawn snapshot; when the population
+cannot be refreshed the spawn-time collection is kept and the next garage load
+reads the committed one. The return also forwards the content its staged
+garage car needs instead of refusing the frame (run e911q: a tuned car with
+unlock grants from two credits had every return frame refused as unsupported). Speeding, wrong way, slipstream, speed match, drift train, airtime,
+doughnuts, acceleration and continuous max speed now have inputs; their live
+validation, the nitrous input and the unlock check are outstanding.

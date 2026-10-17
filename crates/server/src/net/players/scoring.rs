@@ -14,6 +14,7 @@
 //! room, so the driving traffic and the send window are never starved.
 use super::*;
 use crate::scoring::{Content, TIME_SCALE, Which};
+use nfs_world::items::Derived;
 use nfs_world::{
     logic::{EntityRef, Fire},
     participants::HostRpc,
@@ -22,6 +23,7 @@ use nfs_world::{
     scoring::{
         interpreter::{Award, Inputs, Output, Session, Vehicle},
         reports::{Binding as ReportBinding, Report},
+        stats::Stats,
     },
 };
 use std::sync::Arc;
@@ -43,6 +45,8 @@ const FLUSH_INTERVAL_MS: u64 = 100;
 /// Coalesced records waiting for a flush (one per live entity at most, plus
 /// reputation fields); more than this means the queue never drains.
 const MAX_DIRTY: usize = 64;
+/// Other cars supplied to the queries per tick.
+const MAX_OTHERS: usize = 64;
 
 #[derive(Clone, Debug)]
 pub(super) struct Entity {
@@ -98,6 +102,57 @@ pub(super) struct State {
     pub dirty: BTreeMap<u16, Record>,
     pub dirty_deleted: Vec<u16>,
     pub last_flush_ms: u64,
+    /// Per-car free-fall detectors for the owned airborne measurement.
+    pub free_fall: BTreeMap<u16, FreeFall>,
+}
+
+/// Owned airborne estimate (E916, inferred): the replicated chassis carries no
+/// wheel-contact flag, so a car is taken as airborne while its vertical
+/// velocity has fallen at about gravity for at least three consecutive
+/// reports (0.1 s at the 30 Hz report rate). Driving over crests or slopes
+/// changes the vertical velocity far more slowly; a landing resets the run.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct FreeFall {
+    /// Chassis clock (seconds, from the report's identity words) and the
+    /// vertical velocity of the last report; the client clock keeps the
+    /// acceleration estimate free of server arrival jitter (E918).
+    last: Option<(f64, f32)>,
+    run: u8,
+}
+impl FreeFall {
+    const MIN_RUN: u8 = 3;
+    pub fn observe(&mut self, clock: f64, vertical: f32) -> bool {
+        let mut acceleration = None;
+        if let Some((last_clock, last_vertical)) = self.last
+            && clock > last_clock
+            && clock - last_clock <= 0.5
+        {
+            let seconds = (clock - last_clock) as f32;
+            let estimate = (vertical - last_vertical) / seconds;
+            acceleration = Some(estimate);
+            if (-13.5..=-6.5).contains(&estimate) {
+                self.run = self.run.saturating_add(1);
+            } else {
+                self.run = 0;
+            }
+        } else {
+            self.run = 0;
+        }
+        // Diagnostic for the airtime calibration (E919): every report with a
+        // notable vertical speed or a fall in progress.
+        if vertical.abs() > 1.5 || self.run > 0 {
+            tracing::info!(
+                clock,
+                vertical,
+                acceleration,
+                run = self.run,
+                last = ?self.last,
+                "free-fall sample"
+            );
+        }
+        self.last = Some((clock, vertical));
+        self.run >= Self::MIN_RUN
+    }
 }
 
 /// Everything one advance produces, collected across sessions.
@@ -163,6 +218,34 @@ fn remote_fires(
     (fires, skipped)
 }
 
+/// Every other replicated car with decodable chassis physics, for the draft,
+/// proximity and speed-match queries. Other participants' cars are
+/// replicated into this world; traffic is client-side and absent here.
+fn other_vehicles(players: &Players, own: u16) -> Vec<nfs_world::scoring::draft::Vehicle> {
+    let mut others = Vec::new();
+    for (id, object) in players.objects().iter() {
+        if id == own || others.len() >= MAX_OTHERS {
+            continue;
+        }
+        let replication::Update::Vehicle { fields, .. } = &object.current else {
+            continue;
+        };
+        let physics = fields.iter().find_map(|field| match field {
+            Some(nfs_world::replication::vehicle::Update::Chassis(c)) => c.physics.as_ref(),
+            _ => None,
+        });
+        let Some(motion) = physics.and_then(|p| p.decode([0.; 3]).ok()) else {
+            continue;
+        };
+        others.push(nfs_world::scoring::draft::Vehicle {
+            identity: u32::from(id),
+            position: motion.position,
+            velocity: motion.velocity,
+        });
+    }
+    others
+}
+
 /// Log the failing stage and map it to the listener's replication error.
 fn fail<E: std::fmt::Debug>(stage: &'static str) -> impl Fn(E) -> replication::Error {
     move |error| {
@@ -177,6 +260,7 @@ fn idle_inputs(persona: u64, now_ms: u64) -> Inputs {
         vehicle: None,
         others: Vec::new(),
         road: None,
+        stats: None,
         now: now_ms as f64 / 1000.0,
         time_scale: TIME_SCALE,
     }
@@ -242,6 +326,7 @@ impl PlayerListener {
 
     fn scoring_inputs(
         &self,
+        content: &Content,
         players: &Players,
         car: u16,
         now_ms: u64,
@@ -252,10 +337,61 @@ impl PlayerListener {
         let motion = physics.decode([0.; 3]).map_err(fail("physics decode"))?;
         let vehicle =
             Vehicle::from_motion(u32::from(car), &motion).map_err(fail("vehicle basis"))?;
+        // Road measurements from the installed network (E916); absent without
+        // a network or off the network, which preserves the query state.
+        let road = match content.road() {
+            Some(network) => network
+                .sample(motion.position, motion.velocity)
+                .map_err(fail("road sample"))?,
+            None => None,
+        };
         Ok(Inputs {
             vehicle: Some(vehicle),
+            road,
+            others: other_vehicles(players, car),
+            stats: self.vehicle_stats(content, players, car),
             ..idle_inputs(self.persona, now_ms)
         })
+    }
+
+    /// Current and stock figures of the participant's car (E916): the dyno
+    /// cache the client stores on the car item and the item definition's
+    /// defaults. Absent without the item catalog, the inventory or a car item.
+    fn vehicle_stats(&self, content: &Content, players: &Players, car: u16) -> Option<Stats> {
+        let catalog = content.items()?;
+        let items = &self.inventory.as_ref()?.items;
+        let item =
+            items
+                .items
+                .get(&players.vehicle_item_of(HOST_SELECTOR as u8, self.persona, car)?)?;
+        let Derived::RaceVehicle {
+            zero_to_sixty,
+            top_speed_mph,
+            ..
+        } = &item.derived
+        else {
+            return None;
+        };
+        let Some(Derived::RaceVehicle {
+            zero_to_sixty: stock_zero_to_sixty,
+            top_speed_mph: stock_top_speed_mph,
+            ..
+        }) = catalog
+            .definition(&item.definition)
+            .ok()?
+            .default_derived
+            .as_ref()
+        else {
+            return None;
+        };
+        let stats = Stats {
+            top_speed_mph: *top_speed_mph,
+            stock_top_speed_mph: *stock_top_speed_mph,
+            zero_to_sixty: f32::from_bits(*zero_to_sixty),
+            stock_zero_to_sixty: f32::from_bits(*stock_zero_to_sixty),
+        };
+        stats.validate().ok()?;
+        Some(stats)
     }
 
     /// Decode one incoming RPC against the live query bindings. `Some` means
@@ -311,6 +447,19 @@ impl PlayerListener {
             which,
             ghost,
         } = scope;
+        // Boolean synchronized changes are the HUD flags (category and
+        // sub-event popups); log them to time the popups against the drive.
+        for (node, value) in &output.synced {
+            if let nfs_world::scoring::value::Value::Boolean(flag) = value {
+                let identity = content
+                    .participant(which)
+                    .program
+                    .nodes
+                    .get(usize::from(*node))
+                    .map(|n| (n.identity.asset.as_str(), n.identity.index));
+                tracing::info!(participant, ?which, node, ?identity, flag, "scoring flag");
+            }
+        }
         if let Some(update) = content.update(which, &output.synced)?
             && let Some(record) = players.change(ghost, update)?
         {
@@ -376,6 +525,7 @@ impl PlayerListener {
             .live
             .remove(&participant)
             .ok_or(replication::Error::Shape)?;
+        state.free_fall.remove(&live.car);
         let inputs = idle_inputs(self.persona, now_ms);
         let mut ghosts = Vec::with_capacity(2);
         for (which, entity) in Which::ALL.into_iter().zip(live.entities) {
@@ -416,7 +566,7 @@ impl PlayerListener {
         if state.live.len() >= MAX_LIVE {
             return Err(replication::Error::Bound);
         }
-        let inputs = self.scoring_inputs(players, car, now_ms)?;
+        let inputs = self.scoring_inputs(content, players, car, now_ms)?;
         let mut entities = Vec::with_capacity(2);
         for which in Which::ALL {
             let (session, output) = content
@@ -569,7 +719,7 @@ impl PlayerListener {
             let Some(live) = state.live.get(&queued.participant) else {
                 continue;
             };
-            let inputs = self.scoring_inputs(&players, live.car, now_ms)?;
+            let inputs = self.scoring_inputs(&content, &players, live.car, now_ms)?;
             let (output, ghost) = {
                 let live = state
                     .live
@@ -607,7 +757,21 @@ impl PlayerListener {
             }
             let covered = ((now_ms - last_ms) as f32 / 1000.0).min(MAX_TICK_SECONDS);
             let mut remaining = covered;
-            let mut inputs = self.scoring_inputs(&players, car, now_ms)?;
+            let mut inputs = self.scoring_inputs(&content, &players, car, now_ms)?;
+            if let Some(vehicle) = inputs.vehicle.as_mut()
+                && let Ok(physics) = players.vehicle_physics(HOST_SELECTOR as u8, self.persona, car)
+            {
+                let [high, low, _] = physics.identity_words;
+                let clock = f64::from_bits((u64::from(high) << 32) | u64::from(low));
+                if clock.is_finite() {
+                    let airborne = state
+                        .free_fall
+                        .entry(car)
+                        .or_default()
+                        .observe(clock, vehicle.velocity[1]);
+                    vehicle.airborne = Some(airborne);
+                }
+            }
             let start = inputs.now - f64::from(covered);
             if now_ms / 1000 != last_ms / 1000
                 && let Some(vehicle) = &inputs.vehicle
@@ -624,6 +788,14 @@ impl PlayerListener {
                     vertical = dot(v, up),
                     ?position,
                     ?forward,
+                    airborne = vehicle.airborne,
+                    stats = ?inputs.stats,
+                    others = inputs.others.len(),
+                    road = ?inputs.road,
+                    controls = ?players
+                        .vehicle_physics(HOST_SELECTOR as u8, self.persona, car)
+                        .ok()
+                        .map(|p| p.controls),
                     "scoring vehicle sample"
                 );
             }
@@ -790,10 +962,41 @@ impl PlayerListener {
                 }
             }
         }
+        // Adopt the refreshed collection (unlock grants join a credit) and keep
+        // the garage population's spawn snapshot in step with it: the garage
+        // return compares the live inventory with that snapshot and refuses a
+        // changed one (E917: every frame carrying the return RPC was refused
+        // after a credit had replaced the collection behind the snapshot).
         if let Some(inventory) = &mut self.inventory
             && inventory.items.items.len() <= credited.items.items.len()
+            && inventory.items != credited.items
         {
-            inventory.items = credited.items;
+            let refreshed = Inventory {
+                slots: inventory.slots,
+                items: credited.items,
+            };
+            let synced = match &mut self.population {
+                Some(population) => population
+                    .refresh_inventory(
+                        &players,
+                        HOST_SELECTOR as u8,
+                        self.persona,
+                        inventory,
+                        &refreshed,
+                    )
+                    .is_ok(),
+                None => true,
+            };
+            if synced {
+                *inventory = refreshed;
+            } else {
+                // Keep the spawn-time collection: the next garage load reads
+                // the committed inventory anyway, and the return stays valid.
+                tracing::warn!(
+                    participant = request.participant,
+                    "credited collection not adopted; garage population out of step"
+                );
+            }
         }
         self.persistent = Some(credited.loaded);
         tracing::info!(

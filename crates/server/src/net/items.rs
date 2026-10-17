@@ -280,6 +280,10 @@ impl Profile {
     pub fn bindings(&self) -> &nfs_world::items::Catalog {
         self.service.catalog.bindings()
     }
+    /// The item definitions (stock vehicle figures for free-roam scoring).
+    pub fn item_catalog(&self) -> Arc<InventoryCatalog> {
+        self.service.catalog.clone()
+    }
     pub async fn current_tables(
         &self,
         now: Timestamp,
