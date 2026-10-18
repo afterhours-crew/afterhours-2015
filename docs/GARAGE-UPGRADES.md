@@ -363,8 +363,15 @@ prevent repeat grants, including after restart. Older content formats never
 infer rewards. The decal seen alongside the earlier level-3 crossing was a
 daily-challenge reward paired with REP, not a level-3 unlock; challenge
 progression remains under [#57](https://github.com/afterhours-crew/afterhours-2015/issues/57).
-These new reward and replacement paths pass portable tests; their live acceptance
-is still pending under [#92](https://github.com/afterhours-crew/afterhours-2015/issues/92).
+These paths passed live acceptance on 2026-10-18. A copied test account prepared
+one point below level 61 earned the crossing, received the Speedhunters heart
+decal and let the owner select/apply it in the editor. The account held each of
+the ten eligible wraps once and no level-62–70 decal. Buying a $215 level-3 tire
+debited exactly $215 and delivered a fresh offer 200 ms after the purchase reply,
+without another REP credit. Restart retained the reward and purchased/replacement
+identities without duplicates; the owner confirmed parts and decal remained.
+Preparation is not evidence of earning every preceding level, and individual
+wrap presentation was not exhaustively checked. See [#92](https://github.com/afterhours-crew/afterhours-2015/issues/92).
 
 For unattended menu testing, [change the game's Back key to F9](MENU-KEYBINDING.md)
 through its user profile. This works without a mod and leaves Computer Use's

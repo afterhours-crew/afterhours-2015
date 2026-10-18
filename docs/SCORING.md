@@ -11,8 +11,13 @@ purchase, and REP/unlock persistence across a game/server restart. These are
 the named acceptance flows; they do not establish every reward type, crew or
 police scoring, or fresh-install activation independence.
 The installed REP wrap/decal rewards and immediate replacement of purchased
-part offers are implemented with portable regression coverage; their live checks
-remain open in [#92](https://github.com/afterhours-crew/afterhours-2015/issues/92).
+part offers passed the remaining live checks on 2026-10-18. A test account
+prepared one point below level 61 earned the crossing while driving, received
+the decal in-session, and retained it after a game/server restart. The owner
+confirmed the decal was usable. A purchased level-3 tire received a replacement
+offer 200 ms after its purchase reply, without another REP credit; both item
+identities survived restart. Ten already-eligible wraps were reconciled once.
+This validates representative grant paths, not every reward's presentation.
 
 `AssetIndex::scoring_calculations` reads math and curve nodes from an installed
 blueprint composition. Each node retains its asset, object index and prefab
