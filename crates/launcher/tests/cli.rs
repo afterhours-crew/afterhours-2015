@@ -373,7 +373,7 @@ fn a_serve_session_prepares_runs_reports_and_stops() {
     );
     let again = run(&["--data-dir", &data_arg, "stop"]);
     assert_eq!(again.status.code(), Some(0));
-    assert!(text(&again.stdout).contains("account data is preserved"));
+    assert!(text(&again.stdout).contains("Your local save is kept for next time."));
     assert!(run_dir.join("server.stdout.jsonl").exists());
     assert!(run_dir.join("prepare.stdout.json").exists());
     std::fs::remove_dir_all(base).unwrap();
