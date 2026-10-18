@@ -249,7 +249,7 @@ impl PlayerListener {
                 float_bits: None,
                 flag: false,
                 deleted: output.deleted,
-                setup: Some(Setup::Packed {
+                setup: (!output.records.is_empty()).then_some(Setup::Packed {
                     tag: None,
                     width: None,
                     axes: [None; 3],

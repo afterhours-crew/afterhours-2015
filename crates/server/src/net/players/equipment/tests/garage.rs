@@ -7,7 +7,7 @@ use crate::net::items::tests::{deliver_car_reply, enable_cars, item_bindings, tr
 use nfs_protocol::world::rpc::Serial;
 use nfs_world::{
     items::{PurchaseReply, PurchaseRequest, PurchaseSelection, SellReply, SellRequest},
-    replication::sublevel,
+    replication::{section::Bindings, sublevel},
 };
 
 fn setup(listener: &mut PlayerListener, player: u16, car: u16) -> u16 {
@@ -114,7 +114,13 @@ fn setup(listener: &mut PlayerListener, player: u16, car: u16) -> u16 {
         .unwrap();
     participant
 }
-fn ack_cars(listener: &mut PlayerListener, participant: u16) {
+fn ack_cars(listener: &mut PlayerListener, participant: u16, wire: &mut Bindings) {
+    for section in listener.pending.drain(..) {
+        // Exercise the same encoder and binding validation as Session's queue.
+        // Checking only the updated listener state missed sale-only removals.
+        nfs_world::session::replication_frame(&section, &[], 0).unwrap();
+        wire.apply(&section).unwrap();
+    }
     for rpc in std::mem::take(&mut listener.pending_rpcs) {
         if let nfs_world::participants::HostRpc::Vehicle(binding) = rpc {
             listener
@@ -133,7 +139,6 @@ fn ack_cars(listener: &mut PlayerListener, participant: u16) {
                 .unwrap();
         }
     }
-    listener.pending.clear();
     listener.pending_content.clear();
 }
 fn command_body(
@@ -213,6 +218,19 @@ fn garage_commands_authorize_participant_not_player_or_foreign_object() {
 async fn buy_switch_customize_and_sell_keep_durable_and_visible_cars_in_sync() {
     let (mut listener, mut jobs, repo, account, scene, player, car) = fixture();
     let participant = setup(&mut listener, player, car);
+    let mut wire = Bindings::default();
+    wire.apply(&Section {
+        float_bits: None,
+        flag: false,
+        deleted: vec![],
+        setup: Some(Setup::Packed {
+            tag: None,
+            width: None,
+            axes: [None; 3],
+        }),
+        records: listener.players.objects().snapshot(),
+    })
+    .unwrap();
     enable_cars(&mut jobs, &listener.inventory.as_ref().unwrap().items);
     assert!(listener.garage_ready());
     let buy = PurchaseRequest {
@@ -248,14 +266,14 @@ async fn buy_switch_customize_and_sell_keep_durable_and_visible_cars_in_sync() {
             .0,
         40
     );
-    ack_cars(&mut listener, participant);
+    ack_cars(&mut listener, participant, &mut wire);
     command(&mut listener, scene, participant, 3, 0, Some(second));
     jobs.start(&mut listener, 12, Timestamp(12));
     assert!(jobs.completed(&mut listener).await);
     command(&mut listener, scene, participant, 2, 0, None);
     jobs.start(&mut listener, 13, Timestamp(13));
     assert!(jobs.completed(&mut listener).await);
-    ack_cars(&mut listener, participant);
+    ack_cars(&mut listener, participant, &mut wire);
     assert_eq!(
         listener.inventory.as_ref().unwrap().slots.values()[0],
         Some(second)
@@ -274,7 +292,7 @@ async fn buy_switch_customize_and_sell_keep_durable_and_visible_cars_in_sync() {
     command(&mut listener, scene, participant, 2, 0, None);
     jobs.start(&mut listener, 15, Timestamp(15));
     assert!(jobs.completed(&mut listener).await);
-    ack_cars(&mut listener, participant);
+    ack_cars(&mut listener, participant, &mut wire);
     let before = listener.inventory.as_ref().unwrap().items.clone();
     assert_ne!(before.items[&1].derived, before.items[&second].derived);
     transfer(
@@ -314,6 +332,13 @@ async fn buy_switch_customize_and_sell_keep_durable_and_visible_cars_in_sync() {
         listener.inventory.as_ref().unwrap().items.items[&1],
         before.items[&1]
     );
+    let removal = listener.pending.front().unwrap();
+    assert_eq!(removal.deleted.len(), 1);
+    assert!(removal.records.is_empty());
+    let sold_ghost = removal.deleted[0];
+    assert!(wire.get(sold_ghost).is_some());
+    ack_cars(&mut listener, participant, &mut wire);
+    assert!(wire.get(sold_ghost).is_none());
     command(&mut listener, scene, participant, 4, 0, None);
     jobs.start(&mut listener, 18, Timestamp(18));
     assert!(jobs.completed(&mut listener).await);
