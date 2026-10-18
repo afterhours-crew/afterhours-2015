@@ -298,7 +298,9 @@ new car, the server assigns a spawn point (a per-session id). It answers spawn
 requests and releases with the scene's occupied flag. Once a participant has
 joined, the server polls the level root about every 1.1 s, and the client's
 answers are recorded. Configured arrival sequences, vehicle bindings and world
-membership then complete the handoff; this does not yet establish drivable play.
+membership then complete the handoff. The garage/free-roam/return loop has
+passed live checks; the [gameplay roadmap](https://github.com/afterhours-crew/afterhours-2015/issues/62)
+records the separately accepted gameplay systems and remaining work.
 
 `--redirector-port 0` chooses an ephemeral port (the default).
 `--idle-seconds` accepts 1–3600. `--qos-seconds` bounds each QoS TLS request

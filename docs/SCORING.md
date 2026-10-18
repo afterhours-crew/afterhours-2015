@@ -2,8 +2,14 @@
 
 Free-roam REP work is tracked by [#50](https://github.com/afterhours-crew/afterhours-2015/issues/50)
 and its [input contract subissue](https://github.com/afterhours-crew/afterhours-2015/issues/85).
-The scoring participants are not enabled yet. These libraries do not by
-themselves award REP or establish live driving support.
+The server creates the installed scoring participants, evaluates their graph
+from owned inputs and commits earned REP, derived levels and eligible unlocks.
+The owner accepted the remaining solo free-roam checks on 2026-10-18: nitrous
+depletion/refill and taps, airtime, overlapping popups and multiplier stacking.
+Earlier live checks covered level-up, same-session part availability and
+purchase, and REP/unlock persistence across a game/server restart. These are
+the named acceptance flows; they do not establish every reward type, crew or
+police scoring, or fresh-install activation independence.
 
 `AssetIndex::scoring_calculations` reads math and curve nodes from an installed
 blueprint composition. Each node retains its asset, object index and prefab
@@ -95,8 +101,9 @@ the caller must resolve the connected-input mask and output binding.
 Numeric PropertyCast support publishes float, integer and Boolean values in that
 order; string conversion/formatting is not implemented. Nonfinite values and
 out-of-range casts fail before any effects escape. Engine save-state restoration
-is outside these fresh-session nodes. The complete property propagation engine,
-remaining node/query behaviors and durable award integration are still required.
+is outside these fresh-session nodes. The session interpreter connects these
+nodes to property propagation, supported vehicle queries and durable awards;
+unsupported classes remain explicit rather than receiving guessed behavior.
 
 `scoring::properties::Store` holds resolved Boolean, integer, float, vector and
 transform cells.
@@ -527,8 +534,9 @@ snapshot is taken. Timestamp compensation uses a recent accepted movement
 clock from that same car: a late engage burns the missed interval and a late
 release refunds it after sampling. Correction is bounded to half a second;
 missing or stale anchors use arrival timing alone. Repeats are idempotent and
-queue overflow rejects the candidate frame atomically. Gauge timing and
-nitrous REP still require a live check. The proximity filter counts the other cars inside
+queue overflow rejects the candidate frame atomically. The owner accepted
+nitrous gauge behavior and REP during the 2026-10-18 live run, including full
+burns and short taps. The proximity filter counts the other cars inside
 its bound radius, the doughnut query accumulates yaw while the car slides
 sideways inside its speed window and fires on every full turn, and the
 Boolean participant-property accessor publishes its authored value once (no
@@ -596,7 +604,8 @@ reads the committed one. The return also forwards the content its staged
 garage car needs instead of refusing the frame (run e911q: a tuned car with
 unlock grants from two credits had every return frame refused as unsupported). Speeding, wrong way, slipstream, speed match, drift train, airtime,
 doughnuts, acceleration and continuous max speed now have inputs. Live runs
-have credited speed, style, outlaw, build and doughnuts. Airtime, nitrous and
-popup stacking remain under validation; crew and police-dependent scoring
-are tracked separately. A level-up's unlocks reach
+have credited speed, style, outlaw, build and doughnuts. The owner confirmed
+airtime, nitrous, popup stacking and the multiplier in the 2026-10-18 run;
+crew and police-dependent scoring are tracked separately in #90 and #91.
+A level-up's unlocks reach
 the client during the session; see [GARAGE-UPGRADES](GARAGE-UPGRADES.md).

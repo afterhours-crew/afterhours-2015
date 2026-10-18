@@ -431,8 +431,12 @@ an acknowledged credit onto a later snapshot. Repository replay history is
 bounded, so the original generation is also necessary to reject expired retries.
 
 This domain API is covered by constructed transaction and SQLite restart tests.
-It is not yet connected to driving actions and does not establish live REP
-earning; that integration is tracked by [#50](https://github.com/Afterhours-Crew/afterhours-2015/issues/50).
+The free-roam scoring interpreter now supplies driving credits. Live checks
+covered earning REP, crossing levels 2 and 3, same-session part availability
+and purchase, and level-2 REP/unlock persistence after restarting game/server.
+The owner accepted the remaining action and popup checks on 2026-10-18; see
+[#50](https://github.com/Afterhours-Crew/afterhours-2015/issues/50) and
+[driving-score calculations](SCORING.md) for the tested scope and limits.
 The operator command below remains a separate stopped-account testing tool.
 
 Use a separate test account, stop its game and server, and back up the account
