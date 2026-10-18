@@ -517,6 +517,44 @@ impl Lifecycle {
         }
         out
     }
+    /// Publish slot changes only for this owner's participants already in the
+    /// garage. Zero is the native empty item reference.
+    pub fn replace_garage(
+        &mut self,
+        previous: crate::garage::Slots,
+        next: crate::garage::Slots,
+        owns: impl Fn(u16) -> bool,
+    ) -> Result<Vec<crate::garage::Binding>, Error> {
+        if self.garage != Some(previous) {
+            return Err(Error::Shape);
+        }
+        let bindings = self.bindings.ok_or(Error::UnknownObject)?;
+        let mut out = Vec::new();
+        let mut owned = false;
+        for (&participant, &stage) in &self.stages {
+            if !owns(participant) {
+                continue;
+            }
+            owned = true;
+            if stage != Stage::Customization || !self.garage_sent.contains(&participant) {
+                return Err(Error::Shape);
+            }
+            for (i, endpoint) in bindings.garage.into_iter().enumerate() {
+                if previous.values()[i] != next.values()[i] {
+                    out.push(crate::garage::Binding {
+                        endpoint,
+                        participant,
+                        item: next.values()[i].unwrap_or(0),
+                    });
+                }
+            }
+        }
+        if !owned {
+            return Err(Error::UnknownObject);
+        }
+        self.garage = Some(next);
+        Ok(out)
+    }
     pub fn finish_persistent(&mut self, connected: impl Fn(u16) -> bool) -> Vec<Notification> {
         let Some(bindings) = self.bindings else {
             return Vec::new();

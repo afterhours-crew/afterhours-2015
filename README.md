@@ -15,6 +15,8 @@ requirements are documented in that guide. Tested gameplay and the prioritized
 remaining systems are tracked in the [gameplay roadmap issue][roadmap] and its
 per-system tracking issues. The tested garage customization scope and local
 test-cash/REP commands are covered in [garage upgrades and customization](docs/GARAGE-UPGRADES.md).
+[Car ownership and garage management](docs/CAR-OWNERSHIP.md) describes the current
+implementation and its acceptance status.
 The workspace owns these implemented components:
 
 | Component | Responsibility |

@@ -217,6 +217,16 @@ fn rows(
                 .map(|f| guids(f, "TireMeshGuids"))
                 .collect::<Result<Vec<_>, _>>()?
         );
+    } else if class == Class::LightsItemData {
+        mesh["kind"] = json!("light");
+        mesh["guids"] = json!(guids(f, "MeshGuids")?);
+        mesh["rear"] = json!(rear(f)?);
+        mesh["extent"] = json!(float(f, "AnimationExtent")?);
+    } else if class == Class::SpoilerItemData {
+        mesh["kind"] = json!("spoiler");
+        mesh["guids"] = json!(guids(f, "MeshGuids")?);
+        mesh["extent"] = json!(float(f, "AnimationExtent")?);
+        mesh["selector"] = json!(integer(f, "AnimationId")?);
     } else if family(class) != Family::Other {
         mesh["kind"] = json!("part");
         mesh["guids"] = json!(guids(f, "MeshGuids")?);

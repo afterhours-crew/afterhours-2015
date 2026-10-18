@@ -76,6 +76,11 @@ impl Players {
             participant == id && self.owns(connection, persona, player)
         })
     }
+    pub fn participant_for_player(&self, connection: u8, persona: u64, player: u16) -> Option<u16> {
+        self.owns(connection, persona, player)
+            .then(|| self.participants.get(&player).copied())
+            .flatten()
+    }
 
     pub fn join(
         &mut self,

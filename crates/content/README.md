@@ -67,6 +67,13 @@ defaults; no level or reward GUID is hardcoded. Builder revision 25 invalidates
 older caches so existing installations receive these rules. Daily-challenge and
 story rewards are separate policies.
 
+Item content version 10 adds explicit purchasable car definitions and their REP
+requirements. Prices, quantities, stock parts and additional account wraps come
+from installed definitions. Nonpurchasable story, traffic and reward cars are
+excluded. Builder revision 26 also resolves the garage command serializer from
+the installed five-slot link graph. Older content can still display its garage;
+ownership commands require the new policy and serializer binding.
+
 ## Build profiles
 
 Identifiers that belong to one executable build and cannot be read from the
@@ -253,6 +260,12 @@ to 512 KiB. Default operator settings disable consumer beta and SpeedLists;
 an explicit `--progression-content` keeps precedence. Account values and runtime
 identities remain owned by the server. Floats in progression persistence and
 unrecognized activation expressions are unsupported.
+
+Vehicle mesh inputs retain front/rear headlight animation extent and spoiler
+extent/animation ID from the installed item definitions. The vehicle model applies
+them to selected mesh variants; non-finite fields and wrong definition classes
+are rejected. Older definitions lacking animation inputs remain readable but
+cannot construct an animated component's selected part.
 
 ## Participant value inspection
 

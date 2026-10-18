@@ -127,6 +127,15 @@ fn fields(class: Class) -> Object {
     if let Some(name) = tuning_field(class) {
         put(&mut obj, name, Value::Pointer(Pointer::Null));
     }
+    if matches!(class, Class::LightsItemData | Class::SpoilerItemData) {
+        put(&mut obj, "AnimationExtent", Value::Float32(0.625));
+    }
+    if class == Class::LightsItemData {
+        put(&mut obj, "Location", location(false));
+    }
+    if class == Class::SpoilerItemData {
+        put(&mut obj, "AnimationId", Value::Int32(-1));
+    }
     obj
 }
 fn document(rows: &BTreeMap<&str, Json>) -> Json {
@@ -147,6 +156,33 @@ fn location(rear: bool) -> Value {
     Value::Enum {
         value: i32::from(rear),
         name: None,
+    }
+}
+
+#[test]
+fn animation_fields_survive_extraction_and_require_the_right_classes() {
+    for (class, kind) in [
+        (Class::LightsItemData, "light"),
+        (Class::SpoilerItemData, "spoiler"),
+    ] {
+        let mut obj = fields(class);
+        let result = validate(&obj, Json::Null).unwrap();
+        assert_eq!(result["mesh"]["kind"], kind);
+        assert_eq!(result["mesh"]["extent"], 0.625);
+        if kind == "light" {
+            assert_eq!(result["mesh"]["rear"], false);
+        } else {
+            assert_eq!(result["mesh"]["selector"], -1);
+        }
+        put(&mut obj, "AnimationExtent", Value::Float32(f32::INFINITY));
+        assert!(validate(&obj, Json::Null).is_err());
+        let classes = ItemCatalog::new([(obj.guid.unwrap(), class)]).unwrap();
+        let mut missing = document(&result);
+        missing["mesh"][0].as_object_mut().unwrap().remove("extent");
+        assert_eq!(
+            Catalog::from_rows(&missing, &classes),
+            Err(super::super::ParseError::Invalid)
+        );
     }
 }
 

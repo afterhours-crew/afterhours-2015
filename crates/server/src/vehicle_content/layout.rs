@@ -31,6 +31,9 @@ impl Slot {
 pub struct Layout {
     pub scene_key: u32,
     pub item_scene_key: u32,
+    /// GarageEntity serializer resolved from installed scene links. Old content
+    /// can still display cars, but cannot route ownership commands.
+    pub garage_component_index: Option<usize>,
     slots: [Slot; 5],
     /// Root pose of the player's car when it leaves the garage (exact root
     /// position, not a resting locator). Optional deployment content.
@@ -69,7 +72,7 @@ impl Layout {
                 "item_blueprint",
                 "main",
             ],
-            &["world_spawn", "exit_teleport"],
+            &["world_spawn", "exit_teleport", "garage_component_index"],
         )?;
         if v["format"] != "nfs-garage-population"
             || v["version"] != 1
@@ -149,9 +152,17 @@ impl Layout {
         };
         let exit_teleport = v.get("exit_teleport").map(transform_slot).transpose()?;
         let world_spawn = v.get("world_spawn").map(transform_slot).transpose()?;
+        let garage_component_index = v
+            .get("garage_component_index")
+            .map(uint::<usize>)
+            .transpose()?;
+        if garage_component_index.is_some_and(|i| i >= 512 || slot_indices.contains(&i)) {
+            return Err(Failure::ProfileConfig);
+        }
         Ok(Self {
             scene_key,
             item_scene_key,
+            garage_component_index,
             slots: slots.try_into().map_err(|_| Failure::ProfileConfig)?,
             world_spawn,
             exit_teleport,

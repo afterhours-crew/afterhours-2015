@@ -10,6 +10,158 @@ use nfs_world::{
 use serde_json::json;
 
 #[test]
+fn garage_transactions_replace_only_changed_slots_and_retire_old_acks() {
+    let (mut population, mut players, content, layout, items, p) = fixture();
+    let one = Inventory {
+        slots: Slots::new([Some(1), None, None, None, None]).unwrap(),
+        items: items.clone(),
+    };
+    let first = population
+        .spawn(
+            &mut players,
+            owner(p),
+            one.clone(),
+            &content,
+            &layout,
+            [0.; 3],
+        )
+        .unwrap();
+    let first_ghost = first.bindings[0].vehicle;
+    for binding in &first.bindings {
+        population
+            .acknowledge(&players, owner(p), binding.expected())
+            .unwrap();
+    }
+    let foreign = join(&mut players, 4, 202);
+    let foreign_owner = Owner {
+        connection: 4,
+        persona: 202,
+        participant: foreign,
+    };
+    let foreign_spawn = population
+        .spawn(
+            &mut players,
+            foreign_owner,
+            one.clone(),
+            &content,
+            &layout,
+            [0.; 3],
+        )
+        .unwrap();
+    let mut bought = (*items).clone();
+    for item in items.items.values() {
+        let mut item = item.clone();
+        item.id += 100;
+        if item.owner != 0 {
+            item.owner += 100;
+        }
+        for id in item.children.iter_mut().chain(item.defaults.iter_mut()) {
+            *id += 100;
+        }
+        bought.items.insert(item.id, item);
+    }
+    bought.roots.extend(items.roots.iter().map(|id| id + 100));
+    let two = Inventory {
+        slots: Slots::new([Some(1), Some(101), None, None, None]).unwrap(),
+        items: Arc::new(bought),
+    };
+    let added = population
+        .reconcile(&mut players, owner(p), &one, two.clone(), &content, &layout)
+        .unwrap();
+    assert!(added.deleted.is_empty());
+    assert_eq!(added.bindings.len(), 1);
+    assert_eq!(
+        players.owned_vehicle(3, 0x100000002, p, 1),
+        Some(first_ghost)
+    );
+    assert!(!population.all_loaded(p));
+    let snapshot = players.objects().snapshot();
+    let swapped = Inventory {
+        slots: Slots::new([Some(101), Some(1), None, None, None]).unwrap(),
+        items: two.items.clone(),
+    };
+    assert!(
+        population
+            .reconcile(
+                &mut players,
+                owner(p),
+                &two,
+                swapped.clone(),
+                &content,
+                &layout
+            )
+            .is_err()
+    );
+    assert_eq!(snapshot, players.objects().snapshot());
+    for binding in &added.bindings {
+        population
+            .acknowledge(&players, owner(p), binding.expected())
+            .unwrap();
+    }
+    let switched = population
+        .reconcile(
+            &mut players,
+            owner(p),
+            &two,
+            swapped.clone(),
+            &content,
+            &layout,
+        )
+        .unwrap();
+    assert_eq!(switched.deleted.len(), 2);
+    assert_eq!(switched.bindings.len(), 2);
+    for binding in first.bindings.iter().chain(&added.bindings) {
+        assert_eq!(
+            population.acknowledge(&players, owner(p), binding.expected()),
+            Ok(false)
+        );
+    }
+    assert!(!population.all_loaded(p));
+    for binding in &switched.bindings {
+        population
+            .acknowledge(&players, owner(p), binding.expected())
+            .unwrap();
+    }
+    let sold = Inventory {
+        slots: Slots::new([Some(101), None, None, None, None]).unwrap(),
+        items: Arc::new(Collection {
+            roots: two
+                .items
+                .roots
+                .iter()
+                .copied()
+                .filter(|id| *id >= 100)
+                .collect(),
+            items: two
+                .items
+                .items
+                .iter()
+                .filter(|(id, _)| **id >= 100)
+                .map(|(&id, item)| (id, item.clone()))
+                .collect(),
+        }),
+    };
+    let sale = population
+        .reconcile(&mut players, owner(p), &swapped, sold, &content, &layout)
+        .unwrap();
+    assert_eq!(sale.deleted.len(), 1);
+    assert!(sale.bindings.is_empty());
+    assert!(population.all_loaded(p));
+    assert_eq!(population.groups.len(), 2);
+    assert!(
+        players
+            .objects()
+            .get(foreign_spawn.bindings[0].vehicle)
+            .is_some()
+    );
+    assert_eq!(population.spawned[&foreign].items, one.items);
+    assert_eq!(
+        population.acknowledge(&players, owner(p), foreign_spawn.bindings[0].expected()),
+        Err(Error::UnknownObject)
+    );
+}
+
+#[test]
 fn purchased_inventory_refresh_keeps_other_players_and_allows_garage_return() {
     let (mut population, mut players, content, layout, items, participant) = fixture();
     let layout = world_layout(&layout);
@@ -177,7 +329,7 @@ pub(crate) fn fixture() -> (Population, Players, Content, Layout, Arc<Collection
     }).collect::<Vec<_>>();
     let layout = Layout::from_json(
         &json!({"format":"nfs-garage-population","version":1,"build_sha256":crate::content::BUILD,
-        "blueprint":"garage/test","item_blueprint":"test/gameplay","main":slots}),
+        "blueprint":"garage/test","item_blueprint":"test/gameplay","garage_component_index":6,"main":slots}),
     )
     .unwrap();
     let messages = [
@@ -216,6 +368,7 @@ pub(crate) fn fixture() -> (Population, Players, Content, Layout, Arc<Collection
                 false,
                 &[
                     sublevel::Kind::Noop,
+                    sublevel::Kind::Rpc,
                     sublevel::Kind::Rpc,
                     sublevel::Kind::Rpc,
                     sublevel::Kind::Rpc,

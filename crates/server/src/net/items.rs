@@ -2,7 +2,10 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-use super::players::{AwardRequest, Credited, EquipmentRequest, PlayerListener};
+use super::players::{
+    AwardRequest, Credited, EquipmentRequest, GarageOperation, GarageRequest, PlayerListener,
+};
+mod garage;
 use crate::inventory;
 use nfs_storage::{AccountId, InventoryRepository, Timestamp};
 use nfs_world::{
@@ -64,6 +67,7 @@ pub struct Service {
     catalog: Arc<InventoryCatalog>,
     persistent: Option<Arc<crate::persistent::Catalog>>,
     offers: Option<Arc<nfs_services::purchase::Offers>>,
+    car_offers: Option<Arc<nfs_services::garage::Offers>>,
     category_unlocks: Option<Arc<nfs_services::category_unlocks::Policy>>,
     records: Option<Arc<dyn nfs_storage::records::Repository>>,
     workers: Arc<Semaphore>,
@@ -75,6 +79,7 @@ impl Service {
             catalog,
             persistent: None,
             offers: None,
+            car_offers: None,
             category_unlocks: None,
             records: None,
             workers: Arc::new(Semaphore::new(WORKERS)),
@@ -92,6 +97,10 @@ impl Service {
         self.offers = Some(Arc::new(offers));
         self
     }
+    pub fn with_car_offers(mut self, offers: nfs_services::garage::Offers) -> Self {
+        self.car_offers = Some(Arc::new(offers));
+        self
+    }
     pub fn with_category_unlocks(mut self, policy: nfs_services::category_unlocks::Policy) -> Self {
         self.category_unlocks = Some(Arc::new(policy));
         self
@@ -100,6 +109,7 @@ impl Service {
         Profile {
             service: self.clone(),
             account,
+            garage_session: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 }
@@ -108,6 +118,7 @@ impl Service {
 pub struct Profile {
     service: Service,
     account: AccountId,
+    garage_session: Arc<std::sync::Mutex<Option<u64>>>,
 }
 impl std::fmt::Debug for Profile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -122,11 +133,13 @@ enum Error {
     Deadline,
     Purchase(nfs_services::purchase::Error),
     Equipment(nfs_services::equipment::Error),
+    Garage(nfs_services::garage::Error),
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ReplyKind {
     Load,
     Purchase,
+    Garage,
     Rejected,
 }
 #[derive(Debug)]
@@ -134,6 +147,7 @@ struct LoadedReply {
     reply: inventory::Reply,
     items: Arc<nfs_world::items::Collection>,
     kind: ReplyKind,
+    previous: Option<crate::vehicle_content::population::Inventory>,
 }
 struct Equipped {
     loaded: Arc<crate::persistent::Loaded>,
@@ -147,6 +161,7 @@ fn supported_request(bytes: &[u8]) -> Result<bool, nfs_world::items::Error> {
     use nfs_world::items;
     match bytes.get(4) {
         Some(&items::PURCHASE_ITEMS) => items::PurchaseRequest::decode(bytes).map(|_| true),
+        Some(&items::SELL_ITEMS) => items::SellRequest::decode(bytes).map(|_| true),
         _ => items::Request::decode(bytes).map(|r| r.operation == items::LOAD_INVENTORY),
     }
 }
@@ -515,6 +530,11 @@ impl Profile {
             .then(|| nfs_world::items::PurchaseRequest::decode(&request))
             .transpose()
             .map_err(|e| Error::Inventory(e.into()))?;
+        if request[4] == nfs_world::items::SELL_ITEMS
+            || purchase.as_ref().is_some_and(|p| p.owner == 0)
+        {
+            return self.answer_garage(request, now).await;
+        }
         if purchase.is_some() && self.service.offers.is_none() {
             return Ok(None);
         }
@@ -583,6 +603,7 @@ impl Profile {
                         },
                         items: Arc::new(items),
                         kind,
+                        previous: None,
                     }));
                 }
                 let reply = inventory::answer_load_with_unlocks(
@@ -609,6 +630,7 @@ impl Profile {
                             reply,
                             items: Arc::new(items),
                             kind: ReplyKind::Load,
+                            previous: None,
                         })
                     })
                     .transpose()
@@ -630,11 +652,16 @@ pub(super) struct Exchanges {
     profile: Option<Profile>,
     jobs: JoinSet<(usize, u8, Result<Option<LoadedReply>, Error>)>,
     equipment: JoinSet<(EquipmentRequest, Result<Equipped, Error>)>,
+    garage: JoinSet<(GarageRequest, Result<garage::Updated, Error>)>,
     awards: JoinSet<(AwardRequest, Result<Credited, Error>)>,
     pending: [Option<Completed>; 2],
     started: [Option<u64>; 2],
     /// Unsolicited notifications awaiting the request handler, in order.
     notifications: VecDeque<Completed>,
+    /// Display objects may refer to newly purchased item IDs. Publish them only
+    /// after the client has acknowledged delivery of the Items result.
+    garage_delivery: Option<garage::Updated>,
+    failed: bool,
     connection: u32,
     unsupported: crate::diagnostics::Unsupported<UnsupportedRoute>,
 }
@@ -644,18 +671,44 @@ impl Exchanges {
             profile,
             jobs: JoinSet::new(),
             equipment: JoinSet::new(),
+            garage: JoinSet::new(),
             awards: JoinSet::new(),
             pending: [None, None],
             started: [None, None],
             notifications: VecDeque::new(),
+            garage_delivery: None,
+            failed: false,
             connection,
             unsupported: crate::diagnostics::Unsupported::new("world-file", connection),
         }
     }
     pub(super) fn working(&self) -> bool {
-        !self.jobs.is_empty() || !self.equipment.is_empty() || !self.awards.is_empty()
+        !self.jobs.is_empty()
+            || !self.equipment.is_empty()
+            || !self.awards.is_empty()
+            || !self.garage.is_empty()
     }
     pub(super) fn start(&mut self, listener: &mut PlayerListener, now: u64, utc: Timestamp) {
+        if self.pending.iter().all(Option::is_none)
+            && self.started.iter().all(Option::is_none)
+            && let Some(updated) = self.garage_delivery.take()
+            && let Err(error) = listener.garage_inventory(
+                &updated.previous,
+                updated.loaded.garage(),
+                updated.loaded,
+                updated.items,
+            )
+        {
+            warn!(
+                connection = self.connection,
+                ?error,
+                "delivered garage snapshot rejected"
+            );
+            self.failed = true;
+        }
+        if self.failed {
+            return;
+        }
         if self.working()
             || self.pending.iter().any(Option::is_some)
             || self.started.iter().any(Option::is_some)
@@ -673,6 +726,20 @@ impl Exchanges {
                 warn!(
                     connection = self.connection,
                     "equipment service not configured"
+                );
+            }
+            return;
+        }
+        if let Some(request) = listener.take_garage() {
+            if let Some(profile) = self.profile.clone() {
+                self.garage.spawn(async move {
+                    let result = profile.garage_command(&request, utc).await;
+                    (request, result)
+                });
+            } else {
+                warn!(
+                    connection = self.connection,
+                    "garage service not configured"
                 );
             }
             return;
@@ -732,6 +799,22 @@ impl Exchanges {
                 }
                 _ => {}
             }
+            let car_request = request.bytes[4] == nfs_world::items::SELL_ITEMS
+                || (request.bytes[4] == nfs_world::items::PURCHASE_ITEMS
+                    && nfs_world::items::PurchaseRequest::decode(&request.bytes)
+                        .is_ok_and(|p| p.owner == 0));
+            if car_request && !listener.garage_ready() {
+                // A loading garage is a normal rejected transaction, not an
+                // unsupported request that leaves the client's File waiting.
+                let mut bytes = request.bytes[..4].to_vec();
+                bytes.push(3);
+                self.started[index] = Some(now);
+                self.pending[index] = Some(Completed {
+                    name: b"Items".to_vec(),
+                    bytes,
+                });
+                return;
+            }
             if request.bytes[4] == nfs_world::items::PURCHASE_ITEMS && !listener.purchase_ready() {
                 warn!(
                     connection = self.connection,
@@ -747,6 +830,40 @@ impl Exchanges {
         }
     }
     pub(super) async fn completed(&mut self, listener: &mut PlayerListener) -> bool {
+        if !self.garage.is_empty() {
+            let Some(Ok((request, result))) = self.garage.join_next().await else {
+                return false;
+            };
+            return match result {
+                Ok(updated) => match listener.garage_inventory(
+                    &updated.previous,
+                    updated.loaded.garage(),
+                    updated.loaded,
+                    updated.items,
+                ) {
+                    Ok(()) => {
+                        info!(connection = self.connection, ?request.operation, "owned garage command committed");
+                        true
+                    }
+                    Err(error) => {
+                        warn!(
+                            connection = self.connection,
+                            ?error,
+                            "garage snapshot rejected"
+                        );
+                        false
+                    }
+                },
+                Err(error) => {
+                    warn!(
+                        connection = self.connection,
+                        ?error,
+                        "garage command failed"
+                    );
+                    false
+                }
+            };
+        }
         // start() serializes account writes across Files, equipment and credits.
         if !self.awards.is_empty() {
             let Some(Ok((request, result))) = self.awards.join_next().await else {
@@ -858,7 +975,12 @@ impl Exchanges {
             return false;
         };
         match result {
-            Ok(Some(LoadedReply { reply, items, kind })) => {
+            Ok(Some(LoadedReply {
+                reply,
+                items,
+                kind,
+                previous,
+            })) => {
                 let notifications = if kind == ReplyKind::Purchase {
                     let Some(profile) = &self.profile else {
                         return false;
@@ -876,6 +998,16 @@ impl Exchanges {
                             return false;
                         }
                     }
+                } else if kind == ReplyKind::Garage {
+                    let Some(profile) = &self.profile else {
+                        return false;
+                    };
+                    match listener
+                        .garage_offer_notifications(&items, profile.service.catalog.bindings())
+                    {
+                        Ok(notifications) => notifications,
+                        Err(_) => return false,
+                    }
                 } else {
                     Vec::new()
                 };
@@ -889,6 +1021,17 @@ impl Exchanges {
                         listener.purchased_inventory(reply.garage, reply.persistent.clone(), items)
                     }
                     ReplyKind::Rejected => Ok(()),
+                    ReplyKind::Garage => match (previous, reply.persistent.clone()) {
+                        (Some(previous), Some(loaded)) if self.garage_delivery.is_none() => {
+                            self.garage_delivery = Some(garage::Updated {
+                                previous,
+                                loaded,
+                                items,
+                            });
+                            Ok(())
+                        }
+                        _ => Err(nfs_world::replication::Error::Shape),
+                    },
                 };
                 if let Err(error) = applied {
                     warn!(
@@ -947,6 +1090,9 @@ impl Exchanges {
         }
     }
     pub(super) fn advance(&mut self, host: &mut Host, events: &[Event], now: u64) -> bool {
+        if self.failed {
+            return false;
+        }
         for event in events {
             match event {
                 Event::FileComplete { handler } => self.started[usize::from(handler - 4)] = None,

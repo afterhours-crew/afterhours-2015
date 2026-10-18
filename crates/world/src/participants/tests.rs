@@ -349,6 +349,35 @@ fn loading_garage(model: &mut Lifecycle, participant: u16) {
     assert_eq!(model.enter_garage_loading(participant).len(), 12);
     assert_eq!(model.stage(participant), Some(Stage::LoadingGarage));
 }
+#[test]
+fn garage_replacement_is_owned_atomic_and_encodes_an_empty_slot() {
+    use crate::garage::{Binding, Slots};
+    let mut model = ready();
+    loading_garage(&mut model, 8);
+    model.enter_customization(8);
+    let empty = Slots::new([None; 5]).unwrap();
+    let one = Slots::new([Some(10), Some(20), None, None, None]).unwrap();
+    let before = model.clone();
+    assert!(model.replace_garage(empty, one, |_| false).is_err());
+    assert_eq!(model, before);
+    let added = model.replace_garage(empty, one, |p| p == 8).unwrap();
+    assert_eq!(added.len(), 2);
+    let sold = Slots::new([Some(10), None, None, None, None]).unwrap();
+    let removed = model.replace_garage(one, sold, |p| p == 8).unwrap();
+    assert_eq!(removed.len(), 1);
+    assert_eq!(removed[0].item, 0);
+    assert_eq!(
+        Binding::decode(removed[0].encode().unwrap().span()),
+        Ok(removed[0])
+    );
+    assert!(model.replace_garage(one, sold, |_| true).is_err());
+    assert!(
+        model
+            .replace_garage(sold, sold, |_| true)
+            .unwrap()
+            .is_empty()
+    );
+}
 
 #[test]
 fn customization_entry_follows_loading_garage_once_in_captured_order() {

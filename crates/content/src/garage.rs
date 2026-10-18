@@ -253,10 +253,16 @@ pub(crate) fn build(index: &mut AssetIndex) -> Result<Vec<u8>, Error> {
         )?;
         if primary.len() == 1 && secondary.len() == 4 {
             primary.extend(secondary);
-            candidates.push(primary);
+            candidates.push((source, primary));
         }
     }
-    let slots = only(candidates, "missing or ambiguous five-slot garage")?;
+    let (garage_entity, slots) = only(candidates, "missing or ambiguous five-slot garage")?;
+    let garage_component = serializer(
+        assets,
+        &garage_instances,
+        &garage_entity,
+        "GarageEntityData",
+    )?;
     if slots.iter().collect::<BTreeSet<_>>().len() != 5 {
         return Err(bad("duplicate garage slot"));
     }
@@ -307,7 +313,7 @@ pub(crate) fn build(index: &mut AssetIndex) -> Result<Vec<u8>, Error> {
     }
     serde_json::to_vec(&json!({"format":"nfs-garage-population","version":1,
         "build_sha256":nfs_services::SUPPORTED_BUILD_SHA256,"blueprint":garage,"item_blueprint":gameplay,
-        "main":main,"exit_teleport":{"transform_bits":exit}}))
+        "main":main,"garage_component_index":garage_component,"exit_teleport":{"transform_bits":exit}}))
         .map_err(|_|bad("JSON encoding"))
 }
 
