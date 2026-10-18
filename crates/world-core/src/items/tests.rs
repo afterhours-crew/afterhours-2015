@@ -32,6 +32,38 @@ fn one() -> Collection {
 }
 
 #[test]
+fn changes_name_new_roots_changed_subtrees_and_removed_roots() {
+    let mut before = one();
+    before.items.get_mut(&7).unwrap().children = vec![8];
+    before.items.insert(8, item(8));
+    before.roots.push(10);
+    before.items.insert(10, item(10));
+    assert_eq!(before.changes_since(&before), Ok(Changes::default()));
+    let mut after = before.clone();
+    // A child edit changes its root; a new root is added; a vanished root is removed.
+    after.items.get_mut(&8).unwrap().buy_price = 1;
+    after.roots = vec![11, 7];
+    after.items.remove(&10);
+    after.items.insert(11, item(11));
+    assert_eq!(
+        after.changes_since(&before),
+        Ok(Changes {
+            added: vec![11],
+            changed: vec![7],
+            removed: vec![10],
+        })
+    );
+    // A new child under an unchanged root record changes that root.
+    let mut grown = before.clone();
+    grown.items.get_mut(&10).unwrap().children = vec![12];
+    grown.items.insert(12, item(12));
+    assert_eq!(grown.changes_since(&before).unwrap().changed, [10]);
+    let mut broken = after;
+    broken.items.get_mut(&7).unwrap().children.push(13);
+    assert_eq!(broken.changes_since(&before), Err(Error::MissingItem));
+}
+
+#[test]
 fn selected_roots_include_shared_defaults_and_children_without_unrelated_items() {
     let mut graph = one();
     graph.items.get_mut(&7).unwrap().defaults = vec![8];

@@ -7,6 +7,7 @@ use crate::bits::BitWriter;
 use nfs_protocol::world::{BitSpan, rpc::Serial};
 
 pub const MAX_SERIALIZERS: usize = 512;
+pub const MAX_REFERENCES: usize = 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Kind {
@@ -15,6 +16,10 @@ pub enum Kind {
     Rpc,
     RpcReference,
     RpcFlags,
+    /// RPC identity followed by one initialization Boolean; updates have no body.
+    RpcBool,
+    /// RPC identity, a 16-bit count and 13-bit references; updates have no body.
+    RpcReferences,
     BoolProperty,
     FloatProperty,
     I32Property,
@@ -73,6 +78,14 @@ pub enum Initial {
         rpc: Rpc,
         flags: [bool; 2],
     },
+    RpcBool {
+        rpc: Rpc,
+        value: bool,
+    },
+    RpcReferences {
+        rpc: Rpc,
+        references: Vec<u16>,
+    },
     BoolProperty(Option<bool>),
     /// IEEE-754 bits, preserving NaN payloads and signed zero.
     FloatProperty(Option<u32>),
@@ -98,6 +111,8 @@ impl Initial {
             Self::Rpc(_) => Kind::Rpc,
             Self::RpcReference { .. } => Kind::RpcReference,
             Self::RpcFlags { .. } => Kind::RpcFlags,
+            Self::RpcBool { .. } => Kind::RpcBool,
+            Self::RpcReferences { .. } => Kind::RpcReferences,
             Self::BoolProperty(_) => Kind::BoolProperty,
             Self::FloatProperty(_) => Kind::FloatProperty,
             Self::I32Property(_) => Kind::I32Property,
@@ -127,6 +142,8 @@ impl Update {
                     | Kind::Rpc
                     | Kind::RpcReference
                     | Kind::RpcFlags
+                    | Kind::RpcBool
+                    | Kind::RpcReferences
                     | Kind::RpcVariant
                     | Kind::RpcOptionalReference
             ) | (Self::BoolProperty(_), Kind::BoolProperty)
@@ -205,6 +222,21 @@ impl Body {
                         rpc: read_rpc(&mut r)?,
                         flags: [r.bit()?, r.bit()?],
                     },
+                    Kind::RpcBool => Initial::RpcBool {
+                        rpc: read_rpc(&mut r)?,
+                        value: r.bit()?,
+                    },
+                    Kind::RpcReferences => {
+                        let rpc = read_rpc(&mut r)?;
+                        let count = r.take(16)? as usize;
+                        if count > MAX_REFERENCES {
+                            return Err(Error::Bound);
+                        }
+                        let references = (0..count)
+                            .map(|_| r.reference())
+                            .collect::<Result<_, _>>()?;
+                        Initial::RpcReferences { rpc, references }
+                    }
                     Kind::BoolProperty => Initial::BoolProperty(r.optional(Reader::bit)?),
                     Kind::FloatProperty => Initial::FloatProperty(r.optional(|r| r.take(32))?),
                     Kind::I32Property => {
@@ -243,6 +275,8 @@ impl Body {
                     | Kind::Rpc
                     | Kind::RpcReference
                     | Kind::RpcFlags
+                    | Kind::RpcBool
+                    | Kind::RpcReferences
                     | Kind::RpcVariant
                     | Kind::RpcOptionalReference => Update::Noop,
                     Kind::RpcGhostReference => {
@@ -328,6 +362,20 @@ impl Body {
                         w.bit(flags[0])?;
                         w.bit(flags[1])?;
                     }
+                    Initial::RpcBool { rpc, value } => {
+                        write_rpc(&mut w, rpc)?;
+                        w.bit(*value)?;
+                    }
+                    Initial::RpcReferences { rpc, references } => {
+                        if references.len() > MAX_REFERENCES {
+                            return Err(Error::Bound);
+                        }
+                        write_rpc(&mut w, rpc)?;
+                        w.put(references.len() as u64, 16)?;
+                        for reference in references {
+                            w.reference(reference)?;
+                        }
+                    }
                     Initial::BoolProperty(v) => w.optional(v, |w, v| w.bit(*v))?,
                     Initial::FloatProperty(v) => w.optional(v, |w, v| w.put(u64::from(*v), 32))?,
                     Initial::I32Property(v) => {
@@ -384,6 +432,8 @@ impl Body {
 
 #[cfg(test)]
 mod float_tests;
+#[cfg(test)]
+mod query_tests;
 #[cfg(test)]
 mod sequence_tests;
 

@@ -160,7 +160,12 @@ fn threshold_grants_are_additive_separate_from_purchase_and_use_shared_allocator
     assert_eq!(bought.items.roots, [grant.id.get()]);
     assert_eq!(bought.items.items[&grant.id.get()].owner, 10);
     assert_eq!(bought.items.items[&grant.id.get()].state, items::OWNED);
-    assert_eq!(bought.snapshot.items.len(), after.items.len());
+    assert_eq!(bought.snapshot.items.len(), after.items.len() + 1);
+    assert!(Policy::granted(&bought.snapshot, &[2; 16]));
+    assert_eq!(
+        reconcile(&repo, account(1), bought.snapshot.clone()),
+        bought.snapshot
+    );
     let wire = items::PurchaseReply {
         sequence: 3,
         purchased: Some(bought.items.clone()),
@@ -214,7 +219,7 @@ fn threshold_grants_are_additive_separate_from_purchase_and_use_shared_allocator
         )
         .is_err()
     );
-    assert!(!Policy::granted(&bought.snapshot, &[2; 16]));
+    assert!(Policy::granted(&bought.snapshot, &[2; 16]));
     let eligible = score(&repo, account(1), 50);
     let after = reconcile(&repo, account(1), eligible);
     assert_eq!(after.items.len(), 4);
@@ -372,7 +377,15 @@ fn competing_instance_purchases_keep_one_identity_and_charge() {
     });
     let saved = repo.snapshot(account(1)).unwrap();
     assert_eq!(saved.generation, unlocked.generation + 1);
-    assert_eq!(saved.items.len(), unlocked.items.len());
+    assert_eq!(saved.items.len(), unlocked.items.len() + 1);
+    assert_eq!(
+        saved
+            .items
+            .values()
+            .filter(|i| i.definition.0 == [2; 16] && i.state == items::PURCHASABLE)
+            .count(),
+        1
+    );
 }
 
 #[test]

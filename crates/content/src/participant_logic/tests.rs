@@ -299,6 +299,56 @@ fn synced_float_keeps_its_position_between_other_serializers() {
 }
 
 #[test]
+fn driving_queries_keep_distinct_serializers_and_unknown_classes_fail() {
+    use crate::graph::tests::{Memory, local};
+    let mut source = Memory::default();
+    let classes = [
+        "ParticipantLogicEntityData",
+        "RaceVehicleNearMissQueryEntityData",
+        "RaceVehicleCollisionQueryEntityData",
+        "RaceVehicleSlamAParticipantCollisionEvaluatorEntityData",
+        "RaceVehicleNosQueryEntityData",
+        "SyncedFloatEntityData",
+    ];
+    source.put(
+        "a",
+        0,
+        "ParticipantLogicBlueprint",
+        &[
+            ("Flags", Value::UInt16(1)),
+            (
+                "Objects",
+                Value::Array((1..=classes.len()).map(local).collect()),
+            ),
+        ],
+    );
+    for (index, class) in classes.iter().enumerate() {
+        source.put("a", index + 1, class, &[]);
+    }
+    let rules = crate::BuildIdentity::supported().participant_logic;
+    let mut nodes = Graph::new(&mut source).read(Site::root("a")).unwrap();
+    let (_, fields) = shape(&nodes, &rules).unwrap();
+    assert_eq!(
+        fields.iter().map(|(_, kind)| *kind).collect::<Vec<_>>(),
+        vec![
+            Kind::Root,
+            Kind::Rpc,
+            Kind::RpcBool,
+            Kind::RpcReferences,
+            Kind::FloatProperty
+        ]
+    );
+    assert_eq!(Rules::from_json(&rules.to_json()).unwrap(), rules);
+    nodes.last_mut().unwrap().object.class = "UnverifiedDrivingQuery".into();
+    assert!(
+        shape(&nodes, &rules)
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported")
+    );
+}
+
+#[test]
 fn shape_counts_repeated_prefab_occurrences_and_rejects_duplicate_roots() {
     use crate::graph::tests::{Memory, local, ptr};
     let mut source = Memory::default();

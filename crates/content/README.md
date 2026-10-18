@@ -60,6 +60,13 @@ Reputation thresholds must be signed integers, start at zero and increase strict
 with at most 256 levels. The generated versioned document contains no account
 scores. It can supply thresholds omitted from the server's garage-logic document.
 
+Item content version 9 includes explicit REP wrap/decal reward definitions and
+their score thresholds, resolved from the progression graph's award transactions.
+They are distinct from purchasable part grants. Both use the installed constructor
+defaults; no level or reward GUID is hardcoded. Builder revision 25 invalidates
+older caches so existing installations receive these rules. Daily-challenge and
+story rewards are separate policies.
+
 ## Build profiles
 
 Identifiers that belong to one executable build and cannot be read from the
@@ -94,6 +101,13 @@ and contextual channel bindings. Scene-owned logic uses the blueprint's unique
 installed spawner. Participant-owned children bind only to compatible channels
 inside the explicitly supplied parent. Repeated prefab instances retain separate
 contexts; missing, ambiguous and unsupported composition fails.
+
+The supported build's rules cover the driving-data and driving-style scoring
+compositions, including the distinct RPC-only, single-Boolean and reference-list
+query serializers. Server-only queries and local evaluators remain explicit
+non-serializing classes. Unknown classes still fail extraction. This enables
+layout inspection; driving awards and live scoring acceptance remain tracked in
+[#50](https://github.com/afterhours-crew/afterhours-2015/issues/50).
 
 This extraction API supplies static layout only. It does not choose which logic
 to activate, initialize account-dependent values or publish another prepared file.

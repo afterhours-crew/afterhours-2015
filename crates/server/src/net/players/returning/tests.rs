@@ -6,7 +6,7 @@ use super::*;
 use nfs_protocol::world::rpc::Serial;
 use nfs_world::{
     bits::BitWriter,
-    participants::{Lifecycle, Stage},
+    participants::{Call, Lifecycle, Stage},
     replication::{
         entity::creation::{Asset, Catalog, Content},
         spline, sublevel,
@@ -296,20 +296,68 @@ fn return_handlers_publish_valid_frames_restore_loading_and_allow_three_exits() 
         returns.poll(cycle * 8000).unwrap();
         // Exercise the production queue's reference validation, not only wire
         // encoding: a slot binding must follow its replacement car's creation.
+        // The stages run through the listener's scheduler at the official
+        // delays (E921).
         let mut transport = transport_with_snapshot(&players);
-        let entries = PlayerListener::begin_return(
-            &mut players,
-            &mut returns,
-            &mut population,
-            &inventory,
-            &content,
+        let (slots, chain): (Vec<_>, Vec<_>) = chain
+            .into_iter()
+            .map(HostRpc::Participant)
+            .partition(|rpc| {
+                matches!(rpc, HostRpc::Participant(n)
+                    if matches!(n.call, Call::GarageItem(_) | Call::NotifyTagged(_)))
+            });
+        let mut listener = PlayerListener::new(persona);
+        listener.players = players.clone();
+        listener.population = Some(population.clone());
+        listener.inventory = Some(inventory.clone());
+        listener.vehicles = Some(std::sync::Arc::new(content.clone()));
+        listener.returns = Some(returns.clone());
+        listener.logic_ghosts = ghosts.clone();
+        // Stage 1 inside the request's transaction: without garage logic, no event.
+        let first = PlayerListener::begin_return(
+            &mut listener.players,
+            listener.returns.as_mut().unwrap(),
             None,
-            &mut ghosts,
+            &listener.logic_ghosts,
             persona,
             participant,
-            chain.into_iter().map(HostRpc::Participant).collect(),
         )
         .unwrap();
+        assert!(first.is_empty());
+        let requested_ms = cycle * 10_000;
+        listener.pending_returns.push_back(PendingReturn {
+            participant,
+            requested_ms,
+            torn_down: false,
+            chain,
+            slots,
+        });
+        listener.advance_returns(requested_ms + RETURN_TEARDOWN_DELAY_MS - 1);
+        assert!(listener.pending_entries.is_empty());
+        listener.advance_returns(requested_ms + RETURN_TEARDOWN_DELAY_MS);
+        assert_eq!(listener.pending_entries.len(), 1);
+        assert!(listener.pending_returns[0].torn_down);
+        // The entry sequence exists before the car is staged.
+        assert!(
+            listener
+                .returns
+                .as_ref()
+                .unwrap()
+                .ghost(participant)
+                .is_some()
+        );
+        listener.advance_returns(requested_ms + RETURN_STAGING_DELAY_MS - 1);
+        assert_eq!(listener.pending_entries.len(), 1);
+        listener.advance_returns(requested_ms + RETURN_STAGING_DELAY_MS);
+        assert!(listener.pending_returns.is_empty());
+        // A car already shown in the garage needs no new content on its return.
+        assert!(listener.pending_content.is_empty());
+        let entries: Vec<_> = listener.pending_entries.drain(..).collect();
+        assert!(entries.len() >= 3, "{}", entries.len());
+        players = listener.players.clone();
+        population = listener.population.clone().unwrap();
+        returns = listener.returns.clone().unwrap();
+        ghosts = listener.logic_ghosts.clone();
         for (section, rpcs) in &entries {
             transport
                 .queue_replication_after(section.clone(), rpcs.clone())

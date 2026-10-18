@@ -338,8 +338,40 @@ promotion when refreshing the live inventory. The follow-up purchased and equipp
 SC-V2 for 10,900, retained the remaining 82,330 balance and existing appearance,
 then passed free roam, garage return and a full game/server restart. The restarted
 garage retained SC-V2, the balance and saved dyno values; see [issue #63][rep-item-issue].
-Formatting, workspace Clippy and all 1,216 tests
-pass, including a regression for the live inventory refresh and bank notification.
+
+The client loads Items once per session, so a level-up's grants are announced
+when the credit commits. The server compares the account's item collection
+before and after the credit and sends, one transfer at a time on the Items
+handler, a change notification per new record (sequence 1: a state byte, the
+runtime player index, then the added and the removed collections), followed by
+an update notification per changed root (the category unlock controller). The
+client builds the added records as new items and inserts them into its live
+inventory (receiver `0x14406f9e0`, insert `0x14407d0c0`, erase `0x14408ae70`
+in the supported build). An official host sent the same notifications at a
+level-up, one record each about 0.3 s apart, and both codecs reproduce those
+bytes exactly. Live, a level-up to 3 made both level-3 tire compositions
+buyable in the garage without a restart, and one was bought and fitted. Buying
+promotes the offer. Its replacement now commits in the same purchase transaction
+and receives a separate change notification immediately, without another REP
+credit or load. Retries retain the purchased identity, single charge and one
+replacement. Removals are never announced by these grant paths.
+
+Item content version 9 also reads the installed REP award branches: wraps at
+levels 51–60 and decal packs at 61–70. These ownerless owned rewards use the
+same allocator and transaction as REP and part offers. Existing owned rewards
+prevent repeat grants, including after restart. Older content formats never
+infer rewards. The decal seen alongside the earlier level-3 crossing was a
+daily-challenge reward paired with REP, not a level-3 unlock; challenge
+progression remains under [#57](https://github.com/afterhours-crew/afterhours-2015/issues/57).
+These paths passed live acceptance on 2026-10-18. A copied test account prepared
+one point below level 61 earned the crossing, received the Speedhunters heart
+decal and let the owner select/apply it in the editor. The account held each of
+the ten eligible wraps once and no level-62–70 decal. Buying a $215 level-3 tire
+debited exactly $215 and delivered a fresh offer 200 ms after the purchase reply,
+without another REP credit. Restart retained the reward and purchased/replacement
+identities without duplicates; the owner confirmed parts and decal remained.
+Preparation is not evidence of earning every preceding level, and individual
+wrap presentation was not exhaustively checked. See [#92](https://github.com/afterhours-crew/afterhours-2015/issues/92).
 
 For unattended menu testing, [change the game's Back key to F9](MENU-KEYBINDING.md)
 through its user profile. This works without a mod and leaves Computer Use's
@@ -404,6 +436,24 @@ the game/server to load the new balance.
 
 ## Give a local test account REP
 
+For server development, `nfs_services::reputation::earned::Policy::prepare`
+builds a single generation-guarded storage batch containing a calculated REP
+credit, its derived level, category masks and newly eligible purchasable items.
+It leaves unrelated tables, money and equipment unchanged. The caller owns the
+scoring decision and retry ID; retain the original batch and generation on a
+retry, and include any additional reward in that same transaction. Never rebase
+an acknowledged credit onto a later snapshot. Repository replay history is
+bounded, so the original generation is also necessary to reject expired retries.
+
+This domain API is covered by constructed transaction and SQLite restart tests.
+The free-roam scoring interpreter now supplies driving credits. Live checks
+covered earning REP, crossing levels 2 and 3, same-session part availability
+and purchase, and level-2 REP/unlock persistence after restarting game/server.
+The owner accepted the remaining action and popup checks on 2026-10-18; see
+[#50](https://github.com/Afterhours-Crew/afterhours-2015/issues/50) and
+[driving-score calculations](SCORING.md) for the tested scope and limits.
+The operator command below remains a separate stopped-account testing tool.
+
 Use a separate test account, stop its game and server, and back up the account
 directory as above. REP is calculated from total score; changing only a saved
 level is insufficient. The operator command sets the total score to the
@@ -434,7 +484,10 @@ if ($LASTEXITCODE -ne 0) { throw 'REP adjustment failed; inspect before retrying
 
 Restart to load the new score. The JSON report shows the old/new score, level
 and generation. `--set-level 1` with a freshly inspected generation resets REP
-to the first level threshold. On inventory load, authored REP rules add eligible
+to the first level threshold. `--set-score <total>` (instead of `--set-level`)
+stores an exact total and derives the level from the installed thresholds, for
+example a total a few thousand points under the next threshold so a live
+drive reaches the next level. On inventory load, authored REP rules add eligible
 visual-category unlocks to the account's category controller. Existing unlocks
 remain unlocked if REP is later lowered. Restore the stopped account backup to
 recover the earlier category state and exact score within its level. A stale generation fails without

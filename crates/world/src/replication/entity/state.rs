@@ -38,6 +38,9 @@ impl State {
                 Initial::RpcOptionalReference { reference, .. } => {
                     reference.is_some_and(|id| !valid(id))
                 }
+                Initial::RpcReferences { references, .. } => {
+                    references.iter().any(|id| !valid(*id))
+                }
                 Initial::SequenceRoot {
                     manager,
                     participants,
@@ -102,6 +105,8 @@ impl State {
                     | Kind::Rpc
                     | Kind::RpcReference
                     | Kind::RpcFlags
+                    | Kind::RpcBool
+                    | Kind::RpcReferences
                     | Kind::RpcVariant
                     | Kind::RpcOptionalReference => Update::Noop,
                     Kind::RpcGhostReference => Update::GhostReference(None),

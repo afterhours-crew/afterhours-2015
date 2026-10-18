@@ -32,6 +32,14 @@ impl Definitions {
         }
         Ok(Self { classes, variants })
     }
+    /// The item definition that replicates as `variant` (E921: the installed
+    /// nitrous of a car is identified by the variant its state resolves to).
+    pub fn guid_for_variant(&self, variant: u8) -> Option<Guid> {
+        self.variants
+            .iter()
+            .find(|(_, v)| **v == variant)
+            .map(|(guid, _)| *guid)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

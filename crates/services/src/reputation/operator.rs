@@ -11,7 +11,8 @@ use nfs_storage::{
 /// Explicit local test-profile adjustment with a generation guard. Call only
 /// with the account's game and server stopped. This is not an earned reward:
 /// the total score and derived level change, while the five driving-style
-/// scores, inventory, money and all other tables remain intact.
+/// scores, inventory, money and all other tables remain intact. The total
+/// becomes the installed threshold of `level`.
 pub fn set_for_operator(
     repository: &dyn InventoryRepository,
     account: AccountId,
@@ -21,13 +22,56 @@ pub fn set_for_operator(
     level: u32,
     now: Timestamp,
 ) -> Result<Snapshot, Error> {
-    const NAMESPACE: u64 = 1 << 59;
     if level == 0 {
         return Err(Error::Config);
     }
     let score = thresholds
         .score_for_level(level)
         .map_err(|_| Error::Config)?;
+    set_total(
+        repository,
+        account,
+        catalog,
+        thresholds,
+        expected,
+        score,
+        Some(level),
+        now,
+    )
+}
+
+/// The same adjustment with an exact total score; the level is derived from
+/// the installed thresholds (a total just under a threshold lets a live run
+/// reach the next level by driving).
+pub fn set_score_for_operator(
+    repository: &dyn InventoryRepository,
+    account: AccountId,
+    catalog: &Catalog,
+    thresholds: &Thresholds,
+    expected: u64,
+    score: i32,
+    now: Timestamp,
+) -> Result<Snapshot, Error> {
+    if score < 0 {
+        return Err(Error::Config);
+    }
+    set_total(
+        repository, account, catalog, thresholds, expected, score, None, now,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn set_total(
+    repository: &dyn InventoryRepository,
+    account: AccountId,
+    catalog: &Catalog,
+    thresholds: &Thresholds,
+    expected: u64,
+    score: i32,
+    expected_level: Option<u32>,
+    now: Timestamp,
+) -> Result<Snapshot, Error> {
+    const NAMESPACE: u64 = 1 << 59;
     let mut snapshot = repository.snapshot(account)?;
     let loaded = catalog.view(&snapshot)?;
     Scores::load(&loaded).map_err(|_| Error::Config)?;
@@ -41,16 +85,18 @@ pub fn set_for_operator(
         .clone();
     let row = table.rows.entry(0).or_default();
     row.insert(key("RepScore"), Value::Int(score));
-    row.insert(key("RepLevel"), Value::Int(level as i32));
     snapshot.tables.insert(key("RepValuesTable"), table.clone());
-    let check = catalog.view(&snapshot)?;
-    if thresholds
-        .evaluate(Scores::load(&check).map_err(|_| Error::Config)?)
-        .get(Field::Level)
-        != level as i32
-    {
+    // The level the installed thresholds derive from the new total; the
+    // saved level only mirrors it.
+    let level = thresholds
+        .evaluate(Scores::load(&catalog.view(&snapshot)?).map_err(|_| Error::Config)?)
+        .get(Field::Level);
+    if level < 1 || expected_level.is_some_and(|l| l as i32 != level) {
         return Err(Error::Config);
     }
+    let row = table.rows.entry(0).or_default();
+    row.insert(key("RepLevel"), Value::Int(level));
+    snapshot.tables.insert(key("RepValuesTable"), table.clone());
     let applied = repository.apply(
         account,
         &Batch {
@@ -108,6 +154,59 @@ mod tests {
             .ensure_loaded(repo, account, repo.snapshot(account).unwrap(), Timestamp(2))
             .unwrap()
             .0
+    }
+    #[test]
+    fn score_adjustment_derives_the_level_and_keeps_the_guards() {
+        let repo = MemoryRepository::default();
+        let catalog = catalog();
+        let thresholds = Thresholds::new(vec![0, 10, 25]).unwrap();
+        let account = AccountId::from_owned_config([1; 16]).unwrap();
+        let before = initialize(&repo, account, &catalog);
+        assert_eq!(
+            set_score_for_operator(
+                &repo,
+                account,
+                &catalog,
+                &thresholds,
+                before.generation,
+                -1,
+                Timestamp(3)
+            ),
+            Err(Error::Config)
+        );
+        assert_eq!(
+            set_score_for_operator(
+                &repo,
+                account,
+                &catalog,
+                &thresholds,
+                before.generation + 1,
+                24,
+                Timestamp(3)
+            ),
+            Err(Error::Conflict)
+        );
+        assert_eq!(repo.snapshot(account).unwrap(), before);
+        // One point under the level-3 threshold: level 2, total exactly 24.
+        let saved = set_score_for_operator(
+            &repo,
+            account,
+            &catalog,
+            &thresholds,
+            before.generation,
+            24,
+            Timestamp(3),
+        )
+        .unwrap();
+        let values = thresholds.evaluate(Scores::load(&catalog.view(&saved).unwrap()).unwrap());
+        assert_eq!(values.get(Field::Total), 24);
+        assert_eq!(values.get(Field::Level), 2);
+        let row = &saved.tables[&key("RepValuesTable")].rows[&0];
+        assert_eq!(row[&key("RepScore")], Value::Int(24));
+        assert_eq!(row[&key("RepLevel")], Value::Int(2));
+        assert_eq!(row[&key("StyleScore")], Value::Int(7));
+        assert_eq!(saved.generation, before.generation + 1);
+        assert_eq!(repo.snapshot(account).unwrap(), saved);
     }
     #[test]
     fn level_adjustment_is_atomic_preserves_styles_and_rejects_stale_or_invalid_input() {

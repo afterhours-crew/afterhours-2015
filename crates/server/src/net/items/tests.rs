@@ -4,6 +4,10 @@
 
 use super::*;
 
+pub(in crate::net) fn item_bindings(jobs: &Exchanges) -> &nfs_world::items::Catalog {
+    jobs.profile.as_ref().unwrap().bindings()
+}
+
 pub(in crate::net) fn reload_inventory(
     jobs: &Exchanges,
     snapshot: &nfs_storage::Snapshot,
@@ -452,4 +456,108 @@ async fn cancellation_keeps_running_workers_bounded_and_does_not_block_executor(
     .await
     .unwrap();
     assert!(signals.try_recv().is_err());
+}
+
+fn record(id: u64, state: u8) -> items::Item {
+    items::Item {
+        id,
+        definition: [1; 16],
+        owner: 0,
+        defaults: vec![],
+        children: vec![],
+        state,
+        buy_price: 215,
+        sell_price: 139,
+        derived: Derived::Empty,
+    }
+}
+
+#[test]
+fn credit_announces_each_new_record_then_each_changed_root() {
+    let bindings = catalog();
+    let bindings = bindings.bindings();
+    let before = items::Collection {
+        roots: vec![1, 2],
+        items: [(1, record(1, items::OWNED)), (2, record(2, items::OWNED))].into(),
+    };
+    assert_eq!(
+        credit_notifications(2, &before, &before, bindings),
+        Ok((vec![], 0))
+    );
+    // A level-up: the controller (1) changes, two offers and a grant arrive.
+    let mut after = before.clone();
+    after.items.get_mut(&1).unwrap().buy_price = 1;
+    for (id, state) in [
+        (5, items::PURCHASABLE),
+        (4, items::PURCHASABLE),
+        (6, items::OWNED),
+    ] {
+        after.roots.push(id);
+        after.items.insert(id, record(id, state));
+    }
+    let (sent, unannounced) = credit_notifications(2, &before, &after, bindings).unwrap();
+    assert_eq!(unannounced, 0);
+    assert_eq!(sent.len(), 4);
+    for (bytes, id) in sent[..3].iter().zip([5, 4, 6]) {
+        let change = items::ChangeNotification::decode(bytes, bindings).unwrap();
+        assert_eq!(change.player_index, 2);
+        assert_eq!(change.added, after.for_roots(vec![id]).unwrap());
+        assert_eq!(change.removed, items::Collection::default());
+    }
+    let update = items::UpdateNotification::decode(&sent[3], bindings).unwrap();
+    assert_eq!(update.items, after.for_roots(vec![1]).unwrap());
+    // Many grants share a bounded number of notifications; removals are
+    // never described.
+    let mut many = before.clone();
+    many.roots.retain(|&id| id != 2);
+    many.items.remove(&2);
+    for id in 10..30 {
+        many.roots.push(id);
+        many.items.insert(id, record(id, items::PURCHASABLE));
+    }
+    let (sent, unannounced) = credit_notifications(2, &before, &many, bindings).unwrap();
+    assert_eq!(unannounced, 1);
+    assert_eq!(sent.len(), 10);
+    let added: Vec<_> = sent
+        .iter()
+        .flat_map(|bytes| {
+            items::ChangeNotification::decode(bytes, bindings)
+                .unwrap()
+                .added
+                .roots
+        })
+        .collect();
+    assert_eq!(added, (10..30).collect::<Vec<_>>());
+}
+
+#[tokio::test]
+async fn queued_notifications_go_out_one_at_a_time_ahead_of_requests() {
+    let repo = Arc::new(MemoryRepository::default());
+    let service = Service::new(repo, catalog());
+    let mut exchanges = Exchanges::new(Some(service.bind(account(4))), 7);
+    let mut listener = PlayerListener::new(999);
+    for bytes in [vec![1], vec![2]] {
+        exchanges.notifications.push_back(Completed {
+            name: b"Items".to_vec(),
+            bytes,
+        });
+    }
+    transfer(&mut listener, 0, b"Items", request(1));
+    // A request waits until every queued notification went out.
+    exchanges.start(&mut listener, 0, Timestamp(0));
+    assert!(!exchanges.working());
+    exchanges.promote();
+    assert_eq!(exchanges.pending[0].as_ref().unwrap().bytes, [1]);
+    exchanges.promote();
+    assert_eq!(exchanges.pending[0].as_ref().unwrap().bytes, [1]);
+    // Queued on the wire: the next waits for its FileComplete.
+    exchanges.pending[0] = None;
+    exchanges.started[0] = Some(0);
+    exchanges.promote();
+    assert!(exchanges.pending[0].is_none());
+    exchanges.started[0] = None;
+    exchanges.promote();
+    assert_eq!(exchanges.pending[0].take().unwrap().bytes, [2]);
+    exchanges.start(&mut listener, 0, Timestamp(0));
+    assert!(exchanges.working());
 }

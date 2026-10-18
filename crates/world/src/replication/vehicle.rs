@@ -165,6 +165,15 @@ pub struct PhysicsControls {
     pub flags: [bool; 4],
     pub wheel_pairs: Option<[[u8; 2]; 4]>,
 }
+impl PhysicsControls {
+    /// The first four-bit control value is the physical state enum. The
+    /// native airborne query tests exactly state 1; the other values are not
+    /// interchangeable with true. Wheel slips and the trailing flags do not
+    /// indicate ground contact.
+    pub fn is_airborne(&self) -> bool {
+        self.values[0] == 1
+    }
+}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Physics {
     pub identity_words: [u32; 3],

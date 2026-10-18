@@ -112,6 +112,19 @@ pub struct Batch {
     pub events: Vec<Event>,
 }
 
+/// The part of a batch to produce: the official host spreads a garage
+/// return's batch over time (E921: the free-roam presentation is deleted one
+/// frame after the confirming request, the returning entities and events
+/// follow about 1.4 s later).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Part {
+    All,
+    /// Only the batch's deletions.
+    Deletions,
+    /// Everything but the deletions: scene and entity updates, entities, events.
+    Creations,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Which {
     Spawn,
@@ -727,6 +740,35 @@ impl GarageLogic {
             Which::Returned => &self.returned,
         }
     }
+    /// Every integer serializer that presents a reputation value, as
+    /// (capture id, field index, reputation field), across all batches.
+    pub fn reputation_fields(&self) -> Vec<(u16, usize, ReputationField)> {
+        let mut fields = Vec::new();
+        for which in [
+            Which::Spawn,
+            Which::Vehicles,
+            Which::Entry,
+            Which::Exit,
+            Which::Arrive,
+            Which::Arrived,
+            Which::WorldReady,
+            Which::WorldSpawn,
+            Which::WorldSettled,
+            Which::FreeRoam,
+            Which::Returning,
+            Which::ReturnRequested,
+            Which::Returned,
+        ] {
+            for definition in &self.batch(which).entities {
+                for (index, role) in definition.roles.iter().enumerate() {
+                    if let Role::Reputation(field) = role {
+                        fields.push((definition.capture_id, index, *field));
+                    }
+                }
+            }
+        }
+        fields
+    }
     /// Whether deployment content describes a batch for this point.
     pub fn has(&self, which: Which) -> bool {
         *self.batch(which) != Batch::default()
@@ -742,7 +784,18 @@ impl GarageLogic {
         participant: u16,
         ghosts: &mut BTreeMap<u16, u16>,
     ) -> Result<Output, replication::Error> {
-        self.produce_with_reputation(which, players, participant, ghosts, None)
+        self.produce_with_reputation_part(which, players, participant, ghosts, None, Part::All)
+    }
+    /// One part of a batch (see [`Part`]).
+    pub fn produce_part(
+        &self,
+        which: Which,
+        players: &mut Players,
+        participant: u16,
+        ghosts: &mut BTreeMap<u16, u16>,
+        part: Part,
+    ) -> Result<Output, replication::Error> {
+        self.produce_with_reputation_part(which, players, participant, ghosts, None, part)
     }
     pub fn produce_with_reputation(
         &self,
@@ -752,6 +805,17 @@ impl GarageLogic {
         ghosts: &mut BTreeMap<u16, u16>,
         scores: Option<ReputationScores>,
     ) -> Result<Output, replication::Error> {
+        self.produce_with_reputation_part(which, players, participant, ghosts, scores, Part::All)
+    }
+    pub fn produce_with_reputation_part(
+        &self,
+        which: Which,
+        players: &mut Players,
+        participant: u16,
+        ghosts: &mut BTreeMap<u16, u16>,
+        scores: Option<ReputationScores>,
+        part: Part,
+    ) -> Result<Output, replication::Error> {
         if participant == 0 {
             return Err(replication::Error::Shape);
         }
@@ -760,7 +824,8 @@ impl GarageLogic {
             (Some(scores), Some(thresholds)) => Some(thresholds.evaluate(scores)),
             _ => None,
         };
-        if values.is_none()
+        if part != Part::Deletions
+            && values.is_none()
             && batch
                 .entities
                 .iter()
@@ -770,6 +835,9 @@ impl GarageLogic {
             return Err(replication::Error::Shape);
         }
         let mut output = Output::default();
+        if part == Part::Deletions {
+            return Self::delete_batch(batch, players, ghosts, output);
+        }
         for update in &batch.scene_updates {
             let scene = players
                 .objects()
@@ -826,24 +894,36 @@ impl GarageLogic {
             ghosts.insert(definition.capture_id, record.id);
             output.records.push(record);
         }
-        if !batch.delete.is_empty() {
-            let ids = batch
-                .delete
-                .iter()
-                .map(|id| {
-                    ghosts
-                        .get(id)
-                        .copied()
-                        .ok_or(replication::Error::UnknownObject)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            players.remove_entities(&ids)?;
-            for id in &batch.delete {
-                ghosts.remove(id);
-            }
-            output.deleted = ids;
+        if part != Part::Creations {
+            output = Self::delete_batch(batch, players, ghosts, output)?;
         }
         output.events = self.events(which, players, ghosts)?;
+        Ok(output)
+    }
+    fn delete_batch(
+        batch: &Batch,
+        players: &mut Players,
+        ghosts: &mut BTreeMap<u16, u16>,
+        mut output: Output,
+    ) -> Result<Output, replication::Error> {
+        if batch.delete.is_empty() {
+            return Ok(output);
+        }
+        let ids = batch
+            .delete
+            .iter()
+            .map(|id| {
+                ghosts
+                    .get(id)
+                    .copied()
+                    .ok_or(replication::Error::UnknownObject)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        players.remove_entities(&ids)?;
+        for id in &batch.delete {
+            ghosts.remove(id);
+        }
+        output.deleted = ids;
         Ok(output)
     }
     /// Resolve authored event targets from current owned objects without
@@ -1110,6 +1190,58 @@ pub(crate) mod tests {
         bad = v;
         bad["return_requested"]["delete_capture_ids"] = json!([277]);
         assert!(GarageLogic::from_json(&bad).is_err());
+    }
+
+    #[test]
+    fn return_batch_parts_split_deletions_from_creations() {
+        let mut v = presentation_json();
+        v["exit"]["delete_capture_ids"] = json!([319]);
+        v["return_requested"] = json!({"scene_updates":[],"entities":[],"events":[{"target":{"capture_id":277},"entity":1,"event":18}]});
+        v["returning"] = json!({"scene_updates":[],"entities":[v["spawn"]["entities"][3].clone()],
+            "delete_capture_ids":[288],"events":[{"target":{"capture_id":277},"entity":1,"event":19}]});
+        let logic = GarageLogic::from_json(&v).unwrap();
+        let (mut players, participant) = world();
+        let mut ghosts = BTreeMap::new();
+        for phase in [Which::Spawn, Which::Entry, Which::Exit] {
+            logic
+                .produce(phase, &mut players, participant, &mut ghosts)
+                .unwrap();
+        }
+        let doomed = ghosts[&288];
+        let count = players.objects().snapshot().len();
+        // Deletions alone: the object goes, nothing is created or fired.
+        let out = logic
+            .produce_part(
+                Which::Returning,
+                &mut players,
+                participant,
+                &mut ghosts,
+                Part::Deletions,
+            )
+            .unwrap();
+        assert_eq!(out.deleted, vec![doomed]);
+        assert!(out.records.is_empty() && out.events.is_empty());
+        assert!(players.objects().get(doomed).is_none());
+        assert!(!ghosts.contains_key(&288));
+        assert_eq!(players.objects().snapshot().len(), count - 1);
+        // Creations alone: the entity and the event, no deletion.
+        let out = logic
+            .produce_part(
+                Which::Returning,
+                &mut players,
+                participant,
+                &mut ghosts,
+                Part::Creations,
+            )
+            .unwrap();
+        assert!(out.deleted.is_empty());
+        assert_eq!(out.records.len(), 1);
+        assert_eq!(
+            out.events.iter().map(|e| e.event).collect::<Vec<_>>(),
+            vec![19]
+        );
+        assert!(ghosts.contains_key(&295));
+        assert_eq!(players.objects().snapshot().len(), count);
     }
 
     #[test]

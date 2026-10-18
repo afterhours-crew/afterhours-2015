@@ -26,11 +26,14 @@ mod graph;
 mod items;
 mod licenses;
 pub mod logic_events;
+pub mod nitrous;
 pub mod participant_logic;
 pub mod progression;
 mod reputation;
+pub mod road_network;
 mod scan;
 pub mod scenes;
+pub mod scoring;
 pub mod sequences;
 mod startup;
 mod stats;
@@ -53,7 +56,7 @@ pub const FORMAT: &str = "nfs-install-content";
 pub const VERSION: u64 = 1;
 /// Increment whenever a builder's output for an unchanged installation changes,
 /// so existing cache entries are rebuilt.
-pub const BUILDER_REVISION: u64 = 24;
+pub const BUILDER_REVISION: u64 = 25;
 /// Executable file name relative to the installation root.
 pub const EXECUTABLE: &str = "NFS16.exe";
 

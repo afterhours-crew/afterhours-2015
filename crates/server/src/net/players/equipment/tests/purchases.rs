@@ -47,6 +47,8 @@ fn purchased_instance_refreshes_live_snapshot_and_bank_without_equipping() {
         serializer: 1,
     });
 
+    let mut replacement = grant.clone();
+    replacement.id = ItemId::new(99).unwrap();
     grant.state = OWNED;
     grant.owner = ItemId::new(1);
     repo.apply(
@@ -54,7 +56,11 @@ fn purchased_instance_refreshes_live_snapshot_and_bank_without_equipping() {
         &Batch {
             id: 91,
             expected_generation: snapshot.generation,
-            ops: vec![Op::Update(grant), nfs_services::bank::Balance(40).store()],
+            ops: vec![
+                Op::Update(grant),
+                Op::Insert(replacement),
+                nfs_services::bank::Balance(40).store(),
+            ],
         },
         Timestamp(4),
     )
@@ -75,6 +81,17 @@ fn purchased_instance_refreshes_live_snapshot_and_bank_without_equipping() {
     );
     assert_eq!(listener.inventory.as_ref().unwrap().items, before.items);
     assert!(listener.pending_rpcs.is_empty());
+    let notices = listener
+        .purchase_notifications(&after, crate::net::items::tests::item_bindings(&jobs))
+        .unwrap();
+    assert_eq!(notices.len(), 1);
+    let notice = nfs_world::items::ChangeNotification::decode(
+        &notices[0],
+        crate::net::items::tests::item_bindings(&jobs),
+    )
+    .unwrap();
+    assert_eq!(notice.added.roots, [99]);
+    assert!(notice.removed.items.is_empty());
     listener
         .purchased_inventory(garage, persistent.clone(), after.clone())
         .unwrap();
@@ -88,8 +105,14 @@ fn purchased_instance_refreshes_live_snapshot_and_bank_without_equipping() {
     );
     // A committed retry refreshes the same snapshot and never changes the car.
     listener
-        .purchased_inventory(garage, persistent, after)
+        .purchased_inventory(garage, persistent, after.clone())
         .unwrap();
     assert_eq!(listener.players.objects().snapshot(), objects);
     assert_eq!(repo.snapshot(account).unwrap(), committed);
+    assert!(
+        listener
+            .purchase_notifications(&after, crate::net::items::tests::item_bindings(&jobs))
+            .unwrap()
+            .is_empty()
+    );
 }

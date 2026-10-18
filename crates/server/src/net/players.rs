@@ -22,10 +22,12 @@ mod customization;
 mod diagnostics;
 mod equipment;
 pub(super) use equipment::EquipmentRequest;
+pub(super) use scoring::{AwardRequest, Credited};
 mod launchers;
 mod purchases;
 mod refusal;
 mod returning;
+mod scoring;
 mod sequences;
 
 #[cfg(test)]
@@ -45,6 +47,28 @@ const BINDING_REFRESH_DELAY_MS: u64 = 100;
 const SETTLE_DELAY_MS: u64 = 100;
 /// Glass replies held per world car (three reports per car).
 const MAX_HELD_GLASS: usize = 8;
+
+/// A short label of a host notification for the outbound diagnostics log.
+pub(super) fn describe_host_rpc(rpc: &nfs_world::participants::HostRpc) -> String {
+    use nfs_world::participants::HostRpc;
+    match rpc {
+        HostRpc::Participant(n) => format!(
+            "participant{}@{}/{}:{:?}",
+            n.participant, n.endpoint.scene, n.endpoint.selector, n.call
+        ),
+        HostRpc::Event(f) => format!("fire{}@{}e{}", f.event, f.target.ghost, f.target.entity),
+        HostRpc::Vehicle(b) => format!(
+            "vehicle{}@{}/{}p{}",
+            b.vehicle, b.endpoint.scene, b.endpoint.selector, b.participant
+        ),
+        HostRpc::SequenceStop(s) => format!("stop{}", s.sequence),
+        HostRpc::WorldActivation(n) => format!(
+            "activation{:?}@{}/{}p{:?}",
+            n.call, n.endpoint.scene, n.endpoint.selector, n.participant
+        ),
+        other => format!("{other:?}").chars().take(48).collect(),
+    }
+}
 
 pub(super) struct PlayerListener {
     stats: Accepting,
@@ -84,6 +108,15 @@ pub(super) struct PlayerListener {
     spawn_released: BTreeMap<u16, u64>,
     /// Completion handoffs awaiting a current owned binding snapshot.
     pending_binding_refreshes: VecDeque<(u64, u16)>,
+    /// Garage returns whose teardown and staging wait for their world time.
+    pending_returns: VecDeque<returning::PendingReturn>,
+    /// World ms until which the client's calls are logged (a return began).
+    return_trace_until: u64,
+    /// Sections waiting in the world session's replication queue, set by the
+    /// world loop before each scoring advance (E923: periodic scoring
+    /// sections kept that queue at 31 of 32 entries all session and held
+    /// every later section, garage-return events included, for ~2.6 s).
+    pub(in crate::net) session_backlog: usize,
     glass: crate::glass::Glass,
     customization: crate::customization_timer::Timers,
     world_ms: u64,
@@ -100,6 +133,8 @@ pub(super) struct PlayerListener {
     logic_ghosts: BTreeMap<u16, BTreeMap<u16, u16>>,
     logic_vehicles_fired: BTreeSet<u16>,
     free_roam_presented: BTreeSet<u16>,
+    scoring: Option<std::sync::Arc<crate::scoring::Content>>,
+    scoring_state: scoring::State,
     pub(super) pending_content: VecDeque<nfs_world::content::Message>,
     pub(super) pending_rpcs: VecDeque<nfs_world::participants::HostRpc>,
     unsupported_rpcs: usize,
@@ -607,6 +642,9 @@ impl PlayerListener {
             pending_teleports: VecDeque::new(),
             spawn_released: BTreeMap::new(),
             pending_binding_refreshes: VecDeque::new(),
+            pending_returns: VecDeque::new(),
+            return_trace_until: 0,
+            session_backlog: 0,
             arrivals: None,
             returns: None,
             glass: crate::glass::Glass::default(),
@@ -622,6 +660,11 @@ impl PlayerListener {
             logic_ghosts: BTreeMap::new(),
             logic_vehicles_fired: BTreeSet::new(),
             free_roam_presented: BTreeSet::new(),
+            scoring: None,
+            scoring_state: scoring::State {
+                trace: std::env::var_os("NFS_SCORING_TRACE").is_some(),
+                ..scoring::State::default()
+            },
             pending_content: VecDeque::new(),
             pending_rpcs: VecDeque::new(),
             unsupported_rpcs: 0,
@@ -881,6 +924,11 @@ impl Listener for PlayerListener {
         let mut deferred_sections = Vec::new();
         let mut movement_section = None;
         let mut vehicle_reports = self.vehicle_reports.clone();
+        let mut scoring_reported = BTreeSet::new();
+        let mut scoring_reports = Vec::new();
+        // Fuel, clock anchors and transition snapshots commit with this frame.
+        let mut nitrous = self.scoring_state.nitrous.clone();
+        let mut nitrous_reported = BTreeSet::new();
         let mut trigger_volumes = self.trigger_volumes.clone();
         let mut world_activation = self.world_activation.clone();
         if let Some(movement) = &parsed.movement {
@@ -894,6 +942,22 @@ impl Listener for PlayerListener {
                 self.world_ms,
             ) {
                 Ok(reports) if !reports.is_empty() => {
+                    scoring_reported.extend(reports.iter().map(|r| r.id));
+                    for report in &reports {
+                        if let Some(fuel) = nitrous.get_mut(&report.id)
+                            && let Ok(physics) = players.vehicle_physics(
+                                HOST_SELECTOR as u8,
+                                self.persona,
+                                report.id,
+                            )
+                        {
+                            let [high, low, _] = physics.identity_words;
+                            fuel.observe_clock(
+                                f64::from_bits((u64::from(high) << 32) | u64::from(low)),
+                                self.world_ms,
+                            );
+                        }
+                    }
                     movement_section = Some(Section {
                         float_bits: None,
                         flag: false,
@@ -917,6 +981,8 @@ impl Listener for PlayerListener {
         let mut completed_returns = Vec::new();
         let mut scheduled_teleports = Vec::new();
         let mut scheduled_binding_refreshes = Vec::new();
+        let mut scheduled_returns = Vec::new();
+        let mut return_trace = false;
         let mut sequences = self.sequences.clone();
         let mut logic_ghosts = self.logic_ghosts.clone();
         let mut unsupported_logic = 0;
@@ -1124,6 +1190,16 @@ impl Listener for PlayerListener {
         let mut exit_entries = Vec::new();
         let mut equipment = self.equipment.clone();
         for body in rpcs {
+            if self.world_ms < self.return_trace_until
+                && let Some(label) = refusal::route_label(body)
+            {
+                tracing::info!(
+                    selector = label.selector,
+                    method = label.method,
+                    references = ?label.references,
+                    "client call during a garage return"
+                );
+            }
             match nfs_world::vehicle_nitrous::receive(
                 &mut players,
                 HOST_SELECTOR as u8,
@@ -1132,7 +1208,7 @@ impl Listener for PlayerListener {
                 |id| world_cars.get(&id).is_some_and(|(_, ready)| *ready),
             ) {
                 Ok(Some(report)) => {
-                    tracing::debug!(
+                    tracing::info!(
                         vehicle = report.vehicle,
                         active = report.active,
                         client_seconds = report.client_seconds,
@@ -1140,6 +1216,26 @@ impl Listener for PlayerListener {
                         "owned nitrous transition"
                     );
                     records.extend(report.record);
+                    if let Some(fuel) = nitrous.get_mut(&report.vehicle) {
+                        if fuel
+                            .request(report.active, report.client_seconds, self.world_ms)
+                            .is_err()
+                        {
+                            return self.refuse_rpc(replication::Error::Bound, body);
+                        }
+                        nitrous_reported.insert(report.vehicle);
+                    }
+                    continue;
+                }
+                Ok(None) => {}
+                Err(error) => return self.refuse_rpc(error, body),
+            }
+            match self.scoring_report(&players, body) {
+                Ok(Some(queued)) => {
+                    if scoring_reports.len() >= scoring::MAX_QUEUED_REPORTS {
+                        return self.refuse_rpc(replication::Error::Bound, body);
+                    }
+                    scoring_reports.push(queued);
                     continue;
                 }
                 Ok(None) => {}
@@ -1456,23 +1552,18 @@ impl Listener for PlayerListener {
                             }
                             let returning = participants.take_returning();
                             if let [participant] = returning.as_slice() {
-                                let (
-                                    Some(returns),
-                                    Some(population),
-                                    Some(inventory),
-                                    Some(content),
-                                ) = (
-                                    returns.as_mut(),
-                                    population.as_mut(),
-                                    self.inventory.as_ref(),
-                                    self.vehicles.as_deref(),
-                                )
-                                else {
+                                let Some(returns) = returns.as_mut() else {
                                     return self.refuse_rpc(replication::Error::Unsupported, body);
                                 };
-                                // Send garage slot refreshes in a following
-                                // frame so the return entry stays within the
-                                // outbound frame bound.
+                                if population.is_none()
+                                    || self.inventory.is_none()
+                                    || self.vehicles.is_none()
+                                {
+                                    return self.refuse_rpc(replication::Error::Unsupported, body);
+                                }
+                                // Garage slot refreshes follow the staged car
+                                // (E921: official slot calls 1.8 s after the
+                                // request); the other replies ride the teardown.
                                 let (slots, chain): (Vec<_>, Vec<_>) =
                                     chain.into_iter().partition(|rpc| {
                                         matches!(
@@ -1488,23 +1579,30 @@ impl Listener for PlayerListener {
                                 match Self::begin_return(
                                     &mut players,
                                     returns,
-                                    population,
-                                    inventory,
-                                    content,
                                     self.logic.as_deref(),
-                                    &mut logic_ghosts,
+                                    &logic_ghosts,
                                     self.persona,
                                     *participant,
-                                    chain,
                                 ) {
                                     Ok(entries) => exit_entries.extend(entries),
                                     Err(error) => {
                                         return self.refuse_rpc(error, body);
                                     }
                                 }
-                                if !slots.is_empty() {
-                                    exit_entries.push((returning::empty_section(), slots));
-                                }
+                                scheduled_returns.push(returning::PendingReturn {
+                                    participant: *participant,
+                                    requested_ms: self.world_ms,
+                                    torn_down: false,
+                                    chain,
+                                    slots,
+                                });
+                                return_trace = true;
+                                tracing::info!(
+                                    participant,
+                                    teardown_ms = returning::RETURN_TEARDOWN_DELAY_MS,
+                                    staging_ms = returning::RETURN_STAGING_DELAY_MS,
+                                    "garage return requested; presentation event queued, teardown and staging scheduled"
+                                );
                                 continue;
                             }
                             let exited = participants.take_exited();
@@ -1846,6 +1944,7 @@ impl Listener for PlayerListener {
             deferred_sections.insert(0, section);
         }
         if spawned.messages.len() > MAX_PENDING.saturating_sub(self.pending_content.len())
+            || scheduled_returns.len() > MAX_PENDING.saturating_sub(self.pending_returns.len())
             || responses.len() > nfs_world::session::MAX_RPC_QUEUE - self.pending_rpcs.len()
             || sections.len() + deferred_sections.len() + usize::from(!records.is_empty())
                 > MAX_PENDING - self.pending.len()
@@ -1914,6 +2013,8 @@ impl Listener for PlayerListener {
             self.pending_teleports.retain(|(_, n)| n.vehicle != removed);
             self.pending_binding_refreshes
                 .retain(|(_, p)| *p != participant);
+            self.pending_returns
+                .retain(|r| r.participant != participant);
             tracing::info!(
                 participant,
                 world_car = removed,
@@ -1923,6 +2024,10 @@ impl Listener for PlayerListener {
         self.pending_teleports.extend(scheduled_teleports);
         self.pending_binding_refreshes
             .extend(scheduled_binding_refreshes);
+        self.pending_returns.extend(scheduled_returns);
+        if return_trace {
+            self.return_trace_until = self.world_ms.saturating_add(returning::RETURN_TRACE_MS);
+        }
         glass.retain_vehicles(|id| self.players.objects().get(id).is_some());
         self.glass = glass;
         self.customization = customization;
@@ -1953,6 +2058,10 @@ impl Listener for PlayerListener {
         self.pending_content.extend(spawned.messages);
         self.unsupported_rpcs += unsupported;
         self.unsupported_logic += unsupported_logic;
+        self.scoring_state.reported.extend(scoring_reported);
+        self.scoring_state.reports.extend(scoring_reports);
+        self.scoring_state.nitrous = nitrous;
+        self.scoring_state.reported.extend(nitrous_reported);
         if !records.is_empty() {
             self.pending.push_back(Section {
                 float_bits: None,

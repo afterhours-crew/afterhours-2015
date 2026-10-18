@@ -2,7 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-use super::players::{EquipmentRequest, PlayerListener};
+use super::players::{AwardRequest, Credited, EquipmentRequest, PlayerListener};
 use crate::inventory;
 use nfs_storage::{AccountId, InventoryRepository, Timestamp};
 use nfs_world::{
@@ -10,13 +10,53 @@ use nfs_world::{
     items::InventoryCatalog,
     session::{Event, Host},
 };
-use std::{sync::Arc, time::Duration};
+use std::{collections::VecDeque, sync::Arc, time::Duration};
 use tokio::{sync::Semaphore, task::JoinSet, time::timeout};
 use tracing::{info, warn};
 
 const WORKERS: usize = 4;
 const JOB_TIMEOUT: Duration = Duration::from_secs(5);
 const EXCHANGE_MS: u64 = 60_000;
+/// Separate notifications per kind and credit; more changes share them.
+const MAX_SEPARATE: usize = 16;
+
+/// Notifications for what a committed credit changed, in the official order
+/// (E926): every new record in its own change notification (one per part a
+/// level-up unlocked), then every changed root (the category unlock
+/// controller) in its own update notification. Also returns the changed
+/// roots no notification describes: removals, which a credit never makes,
+/// and updates beyond the bound.
+fn credit_notifications(
+    player_index: u32,
+    before: &nfs_world::items::Collection,
+    after: &nfs_world::items::Collection,
+    catalog: &nfs_world::items::Catalog,
+) -> Result<(Vec<Vec<u8>>, usize), nfs_world::items::Error> {
+    let changes = after.changes_since(before)?;
+    let mut notifications = Vec::new();
+    let per = changes.added.len().div_ceil(MAX_SEPARATE).max(1);
+    for roots in changes.added.chunks(per) {
+        notifications.push(
+            nfs_world::items::ChangeNotification {
+                player_index,
+                added: after.for_roots(roots.to_vec())?,
+                removed: Default::default(),
+            }
+            .encode(catalog)?,
+        );
+    }
+    for &root in changes.changed.iter().take(MAX_SEPARATE) {
+        notifications.push(
+            nfs_world::items::UpdateNotification {
+                player_index,
+                items: after.for_roots(vec![root])?,
+            }
+            .encode(catalog)?,
+        );
+    }
+    let unannounced = changes.removed.len() + changes.changed.len().saturating_sub(MAX_SEPARATE);
+    Ok((notifications, unannounced))
+}
 
 #[derive(Clone)]
 pub struct Service {
@@ -280,6 +320,10 @@ impl Profile {
     pub fn bindings(&self) -> &nfs_world::items::Catalog {
         self.service.catalog.bindings()
     }
+    /// The item definitions (stock vehicle figures for free-roam scoring).
+    pub fn item_catalog(&self) -> Arc<InventoryCatalog> {
+        self.service.catalog.clone()
+    }
     pub async fn current_tables(
         &self,
         now: Timestamp,
@@ -384,6 +428,84 @@ impl Profile {
         })
         .await
         .map_err(|_| crate::Failure::Io)?
+    }
+    /// Apply one banked driving credit as a single retry-safe batch: the
+    /// score columns, the derived level and every newly eligible category
+    /// and item grant commit together. The refreshed account view and item
+    /// collection come back for the listener to adopt.
+    async fn credit(&self, request: &AwardRequest, now: Timestamp) -> Result<Credited, Error> {
+        let service = self.service.clone();
+        let account = self.account;
+        let credit = request.credit;
+        let batch_id = request.batch_id;
+        let thresholds = request.thresholds.clone();
+        let player_index = request.player_index;
+        timeout(JOB_TIMEOUT, async move {
+            let permit = service
+                .workers
+                .acquire_owned()
+                .await
+                .map_err(|_| Error::Worker)?;
+            tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                let tables = service.persistent.as_deref().ok_or(Error::Worker)?;
+                let snapshot = inventory::load(
+                    service.repository.as_ref(),
+                    account,
+                    &service.catalog,
+                    1,
+                    now,
+                )
+                .map_err(Error::Inventory)?;
+                let policy = nfs_services::reputation::earned::Policy {
+                    tables,
+                    inventory: &service.catalog,
+                    thresholds: &thresholds,
+                    categories: service.category_unlocks.as_deref(),
+                    items: service
+                        .offers
+                        .as_ref()
+                        .and_then(|offers| offers.item_unlocks()),
+                };
+                let before = inventory::collection(&snapshot, service.catalog.bindings())
+                    .map_err(Error::Inventory)?;
+                let batch = policy
+                    .prepare(&snapshot, credit, batch_id)
+                    .map_err(Error::Inventory)?;
+                let applied = service
+                    .repository
+                    .apply(account, &batch, now)
+                    .map_err(|e| Error::Inventory(e.into()))?;
+                let snapshot = service
+                    .repository
+                    .snapshot(account)
+                    .map_err(|e| Error::Inventory(e.into()))?;
+                let loaded = tables
+                    .view(&snapshot)
+                    .map_err(|e| Error::Inventory(e.into()))?;
+                let items = inventory::collection(&snapshot, service.catalog.bindings())
+                    .map_err(Error::Inventory)?;
+                // The commit stands whatever happens here; an unannounced
+                // change still reaches the client at its next load.
+                let (notifications, unannounced) = player_index
+                    .and_then(|index| {
+                        credit_notifications(index, &before, &items, service.catalog.bindings())
+                            .ok()
+                    })
+                    .unwrap_or_else(|| (Vec::new(), usize::from(before != items)));
+                Ok(Credited {
+                    loaded: Arc::new(loaded),
+                    items: Arc::new(items),
+                    replayed: applied.replayed,
+                    notifications,
+                    unannounced,
+                })
+            })
+            .await
+            .map_err(|_| Error::Worker)?
+        })
+        .await
+        .map_err(|_| Error::Deadline)?
     }
     async fn answer(&self, request: Vec<u8>, now: Timestamp) -> Result<Option<LoadedReply>, Error> {
         if !supported_request(&request).map_err(|e| Error::Inventory(e.into()))? {
@@ -508,8 +630,11 @@ pub(super) struct Exchanges {
     profile: Option<Profile>,
     jobs: JoinSet<(usize, u8, Result<Option<LoadedReply>, Error>)>,
     equipment: JoinSet<(EquipmentRequest, Result<Equipped, Error>)>,
+    awards: JoinSet<(AwardRequest, Result<Credited, Error>)>,
     pending: [Option<Completed>; 2],
     started: [Option<u64>; 2],
+    /// Unsolicited notifications awaiting the request handler, in order.
+    notifications: VecDeque<Completed>,
     connection: u32,
     unsupported: crate::diagnostics::Unsupported<UnsupportedRoute>,
 }
@@ -519,19 +644,22 @@ impl Exchanges {
             profile,
             jobs: JoinSet::new(),
             equipment: JoinSet::new(),
+            awards: JoinSet::new(),
             pending: [None, None],
             started: [None, None],
+            notifications: VecDeque::new(),
             connection,
             unsupported: crate::diagnostics::Unsupported::new("world-file", connection),
         }
     }
     pub(super) fn working(&self) -> bool {
-        !self.jobs.is_empty() || !self.equipment.is_empty()
+        !self.jobs.is_empty() || !self.equipment.is_empty() || !self.awards.is_empty()
     }
     pub(super) fn start(&mut self, listener: &mut PlayerListener, now: u64, utc: Timestamp) {
         if self.working()
             || self.pending.iter().any(Option::is_some)
             || self.started.iter().any(Option::is_some)
+            || !self.notifications.is_empty()
         {
             return;
         }
@@ -545,6 +673,20 @@ impl Exchanges {
                 warn!(
                     connection = self.connection,
                     "equipment service not configured"
+                );
+            }
+            return;
+        }
+        if let Some(request) = listener.take_award() {
+            if let Some(profile) = self.profile.clone() {
+                self.awards.spawn(async move {
+                    let result = profile.credit(&request, utc).await;
+                    (request, result)
+                });
+            } else {
+                warn!(
+                    connection = self.connection,
+                    "reputation credit dropped: inventory service not configured"
                 );
             }
             return;
@@ -605,7 +747,62 @@ impl Exchanges {
         }
     }
     pub(super) async fn completed(&mut self, listener: &mut PlayerListener) -> bool {
-        // start() serializes account writes across Files and equipment RPCs.
+        // start() serializes account writes across Files, equipment and credits.
+        if !self.awards.is_empty() {
+            let Some(Ok((request, result))) = self.awards.join_next().await else {
+                return false;
+            };
+            return match result {
+                Ok(mut credited) => {
+                    let notifications = std::mem::take(&mut credited.notifications);
+                    let unannounced = credited.unannounced;
+                    match listener.awarded(&request, credited) {
+                        Ok(()) => {
+                            if unannounced > 0 {
+                                warn!(
+                                    connection = self.connection,
+                                    batch_id = request.batch_id,
+                                    unannounced,
+                                    "credited inventory changes left for the next load"
+                                );
+                            }
+                            if !notifications.is_empty() {
+                                info!(
+                                    connection = self.connection,
+                                    batch_id = request.batch_id,
+                                    count = notifications.len(),
+                                    "credited inventory changes queued"
+                                );
+                            }
+                            self.notifications
+                                .extend(notifications.into_iter().map(|bytes| Completed {
+                                    name: b"Items".to_vec(),
+                                    bytes,
+                                }));
+                            true
+                        }
+                        Err(error) => {
+                            warn!(
+                                connection = self.connection,
+                                ?error,
+                                batch_id = request.batch_id,
+                                "reputation credit snapshot rejected"
+                            );
+                            false
+                        }
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        connection = self.connection,
+                        ?error,
+                        batch_id = request.batch_id,
+                        "reputation credit failed"
+                    );
+                    false
+                }
+            };
+        }
         if !self.equipment.is_empty() {
             let Some(Ok((request, result))) = self.equipment.join_next().await else {
                 return false;
@@ -662,6 +859,26 @@ impl Exchanges {
         };
         match result {
             Ok(Some(LoadedReply { reply, items, kind })) => {
+                let notifications = if kind == ReplyKind::Purchase {
+                    let Some(profile) = &self.profile else {
+                        return false;
+                    };
+                    match listener
+                        .purchase_notifications(&items, profile.service.catalog.bindings())
+                    {
+                        Ok(notifications) => notifications,
+                        Err(error) => {
+                            warn!(
+                                connection = self.connection,
+                                ?error,
+                                "purchase notification rejected"
+                            );
+                            return false;
+                        }
+                    }
+                } else {
+                    Vec::new()
+                };
                 let applied = match kind {
                     ReplyKind::Load => listener.inventory_with_items(
                         reply.garage,
@@ -695,6 +912,11 @@ impl Exchanges {
                     name: b"Items".to_vec(),
                     bytes: reply.bytes,
                 });
+                self.notifications
+                    .extend(notifications.into_iter().map(|bytes| Completed {
+                        name: b"Items".to_vec(),
+                        bytes,
+                    }));
                 true
             }
             Ok(None) => {
@@ -716,6 +938,14 @@ impl Exchanges {
             }
         }
     }
+    /// Unsolicited notifications use the request handler one at a time, each
+    /// after the previous transfer completed (E926: an official level-up sent
+    /// its notifications about 0.3 s apart).
+    fn promote(&mut self) {
+        if self.pending[0].is_none() && self.started[0].is_none() {
+            self.pending[0] = self.notifications.pop_front();
+        }
+    }
     pub(super) fn advance(&mut self, host: &mut Host, events: &[Event], now: u64) -> bool {
         for event in events {
             match event {
@@ -724,6 +954,7 @@ impl Exchanges {
                 _ => {}
             }
         }
+        self.promote();
         for index in 0..2 {
             if self.started[index].is_some_and(|start| now.saturating_sub(start) >= EXCHANGE_MS) {
                 warn!(

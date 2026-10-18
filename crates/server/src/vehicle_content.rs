@@ -272,6 +272,16 @@ impl Content {
     pub fn definition(&self, guid: &Guid) -> Option<&Definition> {
         self.definitions.get(guid).map(Arc::as_ref)
     }
+    /// The nitrous item definition installed on `vehicle`, the one whose
+    /// variant the car replicates (E921).
+    pub fn nitrous_definition(&self, items: &Collection, vehicle: u64) -> Option<Guid> {
+        let state = nos::State::from_vehicle(items, &self.nos, vehicle).ok()?;
+        self.nos.guid_for_variant(state.variant?)
+    }
+    pub fn nitrous_setting(&self, items: &Collection, vehicle: u64) -> Option<u8> {
+        let state = nos::State::from_vehicle(items, &self.nos, vehicle).ok()?;
+        state.variant.map(|_| state.setting)
+    }
     pub fn customization(&self, items: &Collection, vehicle: u64) -> Result<Customization, Error> {
         Customization::from_vehicle(items, &self.custom, vehicle)
     }

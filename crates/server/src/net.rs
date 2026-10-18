@@ -61,6 +61,7 @@ pub struct Config {
     pub vehicles: Option<Arc<crate::vehicle_content::GarageContent>>,
     pub sequences: Option<Arc<crate::sequence_content::SequenceContent>>,
     pub garage_logic: Option<Arc<crate::garage_logic::GarageLogic>>,
+    pub scoring: Option<Arc<crate::scoring::Content>>,
     pub user_settings: Option<Arc<crate::user_settings::Store>>,
     pub catalogs: Option<Arc<nfs_services::control_catalogs::Catalog>>,
     pub entitlements: Option<(
@@ -90,6 +91,7 @@ pub struct WorldServe {
     pub vehicles: Option<Arc<crate::vehicle_content::GarageContent>>,
     pub sequences: Option<Arc<crate::sequence_content::SequenceContent>>,
     pub garage_logic: Option<Arc<crate::garage_logic::GarageLogic>>,
+    pub scoring: Option<Arc<crate::scoring::Content>>,
 }
 
 mod items;
@@ -685,6 +687,7 @@ pub async fn serve(
                 let vehicles = config.vehicles.clone();
                 let sequences = config.sequences.clone();
                 let garage_logic = config.garage_logic.clone();
+                let scoring = config.scoring.clone();
                 let catalogs = config.catalogs.clone();
                 let entitlements = config.entitlements.clone();
                 let user_settings = config.user_settings.clone();
@@ -748,6 +751,7 @@ pub async fn serve(
                             vehicles,
                             sequences,
                             garage_logic,
+                            scoring,
                         },
                         n,
                         recorder.clone(),
@@ -814,6 +818,7 @@ pub async fn world_host(
         vehicles,
         sequences,
         garage_logic,
+        scoring,
     } = serve;
     let Some(binding) = start.recv().await else {
         return;
@@ -902,7 +907,8 @@ pub async fn world_host(
         .with_sequences(sequences)
         .with_arrivals(arrivals)
         .with_returns(returns)
-        .with_garage_logic(garage_logic);
+        .with_garage_logic(garage_logic)
+        .with_scoring(scoring, unix_micros().max(0) as u64);
     let mut items = items::Exchanges::new(inventory, connection);
     if let Some(content) = &content
         && let Err(error) = listener.initialize_world(content)
@@ -930,6 +936,17 @@ pub async fn world_host(
         if let Err(error) = listener.advance_settled(now_ms()) {
             warn!(connection, ?error, "world car settlement rejected");
             return;
+        }
+        listener.session_backlog = host.replication_progress().1;
+        if let Err(error) = listener.advance_scoring(now_ms()) {
+            // Scoring is best effort: a fault disables it for this session
+            // and never closes the world host.
+            warn!(
+                connection,
+                ?error,
+                "owned scoring rejected; scoring disabled for this session"
+            );
+            listener.disable_scoring();
         }
         if !listener.files_alive(now_ms()) {
             warn!(
@@ -1085,6 +1102,11 @@ pub async fn world_host(
                         connection,
                         notifications = before.len(),
                         records = section.records.len(),
+                        deleted = section.deleted.len(),
+                        calls = ?before
+                            .iter()
+                            .map(players::describe_host_rpc)
+                            .collect::<Vec<_>>(),
                         "owned entry notifications and replication queued together"
                     );
                     listener.pending_entries.pop_front();

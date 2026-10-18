@@ -2,8 +2,8 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! Authored REP comparisons that grant categories and purchasable item records.
-//! Debug-all events and award-item branches are outside this projection.
+//! Authored REP comparisons that grant categories, offers and owned rewards.
+//! Debug-all events and challenge awards are outside this projection.
 use crate::{Error, graph::bad, scan::Assets};
 use nfs_frostbite::ebx::{Fields, Object, Pointer, Value};
 use nfs_services::reputation::Thresholds;
@@ -169,6 +169,19 @@ fn item_rules(
     objects: &[Object],
     thresholds: &Thresholds,
 ) -> Result<Vec<(Pointer, u32, i32)>, Error> {
+    transaction_rules(
+        objects,
+        thresholds,
+        "UnlockItemTransactionEntityData",
+        "UnlockedItem",
+    )
+}
+fn transaction_rules(
+    objects: &[Object],
+    thresholds: &Thresholds,
+    class: &str,
+    field: &str,
+) -> Result<Vec<(Pointer, u32, i32)>, Error> {
     let root = objects
         .first()
         .filter(|o| o.class == "ParticipantLogicBlueprint")
@@ -182,11 +195,7 @@ fn item_rules(
         .map(|v| v.as_fields().ok_or_else(|| bad("unlock event")))
         .collect::<Result<Vec<_>, _>>()?;
     let mut rows = Vec::new();
-    for (i, object) in objects
-        .iter()
-        .enumerate()
-        .filter(|(_, o)| o.class == "UnlockItemTransactionEntityData")
-    {
+    for (i, object) in objects.iter().enumerate().filter(|(_, o)| o.class == class) {
         let matches: Vec<_> = events
             .iter()
             .copied()
@@ -205,7 +214,7 @@ fn item_rules(
         if level < 2 {
             return Err(bad("item unlock level"));
         }
-        let pointer = get(&object.fields, "UnlockedItem")?
+        let pointer = get(&object.fields, field)?
             .as_pointer()
             .filter(|p| matches!(p, Pointer::Import { .. }))
             .ok_or_else(|| bad("item unlock reference"))?;
@@ -247,6 +256,38 @@ pub(super) fn items(
         }
     }
     Ok(result)
+}
+
+pub(super) fn rewards(assets: &mut Assets, thresholds: &Thresholds) -> Result<Json, Error> {
+    if assets.named("CategoryUnlockControllerItemData").is_empty() {
+        return Ok(json!([]));
+    }
+    let rules = transaction_rules(
+        assets.objects("gameplay/progression/unlocksparticipantlogic")?,
+        thresholds,
+        "AwardItemTransactionEntityData",
+        "AwardedItem",
+    )?;
+    let mut rewards = std::collections::BTreeMap::new();
+    for (pointer, _, score) in rules {
+        let (_, object) = assets.resolve(Some(pointer))?;
+        if !matches!(
+            object.class.as_str(),
+            "LiveryCustomizationItemData" | "LiveryDecalSwatchPackItemData"
+        ) {
+            return Err(bad("unsupported REP reward class"));
+        }
+        let guid = object.guid.ok_or_else(|| bad("reward GUID"))?;
+        if rewards.insert(guid, score).is_some() {
+            return Err(bad("duplicate REP reward"));
+        }
+    }
+    Ok(json!(
+        rewards
+            .into_iter()
+            .map(|(g, s)| json!({"definition":nfs_frostbite::hex(&g),"minimum_rep_score":s}))
+            .collect::<Vec<_>>()
+    ))
 }
 
 #[cfg(test)]
@@ -392,5 +433,25 @@ mod tests {
         assert!(item_rules(&debug_only, &thresholds).unwrap().is_empty());
         objects[1].class = "AwardItemTransactionEntityData".into();
         assert!(item_rules(&objects, &thresholds).unwrap().is_empty());
+        objects[1].fields = f(vec![("AwardedItem", Value::Pointer(pointer))]);
+        assert_eq!(
+            transaction_rules(
+                &objects,
+                &thresholds,
+                "AwardItemTransactionEntityData",
+                "AwardedItem"
+            )
+            .unwrap(),
+            [(pointer, 3, 25)]
+        );
+        assert!(
+            transaction_rules(
+                &objects,
+                &thresholds,
+                "AwardItemTransactionEntityData",
+                "UnlockedItem"
+            )
+            .is_err()
+        );
     }
 }

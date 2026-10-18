@@ -31,6 +31,7 @@ fn rpc_message(rpc: crate::participants::HostRpc) -> frame::Message<'static> {
         HostRpc::SequenceStop(v) => frame::Message::SequenceStop(v),
         HostRpc::Event(v) => frame::Message::LogicEvent(v),
         HostRpc::WorldActivation(v) => frame::Message::WorldActivation(v),
+        HostRpc::Query(v) => frame::Message::QueryControl(v),
     }
 }
 
@@ -436,6 +437,9 @@ impl Host {
                 self.replication_bindings.get(v.target.ghost),
                 Some(crate::replication::Kind::Entity | crate::replication::Kind::SubLevel)
             ),
+            crate::participants::HostRpc::Query(v) => {
+                self.replication_bindings.get(v.entity) == Some(crate::replication::Kind::Entity)
+            }
             _ => {
                 self.replication_bindings.get(reply.scene())
                     == Some(crate::replication::Kind::SubLevel)
@@ -456,7 +460,8 @@ impl Host {
             | crate::participants::HostRpc::SpawnOccupied(_)
             | crate::participants::HostRpc::LevelPoll(_)
             | crate::participants::HostRpc::SequenceStop(_)
-            | crate::participants::HostRpc::Event(_) => None,
+            | crate::participants::HostRpc::Event(_)
+            | crate::participants::HostRpc::Query(_) => None,
         };
         if participant.is_some_and(|id| {
             self.replication_bindings.get(id) != Some(crate::replication::Kind::Participant)

@@ -10,14 +10,21 @@ use nfs_services::{
 use nfs_storage::{AccountId, InventoryRepository, SqliteRepository, Timestamp};
 use std::{collections::BTreeMap, ffi::OsString, path::PathBuf, process::ExitCode};
 
-const HELP: &str = "Usage: nfs-server reputation --state-directory <account-directory> --local-account <32 lowercase hex digits> --persistent-content <tables.json> --reputation-thresholds <thresholds.json> [--set-level <level|max> --expected-generation <generation>]\nInspect REP and generation as JSON. Stop the game/server and back up the test account before setting REP. This sets the total score to the installed level threshold, not earned gameplay progression. Style scores, money and inventory are preserved. Existing accounts only; no administrator access is needed.";
+const HELP: &str = "Usage: nfs-server reputation --state-directory <account-directory> --local-account <32 lowercase hex digits> --persistent-content <tables.json> --reputation-thresholds <thresholds.json> [--set-level <level|max> | --set-score <total>] [--expected-generation <generation>]\nInspect REP and generation as JSON. Stop the game/server and back up the test account before setting REP. --set-level sets the total score to the installed level threshold; --set-score sets an exact total and derives the level. Neither is earned gameplay progression. Style scores, money and inventory are preserved. Existing accounts only; no administrator access is needed.";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Target {
+    /// An authored level, `None` for the highest installed one.
+    Level(Option<u32>),
+    /// An exact total score.
+    Score(i32),
+}
 struct Args {
     directory: PathBuf,
     account: AccountId,
     tables: PathBuf,
     thresholds: PathBuf,
-    set: Option<(Option<u32>, u64)>,
+    set: Option<(Target, u64)>,
 }
 fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
     let mut fields = BTreeMap::new();
@@ -29,6 +36,7 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
             "--persistent-content",
             "--reputation-thresholds",
             "--set-level",
+            "--set-score",
             "--expected-generation",
         ]
         .contains(&name)
@@ -64,10 +72,11 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
     let account = AccountId::from_owned_config(bytes).map_err(|_| "bad account id")?;
     let set = match (
         fields.remove("--set-level"),
+        fields.remove("--set-score"),
         fields.remove("--expected-generation"),
     ) {
-        (None, None) => None,
-        (Some(level), Some(generation)) => {
+        (None, None, None) => None,
+        (Some(level), None, Some(generation)) => {
             let level = if level == "max" {
                 None
             } else {
@@ -81,16 +90,25 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
                 }
                 Some(level)
             };
-            Some((
-                level,
-                generation
-                    .to_str()
-                    .ok_or("bad generation")?
-                    .parse::<u64>()
-                    .map_err(|_| "bad generation")?,
-            ))
+            Some((Target::Level(level), parse_generation(&generation)?))
         }
-        _ => return Err("--set-level and --expected-generation must be supplied together".into()),
+        (None, Some(score), Some(generation)) => {
+            let score = score
+                .to_str()
+                .ok_or("bad score")?
+                .parse::<i32>()
+                .map_err(|_| "bad score")?;
+            if score < 0 {
+                return Err("score must not be negative".into());
+            }
+            Some((Target::Score(score), parse_generation(&generation)?))
+        }
+        _ => {
+            return Err(
+                "exactly one of --set-level or --set-score with --expected-generation is required for a change"
+                    .into(),
+            );
+        }
     };
     Ok(Args {
         directory,
@@ -99,6 +117,13 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
         thresholds,
         set,
     })
+}
+fn parse_generation(value: &OsString) -> Result<u64, String> {
+    value
+        .to_str()
+        .ok_or("bad generation")?
+        .parse::<u64>()
+        .map_err(|_| "bad generation".into())
 }
 fn run(args: &Args, now: Timestamp) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     if !args.directory.is_dir() {
@@ -109,8 +134,8 @@ fn run(args: &Args, now: Timestamp) -> Result<serde_json::Value, Box<dyn std::er
     let repository = SqliteRepository::open_owned_directory(&args.directory)?;
     let before = repository.snapshot(args.account)?;
     let previous = thresholds.evaluate(Scores::load(&catalog.view(&before)?)?);
-    let saved = if let Some((level, generation)) = args.set {
-        reputation::set_for_operator(
+    let saved = match args.set {
+        Some((Target::Level(level), generation)) => reputation::set_for_operator(
             &repository,
             args.account,
             &catalog,
@@ -118,9 +143,17 @@ fn run(args: &Args, now: Timestamp) -> Result<serde_json::Value, Box<dyn std::er
             generation,
             level.unwrap_or(thresholds.maximum_level()),
             now,
-        )?
-    } else {
-        before.clone()
+        )?,
+        Some((Target::Score(score), generation)) => reputation::set_score_for_operator(
+            &repository,
+            args.account,
+            &catalog,
+            &thresholds,
+            generation,
+            score,
+            now,
+        )?,
+        None => before.clone(),
     };
     let current = thresholds.evaluate(Scores::load(&catalog.view(&saved)?)?);
     Ok(
@@ -192,6 +225,17 @@ mod tests {
                 "--expected-generation",
                 "1",
             ],
+            vec!["--set-score", "5"],
+            vec!["--set-score", "-5", "--expected-generation", "1"],
+            vec!["--set-score", "x", "--expected-generation", "1"],
+            vec![
+                "--set-level",
+                "2",
+                "--set-score",
+                "5",
+                "--expected-generation",
+                "1",
+            ],
         ] {
             assert!(parse(base.into_iter().chain(extra).map(Into::into)).is_err());
         }
@@ -203,7 +247,17 @@ mod tests {
             )
             .unwrap()
             .set,
-            Some((None, 7))
+            Some((Target::Level(None), 7))
+        );
+        assert_eq!(
+            parse(
+                base.into_iter()
+                    .chain(["--set-score", "13040000", "--expected-generation", "7"])
+                    .map(Into::into)
+            )
+            .unwrap()
+            .set,
+            Some((Target::Score(13_040_000), 7))
         );
     }
 }

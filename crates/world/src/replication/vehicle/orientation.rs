@@ -24,6 +24,40 @@ pub fn spawn_vector(forward: [f32; 3], speed: Option<f32>) -> Result<[Option<u32
     Ok(values.map(|v| (v != 0.0).then(|| v.to_bits())))
 }
 
+/// Inverse of `quaternion_from_basis`: the right, up and forward axes of a
+/// unit quaternion (x, y, z, w), as column vectors of its rotation.
+pub fn basis_from_quaternion(q: [f32; 4]) -> Result<[[f32; 3]; 3], Error> {
+    if q.iter().any(|v| !v.is_finite()) {
+        return Err(Error::Shape);
+    }
+    let [x, y, z, w] = q;
+    let length = ((x * x + y * y) + (z * z + w * w)).sqrt();
+    if !length.is_finite() || (length - 1.0).abs() > 1.0 / 256.0 {
+        return Err(Error::Shape);
+    }
+    let basis = [
+        [
+            1.0 - 2.0 * (y * y + z * z),
+            2.0 * (x * y + z * w),
+            2.0 * (x * z - y * w),
+        ],
+        [
+            2.0 * (x * y - z * w),
+            1.0 - 2.0 * (x * x + z * z),
+            2.0 * (y * z + x * w),
+        ],
+        [
+            2.0 * (x * z + y * w),
+            2.0 * (y * z - x * w),
+            1.0 - 2.0 * (x * x + y * y),
+        ],
+    ];
+    if basis.iter().flatten().any(|v| !v.is_finite()) {
+        return Err(Error::Shape);
+    }
+    Ok(basis)
+}
+
 pub fn quaternion_from_basis(basis: [[f32; 3]; 3]) -> Result<[f32; 4], Error> {
     if basis.iter().flatten().any(|v| !v.is_finite()) {
         return Err(Error::Shape);
@@ -140,5 +174,36 @@ mod tests {
         let mut reflected = IDENTITY;
         reflected[0][0] = -1.0;
         assert!(quaternion_from_basis(reflected).is_err());
+    }
+}
+
+#[cfg(test)]
+mod decode_tests {
+    use super::*;
+    #[test]
+    fn basis_from_quaternion_inverts_quaternion_from_basis() {
+        for q in [
+            [0.0, 0.0, 0.0, 1.0],
+            [0.0, 0.70710677, 0.0, 0.70710677],
+            [0.5, -0.5, 0.5, 0.5],
+            [-0.1, 0.2, -0.3, (1.0f32 - 0.14).sqrt()],
+        ] {
+            let basis = basis_from_quaternion(q).unwrap();
+            let back = quaternion_from_basis(basis).unwrap();
+            let sign = if back[3].is_sign_negative() != q[3].is_sign_negative() {
+                -1.0
+            } else {
+                1.0
+            };
+            for (a, b) in q.iter().zip(back) {
+                assert!((a - b * sign).abs() < 1e-5, "{q:?} vs {back:?}");
+            }
+        }
+        assert_eq!(
+            basis_from_quaternion([0.0, 0.0, 0.0, 1.0]).unwrap(),
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+        );
+        assert!(basis_from_quaternion([1.0, 1.0, 0.0, 0.0]).is_err());
+        assert!(basis_from_quaternion([f32::NAN, 0.0, 0.0, 1.0]).is_err());
     }
 }

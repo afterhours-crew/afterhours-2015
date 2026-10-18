@@ -279,7 +279,15 @@ Garage return requires the installed entry sequence and all three garage logic
 phases: `return_requested`, `returning`, and `returned`. The entry definition
 includes both cinematic channels, its spline and a validated server timer.
 The server prepares a replacement garage car, completes the cinematic, detaches
-the driven car, and re-arms garage loading for subsequent trips. Missing return
+the driven car, and re-arms garage loading for subsequent trips. The
+return is staged as the official host stages it (both official returns of
+E847): the confirming request is answered with the return-requested
+presentation event alone; one host frame later the free-roam presentation is
+deleted and the entry sequence starts with its path; about 1.35 s after the
+request the replacement car is staged (its content ahead), the returning
+presentation created and the arriving actor announced. Sending all of it in
+the request's reply stalled the client's presentation for about 2.5 s. While
+a return runs, the client's calls are logged for twelve seconds. Missing return
 presentation keeps the request unsupported. Portable repeated-cycle tests cover
 this path; game acceptance is recorded separately.
 
@@ -290,7 +298,9 @@ new car, the server assigns a spawn point (a per-session id). It answers spawn
 requests and releases with the scene's occupied flag. Once a participant has
 joined, the server polls the level root about every 1.1 s, and the client's
 answers are recorded. Configured arrival sequences, vehicle bindings and world
-membership then complete the handoff; this does not yet establish drivable play.
+membership then complete the handoff. The garage/free-roam/return loop has
+passed live checks; the [gameplay roadmap](https://github.com/afterhours-crew/afterhours-2015/issues/62)
+records the separately accepted gameplay systems and remaining work.
 
 `--redirector-port 0` chooses an ephemeral port (the default).
 `--idle-seconds` accepts 1–3600. `--qos-seconds` bounds each QoS TLS request

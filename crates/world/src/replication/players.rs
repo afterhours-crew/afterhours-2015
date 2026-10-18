@@ -167,6 +167,16 @@ impl Players {
             _ => None,
         }
     }
+    /// Resolve account inventory notifications only when this connection and
+    /// persona identify one live player. Never use another account's index.
+    pub fn account_runtime_index(&self, connection: u8, persona: u64) -> Option<u8> {
+        let mut indices = self
+            .participants
+            .values()
+            .filter_map(|&participant| self.runtime_index(connection, persona, participant));
+        let index = indices.next()?;
+        indices.next().is_none().then_some(index)
+    }
     pub fn local_slot(&self, connection: u8, persona: u64, participant: u16) -> Option<u8> {
         if !self.owns_participant(connection, persona, participant) {
             return None;
@@ -479,5 +489,9 @@ mod tests {
         assert_eq!(world.runtime_index(1, 100, b), None);
         assert_eq!(world.runtime_index(1, 100, one.id), None);
         assert_eq!(world.runtime_index(1, 100, 8000), None);
+        assert_eq!(world.account_runtime_index(1, 100), Some(0));
+        assert_eq!(world.account_runtime_index(2, 200), Some(1));
+        assert_eq!(world.account_runtime_index(1, 200), None);
+        assert_eq!(world.account_runtime_index(2, 100), None);
     }
 }
