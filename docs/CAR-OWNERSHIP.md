@@ -1,9 +1,9 @@
 # Car ownership and garage management
 
 Implementation and game acceptance are tracked in [issue #52][tracking]. The
-five-slot scope passed the combined live checks on 2026-10-18, including fresh
-game/server restarts. Warehouse storage and retrieval await live acceptance under
-[issue #98][warehouse], so the overall milestone and its draft PR remain open.
+five-slot and warehouse scopes passed combined live checks on 2026-10-18,
+including fresh game/server restarts. [Issue #98][warehouse] records warehouse
+acceptance; the milestone is ready for owner review in PR #97.
 
 The local account owns five garage slots. Slot zero is the active car; the other
 four hold secondary cars. Buying an eligible car reserves a free secondary slot,
@@ -91,8 +91,17 @@ not live malformed-traffic tests. Warehouse transfer, retrieval and swaps have
 portable and installed-content coverage, including retries, stale slot reuse,
 capacity, concurrent retrieval and SQLite restart. The edge test applies generated
 removal/retrieval sections to a receiver model while preserving customization.
-Their live acceptance remains required before this milestone closes. Other
-gameplay systems retain their own roadmap issues.
+
+Warehouse live checks stored the customized MX-5, retrieved it into the freed
+slot, stored it again and bought a Volvo 242 into that slot. With all five slots
+occupied, swapping the stored MX-5 for the Volvo retained both cars. A fresh
+game/server restart restored both stored cars in the warehouse list; collecting
+the MX-5 and selecting it as the active car restored its green wrap. All 350
+owned records, including installed parts and tuning, remained identical across
+storage, retrieval, swapping and restart; only slot bindings changed. The Volvo
+remained stored, and the run ended through normal game exit. The 100-car limit
+and hostile/concurrent request cases have automated coverage, not live tests at
+that scale. Other gameplay systems retain their own roadmap issues.
 
 [tracking]: https://github.com/afterhours-crew/afterhours-2015/issues/52
 [timing]: https://github.com/afterhours-crew/afterhours-2015/issues/96
