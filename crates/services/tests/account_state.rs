@@ -10,7 +10,11 @@ use nfs_storage::{
     account::{Kind, Repository},
 };
 use serde_json::{Value, json};
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    sync::atomic::{AtomicU64, Ordering},
+};
+static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
 struct Root(PathBuf);
 impl Root {
     fn new() -> Self {
@@ -18,11 +22,16 @@ impl Root {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = Self(
-            std::env::temp_dir().join(format!("account-services-{}-{stamp}", std::process::id())),
-        );
-        std::fs::create_dir_all(&root.0).unwrap();
-        root
+        Self::with_stamp(stamp)
+    }
+    fn with_stamp(stamp: u128) -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "account-services-{}-{stamp}-{}",
+            std::process::id(),
+            NEXT_ROOT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&path).unwrap();
+        Self(path)
     }
     fn file(&self, name: &str, value: &Value) -> PathBuf {
         let path = self.0.join(name);
@@ -60,6 +69,19 @@ fn imports(root: &Root, docs: &[Value; 5]) -> Imports {
         speedwall: Some(root.file("speedwall.json", &docs[3])),
         settings: Some(root.file("settings.json", &docs[4])),
     }
+}
+
+#[test]
+fn coincident_fixture_clocks_keep_imports_and_cleanup_isolated() {
+    let first = Root::with_stamp(0);
+    let second = Root::with_stamp(0);
+    first.file("identity.json", &json!({"owner": 1}));
+    let retained = second.file("identity.json", &json!({"owner": 2}));
+    drop(first);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&std::fs::read(retained).unwrap()).unwrap(),
+        json!({"owner": 2})
+    );
 }
 
 #[test]

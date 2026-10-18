@@ -171,6 +171,8 @@ fn installed_fitment_restrictions_round_trip_and_reject_unknown_targets() {
             vec![],
             vec![
                 ("DownforceSetting", Field::Int(5)),
+                ("AnimationExtent", Field::Float(0.75)),
+                ("AnimationId", Field::Int(-1)),
                 ("SpoilerTuning", Field::RawPointer(0)),
                 ("WideCollision", Field::Bool(false)),
                 ("PerformanceModifier", Field::RawPointer(0)),
@@ -188,7 +190,7 @@ fn installed_fitment_restrictions_round_trip_and_reject_unknown_targets() {
             let json = items.to_json();
             assert_eq!(
                 json["version"],
-                nfs_services::item_content::REP_REWARD_VERSION
+                nfs_services::item_content::CAR_OWNERSHIP_VERSION
             );
             assert_eq!(json["rep_rewards"], serde_json::json!([]));
             assert_eq!(

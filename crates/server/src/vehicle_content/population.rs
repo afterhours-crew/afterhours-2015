@@ -47,6 +47,7 @@ pub struct WorldSpawn {
 }
 #[derive(Clone, Debug, Default)]
 pub struct Output {
+    pub deleted: Vec<u16>,
     pub messages: Vec<Message>,
     pub records: Vec<Record>,
     pub bindings: Vec<Binding>,
@@ -124,7 +125,9 @@ impl Population {
         layout: &Layout,
         origin: [f32; 3],
     ) -> Result<Output, Error> {
-        self.spawn_mode(players, owner, inventory, content, layout, origin, false)
+        self.spawn_mode(
+            players, owner, inventory, content, layout, origin, false, None,
+        )
     }
     /// Prepare the selected car in its garage slot while its world lifetime runs.
     pub fn prepare_return(
@@ -141,7 +144,82 @@ impl Population {
             .ok_or(Error::UnknownObject)?
             .origin
             .map(f32::from_bits);
-        self.spawn_mode(players, owner, inventory, content, layout, origin, true)
+        self.spawn_mode(
+            players, owner, inventory, content, layout, origin, true, None,
+        )
+    }
+    /// Replace only changed slots after an owned, durable garage transaction.
+    /// Preflight the entire replacement on clones before publishing any ghosts.
+    pub fn reconcile(
+        &mut self,
+        players: &mut Players,
+        owner: Owner,
+        previous: &Inventory,
+        inventory: Inventory,
+        content: &Content,
+        layout: &Layout,
+    ) -> Result<Output, Error> {
+        let old = self
+            .spawned
+            .get(&owner.participant)
+            .ok_or(Error::UnknownObject)?;
+        if old.slots != previous.slots
+            || old.items != previous.items
+            || !self.all_loaded(owner.participant)
+            || !players.owns_participant(owner.connection, owner.persona, owner.participant)
+        {
+            return Err(Error::Shape);
+        }
+        let origin = old.origin.map(f32::from_bits);
+        let changed =
+            std::array::from_fn(|i| previous.slots.values()[i] != inventory.slots.values()[i]);
+        let mut next = self.clone();
+        let mut world = players.clone();
+        let mut deleted = Vec::new();
+        for entry in layout.occupied(previous.slots, &previous.items)? {
+            if !changed[entry.ordinal] {
+                continue;
+            }
+            let (scene, _) = world
+                .objects()
+                .scene_endpoint(layout.scene_key, entry.slot.component_index)
+                .ok_or(Error::UnknownObject)?;
+            let Some(Initial::SubLevel { fields, .. }) =
+                world.objects().get(scene).map(|o| &o.initial)
+            else {
+                return Err(Error::TypeMismatch);
+            };
+            let rpc = fields
+                .get(entry.slot.component_index)
+                .and_then(sublevel::Initial::rpc)
+                .ok_or(Error::TypeMismatch)?;
+            next.pending
+                .remove_slot(scene, rpc.selector, owner.participant)?;
+            let ghost = world.remove_vehicle(
+                owner.connection,
+                owner.persona,
+                owner.participant,
+                entry.item,
+            )?;
+            if let Some(group) = next.groups.remove(&ghost) {
+                next.authority.remove_group(group);
+            }
+            deleted.push(ghost);
+        }
+        let mut output = next.spawn_mode(
+            &mut world,
+            owner,
+            inventory,
+            content,
+            layout,
+            origin,
+            false,
+            Some(changed),
+        )?;
+        output.deleted = deleted;
+        *self = next;
+        *players = world;
+        Ok(output)
     }
     #[allow(clippy::too_many_arguments)]
     fn spawn_mode(
@@ -153,6 +231,7 @@ impl Population {
         layout: &Layout,
         origin: [f32; 3],
         returning: bool,
+        changed: Option<[bool; 5]>,
     ) -> Result<Output, Error> {
         let identity = players
             .owned_identity(owner.connection, owner.persona, owner.participant)
@@ -166,7 +245,11 @@ impl Population {
         if origin.iter().any(|v| !v.is_finite()) {
             return Err(Error::Shape);
         }
-        if let Some(old) = self.spawned.get(&owner.participant) {
+        if let Some(old) = self
+            .spawned
+            .get(&owner.participant)
+            .filter(|_| changed.is_none())
+        {
             if old.slots == inventory.slots
                 && old.items == inventory.items
                 && old.origin == origin.map(f32::to_bits)
@@ -177,16 +260,19 @@ impl Population {
             } else {
                 return Err(Error::Unsupported);
             }
-        } else if returning {
+        } else if returning && changed.is_none() {
             return Err(Error::UnknownObject);
         }
-        if !returning && self.spawned.len() >= 128 {
+        if !self.spawned.contains_key(&owner.participant) && self.spawned.len() >= 128 {
             return Err(Error::Bound);
         }
         let mut next = self.clone();
         let mut world = players.clone();
         let mut output = Output::default();
         let mut occupied = layout.occupied(inventory.slots, &inventory.items)?;
+        if let Some(changed) = changed {
+            occupied.retain(|entry| changed[entry.ordinal]);
+        }
         if returning {
             occupied.truncate(1);
             let entry = occupied.first().ok_or(Error::UnknownObject)?;

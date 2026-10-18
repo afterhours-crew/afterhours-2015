@@ -418,6 +418,9 @@ fn inventory_config(args: &Args) -> Result<Option<net::InventoryProfile>, Failur
     if let Some(offers) = content.purchase_offers() {
         service = service.with_purchase_offers(offers.clone());
     }
+    if let Some(offers) = content.car_offers() {
+        service = service.with_car_offers(offers.clone());
+    }
     if let Some(policy) = content.category_unlocks() {
         service = service.with_category_unlocks(policy.clone());
     }

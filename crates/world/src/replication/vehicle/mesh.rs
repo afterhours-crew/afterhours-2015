@@ -29,6 +29,16 @@ pub enum Input {
         rear: bool,
         alternatives: Vec<Vec<Guid>>,
     },
+    Light {
+        guids: Vec<Guid>,
+        rear: bool,
+        extent: f32,
+    },
+    Spoiler {
+        guids: Vec<Guid>,
+        extent: f32,
+        selector: i32,
+    },
     Unsupported,
 }
 #[derive(Clone, Debug, PartialEq)]
@@ -67,6 +77,19 @@ impl Definitions {
                         return Err(Error::Bound);
                     }
                 }
+                Input::Light { guids, extent, .. } | Input::Spoiler { guids, extent, .. } => {
+                    let expected = if matches!(input, Input::Light { .. }) {
+                        DefinitionClass::LightsItemData
+                    } else {
+                        DefinitionClass::SpoilerItemData
+                    };
+                    if class != expected {
+                        return Err(Error::TypeMismatch);
+                    }
+                    if guids.len() > 256 || !extent.is_finite() {
+                        return Err(Error::Bound);
+                    }
+                }
                 Input::Ignore | Input::Unsupported => (),
             }
             if inputs.insert(guid, input).is_some() {
@@ -89,12 +112,6 @@ impl State {
         mut resolve: impl FnMut(&str) -> Option<u16>,
     ) -> Result<Self, Error> {
         validate_components(components)?;
-        if components
-            .iter()
-            .any(|c| matches!(c.kind.extra, MeshExtra::Light | MeshExtra::Spoiler))
-        {
-            return Err(Error::Unsupported);
-        }
         if tire_indices.into_iter().any(|v| v >= 256) {
             return Err(Error::Bound);
         }
@@ -109,8 +126,8 @@ impl State {
                         middle: 0,
                         last: 0,
                     },
-                    MeshExtra::Light => MeshValue::Light(0),
-                    MeshExtra::Spoiler => unreachable!("unsupported initialization rejected above"),
+                    MeshExtra::Light => MeshValue::Light(1f32.to_bits()),
+                    MeshExtra::Spoiler => spoiler_value(1., 0),
                 },
             })
             .collect();
@@ -124,6 +141,7 @@ impl State {
                 Input::Ignore => continue,
                 Input::Unsupported => return Err(Error::Unsupported),
                 Input::Part { guids, rim } => (guids.clone(), *rim),
+                Input::Light { guids, .. } | Input::Spoiler { guids, .. } => (guids.clone(), None),
                 Input::Tire { rear, alternatives } => {
                     let Some(guids) = alternatives.get(tire_indices[usize::from(*rear)]) else {
                         continue;
@@ -145,6 +163,33 @@ impl State {
                     {
                         meshes[i].extra = rim_value(rim)?;
                     }
+                    match (c.kind.extra, input) {
+                        (
+                            MeshExtra::Light,
+                            Input::Light {
+                                rear: false,
+                                extent,
+                                ..
+                            },
+                        ) => {
+                            meshes[i].extra = MeshValue::Light(extent.to_bits());
+                        }
+                        (MeshExtra::Light, Input::Light { rear: true, .. }) => (),
+                        (
+                            MeshExtra::Spoiler,
+                            Input::Spoiler {
+                                extent, selector, ..
+                            },
+                        ) => {
+                            meshes[i].extra = spoiler_value(*extent, *selector);
+                        }
+                        // Legacy definitions without the animation inputs must
+                        // not silently substitute defaults for a selected part.
+                        (MeshExtra::Light | MeshExtra::Spoiler, _) => {
+                            return Err(Error::Unsupported);
+                        }
+                        _ => (),
+                    }
                 }
             }
         }
@@ -161,6 +206,14 @@ impl State {
     }
     pub fn update(&self, changed: bool) -> Update {
         Update::Mesh(changed.then(|| self.0.clone()))
+    }
+}
+fn spoiler_value(extent: f32, selector: i32) -> MeshValue {
+    // Native normalized16 writer clamps and rounds in f32; the integer writer
+    // preserves only the low eight selector bits (including negative IDs).
+    MeshValue::Spoiler {
+        normalized: (extent.clamp(0., 1.) * 65535. + 0.5) as u16,
+        selector: selector as u8,
     }
 }
 fn validate_components(components: &[Component]) -> Result<(), Error> {
@@ -425,6 +478,134 @@ mod tests {
         assert_eq!(
             State::from_vehicle(&c, &d, 1, &[component], [0, 0], |_| None),
             Err(Error::UnknownObject)
+        );
+    }
+
+    #[test]
+    fn animated_parts_use_selected_items_and_native_defaults_and_quantization() {
+        let (mut collection, _) = fixture();
+        collection.items.remove(&4);
+        collection.items.get_mut(&1).unwrap().children = vec![2, 3];
+        collection.items.get_mut(&2).unwrap().derived =
+            Derived::decode(Layout::Empty, &[]).unwrap();
+        collection.items.get_mut(&3).unwrap().derived =
+            Derived::decode(Layout::Spoiler, &[0; 4]).unwrap();
+        let classes = Catalog::new([
+            (guid(1), DefinitionClass::RaceVehicleItemData),
+            (guid(2), DefinitionClass::LightsItemData),
+            (guid(3), DefinitionClass::SpoilerItemData),
+        ])
+        .unwrap();
+        let make = |rear, extent, selector| {
+            Definitions::new(
+                classes.clone(),
+                [
+                    (guid(1), Input::Ignore),
+                    (
+                        guid(2),
+                        Input::Light {
+                            guids: vec![guid(11), guid(12)],
+                            rear,
+                            extent: 0.375,
+                        },
+                    ),
+                    (
+                        guid(3),
+                        Input::Spoiler {
+                            guids: vec![guid(13)],
+                            extent,
+                            selector,
+                        },
+                    ),
+                ],
+            )
+            .unwrap()
+        };
+        let components = [
+            component(MeshExtra::Light, &[(11, None)]),
+            component(MeshExtra::Light, &[(12, None)]),
+            component(MeshExtra::Spoiler, &[(13, None)]),
+            component(MeshExtra::Spoiler, &[(14, None)]),
+        ];
+        let run = |rear, extent, selector| {
+            value(
+                State::from_vehicle(
+                    &collection,
+                    &make(rear, extent, selector),
+                    1,
+                    &components,
+                    [0, 0],
+                    |_| None,
+                )
+                .unwrap(),
+            )
+        };
+        let state = run(false, 0.5, -1);
+        assert_eq!(
+            state.meshes.iter().map(|m| m.index).collect::<Vec<_>>(),
+            [0, 0, 0, -1]
+        );
+        assert_eq!(state.meshes[0].extra, MeshValue::Light(0.375f32.to_bits()));
+        assert_eq!(state.meshes[1].extra, state.meshes[0].extra);
+        assert_eq!(
+            state.meshes[2].extra,
+            MeshValue::Spoiler {
+                normalized: 32768,
+                selector: 255
+            }
+        );
+        assert_eq!(
+            state.meshes[3].extra,
+            MeshValue::Spoiler {
+                normalized: 65535,
+                selector: 0
+            }
+        );
+        assert_eq!(
+            run(true, -0.1, 258).meshes[0].extra,
+            MeshValue::Light(1f32.to_bits())
+        );
+        assert_eq!(
+            run(false, -0.1, 258).meshes[2].extra,
+            MeshValue::Spoiler {
+                normalized: 0,
+                selector: 2
+            }
+        );
+        assert_eq!(
+            run(false, 1.1, 7).meshes[2].extra,
+            MeshValue::Spoiler {
+                normalized: 65535,
+                selector: 7
+            }
+        );
+        assert_eq!(
+            Definitions::new(
+                classes.clone(),
+                [(
+                    guid(2),
+                    Input::Light {
+                        guids: vec![],
+                        rear: false,
+                        extent: f32::NAN
+                    }
+                )]
+            ),
+            Err(Error::Bound)
+        );
+        assert_eq!(
+            Definitions::new(
+                classes,
+                [(
+                    guid(2),
+                    Input::Spoiler {
+                        guids: vec![],
+                        extent: 1.,
+                        selector: 0
+                    }
+                )]
+            ),
+            Err(Error::TypeMismatch)
         );
     }
 }

@@ -8,20 +8,29 @@ use nfs_services::user_settings::{
 use nfs_storage::AccountId;
 use std::{
     path::PathBuf,
-    sync::{Arc, Barrier},
+    sync::{
+        Arc, Barrier,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 struct Root(PathBuf);
 impl Root {
     fn new() -> Self {
-        let name = format!(
-            "settings-service-{}-{}",
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        Self::with_stamp(stamp)
+    }
+    fn with_stamp(stamp: u128) -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "settings-service-{}-{stamp}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
-        Self(std::env::temp_dir().join(name))
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&path).unwrap();
+        Self(path)
     }
 }
 impl Drop for Root {
@@ -38,6 +47,27 @@ fn store(root: &Root, n: u8) -> Store {
 fn change(key: &[u8], n: u32) -> Change {
     Change::Preferences(vec![(key.to_vec(), n)], vec![])
 }
+
+#[test]
+fn coincident_fixture_clocks_preserve_separate_settings_and_cleanup() {
+    let first = Root::with_stamp(0);
+    let second = Root::with_stamp(0);
+    let one = store(&first, 1);
+    let two = store(&second, 1);
+    one.apply(&change(b"fixture", 1)).unwrap();
+    two.apply(&change(b"fixture", 2)).unwrap();
+    assert_eq!(
+        one.current().unwrap().integers,
+        vec![(b"fixture".to_vec(), 1)]
+    );
+    drop(one);
+    drop(first);
+    assert_eq!(
+        two.current().unwrap().integers,
+        vec![(b"fixture".to_vec(), 2)]
+    );
+}
+
 fn save(value: &[u8]) -> Vec<u8> {
     let body = nfs_protocol::util::UserSettingsSaveRequest {
         key: Some(b"option"),

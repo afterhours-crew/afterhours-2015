@@ -20,6 +20,7 @@ use serde_json::json;
 
 mod appearance;
 mod driving;
+mod garage;
 mod plate;
 mod purchases;
 mod reset;
@@ -282,7 +283,10 @@ fn fixture() -> (
     players
         .create_actor(HOST_SELECTOR as u8, persona, participant)
         .unwrap();
-    let inventory = population_tests::inventory(Arc::new(items));
+    let inventory = Inventory {
+        slots: nfs_world::garage::Slots::new([Some(1), None, None, None, None]).unwrap(),
+        items: Arc::new(items),
+    };
     let spawned = population
         .spawn(
             &mut players,

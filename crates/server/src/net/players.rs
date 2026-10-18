@@ -21,7 +21,9 @@ mod activation;
 mod customization;
 mod diagnostics;
 mod equipment;
+mod garage;
 pub(super) use equipment::EquipmentRequest;
+pub(super) use garage::{GarageOperation, GarageRequest};
 pub(super) use scoring::{AwardRequest, Credited};
 mod launchers;
 mod purchases;
@@ -129,6 +131,7 @@ pub(super) struct PlayerListener {
     returns: Option<nfs_world::arrival::Arrivals>,
     inventory: Option<Inventory>,
     equipment: equipment::State,
+    garage_commands: VecDeque<GarageRequest>,
     logic: Option<std::sync::Arc<crate::garage_logic::GarageLogic>>,
     logic_ghosts: BTreeMap<u16, BTreeMap<u16, u16>>,
     logic_vehicles_fired: BTreeSet<u16>,
@@ -656,6 +659,7 @@ impl PlayerListener {
             sequences: None,
             inventory: None,
             equipment: equipment::State::default(),
+            garage_commands: VecDeque::new(),
             logic: None,
             logic_ghosts: BTreeMap::new(),
             logic_vehicles_fired: BTreeSet::new(),
@@ -1189,6 +1193,7 @@ impl Listener for PlayerListener {
         let mut unsupported = 0;
         let mut exit_entries = Vec::new();
         let mut equipment = self.equipment.clone();
+        let mut garage_commands = self.garage_commands.clone();
         for body in rpcs {
             if self.world_ms < self.return_trace_until
                 && let Some(label) = refusal::route_label(body)
@@ -1239,6 +1244,11 @@ impl Listener for PlayerListener {
                     continue;
                 }
                 Ok(None) => {}
+                Err(error) => return self.refuse_rpc(error, body),
+            }
+            match self.stage_garage(&players, body, &mut garage_commands) {
+                Ok(true) => continue,
+                Ok(false) => {}
                 Err(error) => return self.refuse_rpc(error, body),
             }
             match self.stage_equipment(&players, body, &mut equipment) {
@@ -2053,6 +2063,7 @@ impl Listener for PlayerListener {
         }
         self.sequences = sequences;
         self.equipment = equipment;
+        self.garage_commands = garage_commands;
         self.logic_ghosts = logic_ghosts;
         self.logic_vehicles_fired = logic_vehicles_fired;
         self.pending_content.extend(spawned.messages);

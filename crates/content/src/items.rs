@@ -14,7 +14,7 @@
 use crate::Error;
 use crate::scan::Assets;
 use nfs_frostbite::ebx::{Fields, Object, Value};
-use nfs_services::item_content::{FORMAT, ItemContent, REP_REWARD_VERSION};
+use nfs_services::item_content::{CAR_OWNERSHIP_VERSION, FORMAT, ItemContent};
 use nfs_world_core::items::{DefinitionClass, Layout};
 use serde_json::{Value as Json, json};
 
@@ -216,6 +216,28 @@ fn definition(assets: &mut Assets, object: &Object) -> Result<Json, Error> {
 fn initial_offer(object: &Object) -> Result<bool, Error> {
     part_offer(object, false)
 }
+fn car_offer(object: &Object) -> Result<bool, Error> {
+    if object.class != "RaceVehicleItemData" {
+        return Ok(false);
+    }
+    let f = &object.fields;
+    let flag = |name: &str| {
+        f.get(name)
+            .and_then(Value::as_bool)
+            .ok_or_else(|| missing(&object.class, name))
+    };
+    Ok(flag("Purchasable")?
+        && !flag("Deprecated")?
+        && !flag("RequiresOwner")?
+        && flag("UsesScope")?
+        && matches!(word(f, &object.class, "Quantity")?, 1 | u32::MAX)
+        && matches!(
+            f.get("UnlockCriteriaDescriptionID")
+                .and_then(Value::as_str)
+                .ok_or_else(|| missing(&object.class, "UnlockCriteriaDescriptionID"))?,
+            "" | "ID_UNLOCKED_AT_REP_LEVEL"
+        ))
+}
 fn part_offer(object: &Object, granted: bool) -> Result<bool, Error> {
     if !DefinitionClass::from_name(&object.class).is_some_and(nfs_services::purchase::part_class) {
         return Ok(false);
@@ -369,6 +391,7 @@ pub fn build(assets: &mut Assets) -> Result<Vec<u8>, Error> {
         .ok_or_else(|| Error::Content(format!("{ITEM_SYSTEM} is not an item system")))?;
     let mut definitions = Vec::new();
     let mut purchase_offers = Vec::new();
+    let mut car_offers = Vec::new();
     let mut vehicle_scopes = Vec::new();
     let mut part_locations = Vec::new();
     let mut purchase_requirements = Vec::new();
@@ -382,6 +405,13 @@ pub fn build(assets: &mut Assets) -> Result<Vec<u8>, Error> {
         .ok_or_else(|| missing("ItemSystemData", "Items"))?
     {
         let (_, object) = assets.resolve(value.as_pointer())?;
+        if car_offer(&object)? {
+            let level = word(&object.fields, &object.class, "UnlocksAtRepLevel")?;
+            let score = thresholds
+                .score_for_level(level)
+                .map_err(|_| Error::Content("car REP level exceeds installed thresholds".into()))?;
+            car_offers.push(json!({"definition":nfs_frostbite::hex(&object.guid.ok_or_else(||missing(&object.class,"exported GUID"))?),"minimum_rep_score":score}));
+        }
         if DefinitionClass::from_name(&object.class)
             .is_some_and(nfs_services::purchase::spatial_class)
         {
@@ -428,11 +458,12 @@ pub fn build(assets: &mut Assets) -> Result<Vec<u8>, Error> {
     let initial = references(assets, &system, "Inventory")?;
     let document = json!({
         "format": FORMAT,
-        "version": REP_REWARD_VERSION,
+        "version": CAR_OWNERSHIP_VERSION,
         "build_sha256": nfs_services::SUPPORTED_BUILD_SHA256,
         "definitions": definitions,
         "initial_definitions": initial,
         "purchase_offers": purchase_offers,
+        "car_offers": car_offers,
         "body_kits": body_kits,
         "vehicle_scopes": vehicle_scopes,
         "part_locations":part_locations,

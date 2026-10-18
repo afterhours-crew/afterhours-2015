@@ -6,7 +6,10 @@ use nfs_storage::{
     account::{Document, Kind, Repository},
     settings,
 };
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    sync::atomic::{AtomicU64, Ordering},
+};
 struct Root(PathBuf);
 impl Root {
     fn new() -> Self {
@@ -14,7 +17,17 @@ impl Root {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        Self(std::env::temp_dir().join(format!("account-storage-{}-{stamp}", std::process::id())))
+        Self::with_stamp(stamp)
+    }
+    fn with_stamp(stamp: u128) -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "account-storage-{}-{stamp}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&path).unwrap();
+        Self(path)
     }
 }
 impl Drop for Root {
@@ -30,6 +43,26 @@ fn doc(revision: u64, bytes: &[u8]) -> Document {
         revision,
         bytes: bytes.to_vec(),
     }
+}
+
+#[test]
+fn coincident_fixture_clocks_preserve_separate_documents_and_cleanup() {
+    let first = Root::with_stamp(0);
+    let second = Root::with_stamp(0);
+    let a = account(1);
+    let one = Repository::open_owned_directory(&first.0).unwrap();
+    let two = Repository::open_owned_directory(&second.0).unwrap();
+    one.initialize(a, &[(Kind::Identity, doc(7, b"owned"))])
+        .unwrap();
+    two.initialize(a, &[(Kind::Identity, doc(i64::MAX as u64, b"other"))])
+        .unwrap();
+    assert_eq!(one.read(a, Kind::Identity).unwrap(), Some(doc(7, b"owned")));
+    drop(one);
+    drop(first);
+    assert_eq!(
+        two.read(a, Kind::Identity).unwrap(),
+        Some(doc(i64::MAX as u64, b"other"))
+    );
 }
 
 #[test]

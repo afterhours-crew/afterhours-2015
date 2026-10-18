@@ -229,7 +229,12 @@ fn deliver(
         data: bits.span(),
     })
 }
-fn transfer(listener: &mut PlayerListener, index: usize, name: &[u8], bytes: Vec<u8>) {
+pub(in crate::net) fn transfer(
+    listener: &mut PlayerListener,
+    index: usize,
+    name: &[u8],
+    bytes: Vec<u8>,
+) {
     let size = bytes.len();
     assert!(deliver(
         listener,
@@ -250,6 +255,43 @@ fn transfer(listener: &mut PlayerListener, index: usize, name: &[u8], bytes: Vec
         Some(size)
     ));
     assert!(deliver(listener, index, Record::Finish, Some(size)));
+}
+
+pub(in crate::net) fn enable_cars(jobs: &mut Exchanges, items: &items::Collection) {
+    let profile = jobs.profile.as_mut().unwrap();
+    let catalog = &profile.service.catalog;
+    let definitions = catalog
+        .definitions()
+        .map(|(&guid, d)| {
+            let mut d = d.clone();
+            if guid == [1; 16] {
+                d.buy_price = 30;
+                d.sell_price = 15;
+                d.quantity = u32::MAX;
+                d.flags.purchasable = true;
+                d.flags.uses_scope = true;
+                d.sub_items = items.items[&1]
+                    .children
+                    .iter()
+                    .filter_map(|id| {
+                        let item = &items.items[id];
+                        (item.owner == 1).then_some(item.definition)
+                    })
+                    .collect();
+            }
+            (guid, d)
+        })
+        .collect::<Vec<_>>();
+    let catalog = Arc::new(InventoryCatalog::new(definitions, vec![]).unwrap());
+    profile.service.car_offers = Some(Arc::new(
+        nfs_services::garage::Offers::new(&catalog, [([1; 16], 0)]).unwrap(),
+    ));
+    profile.service.catalog = catalog;
+}
+pub(in crate::net) fn deliver_car_reply(jobs: &mut Exchanges) -> Vec<u8> {
+    let bytes = jobs.pending[0].take().unwrap().bytes;
+    jobs.started[0] = None;
+    bytes
 }
 
 #[tokio::test]
