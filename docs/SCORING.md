@@ -10,6 +10,9 @@ Earlier live checks covered level-up, same-session part availability and
 purchase, and REP/unlock persistence across a game/server restart. These are
 the named acceptance flows; they do not establish every reward type, crew or
 police scoring, or fresh-install activation independence.
+The installed REP wrap/decal rewards and immediate replacement of purchased
+part offers are implemented with portable regression coverage; their live checks
+remain open in [#92](https://github.com/afterhours-crew/afterhours-2015/issues/92).
 
 `AssetIndex::scoring_calculations` reads math and curve nodes from an installed
 blueprint composition. Each node retains its asset, object index and prefab

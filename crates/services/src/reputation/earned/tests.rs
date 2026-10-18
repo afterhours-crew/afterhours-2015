@@ -119,6 +119,137 @@ fn mask(snapshot: &Snapshot, catalog: &InventoryCatalog) -> u32 {
 }
 
 #[test]
+fn owned_rewards_share_credit_allocation_survive_restart_and_do_not_repeat() {
+    let mut fixture = Fixture::new();
+    let mut definitions = fixture
+        .inventory
+        .definitions()
+        .map(|(g, d)| (*g, d.clone()))
+        .collect::<Vec<_>>();
+    for (guid, class, derived) in [
+        (
+            [4; 16],
+            DefinitionClass::LiveryDecalSwatchPackItemData,
+            Derived::Empty,
+        ),
+        (
+            [5; 16],
+            DefinitionClass::LiveryCustomizationItemData,
+            Derived::decode(
+                items::Layout::LiveryCustomization,
+                &[0, 0, 0, 0, 255, 255, 255, 255, 0, 0, 0, 0],
+            )
+            .unwrap(),
+        ),
+    ] {
+        definitions.push((
+            guid,
+            Definition {
+                class,
+                quantity: 1,
+                buy_price: 17,
+                sell_price: 8,
+                ownership_level: OwnershipLevel::Claimable,
+                flags: DefinitionFlags {
+                    purchasable: true,
+                    ..Default::default()
+                },
+                sub_items: vec![],
+                additional_items: vec![],
+                default_derived: Some(derived),
+            },
+        ));
+    }
+    fixture.inventory = InventoryCatalog::new(definitions, vec![[1; 16]]).unwrap();
+    fixture.items = fixture
+        .items
+        .with_rewards(&fixture.inventory, [([4; 16], 10), ([5; 16], 25)])
+        .unwrap();
+    let path = std::env::temp_dir().join(format!(
+        "afterhours-rep-rewards-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let repo = SqliteRepository::open_owned_directory(&path).unwrap();
+    let before = fixture.initialize(&repo, account(1));
+    let other = fixture.initialize(&repo, account(2));
+    let batch = fixture.policy().prepare(&before, credit(30), 900).unwrap();
+    assert_eq!(repo.snapshot(account(1)).unwrap(), before);
+    repo.apply(account(1), &batch, Timestamp(3)).unwrap();
+    let saved = repo.snapshot(account(1)).unwrap();
+    assert_eq!(saved.items.len(), 5); // controller, two offers, two owned rewards
+    assert_eq!(saved.generation, before.generation + 1);
+    for guid in [[4; 16], [5; 16]] {
+        let reward = saved
+            .items
+            .values()
+            .find(|i| i.definition.0 == guid)
+            .unwrap();
+        assert_eq!(
+            (
+                reward.state,
+                reward.owner,
+                reward.buy_price,
+                reward.sell_price
+            ),
+            (items::OWNED, None, 17, 8)
+        );
+        assert_eq!(
+            reward.derived,
+            fixture
+                .inventory
+                .definition(&guid)
+                .unwrap()
+                .default_derived
+                .as_ref()
+                .unwrap()
+                .encode()
+                .unwrap()
+        );
+    }
+    assert_eq!(repo.snapshot(account(2)).unwrap(), other);
+    assert!(
+        repo.apply(account(1), &batch, Timestamp(4))
+            .unwrap()
+            .replayed
+    );
+    let stale = fixture.policy().prepare(&before, credit(30), 901).unwrap();
+    assert!(matches!(
+        repo.apply(account(1), &stale, Timestamp(4)),
+        Err(Error::Conflict)
+    ));
+    drop(repo);
+    let repo = SqliteRepository::open_owned_directory(&path).unwrap();
+    assert_eq!(repo.snapshot(account(1)).unwrap(), saved);
+    assert_eq!(
+        fixture
+            .items
+            .ensure(
+                &repo,
+                account(1),
+                &fixture.inventory,
+                saved.clone(),
+                Timestamp(5)
+            )
+            .unwrap(),
+        saved
+    );
+    let batch = fixture.policy().prepare(&saved, credit(1), 902).unwrap();
+    repo.apply(account(1), &batch, Timestamp(6)).unwrap();
+    let after = repo.snapshot(account(1)).unwrap();
+    assert_eq!(after.items, saved.items);
+    assert_eq!(
+        Balance::from_snapshot(&after).unwrap(),
+        Balance::from_snapshot(&saved).unwrap()
+    );
+    drop(repo);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
 fn threshold_credit_grants_are_one_atomic_generation_and_account_isolated() {
     let fixture = Fixture::new();
     let repo = MemoryRepository::default();

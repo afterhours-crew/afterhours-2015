@@ -134,7 +134,11 @@ fn installed_fitment_restrictions_round_trip_and_reject_unknown_targets() {
         if valid {
             let items = ItemContent::load(&prepared.unwrap().path(Kind::ItemContent)).unwrap();
             let json = items.to_json();
-            assert_eq!(json["version"], nfs_services::item_content::FITMENT_VERSION);
+            assert_eq!(
+                json["version"],
+                nfs_services::item_content::REP_REWARD_VERSION
+            );
+            assert_eq!(json["rep_rewards"], serde_json::json!([]));
             assert_eq!(
                 json["fitment_restrictions"],
                 serde_json::json!([{

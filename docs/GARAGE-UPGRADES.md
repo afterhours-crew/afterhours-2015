@@ -351,12 +351,20 @@ in the supported build). An official host sent the same notifications at a
 level-up, one record each about 0.3 s apart, and both codecs reproduce those
 bytes exactly. Live, a level-up to 3 made both level-3 tire compositions
 buyable in the garage without a restart, and one was bought and fitted. Buying
-promotes the offer; the next credit or load creates a fresh offer for the same
-part and announces it, as the official host did straight after a purchase.
-Removals are never announced, and an official level-up also granted an owned
-decal pack that the installed unlock branches do not describe.
-Formatting, workspace Clippy and all 1,216 tests
-pass, including a regression for the live inventory refresh and bank notification.
+promotes the offer. Its replacement now commits in the same purchase transaction
+and receives a separate change notification immediately, without another REP
+credit or load. Retries retain the purchased identity, single charge and one
+replacement. Removals are never announced by these grant paths.
+
+Item content version 9 also reads the installed REP award branches: wraps at
+levels 51–60 and decal packs at 61–70. These ownerless owned rewards use the
+same allocator and transaction as REP and part offers. Existing owned rewards
+prevent repeat grants, including after restart. Older content formats never
+infer rewards. The decal seen alongside the earlier level-3 crossing was a
+daily-challenge reward paired with REP, not a level-3 unlock; challenge
+progression remains under [#57](https://github.com/afterhours-crew/afterhours-2015/issues/57).
+These new reward and replacement paths pass portable tests; their live acceptance
+is still pending under [#92](https://github.com/afterhours-crew/afterhours-2015/issues/92).
 
 For unattended menu testing, [change the game's Back key to F9](MENU-KEYBINDING.md)
 through its user profile. This works without a mod and leaves Computer Use's

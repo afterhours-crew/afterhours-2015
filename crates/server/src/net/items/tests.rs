@@ -4,6 +4,10 @@
 
 use super::*;
 
+pub(in crate::net) fn item_bindings(jobs: &Exchanges) -> &nfs_world::items::Catalog {
+    jobs.profile.as_ref().unwrap().bindings()
+}
+
 pub(in crate::net) fn reload_inventory(
     jobs: &Exchanges,
     snapshot: &nfs_storage::Snapshot,

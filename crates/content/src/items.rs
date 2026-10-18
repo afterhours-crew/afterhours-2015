@@ -14,7 +14,7 @@
 use crate::Error;
 use crate::scan::Assets;
 use nfs_frostbite::ebx::{Fields, Object, Value};
-use nfs_services::item_content::{BODY_KIT_VERSION, FORMAT, ItemContent};
+use nfs_services::item_content::{FORMAT, ItemContent, REP_REWARD_VERSION};
 use nfs_world_core::items::{DefinitionClass, Layout};
 use serde_json::{Value as Json, json};
 
@@ -428,7 +428,7 @@ pub fn build(assets: &mut Assets) -> Result<Vec<u8>, Error> {
     let initial = references(assets, &system, "Inventory")?;
     let document = json!({
         "format": FORMAT,
-        "version": BODY_KIT_VERSION,
+        "version": REP_REWARD_VERSION,
         "build_sha256": nfs_services::SUPPORTED_BUILD_SHA256,
         "definitions": definitions,
         "initial_definitions": initial,
@@ -439,6 +439,7 @@ pub fn build(assets: &mut Assets) -> Result<Vec<u8>, Error> {
         "fitment_restrictions":restrictions,
         "purchase_requirements":purchase_requirements,
         "category_unlocks":unlocks::build(assets, &thresholds)?,
+        "rep_rewards":unlocks::rewards(assets, &thresholds)?,
         "item_unlocks": item_unlocks.iter().map(|(g, (_, s))| json!({"definition":nfs_frostbite::hex(g),"minimum_rep_score":s})).collect::<Vec<_>>(),
     });
     // The consuming loader validates classes, layouts, references and bounds;

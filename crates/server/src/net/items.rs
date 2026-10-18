@@ -859,6 +859,26 @@ impl Exchanges {
         };
         match result {
             Ok(Some(LoadedReply { reply, items, kind })) => {
+                let notifications = if kind == ReplyKind::Purchase {
+                    let Some(profile) = &self.profile else {
+                        return false;
+                    };
+                    match listener
+                        .purchase_notifications(&items, profile.service.catalog.bindings())
+                    {
+                        Ok(notifications) => notifications,
+                        Err(error) => {
+                            warn!(
+                                connection = self.connection,
+                                ?error,
+                                "purchase notification rejected"
+                            );
+                            return false;
+                        }
+                    }
+                } else {
+                    Vec::new()
+                };
                 let applied = match kind {
                     ReplyKind::Load => listener.inventory_with_items(
                         reply.garage,
@@ -892,6 +912,11 @@ impl Exchanges {
                     name: b"Items".to_vec(),
                     bytes: reply.bytes,
                 });
+                self.notifications
+                    .extend(notifications.into_iter().map(|bytes| Completed {
+                        name: b"Items".to_vec(),
+                        bytes,
+                    }));
                 true
             }
             Ok(None) => {

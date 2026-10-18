@@ -446,9 +446,28 @@ pub fn buy(
         } else {
             None
         };
+        // Consuming an explicit REP offer promotes its identity for the reply,
+        // and replaces the ownerless offer in this same debit/receipt batch.
+        // It must not wait for another credit or inventory load.
+        let replacement = selected_id
+            .filter(|_| offers.requires_item_unlock(&guid))
+            .filter(|selected| {
+                !snapshot.items.values().any(|item| {
+                    item.id != *selected
+                        && item.definition.0 == guid
+                        && item.owner.is_none()
+                        && item.state == items::PURCHASABLE
+                })
+            })
+            .map(|selected| {
+                let mut item = snapshot.items[&selected].clone();
+                item.id = ItemId::new(next).ok_or(nfs_storage::Error::Bounds)?;
+                Ok::<_, nfs_storage::Error>(item)
+            })
+            .transpose()?;
         let following = if let Some(tree) = &subtree {
             tree.next_id
-        } else if selected_id.is_some() {
+        } else if selected_id.is_some() && replacement.is_none() {
             next
         } else {
             next.checked_add(1).ok_or(nfs_storage::Error::Bounds)?
@@ -488,8 +507,8 @@ pub fn buy(
                 .map_err(inventory::Error::from)?,
         };
         // Selecting a purchasable instance promotes that same durable identity.
-        // Only a definition purchase allocates a new record. Returning a fresh
-        // ID for an instance purchase leaves the client's lookup unresolved.
+        // Its replacement offer is separate from the purchased collection.
+        // Returning a fresh owned ID leaves the client's lookup unresolved.
         let mut ops = if let Some(tree) = subtree {
             let mut combined = inventory::collection(&snapshot, catalog.bindings())?;
             for (&key, item) in &tree.collection.items {
@@ -508,6 +527,9 @@ pub fn buy(
         } else {
             vec![Op::Insert(record)]
         };
+        if let Some(replacement) = replacement {
+            ops.push(Op::Insert(replacement));
+        }
         ops.extend([balance.store(), Op::SetTable(table_key(), receipts)]);
         // The namespace is reserved for purchase attempts. Competing purchases
         // on this generation may replay a winner: re-read the receipt before

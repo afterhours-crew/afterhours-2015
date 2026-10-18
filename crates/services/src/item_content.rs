@@ -9,6 +9,7 @@
 //! V6 adds explicit REP item grants; older formats never infer them.
 //! V7 adds installed fitment conflicts for supported leaf selections.
 //! V8 explicitly opts in supported body-kit offers and their owned child trees.
+//! V9 adds explicit owned REP rewards; older formats grant no such items.
 //! No format accepts captured
 //! instances, player ids or reply envelopes.
 use crate::{ContentError, SUPPORTED_BUILD_SHA256 as BUILD};
@@ -28,6 +29,7 @@ pub const PART_POLICY_VERSION: u8 = 5;
 pub const ITEM_UNLOCK_VERSION: u8 = 6;
 pub const FITMENT_VERSION: u8 = 7;
 pub const BODY_KIT_VERSION: u8 = 8;
+pub const REP_REWARD_VERSION: u8 = 9;
 pub const MAX_STORE_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -98,7 +100,7 @@ impl ItemContent {
     }
     pub fn from_json(value: &Value) -> Result<Self, ContentError> {
         if value["version"].as_u64().is_some_and(|v| {
-            (u64::from(INVENTORY_VERSION)..=u64::from(BODY_KIT_VERSION)).contains(&v)
+            (u64::from(INVENTORY_VERSION)..=u64::from(REP_REWARD_VERSION)).contains(&v)
         }) {
             return Self::inventory_from_json(value);
         }
@@ -171,6 +173,9 @@ impl ItemContent {
         }
         if version >= BODY_KIT_VERSION {
             expected.push("body_kits");
+        }
+        if version >= REP_REWARD_VERSION {
+            expected.push("rep_rewards");
         }
         fields(value, &expected)?;
         if value["format"] != FORMAT || value["build_sha256"] != BUILD {
@@ -283,7 +288,7 @@ impl ItemContent {
                 .map_err(|_| ContentError::Invalid)?,
             )
         };
-        let item_unlocks = if version >= ITEM_UNLOCK_VERSION {
+        let mut item_unlocks = if version >= ITEM_UNLOCK_VERSION {
             let rows = value["item_unlocks"]
                 .as_array()
                 .filter(|r| r.len() <= MAX_COLLECTION)
@@ -306,6 +311,29 @@ impl ItemContent {
         } else {
             None
         };
+        if version >= REP_REWARD_VERSION {
+            let rows = value["rep_rewards"]
+                .as_array()
+                .filter(|r| r.len() <= MAX_COLLECTION)
+                .ok_or(ContentError::Invalid)?;
+            let rows = rows
+                .iter()
+                .map(|row| {
+                    fields(row, &["definition", "minimum_rep_score"])?;
+                    Ok((
+                        guid(&row["definition"])?,
+                        i32::try_from(word(&row["minimum_rep_score"])?)
+                            .map_err(|_| ContentError::Invalid)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, ContentError>>()?;
+            item_unlocks = Some(
+                item_unlocks
+                    .ok_or(ContentError::Invalid)?
+                    .with_rewards(&inventory, rows)
+                    .map_err(|_| ContentError::Invalid)?,
+            );
+        }
         let body_kits = if version >= BODY_KIT_VERSION {
             guids(&value["body_kits"])?
         } else {
@@ -494,6 +522,18 @@ impl ItemContent {
                             .collect::<Vec<_>>()
                     );
                 }
+                if let Some(rewards) = offers.item_unlocks().and_then(|p| p.rewards()) {
+                    document["version"] = json!(REP_REWARD_VERSION);
+                    if document.get("body_kits").is_none() {
+                        document["body_kits"] = json!([]);
+                    }
+                    document["rep_rewards"] = json!(
+                        rewards
+                            .iter()
+                            .map(|(g, s)| json!({"definition":hex(g),"minimum_rep_score":s}))
+                            .collect::<Vec<_>>()
+                    );
+                }
             }
             return document;
         }
@@ -575,6 +615,74 @@ mod tests {
         row["additional_items"] = json!([]);
         row["default_derived_hex"] = json!("");
         value
+    }
+    #[test]
+    fn v9_owned_rep_rewards_are_explicit_strict_and_round_trip() {
+        let mut value = inventory_document();
+        value["version"] = json!(REP_REWARD_VERSION);
+        value["initial_definitions"] = json!([]);
+        value["definitions"][0]["class"] = json!("LiveryDecalSwatchPackItemData");
+        value["definitions"][0]["quantity"] = json!(1);
+        for name in [
+            "purchase_offers",
+            "body_kits",
+            "vehicle_scopes",
+            "part_locations",
+            "purchase_requirements",
+            "item_unlocks",
+            "fitment_restrictions",
+        ] {
+            value[name] = json!([]);
+        }
+        value["category_unlocks"] = Value::Null;
+        value["rep_rewards"] =
+            json!([{"definition":"11111111111111111111111111111111","minimum_rep_score":25}]);
+        let parsed = ItemContent::from_json(&value).unwrap();
+        assert_eq!(parsed.to_json(), value);
+        assert_eq!(
+            parsed
+                .purchase_offers()
+                .unwrap()
+                .item_unlocks()
+                .unwrap()
+                .rewards()
+                .unwrap()
+                .len(),
+            1
+        );
+        for mutation in 0..10 {
+            let mut bad = value.clone();
+            match mutation {
+                0 => bad["rep_rewards"][0]["minimum_rep_score"] = json!(0),
+                1 => bad["definitions"][0]["flags"]["requires_owner"] = json!(true),
+                2 => bad["definitions"][0]["flags"]["uses_scope"] = json!(true),
+                3 => bad["definitions"][0]["class"] = json!("AirFilterItemData"),
+                4 => bad["definitions"][0]["flags"]["deprecated"] = json!(true),
+                5 => bad["definitions"][0]["ownership_level"] = json!(1),
+                6 => bad["initial_definitions"] = json!(["11111111111111111111111111111111"]),
+                7 => {
+                    let duplicate = bad["rep_rewards"][0].clone();
+                    bad["rep_rewards"].as_array_mut().unwrap().push(duplicate);
+                }
+                8 => {
+                    bad.as_object_mut().unwrap().remove("rep_rewards");
+                }
+                _ => bad["version"] = json!(BODY_KIT_VERSION),
+            }
+            assert!(ItemContent::from_json(&bad).is_err(), "mutation {mutation}");
+        }
+        value["version"] = json!(BODY_KIT_VERSION);
+        value.as_object_mut().unwrap().remove("rep_rewards");
+        assert!(
+            ItemContent::from_json(&value)
+                .unwrap()
+                .purchase_offers()
+                .unwrap()
+                .item_unlocks()
+                .unwrap()
+                .rewards()
+                .is_none()
+        );
     }
     #[test]
     fn v8_kit_offers_require_explicit_safe_subtrees_and_reject_legacy_implicit_support() {

@@ -60,6 +60,13 @@ Reputation thresholds must be signed integers, start at zero and increase strict
 with at most 256 levels. The generated versioned document contains no account
 scores. It can supply thresholds omitted from the server's garage-logic document.
 
+Item content version 9 includes explicit REP wrap/decal reward definitions and
+their score thresholds, resolved from the progression graph's award transactions.
+They are distinct from purchasable part grants. Both use the installed constructor
+defaults; no level or reward GUID is hardcoded. Builder revision 25 invalidates
+older caches so existing installations receive these rules. Daily-challenge and
+story rewards are separate policies.
+
 ## Build profiles
 
 Identifiers that belong to one executable build and cannot be read from the

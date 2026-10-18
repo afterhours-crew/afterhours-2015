@@ -6,16 +6,24 @@ use nfs_world::items::{Collection, OWNED, PURCHASABLE};
 
 /// Accept one committed purchase tree, including an unchanged retry. Existing
 /// records stay unchanged except a single purchasable leaf promotion. New kit
-/// children must belong to the new root; unrelated grants are not a purchase.
+/// children must belong to the new root. A promoted leaf may have one exact
+/// ownerless replacement offer; unrelated grants are not a purchase.
 pub(super) fn valid_refresh(before: &Collection, after: &Collection) -> bool {
     if before.items.keys().any(|id| !after.items.contains_key(id)) {
         return false;
     }
     let mut added = std::collections::BTreeSet::new();
+    let mut replacement = None;
     let mut promoted_id = None;
     for (id, item) in &after.items {
         let previous = before.items.get(id);
         if previous == Some(item) {
+            continue;
+        }
+        if previous.is_none() && item.state == PURCHASABLE && item.owner == 0 {
+            if item.id != *id || replacement.replace(item).is_some() {
+                return false;
+            }
             continue;
         }
         if item.id != *id || item.state != OWNED || item.owner == 0 {
@@ -42,6 +50,16 @@ pub(super) fn valid_refresh(before: &Collection, after: &Collection) -> bool {
             }
         } else {
             added.insert(*id);
+        }
+    }
+    if let Some(replacement) = replacement {
+        let Some(promoted) = promoted_id.and_then(|id| before.items.get(&id)) else {
+            return false;
+        };
+        let mut expected = promoted.clone();
+        expected.id = replacement.id;
+        if replacement != &expected {
+            return false;
         }
     }
     if added.is_empty() {
@@ -79,6 +97,46 @@ pub(super) fn valid_refresh(before: &Collection, after: &Collection) -> bool {
         }
     }
     added.is_empty()
+}
+
+impl super::PlayerListener {
+    /// The purchase reply describes the promoted record. Announce its fresh
+    /// offer separately through the existing Items change contract.
+    pub(in crate::net) fn purchase_notifications(
+        &self,
+        after: &Collection,
+        catalog: &nfs_world::items::Catalog,
+    ) -> Result<Vec<Vec<u8>>, nfs_world::replication::Error> {
+        use nfs_world::replication::Error;
+        let before = &self.inventory.as_ref().ok_or(Error::Shape)?.items;
+        if !valid_refresh(before, after) {
+            return Err(Error::Shape);
+        }
+        let added = after
+            .items
+            .iter()
+            .filter(|(id, item)| {
+                !before.items.contains_key(id) && item.state == PURCHASABLE && item.owner == 0
+            })
+            .map(|(&id, _)| id)
+            .collect::<Vec<_>>();
+        if added.is_empty() {
+            return Ok(Vec::new());
+        }
+        let index = self
+            .players
+            .account_runtime_index(super::HOST_SELECTOR as u8, self.persona)
+            .ok_or(Error::UnknownObject)?;
+        Ok(vec![
+            nfs_world::items::ChangeNotification {
+                player_index: u32::from(index),
+                added: after.for_roots(added).map_err(|_| Error::Shape)?,
+                removed: Default::default(),
+            }
+            .encode(catalog)
+            .map_err(|_| Error::Shape)?,
+        ])
+    }
 }
 
 #[cfg(test)]
@@ -155,6 +213,40 @@ mod tests {
         let mut two = inserted;
         two.items.insert(3, after.items[&3].clone());
         assert!(!valid_refresh(&before, &two));
+    }
+
+    #[test]
+    fn replacement_requires_one_exact_promoted_offer() {
+        let before = fixture();
+        let mut after = before.clone();
+        after.items.get_mut(&3).unwrap().state = OWNED;
+        after.items.get_mut(&3).unwrap().owner = 1;
+        let mut replacement = before.items[&3].clone();
+        replacement.id = 4;
+        after.items.insert(4, replacement);
+        after.roots.push(4);
+        assert!(valid_refresh(&before, &after));
+        assert!(valid_refresh(&after, &after));
+        for mutation in 0..8 {
+            let mut bad = after.clone();
+            match mutation {
+                0 => bad.items.get_mut(&4).unwrap().definition = [9; 16],
+                1 => bad.items.get_mut(&4).unwrap().buy_price += 1,
+                2 => bad.items.get_mut(&4).unwrap().sell_price += 1,
+                3 => bad.items.get_mut(&4).unwrap().id = 9,
+                4 => bad.items.get_mut(&4).unwrap().children.push(3),
+                5 => bad.items.get_mut(&4).unwrap().defaults.push(3),
+                6 => {
+                    bad.items.insert(3, before.items[&3].clone());
+                }
+                _ => {
+                    let mut second = bad.items[&4].clone();
+                    second.id = 5;
+                    bad.items.insert(5, second);
+                }
+            }
+            assert!(!valid_refresh(&before, &bad), "mutation {mutation}");
+        }
     }
 
     #[test]
