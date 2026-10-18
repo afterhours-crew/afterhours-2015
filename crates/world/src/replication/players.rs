@@ -184,6 +184,22 @@ impl Players {
         let index = indices.next()?;
         indices.next().is_none().then_some(index)
     }
+    /// Resolve the sending local player for an event on a delegated AI object.
+    /// The AI participant itself has no Player or inventory ownership.
+    pub fn local_runtime_index(&self, connection: u8, persona: u64, slot: u8) -> Option<u8> {
+        self.participants
+            .keys()
+            .find_map(|&id| match &self.objects.get(id)?.initial {
+                Initial::Player(player)
+                    if player.value8 == connection
+                        && player.identity.persona == persona
+                        && player.value255 == slot =>
+                {
+                    Some(player.runtime_index)
+                }
+                _ => None,
+            })
+    }
     pub fn local_slot(&self, connection: u8, persona: u64, participant: u16) -> Option<u8> {
         if !self.owns_participant(connection, persona, participant) {
             return None;
@@ -500,5 +516,11 @@ mod tests {
         assert_eq!(world.account_runtime_index(2, 200), Some(1));
         assert_eq!(world.account_runtime_index(1, 200), None);
         assert_eq!(world.account_runtime_index(2, 100), None);
+        assert_eq!(world.local_runtime_index(1, 100, 0), Some(0));
+        assert_eq!(world.local_runtime_index(2, 200, 0), Some(1));
+        assert_eq!(world.local_runtime_index(1, 200, 0), None);
+        assert_eq!(world.local_runtime_index(2, 100, 0), None);
+        assert_eq!(world.local_runtime_index(1, 100, 1), None);
+        assert_eq!(world.local_runtime_index(1, 100, 255), None);
     }
 }

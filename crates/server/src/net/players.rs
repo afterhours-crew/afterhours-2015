@@ -1136,7 +1136,7 @@ impl Listener for PlayerListener {
                         measurements.push((owner.participant, measurement));
                     }
                 } else if crate::glass::Glass::recognizes(&message) {
-                    let nfs_world::logic::Message::Reached { target, .. } = &message else {
+                    let nfs_world::logic::Message::Reached { target, player, .. } = &message else {
                         return Err(replication::Error::Shape);
                     };
                     let owner = population
@@ -1149,6 +1149,7 @@ impl Listener for PlayerListener {
                                 target.ghost,
                             )
                         })
+                        .or_else(|| self.rival_glass_owner(&players, target.ghost, *player))
                         .ok_or(replication::Error::UnknownObject)?;
                     let fire = glass.receive(owner, &message)?;
                     match world_cars.get(&target.ghost) {

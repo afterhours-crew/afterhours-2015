@@ -5,6 +5,26 @@ use super::*;
 use crate::rival_content::population::{Focus, Input};
 
 impl PlayerListener {
+    pub(super) fn rival_glass_owner(
+        &self,
+        players: &Players,
+        vehicle: u16,
+        local_slot: u8,
+    ) -> Option<crate::glass::Owner> {
+        let connection = HOST_SELECTOR as u8;
+        let delegated =
+            self.rival_population
+                .as_ref()?
+                .delegated(players, connection, self.persona);
+        let ids = players.ai_ids(connection, self.persona, *delegated.get(&vehicle)?)?;
+        Some(crate::glass::Owner {
+            vehicle,
+            participant: ids.participant,
+            local_slot,
+            runtime_index: players.local_runtime_index(connection, self.persona, local_slot)?,
+        })
+    }
+
     pub(in crate::net) fn advance_rivals(&mut self, now: u64) -> Result<(), replication::Error> {
         if self.ai_busy() {
             return Ok(());
@@ -82,6 +102,201 @@ impl PlayerListener {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rival_glass_reports_commit_with_movement_and_reliable_delivery() {
+        use nfs_world::{
+            logic::{EntityRef, Message},
+            participants::HostRpc,
+            replication::vehicle::{chassis, movement::Sample},
+        };
+        let connection = HOST_SELECTOR as u8;
+        let (mut rivals, mut world, mut registrations, _) =
+            crate::rival_content::population::tests::fixture(connection);
+        let ids = crate::rival_content::population::tests::spawn(
+            &mut rivals,
+            &mut world,
+            &mut registrations,
+            connection,
+        )
+        .spawned
+        .unwrap();
+        let key = crate::traffic_content::population::RIVAL_KEY_START;
+        let before = world.ai_vehicle_physics(connection, 100, key).unwrap();
+        let mut motion = before.decode([0.; 3]).unwrap();
+        motion.identity = 100f64.to_bits();
+        motion.position[0] += 10.;
+        motion.velocity = [5., 0., 0.];
+        let sample = Sample {
+            physics: motion
+                .encode([0.; 3], &chassis::Controls::new(4).unwrap())
+                .unwrap(),
+            flag: false,
+        };
+        let (header, body) = sample.encode().unwrap();
+        let mut listener = PlayerListener::new(100);
+        listener.players = world;
+        listener.rival_population = Some(rivals);
+        assert!(
+            listener
+                .rival_glass_owner(&listener.players, ids.vehicle, 1)
+                .is_none()
+        );
+        assert!(
+            listener
+                .rival_glass_owner(&listener.players, ids.actor, 0)
+                .is_none()
+        );
+        listener.persona = 200;
+        assert!(
+            listener
+                .rival_glass_owner(&listener.players, ids.vehicle, 0)
+                .is_none()
+        );
+        listener.persona = 100;
+        let make_frame = |sequence, foreign| {
+            let mut events = [28_404_286, 14_703_462, 21_578_436]
+                .map(|event| {
+                    Message::Reached {
+                        event,
+                        target: EntityRef {
+                            ghost: ids.vehicle,
+                            entity: 2,
+                        },
+                        player: 0,
+                    }
+                    .encode()
+                    .unwrap()
+                })
+                .to_vec();
+            if foreign {
+                events.push(
+                    Message::Reached {
+                        event: 28_404_286,
+                        target: EntityRef {
+                            ghost: ids.actor,
+                            entity: 2,
+                        },
+                        player: 0,
+                    }
+                    .encode()
+                    .unwrap(),
+                );
+            }
+            let messages = frame::Builder::new().messages(
+                None,
+                vec![frame::Group {
+                    channel: 0,
+                    sequence: Some(sequence),
+                    messages: events
+                        .iter()
+                        .map(|b| frame::Message::Opaque {
+                            index: 82,
+                            body: b.span(),
+                        })
+                        .collect(),
+                }],
+            );
+            let mut wire = nfs_world::bits::BitWriter::new();
+            wire.put((1 << frame::MESSAGES) | (1 << frame::MOVEMENT), 6);
+            messages.append(&mut wire).unwrap();
+            wire.put_span(header.span())
+                .put(1, 6)
+                .put(ids.vehicle.into(), 16)
+                .put(0, 4)
+                .put(body.len() as u64, 16)
+                .put_span(body.span())
+                .align();
+            wire
+        };
+        let deliver = |listener: &mut PlayerListener, wire: &nfs_world::bits::BitWriter| {
+            listener.frame(Queued {
+                advertised: None,
+                frame: 0,
+                data: wire.span(),
+            })
+        };
+        // A later invalid event must roll back the earlier valid glass and motion.
+        assert!(!deliver(&mut listener, &make_frame(0, true)));
+        assert!(listener.glass.state(ids.vehicle).is_none());
+        assert_eq!(
+            listener
+                .players
+                .ai_vehicle_physics(connection, 100, key)
+                .unwrap(),
+            before
+        );
+        assert!(listener.pending_rpcs.is_empty());
+        let valid = make_frame(0, false);
+        listener.pending_rpcs.resize(
+            nfs_world::session::MAX_RPC_QUEUE,
+            HostRpc::Event(nfs_world::logic::Fire {
+                event: 7,
+                player: Some(3),
+                target: EntityRef {
+                    ghost: ids.vehicle,
+                    entity: 2,
+                },
+            }),
+        );
+        assert!(!deliver(&mut listener, &valid));
+        assert!(listener.glass.state(ids.vehicle).is_none());
+        assert_eq!(
+            listener
+                .players
+                .ai_vehicle_physics(connection, 100, key)
+                .unwrap(),
+            before
+        );
+        listener.pending_rpcs.clear();
+        assert!(deliver(&mut listener, &valid));
+        assert_eq!(
+            listener
+                .players
+                .ai_vehicle_physics(connection, 100, key)
+                .unwrap(),
+            sample.physics
+        );
+        assert_eq!(
+            listener.glass.state(ids.vehicle),
+            Some(&[Some(crate::glass::Condition::BelowThreshold); 3])
+        );
+        assert_eq!(
+            listener
+                .pending_rpcs
+                .iter()
+                .filter_map(|rpc| match rpc {
+                    HostRpc::Event(fire) => Some((fire.event, fire.player, fire.target)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            [7, 9, 11].map(|event| (
+                event,
+                Some(3),
+                EntityRef {
+                    ghost: ids.vehicle,
+                    entity: 2
+                }
+            ))
+        );
+        assert!(listener.world_cars.is_empty() && listener.pending_spawns.is_empty());
+        listener.pending.clear();
+        listener.pending_rpcs.clear();
+        assert!(deliver(&mut listener, &valid));
+        assert!(listener.pending_rpcs.is_empty());
+        // A new report fires again; retirement immediately revokes event authority.
+        assert!(deliver(&mut listener, &make_frame(3, false)));
+        assert_eq!(listener.pending_rpcs.len(), 3);
+        listener
+            .players
+            .remove_ai_vehicle(connection, 100, key)
+            .unwrap();
+        assert!(
+            listener
+                .rival_glass_owner(&listener.players, ids.vehicle, 0)
+                .is_none()
+        );
+    }
+
     #[test]
     fn mixed_traffic_and_rival_reports_keep_both_delegations_and_echo_clocks() {
         use nfs_world::replication::vehicle::{chassis, movement::Sample};
