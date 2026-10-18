@@ -215,7 +215,7 @@ fn traffic_loader_rejects_broken_closure_catalog_and_geometry() {
         serde_json::from_slice(&std::fs::read(prepared.path(Kind::TrafficContent)).unwrap())
             .unwrap();
     for (path, bad) in [
-        ("/version", serde_json::json!(3)),
+        ("/version", serde_json::json!(2)),
         (
             "/managers/actors",
             value["managers"]["participants"].clone(),
@@ -223,17 +223,17 @@ fn traffic_loader_rejects_broken_closure_catalog_and_geometry() {
         ("/personas/0/index", serde_json::json!(1)),
         ("/personas/0/vehicle", serde_json::json!("missing/bundle")),
         ("/personas/0/tags", serde_json::json!(["invalid-guid"])),
-        ("/spline_count", serde_json::json!(1)),
-        ("/splines/1/index", serde_json::json!(0)),
-        ("/splines/1/segments/0/speed", serde_json::json!(-1)),
-        ("/splines/1/segments/0/points/0", serde_json::json!([0, 1])),
+        ("/splines/0/catalog_count", serde_json::json!(1)),
+        ("/splines/0/index", serde_json::json!(2)),
+        ("/splines/0/segments/0/speed", serde_json::json!(-1)),
+        ("/splines/0/segments/0/points/0", serde_json::json!([0, 1])),
         (
-            "/splines/1/segments/0/points/0",
+            "/splines/0/segments/0/points/0",
             serde_json::json!([100, 3, 4]),
         ),
-        ("/splines/1/segments/0/controls", serde_json::json!([])),
-        ("/splines/1/segments/0/times", serde_json::json!([0.])),
-        ("/splines/1/segments/0/distances", serde_json::json!([-1.])),
+        ("/splines/0/segments/0/controls", serde_json::json!([])),
+        ("/splines/0/segments/0/times", serde_json::json!([0.])),
+        ("/splines/0/segments/0/distances", serde_json::json!([-1.])),
         ("/density", serde_json::json!(101)),
         ("/vehicles", serde_json::json!([])),
     ] {
@@ -241,8 +241,25 @@ fn traffic_loader_rejects_broken_closure_catalog_and_geometry() {
         *corrupt.pointer_mut(path).unwrap() = bad;
         assert!(traffic::Content::from_json(&corrupt).is_err(), "{path}");
     }
+    let mut duplicate = value.clone();
+    duplicate["splines"]
+        .as_array_mut()
+        .unwrap()
+        .push(value["splines"][0].clone());
+    assert!(traffic::Content::from_json(&duplicate).is_err());
+    duplicate["splines"][1]["index"] = serde_json::json!(0);
+    assert!(traffic::Content::from_json(&duplicate).is_ok());
+    duplicate["splines"][1]["catalog_count"] = serde_json::json!(3);
+    assert!(traffic::Content::from_json(&duplicate).is_err());
+    duplicate["splines"][1]["scene"] = serde_json::json!(123);
+    assert!(traffic::Content::from_json(&duplicate).is_ok());
+    let mut empty_road = value.clone();
+    empty_road["splines"][0]["segments"] = serde_json::json!([]);
+    let parsed = traffic::Content::from_json(&empty_road).unwrap();
+    assert_eq!(parsed.splines.len(), 1);
+    assert!(parsed.splines[0].segments.is_empty());
     let mut extra = value;
-    extra["splines"][1]["unexpected"] = serde_json::json!(true);
+    extra["splines"][0]["unexpected"] = serde_json::json!(true);
     assert!(traffic::Content::from_json(&extra).is_err());
 }
 
@@ -260,10 +277,11 @@ fn builds_outputs_the_service_loaders_accept() {
     sequences::SequenceContent::load(&prepared.path(Kind::SequenceContent)).unwrap();
     let traffic = traffic::Content::load(&prepared.path(Kind::TrafficContent)).unwrap();
     assert_eq!(traffic.personas.len(), 1);
-    assert_eq!(traffic.splines.len(), 2);
-    assert!(traffic.splines[0].segments.is_empty());
+    assert_eq!(traffic.splines.len(), 1);
+    assert_eq!(traffic.splines[0].index, 1);
+    assert_eq!(traffic.splines[0].catalog_count, 2);
     assert_eq!(
-        traffic.splines[1].segments[0].points,
+        traffic.splines[0].segments[0].points,
         [[2., 3., 4.], [12., 3., 4.]]
     );
     vehicle_parts::Catalog::load(&prepared.path(Kind::VehicleParts), &items.catalog).unwrap();

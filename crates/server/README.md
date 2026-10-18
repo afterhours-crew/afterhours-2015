@@ -478,7 +478,13 @@ simulates delegated cars. AI remains separate from player inventory and scoring.
 Only session-authorized spawn keys accept reports; stale reports cannot rewind
 state, and retirement removes their grants. Independent chassis updates can
 share bounded publications without crossing lifecycle barriers. Installed cubic
-control points provide initial road tangents; prepared traffic content version 2
-rebuilds older caches. The superseded host path-following policy is removed.
-The first moving test exposed uneven motion and periodic bounce; the fix and
-fresh live acceptance remain in progress (#114, #54).
+control points supply distance-spaced spawn candidates with level headings.
+Population follows linked road order, provider persona order, road quotas,
+motion-predicted focus regions, heading/spacing checks and traffic-jam suppression.
+Each focus has adaptive spawn timing; at most one vehicle is added per advance.
+Retirement requires total age over two seconds outside every retained region;
+there is no fixed maximum lifetime. Scene-local road identities are preserved
+across nested catalogs, and prepared traffic version 3 rebuilds older caches.
+Time and selection entropy are injected into the population model. A session is
+bounded by the shared AI object limit. Library tests cover the policy and atomic
+rollback; complete gameplay acceptance remains tracked in #54.

@@ -30,12 +30,16 @@ impl Curve {
             return Err(bad("curve shape"));
         }
         let mut previous = [0., 0.];
+        // Authored roads may contain a collapsed segment. Preserve its place
+        // in the road/speed tables, but never use it as a spawn direction.
+        let collapsed =
+            controls.iter().all(|p| *p == controls[0]) && distances.iter().all(|d| *d == 0.);
         for (&t, &d) in times.iter().zip(&distances) {
             if !t.is_finite()
                 || t <= previous[0]
                 || t > 1.
                 || !d.is_finite()
-                || d <= previous[1]
+                || (!collapsed && d <= previous[1])
                 || d > 100_000.
             {
                 return Err(bad("curve distance table"));
@@ -74,7 +78,8 @@ impl Curve {
     }
     /// Position and analytic forward tangent at an authored arc distance.
     pub fn sample(&self, distance: f32) -> Option<([f32; 3], [f32; 3])> {
-        if !distance.is_finite() || distance < 0. || distance > self.length() {
+        if !distance.is_finite() || distance < 0. || distance > self.length() || self.length() == 0.
+        {
             return None;
         }
         let i = self
@@ -130,6 +135,19 @@ fn norm(v: [f32; 3]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn collapsed_authored_segments_are_preserved_without_a_spawn_tangent() {
+        let point = [1200., 150., -200.];
+        let c = Curve::new([point; 4], vec![0.5, 1.], vec![0., 0.]).unwrap();
+        assert_eq!(c.length(), 0.);
+        assert!(c.sample(0.).is_none());
+        c.validate_points(&[point; 3]).unwrap();
+        let mut controls = [point; 4];
+        controls[1][0] += 1.;
+        assert!(Curve::new(controls, vec![0.5, 1.], vec![0., 0.]).is_err());
+        assert!(Curve::new([point; 4], vec![0.5, 1.], vec![1., 1.]).is_err());
+        assert!(Curve::new([point; 4], vec![0.5, 1.], vec![0., 1.]).is_err());
+    }
     #[test]
     fn curve_tangents_change_continuously_across_distance_table_entries() {
         let c = Curve::new(

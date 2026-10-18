@@ -2,11 +2,10 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! Bounded session-owned traffic. Placement is host policy over installed roads;
-//! vehicle/manager/goal wire shapes are independent of that policy.
+//! Session-owned ambient traffic with installed roads and native population rules.
 use nfs_content::traffic::Content;
 use nfs_world::{
-    content::bindings::{Bindings, name_key},
+    content::bindings::{Bindings, Level, name_key},
     participants::HostRpc,
     replication::{
         Error, Record,
@@ -15,35 +14,51 @@ use nfs_world::{
         traffic, vehicle,
     },
 };
-use std::collections::BTreeMap;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
+
+mod policy;
+pub use policy::Focus;
 
 #[cfg(test)]
 pub(crate) mod tests;
 
-pub const MAX_CARS: usize = 8;
-const SPAWN_INTERVAL_MS: u64 = 1000;
-// The native population uses 300/450 metre eligibility/retention distances.
-// Its spawn region also depends on player motion and orientation, and its
-// retirement gate checks total age. This host policy conservatively excludes
-// a circle and requires two continuous seconds outside every retention region;
-// it does not reproduce the entire native population policy.
-const SPAWN_DISTANCE: f32 = 300.;
-const RETAIN_DISTANCE: f32 = 450.;
-const RETIRE_GRACE_MS: u64 = 2000;
+pub const MAX_CARS: usize = ai::MAX_AI;
+
+pub struct Input<'a> {
+    pub now: u64,
+    pub focus: &'a [Focus],
+    pub random: [u32; 2],
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct Timer {
+    elapsed: f32,
+    interval: f32,
+}
 
 #[derive(Clone, Debug)]
 struct Car {
     anchor: [f32; 3],
-    outside_since: Option<u64>,
+    velocity: [f32; 3],
+    forward: [f32; 3],
+    road: usize,
+    born: u64,
 }
 
 #[derive(Clone, Debug)]
 pub struct Population {
     bindings: Bindings,
+    catalogs: BTreeMap<u32, Level>,
     authority: vehicle::authority::Registry,
+    policy: Arc<policy::Policy>,
     cars: BTreeMap<u64, Car>,
+    road_counts: BTreeMap<usize, u32>,
+    timers: BTreeMap<u16, Timer>,
+    persona_cursor: usize,
     next: u64,
-    due: u64,
     clock: u64,
     owner: Option<(u8, u64)>,
 }
@@ -58,8 +73,9 @@ pub struct Changes {
 
 #[derive(Clone, Debug)]
 struct Placement {
-    spline: u16,
+    spline: usize,
     persona: usize,
+    born: u64,
     pose: vehicle::initialize::Pose,
 }
 
@@ -79,12 +95,28 @@ impl Population {
                 .bundle_id;
             asset_bundle(bundle)?;
         }
+        let levels = bindings.hierarchy();
+        let mut catalogs = BTreeMap::new();
+        for road in &content.splines {
+            let mut matches = levels
+                .iter()
+                .filter(|level| level.content_key == road.scene);
+            let level = *matches.next().ok_or(Error::UnknownObject)?;
+            if matches.next().is_some() || level.id >= 2048 {
+                return Err(Error::Shape);
+            }
+            catalogs.insert(road.scene, level);
+        }
         Ok(Self {
             bindings,
+            catalogs,
             authority: vehicle::authority::Registry::default(),
+            policy: Arc::new(policy::Policy::new(content)?),
             cars: BTreeMap::new(),
+            road_counts: BTreeMap::new(),
+            timers: BTreeMap::new(),
+            persona_cursor: 0,
             next: 1,
-            due: 0,
             clock: 0,
             owner: None,
         })
@@ -117,11 +149,18 @@ impl Population {
         connection: u8,
         persona: u64,
         content: &Content,
-        now: u64,
-        focus: &[[f32; 3]],
+        input: Input<'_>,
     ) -> Result<Changes, Error> {
-        if now < self.clock || focus.len() > 128 || focus.iter().flatten().any(|v| !v.is_finite()) {
+        let Input { now, focus, random } = input;
+        if now < self.clock || focus.len() > 128 {
             return Err(Error::Bound);
+        }
+        let mut ids = BTreeSet::new();
+        for point in focus {
+            point.validate()?;
+            if !ids.insert(point.id) {
+                return Err(Error::DuplicateObject);
+            }
         }
         if self
             .owner
@@ -133,27 +172,19 @@ impl Population {
         let mut world = players.clone();
         let mut changes = Changes::default();
         for (&key, car) in &mut next.cars {
-            car.anchor = world
+            let motion = world
                 .ai_vehicle_physics(connection, persona, key)?
-                .decode([0.; 3])?
-                .position;
-            if focus
-                .iter()
-                .any(|p| horizontal_distance_squared(*p, car.anchor) <= RETAIN_DISTANCE.powi(2))
-            {
-                car.outside_since = None;
-            } else {
-                car.outside_since.get_or_insert(now);
-            }
+                .decode([0.; 3])?;
+            car.anchor = motion.position;
+            car.velocity = motion.velocity;
+            car.forward = vehicle::orientation::basis_from_quaternion(motion.quaternion)?[2];
         }
         let retire: Vec<_> = next
             .cars
             .iter()
             .filter(|(_, car)| {
                 focus.is_empty()
-                    || car
-                        .outside_since
-                        .is_some_and(|since| now.saturating_sub(since) >= RETIRE_GRACE_MS)
+                    || (now - car.born > 2000 && !focus.iter().any(|p| p.retains(car.anchor)))
             })
             .map(|(&key, _)| key)
             .collect();
@@ -161,11 +192,53 @@ impl Population {
             let removed = world.remove_ai_vehicle(connection, persona, key)?;
             changes.records.extend(removed.records);
             changes.deleted.extend(removed.deleted);
-            next.cars.remove(&key);
+            let car = next.cars.remove(&key).ok_or(Error::UnknownObject)?;
+            let count = next
+                .road_counts
+                .get_mut(&car.road)
+                .ok_or(Error::UnknownObject)?;
+            *count = count.checked_sub(1).ok_or(Error::Shape)?;
             next.authority.remove_group(key);
         }
-        if !focus.is_empty() && next.cars.len() < MAX_CARS && now >= next.due {
-            if let Some(placement) = next.select(content, focus) {
+        next.timers.retain(|id, _| ids.contains(id));
+        for point in focus {
+            let timer = next
+                .timers
+                .entry(point.id)
+                .and_modify(|t| t.elapsed += (now - self.clock) as f32 * 0.001)
+                .or_insert(Timer {
+                    elapsed: 0.,
+                    interval: 1.,
+                });
+            if changes.spawned.is_some()
+                || next.cars.len() >= MAX_CARS
+                || timer.elapsed <= timer.interval
+            {
+                continue;
+            }
+            timer.elapsed -= timer.interval;
+            let query = next.policy.query(point);
+            let nearby = next.policy.nearby(point, &next.cars);
+            timer.interval = (nearby as f32 / query.target as f32) * 2.;
+            if nearby >= query.target {
+                continue;
+            }
+            if let Some(candidate) =
+                next.policy
+                    .select(&query, point, focus, &next.cars, &next.road_counts, random)
+                && let Some((selected, cursor)) =
+                    next.policy.persona(candidate.road, next.persona_cursor)
+            {
+                let placement = Placement {
+                    spline: candidate.road,
+                    persona: selected,
+                    born: now,
+                    pose: vehicle::initialize::Pose {
+                        position: candidate.position,
+                        basis: candidate.basis,
+                        origin: [0.; 3],
+                    },
+                };
                 next.spawn(
                     &mut world,
                     connection,
@@ -174,95 +247,14 @@ impl Population {
                     placement,
                     &mut changes,
                 )?;
+                next.persona_cursor = cursor;
             }
-            next.due = now.saturating_add(SPAWN_INTERVAL_MS);
         }
         next.clock = now;
         next.owner = Some((connection, persona));
         *self = next;
         *players = world;
         Ok(changes)
-    }
-
-    fn select(&self, content: &Content, focus: &[[f32; 3]]) -> Option<Placement> {
-        if content.density <= 0. {
-            return None;
-        }
-        let mut best: Option<(f32, Placement)> = None;
-        for spline in &content.splines {
-            if spline.density == 0 {
-                continue;
-            }
-            // This is an explicit host selection policy, not a claim about the
-            // stock server's random distribution or tag predicate.
-            let compatible: Vec<_> = content
-                .personas
-                .iter()
-                .enumerate()
-                .filter(|(_, p)| {
-                    spline.tags.is_empty() || p.tags.iter().any(|tag| spline.tags.contains(tag))
-                })
-                .map(|(index, _)| index)
-                .collect();
-            if compatible.is_empty() {
-                continue;
-            }
-            let persona = compatible[((self.next - 1) % compatible.len() as u64) as usize];
-            for segment in &spline.segments {
-                for (point_index, pair) in segment.points.windows(2).enumerate() {
-                    let position = pair[0];
-                    // Exclude the close region of every active player, even
-                    // when a different floor makes them ineligible as a focus.
-                    if focus.iter().any(|p| {
-                        horizontal_distance_squared(*p, position) <= SPAWN_DISTANCE.powi(2)
-                    }) {
-                        continue;
-                    }
-                    let distance = focus
-                        .iter()
-                        .filter(|p| (p[1] - position[1]).abs() <= 8.)
-                        .map(|p| horizontal_distance_squared(*p, position))
-                        .min_by(f32::total_cmp);
-                    let Some(distance) = distance else {
-                        continue;
-                    };
-                    if distance >= RETAIN_DISTANCE.powi(2)
-                        || self
-                            .cars
-                            .values()
-                            .any(|car| distance_squared(car.anchor, position) < 30. * 30.)
-                    {
-                        continue;
-                    }
-                    if best.as_ref().is_some_and(|(d, _)| *d <= distance) {
-                        continue;
-                    }
-                    let Some((_, tangent)) = segment
-                        .curve
-                        .distance_at_point(point_index)
-                        .and_then(|d| segment.curve.sample(d))
-                    else {
-                        continue;
-                    };
-                    let Some(basis) = road_basis([0.; 3], tangent) else {
-                        continue;
-                    };
-                    best = Some((
-                        distance,
-                        Placement {
-                            spline: spline.index,
-                            persona,
-                            pose: vehicle::initialize::Pose {
-                                position,
-                                basis,
-                                origin: [0.; 3],
-                            },
-                        },
-                    ));
-                }
-            }
-        }
-        best.map(|(_, p)| p)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -359,10 +351,15 @@ impl Population {
         let bound = world.bind_ai_managers(connection, persona, key, content.managers)?;
         changes.calls.extend(bound.add.map(HostRpc::Participant));
         changes.calls.extend(bound.bind.map(HostRpc::Actor));
+        let spline = content.splines.get(placement.spline).ok_or(Error::Shape)?;
         let level = self
-            .bindings
-            .root_child(content.managers.scene)
-            .map_err(|_| Error::Shape)?;
+            .catalogs
+            .get(&spline.scene)
+            .ok_or(Error::UnknownObject)?;
+        world
+            .objects()
+            .scene(spline.scene)
+            .ok_or(Error::UnknownObject)?;
         let (goal, assigned) = world.start_ai_traffic_goal(
             connection,
             persona,
@@ -371,12 +368,9 @@ impl Population {
                 asset: Asset {
                     bundle: level.id,
                     type_id: content.spline_class,
-                    local_index: placement.spline,
+                    local_index: spline.index,
                 },
-                catalog: Catalog::new(
-                    level.id,
-                    &[(content.spline_class, content.splines.len() as u16)],
-                )?,
+                catalog: Catalog::new(level.id, &[(content.spline_class, spline.catalog_count)])?,
                 allocation_serial: 0,
                 asset_mode: 2,
             },
@@ -388,9 +382,13 @@ impl Population {
             key,
             Car {
                 anchor: placement.pose.position,
-                outside_since: None,
+                velocity: [0.; 3],
+                forward: placement.pose.basis[2],
+                road: placement.spline,
+                born: placement.born,
             },
         );
+        *self.road_counts.entry(placement.spline).or_default() += 1;
         Ok(())
     }
 }
@@ -410,20 +408,11 @@ fn horizontal_distance_squared(a: [f32; 3], b: [f32; 3]) -> f32 {
 }
 pub(super) fn road_basis(a: [f32; 3], b: [f32; 3]) -> Option<[[f32; 3]; 3]> {
     let mut forward = std::array::from_fn::<_, 3, _>(|i| b[i] - a[i]);
+    forward[1] = 0.;
     let length = forward.iter().map(|v| v * v).sum::<f32>().sqrt();
     if !length.is_finite() || length < 0.01 {
         return None;
     }
     forward = forward.map(|v| v / length);
-    let horizontal = (forward[0].powi(2) + forward[2].powi(2)).sqrt();
-    if horizontal < 0.1 {
-        return None;
-    }
-    let right = [forward[2] / horizontal, 0., -forward[0] / horizontal];
-    let up = [
-        forward[1] * right[2],
-        forward[2] * right[0] - forward[0] * right[2],
-        -forward[1] * right[0],
-    ];
-    Some([right, up, forward])
+    Some([[forward[2], 0., -forward[0]], [0., 1., 0.], forward])
 }

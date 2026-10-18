@@ -22,6 +22,8 @@ const MAX_SEGMENT_POINTS: usize = 4096;
 type Key = (String, usize);
 mod curve;
 pub use curve::Curve;
+mod links;
+pub use links::Links;
 
 #[derive(Clone, Debug)]
 pub struct Persona {
@@ -39,7 +41,11 @@ pub struct Segment {
 }
 #[derive(Clone, Debug)]
 pub struct Spline {
+    /// Owning startup scene and local asset catalog identity, independently of
+    /// this road's position in the manager's population list.
+    pub scene: u32,
     pub index: u16,
+    pub catalog_count: u16,
     pub density: u16,
     pub tags: Vec<[u8; 16]>,
     pub segments: Vec<Segment>,
@@ -74,7 +80,6 @@ impl Content {
                 "build_sha256",
                 "scene",
                 "spline_class",
-                "spline_count",
                 "managers",
                 "density",
                 "personas",
@@ -83,7 +88,7 @@ impl Content {
             ],
         )?;
         if v["format"] != "nfs-traffic-content"
-            || v["version"] != 2
+            || v["version"] != 3
             || v["build_sha256"] != nfs_services::SUPPORTED_BUILD_SHA256
         {
             return Err(bad("content identity"));
@@ -149,13 +154,34 @@ impl Content {
             return Err(bad("persona vehicle closure"));
         }
         let mut splines = Vec::new();
+        let mut identities = BTreeSet::new();
+        let mut catalogs = BTreeMap::new();
         let mut total_segments = 0;
         let mut total_points = 0;
         for value in json_array(&v["splines"], MAX_SPLINES)? {
-            json_keys(value, &["index", "density", "tags", "segments"])?;
+            json_keys(
+                value,
+                &[
+                    "scene",
+                    "index",
+                    "catalog_count",
+                    "density",
+                    "tags",
+                    "segments",
+                ],
+            )?;
+            let scene = number::<u32>(&value["scene"])?;
             let index = number(&value["index"])?;
+            let catalog_count = number::<u16>(&value["catalog_count"])?;
             let density = number(&value["density"])?;
-            if index as usize != splines.len() || density > 10000 {
+            if index >= catalog_count
+                || catalog_count as usize > MAX_SPLINES
+                || density > 10000
+                || !identities.insert((scene, index))
+                || catalogs
+                    .insert(scene, catalog_count)
+                    .is_some_and(|previous| previous != catalog_count)
+            {
                 return Err(bad("spline identity/density"));
             }
             let mut segments = Vec::new();
@@ -213,13 +239,15 @@ impl Content {
                 });
             }
             splines.push(Spline {
+                scene,
                 index,
+                catalog_count,
                 density,
                 tags: json_tags(&value["tags"])?,
                 segments,
             });
         }
-        if splines.is_empty() || number::<usize>(&v["spline_count"])? != splines.len() {
+        if splines.is_empty() {
             return Err(bad("spline count"));
         }
         Ok(Self {
@@ -382,6 +410,19 @@ pub fn extract(index: &mut AssetIndex) -> Result<Json, Error> {
         .map(|n| n.to_lowercase())
         .collect();
     let (_, instances) = scenes::construct(&mut index.assets, &rules, &gameplay, true)?;
+    let scene_names = index
+        .startup_entries(&rules.level)?
+        .into_iter()
+        .filter(|s| s.kind == crate::world::StartupKind::SubLevel)
+        .map(|s| s.name.to_lowercase())
+        .collect();
+    let ports = index.identity.traffic_links;
+    let linked = links::resolve(
+        &mut crate::graph::Graph::new(&mut index.assets),
+        crate::graph::Site::root(&gameplay),
+        &scene_names,
+        ports,
+    )?;
     let mut participant_manager = None;
     let mut actor_manager = None;
     let mut density = None;
@@ -422,143 +463,149 @@ pub fn extract(index: &mut AssetIndex) -> Result<Json, Error> {
                     return Err(bad("traffic density"));
                 }
             }
-            "PersonaEntityData" => {
-                let (item, _) = follow(index, &key, "VehicleItemData", "RaceVehicleItemData")?;
-                let (_, reference) = follow(index, &item, "RaceVehicle", "RaceVehicleReference")?;
-                let bundle = text(
-                    field(&reference, "BundleReference")?
-                        .as_fields()
-                        .and_then(|f| f.get("Name"))
-                        .ok_or_else(|| bad("bundle reference"))?,
-                )?
-                .to_lowercase();
-                if !traffic_bundles.contains(&bundle) {
-                    continue;
-                }
-                let name = text(field(&value, "PersonaName")?)?;
-                if name.len() > 64 || !names.insert(name.clone()) || personas.len() >= MAX_PERSONAS
-                {
-                    return Err(bad("persona names/count"));
-                }
-                // Traffic uses stock vehicles. Refuse authored modifications until
-                // their state is modeled instead of silently dropping them.
-                for name in [
-                    "OverrideCarColor",
-                    "OverridePerformance",
-                    "OverrideGripValue",
-                ] {
-                    if field(&value, name)?.as_bool() != Some(false) {
-                        return Err(bad("modified traffic persona"));
-                    }
-                }
-                if field(&value, "AdditionalItems")?
-                    .as_array()
-                    .is_none_or(|a| !a.is_empty())
-                {
-                    return Err(bad("traffic additional items"));
-                }
-                if !definitions.contains_key(&bundle) {
-                    definitions.insert(bundle.clone(), vehicles::extract(index, &bundle)?);
-                }
-                personas.push(json!({"name":name,"index":personas.len(),"vehicle":bundle,"tags":tags(index,&key,&value)?}));
-            }
             _ => (),
         }
+    }
+    for key in linked.personas {
+        let value = object(index, &key)?;
+        let (item, _) = follow(index, &key, "VehicleItemData", "RaceVehicleItemData")?;
+        let (_, reference) = follow(index, &item, "RaceVehicle", "RaceVehicleReference")?;
+        let bundle = text(
+            field(&reference, "BundleReference")?
+                .as_fields()
+                .and_then(|f| f.get("Name"))
+                .ok_or_else(|| bad("bundle reference"))?,
+        )?
+        .to_lowercase();
+        if !traffic_bundles.contains(&bundle) {
+            return Err(bad("traffic vehicle bundle is not preloaded"));
+        }
+        let name = text(field(&value, "PersonaName")?)?;
+        if name.len() > 64 || !names.insert(name.clone()) || personas.len() >= MAX_PERSONAS {
+            return Err(bad("persona names/count"));
+        }
+        // Traffic uses stock vehicles. Refuse authored modifications until
+        // their state is modeled instead of silently dropping them.
+        for name in [
+            "OverrideCarColor",
+            "OverridePerformance",
+            "OverrideGripValue",
+        ] {
+            if field(&value, name)?.as_bool() != Some(false) {
+                return Err(bad("modified traffic persona"));
+            }
+        }
+        if field(&value, "AdditionalItems")?
+            .as_array()
+            .is_none_or(|a| !a.is_empty())
+        {
+            return Err(bad("traffic additional items"));
+        }
+        if !definitions.contains_key(&bundle) {
+            definitions.insert(bundle.clone(), vehicles::extract(index, &bundle)?);
+        }
+        personas.push(json!({"name":name,"index":personas.len(),"vehicle":bundle,"tags":tags(index,&key,&value)?}));
     }
     if personas.is_empty() {
         return Err(bad("no traffic personas"));
     }
-    let registered = index.registered_objects(&gameplay, "TrafficSplineEntityData")?;
-    if registered.is_empty() || registered.len() > MAX_SPLINES {
-        return Err(bad("spline count"));
-    }
-    let count = registered.len();
+    let mut registries = BTreeMap::new();
     let mut splines = Vec::new();
     let mut total_segments = 0;
     let mut total_points = 0;
-    for (ordinal, key) in registered.into_iter().enumerate() {
+    for (scene, key) in linked.roads {
+        if !registries.contains_key(&scene) {
+            let registered = index.registered_objects(&scene, "TrafficSplineEntityData")?;
+            if registered.is_empty() || registered.len() > MAX_SPLINES {
+                return Err(bad("spline catalog count"));
+            }
+            registries.insert(scene.clone(), registered);
+        }
+        let registered = &registries[&scene];
+        let ordinal = registered
+            .iter()
+            .position(|k| *k == key)
+            .ok_or_else(|| bad("linked spline is not registered in its scene"))?;
+        let count = registered.len();
         let value = object(index, &key)?;
         let density = match field(&value, "DesiredDensity")? {
             Value::Int32(n) if (0..=10000).contains(n) => *n,
             _ => return Err(bad("spline density")),
         };
         let mut segments = Vec::new();
-        if let Some(speed_key) = target(index, &key.0, field(&value, "SpeedSegmentAsset")?)? {
-            let speeds = object(index, &speed_key)?;
-            if speeds.class != "SplineSpeedSegmentsAsset" {
-                return Err(bad("speed segment asset class"));
+        let (speed_key, speeds) =
+            follow(index, &key, "SpeedSegmentAsset", "SplineSpeedSegmentsAsset")?;
+        let entries = field(&speeds, "SpeedSegments")?
+            .as_array()
+            .ok_or_else(|| bad("speed segments"))?;
+        for entry in entries {
+            total_segments += 1;
+            if total_segments > MAX_SEGMENTS {
+                return Err(bad("segment bound"));
             }
-            let entries = field(&speeds, "SpeedSegments")?
-                .as_array()
-                .ok_or_else(|| bad("speed segments"))?;
-            for entry in entries {
-                total_segments += 1;
-                if total_segments > MAX_SEGMENTS {
-                    return Err(bad("segment bound"));
-                }
-                let segment_key =
-                    target(index, &speed_key.0, entry)?.ok_or_else(|| bad("null segment"))?;
-                let segment = object(index, &segment_key)?;
-                if segment.class != "SplineSpeedSegment" {
-                    return Err(bad("segment class"));
-                }
-                let speed = float(field(&segment, "DesiredSpeed")?)?;
-                if !(0. ..=500.).contains(&speed) {
-                    return Err(bad("desired speed"));
-                }
-                let p = points(
-                    field(&segment, "Spline")?
-                        .as_fields()
-                        .and_then(|f| f.get("SegmentPoints"))
-                        .ok_or_else(|| bad("spline points"))?,
-                )?;
-                total_points += p.len();
-                if total_points > MAX_POINTS {
-                    return Err(bad("point bound"));
-                }
-                let spline = field(&segment, "Spline")?
+            let segment_key =
+                target(index, &speed_key.0, entry)?.ok_or_else(|| bad("null segment"))?;
+            let segment = object(index, &segment_key)?;
+            if segment.class != "SplineSpeedSegment" {
+                return Err(bad("segment class"));
+            }
+            let speed = float(field(&segment, "DesiredSpeed")?)?;
+            if !(0. ..=500.).contains(&speed) {
+                return Err(bad("desired speed"));
+            }
+            let p = points(
+                field(&segment, "Spline")?
                     .as_fields()
-                    .ok_or_else(|| bad("spline"))?;
-                let base = spline
-                    .get("MatrixFormData")
-                    .and_then(Value::as_fields)
-                    .and_then(|v| v.get("BaseData"))
-                    .and_then(Value::as_fields)
-                    .ok_or_else(|| bad("curve controls"))?;
-                let controls = ["P0", "P1", "P2", "P3"]
-                    .into_iter()
-                    .map(|name| {
-                        let f = base
-                            .get(name)
-                            .and_then(Value::as_fields)
-                            .ok_or_else(|| bad("curve control"))?;
-                        Ok([
-                            float(f.get("x").ok_or_else(|| bad("x"))?)?,
-                            float(f.get("y").ok_or_else(|| bad("y"))?)?,
-                            float(f.get("z").ok_or_else(|| bad("z"))?)?,
-                        ])
-                    })
-                    .collect::<Result<Vec<_>, Error>>()?;
-                let floats = |key| {
-                    spline
-                        .get(key)
-                        .and_then(Value::as_array)
-                        .filter(|v| v.len() < MAX_SEGMENT_POINTS)
-                        .ok_or_else(|| bad("curve table"))?
-                        .iter()
-                        .map(float)
-                        .collect::<Result<Vec<_>, Error>>()
-                };
-                segments.push(json!({"speed":speed,"points":p,"controls":controls,"times":floats("SegmentEndTime")?,"distances":floats("SegmentEndDistance")?}));
+                    .and_then(|f| f.get("SegmentPoints"))
+                    .ok_or_else(|| bad("spline points"))?,
+            )?;
+            total_points += p.len();
+            if total_points > MAX_POINTS {
+                return Err(bad("point bound"));
             }
+            let spline = field(&segment, "Spline")?
+                .as_fields()
+                .ok_or_else(|| bad("spline"))?;
+            let base = spline
+                .get("MatrixFormData")
+                .and_then(Value::as_fields)
+                .and_then(|v| v.get("BaseData"))
+                .and_then(Value::as_fields)
+                .ok_or_else(|| bad("curve controls"))?;
+            let controls = ["P0", "P1", "P2", "P3"]
+                .into_iter()
+                .map(|name| {
+                    let f = base
+                        .get(name)
+                        .and_then(Value::as_fields)
+                        .ok_or_else(|| bad("curve control"))?;
+                    Ok([
+                        float(f.get("x").ok_or_else(|| bad("x"))?)?,
+                        float(f.get("y").ok_or_else(|| bad("y"))?)?,
+                        float(f.get("z").ok_or_else(|| bad("z"))?)?,
+                    ])
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
+            let floats = |key| {
+                spline
+                    .get(key)
+                    .and_then(Value::as_array)
+                    .filter(|v| v.len() < MAX_SEGMENT_POINTS)
+                    .ok_or_else(|| bad("curve table"))?
+                    .iter()
+                    .map(float)
+                    .collect::<Result<Vec<_>, Error>>()
+            };
+            segments.push(json!({"speed":speed,"points":p,"controls":controls,"times":floats("SegmentEndTime")?,"distances":floats("SegmentEndDistance")?}));
         }
-        // Preserve empty definitions and their catalog positions. Only usable
-        // geometry can become a population candidate at runtime.
-        splines.push(json!({"index":ordinal,"density":density,"tags":tags(index,&key,&value)?,"segments":segments}));
+        splines.push(
+            json!({"scene":scene_key(&scene),"index":ordinal,"catalog_count":count,
+            "density":density,"tags":tags(index,&key,&value)?,"segments":segments}),
+        );
     }
     Ok(
-        json!({"format":"nfs-traffic-content","version":2,"build_sha256":nfs_services::SUPPORTED_BUILD_SHA256,
-        "scene":scene_key(&gameplay),"spline_class":spline_class,"spline_count":count,
+        json!({"format":"nfs-traffic-content","version":3,"build_sha256":nfs_services::SUPPORTED_BUILD_SHA256,
+        "scene":scene_key(&gameplay),"spline_class":spline_class,
         "managers":{"participants":participant_manager.ok_or_else(||bad("missing participant manager"))?,"actors":actor_manager.ok_or_else(||bad("missing actor manager"))?},
         "density":density.ok_or_else(||bad("missing traffic manager"))?,"personas":personas,"vehicles":definitions.into_values().collect::<Vec<_>>(),"splines":splines}),
     )

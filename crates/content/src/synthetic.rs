@@ -910,6 +910,7 @@ pub fn write(root: &Path, assets: &[Asset]) -> std::io::Result<(Options, [u8; 64
             sequences: sequences::rules(),
             participant_logic: crate::BuildIdentity::supported().participant_logic,
             traffic_spline_class_id: 72,
+            traffic_links: traffic::links(),
             scenes: crate::scenes::Rules {
                 level: RUNTIME_LEVEL.to_owned(),
                 classes: [
@@ -920,6 +921,7 @@ pub fn write(root: &Path, assets: &[Asset]) -> std::io::Result<(Options, [u8; 64
                     ("ScriptedAISplineEntityData", None),
                     ("TrafficSplineEntityData", None),
                     ("PersonaEntityData", None),
+                    ("PersonaSetEntityData", None),
                     ("TrafficManagerEntityData", None),
                     (
                         "AiParticipantManagerEntityData",

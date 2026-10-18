@@ -40,7 +40,7 @@ let items = prepared.path(nfs_content::Kind::ItemContent);
 | `VehicleProfiles` | `vehicle-profiles.json` | Player vehicle blueprints reached through the item system: component profiles, mesh-link order, bus flags, registry identities, physics, appearance and health defaults |
 | `ProgressionContent` | `progression-content.json` | Main/intro persistence links, stable IDs, activation expressions, entity composition and explicit spawner-to-scene channel bindings |
 | `SequenceContent` | `sequence-content.json` | Waiting/exit sequence registries, manager bus and serializer, spawner channel links and the exit command's registered spline definition |
-| `TrafficContent` | `traffic-content.json` | Stock traffic personas, vehicle profiles, manager serializer ordinals and registered road-spline geometry |
+| `TrafficContent` | `traffic-content.json` | Linked traffic personas in provider order, vehicle profiles, manager serializer ordinals and roads with owning scene catalogs |
 | `WorldMacTemplate` | `world-mac-template.bin` | 64 bytes of the executable image at the build's known address, checked by digest |
 
 Derived defaults are the stored 32-bit patterns of each class's same-named
@@ -293,5 +293,10 @@ events and adds no prepared runtime file.
 bundle's component order, asset catalog, property buses, physics and health
 inputs. Its strict `Definition` omits player customization and inventory fields;
 player definitions retain their existing requirements. Unknown components fail
-extraction. This API supplies constructor inputs, not population or AI policy,
-and does not yet add a prepared runtime file.
+extraction. The prepared traffic document also follows manager road links through
+subworld interfaces and keeps each road's scene, local catalog index and catalog
+count separate from population order. Persona identities follow their provider's
+member links. Unknown providers, missing scene registrations and ambiguous links
+fail preparation. Version 3 rebuilds older traffic caches. Completely collapsed
+authored curve segments remain in the road and speed tables but have no spawn
+tangent. Population and AI lifecycle belong to the server.

@@ -4,6 +4,13 @@
 
 //! Authored traffic topology, with an empty spline before a usable one.
 use super::{Asset, Field, ObjectFields, PartitionWriter, SceneObjects};
+pub(super) fn links() -> crate::traffic::Links {
+    crate::traffic::Links {
+        roads: 111,
+        provider: 222,
+        personas: 333,
+    }
+}
 const BUNDLE: &str = "vehicles/runtime/0_bundle";
 const BLUEPRINT: &str = "synthetic/traffic/vehicle";
 fn guid(seed: u8) -> [u8; 16] {
@@ -80,7 +87,22 @@ pub(super) fn install(assets: &mut Vec<Asset>) {
             "LogicPrefabBlueprint",
             vec![
                 ("Flags", Field::UInt(14)),
-                ("Objects", Field::RawPointers(vec![2, 3, 4, 5])),
+                ("Objects", Field::RawPointers(vec![2, 3, 4, 5, 6])),
+                (
+                    "LinkConnections",
+                    Field::Structs(
+                        "LinkConnection",
+                        vec![
+                            super::connection(3, links().provider, 6, 0),
+                            super::connection(6, links().personas, 5, 0),
+                            {
+                                let mut row = super::connection(3, links().roads, 0, 0);
+                                row[2].1 = import(4);
+                                row
+                            },
+                        ],
+                    ),
+                ),
             ],
             vec![
                 ("AiActorManagerEntityData", vec![]),
@@ -90,6 +112,7 @@ pub(super) fn install(assets: &mut Vec<Asset>) {
                 ),
                 ("AiParticipantManagerEntityData", vec![]),
                 ("PersonaEntityData", persona),
+                ("PersonaSetEntityData", vec![]),
             ],
         ),
         asset(

@@ -2,6 +2,8 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 use super::*;
+use crate::traffic_content::population::{Focus, Input};
+use nfs_world::application::Random;
 
 impl PlayerListener {
     pub(in crate::net) fn advance_traffic(
@@ -35,7 +37,15 @@ impl PlayerListener {
             let physics = self
                 .players
                 .vehicle_physics(HOST_SELECTOR as u8, self.persona, car)?;
-            focus.push(physics.decode([0.; 3])?.position);
+            let motion = physics.decode([0.; 3])?;
+            focus.push(Focus {
+                id: participant,
+                position: motion.position,
+                velocity: motion.velocity,
+                forward: replication::vehicle::orientation::basis_from_quaternion(
+                    motion.quaternion,
+                )?[2],
+            });
         }
         let mut players = self.players.clone();
         let changes = population.advance(
@@ -43,8 +53,14 @@ impl PlayerListener {
             HOST_SELECTOR as u8,
             self.persona,
             content,
-            now_ms,
-            &focus,
+            Input {
+                now: now_ms,
+                focus: &focus,
+                random: [
+                    crate::seeds::OsRandom.next_u32(),
+                    crate::seeds::OsRandom.next_u32(),
+                ],
+            },
         )?;
         let mut entries: Vec<_> = split_scenes(
             changes.records,
@@ -100,16 +116,12 @@ mod tests {
     fn backpressure_retains_traffic_and_disable_orders_detach_before_deletion() {
         let (mut population, mut world, content) =
             crate::traffic_content::population::tests::fixture_with(HOST_SELECTOR as u8);
-        population
-            .advance(
-                &mut world,
-                HOST_SELECTOR as u8,
-                100,
-                &content,
-                0,
-                &[[0.; 3]],
-            )
-            .unwrap();
+        crate::traffic_content::population::tests::spawn(
+            &mut population,
+            &mut world,
+            &content,
+            HOST_SELECTOR as u8,
+        );
         let mut listener =
             PlayerListener::new(100).with_traffic(Some(std::sync::Arc::new(content)));
         listener.players = world;
@@ -125,11 +137,11 @@ mod tests {
         listener.session_backlog = 2;
         assert!(listener.disable_traffic());
         assert!(!listener.disable_traffic());
-        listener.advance_traffic(1).unwrap();
+        listener.advance_traffic(1002).unwrap();
         assert_eq!(listener.traffic_population.as_ref().unwrap().count(), 1);
         assert!(listener.pending_entries.is_empty());
         listener.session_backlog = 0;
-        listener.advance_traffic(2).unwrap();
+        listener.advance_traffic(1003).unwrap();
         assert_eq!(listener.traffic_population.as_ref().unwrap().count(), 0);
         assert!(listener.movement_objects().is_empty());
         assert_eq!(listener.pending_entries.len(), 2);

@@ -59,7 +59,7 @@ pub const FORMAT: &str = "nfs-install-content";
 pub const VERSION: u64 = 1;
 /// Increment whenever a builder's output for an unchanged installation changes,
 /// so existing cache entries are rebuilt.
-pub const BUILDER_REVISION: u64 = 29;
+pub const BUILDER_REVISION: u64 = 30;
 /// Executable file name relative to the installation root.
 pub const EXECUTABLE: &str = "NFS16.exe";
 
@@ -80,6 +80,7 @@ pub struct BuildIdentity {
     pub sequences: sequences::Rules,
     pub participant_logic: participant_logic::Rules,
     pub traffic_spline_class_id: u16,
+    pub traffic_links: traffic::Links,
 }
 
 impl BuildIdentity {

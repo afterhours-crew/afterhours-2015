@@ -65,7 +65,9 @@ pub(crate) fn fixture_with(connection: u8) -> (Population, Players, Content) {
         }],
         vehicles: BTreeMap::from([(d.bundle.clone(), d)]),
         splines: vec![Spline {
+            scene: keys[0],
             index: 0,
+            catalog_count: 1,
             density: 1,
             tags: vec![[3; 16]],
             segments: vec![Segment {
@@ -130,60 +132,94 @@ pub(crate) fn fixture_with(connection: u8) -> (Population, Players, Content) {
     (population, world, content)
 }
 
+pub(crate) fn focus() -> Focus {
+    Focus {
+        id: 1,
+        position: [600., 0., 0.],
+        velocity: [0.; 3],
+        forward: [1., 0., 0.],
+    }
+}
+fn input(now: u64, focus: &[Focus]) -> Input<'_> {
+    Input {
+        now,
+        focus,
+        random: [0; 2],
+    }
+}
+pub(crate) fn spawn(
+    p: &mut Population,
+    world: &mut Players,
+    c: &Content,
+    connection: u8,
+) -> Changes {
+    p.advance(world, connection, 100, c, input(0, &[focus()]))
+        .unwrap();
+    p.advance(world, connection, 100, c, input(1001, &[focus()]))
+        .unwrap()
+}
+
 #[test]
-fn spawn_goal_managers_and_retirement_are_owned_and_repeat_safe() {
+fn initial_delay_owned_creation_and_garage_retirement() {
     let (mut p, mut world, c) = fixture();
     let initial = world.objects().snapshot();
-    let change = p.advance(&mut world, 1, 100, &c, 0, &[[0.; 3]]).unwrap();
+    for now in [0, 1000] {
+        assert!(
+            p.advance(&mut world, 1, 100, &c, input(now, &[focus()]))
+                .unwrap()
+                .spawned
+                .is_none()
+        );
+    }
+    let change = p
+        .advance(&mut world, 1, 100, &c, input(1001, &[focus()]))
+        .unwrap();
     let ids = change.spawned.unwrap();
     assert_eq!(change.calls.len(), 2);
     assert_eq!(change.records.len(), 6);
     assert_eq!(p.count(), 1);
+    assert_eq!(p.cars[&1].born, 1001);
     assert!(matches!(
-        p.advance(&mut world, 2, 100, &c, 1, &[]),
+        p.advance(&mut world, 2, 100, &c, input(1002, &[])),
         Err(Error::UnknownObject)
     ));
-    assert_eq!(p.count(), 1);
-    assert!(world.ai_ids(2, 100, 1).is_none());
     assert_eq!(world.ai_ids(1, 100, 1), Some(ids));
-    assert!(
-        p.advance(&mut world, 1, 100, &c, 0, &[[0.; 3]])
-            .unwrap()
-            .records
-            .is_empty()
-    );
-    let retired = p.advance(&mut world, 1, 100, &c, 1, &[]).unwrap();
-    assert_eq!(retired.deleted.len(), 4);
-    assert_eq!(retired.records.len(), 2);
-    assert!(retired.calls.is_empty());
-    assert_eq!(p.count(), 0);
-    assert!(world.ai_ids(1, 100, 1).is_none());
+    let retired = p.advance(&mut world, 1, 100, &c, input(1002, &[])).unwrap();
+    assert_eq!((retired.records.len(), retired.deleted.len()), (2, 4));
     assert_eq!(world.objects().snapshot(), initial);
+    assert_eq!(p.road_counts[&0], 0);
     assert!(
-        p.advance(&mut world, 1, 100, &c, 1, &[])
+        p.advance(&mut world, 1, 100, &c, input(1002, &[]))
             .unwrap()
             .deleted
             .is_empty()
     );
     assert!(matches!(
-        p.advance(&mut world, 1, 100, &c, 0, &[]),
+        p.advance(&mut world, 1, 100, &c, input(1001, &[])),
         Err(Error::Bound)
     ));
 }
 
 #[test]
-fn late_manager_failure_rolls_back_car_ids_authority_and_clock() {
+fn late_failure_rolls_back_timers_persona_counts_ids_and_authority() {
     let (mut p, mut world, mut c) = fixture();
+    p.advance(&mut world, 1, 100, &c, input(0, &[focus()]))
+        .unwrap();
     let before = world.objects().snapshot();
+    let timers = p.timers.clone();
     c.managers.actors = 0;
-    assert!(p.advance(&mut world, 1, 100, &c, 10, &[[0.; 3]]).is_err());
+    assert!(
+        p.advance(&mut world, 1, 100, &c, input(1001, &[focus()]))
+            .is_err()
+    );
     assert_eq!(world.objects().snapshot(), before);
-    assert_eq!(p.count(), 0);
-    assert_eq!((p.next, p.due, p.clock), (1, 0, 0));
+    assert_eq!((p.next, p.clock, p.persona_cursor), (1, 0, 0));
+    assert_eq!(p.timers, timers);
+    assert!(p.cars.is_empty() && p.road_counts.is_empty());
     assert_eq!(p.authority, vehicle::authority::Registry::default());
     c.managers.actors = 1;
     assert!(
-        p.advance(&mut world, 1, 100, &c, 10, &[[0.; 3]])
+        p.advance(&mut world, 1, 100, &c, input(1001, &[focus()]))
             .unwrap()
             .spawned
             .is_some()
@@ -191,97 +227,121 @@ fn late_manager_failure_rolls_back_car_ids_authority_and_clock() {
 }
 
 #[test]
-fn placement_respects_tags_floor_spacing_and_population_bound() {
-    let (mut p, mut world, mut c) = fixture();
-    assert!(p.select(&c, &[[0., 20., 0.]]).is_none());
-    c.splines[0].tags = vec![[9; 16]];
-    assert!(p.select(&c, &[[0.; 3]]).is_none());
-    c.splines[0].tags.clear();
-    for i in 0..30 {
-        p.advance(&mut world, 1, 100, &c, i * 1000, &[[i as f32 * 5., 0., 0.]])
-            .unwrap();
-        assert!(p.count() <= MAX_CARS);
-    }
-    let points: Vec<_> = p.cars.values().map(|c| c.anchor).collect();
-    for (i, point) in points.iter().enumerate() {
-        for other in &points[i + 1..] {
-            assert!(distance_squared(*point, *other) >= 900.);
-        }
-    }
-    assert!(p.count() > 1);
-    p.advance(&mut world, 1, 100, &c, 200_000, &[]).unwrap();
-    assert_eq!(p.count(), 0);
-    let basis = road_basis([0.; 3], [3., 1., 4.]).unwrap();
-    vehicle::orientation::quaternion_from_basis(basis).unwrap();
-    assert!(road_basis([0.; 3], [0.; 3]).is_none());
-}
-
-#[test]
-fn nearby_traffic_survives_age_and_retirement_grace_resets_on_return() {
-    let (mut population, mut world, mut content) = fixture();
-    let ids = population
-        .advance(&mut world, 1, 100, &content, 0, &[[0.; 3]])
-        .unwrap()
-        .spawned
-        .unwrap();
-    content.density = 0.; // Isolate retention from further population growth.
-    let anchor = population.cars[&1].anchor;
-    for now in [90_000, 180_000, 1_000_000] {
-        let changes = population
-            .advance(&mut world, 1, 100, &content, now, &[anchor])
-            .unwrap();
-        assert!(changes.deleted.is_empty());
-        assert_eq!(world.ai_ids(1, 100, 1), Some(ids));
-    }
-    let far = [anchor[0] + 451., anchor[1], anchor[2]];
-    for now in [1_000_100, 1_002_099] {
+fn retirement_uses_total_age_and_motion_regions_not_an_outside_timer() {
+    let (mut p, mut world, c) = fixture();
+    let ids = spawn(&mut p, &mut world, &c, 1).spawned.unwrap();
+    let anchor = p.cars[&1].anchor;
+    let far = Focus {
+        position: [anchor[0] - 500., 0., 0.],
+        ..focus()
+    };
+    assert!(
+        p.advance(&mut world, 1, 100, &c, input(3001, &[far]))
+            .unwrap()
+            .deleted
+            .is_empty()
+    );
+    // Prediction protects a car 500m ahead of the actual player.
+    let moving = Focus {
+        velocity: [100., 0., 0.],
+        ..far
+    };
+    for now in [3002, 90_000, 180_000] {
         assert!(
-            population
-                .advance(&mut world, 1, 100, &content, now, &[far])
+            !p.advance(&mut world, 1, 100, &c, input(now, &[moving]))
                 .unwrap()
                 .deleted
-                .is_empty()
+                .contains(&ids.vehicle)
         );
+        assert_eq!(world.ai_ids(1, 100, 1), Some(ids));
     }
-    // A second nearby player protects the car and clears the earlier timer.
-    assert!(
-        population
-            .advance(&mut world, 1, 100, &content, 1_002_100, &[far, anchor])
-            .unwrap()
-            .deleted
-            .is_empty()
-    );
-    assert!(
-        population
-            .advance(&mut world, 1, 100, &content, 1_002_101, &[far])
-            .unwrap()
-            .deleted
-            .is_empty()
-    );
-    assert!(
-        population
-            .advance(&mut world, 1, 100, &content, 1_004_100, &[far])
-            .unwrap()
-            .deleted
-            .is_empty()
-    );
-    let retired = population
-        .advance(&mut world, 1, 100, &content, 1_004_101, &[far])
+    // Stopping removes that protection immediately for an old car.
+    let retired = p
+        .advance(&mut world, 1, 100, &c, input(180_001, &[far]))
         .unwrap();
-    assert_eq!(retired.deleted.len(), 4);
-    assert_eq!(population.count(), 0);
+    assert!(retired.deleted.contains(&ids.vehicle));
     assert!(world.ai_ids(1, 100, 1).is_none());
 }
 
 #[test]
-fn spawning_respects_every_players_near_region() {
-    let (population, _, content) = fixture();
-    let focus = [[0.; 3], [600., 0., 0.], [1200., 0., 0.]];
-    // Together these exclusion circles cover the complete installed segment.
-    assert!(population.select(&content, &focus).is_none());
-    let selected = population.select(&content, &[[0.; 3]]).unwrap();
-    assert!(horizontal_distance_squared(selected.pose.position, [0.; 3]) > SPAWN_DISTANCE.powi(2));
-    assert!(horizontal_distance_squared(selected.pose.position, [0.; 3]) < RETAIN_DISTANCE.powi(2));
+fn focus_identity_is_stable_and_invalid_updates_are_atomic() {
+    let (mut p, mut world, c) = fixture();
+    let other = Focus {
+        id: 2,
+        position: [5000., 0., 0.],
+        ..focus()
+    };
+    p.advance(&mut world, 1, 100, &c, input(0, &[focus(), other]))
+        .unwrap();
+    p.advance(&mut world, 1, 100, &c, input(500, &[other, focus()]))
+        .unwrap();
+    assert_eq!(p.timers[&1].elapsed, 0.5);
+    assert_eq!(p.timers[&2].elapsed, 0.5);
+    let before = p.timers.clone();
+    for bad in [
+        vec![focus(), focus()],
+        vec![Focus {
+            velocity: [f32::INFINITY, 0., 0.],
+            ..focus()
+        }],
+        vec![Focus {
+            forward: [0.; 3],
+            ..focus()
+        }],
+    ] {
+        assert!(p.advance(&mut world, 1, 100, &c, input(600, &bad)).is_err());
+        assert_eq!(p.timers, before);
+        assert_eq!(p.clock, 500);
+    }
+    p.advance(&mut world, 1, 100, &c, input(1001, &[focus(), other]))
+        .unwrap();
+    assert_eq!(p.count(), 1);
+    assert_eq!(p.timers[&2].elapsed, 1.001);
+}
+
+#[test]
+fn road_goal_uses_its_own_scene_and_catalog_not_population_order() {
+    let (p, mut world, mut content) = fixture();
+    let vehicle_scene =
+        name_key(content.vehicles.values().next().unwrap().bundle.as_bytes()).unwrap();
+    content.splines[0].scene = vehicle_scene;
+    content.splines[0].index = 3;
+    content.splines[0].catalog_count = 7;
+    let mut p = Population::new(p.bindings, &content).unwrap();
+    let change = spawn(&mut p, &mut world, &content, 1);
+    let record = change
+        .records
+        .iter()
+        .find(|r| {
+            matches!(
+                r.initial,
+                Some(nfs_world::replication::Initial::TrafficGoal(_))
+            )
+        })
+        .unwrap();
+    let Some(nfs_world::replication::Initial::TrafficGoal(goal)) = &record.initial else {
+        panic!()
+    };
+    assert_eq!(
+        goal.asset,
+        Asset {
+            bundle: 2,
+            type_id: content.spline_class,
+            local_index: 3
+        }
+    );
+    assert_eq!(
+        goal.catalog,
+        Catalog::new(2, &[(content.spline_class, 7)]).unwrap()
+    );
+    let catalogs = traffic::Content::new(vec![goal.catalog.clone()]).unwrap();
+    let wire = record.encode().unwrap();
+    assert_eq!(
+        Record::decode_traffic(wire.span(), None, Some(&catalogs))
+            .unwrap()
+            .record,
+        *record
+    );
 }
 
 #[test]
@@ -292,9 +352,7 @@ fn delegated_traffic_reports_are_isolated_retry_safe_and_retired() {
         vehicle_reports::Reports,
     };
     let (mut population, mut world, content) = fixture();
-    let ids = population
-        .advance(&mut world, 1, 100, &content, 0, &[[0.; 3]])
-        .unwrap()
+    let ids = spawn(&mut population, &mut world, &content, 1)
         .spawned
         .unwrap();
     let cars = population.delegated(&world, 1, 100);
@@ -372,20 +430,17 @@ fn delegated_traffic_reports_are_isolated_retry_safe_and_retired() {
         assert_eq!(world.objects().snapshot(), before);
     }
     let retained = world.ai_vehicle_physics(1, 100, 1).unwrap();
-    assert!(
-        population
-            .advance(&mut world, 1, 100, &content, 500, &[[0.; 3]])
-            .unwrap()
-            .records
-            .is_empty()
-    );
+    let changes = population
+        .advance(&mut world, 1, 100, &content, input(1501, &[focus()]))
+        .unwrap();
+    assert!(!changes.deleted.contains(&ids.vehicle));
     assert_eq!(world.ai_vehicle_physics(1, 100, 1).unwrap(), retained);
     assert_eq!(
         population.cars[&1].anchor,
         retained.decode([0.; 3]).unwrap().position
     );
     let removed = population
-        .advance(&mut world, 1, 100, &content, 501, &[])
+        .advance(&mut world, 1, 100, &content, input(1502, &[]))
         .unwrap();
     assert!(removed.deleted.contains(&ids.vehicle));
     assert!(population.delegated(&world, 1, 100).is_empty());
