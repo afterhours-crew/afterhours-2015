@@ -293,7 +293,9 @@ impl Population {
                     name: provider.name.as_bytes().to_vec(),
                     flags: [true, false],
                     words: [provider.provider_index, provider.personality_index],
-                    mode: 0,
+                    // Roaming racers use the full vehicle driving mode.
+                    // The ambient-traffic mode selects different physics.
+                    mode: 2,
                 },
                 vehicle::EntityCreation {
                     prefix: Prefix {

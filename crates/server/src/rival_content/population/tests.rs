@@ -7,7 +7,7 @@ use nfs_protocol::world::rpc::Serial;
 use nfs_world::content::bindings::name_key;
 use nfs_world::{
     content::{Registration, Registrations, SubLevelNames},
-    replication::{Initial, sublevel},
+    replication::{Initial, Update, sublevel},
 };
 
 pub(crate) fn fixture(
@@ -214,6 +214,7 @@ fn authored_pose_personality_wander_and_mesh_namespace_are_published() {
         .unwrap();
     assert!(actor.flag_a && !actor.flag_b);
     assert_eq!((actor.word_a, actor.word_b), (11, 15));
+    assert_rival_driving_mode(&c, ids.actor);
     let goal = c
         .records
         .iter()
@@ -279,6 +280,23 @@ fn authored_pose_personality_wander_and_mesh_namespace_are_published() {
         })
         .unwrap();
     assert_eq!((actor.word_a, actor.word_b), (12, 16));
+    assert_rival_driving_mode(&c, c.spawned.unwrap().actor);
+}
+
+fn assert_rival_driving_mode(changes: &Changes, actor: u16) {
+    let record = changes
+        .records
+        .iter()
+        .find(|r| r.id == actor && r.initial.is_some())
+        .unwrap();
+    // Decode the published creation as a client would. A roaming rival must
+    // keep racer physics on both its first spawn and subsequent persona cycle.
+    let encoded = record.encode().unwrap();
+    let decoded = Record::decode(encoded.span(), None).unwrap();
+    assert!(matches!(
+        decoded.record.update,
+        Update::Actor(ref update) if update.word_c == Some(2)
+    ));
 }
 
 #[test]
