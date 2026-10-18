@@ -1,7 +1,8 @@
 # Car ownership and garage management
 
 Implementation and game acceptance are tracked in [issue #52][tracking]. The
-current branch has automated coverage; its combined in-game acceptance is pending.
+five-slot scope passed the combined live checks on 2026-10-18, including fresh
+game/server restarts. The implementation is on the milestone branch pending merge.
 
 The local account owns five garage slots. Slot zero is the active car; the other
 four hold secondary cars. Buying an eligible car reserves a free secondary slot,
@@ -41,10 +42,37 @@ including headlight and spoiler animation fields.
 Automated checks cover transaction retries, funds, quantities, the five-slot cap,
 duplicate car models, account isolation, concurrent purchases, SQLite restart,
 selection, sale descendants and wrap retention. The edge test exercises purchase,
-result delivery, placement, switching, a car-specific edit, sale and slot clearing.
-These checks do not establish game acceptance. Warehouse storage and the other
-systems on the [gameplay roadmap][roadmap] remain outside this issue's five-slot
-scope.
+result delivery, placement, switching, a car-specific edit, sale and slot clearing;
+every generated section is encoded and applied to a receiver model. In particular,
+a deletion-only section has no construction setup.
+
+Live acceptance used five cars, including the Mustang Foxbody, Mazda MX-5,
+Toyota Supra, Mercedes-AMG GT and Ferrari 458 Italia. Purchases deducted their
+prices and appeared in free slots. Two subsequent sales removed their displayed
+cars without disconnecting; credits, descendant removal and account-wrap retention
+matched the saved state. Freed slots could be reused, and the full garage offered
+no sixth purchase. The owner confirmed separate paint and tuning remained on the
+original cars after restart. A final independent restart restored the selected
+Ferrari and all five cars, and switching to the green MX-5 succeeded. The final
+saved audit retained all 311 owned records, including its installed air filter and
+tuning, unchanged; only active/secondary slot selection changed. Both final runs
+ended through normal game exit.
+
+The short black transitions remain stock client behavior. The installed garage UI
+configures delays of 1.5 seconds for selection, 2 seconds after sale completion and
+3 seconds after purchase completion, followed by a 0.5-second closing fade.
+Observed backend sale delivery took about 300 ms; selection queued its two changed
+displays within milliseconds. The owner reported roughly 3-second purchase/sale
+pauses and 1–2-second selection pauses. These are approximate live observations,
+not frame-accurate measurements. The timing investigation is [issue #96][timing];
+this milestone does not shorten the client's fades or modify game files.
+
+All 54 eligible installed stock-car offers passed private transaction and display
+construction comparisons; live testing covered the cars above, not every model.
+Retry, malformed-request and concurrent-account guarantees have automated coverage,
+not live malformed-traffic tests. Warehouse storage and the other systems on the
+[gameplay roadmap][roadmap] remain outside this issue's five-slot scope.
 
 [tracking]: https://github.com/afterhours-crew/afterhours-2015/issues/52
+[timing]: https://github.com/afterhours-crew/afterhours-2015/issues/96
 [roadmap]: https://github.com/afterhours-crew/afterhours-2015/issues/62
