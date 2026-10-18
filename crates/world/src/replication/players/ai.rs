@@ -9,6 +9,21 @@ use super::*;
 
 pub const MAX_AI: usize = 128;
 
+/// Installed serializer ordinals, supplied by content preparation. They are
+/// distinct from RPC selector numbers and allocated scene ghost IDs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Managers {
+    pub scene: u32,
+    pub participants: usize,
+    pub actors: usize,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Bound {
+    pub add: Option<crate::participants::Notification>,
+    pub bind: Option<crate::actors::Binding>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Request {
     /// Host-issued spawn identity; independent of ghost IDs and inventory IDs.
@@ -45,6 +60,7 @@ pub(super) struct Instance {
     creation: vehicle::EntityCreation,
     ids: Ids,
     goal: Option<u16>,
+    managers: Option<Managers>,
 }
 
 impl Players {
@@ -146,12 +162,41 @@ impl Players {
                 creation,
                 ids,
                 goal: None,
+                managers: None,
             },
         );
         Ok(Some(Spawned {
             ids,
             records: vec![participant, actor, vehicle, attached],
         }))
+    }
+
+    /// Bind the AI participant and actor to their installed scene managers.
+    /// Retained snapshots and both RPCs commit together; retry is inert.
+    pub fn bind_ai_managers(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        key: u64,
+        managers: Managers,
+    ) -> Result<Bound, Error> {
+        let instance = self
+            .ai
+            .get(&(connection, persona, key))
+            .ok_or(Error::UnknownObject)?;
+        if instance.managers.is_some_and(|old| old != managers) {
+            return Err(Error::DuplicateObject);
+        }
+        let bound = self.objects.bind_ai_managers(
+            managers,
+            instance.ids.participant,
+            instance.ids.actor,
+        )?;
+        self.ai
+            .get_mut(&(connection, persona, key))
+            .ok_or(Error::UnknownObject)?
+            .managers = Some(managers);
+        Ok(bound)
     }
 
     /// Attach an installed TrafficGoal. The global goal serial is shared with
@@ -192,8 +237,8 @@ impl Players {
         Ok((goal, assigned))
     }
 
-    /// Retire one host spawn; repeated removal is inert. Scene registries that
-    /// retain either participant or actor must first release their references.
+    /// Retire one host spawn; repeated removal is inert. Manager snapshots release
+    /// their references atomically with deletion, matching client death listeners.
     pub fn remove_ai_vehicle(
         &mut self,
         connection: u8,
@@ -205,6 +250,9 @@ impl Players {
         };
         let mut next = self.objects.clone();
         let mut result = Removed::default();
+        if let Some(managers) = instance.managers {
+            next.release_ai_managers(managers, instance.ids.participant, instance.ids.actor)?;
+        }
         result.records.extend(next.change(
             instance.ids.participant,
             Update::Participant(ParticipantUpdate {
@@ -490,5 +538,195 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    fn managers(world: &mut Players) -> (Managers, u16) {
+        let key = 912;
+        let profile = sublevel::Profile::new(
+            false,
+            &[
+                sublevel::Kind::Noop,
+                sublevel::Kind::RpcPairs,
+                sublevel::Kind::RpcReferences,
+            ],
+        )
+        .unwrap();
+        let content = sublevel::Content::new(vec![(key, profile.clone())]).unwrap();
+        let creation = sublevel::ordinary::creation(
+            1,
+            key,
+            None,
+            Serial::new(7).unwrap(),
+            &sublevel::ordinary::unpopulated(&profile).unwrap(),
+            &content,
+        )
+        .unwrap();
+        let scene = world.create_scenes(&[1], vec![creation], &content).unwrap()[0].id;
+        (
+            Managers {
+                scene: key,
+                participants: 2,
+                actors: 1,
+            },
+            scene,
+        )
+    }
+
+    #[test]
+    fn manager_registration_is_atomic_retained_and_owned_and_death_releases_both_lists() {
+        let mut world = world();
+        let (managers, scene) = managers(&mut world);
+        let (car, content) = car();
+        let a = world
+            .spawn_ai_vehicle(1, 100, request(1), car.clone(), &content)
+            .unwrap()
+            .unwrap()
+            .ids;
+        let b = world
+            .spawn_ai_vehicle(2, 200, request(1), car, &content)
+            .unwrap()
+            .unwrap()
+            .ids;
+        let before = world.objects.snapshot();
+        assert_eq!(
+            world.bind_ai_managers(2, 100, 1, managers),
+            Err(Error::UnknownObject)
+        );
+        // Fail after adding the participant to a pending copy, at the actor field.
+        assert_eq!(
+            world.bind_ai_managers(
+                1,
+                100,
+                1,
+                Managers {
+                    actors: 0,
+                    ..managers
+                }
+            ),
+            Err(Error::TypeMismatch)
+        );
+        assert_eq!(world.objects.snapshot(), before);
+        let bound = world.bind_ai_managers(1, 100, 1, managers).unwrap();
+        let add = bound.add.unwrap();
+        let bind = bound.bind.unwrap();
+        assert_eq!(
+            (
+                add.endpoint.scene,
+                add.endpoint.selector,
+                add.endpoint.serial.value()
+            ),
+            (scene, 1, 7)
+        );
+        assert_eq!(
+            (
+                bind.endpoint.scene,
+                bind.endpoint.selector,
+                bind.participant,
+                bind.actor
+            ),
+            (scene, 0, a.participant, a.actor)
+        );
+        let wire = add.encode().unwrap();
+        let envelope = nfs_protocol::world::rpc::Envelope::decode(
+            wire.span(),
+            nfs_protocol::world::rpc::Limits {
+                max_input_bits: 163,
+                max_references: 2,
+                max_payload_bytes: 7,
+            },
+        )
+        .unwrap();
+        assert_eq!(envelope.references(), &[scene, a.participant]);
+        assert_eq!(
+            envelope
+                .route(nfs_protocol::world::rpc::RouteProfile::ClientReceive)
+                .unwrap()
+                .method_index(),
+            0
+        );
+        assert_eq!(
+            crate::actors::Binding::decode(bind.encode().unwrap().span()).unwrap(),
+            bind
+        );
+        assert_eq!(
+            world.bind_ai_managers(1, 100, 1, managers).unwrap(),
+            Bound::default()
+        );
+        assert_eq!(
+            world.bind_ai_managers(
+                1,
+                100,
+                1,
+                Managers {
+                    scene: 999,
+                    ..managers
+                }
+            ),
+            Err(Error::DuplicateObject)
+        );
+        world.bind_ai_managers(2, 200, 1, managers).unwrap();
+        let removed = world.remove_ai_for_connection(1).unwrap();
+        assert!(removed.deleted.contains(&a.participant));
+        let Initial::SubLevel { fields, .. } = &world.objects.get(scene).unwrap().initial else {
+            panic!()
+        };
+        assert!(
+            matches!(&fields[1],sublevel::Initial::RpcPairs {value,..} if value == &vec![(b.participant,b.actor)])
+        );
+        assert!(
+            matches!(&fields[2],sublevel::Initial::RpcReferences {value,..} if value == &vec![b.participant])
+        );
+        for record in world.objects.snapshot() {
+            record.encode().unwrap();
+        }
+        world.remove_ai_for_connection(2).unwrap();
+        assert_eq!(
+            world.remove_ai_for_connection(2).unwrap(),
+            Removed::default()
+        );
+    }
+
+    #[test]
+    fn failed_deletion_restores_manager_snapshots_and_ai_ownership() {
+        let mut world = world();
+        let (managers, _) = managers(&mut world);
+        let (car, content) = car();
+        let a = world
+            .spawn_ai_vehicle(1, 100, request(1), car, &content)
+            .unwrap()
+            .unwrap()
+            .ids;
+        world.bind_ai_managers(1, 100, 1, managers).unwrap();
+        // A separate consumer retains this vehicle. It must be released first.
+        let key = 913;
+        let profile = sublevel::Profile::new(
+            false,
+            &[sublevel::Kind::Noop, sublevel::Kind::RpcReferences],
+        )
+        .unwrap();
+        let content = sublevel::Content::new(vec![(key, profile)]).unwrap();
+        let creation = sublevel::ordinary::creation(
+            2,
+            key,
+            None,
+            Serial::new(1).unwrap(),
+            &[
+                sublevel::ordinary::Value::Noop,
+                sublevel::ordinary::Value::References(vec![a.vehicle]),
+            ],
+            &content,
+        )
+        .unwrap();
+        let blocker = world.create_scenes(&[2], vec![creation], &content).unwrap()[0].id;
+        let before = world.objects.snapshot();
+        assert!(world.remove_ai_for_connection(1).is_err());
+        assert_eq!(world.objects.snapshot(), before);
+        assert_eq!(world.ai_ids(1, 100, 1), Some(a));
+        assert_eq!(
+            world.bind_ai_managers(1, 100, 1, managers).unwrap(),
+            Bound::default()
+        );
+        world.objects.remove(blocker).unwrap();
+        assert_eq!(world.remove_ai_for_connection(1).unwrap().deleted.len(), 3);
     }
 }

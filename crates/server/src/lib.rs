@@ -43,6 +43,7 @@ pub mod startup;
 pub mod startup_branch;
 pub mod startup_profile;
 pub mod telemetry;
+pub mod traffic_content;
 pub mod user_lookup;
 pub mod user_settings;
 pub mod vehicle_content;

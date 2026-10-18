@@ -6,6 +6,7 @@ use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 
 mod actors;
+mod ai;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Object {

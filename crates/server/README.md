@@ -467,3 +467,8 @@ Startup QoS may first report an unresolved external endpoint and then resolve it
 The user-session model accepts that first resolution while preserving the
 connection machine and internal endpoint; it still rejects replacement of an
 already established external endpoint.
+
+The traffic construction API builds unowned vehicles from installed traffic
+profiles and explicit pose/speed inputs, without player inventory. Manager
+binding and constructor tests cover rollback and isolation. Prepared population,
+runtime activation and live traffic/rival acceptance remain in progress (#54).
