@@ -298,6 +298,7 @@ pub fn scene_assets_with(
         append(gf, go, 2);
         append(gf, go, 7);
         append(pf, po, 1);
+        super::traffic::append(pf, po);
         edit(GARAGE, gf, go);
         edit(GAMEPLAY, pf, po);
     })
@@ -317,6 +318,7 @@ pub fn install(assets: &mut Vec<Asset>) {
     });
     assets.extend(scene_assets_with(|_, _, _| {}));
     assets.extend(assets_with(|_, _, _| {}));
+    super::traffic::install(assets);
     let base = super::guid;
     for (seed, scene, mut pointers) in [
         (
@@ -328,6 +330,9 @@ pub fn install(assets: &mut Vec<Asset>) {
     ] {
         let sequence = if scene == GAMEPLAY { 1 } else { 2 };
         pointers.push((guid(sequence), guid(sequence ^ 0x80)));
+        if scene == GAMEPLAY {
+            pointers.extend(super::traffic::registered());
+        }
         if scene == GARAGE {
             pointers.push((guid(7), guid(7 ^ 0x80)));
             for spline in [6, 5] {

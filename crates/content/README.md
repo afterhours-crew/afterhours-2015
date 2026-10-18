@@ -40,6 +40,7 @@ let items = prepared.path(nfs_content::Kind::ItemContent);
 | `VehicleProfiles` | `vehicle-profiles.json` | Player vehicle blueprints reached through the item system: component profiles, mesh-link order, bus flags, registry identities, physics, appearance and health defaults |
 | `ProgressionContent` | `progression-content.json` | Main/intro persistence links, stable IDs, activation expressions, entity composition and explicit spawner-to-scene channel bindings |
 | `SequenceContent` | `sequence-content.json` | Waiting/exit sequence registries, manager bus and serializer, spawner channel links and the exit command's registered spline definition |
+| `TrafficContent` | `traffic-content.json` | Stock traffic personas, vehicle profiles, manager serializer ordinals and registered road-spline geometry |
 | `WorldMacTemplate` | `world-mac-template.bin` | 64 bytes of the executable image at the build's known address, checked by digest |
 
 Derived defaults are the stored 32-bit patterns of each class's same-named

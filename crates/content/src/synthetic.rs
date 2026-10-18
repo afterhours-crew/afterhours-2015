@@ -12,6 +12,7 @@ use nfs_services::persistent::required_tables;
 use std::path::Path;
 pub mod progression;
 pub mod sequences;
+pub mod traffic;
 pub mod vehicles;
 
 pub const TEMPLATE_RVA: u32 = 0x1010;
@@ -908,6 +909,7 @@ pub fn write(root: &Path, assets: &[Asset]) -> std::io::Result<(Options, [u8; 64
             progression: progression::rules(),
             sequences: sequences::rules(),
             participant_logic: crate::BuildIdentity::supported().participant_logic,
+            traffic_spline_class_id: 72,
             scenes: crate::scenes::Rules {
                 level: RUNTIME_LEVEL.to_owned(),
                 classes: [
@@ -916,6 +918,17 @@ pub fn write(root: &Path, assets: &[Asset]) -> std::io::Result<(Options, [u8; 64
                     ("LogicPrefabReferenceObjectData", None),
                     ("LogicPrefabBlueprint", None),
                     ("ScriptedAISplineEntityData", None),
+                    ("TrafficSplineEntityData", None),
+                    ("PersonaEntityData", None),
+                    ("TrafficManagerEntityData", None),
+                    (
+                        "AiParticipantManagerEntityData",
+                        Some(nfs_world::replication::sublevel::Kind::RpcReferences),
+                    ),
+                    (
+                        "AiActorManagerEntityData",
+                        Some(nfs_world::replication::sublevel::Kind::RpcPairs),
+                    ),
                     (
                         "StateSequenceManagerEntityData",
                         Some(nfs_world::replication::sublevel::Kind::Rpc),

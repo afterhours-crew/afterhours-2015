@@ -1,6 +1,7 @@
 {
   "format": "nfs-build-profile",
-  "version": 10,
+  "version": 11,
+  "traffic_spline_class_id": 5372,
   "description": "Need for Speed (2015) PC, NFS16.exe with the SHA-256 below. Every value in this file belongs to that executable only; another build needs its own profile.",
   "executable": "NFS16.exe",
   "executable_sha256": "92aa6ff4b5f8d0f033ca7e88cb86cc64b42b1d2412c4294905eb22950616e4df",

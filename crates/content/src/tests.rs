@@ -208,6 +208,38 @@ fn installed_fitment_restrictions_round_trip_and_reject_unknown_targets() {
 }
 
 #[test]
+fn traffic_loader_rejects_broken_closure_catalog_and_geometry() {
+    let install = install_with(&assets());
+    let prepared = install.prepare().unwrap();
+    let value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(prepared.path(Kind::TrafficContent)).unwrap())
+            .unwrap();
+    for (path, bad) in [
+        ("/version", serde_json::json!(2)),
+        (
+            "/managers/actors",
+            value["managers"]["participants"].clone(),
+        ),
+        ("/personas/0/index", serde_json::json!(1)),
+        ("/personas/0/vehicle", serde_json::json!("missing/bundle")),
+        ("/personas/0/tags", serde_json::json!(["invalid-guid"])),
+        ("/spline_count", serde_json::json!(1)),
+        ("/splines/1/index", serde_json::json!(0)),
+        ("/splines/1/segments/0/speed", serde_json::json!(-1)),
+        ("/splines/1/segments/0/points/0", serde_json::json!([0, 1])),
+        ("/density", serde_json::json!(101)),
+        ("/vehicles", serde_json::json!([])),
+    ] {
+        let mut corrupt = value.clone();
+        *corrupt.pointer_mut(path).unwrap() = bad;
+        assert!(traffic::Content::from_json(&corrupt).is_err(), "{path}");
+    }
+    let mut extra = value;
+    extra["splines"][1]["unexpected"] = serde_json::json!(true);
+    assert!(traffic::Content::from_json(&extra).is_err());
+}
+
+#[test]
 fn builds_outputs_the_service_loaders_accept() {
     let install = install_with(&assets());
     let prepared = install.prepare().unwrap();
@@ -219,6 +251,14 @@ fn builds_outputs_the_service_loaders_accept() {
     let items = ItemContent::load(&prepared.path(Kind::ItemContent)).unwrap();
     progression::Content::load(&prepared.path(Kind::ProgressionContent)).unwrap();
     sequences::SequenceContent::load(&prepared.path(Kind::SequenceContent)).unwrap();
+    let traffic = traffic::Content::load(&prepared.path(Kind::TrafficContent)).unwrap();
+    assert_eq!(traffic.personas.len(), 1);
+    assert_eq!(traffic.splines.len(), 2);
+    assert!(traffic.splines[0].segments.is_empty());
+    assert_eq!(
+        traffic.splines[1].segments[0].points,
+        [[2., 3., 4.], [12., 3., 4.]]
+    );
     vehicle_parts::Catalog::load(&prepared.path(Kind::VehicleParts), &items.catalog).unwrap();
     let parts: serde_json::Value =
         serde_json::from_slice(&std::fs::read(prepared.path(Kind::VehicleParts)).unwrap()).unwrap();

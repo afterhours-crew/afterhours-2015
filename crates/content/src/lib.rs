@@ -41,6 +41,7 @@ mod stats;
 #[cfg(any(test, feature = "synthetic"))]
 pub mod synthetic;
 mod tables;
+pub mod traffic;
 pub use progress::Progress;
 pub mod vehicle_parts;
 pub mod vehicle_profiles;
@@ -58,7 +59,7 @@ pub const FORMAT: &str = "nfs-install-content";
 pub const VERSION: u64 = 1;
 /// Increment whenever a builder's output for an unchanged installation changes,
 /// so existing cache entries are rebuilt.
-pub const BUILDER_REVISION: u64 = 27;
+pub const BUILDER_REVISION: u64 = 28;
 /// Executable file name relative to the installation root.
 pub const EXECUTABLE: &str = "NFS16.exe";
 
@@ -78,6 +79,7 @@ pub struct BuildIdentity {
     pub progression: progression::Rules,
     pub sequences: sequences::Rules,
     pub participant_logic: participant_logic::Rules,
+    pub traffic_spline_class_id: u16,
 }
 
 impl BuildIdentity {
@@ -123,10 +125,11 @@ pub enum Kind {
     /// Objective defaults, entity shapes and installed scene-channel bindings.
     ProgressionContent,
     SequenceContent,
+    TrafficContent,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 14] = [
+    pub const ALL: [Kind; 15] = [
         Kind::ItemContent,
         Kind::PersistentContent,
         Kind::StatDefinitions,
@@ -141,6 +144,7 @@ impl Kind {
         Kind::VehicleProfiles,
         Kind::ProgressionContent,
         Kind::SequenceContent,
+        Kind::TrafficContent,
     ];
     /// Manifest key.
     pub fn key(self) -> &'static str {
@@ -159,6 +163,7 @@ impl Kind {
             Self::VehicleProfiles => "vehicle_profiles",
             Self::ProgressionContent => "progression_content",
             Self::SequenceContent => "sequence_content",
+            Self::TrafficContent => "traffic_content",
         }
     }
     /// File name inside a cache entry.
@@ -178,6 +183,7 @@ impl Kind {
             Self::VehicleProfiles => "vehicle-profiles.json",
             Self::ProgressionContent => "progression-content.json",
             Self::SequenceContent => "sequence-content.json",
+            Self::TrafficContent => "traffic-content.json",
         }
     }
 }
@@ -404,6 +410,10 @@ fn build_with_progress(
     outputs.insert(
         Kind::SequenceContent,
         extract!(Kind::SequenceContent, sequences::build(&mut index)),
+    );
+    outputs.insert(
+        Kind::TrafficContent,
+        extract!(Kind::TrafficContent, traffic::build(&mut index)),
     );
     Ok(outputs)
 }

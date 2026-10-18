@@ -12,7 +12,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 pub const FORMAT: &str = "nfs-build-profile";
-pub const VERSION: u64 = 10;
+pub const VERSION: u64 = 11;
 
 /// `(file name, contents)` of every profile.
 const PROFILES: &[(&str, &str)] = &[(
@@ -33,7 +33,7 @@ pub fn parse(file_name: &str, text: &str) -> Result<BuildIdentity, Error> {
     let bad = |what: &str| Error::Content(format!("build profile {file_name}: {what}"));
     let value: Value = serde_json::from_str(text).map_err(|_| bad("not JSON"))?;
     let object = value.as_object().ok_or_else(|| bad("not an object"))?;
-    const FIELDS: [&str; 13] = [
+    const FIELDS: [&str; 14] = [
         "format",
         "version",
         "description",
@@ -47,6 +47,7 @@ pub fn parse(file_name: &str, text: &str) -> Result<BuildIdentity, Error> {
         "progression",
         "sequences",
         "participant_logic",
+        "traffic_spline_class_id",
     ];
     if object.len() != FIELDS.len() || FIELDS.iter().any(|f| !object.contains_key(*f)) {
         return Err(bad("unexpected or missing fields"));
@@ -112,6 +113,11 @@ pub fn parse(file_name: &str, text: &str) -> Result<BuildIdentity, Error> {
         progression: crate::progression::Rules::from_json(&value["progression"])?,
         sequences: crate::sequences::Rules::from_json(&value["sequences"])?,
         participant_logic: crate::participant_logic::Rules::from_json(&value["participant_logic"])?,
+        traffic_spline_class_id: value["traffic_spline_class_id"]
+            .as_u64()
+            .and_then(|n| u16::try_from(n).ok())
+            .filter(|n| *n != 0)
+            .ok_or_else(|| bad("traffic spline class ID"))?,
     })
 }
 

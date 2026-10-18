@@ -226,6 +226,17 @@ impl PartitionWriter {
                 rows.push((member.to_string(), 0x02, class, offset));
                 offset += u32::from(size);
                 continue;
+            } else if let Field::Structs(type_name, _) = field {
+                let nested: Vec<_> = items
+                    .iter()
+                    .flat_map(|item| match &item[i].1 {
+                        Field::Structs(name, rows) if name == type_name => rows.clone(),
+                        _ => panic!("inconsistent synthetic array"),
+                    })
+                    .collect();
+                let (class, _) = self.struct_class(type_name, &nested);
+                let array = self.class("array", 4, vec![("member".into(), 0x02, class, 0)]);
+                rows.push((member.to_string(), 0x04, array, offset));
             } else if let Field::Enum(type_name, _, _) = field {
                 let mut enumerators: Vec<(String, u8, u16, u32)> = Vec::new();
                 for item in items {
@@ -262,6 +273,8 @@ impl PartitionWriter {
     fn inline(&mut self, field: &Field) -> Vec<u8> {
         if let Field::Struct(_, fields) = field {
             fields.iter().flat_map(|(_, f)| self.inline(f)).collect()
+        } else if matches!(field, Field::Structs(_, _)) {
+            self.object(&[("inline_array", field.clone())]).1
         } else {
             self.scalar(field).to_vec()
         }
@@ -376,13 +389,15 @@ impl PartitionWriter {
                         4,
                         vec![("member".to_string(), 0x02, struct_class, 0)],
                     );
-                    let at = self.array_data.len() as u32;
+                    let mut encoded = Vec::new();
                     for item in items {
                         for (_, member) in item {
                             let bytes = self.inline(member);
-                            self.array_data.extend_from_slice(&bytes);
+                            encoded.extend_from_slice(&bytes);
                         }
                     }
+                    let at = self.array_data.len() as u32;
+                    self.array_data.extend_from_slice(&encoded);
                     self.arrays
                         .push((at, items.len() as u32, i32::from(array_class)));
                     rows.push((name.to_string(), 0x04, array_class, offset));

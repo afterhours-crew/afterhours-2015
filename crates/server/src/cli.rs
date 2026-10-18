@@ -23,6 +23,7 @@ struct Args {
     vehicle_parts: Option<PathBuf>,
     garage_layout: Option<PathBuf>,
     sequence_content: Option<PathBuf>,
+    traffic_content: Option<PathBuf>,
     garage_logic: Option<PathBuf>,
     reputation_thresholds: Option<PathBuf>,
     scene_catalog: Option<PathBuf>,
@@ -68,6 +69,7 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
     let (mut vehicle_content, mut garage_layout) = (None, None);
     let mut vehicle_parts = None;
     let mut sequence_content = None;
+    let mut traffic_content = None;
     let mut garage_logic = None;
     let mut reputation_thresholds = None;
     let mut scene_catalog = None;
@@ -110,6 +112,7 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
             Some("--vehicle-parts") => vehicle_parts = Some(PathBuf::from(value()?)),
             Some("--garage-layout") => garage_layout = Some(PathBuf::from(value()?)),
             Some("--sequence-content") => sequence_content = Some(PathBuf::from(value()?)),
+            Some("--traffic-content") => traffic_content = Some(PathBuf::from(value()?)),
             Some("--garage-logic") => garage_logic = Some(PathBuf::from(value()?)),
             Some("--reputation-thresholds") => {
                 reputation_thresholds = Some(PathBuf::from(value()?))
@@ -253,6 +256,11 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
             "--sequence-content requires the owned vehicle/progression configuration".into(),
         );
     }
+    if traffic_content.is_some() && vehicle_content.is_none() && !generated {
+        return Err(
+            "--traffic-content requires the owned vehicle/progression configuration".into(),
+        );
+    }
     if garage_logic.is_some() && sequence_content.is_none() && !generated {
         return Err("--garage-logic requires --sequence-content".into());
     }
@@ -285,6 +293,7 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
         vehicle_parts,
         garage_layout,
         sequence_content,
+        traffic_content,
         garage_logic,
         reputation_thresholds,
         scene_catalog,
@@ -349,6 +358,8 @@ fn resolve_install_content(args: &mut Args, options: &nfs_content::Options) -> R
         .get_or_insert(generated.progression_content);
     args.sequence_content
         .get_or_insert(generated.sequence_content);
+    args.traffic_content
+        .get_or_insert(generated.traffic_content);
     args.world_mac_template = Some(generated.world_mac_template);
     Ok(())
 }
@@ -613,6 +624,15 @@ async fn run(args: Args) -> Result<(), Failure> {
         .map(|path| nfs_server::sequence_content::SequenceContent::load(&args.root.join(path)))
         .transpose()?
         .map(Arc::new);
+    let traffic = args
+        .traffic_content
+        .as_ref()
+        .map(|path| {
+            nfs_content::traffic::Content::load(&args.root.join(path))
+                .map_err(|_| Failure::ProfileConfig)
+        })
+        .transpose()?
+        .map(Arc::new);
     let default_reputation = args
         .reputation_thresholds
         .as_ref()
@@ -829,6 +849,7 @@ async fn run(args: Args) -> Result<(), Failure> {
         progression,
         vehicles,
         sequences,
+        traffic,
         garage_logic,
         scoring,
         catalogs,
@@ -1073,6 +1094,7 @@ mod tests {
         assert!(parsed.persistent_content.as_ref().unwrap().exists());
         assert!(parsed.vehicle_parts.as_ref().unwrap().exists());
         assert!(parsed.vehicle_content.as_ref().unwrap().exists());
+        nfs_content::traffic::Content::load(parsed.traffic_content.as_ref().unwrap()).unwrap();
         nfs_server::progression::Content::load(parsed.progression_content.as_ref().unwrap())
             .unwrap();
         nfs_server::sequence_content::SequenceContent::load(

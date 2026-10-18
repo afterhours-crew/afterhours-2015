@@ -1,0 +1,189 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+//! Authored traffic topology, with an empty spline before a usable one.
+use super::{Asset, Field, ObjectFields, PartitionWriter, SceneObjects};
+const BUNDLE: &str = "vehicles/runtime/0_bundle";
+const BLUEPRINT: &str = "synthetic/traffic/vehicle";
+fn guid(seed: u8) -> [u8; 16] {
+    let mut g = [0xf3; 16];
+    g[15] = seed;
+    g
+}
+fn reference(seed: u8) -> ([u8; 16], [u8; 16]) {
+    (guid(seed), guid(seed ^ 0x80))
+}
+fn import(seed: u8) -> Field {
+    let (a, b) = reference(seed);
+    Field::Import(a, b)
+}
+fn asset(seed: u8, name: &str, class: &str, fields: ObjectFields, objects: SceneObjects) -> Asset {
+    let (partition, instance) = reference(seed);
+    Asset {
+        name: name.into(),
+        partition: PartitionWriter::default()
+            .build_many(partition, class, instance, fields, objects),
+    }
+}
+pub(super) fn registered() -> Vec<([u8; 16], [u8; 16])> {
+    vec![reference(3), reference(4)]
+}
+pub(super) fn append(fields: &mut ObjectFields, objects: &mut SceneObjects) {
+    let start = objects.len() as u32 + 2;
+    for (name, value) in fields {
+        if *name == "Objects" {
+            let Field::RawPointers(values) = value else {
+                panic!()
+            };
+            values.push(start);
+        }
+    }
+    objects.push((
+        "LogicPrefabReferenceObjectData",
+        vec![("Blueprint", import(1))],
+    ));
+}
+pub(super) fn install(assets: &mut Vec<Asset>) {
+    assets.retain(|a| a.name != BUNDLE);
+    let mut blueprint = None;
+    super::vehicles::assets_with(|fields, objects| {
+        fields[3].1 = Field::Structs("LinkConnection", vec![]);
+        objects[0].1[1].1 = Field::RawPointers(vec![3, 6, 7, 8, 9, 10, 11, 14, 15, 18, 21]);
+        objects[13] = ("TrafficComponentData", vec![]);
+        for (key, value) in fields.iter_mut() {
+            if *key == "Name" {
+                *value = Field::CString(BLUEPRINT.into())
+            }
+        }
+        blueprint = Some(asset(
+            8,
+            BLUEPRINT,
+            "RaceVehicleBlueprint",
+            fields.clone(),
+            objects.clone(),
+        ));
+    });
+    let persona = vec![
+        ("PersonaName", Field::CString("SyntheticTraffic".into())),
+        ("VehicleItemData", import(6)),
+        ("VehicleTags", Field::Imports(vec![reference(5)])),
+        ("AdditionalItems", Field::RawPointers(vec![])),
+        ("OverrideCarColor", Field::Bool(false)),
+        ("OverridePerformance", Field::Bool(false)),
+        ("OverrideGripValue", Field::Bool(false)),
+    ];
+    assets.extend([
+        asset(
+            1,
+            "synthetic/traffic/manager",
+            "LogicPrefabBlueprint",
+            vec![
+                ("Flags", Field::UInt(14)),
+                ("Objects", Field::RawPointers(vec![2, 3, 4, 5])),
+            ],
+            vec![
+                ("AiActorManagerEntityData", vec![]),
+                (
+                    "TrafficManagerEntityData",
+                    vec![("Density", Field::Float(0.5))],
+                ),
+                ("AiParticipantManagerEntityData", vec![]),
+                ("PersonaEntityData", persona),
+            ],
+        ),
+        asset(
+            3,
+            "synthetic/traffic/empty",
+            "TrafficSplineEntityData",
+            vec![
+                ("SpeedSegmentAsset", Field::RawPointer(0)),
+                ("DesiredDensity", Field::Int(0)),
+                ("VehicleTags", Field::RawPointers(vec![])),
+            ],
+            vec![],
+        ),
+        asset(
+            4,
+            "synthetic/traffic/road",
+            "TrafficSplineEntityData",
+            vec![
+                ("SpeedSegmentAsset", Field::RawPointer(2)),
+                ("DesiredDensity", Field::Int(10)),
+                ("VehicleTags", Field::Imports(vec![reference(5)])),
+            ],
+            vec![
+                (
+                    "SplineSpeedSegmentsAsset",
+                    vec![("SpeedSegments", Field::RawPointers(vec![3]))],
+                ),
+                (
+                    "SplineSpeedSegment",
+                    vec![
+                        ("DesiredSpeed", Field::Float(17.)),
+                        (
+                            "Spline",
+                            Field::Struct(
+                                "SplineData",
+                                vec![(
+                                    "SegmentPoints",
+                                    Field::Structs(
+                                        "Vec3",
+                                        vec![
+                                            vec![
+                                                ("x", Field::Float(2.)),
+                                                ("y", Field::Float(3.)),
+                                                ("z", Field::Float(4.)),
+                                            ],
+                                            vec![
+                                                ("x", Field::Float(12.)),
+                                                ("y", Field::Float(3.)),
+                                                ("z", Field::Float(4.)),
+                                            ],
+                                        ],
+                                    ),
+                                )],
+                            ),
+                        ),
+                    ],
+                ),
+            ],
+        ),
+        asset(5, "synthetic/traffic/tag", "GameTagAsset", vec![], vec![]),
+        asset(
+            6,
+            "synthetic/traffic/item",
+            "RaceVehicleItemData",
+            vec![("RaceVehicle", import(7))],
+            vec![],
+        ),
+        asset(
+            7,
+            "synthetic/traffic/reference",
+            "RaceVehicleReference",
+            vec![(
+                "BundleReference",
+                Field::Struct(
+                    "AssetReference",
+                    vec![("Name", Field::CString(BUNDLE.into()))],
+                ),
+            )],
+            vec![],
+        ),
+        blueprint.unwrap(),
+        asset(
+            9,
+            BUNDLE,
+            "BlueprintBundle",
+            vec![("Blueprint", import(8))],
+            vec![],
+        ),
+        asset(
+            10,
+            &format!("{BUNDLE}_networkregistry_win32"),
+            "NetworkRegistryAsset",
+            vec![("Objects", Field::Imports(vec![reference(8)]))],
+            vec![],
+        ),
+    ]);
+}

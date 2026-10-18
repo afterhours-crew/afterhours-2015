@@ -245,6 +245,7 @@ For world/garage operation also supply:
 | `--vehicle-content`, `--garage-layout` | Vehicle assets and parking layout; both default to installed content with `--game-dir` ([vehicles](src/vehicle_content.rs), [layout](src/vehicle_content/layout.rs)) |
 | `--vehicle-parts` | Part definitions for version-2 vehicle content; defaults to installed content with `--game-dir`. Explicit profiles, parts and layouts retain precedence |
 | `--sequence-content`, `--garage-logic` | Sequence definitions default to installed content with `--game-dir`; explicit definitions override them. Garage logic remains separately supplied ([sequences](src/sequence_content.rs), [garage](src/garage_logic.rs)) |
+| `--traffic-content` | Installed traffic vehicles, AI managers and road splines; generated with `--game-dir`. Bounded session population and lifecycle are implemented; gameplay acceptance remains tracked in [#54](https://github.com/afterhours-crew/afterhours-2015/issues/54) |
 
 Sequence content version 2 omits `arrive.spline.base_value`: the six-bit goal
 allocation counter belongs to the current world and wraps after 63. It advances

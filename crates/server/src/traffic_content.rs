@@ -7,6 +7,8 @@
 use nfs_content::vehicle_profiles::traffic::Definition;
 use nfs_world::replication::{Error, vehicle::*};
 
+pub mod population;
+
 pub struct Request<'a> {
     pub pose: initialize::Pose,
     pub speed: f32,
@@ -90,7 +92,7 @@ pub fn construct(
 mod tests {
     use super::*;
     use serde_json::json;
-    fn definition() -> Definition {
+    pub(super) fn definition() -> Definition {
         let (v, _, _) = crate::vehicle_content::tests::fixture();
         let mut row = v["vehicles"][0].clone();
         for key in ["definitions", "wheel_baseline", "appearance", "meshes"] {

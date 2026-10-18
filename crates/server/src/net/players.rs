@@ -31,6 +31,7 @@ mod refusal;
 mod returning;
 mod scoring;
 mod sequences;
+mod traffic;
 
 #[cfg(test)]
 mod deployment_tests;
@@ -84,6 +85,9 @@ pub(super) struct PlayerListener {
     progression: Option<std::sync::Arc<crate::progression::Content>>,
     vehicles: Option<std::sync::Arc<GarageContent>>,
     population: Option<Population>,
+    traffic_content: Option<std::sync::Arc<nfs_content::traffic::Content>>,
+    traffic_population: Option<crate::traffic_content::population::Population>,
+    traffic_failed: bool,
     garage_presence: nfs_world::garage::presence::Presence,
     spawn_points: nfs_world::spawn_points::SpawnPoints,
     level_poll: nfs_world::level_poll::LevelPoll,
@@ -633,6 +637,9 @@ impl PlayerListener {
             progression: None,
             vehicles: None,
             population: None,
+            traffic_content: None,
+            traffic_population: None,
+            traffic_failed: false,
             garage_presence: nfs_world::garage::presence::Presence::default(),
             spawn_points: nfs_world::spawn_points::SpawnPoints::default(),
             level_poll: nfs_world::level_poll::LevelPoll::default(),
@@ -692,6 +699,13 @@ impl PlayerListener {
         self.vehicles = vehicles;
         self
     }
+    pub(super) fn with_traffic(
+        mut self,
+        content: Option<std::sync::Arc<nfs_content::traffic::Content>>,
+    ) -> Self {
+        self.traffic_content = content;
+        self
+    }
     pub(super) fn with_arrivals(mut self, arrivals: Option<nfs_world::arrival::Arrivals>) -> Self {
         self.arrivals = arrivals;
         self
@@ -739,6 +753,13 @@ impl PlayerListener {
             .map(|_| Population::new(&messages))
             .transpose()?;
         let bindings = Bindings::from_messages(&messages).map_err(|_| replication::Error::Shape)?;
+        let traffic_population = self
+            .traffic_content
+            .as_ref()
+            .map(|content| {
+                crate::traffic_content::population::Population::new(bindings.clone(), content)
+            })
+            .transpose()?;
         let rpc = Rpc {
             selector: 0,
             serial: Serial::new(0).ok_or(replication::Error::Shape)?,
@@ -834,6 +855,7 @@ impl PlayerListener {
         self.world_activation = world_activation;
         self.pending.extend(sections);
         self.population = population;
+        self.traffic_population = traffic_population;
         self.roles = Some(roles.clone());
         Ok(())
     }
