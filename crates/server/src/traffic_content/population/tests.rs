@@ -70,11 +70,11 @@ pub(crate) fn fixture_with(connection: u8) -> (Population, Players, Content) {
             tags: vec![[3; 16]],
             segments: vec![Segment {
                 speed: 15.,
-                points: (0..20).map(|i| [i as f32 * 15., 0., 0.]).collect(),
+                points: (0..80).map(|i| [i as f32 * 15., 0., 0.]).collect(),
                 curve: nfs_content::traffic::Curve::new(
-                    [[0.; 3], [95., 0., 0.], [190., 0., 0.], [285., 0., 0.]],
-                    (1..20).map(|i| i as f32 / 19.).collect(),
-                    (1..20).map(|i| i as f32 * 15.).collect(),
+                    [[0.; 3], [395., 0., 0.], [790., 0., 0.], [1185., 0., 0.]],
+                    (1..80).map(|i| i as f32 / 79.).collect(),
+                    (1..80).map(|i| i as f32 * 15.).collect(),
                 )
                 .unwrap(),
             }],
@@ -214,6 +214,74 @@ fn placement_respects_tags_floor_spacing_and_population_bound() {
     let basis = road_basis([0.; 3], [3., 1., 4.]).unwrap();
     vehicle::orientation::quaternion_from_basis(basis).unwrap();
     assert!(road_basis([0.; 3], [0.; 3]).is_none());
+}
+
+#[test]
+fn nearby_traffic_survives_age_and_retirement_grace_resets_on_return() {
+    let (mut population, mut world, mut content) = fixture();
+    let ids = population
+        .advance(&mut world, 1, 100, &content, 0, &[[0.; 3]])
+        .unwrap()
+        .spawned
+        .unwrap();
+    content.density = 0.; // Isolate retention from further population growth.
+    let anchor = population.cars[&1].anchor;
+    for now in [90_000, 180_000, 1_000_000] {
+        let changes = population
+            .advance(&mut world, 1, 100, &content, now, &[anchor])
+            .unwrap();
+        assert!(changes.deleted.is_empty());
+        assert_eq!(world.ai_ids(1, 100, 1), Some(ids));
+    }
+    let far = [anchor[0] + 451., anchor[1], anchor[2]];
+    for now in [1_000_100, 1_002_099] {
+        assert!(
+            population
+                .advance(&mut world, 1, 100, &content, now, &[far])
+                .unwrap()
+                .deleted
+                .is_empty()
+        );
+    }
+    // A second nearby player protects the car and clears the earlier timer.
+    assert!(
+        population
+            .advance(&mut world, 1, 100, &content, 1_002_100, &[far, anchor])
+            .unwrap()
+            .deleted
+            .is_empty()
+    );
+    assert!(
+        population
+            .advance(&mut world, 1, 100, &content, 1_002_101, &[far])
+            .unwrap()
+            .deleted
+            .is_empty()
+    );
+    assert!(
+        population
+            .advance(&mut world, 1, 100, &content, 1_004_100, &[far])
+            .unwrap()
+            .deleted
+            .is_empty()
+    );
+    let retired = population
+        .advance(&mut world, 1, 100, &content, 1_004_101, &[far])
+        .unwrap();
+    assert_eq!(retired.deleted.len(), 4);
+    assert_eq!(population.count(), 0);
+    assert!(world.ai_ids(1, 100, 1).is_none());
+}
+
+#[test]
+fn spawning_respects_every_players_near_region() {
+    let (population, _, content) = fixture();
+    let focus = [[0.; 3], [600., 0., 0.], [1200., 0., 0.]];
+    // Together these exclusion circles cover the complete installed segment.
+    assert!(population.select(&content, &focus).is_none());
+    let selected = population.select(&content, &[[0.; 3]]).unwrap();
+    assert!(horizontal_distance_squared(selected.pose.position, [0.; 3]) > SPAWN_DISTANCE.powi(2));
+    assert!(horizontal_distance_squared(selected.pose.position, [0.; 3]) < RETAIN_DISTANCE.powi(2));
 }
 
 #[test]

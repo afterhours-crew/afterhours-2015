@@ -22,12 +22,19 @@ pub(crate) mod tests;
 
 pub const MAX_CARS: usize = 8;
 const SPAWN_INTERVAL_MS: u64 = 1000;
-const LIFETIME_MS: u64 = 90_000;
+// The native population uses 300/450 metre eligibility/retention distances.
+// Its spawn region also depends on player motion and orientation, and its
+// retirement gate checks total age. This host policy conservatively excludes
+// a circle and requires two continuous seconds outside every retention region;
+// it does not reproduce the entire native population policy.
+const SPAWN_DISTANCE: f32 = 300.;
+const RETAIN_DISTANCE: f32 = 450.;
+const RETIRE_GRACE_MS: u64 = 2000;
 
 #[derive(Clone, Debug)]
 struct Car {
     anchor: [f32; 3],
-    expires: u64,
+    outside_since: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -130,11 +137,24 @@ impl Population {
                 .ai_vehicle_physics(connection, persona, key)?
                 .decode([0.; 3])?
                 .position;
+            if focus
+                .iter()
+                .any(|p| horizontal_distance_squared(*p, car.anchor) <= RETAIN_DISTANCE.powi(2))
+            {
+                car.outside_since = None;
+            } else {
+                car.outside_since.get_or_insert(now);
+            }
         }
         let retire: Vec<_> = next
             .cars
             .iter()
-            .filter(|(_, car)| focus.is_empty() || now >= car.expires)
+            .filter(|(_, car)| {
+                focus.is_empty()
+                    || car
+                        .outside_since
+                        .is_some_and(|since| now.saturating_sub(since) >= RETIRE_GRACE_MS)
+            })
             .map(|(&key, _)| key)
             .collect();
         for key in retire {
@@ -151,7 +171,6 @@ impl Population {
                     connection,
                     persona,
                     content,
-                    now,
                     placement,
                     &mut changes,
                 )?;
@@ -192,15 +211,22 @@ impl Population {
             for segment in &spline.segments {
                 for (point_index, pair) in segment.points.windows(2).enumerate() {
                     let position = pair[0];
+                    // Exclude the close region of every active player, even
+                    // when a different floor makes them ineligible as a focus.
+                    if focus.iter().any(|p| {
+                        horizontal_distance_squared(*p, position) <= SPAWN_DISTANCE.powi(2)
+                    }) {
+                        continue;
+                    }
                     let distance = focus
                         .iter()
                         .filter(|p| (p[1] - position[1]).abs() <= 8.)
-                        .map(|p| distance_squared(*p, position))
+                        .map(|p| horizontal_distance_squared(*p, position))
                         .min_by(f32::total_cmp);
                     let Some(distance) = distance else {
                         continue;
                     };
-                    if !(45. * 45. ..=110. * 110.).contains(&distance)
+                    if distance >= RETAIN_DISTANCE.powi(2)
                         || self
                             .cars
                             .values()
@@ -246,7 +272,6 @@ impl Population {
         connection: u8,
         persona: u64,
         content: &Content,
-        now: u64,
         placement: Placement,
         changes: &mut Changes,
     ) -> Result<(), Error> {
@@ -363,7 +388,7 @@ impl Population {
             key,
             Car {
                 anchor: placement.pose.position,
-                expires: now.saturating_add(LIFETIME_MS),
+                outside_since: None,
             },
         );
         Ok(())
@@ -379,6 +404,9 @@ fn asset_bundle(stream: u16) -> Result<u16, Error> {
 }
 pub(super) fn distance_squared(a: [f32; 3], b: [f32; 3]) -> f32 {
     a.into_iter().zip(b).map(|(a, b)| (a - b).powi(2)).sum()
+}
+fn horizontal_distance_squared(a: [f32; 3], b: [f32; 3]) -> f32 {
+    (a[0] - b[0]).powi(2) + (a[2] - b[2]).powi(2)
 }
 pub(super) fn road_basis(a: [f32; 3], b: [f32; 3]) -> Option<[[f32; 3]; 3]> {
     let mut forward = std::array::from_fn::<_, 3, _>(|i| b[i] - a[i]);
