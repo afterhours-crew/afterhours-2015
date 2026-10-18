@@ -12,6 +12,7 @@ use nfs_protocol::world::{
     BitSpan,
     rpc::{Envelope, Limits, RouteProfile},
 };
+use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Report {
@@ -29,6 +30,19 @@ pub fn receive(
     persona: u64,
     body: BitSpan<'_>,
     ready: impl Fn(u16) -> bool,
+) -> Result<Option<Report>, Error> {
+    receive_with_ai(players, connection, persona, body, ready, &BTreeMap::new())
+}
+
+/// The host supplies its currently delegated AI lifetimes separately from owned
+/// inventory. Every mapping is checked against the session's exact live car.
+pub fn receive_with_ai(
+    players: &mut Players,
+    connection: u8,
+    persona: u64,
+    body: BitSpan<'_>,
+    ready: impl Fn(u16) -> bool,
+    delegated: &BTreeMap<u16, u64>,
 ) -> Result<Option<Report>, Error> {
     let envelope = Envelope::decode(
         body,
@@ -72,11 +86,22 @@ pub fn receive(
     if !client_seconds.is_finite() || client_seconds < 0.0 {
         return Err(Error::Shape);
     }
-    if !ready(id) {
-        return Err(Error::UnknownObject);
-    }
     let active = route.method_index() == 0;
-    let record = players.set_vehicle_nitrous_mode(connection, persona, id, active)?;
+    let record = if let Some(&key) = delegated.get(&id) {
+        if players
+            .ai_ids(connection, persona, key)
+            .map(|ids| ids.vehicle)
+            != Some(id)
+        {
+            return Err(Error::UnknownObject);
+        }
+        players.set_ai_vehicle_nitrous_mode(connection, persona, key, active)?
+    } else {
+        if !ready(id) {
+            return Err(Error::UnknownObject);
+        }
+        players.set_vehicle_nitrous_mode(connection, persona, id, active)?
+    };
     Ok(Some(Report {
         vehicle: id,
         active,

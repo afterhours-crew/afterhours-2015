@@ -103,6 +103,230 @@ impl PlayerListener {
 mod tests {
     use super::*;
     #[test]
+    fn delegated_callbacks_commit_atomically_with_motion_and_glass() {
+        use nfs_world::{
+            bits::BitWriter,
+            logic::{EntityRef, Message},
+            replication::{
+                Initial, Update,
+                vehicle::{self, chassis, movement::Sample},
+            },
+        };
+        let connection = HOST_SELECTOR as u8;
+        let (mut rivals, mut world, mut registrations, _) =
+            crate::rival_content::population::tests::fixture(connection);
+        let ids = crate::rival_content::population::tests::spawn(
+            &mut rivals,
+            &mut world,
+            &mut registrations,
+            connection,
+        )
+        .spawned
+        .unwrap();
+        let key = crate::traffic_content::population::RIVAL_KEY_START;
+        let Initial::Vehicle { creation, .. } = &world.objects().get(ids.vehicle).unwrap().initial
+        else {
+            panic!()
+        };
+        let horn_selector = creation
+            .fields
+            .iter()
+            .find_map(|f| match f {
+                vehicle::Initial::Chassis(c) => Some(c.rpc.selector),
+                _ => None,
+            })
+            .unwrap();
+        let nos_selector = creation
+            .fields
+            .iter()
+            .find_map(|f| match f {
+                vehicle::Initial::Index { rpc, .. } => Some(rpc.selector),
+                _ => None,
+            })
+            .unwrap();
+        let wheel_selector = creation
+            .fields
+            .iter()
+            .find_map(|f| match f {
+                vehicle::Initial::Wheel { rpc, .. } => Some(rpc.selector),
+                _ => None,
+            })
+            .unwrap();
+        // Driving callbacks use the same ordinary component endpoints as owned cars.
+        let rpc = |selector: u16, method: u32, value: u64, bits: usize| {
+            let mut payload = BitWriter::new();
+            payload
+                .put(selector.into(), 9)
+                .put(method.into(), 32)
+                .put(value, bits)
+                .put(0, if bits == 1 { 6 } else { 7 });
+            let mut body = BitWriter::new();
+            body.put(0, 32)
+                .put(0, 32)
+                .put(1, 8)
+                .put(ids.vehicle.into(), 13)
+                .put((payload.len() / 8) as u64, 9)
+                .put_span(payload.span());
+            body
+        };
+        let before = world.ai_vehicle_physics(connection, 100, key).unwrap();
+        let mut motion = before.decode([0.; 3]).unwrap();
+        motion.identity = 100f64.to_bits();
+        motion.position[0] += 10.;
+        motion.velocity = [5., 0., 0.];
+        let sample = Sample {
+            physics: motion
+                .encode([0.; 3], &chassis::Controls::new(4).unwrap())
+                .unwrap(),
+            flag: false,
+        };
+        let (header, movement) = sample.encode().unwrap();
+        let make_frame = |sequence, active: bool, invalid: bool| {
+            let calls = [
+                rpc(horn_selector, 0, u64::from(active), 1),
+                rpc(nos_selector, u32::from(!active), 10f32.to_bits().into(), 32),
+                rpc(wheel_selector, u32::from(!active), 0, 1),
+                rpc(
+                    horn_selector,
+                    2,
+                    if invalid { f32::NAN } else { 8.75f32 }.to_bits().into(),
+                    32,
+                ),
+            ];
+            let glass = Message::Reached {
+                event: 28_404_286,
+                target: EntityRef {
+                    ghost: ids.vehicle,
+                    entity: 2,
+                },
+                player: 0,
+            }
+            .encode()
+            .unwrap();
+            let mut messages: Vec<_> = calls
+                .iter()
+                .map(|b| frame::Message::Opaque {
+                    index: 47,
+                    body: b.span(),
+                })
+                .collect();
+            messages.push(frame::Message::Opaque {
+                index: 82,
+                body: glass.span(),
+            });
+            let messages = frame::Builder::new().messages(
+                None,
+                vec![frame::Group {
+                    channel: 0,
+                    sequence: Some(sequence),
+                    messages,
+                }],
+            );
+            let mut wire = BitWriter::new();
+            wire.put((1 << frame::MESSAGES) | (1 << frame::MOVEMENT), 6);
+            messages.append(&mut wire).unwrap();
+            wire.put_span(header.span())
+                .put(1, 6)
+                .put(ids.vehicle.into(), 16)
+                .put(0, 4)
+                .put(movement.len() as u64, 16)
+                .put_span(movement.span())
+                .align();
+            wire
+        };
+        let deliver = |listener: &mut PlayerListener, wire: &BitWriter| {
+            listener.frame(Queued {
+                advertised: None,
+                frame: 0,
+                data: wire.span(),
+            })
+        };
+        let mut listener = PlayerListener::new(100);
+        listener.players = world;
+        listener.rival_population = Some(rivals);
+        let snapshot = listener.players.objects().snapshot();
+        // The final malformed RPC rolls back valid horn, nitrous, glass and motion.
+        assert!(!deliver(&mut listener, &make_frame(0, true, true)));
+        assert_eq!(listener.players.objects().snapshot(), snapshot);
+        assert!(listener.pending.is_empty() && listener.pending_rpcs.is_empty());
+        assert!(listener.glass.state(ids.vehicle).is_none());
+        let valid = make_frame(0, true, false);
+        listener
+            .pending
+            .resize(MAX_PENDING, returning::empty_section());
+        assert!(!deliver(&mut listener, &valid));
+        assert_eq!(listener.players.objects().snapshot(), snapshot);
+        assert!(listener.glass.state(ids.vehicle).is_none());
+        listener.pending.clear();
+        assert!(deliver(&mut listener, &valid));
+        assert_eq!(
+            listener
+                .players
+                .ai_vehicle_physics(connection, 100, key)
+                .unwrap(),
+            sample.physics
+        );
+        assert_eq!(listener.pending_rpcs.len(), 1);
+        assert_eq!(listener.unsupported_rpcs, 0);
+        let Update::Vehicle { fields, .. } =
+            &listener.players.objects().get(ids.vehicle).unwrap().current
+        else {
+            panic!()
+        };
+        assert!(
+            fields
+                .iter()
+                .any(|f| matches!(f, Some(vehicle::Update::Chassis(c)) if c.flag == Some(true)))
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|f| matches!(f, Some(vehicle::Update::Index { index: Some(1), .. })))
+        );
+        assert!(listener.world_cars.is_empty() && listener.scoring_state.nitrous.is_empty());
+        assert_eq!(
+            fields
+                .iter()
+                .filter(|f| matches!(f, Some(vehicle::Update::Wheel(Some(true)))))
+                .count(),
+            1
+        );
+        let committed = listener.players.objects().snapshot();
+        listener.pending.clear();
+        listener.pending_rpcs.clear();
+        // A repeated reliable frame must not repeat events or change state.
+        assert!(deliver(&mut listener, &valid));
+        assert_eq!(listener.players.objects().snapshot(), committed);
+        assert!(listener.pending.is_empty() && listener.pending_rpcs.is_empty());
+        // Five messages consumed sequence indices 0..4; the next frame turns all off.
+        assert!(deliver(&mut listener, &make_frame(5, false, false)));
+        let Update::Vehicle { fields, .. } =
+            &listener.players.objects().get(ids.vehicle).unwrap().current
+        else {
+            panic!()
+        };
+        assert!(
+            fields
+                .iter()
+                .any(|f| matches!(f, Some(vehicle::Update::Chassis(c)) if c.flag == Some(false)))
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|f| matches!(f, Some(vehicle::Update::Index { index: Some(0), .. })))
+        );
+        listener
+            .players
+            .remove_ai_vehicle(connection, 100, key)
+            .unwrap();
+        assert!(
+            !listener
+                .delegated_ai(&listener.players)
+                .contains_key(&ids.vehicle)
+        );
+    }
+
+    #[test]
     fn rival_glass_reports_commit_with_movement_and_reliable_delivery() {
         use nfs_world::{
             logic::{EntityRef, Message},

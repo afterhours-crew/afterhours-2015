@@ -62,3 +62,12 @@ add/bind RPCs. Deletion releases those references with the AI objects, matching
 client death listeners; failed deletion leaves all retained state intact.
 Actor configuration is explicit. These APIs do not yet establish live traffic,
 client delegation or rival behavior; those remain tracked in issue #54.
+
+Driver callbacks accept an explicit map of currently delegated AI lifetimes,
+separate from owned inventory. Nitrous changes its mode, the horn changes its
+chassis flag, and burst/reinflate requests change only the selected wheel.
+Drift exit returns an event for a gameplay hook without inventing a reply or
+awarding REP. The listener commits callbacks with movement, reliable ordering
+and bounded output queues; a failed frame publishes none of those changes.
+See [#120](https://github.com/afterhours-crew/afterhours-2015/issues/120) for the
+remaining live validation of these paths.

@@ -1281,6 +1281,7 @@ impl Listener for PlayerListener {
         let mut exit_entries = Vec::new();
         let mut equipment = self.equipment.clone();
         let mut garage_commands = self.garage_commands.clone();
+        let delegated = self.delegated_ai(&players);
         for body in rpcs {
             if self.world_ms < self.return_trace_until
                 && let Some(label) = refusal::route_label(body)
@@ -1292,12 +1293,13 @@ impl Listener for PlayerListener {
                     "client call during a garage return"
                 );
             }
-            match nfs_world::vehicle_nitrous::receive(
+            match nfs_world::vehicle_nitrous::receive_with_ai(
                 &mut players,
                 HOST_SELECTOR as u8,
                 self.persona,
                 body,
                 |id| world_cars.get(&id).is_some_and(|(_, ready)| *ready),
+                &delegated,
             ) {
                 Ok(Some(report)) => {
                     tracing::info!(
@@ -1305,7 +1307,7 @@ impl Listener for PlayerListener {
                         active = report.active,
                         client_seconds = report.client_seconds,
                         changed = report.record.is_some(),
-                        "owned nitrous transition"
+                        "driver nitrous transition"
                     );
                     records.extend(report.record);
                     if let Some(fuel) = nitrous.get_mut(&report.vehicle) {
@@ -1317,6 +1319,42 @@ impl Listener for PlayerListener {
                         }
                         nitrous_reported.insert(report.vehicle);
                     }
+                    continue;
+                }
+                Ok(None) => {}
+                Err(error) => return self.refuse_rpc(error, body),
+            }
+            match nfs_world::vehicle_chassis::receive(
+                &mut players,
+                HOST_SELECTOR as u8,
+                self.persona,
+                body,
+                |id| world_cars.get(&id).is_some_and(|(_, ready)| *ready),
+                &delegated,
+            ) {
+                Ok(Some(nfs_world::vehicle_chassis::Report::Horn { record, .. })) => {
+                    records.extend(record.map(|r| *r));
+                    continue;
+                }
+                Ok(Some(nfs_world::vehicle_chassis::Report::DriftExit { vehicle, value })) => {
+                    // No challenge gameplay hook is registered in free roam.
+                    // The independent REP graphs retain their own query inputs.
+                    tracing::debug!(vehicle, value, "driver drift exit without a challenge hook");
+                    continue;
+                }
+                Ok(None) => {}
+                Err(error) => return self.refuse_rpc(error, body),
+            }
+            match nfs_world::vehicle_wheels::receive(
+                &mut players,
+                HOST_SELECTOR as u8,
+                self.persona,
+                body,
+                |id| world_cars.get(&id).is_some_and(|(_, ready)| *ready),
+                &delegated,
+            ) {
+                Ok(Some(report)) => {
+                    records.extend(report.record);
                     continue;
                 }
                 Ok(None) => {}
