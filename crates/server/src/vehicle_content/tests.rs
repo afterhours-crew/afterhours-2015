@@ -110,7 +110,7 @@ fn request(items: &Collection) -> Request<'_> {
             name: b"Local".to_vec(),
         },
         customization_attached: true,
-        world: false,
+        placement: Placement::Garage,
         authority_group: 10,
         authority_components: &[100],
     }

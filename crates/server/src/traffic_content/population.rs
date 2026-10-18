@@ -26,6 +26,9 @@ pub use policy::Focus;
 pub(crate) mod tests;
 
 pub const MAX_CARS: usize = ai::MAX_AI;
+/// Disjoint host identity ranges for ambient traffic and roaming rivals.
+/// These are server bookkeeping keys, never client object IDs.
+pub(crate) const RIVAL_KEY_START: u64 = 1 << 40;
 
 pub struct Input<'a> {
     pub now: u64,
@@ -212,6 +215,7 @@ impl Population {
                 });
             if changes.spawned.is_some()
                 || next.cars.len() >= MAX_CARS
+                || world.ai_count() >= ai::MAX_AI
                 || timer.elapsed <= timer.interval
             {
                 continue;
@@ -289,6 +293,9 @@ impl Population {
             .scene(content.managers.scene)
             .ok_or(Error::UnknownObject)?;
         let key = self.next;
+        if key >= RIVAL_KEY_START {
+            return Err(Error::Bound);
+        }
         let components = definition
             .profile
             .kinds()

@@ -276,6 +276,18 @@ fn builds_outputs_the_service_loaders_accept() {
     progression::Content::load(&prepared.path(Kind::ProgressionContent)).unwrap();
     sequences::SequenceContent::load(&prepared.path(Kind::SequenceContent)).unwrap();
     let traffic = traffic::Content::load(&prepared.path(Kind::TrafficContent)).unwrap();
+    let rivals = rivals::Content::load(&prepared.path(Kind::RivalContent)).unwrap();
+    assert_eq!(rivals.managers, traffic.managers);
+    assert_eq!(rivals.personas.len(), 1);
+    assert_eq!(rivals.racers.len(), 1);
+    assert_eq!(rivals.personas[0].name, "SyntheticRival");
+    assert_eq!(rivals.personas[0].driving.performance, 0.2);
+    assert_eq!(rivals.personas[0].driving.grip, Some(4));
+    assert_eq!(rivals.personality_count, 2);
+    assert_eq!(rivals.personas[0].personality_index, 1);
+    assert_eq!(rivals.racers[0].position, [8., 3., -9.]);
+    assert!(rivals.racers[0].regions[0].contains([0., 1., 0.]));
+    assert!(!rivals.racers[0].regions[0].contains([21., 1., 0.]));
     assert_eq!(traffic.personas.len(), 1);
     assert_eq!(traffic.splines.len(), 1);
     assert_eq!(traffic.splines[0].index, 1);
@@ -434,6 +446,19 @@ fn changed_construction_rules_do_not_reuse_an_installation_cache() {
         fingerprint(&install.game(), &changed_vehicles).unwrap()
     );
     assert!(prepare(&install.game(), &install.cache(), &changed_vehicles).is_err());
+    for mutate in [
+        |id: &mut BuildIdentity| id.traffic_spline_class_id ^= 1,
+        |id: &mut BuildIdentity| id.traffic_links.roads ^= 1,
+        |id: &mut BuildIdentity| id.rival_links.personality_library ^= 1,
+        |id: &mut BuildIdentity| id.rival_links.personality ^= 1,
+    ] {
+        let mut changed = install.options();
+        mutate(&mut changed.identity);
+        assert_ne!(
+            first.fingerprint,
+            fingerprint(&install.game(), &changed).unwrap()
+        );
+    }
     assert!(!install.prepare().unwrap().built);
 }
 

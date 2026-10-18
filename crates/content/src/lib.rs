@@ -60,7 +60,7 @@ pub const FORMAT: &str = "nfs-install-content";
 pub const VERSION: u64 = 1;
 /// Increment whenever a builder's output for an unchanged installation changes,
 /// so existing cache entries are rebuilt.
-pub const BUILDER_REVISION: u64 = 30;
+pub const BUILDER_REVISION: u64 = 32;
 /// Executable file name relative to the installation root.
 pub const EXECUTABLE: &str = "NFS16.exe";
 
@@ -129,10 +129,11 @@ pub enum Kind {
     ProgressionContent,
     SequenceContent,
     TrafficContent,
+    RivalContent,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 15] = [
+    pub const ALL: [Kind; 16] = [
         Kind::ItemContent,
         Kind::PersistentContent,
         Kind::StatDefinitions,
@@ -148,6 +149,7 @@ impl Kind {
         Kind::ProgressionContent,
         Kind::SequenceContent,
         Kind::TrafficContent,
+        Kind::RivalContent,
     ];
     /// Manifest key.
     pub fn key(self) -> &'static str {
@@ -167,6 +169,7 @@ impl Kind {
             Self::ProgressionContent => "progression_content",
             Self::SequenceContent => "sequence_content",
             Self::TrafficContent => "traffic_content",
+            Self::RivalContent => "rival_content",
         }
     }
     /// File name inside a cache entry.
@@ -187,6 +190,7 @@ impl Kind {
             Self::ProgressionContent => "progression-content.json",
             Self::SequenceContent => "sequence-content.json",
             Self::TrafficContent => "traffic-content.json",
+            Self::RivalContent => "rival-content.json",
         }
     }
 }
@@ -417,6 +421,10 @@ fn build_with_progress(
     outputs.insert(
         Kind::TrafficContent,
         extract!(Kind::TrafficContent, traffic::build(&mut index)),
+    );
+    outputs.insert(
+        Kind::RivalContent,
+        extract!(Kind::RivalContent, rivals::build(&mut index)),
     );
     Ok(outputs)
 }

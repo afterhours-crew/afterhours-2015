@@ -1,6 +1,6 @@
 {
   "format": "nfs-build-profile",
-  "version": 13,
+  "version": 14,
   "traffic_spline_class_id": 5372,
   "traffic_links": {
     "roads": 2618941240,
@@ -1280,6 +1280,9 @@
     "secondary_regions": 738504807,
     "spawn": 1399825718,
     "participants": 354899994,
-    "actors": 2002708558
+    "actors": 2002708558,
+    "personality_library": 3044713446,
+    "personalities": 298306079,
+    "personality": 2587508601
   }
 }

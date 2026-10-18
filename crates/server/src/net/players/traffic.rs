@@ -6,25 +6,17 @@ use crate::traffic_content::population::{Focus, Input};
 use nfs_world::application::Random;
 
 impl PlayerListener {
-    pub(in crate::net) fn advance_traffic(
-        &mut self,
-        now_ms: u64,
-    ) -> Result<(), replication::Error> {
-        if !self.pending_entries.is_empty()
+    pub(super) fn ai_busy(&self) -> bool {
+        !self.pending_entries.is_empty()
             || !self.pending.is_empty()
             || !self.pending_rpcs.is_empty()
+            || !self.pending_content.is_empty()
             || self.session_backlog > 1
-        {
-            return Ok(());
-        }
-        let (Some(content), Some(population)) = (&self.traffic_content, &self.traffic_population)
-        else {
-            return Ok(());
-        };
-        let mut population = population.clone();
+    }
+    pub(super) fn ai_focus(&self) -> Result<Vec<Focus>, replication::Error> {
         let mut focus = Vec::new();
         for participant in self.participants.in_free_roam() {
-            if self.traffic_failed || !self.free_roam_presented.contains(&participant) {
+            if !self.free_roam_presented.contains(&participant) {
                 continue;
             }
             let Some((&car, _)) = self
@@ -34,10 +26,10 @@ impl PlayerListener {
             else {
                 continue;
             };
-            let physics = self
+            let motion = self
                 .players
-                .vehicle_physics(HOST_SELECTOR as u8, self.persona, car)?;
-            let motion = physics.decode([0.; 3])?;
+                .vehicle_physics(HOST_SELECTOR as u8, self.persona, car)?
+                .decode([0.; 3])?;
             focus.push(Focus {
                 id: participant,
                 position: motion.position,
@@ -47,6 +39,25 @@ impl PlayerListener {
                 )?[2],
             });
         }
+        Ok(focus)
+    }
+    pub(in crate::net) fn advance_traffic(
+        &mut self,
+        now_ms: u64,
+    ) -> Result<(), replication::Error> {
+        if self.ai_busy() {
+            return Ok(());
+        }
+        let (Some(content), Some(population)) = (&self.traffic_content, &self.traffic_population)
+        else {
+            return Ok(());
+        };
+        let mut population = population.clone();
+        let focus = if self.traffic_failed {
+            vec![]
+        } else {
+            self.ai_focus()?
+        };
         let mut players = self.players.clone();
         let changes = population.advance(
             &mut players,

@@ -61,6 +61,7 @@ pub struct Config {
     pub vehicles: Option<Arc<crate::vehicle_content::GarageContent>>,
     pub sequences: Option<Arc<crate::sequence_content::SequenceContent>>,
     pub traffic: Option<Arc<nfs_content::traffic::Content>>,
+    pub rivals: Option<Arc<crate::rival_content::Content>>,
     pub garage_logic: Option<Arc<crate::garage_logic::GarageLogic>>,
     pub scoring: Option<Arc<crate::scoring::Content>>,
     pub user_settings: Option<Arc<crate::user_settings::Store>>,
@@ -92,6 +93,7 @@ pub struct WorldServe {
     pub vehicles: Option<Arc<crate::vehicle_content::GarageContent>>,
     pub sequences: Option<Arc<crate::sequence_content::SequenceContent>>,
     pub traffic: Option<Arc<nfs_content::traffic::Content>>,
+    pub rivals: Option<Arc<crate::rival_content::Content>>,
     pub garage_logic: Option<Arc<crate::garage_logic::GarageLogic>>,
     pub scoring: Option<Arc<crate::scoring::Content>>,
 }
@@ -689,6 +691,7 @@ pub async fn serve(
                 let vehicles = config.vehicles.clone();
                 let sequences = config.sequences.clone();
                 let traffic = config.traffic.clone();
+                let rivals = config.rivals.clone();
                 let garage_logic = config.garage_logic.clone();
                 let scoring = config.scoring.clone();
                 let catalogs = config.catalogs.clone();
@@ -754,6 +757,7 @@ pub async fn serve(
                             vehicles,
                             sequences,
                             traffic,
+                            rivals,
                             garage_logic,
                             scoring,
                         },
@@ -822,6 +826,7 @@ pub async fn world_host(
         vehicles,
         sequences,
         traffic,
+        rivals,
         garage_logic,
         scoring,
     } = serve;
@@ -911,6 +916,7 @@ pub async fn world_host(
         .with_vehicles(vehicles)
         .with_sequences(sequences)
         .with_traffic(traffic)
+        .with_rivals(rivals)
         .with_arrivals(arrivals)
         .with_returns(returns)
         .with_garage_logic(garage_logic)
@@ -951,6 +957,15 @@ pub async fn world_host(
                 connection,
                 ?error,
                 "owned traffic rejected; spawning disabled for this session"
+            );
+        }
+        if let Err(error) = listener.advance_rivals(now_ms())
+            && listener.disable_rivals()
+        {
+            warn!(
+                connection,
+                ?error,
+                "owned rivals rejected; spawning disabled for this session"
             );
         }
         if let Err(error) = listener.advance_scoring(now_ms()) {

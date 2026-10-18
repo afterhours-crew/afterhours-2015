@@ -37,6 +37,15 @@ pub struct Content {
     appearance: appearance::Definitions,
     meshes: mesh::Definitions,
 }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Placement {
+    /// Garage locator, axle-weighted resting height and installed reset mode.
+    Garage,
+    /// Exact world root position and the official player start state (E748).
+    PlayerWorld,
+    /// Authored spawner transform, mean suspension offset and reset mode.
+    Rival,
+}
 pub struct Request<'a> {
     pub items: &'a Collection,
     pub vehicle: u64,
@@ -47,10 +56,7 @@ pub struct Request<'a> {
     pub connection: Option<u8>,
     pub owner: Resource,
     pub customization_attached: bool,
-    /// World car: the locator is the exact root position (no resting offset)
-    /// and the chassis is driveable (mode 3, settled mode timer), as the
-    /// official world car (E748).
-    pub world: bool,
+    pub placement: Placement,
     pub authority_group: u64,
     pub authority_components: &'a [u64],
 }
@@ -63,6 +69,17 @@ pub struct EquipmentPresentation {
 }
 
 impl Content {
+    /// Construct an ephemeral authored AI preset using the same installed part
+    /// definitions as player vehicles, without touching persistent inventory.
+    pub fn rival_preset(
+        &self,
+        preset: &nfs_content::rivals::preset::Preset,
+        catalog: &nfs_world::items::InventoryCatalog,
+        slots: &nfs_services::purchase::Offers,
+    ) -> Result<Collection, nfs_content::Error> {
+        preset.instantiate(catalog, slots, &self.wheels)
+    }
+
     pub fn validate_rim_size(
         &self,
         items: &Collection,
@@ -321,12 +338,15 @@ impl Content {
         if request.customization_attached {
             root.attach_customization();
         }
-        let position = if request.world {
-            request.locator
-        } else {
-            d.resting
+        let position = match request.placement {
+            Placement::PlayerWorld => request.locator,
+            Placement::Garage => d
+                .resting
                 .position_at(request.locator)?
-                .map(|v| v.map_or(0., f32::from_bits))
+                .map(|v| v.map_or(0., f32::from_bits)),
+            Placement::Rival => d
+                .resting
+                .spawn_position(request.locator, request.basis[1])?,
         };
         let spawn = initialize::Spawn::new(position, request.basis[2], request.speed)?;
         let mut pending = authority.clone();
@@ -358,10 +378,14 @@ impl Content {
         let mut chassis = chassis::State::new(
             position,
             orientation::quaternion_from_basis(request.basis)?,
-            if request.world { WORLD_MODE } else { d.mode },
+            if request.placement == Placement::PlayerWorld {
+                WORLD_MODE
+            } else {
+                d.mode
+            },
             custom,
         )?;
-        if request.world {
+        if request.placement == Placement::PlayerWorld {
             let mut controls = chassis::Controls::new(WORLD_MODE)?;
             controls.mode_time = WORLD_MODE_TIME;
             chassis.set_motion(chassis.motion().clone(), controls)?;

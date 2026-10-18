@@ -64,6 +64,11 @@ pub(super) struct Instance {
 }
 
 impl Players {
+    /// Shared budget for all host-owned AI populations in this world.
+    pub fn ai_count(&self) -> usize {
+        self.ai.len()
+    }
+
     pub fn ai_ids(&self, connection: u8, persona: u64, key: u64) -> Option<Ids> {
         self.ai.get(&(connection, persona, key)).map(|a| a.ids)
     }

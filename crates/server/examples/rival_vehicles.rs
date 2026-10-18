@@ -59,7 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 name: vec![],
             },
             customization_attached: true,
-            world: true,
+            placement: nfs_server::vehicle_content::Placement::Rival,
             authority_group: 1,
             authority_components: &components,
         };

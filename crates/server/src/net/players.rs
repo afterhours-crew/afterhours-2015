@@ -29,6 +29,7 @@ mod launchers;
 mod purchases;
 mod refusal;
 mod returning;
+mod rivals;
 mod scoring;
 mod sequences;
 mod traffic;
@@ -88,6 +89,9 @@ pub(super) struct PlayerListener {
     traffic_content: Option<std::sync::Arc<nfs_content::traffic::Content>>,
     traffic_population: Option<crate::traffic_content::population::Population>,
     traffic_failed: bool,
+    rival_content: Option<std::sync::Arc<crate::rival_content::Content>>,
+    rival_population: Option<crate::rival_content::population::Population>,
+    rivals_failed: bool,
     garage_presence: nfs_world::garage::presence::Presence,
     spawn_points: nfs_world::spawn_points::SpawnPoints,
     level_poll: nfs_world::level_poll::LevelPoll,
@@ -624,14 +628,19 @@ impl PlayerListener {
                 .owned_vehicles(HOST_SELECTOR as u8, self.persona),
             &self.world_cars,
         );
-        if let Some(traffic) = &self.traffic_population {
-            objects.extend(
-                traffic
-                    .delegated(&self.players, HOST_SELECTOR as u8, self.persona)
-                    .keys(),
-            );
-        }
+        objects.extend(self.delegated_ai(&self.players).keys());
         objects
+    }
+    fn delegated_ai(&self, players: &Players) -> BTreeMap<u16, u64> {
+        let mut cars = self
+            .traffic_population
+            .as_ref()
+            .map(|p| p.delegated(players, HOST_SELECTOR as u8, self.persona))
+            .unwrap_or_default();
+        if let Some(rivals) = &self.rival_population {
+            cars.extend(rivals.delegated(players, HOST_SELECTOR as u8, self.persona));
+        }
+        cars
     }
     pub(super) fn new(persona: u64) -> Self {
         Self {
@@ -649,6 +658,9 @@ impl PlayerListener {
             traffic_content: None,
             traffic_population: None,
             traffic_failed: false,
+            rival_content: None,
+            rival_population: None,
+            rivals_failed: false,
             garage_presence: nfs_world::garage::presence::Presence::default(),
             spawn_points: nfs_world::spawn_points::SpawnPoints::default(),
             level_poll: nfs_world::level_poll::LevelPoll::default(),
@@ -720,6 +732,13 @@ impl PlayerListener {
         self.arrivals = arrivals;
         self
     }
+    pub(super) fn with_rivals(
+        mut self,
+        content: Option<std::sync::Arc<crate::rival_content::Content>>,
+    ) -> Self {
+        self.rival_content = content;
+        self
+    }
     pub(super) fn with_returns(mut self, returns: Option<nfs_world::arrival::Arrivals>) -> Self {
         self.returns = returns;
         self
@@ -768,6 +787,16 @@ impl PlayerListener {
             .as_ref()
             .map(|content| {
                 crate::traffic_content::population::Population::new(bindings.clone(), content)
+            })
+            .transpose()?;
+        let rival_population = self
+            .rival_content
+            .as_ref()
+            .map(|content| {
+                if population.is_none() {
+                    return Err(replication::Error::Shape);
+                }
+                crate::rival_content::population::Population::new(&bindings, content.clone())
             })
             .transpose()?;
         let rpc = Rpc {
@@ -866,6 +895,7 @@ impl PlayerListener {
         self.pending.extend(sections);
         self.population = population;
         self.traffic_population = traffic_population;
+        self.rival_population = rival_population;
         self.roles = Some(roles.clone());
         Ok(())
     }
@@ -1008,8 +1038,8 @@ impl Listener for PlayerListener {
                     return self.refuse(error);
                 }
             }
-            if let Some(traffic) = &self.traffic_population {
-                let delegated = traffic.delegated(&players, HOST_SELECTOR as u8, self.persona);
+            if self.traffic_population.is_some() || self.rival_population.is_some() {
+                let delegated = self.delegated_ai(&players);
                 match traffic_reports.receive_ai(
                     &mut players,
                     HOST_SELECTOR as u8,

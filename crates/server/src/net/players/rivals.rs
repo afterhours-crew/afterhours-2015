@@ -1,0 +1,231 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+use super::*;
+use crate::rival_content::population::{Focus, Input};
+
+impl PlayerListener {
+    pub(in crate::net) fn advance_rivals(&mut self, now: u64) -> Result<(), replication::Error> {
+        if self.ai_busy() {
+            return Ok(());
+        }
+        let Some(rivals) = &self.rival_population else {
+            return Ok(());
+        };
+        let mut rivals = rivals.clone();
+        let mut population = self.population.clone().ok_or(replication::Error::Shape)?;
+        let previous = population.registrations().clone();
+        let mut registrations = previous.clone();
+        let focus = if self.rivals_failed {
+            vec![]
+        } else {
+            self.ai_focus()?
+                .into_iter()
+                .map(|f| Focus {
+                    id: f.id,
+                    position: f.position,
+                })
+                .collect()
+        };
+        let mut players = self.players.clone();
+        let changes = rivals.advance(
+            &mut players,
+            &mut registrations,
+            HOST_SELECTOR as u8,
+            self.persona,
+            Input { now, focus: &focus },
+        )?;
+        let mut entries: Vec<_> = split_scenes(
+            changes.records,
+            nfs_world::application::OUTBOUND_FRAME_BITS - 104,
+        )?
+        .into_iter()
+        .map(|mut section| {
+            section.setup = Some(Setup::RawEscape([0; 3]));
+            (section, Vec::new())
+        })
+        .collect();
+        if !changes.calls.is_empty() || !changes.deleted.is_empty() {
+            let mut section = returning::empty_section();
+            section.deleted = changes.deleted;
+            entries.push((section, changes.calls));
+        }
+        if entries.len() > MAX_PENDING.saturating_sub(self.pending_entries.len())
+            || changes.messages.len() > MAX_PENDING.saturating_sub(self.pending_content.len())
+        {
+            return Ok(());
+        }
+        population.update_registrations(&previous, registrations)?;
+        if let Some(ids) = changes.spawned {
+            tracing::info!(
+                participant = ids.participant,
+                actor = ids.actor,
+                vehicle = ids.vehicle,
+                count = rivals.count(),
+                "owned roaming rival spawn queued"
+            );
+        }
+        self.players = players;
+        self.population = Some(population);
+        self.rival_population = Some(rivals);
+        // The edge drains content before these creation sections, so the client
+        // knows every selected part's mesh identity before it constructs the car.
+        self.pending_content.extend(changes.messages);
+        self.pending_entries.extend(entries);
+        Ok(())
+    }
+    pub(in crate::net) fn disable_rivals(&mut self) -> bool {
+        !std::mem::replace(&mut self.rivals_failed, true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn mixed_traffic_and_rival_reports_keep_both_delegations_and_echo_clocks() {
+        use nfs_world::replication::vehicle::{chassis, movement::Sample};
+        let connection = HOST_SELECTOR as u8;
+        let (mut rivals, mut world, mut registrations, _) =
+            crate::rival_content::population::tests::fixture(connection);
+        let rival = crate::rival_content::population::tests::spawn(
+            &mut rivals,
+            &mut world,
+            &mut registrations,
+            connection,
+        )
+        .spawned
+        .unwrap();
+        let (mut traffic, _, content) =
+            crate::traffic_content::population::tests::fixture_with(connection);
+        let ambient = crate::traffic_content::population::tests::spawn(
+            &mut traffic,
+            &mut world,
+            &content,
+            connection,
+        )
+        .spawned
+        .unwrap();
+        let mut listener = PlayerListener::new(100);
+        listener.players = world;
+        listener.traffic_population = Some(traffic);
+        listener.rival_population = Some(rivals);
+        let ids = [ambient.vehicle, rival.vehicle];
+        assert_eq!(listener.movement_objects(), ids.into_iter().collect());
+        let delegated = listener.delegated_ai(&listener.players);
+        assert_eq!(delegated[&ids[0]], 1);
+        assert_eq!(
+            delegated[&ids[1]],
+            crate::traffic_content::population::RIVAL_KEY_START
+        );
+        for (step, now) in [(0, 100), (1, 200)] {
+            let samples = ids.map(|id| {
+                let mut motion = listener
+                    .players
+                    .ai_vehicle_physics(connection, 100, delegated[&id])
+                    .unwrap()
+                    .decode([0.; 3])
+                    .unwrap();
+                motion.identity = (100. + step as f64 * 0.1).to_bits();
+                motion.revision = 3000 + step * 3;
+                motion.position[0] += 1.;
+                motion.velocity = [5., 0., 0.];
+                Sample {
+                    physics: motion
+                        .encode([0.; 3], &chassis::Controls::new(4).unwrap())
+                        .unwrap(),
+                    flag: false,
+                }
+            });
+            let encoded = samples.each_ref().map(|sample| sample.encode().unwrap());
+            assert_eq!(encoded[0].0, encoded[1].0);
+            let movement = frame::Movement {
+                header: Some(encoded[0].0.span()),
+                records: ids
+                    .into_iter()
+                    .zip(&encoded)
+                    .map(|(id, (_, body))| frame::MovementRecord {
+                        id,
+                        component: 0,
+                        data: body.span(),
+                    })
+                    .collect(),
+            };
+            let echoes = listener
+                .traffic_reports
+                .receive_ai(
+                    &mut listener.players,
+                    connection,
+                    100,
+                    &movement,
+                    &delegated,
+                    now,
+                )
+                .unwrap();
+            assert_eq!(
+                echoes.iter().map(|r| r.id).collect::<BTreeSet<_>>(),
+                ids.into_iter().collect()
+            );
+            for (id, sample) in ids.into_iter().zip(samples) {
+                assert_eq!(
+                    listener
+                        .players
+                        .ai_vehicle_physics(connection, 100, delegated[&id])
+                        .unwrap(),
+                    sample.physics
+                );
+            }
+            assert!(
+                listener
+                    .traffic_reports
+                    .receive_ai(
+                        &mut listener.players,
+                        connection,
+                        100,
+                        &movement,
+                        &delegated,
+                        now,
+                    )
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+    #[test]
+    fn backpressure_preserves_rivals_and_disable_retires_in_wire_order() {
+        let (mut rivals, mut world, mut registrations, messages) =
+            crate::rival_content::population::tests::fixture(HOST_SELECTOR as u8);
+        crate::rival_content::population::tests::spawn(
+            &mut rivals,
+            &mut world,
+            &mut registrations,
+            HOST_SELECTOR as u8,
+        );
+        let mut population = Population::new(&messages).unwrap();
+        let before = population.registrations().clone();
+        population
+            .update_registrations(&before, registrations)
+            .unwrap();
+        let mut listener = PlayerListener::new(100);
+        listener.players = world;
+        listener.rival_population = Some(rivals);
+        listener.population = Some(population);
+        assert_eq!(listener.movement_objects().len(), 1);
+        listener.session_backlog = 2;
+        assert!(listener.disable_rivals());
+        assert!(!listener.disable_rivals());
+        listener.advance_rivals(1).unwrap();
+        assert_eq!(listener.rival_population.as_ref().unwrap().count(), 1);
+        assert!(listener.pending_entries.is_empty());
+        listener.session_backlog = 0;
+        listener.advance_rivals(2).unwrap();
+        assert!(listener.movement_objects().is_empty());
+        assert_eq!(listener.pending_entries.len(), 2);
+        let (detach, calls) = &listener.pending_entries[0];
+        assert!(calls.is_empty() && detach.deleted.is_empty());
+        assert_eq!(detach.records.len(), 2);
+        let (delete, calls) = &listener.pending_entries[1];
+        assert!(calls.is_empty() && delete.records.is_empty());
+        assert_eq!(delete.deleted.len(), 4);
+    }
+}

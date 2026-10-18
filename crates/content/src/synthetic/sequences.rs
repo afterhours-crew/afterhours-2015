@@ -319,6 +319,7 @@ pub fn install(assets: &mut Vec<Asset>) {
     assets.extend(scene_assets_with(|_, _, _| {}));
     assets.extend(assets_with(|_, _, _| {}));
     super::traffic::install(assets);
+    super::rivals::install(assets);
     let base = super::guid;
     for (seed, scene, mut pointers) in [
         (

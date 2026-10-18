@@ -11,6 +11,7 @@ pub use nfs_frostbite::synthetic::{Asset, Field, PartitionWriter};
 use nfs_services::persistent::required_tables;
 use std::path::Path;
 pub mod progression;
+pub mod rivals;
 pub mod sequences;
 pub mod traffic;
 pub mod vehicles;
@@ -924,6 +925,13 @@ pub fn write(root: &Path, assets: &[Asset]) -> std::io::Result<(Options, [u8; 64
                     ("PersonaEntityData", None),
                     ("PersonaSetEntityData", None),
                     ("TrafficManagerEntityData", None),
+                    ("RoamingRacerManagerEntityData", None),
+                    ("RoamingRacerEntityData", None),
+                    ("SpecificVehicleProviderEntityData", None),
+                    ("RacerSpawnPointEntityData", None),
+                    ("VolumeVectorShapeData", None),
+                    ("PersonalityLibraryEntityData", None),
+                    ("PersonalityEntityData", None),
                     (
                         "AiParticipantManagerEntityData",
                         Some(nfs_world::replication::sublevel::Kind::RpcReferences),

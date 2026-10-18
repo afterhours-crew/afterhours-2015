@@ -34,6 +34,7 @@ pub mod progression;
 pub mod recommendations;
 pub mod record;
 pub mod reputation_account;
+pub mod rival_content;
 pub mod scene_roles;
 pub mod scoring;
 pub mod seeds;

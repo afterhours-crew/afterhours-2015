@@ -25,7 +25,16 @@ fn import(seed: u8) -> Field {
     let (a, b) = reference(seed);
     Field::Import(a, b)
 }
-fn asset(seed: u8, name: &str, class: &str, fields: ObjectFields, objects: SceneObjects) -> Asset {
+fn asset(
+    seed: u8,
+    name: &str,
+    class: &str,
+    mut fields: ObjectFields,
+    mut objects: SceneObjects,
+) -> Asset {
+    if seed == 1 {
+        super::rivals::append(&mut fields, &mut objects);
+    }
     let (partition, instance) = reference(seed);
     Asset {
         name: name.into(),

@@ -7,11 +7,14 @@
 use crate::Error;
 
 mod extract;
+mod json;
 pub mod preset;
 pub use extract::extract;
+pub(crate) use json::build;
 
 pub const MAX_RACERS: usize = 128;
 pub const MAX_REGIONS: usize = 64;
+pub const MAX_PERSONALITIES: usize = 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Links {
@@ -23,8 +26,20 @@ pub struct Links {
     pub spawn: u32,
     pub participants: u32,
     pub actors: u32,
+    pub personality_library: u32,
+    pub personalities: u32,
+    pub personality: u32,
 }
 impl Links {
+    pub(crate) fn to_json(self) -> serde_json::Value {
+        serde_json::json!({
+            "racers": self.racers, "provider": self.provider, "personas": self.personas,
+            "regions": self.regions, "secondary_regions": self.secondary_regions,
+            "spawn": self.spawn, "participants": self.participants, "actors": self.actors,
+            "personality_library": self.personality_library,
+            "personalities": self.personalities, "personality": self.personality,
+        })
+    }
     pub(crate) fn from_json(v: &serde_json::Value) -> Result<Self, Error> {
         let names = [
             "racers",
@@ -35,6 +50,9 @@ impl Links {
             "spawn",
             "participants",
             "actors",
+            "personality_library",
+            "personalities",
+            "personality",
         ];
         let o = v
             .as_object()
@@ -62,6 +80,9 @@ impl Links {
             spawn: ports[5],
             participants: ports[6],
             actors: ports[7],
+            personality_library: ports[8],
+            personalities: ports[9],
+            personality: ports[10],
         })
     }
 }
@@ -71,6 +92,8 @@ pub struct Persona {
     pub name: String,
     /// Position in the linked PersonaSet, before a specific provider filters it.
     pub provider_index: u16,
+    /// Native personality library ordinal; all-ones means no linked personality.
+    pub personality_index: u16,
     pub preset: preset::Preset,
     pub driving: nfs_world::replication::vehicle::customization::SpawnOverrides,
 }
@@ -89,6 +112,7 @@ pub struct Racer {
 #[derive(Clone, Debug)]
 pub struct Content {
     pub managers: nfs_world::replication::players::ai::Managers,
+    pub personality_count: u16,
     pub personas: Vec<Persona>,
     pub racers: Vec<Racer>,
 }

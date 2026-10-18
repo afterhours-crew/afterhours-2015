@@ -246,6 +246,7 @@ For world/garage operation also supply:
 | `--vehicle-parts` | Part definitions for version-2 vehicle content; defaults to installed content with `--game-dir`. Explicit profiles, parts and layouts retain precedence |
 | `--sequence-content`, `--garage-logic` | Sequence definitions default to installed content with `--game-dir`; explicit definitions override them. Garage logic remains separately supplied ([sequences](src/sequence_content.rs), [garage](src/garage_logic.rs)) |
 | `--traffic-content` | Installed traffic vehicles, AI managers and road splines; generated with `--game-dir`. Bounded session population and lifecycle are implemented; gameplay acceptance remains tracked in [#54](https://github.com/afterhours-crew/afterhours-2015/issues/54) |
+| `--rival-content` | Installed roaming racer regions, spawn transforms, vehicle presets and driving personalities; generated with `--game-dir` and requires the owned vehicle configuration |
 
 Sequence content version 2 omits `arrive.spline.base_value`: the six-bit goal
 allocation counter belongs to the current world and wraps after 63. It advances
@@ -488,3 +489,16 @@ across nested catalogs, and prepared traffic version 3 rebuilds older caches.
 Time and selection entropy are injected into the population model. A session is
 bounded by the shared AI object limit. Library tests cover the policy and atomic
 rollback; complete gameplay acceptance remains tracked in #54.
+
+Roaming rivals have a separate population model using authored activation volumes,
+spawn poses, ordered personas and personality-library references. Their temporary
+vehicle presets use the normal installed stock, styling and additional-part
+construction path without granting account items. Rival spawn placement adds the
+native mean suspension height and clearance along the authored up axis, and starts
+from the installed chassis reset mode. Rival and player cars share
+dynamic model/mesh registrations. Primary volumes are checked in ten cohorts;
+nearby rivals are retained by their reported horizontal position. The client
+runs the native wandering goal and driving personality. Shared AI limits,
+transactional publication and session cleanup cover both populations. The
+`rival_population` example preflights every installed lifetime with synthetic
+focus points; it does not establish live driving acceptance.

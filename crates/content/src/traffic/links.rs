@@ -13,6 +13,9 @@ pub struct Links {
     pub personas: u32,
 }
 impl Links {
+    pub(crate) fn to_json(self) -> Json {
+        serde_json::json!({"roads": self.roads, "provider": self.provider, "personas": self.personas})
+    }
     pub(crate) fn from_json(v: &Json) -> Result<Self, Error> {
         json_keys(v, &["roads", "provider", "personas"])?;
         let out = Self {

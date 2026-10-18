@@ -232,6 +232,7 @@ fn persona<S: Source>(
     Ok(Persona {
         name,
         provider_index: u16::try_from(provider_index).map_err(|_| bad("provider index"))?,
+        personality_index: u16::MAX,
         preset: Preset {
             vehicle,
             color,
@@ -310,6 +311,26 @@ pub fn extract(index: &mut AssetIndex) -> Result<Content, Error> {
     if scene != actor_scene || participants == actors {
         return Err(bad("manager scene identity"));
     }
+    let library = one(
+        &mut graph,
+        &pm,
+        ports.personality_library,
+        "PersonalityLibraryEntityData",
+    )?;
+    let personalities = graph.links(&library, ports.personalities)?;
+    if personalities.is_empty() || personalities.len() > super::MAX_PERSONALITIES {
+        return Err(bad("personality library count"));
+    }
+    let mut personality_ids = BTreeMap::new();
+    for (index, endpoint) in personalities.iter().enumerate() {
+        if graph.object(&endpoint.site)?.class != "PersonalityEntityData"
+            || personality_ids
+                .insert(endpoint.site.key.clone(), index as u16)
+                .is_some()
+        {
+            return Err(bad("personality library identity"));
+        }
+    }
     let linked = graph.links(&manager, ports.racers)?;
     if linked.is_empty() || linked.len() > MAX_RACERS {
         return Err(bad("racer count"));
@@ -364,7 +385,17 @@ pub fn extract(index: &mut AssetIndex) -> Result<Content, Error> {
                         return Err(bad("persona count"));
                     }
                     let id = personas.len();
-                    personas.push(persona(&mut graph, &e.site.key, ordinal)?);
+                    let mut parsed = persona(&mut graph, &e.site.key, ordinal)?;
+                    let linked = graph.links(&e.site, ports.personality)?;
+                    if linked.len() > 1 {
+                        return Err(bad("persona personality link"));
+                    }
+                    if let Some(endpoint) = linked.first() {
+                        parsed.personality_index = *personality_ids
+                            .get(&endpoint.site.key)
+                            .ok_or_else(|| bad("persona personality missing from library"))?;
+                    }
+                    personas.push(parsed);
                     persona_ids.insert(identity, id);
                     id
                 };
@@ -399,6 +430,7 @@ pub fn extract(index: &mut AssetIndex) -> Result<Content, Error> {
         });
     }
     Ok(Content {
+        personality_count: personalities.len() as u16,
         managers: nfs_world::replication::players::ai::Managers {
             scene,
             participants,

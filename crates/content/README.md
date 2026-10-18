@@ -41,6 +41,7 @@ let items = prepared.path(nfs_content::Kind::ItemContent);
 | `ProgressionContent` | `progression-content.json` | Main/intro persistence links, stable IDs, activation expressions, entity composition and explicit spawner-to-scene channel bindings |
 | `SequenceContent` | `sequence-content.json` | Waiting/exit sequence registries, manager bus and serializer, spawner channel links and the exit command's registered spline definition |
 | `TrafficContent` | `traffic-content.json` | Linked traffic personas in provider order, vehicle profiles, manager serializer ordinals and roads with owning scene catalogs |
+| `RivalContent` | `rival-content.json` | Roaming racer activation regions, spawn transforms, complete vehicle presets, provider and personality-library indices |
 | `WorldMacTemplate` | `world-mac-template.bin` | 64 bytes of the executable image at the build's known address, checked by digest |
 
 Derived defaults are the stored 32-bit patterns of each class's same-named
@@ -312,4 +313,6 @@ quantization and grip overrides preserve the transmission selection.
 The `rivals` example audits these inputs against an installation and an existing
 prepared-content directory. The server's `rival_vehicles` example additionally
 constructs and encodes complete vehicle components with synthetic mesh identities.
-These APIs do not yet add a prepared rival file or enable a live rival population.
+Preparation writes `rival-content.json` with those inputs and the native ordered
+personality-library indices. The server consumes this bounded cache for its
+session-owned rival population; the audit examples alone do not prove live driving.

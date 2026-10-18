@@ -24,6 +24,7 @@ struct Args {
     garage_layout: Option<PathBuf>,
     sequence_content: Option<PathBuf>,
     traffic_content: Option<PathBuf>,
+    rival_content: Option<PathBuf>,
     garage_logic: Option<PathBuf>,
     reputation_thresholds: Option<PathBuf>,
     scene_catalog: Option<PathBuf>,
@@ -70,6 +71,7 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
     let mut vehicle_parts = None;
     let mut sequence_content = None;
     let mut traffic_content = None;
+    let mut rival_content = None;
     let mut garage_logic = None;
     let mut reputation_thresholds = None;
     let mut scene_catalog = None;
@@ -113,6 +115,7 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
             Some("--garage-layout") => garage_layout = Some(PathBuf::from(value()?)),
             Some("--sequence-content") => sequence_content = Some(PathBuf::from(value()?)),
             Some("--traffic-content") => traffic_content = Some(PathBuf::from(value()?)),
+            Some("--rival-content") => rival_content = Some(PathBuf::from(value()?)),
             Some("--garage-logic") => garage_logic = Some(PathBuf::from(value()?)),
             Some("--reputation-thresholds") => {
                 reputation_thresholds = Some(PathBuf::from(value()?))
@@ -261,6 +264,9 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
             "--traffic-content requires the owned vehicle/progression configuration".into(),
         );
     }
+    if rival_content.is_some() && vehicle_content.is_none() && !generated {
+        return Err("--rival-content requires the owned vehicle/progression configuration".into());
+    }
     if garage_logic.is_some() && sequence_content.is_none() && !generated {
         return Err("--garage-logic requires --sequence-content".into());
     }
@@ -294,6 +300,7 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
         garage_layout,
         sequence_content,
         traffic_content,
+        rival_content,
         garage_logic,
         reputation_thresholds,
         scene_catalog,
@@ -360,6 +367,7 @@ fn resolve_install_content(args: &mut Args, options: &nfs_content::Options) -> R
         .get_or_insert(generated.sequence_content);
     args.traffic_content
         .get_or_insert(generated.traffic_content);
+    args.rival_content.get_or_insert(generated.rival_content);
     args.world_mac_template = Some(generated.world_mac_template);
     Ok(())
 }
@@ -633,6 +641,28 @@ async fn run(args: Args) -> Result<(), Failure> {
         })
         .transpose()?
         .map(Arc::new);
+    let rivals = if let Some(path) = &args.rival_content {
+        let path = args.root.join(path);
+        let item_path = args
+            .root
+            .join(args.item_content.as_ref().ok_or(Failure::ProfileConfig)?);
+        let definitions = vehicles
+            .as_ref()
+            .ok_or(Failure::ProfileConfig)?
+            .vehicles
+            .clone();
+        Some(Arc::new(
+            tokio::task::spawn_blocking(move || {
+                let items = nfs_services::item_content::ItemContent::load(&item_path)
+                    .map_err(|_| Failure::ProfileConfig)?;
+                nfs_server::rival_content::Content::load(&path, definitions, &items)
+            })
+            .await
+            .map_err(|_| Failure::Output)??,
+        ))
+    } else {
+        None
+    };
     let default_reputation = args
         .reputation_thresholds
         .as_ref()
@@ -850,6 +880,7 @@ async fn run(args: Args) -> Result<(), Failure> {
         vehicles,
         sequences,
         traffic,
+        rivals,
         garage_logic,
         scoring,
         catalogs,
@@ -1095,6 +1126,7 @@ mod tests {
         assert!(parsed.vehicle_parts.as_ref().unwrap().exists());
         assert!(parsed.vehicle_content.as_ref().unwrap().exists());
         nfs_content::traffic::Content::load(parsed.traffic_content.as_ref().unwrap()).unwrap();
+        nfs_content::rivals::Content::load(parsed.rival_content.as_ref().unwrap()).unwrap();
         nfs_server::progression::Content::load(parsed.progression_content.as_ref().unwrap())
             .unwrap();
         nfs_server::sequence_content::SequenceContent::load(
