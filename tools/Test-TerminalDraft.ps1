@@ -14,11 +14,18 @@ $global:AfterhoursDraftTestState.tagLines = @("$revision`trefs/tags/v0.3.1")
 $global:AfterhoursDraftTestState.gitExit = 0
 $global:AfterhoursDraftTestState.ghExit = 0
 $global:AfterhoursDraftTestState.ghCalls = @()
+$global:AfterhoursDraftTestState.lookupExit = 0
+$global:AfterhoursDraftTestState.existingRelease = $null
 function git {
     $global:LASTEXITCODE = $global:AfterhoursDraftTestState.gitExit
     $global:AfterhoursDraftTestState.tagLines
 }
 function gh {
+    if ($args[0] -eq 'api') {
+        $global:LASTEXITCODE = $global:AfterhoursDraftTestState.lookupExit
+        @{ data = @{ repository = @{ release = $global:AfterhoursDraftTestState.existingRelease } } } | ConvertTo-Json -Depth 6
+        return
+    }
     $global:AfterhoursDraftTestState.ghCalls += ,@($args)
     $global:LASTEXITCODE = $global:AfterhoursDraftTestState.ghExit
 }
@@ -39,7 +46,7 @@ function Assert-Refused([string]$Name, [scriptblock]$Action, [int]$ExpectedCalls
     Write-Output "Passed: $Name"
 }
 $publisher = Join-Path $PSScriptRoot 'Publish-TerminalDraft.ps1'
-$publish = { & $publisher -PackageDirectory $root -Release v0.3.1 -Revision $revision }
+$publish = { & $publisher -PackageDirectory $root -Release v0.3.1 -Revision $revision -Repository test-owner/test-repo }
 try {
     Write-Package
     & $publish
@@ -64,9 +71,9 @@ try {
     $global:AfterhoursDraftTestState.gitExit = 1
     Assert-Refused 'remote verification failure' $publish
     $global:AfterhoursDraftTestState.gitExit = 0
-    Assert-Refused 'invalid release input' { & $publisher -PackageDirectory $root -Release '--draft' -Revision $revision }
-    Assert-Refused 'wrong release identity' { & $publisher -PackageDirectory $root -Release v0.3.2 -Revision $revision }
-    Assert-Refused 'wrong built revision' { & $publisher -PackageDirectory $root -Release v0.3.1 -Revision ('a' * 40) }
+    Assert-Refused 'invalid release input' { & $publisher -PackageDirectory $root -Release '--draft' -Revision $revision -Repository test-owner/test-repo }
+    Assert-Refused 'wrong release identity' { & $publisher -PackageDirectory $root -Release v0.3.2 -Revision $revision -Repository test-owner/test-repo }
+    Assert-Refused 'wrong built revision' { & $publisher -PackageDirectory $root -Release v0.3.1 -Revision ('a' * 40) -Repository test-owner/test-repo }
     Add-Content -LiteralPath (Join-Path $root 'Afterhours-windows-x64.zip') -Value changed
     Assert-Refused 'changed archive' $publish
     Write-Package
@@ -80,8 +87,16 @@ try {
     $manifest | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'build-info.json')
     Assert-Refused 'wrong executable version' $publish
     Write-Package
+    $global:AfterhoursDraftTestState.lookupExit = 1
+    Assert-Refused 'release lookup failure' $publish
+    $global:AfterhoursDraftTestState.lookupExit = 0
+    $global:AfterhoursDraftTestState.existingRelease = @{ id = 'existing'; isDraft = $true }
+    Assert-Refused 'existing draft' $publish
+    $global:AfterhoursDraftTestState.existingRelease = @{ id = 'existing'; isDraft = $false }
+    Assert-Refused 'existing published release' $publish
+    $global:AfterhoursDraftTestState.existingRelease = $null
     $global:AfterhoursDraftTestState.ghExit = 1
-    Assert-Refused 'existing release or failed upload is not edited/retried' $publish 1
+    Assert-Refused 'failed creation/upload is not edited/retried' $publish 1
 } finally {
     # Only these three known temporary files belong to this test; no recursive deletion.
     foreach ($name in @('Afterhours-windows-x64.zip', 'SHA256SUMS.txt', 'build-info.json')) {

@@ -112,5 +112,5 @@ jobs:
         run: |
           $revision = (git rev-parse HEAD).Trim()
           if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve built revision.' }
-          ./tools/Publish-TerminalDraft.ps1 -PackageDirectory $env:AFTERHOURS_PACKAGE_DIR -Release $env:AFTERHOURS_RELEASE -Revision $revision
+          ./tools/Publish-TerminalDraft.ps1 -PackageDirectory $env:AFTERHOURS_PACKAGE_DIR -Release $env:AFTERHOURS_RELEASE -Revision $revision -Repository $env:GH_REPO
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
