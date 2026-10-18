@@ -471,5 +471,9 @@ already established external endpoint.
 
 The traffic construction API builds unowned vehicles from installed traffic
 profiles and explicit pose/speed inputs, without player inventory. Manager
-binding and constructor tests cover rollback and isolation. Prepared population,
-runtime activation and live traffic/rival acceptance remain in progress (#54).
+binding and constructor tests cover rollback and isolation. Prepared population
+supplies bounded creation, road following, timestamped chassis updates and
+retirement. Its authored traffic policy uses a 12 m/s cruise ceiling, bounded
+acceleration/braking and a forward obstacle corridor. It retires at disconnected
+road endpoints; it does not implement rigid-body collision physics or stock AI
+parity. Live traffic/rival acceptance remains in progress (#54).

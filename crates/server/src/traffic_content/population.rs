@@ -28,6 +28,9 @@ const LIFETIME_MS: u64 = 90_000;
 struct Car {
     anchor: [f32; 3],
     expires: u64,
+    route: super::motion::Route,
+    basis: [[f32; 3]; 3],
+    speed: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -39,6 +42,8 @@ pub struct Population {
     due: u64,
     clock: u64,
     owner: Option<(u8, u64)>,
+    motion_clock: Option<super::motion::Clock>,
+    motion_ms: u64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -49,11 +54,12 @@ pub struct Changes {
     pub spawned: Option<ai::Ids>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct Placement {
     spline: u16,
     persona: usize,
     pose: vehicle::initialize::Pose,
+    route: super::motion::Route,
 }
 
 impl Population {
@@ -80,11 +86,17 @@ impl Population {
             due: 0,
             clock: 0,
             owner: None,
+            motion_clock: None,
+            motion_ms: 0,
         })
     }
 
     pub fn count(&self) -> usize {
         self.cars.len()
+    }
+
+    pub fn observe_clock(&mut self, now: u64, physics: &vehicle::Physics) -> Result<(), Error> {
+        super::motion::Clock::observe(&mut self.motion_clock, now, physics)
     }
 
     /// The caller commits this transaction only after reserving its outbound
@@ -124,6 +136,15 @@ impl Population {
             next.cars.remove(&key);
             next.authority.remove_group(key);
         }
+        next.drive(
+            &mut world,
+            connection,
+            persona,
+            content,
+            now,
+            focus,
+            &mut changes,
+        )?;
         if !focus.is_empty() && next.cars.len() < MAX_CARS && now >= next.due {
             if let Some(placement) = next.select(content, focus) {
                 next.spawn(
@@ -150,7 +171,7 @@ impl Population {
             return None;
         }
         let mut best: Option<(f32, Placement)> = None;
-        for spline in &content.splines {
+        for (spline_index, spline) in content.splines.iter().enumerate() {
             if spline.density == 0 {
                 continue;
             }
@@ -169,8 +190,8 @@ impl Population {
                 continue;
             }
             let persona = compatible[((self.next - 1) % compatible.len() as u64) as usize];
-            for segment in &spline.segments {
-                for pair in segment.points.windows(2) {
+            for (segment_index, segment) in spline.segments.iter().enumerate() {
+                for (point_index, pair) in segment.points.windows(2).enumerate() {
                     let position = pair[0];
                     let distance = focus
                         .iter()
@@ -199,6 +220,12 @@ impl Population {
                         Placement {
                             spline: spline.index,
                             persona,
+                            route: super::motion::Route {
+                                spline: spline_index,
+                                segment: segment_index,
+                                point: point_index,
+                                offset: 0.,
+                            },
                             pose: vehicle::initialize::Pose {
                                 position,
                                 basis,
@@ -210,6 +237,87 @@ impl Population {
             }
         }
         best.map(|(_, p)| p)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn drive(
+        &mut self,
+        world: &mut Players,
+        connection: u8,
+        persona: u64,
+        content: &Content,
+        now: u64,
+        focus: &[[f32; 3]],
+        changes: &mut Changes,
+    ) -> Result<(), Error> {
+        if now.saturating_sub(self.motion_ms) < 100 {
+            return Ok(());
+        }
+        let dt = now.saturating_sub(self.motion_ms).min(200) as f32 / 1000.;
+        self.motion_ms = now;
+        let Some(clock) = &self.motion_clock else {
+            return Ok(());
+        };
+        let (identity, revision) = clock.stamp(now)?;
+        let positions: Vec<_> = self
+            .cars
+            .iter()
+            .map(|(&key, car)| (key, car.anchor))
+            .collect();
+        let mut ended = Vec::new();
+        for (&key, car) in &mut self.cars {
+            let obstacles: Vec<_> = positions
+                .iter()
+                .filter(|(other, _)| *other != key)
+                .map(|(_, p)| *p)
+                .chain(focus.iter().copied())
+                .collect();
+            let gap = super::motion::clearance(car.anchor, car.basis[2], &obstacles);
+            // Authored conservative traffic policy: 12 m/s cruise, 3 m/s²
+            // acceleration, 6 m/s² braking. Installed DesiredSpeed units are
+            // still under audit; do not silently treat those values as m/s.
+            let target = 12f32.min((2. * 6. * gap).sqrt());
+            let speed = if car.speed < target {
+                (car.speed + 3. * dt).min(target)
+            } else {
+                (car.speed - 6. * dt).max(target)
+            };
+            let distance = ((car.speed + speed) * 0.5 * dt).min(gap);
+            let spline = content.splines.get(car.route.spline).ok_or(Error::Shape)?;
+            let Some((position, basis)) = car.route.travel(spline, distance) else {
+                ended.push(key);
+                continue;
+            };
+            let old_yaw = car.basis[2][0].atan2(car.basis[2][2]);
+            let yaw = basis[2][0].atan2(basis[2][2]);
+            let turn = (yaw - old_yaw + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
+                - std::f32::consts::PI;
+            car.anchor = position;
+            car.basis = basis;
+            car.speed = if distance == 0. { 0. } else { speed };
+            let mut controls = vehicle::chassis::Controls::new(4)?;
+            controls.flags[3] = true;
+            let physics = vehicle::chassis::Motion {
+                identity,
+                revision,
+                position,
+                quaternion: vehicle::orientation::quaternion_from_basis(basis)?,
+                velocity: basis[2].map(|v| v * car.speed),
+                angular_velocity: [0., turn / dt, 0.],
+            }
+            .encode([0.; 3], &controls)?;
+            changes
+                .records
+                .extend(world.set_ai_vehicle_physics(connection, persona, key, physics)?);
+        }
+        for key in ended {
+            let removed = world.remove_ai_vehicle(connection, persona, key)?;
+            changes.records.extend(removed.records);
+            changes.deleted.extend(removed.deleted);
+            self.cars.remove(&key);
+            self.authority.remove_group(key);
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -337,6 +445,9 @@ impl Population {
             Car {
                 anchor: placement.pose.position,
                 expires: now.saturating_add(LIFETIME_MS),
+                route: placement.route,
+                basis: placement.pose.basis,
+                speed: 0.,
             },
         );
         Ok(())
@@ -350,10 +461,10 @@ fn asset_bundle(stream: u16) -> Result<u16, Error> {
     }
     Ok(asset)
 }
-fn distance_squared(a: [f32; 3], b: [f32; 3]) -> f32 {
+pub(super) fn distance_squared(a: [f32; 3], b: [f32; 3]) -> f32 {
     a.into_iter().zip(b).map(|(a, b)| (a - b).powi(2)).sum()
 }
-fn road_basis(a: [f32; 3], b: [f32; 3]) -> Option<[[f32; 3]; 3]> {
+pub(super) fn road_basis(a: [f32; 3], b: [f32; 3]) -> Option<[[f32; 3]; 3]> {
     let mut forward = std::array::from_fn::<_, 3, _>(|i| b[i] - a[i]);
     let length = forward.iter().map(|v| v * v).sum::<f32>().sqrt();
     if !length.is_finite() || length < 0.01 {

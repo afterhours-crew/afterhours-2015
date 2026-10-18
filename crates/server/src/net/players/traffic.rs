@@ -19,6 +19,7 @@ impl PlayerListener {
         else {
             return Ok(());
         };
+        let mut population = population.clone();
         let mut focus = Vec::new();
         for participant in self.participants.in_free_roam() {
             if self.traffic_failed || !self.free_roam_presented.contains(&participant) {
@@ -34,9 +35,9 @@ impl PlayerListener {
             let physics = self
                 .players
                 .vehicle_physics(HOST_SELECTOR as u8, self.persona, car)?;
+            population.observe_clock(now_ms, &physics)?;
             focus.push(physics.decode([0.; 3])?.position);
         }
-        let mut population = population.clone();
         let mut players = self.players.clone();
         let changes = population.advance(
             &mut players,

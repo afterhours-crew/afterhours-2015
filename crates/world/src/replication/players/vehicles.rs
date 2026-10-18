@@ -230,6 +230,10 @@ impl Players {
         if !self.owned_vehicles(connection, persona).contains(&id) {
             return Err(Error::UnknownObject);
         }
+        self.physics_of(id)
+    }
+
+    fn physics_of(&self, id: u16) -> Result<vehicle::Physics, Error> {
         let Some(state::Object {
             current: Update::Vehicle { fields, .. },
             ..
@@ -257,6 +261,32 @@ impl Players {
         physics: vehicle::Physics,
     ) -> Result<Option<Record>, Error> {
         self.vehicle_physics(connection, persona, id)?;
+        self.change_physics(id, physics)
+    }
+
+    /// Host-owned AI motion is authorized by its spawn key, never by a client
+    /// movement report or an arbitrary ghost ID. It does not grant that client
+    /// authority over AI cars.
+    pub fn set_ai_vehicle_physics(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        key: u64,
+        physics: vehicle::Physics,
+    ) -> Result<Option<Record>, Error> {
+        let id = self
+            .ai_ids(connection, persona, key)
+            .ok_or(Error::UnknownObject)?
+            .vehicle;
+        self.physics_of(id)?;
+        self.change_physics(id, physics)
+    }
+
+    fn change_physics(
+        &mut self,
+        id: u16,
+        physics: vehicle::Physics,
+    ) -> Result<Option<Record>, Error> {
         let Some(state::Object {
             current: Update::Vehicle { binding, fields },
             ..

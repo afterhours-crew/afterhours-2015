@@ -185,6 +185,66 @@ fn late_manager_failure_rolls_back_car_ids_authority_and_clock() {
 }
 
 #[test]
+fn host_motion_advances_and_stops_without_granting_client_authority() {
+    let (mut p, mut world, c) = fixture();
+    let ids = p
+        .advance(&mut world, 1, 100, &c, 0, &[[0.; 3]])
+        .unwrap()
+        .spawned
+        .unwrap();
+    let controls = vehicle::chassis::Controls::new(4).unwrap();
+    let stamp = vehicle::chassis::Motion {
+        identity: 100f64.to_bits(),
+        revision: 3000,
+        position: [0.; 3],
+        quaternion: [0., 0., 0., 1.],
+        velocity: [0.; 3],
+        angular_velocity: [0.; 3],
+    }
+    .encode([0.; 3], &controls)
+    .unwrap();
+    p.observe_clock(0, &stamp).unwrap();
+    assert!(world.vehicle_physics(1, 100, ids.vehicle).is_err());
+    assert!(
+        world
+            .set_vehicle_physics(1, 100, ids.vehicle, stamp.clone())
+            .is_err()
+    );
+    assert!(
+        world
+            .set_ai_vehicle_physics(2, 100, 1, stamp.clone())
+            .is_err()
+    );
+    let start = p.cars[&1].anchor;
+    let output = p.advance(&mut world, 1, 100, &c, 100, &[[0.; 3]]).unwrap();
+    assert_eq!(output.records.len(), 1);
+    assert!(p.cars[&1].anchor[0] > start[0]);
+    let before_repeat = world.objects().snapshot();
+    assert!(
+        p.advance(&mut world, 1, 100, &c, 100, &[[0.; 3]])
+            .unwrap()
+            .records
+            .is_empty()
+    );
+    assert_eq!(world.objects().snapshot(), before_repeat);
+    // Player is directly ahead: no motion can cross the clearance boundary.
+    let stop = p.cars[&1].anchor;
+    p.advance(&mut world, 1, 100, &c, 200, &[[stop[0] + 5., 0., 0.]])
+        .unwrap();
+    assert_eq!(p.cars[&1].anchor, stop);
+    assert_eq!(p.cars[&1].speed, 0.);
+    let mut invalid = stamp.clone();
+    invalid.identity_words[0] = 0x7ff80000;
+    assert!(p.observe_clock(201, &invalid).is_err());
+    // A long pause is bounded to 200 ms of simulation, not a teleport.
+    p.advance(&mut world, 1, 100, &c, 10_000, &[[0.; 3]])
+        .unwrap();
+    assert!(p.cars[&1].anchor[0] - stop[0] < 1.);
+    world.remove_ai_vehicle(1, 100, 1).unwrap();
+    assert!(world.set_ai_vehicle_physics(1, 100, 1, stamp).is_err());
+}
+
+#[test]
 fn placement_respects_tags_floor_spacing_and_population_bound() {
     let (mut p, mut world, mut c) = fixture();
     assert!(p.select(&c, &[[0., 20., 0.]]).is_none());
