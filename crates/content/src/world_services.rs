@@ -91,6 +91,9 @@ impl AssetIndex {
 mod tests {
     use super::*;
     use crate::synthetic::{self, Asset, Field, PartitionWriter, guid};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
     fn fixture(order: Vec<u32>, bad_link: bool) -> (std::path::PathBuf, AssetIndex) {
         let classes = [
             "SetClientNotificationEntityData",
@@ -133,12 +136,13 @@ mod tests {
             ),
         };
         let path = std::env::temp_dir().join(format!(
-            "afterhours-world-services-{}-{}",
+            "afterhours-world-services-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
         ));
         let (options, _) = synthetic::write(&path, &[asset]).unwrap();
         let mut index = AssetIndex::open(&path, &options).unwrap();
@@ -196,7 +200,11 @@ mod tests {
             ((3..=8).collect(), false),
         ] {
             let (path, mut index) = fixture(order, bad_link);
-            assert!(index.local_world_services("scene").is_err());
+            assert!(
+                index.local_world_services("scene").is_err(),
+                "malformed fixture unexpectedly accepted at {} (bad_link={bad_link})",
+                path.display()
+            );
             std::fs::remove_dir_all(path).unwrap();
         }
     }
