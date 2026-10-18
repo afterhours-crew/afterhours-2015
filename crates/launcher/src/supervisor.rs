@@ -218,7 +218,7 @@ fn wait_for_routing(steps: &mut impl Steps) -> Result<()> {
                 if !waiting_activation {
                     steps.status(
                         State::Activation,
-                        "Waiting for the installed activation dialog. Complete it yourself, or use stop to cancel. Local play is not ready.",
+                        "Waiting for EA activation. Complete the installed dialog in its own window; it may require Internet access. Afterhours does not handle your credentials. Keep this terminal open, or use Ctrl+C / stop to cancel. Local play is not ready.",
                     );
                     waiting_activation = true;
                 }

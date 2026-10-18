@@ -22,7 +22,11 @@ use std::path::PathBuf;
 pub struct Context {
     pub data_dir: PathBuf,
     pub json: bool,
+    pub bundled_server: Option<PathBuf>,
 }
+
+/// Explicit dispatch argument used by the single-executable distribution.
+pub const BUNDLED_SERVER_FLAG: &str = "--afterhours-server";
 
 impl Context {
     fn from(global: &Global) -> Result<Self> {
@@ -35,6 +39,7 @@ impl Context {
         Ok(Self {
             data_dir,
             json: global.json,
+            bundled_server: None,
         })
     }
 
@@ -54,8 +59,8 @@ impl Context {
 }
 
 /// Resolve the server path: the given one, or `nfs-server` next to us.
-pub fn server_path(args: &GameArgs) -> Result<PathBuf> {
-    match &args.server {
+pub fn server_path(context: &Context, args: &GameArgs) -> Result<PathBuf> {
+    match args.server.as_ref().or(context.bundled_server.as_ref()) {
         Some(path) => Ok(path.clone()),
         None => platform::default_server_path().ok_or_else(|| {
             Failure::refused(
@@ -67,7 +72,18 @@ pub fn server_path(args: &GameArgs) -> Result<PathBuf> {
 
 /// Dispatch a parsed command line.
 pub fn run(cli: Cli) -> Result<()> {
-    let context = Context::from(&cli.global)?;
+    dispatch(cli, None)
+}
+
+/// Run the existing launcher with the given executable also providing the
+/// server role. An explicit `--server` still selects a standalone server.
+pub fn run_bundled(cli: Cli, executable: PathBuf) -> Result<()> {
+    dispatch(cli, Some(executable))
+}
+
+fn dispatch(cli: Cli, bundled_server: Option<PathBuf>) -> Result<()> {
+    let mut context = Context::from(&cli.global)?;
+    context.bundled_server = bundled_server;
     match cli.command {
         Command::Check(args) => launch::check(&context, &args),
         Command::Setup(args) => launch::launch(&context, crate::records::Action::Setup, &args),

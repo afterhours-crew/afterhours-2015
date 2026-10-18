@@ -55,6 +55,7 @@ fn require_hash(game: &Path, relative: &str, expected: &str) -> Result<()> {
 
 /// Run every check and describe the result.
 pub fn run(platform: &dyn Platform, input: Input<'_>) -> Result<Preflight> {
+    eprintln!("[check] Checking user permissions, installation and save paths...");
     platform.refuse_privileged()?;
     let game = match input.game_directory {
         Some(game) => Some(platform::existing_absolute(game, "Game directory")?),
@@ -74,9 +75,12 @@ pub fn run(platform: &dyn Platform, input: Input<'_>) -> Result<Preflight> {
     let mut game_sha256 = None;
     let mut activation_sha256 = None;
     if let Some(game) = &game {
+        eprintln!("[check] Verifying NFS16.exe against the supported game build...");
         require_hash(game, platform::GAME_EXECUTABLE, GAME_SHA256)?;
+        eprintln!("[check] Supported game build verified.");
         game_sha256 = Some(GAME_SHA256.to_owned());
         if input.for_game {
+            eprintln!("[check] Verifying the installed activation helper...");
             require_hash(game, platform::ACTIVATION_HELPER, ACTIVATION_SHA256)?;
             activation_sha256 = Some(ACTIVATION_SHA256.to_owned());
         }
@@ -84,6 +88,9 @@ pub fn run(platform: &dyn Platform, input: Input<'_>) -> Result<Preflight> {
     let mut registered_client_path = None;
     let mut compatibility_name = None;
     if input.for_game {
+        eprintln!(
+            "[check] Checking existing EA registration, running programs and local port 3216..."
+        );
         let registration = platform.registered_client_path()?.ok_or_else(|| {
             Failure::refused(
                 "Existing game launcher registration is missing or unsupported. Afterhours does not install or modify it.",
@@ -104,11 +111,16 @@ pub fn run(platform: &dyn Platform, input: Input<'_>) -> Result<Preflight> {
             )));
         }
     }
+    eprintln!("[check] Verifying the local server executable...");
+    let server_sha256 = digest::sha256_file(&server)?;
+    eprintln!(
+        "[check] Checks complete. Activation availability is checked by the game when it starts."
+    );
     Ok(Preflight {
         version: records::VERSION,
         game_directory: game,
         data_directory: data,
-        server_sha256: digest::sha256_file(&server)?,
+        server_sha256,
         server_path: server,
         game_sha256,
         activation_sha256,

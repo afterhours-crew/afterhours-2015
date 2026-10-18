@@ -4,6 +4,16 @@ Command-line launcher for the Afterhours 2015 local server and, on Windows,
 the installed game. It replaces the PowerShell and C# scripts that used to
 live under `launcher/`.
 
+The sibling `nfs-afterhours-bundle` package links this launcher and `nfs-server`
+into one terminal executable, `Afterhours.exe`. Its server children use the
+explicit `--afterhours-server` dispatch flag, recorded as `bundled_server` in
+the session request. The same supervisor owns preparation, activation waits,
+temporary routing and cleanup. Missing `bundled_server` defaults to false for
+existing records; an explicit `--server` uses the standalone-server contract.
+
+Preparation progress goes to stderr and names actual extraction, verification,
+cache reuse, account and service steps. JSON results on stdout remain parseable.
+
 ```text
 nfs-afterhours check   --game-dir <DIR>     verify installation, paths, registration; change nothing
 nfs-afterhours setup   --game-dir <DIR>     prepare content and the local account; start nothing

@@ -15,9 +15,16 @@ Cold disconnected startup, prolonged activation waiting and activation cancellat
 see [validation](#developer-validation-and-current-limits). Complete progression
 remains open.
 
-This is a **source-only distribution**. You must compile `nfs-server` and
-`nfs-afterhours` before running; no executable, installer or game content is
-shipped. All build and runtime source is in this public repository.
+For releases containing `Afterhours-windows-x64.zip`, use the
+[terminal tester quickstart](TESTER-QUICKSTART.md). Its `Afterhours.exe` bundles
+these same server and launcher implementations. With no arguments it starts
+using the game folder beside the executable and keeps the terminal open after
+completion or failure. It prints the real extraction stages and cache reuse,
+and keeps installed activation requirements explicit. Game data is generated
+locally; none is shipped. Existing source-only checkpoints have no binary bundle.
+
+The build instructions below are for contributors and users of the separate
+`nfs-server` and `nfs-afterhours` tools. All source lives in this repository.
 
 ## Install the build tools
 

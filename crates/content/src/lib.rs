@@ -28,6 +28,7 @@ mod licenses;
 pub mod logic_events;
 pub mod nitrous;
 pub mod participant_logic;
+mod progress;
 pub mod progression;
 mod reputation;
 pub mod road_network;
@@ -40,6 +41,7 @@ mod stats;
 #[cfg(any(test, feature = "synthetic"))]
 pub mod synthetic;
 mod tables;
+pub use progress::Progress;
 pub mod vehicle_parts;
 pub mod vehicle_profiles;
 pub mod world;
@@ -266,10 +268,27 @@ impl From<std::io::Error> for Error {
 /// Return a verified cache entry for the installation at `game_root`,
 /// building it under `cache_root` when absent or invalid.
 pub fn prepare(game_root: &Path, cache_root: &Path, options: &Options) -> Result<Prepared, Error> {
+    prepare_with_progress(game_root, cache_root, options, &mut |_| {})
+}
+
+/// Prepare with metadata-only progress. Completion is reported only after
+/// the corresponding work succeeds; a cache hit never reports extraction.
+pub fn prepare_with_progress(
+    game_root: &Path,
+    cache_root: &Path,
+    options: &Options,
+    report: &mut dyn FnMut(Progress),
+) -> Result<Prepared, Error> {
+    report(Progress::Fingerprinting);
     let fingerprint = fingerprint(game_root, options)?;
-    cache::prepare(cache_root, fingerprint, |fingerprint| {
-        build(game_root, fingerprint, options)
-    })
+    let prepared = cache::prepare(
+        cache_root,
+        fingerprint,
+        |fingerprint, report| build_with_progress(game_root, fingerprint, options, report),
+        report,
+    )?;
+    report(Progress::Ready);
+    Ok(prepared)
 }
 
 /// Build every output in memory without touching a cache.
@@ -278,10 +297,36 @@ pub fn build(
     fingerprint: &Fingerprint,
     options: &Options,
 ) -> Result<BTreeMap<Kind, Vec<u8>>, Error> {
+    build_with_progress(game_root, fingerprint, options, &mut |_| {})
+}
+
+fn build_with_progress(
+    game_root: &Path,
+    fingerprint: &Fingerprint,
+    options: &Options,
+    report: &mut dyn FnMut(Progress),
+) -> Result<BTreeMap<Kind, Vec<u8>>, Error> {
+    report(Progress::Scanning);
     let install = nfs_frostbite::install::Installation::open(game_root, options.limits)?;
     let mut assets = scan::Assets::scan(&install)?;
+    report(Progress::Scanned);
     let mut outputs = BTreeMap::new();
-    outputs.insert(Kind::ItemContent, items::build(&mut assets)?);
+    macro_rules! extract {
+        ($kind:expr, $work:expr) => {{
+            let kind = $kind;
+            report(Progress::Extracting(kind));
+            let bytes = $work?;
+            report(Progress::Extracted {
+                kind,
+                bytes: bytes.len(),
+            });
+            bytes
+        }};
+    }
+    outputs.insert(
+        Kind::ItemContent,
+        extract!(Kind::ItemContent, items::build(&mut assets)),
+    );
     let item_content = nfs_services::item_content::ItemContent::from_json(
         &serde_json::from_slice(&outputs[&Kind::ItemContent])
             .map_err(|_| Error::Content("item JSON".into()))?,
@@ -289,38 +334,77 @@ pub fn build(
     .map_err(|_| Error::Content("item catalog".into()))?;
     outputs.insert(
         Kind::VehicleParts,
-        vehicle_parts::build(&mut assets, &item_content.catalog)?,
+        extract!(
+            Kind::VehicleParts,
+            vehicle_parts::build(&mut assets, &item_content.catalog)
+        ),
     );
-    let tables = tables::build(&mut assets, &fingerprint.digest)?;
-    outputs.insert(Kind::StatDefinitions, stats::build(&tables)?);
+    let tables = extract!(
+        Kind::PersistentContent,
+        tables::build(&mut assets, &fingerprint.digest)
+    );
+    outputs.insert(
+        Kind::StatDefinitions,
+        extract!(Kind::StatDefinitions, stats::build(&tables)),
+    );
     outputs.insert(Kind::PersistentContent, tables);
-    outputs.insert(Kind::ItemLicenses, licenses::build(&mut assets)?);
-    outputs.insert(Kind::ControlCatalogs, control::build(&mut assets)?);
-    outputs.insert(Kind::ReputationThresholds, reputation::build(&mut assets)?);
+    outputs.insert(
+        Kind::ItemLicenses,
+        extract!(Kind::ItemLicenses, licenses::build(&mut assets)),
+    );
+    outputs.insert(
+        Kind::ControlCatalogs,
+        extract!(Kind::ControlCatalogs, control::build(&mut assets)),
+    );
+    outputs.insert(
+        Kind::ReputationThresholds,
+        extract!(Kind::ReputationThresholds, reputation::build(&mut assets)),
+    );
     outputs.insert(
         Kind::SceneCatalog,
-        scenes::build(&mut assets, &options.identity.scenes)?,
+        extract!(
+            Kind::SceneCatalog,
+            scenes::build(&mut assets, &options.identity.scenes)
+        ),
     );
     let catalog = scenes::Catalog::from_json(
         &serde_json::from_slice(&outputs[&Kind::SceneCatalog])
             .map_err(|_| Error::Content("scene catalog JSON".into()))?,
     )?;
     let mut index = assets::AssetIndex::from_assets(assets, options.identity.clone());
-    outputs.insert(Kind::WorldContent, startup::build(&mut index, &catalog)?);
-    outputs.insert(Kind::GarageLayout, garage::build(&mut index)?);
+    outputs.insert(
+        Kind::WorldContent,
+        extract!(Kind::WorldContent, startup::build(&mut index, &catalog)),
+    );
+    outputs.insert(
+        Kind::GarageLayout,
+        extract!(Kind::GarageLayout, garage::build(&mut index)),
+    );
     outputs.insert(
         Kind::ProgressionContent,
-        progression::build(&mut index, &fingerprint.digest)?,
+        extract!(
+            Kind::ProgressionContent,
+            progression::build(&mut index, &fingerprint.digest)
+        ),
     );
     outputs.insert(
         Kind::VehicleProfiles,
-        vehicle_profiles::build(&mut index, &item_content.catalog)?,
+        extract!(
+            Kind::VehicleProfiles,
+            vehicle_profiles::build(&mut index, &item_content.catalog)
+        ),
     );
     outputs.insert(
         Kind::WorldMacTemplate,
-        executable::mac_template(&game_root.join(EXECUTABLE), &options.identity)?,
+        extract!(
+            Kind::WorldMacTemplate,
+            executable::mac_template(&game_root.join(EXECUTABLE), &options.identity)
+        ),
     );
-    outputs.insert(Kind::SequenceContent, sequences::build(&mut index)?);
+    outputs.insert(
+        Kind::SequenceContent,
+        extract!(Kind::SequenceContent, sequences::build(&mut index)),
+    );
     Ok(outputs)
 }
 

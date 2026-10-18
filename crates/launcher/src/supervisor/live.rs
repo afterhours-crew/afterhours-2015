@@ -148,7 +148,7 @@ impl LiveSession {
         let stdout_log = self.run.join(format!("{name}.stdout.json"));
         let spec = SpawnSpec {
             executable: self.request.server_path.clone(),
-            arguments,
+            arguments: self.request.server_arguments(arguments),
             working_directory: self.data.clone(),
             stdout_log: stdout_log.clone(),
             stderr_log: self.run.join(format!("{name}.stderr.log")),
@@ -175,7 +175,8 @@ impl LiveSession {
         eprint!("{}", child.drain_diagnostics());
         if child.exit_code() != Some(0) || child.output_truncated() {
             return Err(Failure::session(format!(
-                "{name} failed; see its local error log."
+                "{name} failed; see {}.",
+                self.run.join(format!("{name}.stderr.log")).display()
             )));
         }
         let bytes = std::fs::read(&stdout_log)?;
@@ -187,6 +188,7 @@ impl LiveSession {
         let account_path = self.data.join("account.json");
         let state = self.data.join("artifacts").join("account");
         if account_path.exists() {
+            eprintln!("[account] Opening your existing local save...");
             let account: AccountRecord = records::read_json(&account_path)?;
             account.validate()?;
             if !state.exists() {
@@ -194,6 +196,7 @@ impl LiveSession {
                     "Existing account record is invalid; no state was replaced.",
                 ));
             }
+            eprintln!("[account] Existing local save ready.");
             return Ok(account);
         }
         if state.exists() {
@@ -207,6 +210,7 @@ impl LiveSession {
             .ok_or_else(|| Failure::session("prepare-local did not produce an account policy."))?
             .clone();
         let game = self.game_directory()?.to_path_buf();
+        eprintln!("[account] Creating your independent local driver and starter garage...");
         let created = self.run_tool(
             "create-account",
             vec![
@@ -235,6 +239,7 @@ impl LiveSession {
             .ok_or_else(|| Failure::session("create-account did not report a valid account."))?;
         let account = AccountRecord::post_intro(id.to_owned());
         records::write_new_json(&account_path, &account)?;
+        eprintln!("[account] Local save created. Future launches keep this driver and garage.");
         Ok(account)
     }
 
@@ -375,6 +380,7 @@ impl Steps for LiveSession {
     }
 
     fn start_server(&mut self) -> Result<()> {
+        eprintln!("[server] Starting local services and waiting for readiness...");
         let prepared = self.prepared.clone().unwrap_or_default();
         let account = self
             .account
@@ -399,7 +405,7 @@ impl Steps for LiveSession {
         let arguments = self.server_arguments(&prepared, &account)?;
         let spec = SpawnSpec {
             executable: executable.clone(),
-            arguments,
+            arguments: self.request.server_arguments(arguments),
             working_directory: self.data.clone(),
             stdout_log: self.run.join("server.stdout.jsonl"),
             stderr_log: self.run.join("server.stderr.log"),
@@ -431,6 +437,7 @@ impl Steps for LiveSession {
         self.server_executable = Some(executable);
         self.ready = Some(ready);
         self.server = Some(server);
+        eprintln!("[server] Local services are ready.");
         Ok(())
     }
 
