@@ -126,7 +126,11 @@ impl Population {
         let retire: Vec<_> = next
             .cars
             .iter()
-            .filter(|(_, car)| focus.is_empty() || now >= car.expires)
+            .filter(|(_, car)| {
+                focus.is_empty()
+                    || now >= car.expires
+                    || (next.motion_clock.is_some() && now.saturating_sub(next.motion_ms) > 2_000)
+            })
             .map(|(&key, _)| key)
             .collect();
         for key in retire {
@@ -253,19 +257,71 @@ impl Population {
         if now.saturating_sub(self.motion_ms) < 100 {
             return Ok(());
         }
-        let dt = now.saturating_sub(self.motion_ms).min(200) as f32 / 1000.;
+        let elapsed = now.saturating_sub(self.motion_ms).min(2_000);
         self.motion_ms = now;
         let Some(clock) = &self.motion_clock else {
             return Ok(());
         };
         let (identity, revision) = clock.stamp(now)?;
+        let headings: BTreeMap<_, _> = self
+            .cars
+            .iter()
+            .map(|(&key, car)| (key, car.basis[2][0].atan2(car.basis[2][2])))
+            .collect();
+        // Integrate the actual elapsed time in bounded steps. Publishing full
+        // cruise velocity after advancing only a fraction of that time makes
+        // the client extrapolate ahead and snap back at the next update.
+        let mut remaining = elapsed;
+        while remaining > 0 {
+            let step = remaining.min(50);
+            self.step(content, step as f32 / 1000., focus);
+            remaining -= step;
+        }
+        let mut ended = Vec::new();
+        for (&key, car) in &self.cars {
+            if car.expires == 0 {
+                ended.push(key);
+                continue;
+            }
+            let mut controls = vehicle::chassis::Controls::new(4)?;
+            controls.flags[3] = true;
+            let yaw = car.basis[2][0].atan2(car.basis[2][2]);
+            let turn = (yaw - headings[&key] + std::f32::consts::PI)
+                .rem_euclid(std::f32::consts::TAU)
+                - std::f32::consts::PI;
+            let physics = vehicle::chassis::Motion {
+                identity,
+                revision,
+                position: car.anchor,
+                quaternion: vehicle::orientation::quaternion_from_basis(car.basis)?,
+                velocity: car.basis[2].map(|v| v * car.speed),
+                angular_velocity: [0., turn / (elapsed as f32 / 1000.), 0.],
+            }
+            .encode([0.; 3], &controls)?;
+            changes
+                .records
+                .extend(world.set_ai_vehicle_physics(connection, persona, key, physics)?);
+        }
+        for key in ended {
+            let removed = world.remove_ai_vehicle(connection, persona, key)?;
+            changes.records.extend(removed.records);
+            changes.deleted.extend(removed.deleted);
+            self.cars.remove(&key);
+            self.authority.remove_group(key);
+        }
+        Ok(())
+    }
+
+    fn step(&mut self, content: &Content, dt: f32, focus: &[[f32; 3]]) {
         let positions: Vec<_> = self
             .cars
             .iter()
             .map(|(&key, car)| (key, car.anchor))
             .collect();
-        let mut ended = Vec::new();
         for (&key, car) in &mut self.cars {
+            if car.expires == 0 {
+                continue;
+            }
             let obstacles: Vec<_> = positions
                 .iter()
                 .filter(|(other, _)| *other != key)
@@ -283,41 +339,22 @@ impl Population {
                 (car.speed - 6. * dt).max(target)
             };
             let distance = ((car.speed + speed) * 0.5 * dt).min(gap);
-            let spline = content.splines.get(car.route.spline).ok_or(Error::Shape)?;
-            let Some((position, basis)) = car.route.travel(spline, distance) else {
-                ended.push(key);
+            let Some(spline) = content.splines.get(car.route.spline) else {
+                car.expires = 0;
                 continue;
             };
-            let old_yaw = car.basis[2][0].atan2(car.basis[2][2]);
-            let yaw = basis[2][0].atan2(basis[2][2]);
-            let turn = (yaw - old_yaw + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
-                - std::f32::consts::PI;
+            let Some((position, basis)) = car.route.travel(spline, distance) else {
+                car.expires = 0;
+                continue;
+            };
             car.anchor = position;
             car.basis = basis;
-            car.speed = if distance == 0. { 0. } else { speed };
-            let mut controls = vehicle::chassis::Controls::new(4)?;
-            controls.flags[3] = true;
-            let physics = vehicle::chassis::Motion {
-                identity,
-                revision,
-                position,
-                quaternion: vehicle::orientation::quaternion_from_basis(basis)?,
-                velocity: basis[2].map(|v| v * car.speed),
-                angular_velocity: [0., turn / dt, 0.],
-            }
-            .encode([0.; 3], &controls)?;
-            changes
-                .records
-                .extend(world.set_ai_vehicle_physics(connection, persona, key, physics)?);
+            car.speed = if distance >= gap || distance == 0. {
+                0.
+            } else {
+                speed
+            };
         }
-        for key in ended {
-            let removed = world.remove_ai_vehicle(connection, persona, key)?;
-            changes.records.extend(removed.records);
-            changes.deleted.extend(removed.deleted);
-            self.cars.remove(&key);
-            self.authority.remove_group(key);
-        }
-        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]

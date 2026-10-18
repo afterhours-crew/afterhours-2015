@@ -236,12 +236,47 @@ fn host_motion_advances_and_stops_without_granting_client_authority() {
     let mut invalid = stamp.clone();
     invalid.identity_words[0] = 0x7ff80000;
     assert!(p.observe_clock(201, &invalid).is_err());
-    // A long pause is bounded to 200 ms of simulation, not a teleport.
-    p.advance(&mut world, 1, 100, &c, 10_000, &[[0.; 3]])
+    // A long pause retires stale simulated cars instead of rewinding them
+    // after the client has extrapolated across the missing interval.
+    let retired = p
+        .advance(&mut world, 1, 100, &c, 10_000, &[[0.; 3]])
         .unwrap();
-    assert!(p.cars[&1].anchor[0] - stop[0] < 1.);
-    world.remove_ai_vehicle(1, 100, 1).unwrap();
+    assert!(retired.deleted.contains(&ids.vehicle));
+    assert!(!p.cars.contains_key(&1));
     assert!(world.set_ai_vehicle_physics(1, 100, 1, stamp).is_err());
+}
+
+#[test]
+fn delayed_publication_integrates_the_same_road_distance_as_regular_updates() {
+    let (mut regular, mut world, mut content) = fixture();
+    content.splines[0].segments[0].points = vec![[50., 0., 0.], [100., 0., 0.]];
+    regular
+        .advance(&mut world, 1, 100, &content, 0, &[[0.; 3]])
+        .unwrap();
+    let physics = vehicle::chassis::Motion {
+        identity: 100f64.to_bits(),
+        revision: 3000,
+        position: [0.; 3],
+        quaternion: [0., 0., 0., 1.],
+        velocity: [0.; 3],
+        angular_velocity: [0.; 3],
+    }
+    .encode([0.; 3], &vehicle::chassis::Controls::new(4).unwrap())
+    .unwrap();
+    regular.observe_clock(0, &physics).unwrap();
+    let mut delayed = regular.clone();
+    let mut delayed_world = world.clone();
+    for now in (100..=1000).step_by(100) {
+        regular
+            .advance(&mut world, 1, 100, &content, now, &[[0.; 3]])
+            .unwrap();
+    }
+    delayed
+        .advance(&mut delayed_world, 1, 100, &content, 1000, &[[0.; 3]])
+        .unwrap();
+    assert!((regular.cars[&1].anchor[0] - 51.5).abs() < 0.001);
+    assert_eq!(regular.cars[&1].anchor, delayed.cars[&1].anchor);
+    assert_eq!(regular.cars[&1].speed, delayed.cars[&1].speed);
 }
 
 #[test]

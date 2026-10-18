@@ -74,7 +74,9 @@ impl Clock {
         if !seconds.is_finite() || !(0. ..1e9).contains(&seconds) {
             return Err(Error::Bound);
         }
-        if seconds == 0. || anchor.as_ref().is_some_and(|a| seconds <= a.seconds) {
+        // Anchor once to the session clock. Re-anchoring each received sample
+        // imports variable report/queue latency into host simulation time.
+        if seconds == 0. || anchor.is_some() {
             return Ok(());
         }
         *anchor = Some(Self {
@@ -115,6 +117,37 @@ pub(super) fn clearance(position: [f32; 3], forward: [f32; 3], obstacles: &[[f32
 mod tests {
     use super::*;
     use nfs_content::traffic::Segment;
+
+    #[test]
+    fn network_report_latency_cannot_change_the_host_motion_clock() {
+        let mut anchor = None;
+        let mut motion = vehicle::chassis::Motion {
+            identity: 100f64.to_bits(),
+            revision: 3000,
+            position: [0.; 3],
+            quaternion: [0., 0., 0., 1.],
+            velocity: [0.; 3],
+            angular_velocity: [0.; 3],
+        };
+        let controls = vehicle::chassis::Controls::new(4).unwrap();
+        Clock::observe(
+            &mut anchor,
+            500,
+            &motion.encode([0.; 3], &controls).unwrap(),
+        )
+        .unwrap();
+        motion.identity = 100.1f64.to_bits();
+        motion.revision = 3003;
+        Clock::observe(
+            &mut anchor,
+            1000,
+            &motion.encode([0.; 3], &controls).unwrap(),
+        )
+        .unwrap();
+        let (seconds, tick) = anchor.unwrap().stamp(1500).unwrap();
+        assert_eq!(f64::from_bits(seconds), 101.);
+        assert_eq!(tick, 3030);
+    }
 
     #[test]
     fn connected_roads_progress_without_skipping_gaps_or_looping_on_empty_edges() {

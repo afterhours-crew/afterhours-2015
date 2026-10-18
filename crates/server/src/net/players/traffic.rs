@@ -47,11 +47,20 @@ impl PlayerListener {
             now_ms,
             &focus,
         )?;
-        let mut entries: Vec<_> =
-            split_scenes(changes.records, nfs_world::application::OUTBOUND_FRAME_BITS)?
-                .into_iter()
-                .map(|section| (section, Vec::new()))
-                .collect();
+        let mut entries: Vec<_> = split_scenes(
+            changes.records,
+            nfs_world::application::OUTBOUND_FRAME_BITS - 104,
+        )?
+        .into_iter()
+        .map(|mut section| {
+            // Traffic motion is encoded in absolute world coordinates.
+            // Reserve the larger raw setup before splitting. An explicit
+            // origin also permits bounded co-publication
+            // with player chassis updates at the session edge.
+            section.setup = Some(Setup::RawEscape([0; 3]));
+            (section, Vec::new())
+        })
+        .collect();
         // Manager RPCs reference newly created ghosts. queue_replication_after
         // orders them after all preceding creation sections; deletions likewise
         // follow the relation-clearing updates instead of preceding them on wire.

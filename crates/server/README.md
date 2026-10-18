@@ -476,4 +476,8 @@ supplies bounded creation, road following, timestamped chassis updates and
 retirement. Its authored traffic policy uses a 12 m/s cruise ceiling, bounded
 acceleration/braking and a forward obstacle corridor. It retires at disconnected
 road endpoints; it does not implement rigid-body collision physics or stock AI
-parity. Live traffic/rival acceptance remains in progress (#54).
+parity. Motion uses bounded elapsed-time substeps and a stable session clock;
+adjacent independent chassis updates can share a bounded publication without
+crossing lifecycle barriers. Pauses longer than two seconds retire stale traffic.
+The first moving test exposed uneven motion and periodic bounce; the fix and
+fresh live acceptance remain in progress (#114, #54).
