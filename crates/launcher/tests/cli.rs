@@ -50,6 +50,50 @@ fn text(bytes: &[u8]) -> String {
 }
 
 #[test]
+fn terminal_colors_respect_redirection_no_color_and_leave_json_plain() {
+    let root = scratch("colors");
+    for (force, no_color, expect_color) in [
+        (false, false, false),
+        (true, false, true),
+        (true, true, false),
+    ] {
+        let mut command = bin();
+        command
+            .env_remove("CLICOLOR_FORCE")
+            .env_remove("NO_COLOR")
+            .env_remove("CLICOLOR");
+        if force {
+            command.env("CLICOLOR_FORCE", "1");
+        }
+        if no_color {
+            command.env("NO_COLOR", "1");
+        }
+        let output = command
+            .args(["check", "--game-dir"])
+            .arg(root.join("missing-game"))
+            .arg("--server")
+            .arg(env!("CARGO_BIN_EXE_nfs-afterhours"))
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let error = text(&output.stderr);
+        assert!(error.contains("Checking your game"));
+        assert!(error.contains("ERROR"));
+        assert_eq!(error.contains('\u{1b}'), expect_color, "{error:?}");
+    }
+    let output = bin()
+        .env("CLICOLOR_FORCE", "1")
+        .env_remove("NO_COLOR")
+        .args(["status", "--json", "--data-dir"])
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert!(!text(&output.stdout).contains('\u{1b}'));
+    serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn help_lists_every_public_subcommand_and_the_exit_table() {
     let out = run(&["--help"]);
     assert_eq!(out.status.code(), Some(0));

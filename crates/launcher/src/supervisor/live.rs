@@ -21,7 +21,7 @@ use crate::{
     paths,
     platform::{self, ChildProcess, Platform, SpawnSpec},
     records::{self, AccountRecord, Action, Request, State, Status},
-    session,
+    session, terminal,
 };
 use std::{
     collections::BTreeMap,
@@ -156,11 +156,12 @@ impl LiveSession {
             capture_first_line: false,
         };
         let mut child = self.platform.spawn(&spec)?;
+        let mut diagnostics = terminal::Diagnostics::default();
         let deadline = Instant::now() + PREPARATION_DEADLINE;
         while !child.exited() || !child.logs_finished() {
             let text = child.drain_diagnostics();
             if !text.is_empty() {
-                eprint!("{text}");
+                diagnostics.push(&text);
             }
             child.check_logs()?;
             if Instant::now() > deadline || self.stop_file_present() {
@@ -172,7 +173,8 @@ impl LiveSession {
             std::thread::sleep(Duration::from_millis(100));
         }
         child.check_logs()?;
-        eprint!("{}", child.drain_diagnostics());
+        diagnostics.push(&child.drain_diagnostics());
+        diagnostics.finish();
         if child.exit_code() != Some(0) || child.output_truncated() {
             return Err(Failure::session(format!(
                 "{name} failed; see {}.",
@@ -187,8 +189,9 @@ impl LiveSession {
     fn ensure_account(&mut self, prepared: &Prepared) -> Result<AccountRecord> {
         let account_path = self.data.join("account.json");
         let state = self.data.join("artifacts").join("account");
+        terminal::heading("Your driver");
         if account_path.exists() {
-            eprintln!("[account] Opening your existing local save...");
+            terminal::step("Opening your saved driver and garage...");
             let account: AccountRecord = records::read_json(&account_path)?;
             account.validate()?;
             if !state.exists() {
@@ -196,7 +199,7 @@ impl LiveSession {
                     "Existing account record is invalid; no state was replaced.",
                 ));
             }
-            eprintln!("[account] Existing local save ready.");
+            terminal::success("Your existing save is ready. Progress and balance are unchanged.");
             return Ok(account);
         }
         if state.exists() {
@@ -210,7 +213,7 @@ impl LiveSession {
             .ok_or_else(|| Failure::session("prepare-local did not produce an account policy."))?
             .clone();
         let game = self.game_directory()?.to_path_buf();
-        eprintln!("[account] Creating your independent local driver and starter garage...");
+        terminal::step("Creating your local tester account and starter garage...");
         let created = self.run_tool(
             "create-account",
             vec![
@@ -231,6 +234,8 @@ impl LiveSession {
                     .into_owned(),
                 "--progression".into(),
                 "post-intro".into(),
+                "--starting-resources".into(),
+                "tester".into(),
             ],
         )?;
         let id = created["local_account"]
@@ -239,7 +244,14 @@ impl LiveSession {
             .ok_or_else(|| Failure::session("create-account did not report a valid account."))?;
         let account = AccountRecord::post_intro(id.to_owned());
         records::write_new_json(&account_path, &account)?;
-        eprintln!("[account] Local save created. Future launches keep this driver and garage.");
+        terminal::success("Your local save is ready. Future launches keep this driver and garage.");
+        if let Some(level) = created["starting_level"].as_u64() {
+            terminal::detail(
+                "Starting REP",
+                format_args!("level {level} (one below the cap)"),
+            );
+            terminal::detail("Starting cash", "$10,000,000");
+        }
         Ok(account)
     }
 
@@ -324,7 +336,25 @@ impl LiveSession {
 impl Steps for LiveSession {
     fn status(&mut self, state: State, message: &str) {
         self.echo_diagnostics();
-        eprintln!("[{}] {state} : {message}", clock::now_hms());
+        match state {
+            State::Preparing => terminal::heading("Preparing your game data"),
+            State::Starting => terminal::heading("Starting the game"),
+            State::Activation => terminal::heading("EA activation needs your attention"),
+            State::Ready => terminal::heading(if self.request.action == Action::Serve {
+                "Server is running"
+            } else {
+                "Ready to play"
+            }),
+            State::Stopping => terminal::heading("Closing your session"),
+            State::Finished => terminal::heading("All done"),
+            State::Failed | State::Interrupted => terminal::heading("Session stopped"),
+        }
+        match state {
+            State::Ready | State::Finished => terminal::success(message),
+            State::Activation => terminal::action(message),
+            State::Failed | State::Interrupted => terminal::error(message),
+            _ => terminal::step(message),
+        }
         let record = Status {
             version: records::VERSION,
             id: self.request.id.clone(),
@@ -336,7 +366,7 @@ impl Steps for LiveSession {
             server_pid: self.server.as_ref().map(|s| s.id()),
         };
         if let Err(e) = records::replace_json(&self.run.join("status.json"), &record) {
-            eprintln!("Could not write status.json: {e}");
+            terminal::error(format_args!("Could not save the session status: {e}"));
         }
     }
 
@@ -380,7 +410,8 @@ impl Steps for LiveSession {
     }
 
     fn start_server(&mut self) -> Result<()> {
-        eprintln!("[server] Starting local services and waiting for readiness...");
+        terminal::heading("Starting your local server");
+        terminal::step("Starting local services. This may take a moment...");
         let prepared = self.prepared.clone().unwrap_or_default();
         let account = self
             .account
@@ -437,7 +468,7 @@ impl Steps for LiveSession {
         self.server_executable = Some(executable);
         self.ready = Some(ready);
         self.server = Some(server);
-        eprintln!("[server] Local services are ready.");
+        terminal::success("Your local server is ready.");
         Ok(())
     }
 
@@ -456,7 +487,6 @@ impl Steps for LiveSession {
         let date = crate::marker::UtcDate::today();
         let marker = crate::marker::launch_marker(date);
         // This date-derived value is launch context, not an account credential.
-        eprintln!("Launch context: UTC {}, marker {marker}.", date.iso());
         let spec = SpawnSpec {
             executable: game_path.clone(),
             arguments: Vec::new(),

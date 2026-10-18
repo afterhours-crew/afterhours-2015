@@ -45,15 +45,24 @@ struct Args {
     progression: Progression,
     /// Explicit progression content; required with files and post-intro.
     progression_content: Option<PathBuf>,
+    tester_resources: bool,
 }
 fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
     let (mut name, mut directory, mut policy, mut items, mut tables) =
         (None, None, None, None, None);
     let (mut game_dir, mut cache) = (None, None);
     let (mut progression, mut progression_content) = (None, None);
+    let mut tester_resources = None;
     while let Some(flag) = args.next() {
         let value = args.next().ok_or("missing option value")?;
         match flag.to_str() {
+            Some("--starting-resources") if tester_resources.is_none() => {
+                tester_resources = Some(match value.to_str() {
+                    Some("standard") => false,
+                    Some("tester") => true,
+                    _ => return Err("--starting-resources takes standard or tester".into()),
+                });
+            }
             Some("--name") if name.is_none() => {
                 name = Some(value.into_string().map_err(|_| "name must be UTF-8")?)
             }
@@ -91,6 +100,12 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
         }
     };
     let progression = progression.unwrap_or(Progression::Fresh);
+    let tester_resources = tester_resources.unwrap_or(false);
+    if tester_resources && !matches!(content, Content::Game { .. }) {
+        return Err(
+            "tester starting resources require --game-dir for installed REP thresholds".into(),
+        );
+    }
     if matches!(content, Content::Files { .. })
         && (progression == Progression::PostIntro) != progression_content.is_some()
     {
@@ -105,6 +120,7 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
         content,
         progression,
         progression_content,
+        tester_resources,
     })
 }
 fn run(
@@ -112,11 +128,12 @@ fn run(
     options: &nfs_content::Options,
 ) -> Result<nfs_storage::AccountId, Box<dyn std::error::Error>> {
     let policy = Policy::load(&args.policy)?;
-    let (items, tables, progression_content) = match &args.content {
+    let (items, tables, progression_content, thresholds) = match &args.content {
         Content::Files { items, tables } => (
             items.clone(),
             tables.clone(),
             args.progression_content.clone(),
+            None,
         ),
         Content::Game { game_dir, cache } => {
             let generated = crate::install_content::resolve(
@@ -129,6 +146,7 @@ fn run(
                 generated.item_content,
                 generated.persistent_content,
                 Some(generated.progression_content),
+                Some(generated.reputation_thresholds),
             )
         }
     };
@@ -150,7 +168,7 @@ fn run(
         }
     };
     let now = u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())?;
-    let prepared = Prepared::new(
+    let mut prepared = Prepared::new(
         &args.name,
         fresh::<SEED_BYTES>(&mut OsSeeds)?,
         nfs_storage::Timestamp(now),
@@ -159,6 +177,23 @@ fn run(
         &tables,
         &objectives,
     )?;
+    let starting_level = if args.tester_resources {
+        let thresholds = nfs_services::reputation::Thresholds::load(
+            thresholds
+                .as_deref()
+                .ok_or("missing installed REP thresholds")?,
+        )?;
+        let level = tester_level(&thresholds)?;
+        prepared = prepared.with_starting_resources(
+            &tables,
+            &thresholds,
+            level,
+            nfs_services::bank::Balance(TESTER_CASH),
+        )?;
+        Some(level)
+    } else {
+        None
+    };
     prepared.publish(&args.directory)?;
     let progression = match args.progression {
         Progression::Fresh => "fresh",
@@ -166,9 +201,18 @@ fn run(
     };
     println!(
         "{}",
-        serde_json::json!({"created":true,"local_account":prepared.identity().storage_account().hex(),"schema_version":nfs_storage::sqlite::VERSION,"progression":progression,"objective_rows":objectives.len()})
+        serde_json::json!({"created":true,"local_account":prepared.identity().storage_account().hex(),"schema_version":nfs_storage::sqlite::VERSION,"progression":progression,"objective_rows":objectives.len(),"starting_level":starting_level,"starting_cash":starting_level.map(|_| TESTER_CASH)})
     );
     Ok(prepared.identity().storage_account())
+}
+const TESTER_CASH: u32 = 10_000_000;
+
+fn tester_level(thresholds: &nfs_services::reputation::Thresholds) -> Result<u32, &'static str> {
+    thresholds
+        .maximum_level()
+        .checked_sub(1)
+        .filter(|level| *level > 0)
+        .ok_or("installed REP levels do not contain a level below the cap")
 }
 pub fn main(args: impl Iterator<Item = OsString>) -> std::process::ExitCode {
     let args = match parse(args) {
@@ -190,6 +234,52 @@ pub fn main(args: impl Iterator<Item = OsString>) -> std::process::ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn tester_resources_are_explicit_and_use_one_level_below_the_installed_cap() {
+        use nfs_services::reputation::Thresholds;
+        assert_eq!(
+            tester_level(&Thresholds::new(vec![0, 100, 300]).unwrap()),
+            Ok(2)
+        );
+        assert!(tester_level(&Thresholds::new(vec![0]).unwrap()).is_err());
+        let base: Vec<OsString> = [
+            "--name",
+            "Driver",
+            "--state-directory",
+            "new",
+            "--account-policy",
+            "policy.json",
+            "--game-dir",
+            "installation",
+        ]
+        .into_iter()
+        .map(Into::into)
+        .collect();
+        assert!(!parse(base.clone().into_iter()).unwrap().tester_resources);
+        let mut tester = base.clone();
+        tester.extend(["--starting-resources".into(), "tester".into()]);
+        assert!(parse(tester.clone().into_iter()).unwrap().tester_resources);
+        tester.extend(["--starting-resources".into(), "standard".into()]);
+        assert!(parse(tester.into_iter()).is_err());
+        let mut unknown = base;
+        unknown.extend(["--starting-resources".into(), "unknown".into()]);
+        assert!(parse(unknown.into_iter()).is_err());
+        let files = [
+            "--name",
+            "Driver",
+            "--state-directory",
+            "new",
+            "--account-policy",
+            "policy.json",
+            "--item-content",
+            "items.json",
+            "--persistent-content",
+            "tables.json",
+            "--starting-resources",
+            "tester",
+        ];
+        assert!(parse(files.into_iter().map(Into::into)).is_err());
+    }
     #[test]
     fn all_content_is_explicit_and_unknown_or_repeated_options_fail() {
         let args: Vec<OsString> = [
@@ -288,6 +378,7 @@ mod tests {
             },
             progression: Progression::Fresh,
             progression_content: None,
+            tester_resources: false,
         };
         run(args, &options).unwrap();
         assert!(dir.join("account").is_dir());
@@ -304,6 +395,7 @@ mod tests {
             },
             progression: Progression::PostIntro,
             progression_content: None,
+            tester_resources: false,
         };
         let account = run(args, &options).unwrap();
         let generated = crate::install_content::resolve(

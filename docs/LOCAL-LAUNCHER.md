@@ -139,7 +139,7 @@ The first start generates and validates content, creates an independent identity
 and saved database, starts loopback services, and opens the game. Subsequent starts
 reuse verified content and the same account. Preparation can take a minute or
 more. The command stays in the foreground and prints preparation, server
-diagnostics and session status in the same terminal. Wait for the `ready` line
+diagnostics and session status in the same terminal. Wait for **Ready to play**
 before pressing Space in the game. You can also check from a second terminal:
 
 ```sh
@@ -152,7 +152,7 @@ game has logged in or reached a playable world. Continue through the normal game
 menus yourself. The launcher never presses keys or accepts agreements.
 
 If the installed activation helper opens a sign-in window, the launcher prints
-`activation` and waits for you without a startup timeout. It does not read or
+**EA activation needs your attention** and waits without a startup timeout. It does not read or
 submit credentials. This is EA's activation requirement, separate from your local
 Afterhours account; local play is not ready while it waits. You can cancel with
 `nfs-afterhours stop` from another terminal. If activation replaces the original
@@ -162,6 +162,12 @@ never adopts a different game process without the original identity guards.
 `--player-name "My Driver"` sets the first account's display name. It does not
 rename or replace an existing account. New accounts start **after the scripted
 prologue**; the official prologue and complete progression are not yet supported.
+Launcher-created tester accounts start one level below the installed REP cap
+(level 69 of 70 on the supported build), with $10,000,000. These resources are
+committed with the new account; existing accounts are reused without a top-up.
+This is a local testing preset, not earned rewards or completed career events.
+Stage headings and labeled colors distinguish progress, success, activation waits
+and errors. Redirected output and `NO_COLOR=1` remain plain; JSON is uncolored.
 The local challenge menu uses three fixed preview objectives derived from installed
 type metadata. It grants no challenge rewards and does not implement rotating
 schedules or challenge completion. No remote product entitlements are granted.

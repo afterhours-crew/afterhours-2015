@@ -3,7 +3,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 use clap::Parser;
-use nfs_afterhours::{cli::Cli, exit::Exit};
+use nfs_afterhours::{cli::Cli, exit::Exit, terminal};
 use std::{ffi::OsString, io::IsTerminal, path::Path};
 
 fn arguments(executable: &Path, supplied: Vec<OsString>) -> Vec<OsString> {
@@ -19,9 +19,6 @@ fn arguments(executable: &Path, supplied: Vec<OsString>) -> Vec<OsString> {
 }
 
 fn run(executable: &Path, supplied: Vec<OsString>, automatic: bool) -> std::process::ExitCode {
-    if automatic {
-        print_version();
-    }
     if supplied
         .first()
         .is_some_and(|arg| arg == "--version" || arg == "-V")
@@ -30,15 +27,25 @@ fn run(executable: &Path, supplied: Vec<OsString>, automatic: bool) -> std::proc
         return Exit::Success.into();
     }
     if automatic {
-        eprintln!(
-            "Afterhours - local single-player preview\nGame folder: {}",
-            executable.parent().unwrap_or(Path::new(".")).display()
+        terminal::heading("AFTERHOURS  /  Need for Speed 2015");
+        terminal::note("Local single-player preview");
+        terminal::detail(
+            "Build",
+            format_args!(
+                "{} ({})",
+                env!("CARGO_PKG_VERSION"),
+                option_env!("AFTERHOURS_RELEASE").unwrap_or("development")
+            ),
         );
-        eprintln!(
-            "First setup reads your installed game data. Later launches verify and reuse the cache."
+        terminal::detail(
+            "Game folder",
+            executable.parent().unwrap_or(Path::new(".")).display(),
         );
-        eprintln!(
-            "The installed game must already be activated. If EA activation opens, complete it there; Afterhours waits and never handles your credentials."
+        terminal::note("First launch prepares your game data. Later launches reuse it.");
+        terminal::note("Keep this window open while you play. Ctrl+C stops the session.");
+        terminal::note("Your installed game needs valid EA activation. If a sign-in window");
+        terminal::note(
+            "appears, complete it there. Afterhours waits and never sees your password.",
         );
     }
     let cli = match Cli::try_parse_from(arguments(executable, supplied)) {
@@ -55,7 +62,7 @@ fn run(executable: &Path, supplied: Vec<OsString>, automatic: bool) -> std::proc
     match nfs_afterhours::commands::run_bundled(cli, executable.to_path_buf()) {
         Ok(()) => Exit::Success.into(),
         Err(failure) => {
-            eprintln!("Afterhours: {failure}");
+            terminal::error(&failure);
             failure.exit.into()
         }
     }
@@ -85,14 +92,14 @@ fn main() -> std::process::ExitCode {
     let result = match std::env::current_exe() {
         Ok(executable) => run(&executable, supplied, automatic),
         Err(error) => {
-            eprintln!("Cannot locate Afterhours: {error}");
+            terminal::error(format_args!("Cannot locate Afterhours: {error}"));
             Exit::Internal.into()
         }
     };
     // Explorer's terminal would otherwise disappear with the error or outcome.
     // Explicit commands and redirected stdin remain noninteractive for scripts.
     if automatic && std::io::stdin().is_terminal() {
-        eprintln!("Press Enter to close this window.");
+        terminal::note("Press Enter to close this window.");
         let mut line = String::new();
         let _ = std::io::stdin().read_line(&mut line);
     }

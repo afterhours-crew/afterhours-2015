@@ -22,7 +22,7 @@ fn main() -> std::process::ExitCode {
     match nfs_afterhours::commands::run(cli) {
         Ok(()) => Exit::Success.into(),
         Err(failure) => {
-            eprintln!("{failure}");
+            nfs_afterhours::terminal::error(&failure);
             failure.exit.into()
         }
     }

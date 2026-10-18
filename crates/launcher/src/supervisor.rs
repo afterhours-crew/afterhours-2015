@@ -99,11 +99,9 @@ fn game_exit_message(code: Option<i32>, suffix: &str) -> String {
 
 fn finished_message(action: Action) -> &'static str {
     match action {
-        Action::Setup => {
-            "Setup complete. Local account starts after the unsupported scripted prologue."
-        }
-        Action::Serve => "Server stopped; account data is preserved.",
-        Action::Start => "Game and server stopped; account data is preserved.",
+        Action::Setup => "Setup complete. Your local driver starts after the story introduction.",
+        Action::Serve => "Server closed. Your local save is kept for next time.",
+        Action::Start => "Game and server closed. Your local save is kept for next time.",
     }
 }
 
@@ -140,7 +138,10 @@ pub fn run(steps: &mut impl Steps, action: Action) -> Outcome {
 }
 
 fn session(steps: &mut impl Steps, action: Action) -> Result<()> {
-    steps.status(State::Preparing, "Preparing local content and account.");
+    steps.status(
+        State::Preparing,
+        "Reading your installed game data and checking the local cache.",
+    );
     if steps.stop_requested() {
         return Err(Failure::session("Start cancelled before preparation."));
     }
@@ -154,14 +155,14 @@ fn session(steps: &mut impl Steps, action: Action) -> Result<()> {
     }
     steps.status(
         State::Starting,
-        "Starting game; wait for ready status before pressing Space.",
+        "Opening Need for Speed. Wait for 'Ready to play' here before pressing Space in the game.",
     );
     steps.start_game()?;
     wait_for_routing(steps)?;
     steps.apply_routing()?;
     steps.status(
         State::Ready,
-        "Local routing is ready. Press Space in the game to connect.",
+        "Switch to the game and press Space to connect to your local server. Keep this window open while you play.",
     );
     loop {
         if steps.server_exited() {
@@ -218,7 +219,7 @@ fn wait_for_routing(steps: &mut impl Steps) -> Result<()> {
                 if !waiting_activation {
                     steps.status(
                         State::Activation,
-                        "Waiting for EA activation. Complete the installed dialog in its own window; it may require Internet access. Afterhours does not handle your credentials. Keep this terminal open, or use Ctrl+C / stop to cancel. Local play is not ready.",
+                        "Complete the EA sign-in or activation in its own window. It may need Internet access.\n         Take your time; Afterhours will wait. It never sees your password.\n         Keep this window open, or press Ctrl+C here to cancel. The game is not ready yet.",
                     );
                     waiting_activation = true;
                 }
@@ -236,7 +237,7 @@ fn wait_for_routing(steps: &mut impl Steps) -> Result<()> {
                 if waiting_activation {
                     steps.status(
                         State::Starting,
-                        "Activation dialog closed; checking the original game process.",
+                        "The activation window closed. Waiting for the game to finish starting...",
                     );
                     waiting_activation = false;
                 }

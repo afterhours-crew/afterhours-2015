@@ -55,7 +55,8 @@ fn require_hash(game: &Path, relative: &str, expected: &str) -> Result<()> {
 
 /// Run every check and describe the result.
 pub fn run(platform: &dyn Platform, input: Input<'_>) -> Result<Preflight> {
-    eprintln!("[check] Checking user permissions, installation and save paths...");
+    crate::terminal::heading("Checking your game");
+    crate::terminal::step("Checking permissions and your game and save folders...");
     platform.refuse_privileged()?;
     let game = match input.game_directory {
         Some(game) => Some(platform::existing_absolute(game, "Game directory")?),
@@ -75,12 +76,12 @@ pub fn run(platform: &dyn Platform, input: Input<'_>) -> Result<Preflight> {
     let mut game_sha256 = None;
     let mut activation_sha256 = None;
     if let Some(game) = &game {
-        eprintln!("[check] Verifying NFS16.exe against the supported game build...");
+        crate::terminal::step("Checking that your game version is supported...");
         require_hash(game, platform::GAME_EXECUTABLE, GAME_SHA256)?;
-        eprintln!("[check] Supported game build verified.");
+        crate::terminal::success("Game version supported.");
         game_sha256 = Some(GAME_SHA256.to_owned());
         if input.for_game {
-            eprintln!("[check] Verifying the installed activation helper...");
+            crate::terminal::step("Checking the installed EA activation helper...");
             require_hash(game, platform::ACTIVATION_HELPER, ACTIVATION_SHA256)?;
             activation_sha256 = Some(ACTIVATION_SHA256.to_owned());
         }
@@ -88,8 +89,8 @@ pub fn run(platform: &dyn Platform, input: Input<'_>) -> Result<Preflight> {
     let mut registered_client_path = None;
     let mut compatibility_name = None;
     if input.for_game {
-        eprintln!(
-            "[check] Checking existing EA registration, running programs and local port 3216..."
+        crate::terminal::step(
+            "Checking EA installation settings and looking for running game or EA apps...",
         );
         let registration = platform.registered_client_path()?.ok_or_else(|| {
             Failure::refused(
@@ -111,11 +112,12 @@ pub fn run(platform: &dyn Platform, input: Input<'_>) -> Result<Preflight> {
             )));
         }
     }
-    eprintln!("[check] Verifying the local server executable...");
+    crate::terminal::step("Checking the local server...");
     let server_sha256 = digest::sha256_file(&server)?;
-    eprintln!(
-        "[check] Checks complete. Activation availability is checked by the game when it starts."
-    );
+    crate::terminal::success("Startup checks passed.");
+    if input.for_game {
+        crate::terminal::note("The game will check its activation when it opens.");
+    }
     Ok(Preflight {
         version: records::VERSION,
         game_directory: game,

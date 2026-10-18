@@ -22,19 +22,19 @@ pub enum Progress {
 impl Kind {
     pub fn description(self) -> &'static str {
         match self {
-            Self::ItemContent => "cars, inventory definitions and starter items",
-            Self::PersistentContent => "save-data table definitions",
+            Self::ItemContent => "cars and starter garage items",
+            Self::PersistentContent => "save-data definitions",
             Self::StatDefinitions => "player statistics definitions",
-            Self::ItemLicenses => "installed item license names (no entitlement grants)",
-            Self::ControlCatalogs => "menu catalogs and statistics scopes",
+            Self::ItemLicenses => "installed item identifiers",
+            Self::ControlCatalogs => "menus and statistics categories",
             Self::ReputationThresholds => "REP levels and reward thresholds",
-            Self::SceneCatalog => "world scene and object definitions",
-            Self::WorldContent => "world startup and level registrations",
+            Self::SceneCatalog => "world locations and objects",
+            Self::WorldContent => "world startup definitions",
             Self::GarageLayout => "garage slots and parking positions",
             Self::WorldMacTemplate => "world connection data from NFS16.exe",
             Self::VehicleParts => "vehicle parts, customization and upgrade definitions",
-            Self::VehicleProfiles => "vehicle composition, physics and appearance",
-            Self::ProgressionContent => "progression objectives and scene bindings",
+            Self::VehicleProfiles => "car components, handling and appearance",
+            Self::ProgressionContent => "career objectives and world links",
             Self::SequenceContent => "garage entry and exit sequences",
         }
     }
@@ -43,15 +43,23 @@ impl Kind {
 impl std::fmt::Display for Progress {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Fingerprinting => f.write_str("Checking NFS16.exe and fingerprinting installed content indexes..."),
-            Self::CacheCheck => f.write_str("Verifying cached content and output hashes..."),
+            Self::Fingerprinting => f.write_str("Checking your game files for changes..."),
+            Self::CacheCheck => f.write_str("Checking previously prepared game data..."),
             Self::CacheReused => f.write_str("Verified content cache reused; extraction skipped."),
-            Self::CacheRebuilding => f.write_str("No reusable content cache. Building from your installation..."),
-            Self::Scanning => f.write_str("Reading installed Frostbite containers and indexing game assets (this can take a while)..."),
-            Self::Scanned => f.write_str("Installed asset index ready."),
+            Self::CacheRebuilding => {
+                f.write_str("Preparing a new local cache from your game installation...")
+            }
+            Self::Scanning => {
+                f.write_str("Reading the installed game archives. This can take a few minutes...")
+            }
+            Self::Scanned => f.write_str("Game file index ready."),
             Self::Extracting(kind) => write!(f, "Extracting {}...", kind.description()),
-            Self::Extracted { kind, bytes } => write!(f, "Done: {} ({bytes} bytes generated).", kind.description()),
-            Self::Publishing => f.write_str("Writing verified content and its manifest to the local cache..."),
+            Self::Extracted { kind, bytes } => {
+                write!(f, "Done: {} ({bytes} bytes generated).", kind.description())
+            }
+            Self::Publishing => {
+                f.write_str("Saving the prepared game data for faster launches next time...")
+            }
             Self::Ready => f.write_str("Content preparation complete."),
         }
     }

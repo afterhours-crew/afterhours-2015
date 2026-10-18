@@ -120,8 +120,8 @@ pub fn launch(context: &Context, action: Action, args: &SessionArgs) -> Result<(
         (request_path, run)
     };
     if !context.json {
-        println!("Afterhours {action} - data: {}", data.display());
-        println!("Session logs: {}", run.display());
+        crate::terminal::detail("Saves and cache", data.display());
+        crate::terminal::detail("Session logs", run.display());
     }
     let status = std::process::Command::new(std::env::current_exe()?)
         .arg("supervise")

@@ -6,7 +6,7 @@
    ordinary user. Keep its terminal open while playing.
 4. Follow the terminal's steps. It checks the supported build, reads installed
    content, creates a separate local save, starts the local server and opens the
-   game. Wait for **ready** before pressing Space in the game.
+   game. Wait for **Ready to play** before pressing Space in the game.
 5. Quit the game normally. Afterhours stops its server and preserves your save.
    The terminal stays open for you to read the result; press Enter to close it.
 
@@ -14,6 +14,16 @@ The first extraction can take several minutes. The terminal names each category
 being extracted and reports completion. Later starts verify the cache and report
 when extraction is skipped. Local service configuration is checked each time.
 No percentage or estimated time is inferred from the amount of game loading.
+
+Blue headings show the current stage; green **OK** means it completed. Yellow
+**WAIT** means you need to respond to an activation window. Red **ERROR** explains
+why a step stopped. Text labels remain readable without color. Redirected output
+and `NO_COLOR=1` use plain text; JSON output never includes color codes.
+
+New local tester accounts start at **REP level 69** (one below the installed cap
+of 70) with **$10,000,000** for trying cars and upgrades. This is a one-time
+starting balance, not money or REP earned by driving. Existing saves keep their
+current level and balance; updates and repeat launches never top them up.
 
 ## Activation and installation requirements
 
