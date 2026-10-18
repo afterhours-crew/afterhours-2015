@@ -127,6 +127,7 @@ pub(super) struct PlayerListener {
     customization: crate::customization_timer::Timers,
     world_ms: u64,
     vehicle_reports: nfs_world::vehicle_reports::Reports,
+    traffic_reports: nfs_world::vehicle_reports::Reports,
     trigger_volumes: nfs_world::trigger_volumes::Volumes,
     world_activation: Option<nfs_world::world_activation::Activation>,
     sequences: Option<nfs_world::sequences::Sequences>,
@@ -618,11 +619,19 @@ impl PlayerListener {
     /// Cars this connection's client simulates and reports movement for: the
     /// garage cars, then the world car (official E101 grants).
     pub(super) fn movement_objects(&self) -> BTreeSet<u16> {
-        Self::ready_movement(
+        let mut objects = Self::ready_movement(
             self.players
                 .owned_vehicles(HOST_SELECTOR as u8, self.persona),
             &self.world_cars,
-        )
+        );
+        if let Some(traffic) = &self.traffic_population {
+            objects.extend(
+                traffic
+                    .delegated(&self.players, HOST_SELECTOR as u8, self.persona)
+                    .keys(),
+            );
+        }
+        objects
     }
     pub(super) fn new(persona: u64) -> Self {
         Self {
@@ -661,6 +670,7 @@ impl PlayerListener {
             customization: crate::customization_timer::Timers::default(),
             world_ms: 0,
             vehicle_reports: nfs_world::vehicle_reports::Reports::default(),
+            traffic_reports: nfs_world::vehicle_reports::Reports::default(),
             trigger_volumes: nfs_world::trigger_volumes::Volumes::default(),
             world_activation: None,
             sequences: None,
@@ -950,6 +960,7 @@ impl Listener for PlayerListener {
         let mut deferred_sections = Vec::new();
         let mut movement_section = None;
         let mut vehicle_reports = self.vehicle_reports.clone();
+        let mut traffic_reports = self.traffic_reports.clone();
         let mut scoring_reported = BTreeSet::new();
         let mut scoring_reports = Vec::new();
         // Fuel, clock anchors and transition snapshots commit with this frame.
@@ -995,6 +1006,29 @@ impl Listener for PlayerListener {
                 Ok(_) => {}
                 Err(error) => {
                     return self.refuse(error);
+                }
+            }
+            if let Some(traffic) = &self.traffic_population {
+                let delegated = traffic.delegated(&players, HOST_SELECTOR as u8, self.persona);
+                match traffic_reports.receive_ai(
+                    &mut players,
+                    HOST_SELECTOR as u8,
+                    self.persona,
+                    movement,
+                    &delegated,
+                    self.world_ms,
+                ) {
+                    Ok(reports) if !reports.is_empty() => {
+                        deferred_sections.extend(reports.into_iter().map(|record| Section {
+                            float_bits: None,
+                            flag: false,
+                            deleted: Vec::new(),
+                            setup: Some(Setup::RawEscape([0; 3])),
+                            records: vec![record],
+                        }))
+                    }
+                    Ok(_) => {}
+                    Err(error) => return self.refuse(error),
                 }
             }
         }
@@ -2027,6 +2061,7 @@ impl Listener for PlayerListener {
         self.world_cars = world_cars;
         self.trigger_volumes = trigger_volumes;
         self.vehicle_reports = vehicle_reports;
+        self.traffic_reports = traffic_reports;
         self.world_activation = world_activation;
         self.deferred_deletions = deferred_deletions;
         self.pending_spawns.extend(scheduled_spawns);

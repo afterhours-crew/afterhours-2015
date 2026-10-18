@@ -191,112 +191,6 @@ fn late_manager_failure_rolls_back_car_ids_authority_and_clock() {
 }
 
 #[test]
-fn host_motion_advances_and_stops_without_granting_client_authority() {
-    let (mut p, mut world, c) = fixture();
-    let ids = p
-        .advance(&mut world, 1, 100, &c, 0, &[[0.; 3]])
-        .unwrap()
-        .spawned
-        .unwrap();
-    let controls = vehicle::chassis::Controls::new(4).unwrap();
-    let stamp = vehicle::chassis::Motion {
-        identity: 100f64.to_bits(),
-        revision: 3000,
-        position: [0.; 3],
-        quaternion: [0., 0., 0., 1.],
-        velocity: [0.; 3],
-        angular_velocity: [0.; 3],
-    }
-    .encode([0.; 3], &controls)
-    .unwrap();
-    p.observe_clock(0, &stamp).unwrap();
-    assert!(world.vehicle_physics(1, 100, ids.vehicle).is_err());
-    assert!(
-        world
-            .set_vehicle_physics(1, 100, ids.vehicle, stamp.clone())
-            .is_err()
-    );
-    assert!(
-        world
-            .set_ai_vehicle_physics(2, 100, 1, stamp.clone())
-            .is_err()
-    );
-    let start = p.cars[&1].anchor;
-    let output = p.advance(&mut world, 1, 100, &c, 100, &[[0.; 3]]).unwrap();
-    assert_eq!(output.records.len(), 1);
-    assert!(p.cars[&1].anchor[0] > start[0]);
-    let before_repeat = world.objects().snapshot();
-    assert!(
-        p.advance(&mut world, 1, 100, &c, 100, &[[0.; 3]])
-            .unwrap()
-            .records
-            .is_empty()
-    );
-    assert_eq!(world.objects().snapshot(), before_repeat);
-    // Player is directly ahead: no motion can cross the clearance boundary.
-    let stop = p.cars[&1].anchor;
-    p.advance(&mut world, 1, 100, &c, 200, &[[stop[0] + 5., 0., 0.]])
-        .unwrap();
-    assert_eq!(p.cars[&1].anchor, stop);
-    assert_eq!(p.cars[&1].speed, 0.);
-    let mut invalid = stamp.clone();
-    invalid.identity_words[0] = 0x7ff80000;
-    assert!(p.observe_clock(201, &invalid).is_err());
-    // A long pause retires stale simulated cars instead of rewinding them
-    // after the client has extrapolated across the missing interval.
-    let retired = p
-        .advance(&mut world, 1, 100, &c, 10_000, &[[0.; 3]])
-        .unwrap();
-    assert!(retired.deleted.contains(&ids.vehicle));
-    assert!(!p.cars.contains_key(&1));
-    assert!(world.set_ai_vehicle_physics(1, 100, 1, stamp).is_err());
-}
-
-#[test]
-fn delayed_publication_integrates_the_same_road_distance_as_regular_updates() {
-    let (mut regular, mut world, mut content) = fixture();
-    content.splines[0].segments[0].points = vec![[50., 0., 0.], [100., 0., 0.]];
-    content.splines[0].segments[0].curve = nfs_content::traffic::Curve::new(
-        [
-            [50., 0., 0.],
-            [50. + 50. / 3., 0., 0.],
-            [50. + 100. / 3., 0., 0.],
-            [100., 0., 0.],
-        ],
-        vec![1.],
-        vec![50.],
-    )
-    .unwrap();
-    regular
-        .advance(&mut world, 1, 100, &content, 0, &[[0.; 3]])
-        .unwrap();
-    let physics = vehicle::chassis::Motion {
-        identity: 100f64.to_bits(),
-        revision: 3000,
-        position: [0.; 3],
-        quaternion: [0., 0., 0., 1.],
-        velocity: [0.; 3],
-        angular_velocity: [0.; 3],
-    }
-    .encode([0.; 3], &vehicle::chassis::Controls::new(4).unwrap())
-    .unwrap();
-    regular.observe_clock(0, &physics).unwrap();
-    let mut delayed = regular.clone();
-    let mut delayed_world = world.clone();
-    for now in (100..=1000).step_by(100) {
-        regular
-            .advance(&mut world, 1, 100, &content, now, &[[0.; 3]])
-            .unwrap();
-    }
-    delayed
-        .advance(&mut delayed_world, 1, 100, &content, 1000, &[[0.; 3]])
-        .unwrap();
-    assert!((regular.cars[&1].anchor[0] - 51.5).abs() < 0.001);
-    assert_eq!(regular.cars[&1].anchor, delayed.cars[&1].anchor);
-    assert_eq!(regular.cars[&1].speed, delayed.cars[&1].speed);
-}
-
-#[test]
 fn placement_respects_tags_floor_spacing_and_population_bound() {
     let (mut p, mut world, mut c) = fixture();
     assert!(p.select(&c, &[[0., 20., 0.]]).is_none());
@@ -320,4 +214,136 @@ fn placement_respects_tags_floor_spacing_and_population_bound() {
     let basis = road_basis([0.; 3], [3., 1., 4.]).unwrap();
     vehicle::orientation::quaternion_from_basis(basis).unwrap();
     assert!(road_basis([0.; 3], [0.; 3]).is_none());
+}
+
+#[test]
+fn delegated_traffic_reports_are_isolated_retry_safe_and_retired() {
+    use nfs_world::{
+        frame::{Movement, MovementRecord},
+        replication::vehicle::movement::Sample,
+        vehicle_reports::Reports,
+    };
+    let (mut population, mut world, content) = fixture();
+    let ids = population
+        .advance(&mut world, 1, 100, &content, 0, &[[0.; 3]])
+        .unwrap()
+        .spawned
+        .unwrap();
+    let cars = population.delegated(&world, 1, 100);
+    assert_eq!(cars, BTreeMap::from([(ids.vehicle, 1)]));
+    assert!(population.delegated(&world, 2, 100).is_empty());
+    assert!(world.owned_vehicles(1, 100).is_empty());
+    assert!(world.vehicle_physics(1, 100, ids.vehicle).is_err());
+    let mut reports = Reports::default();
+    assert_eq!(
+        world.ai_vehicle_physics(1, 100, 1).unwrap().controls.value3,
+        0
+    );
+    for (index, now) in [(0, 0), (1, 100)] {
+        let physics = vehicle::chassis::Motion {
+            identity: (100. + index as f64 * 0.1).to_bits(),
+            revision: 3000 + index * 3,
+            position: [70. + index as f32, 1., 2.],
+            quaternion: [0., 0., 0., 1.],
+            velocity: [5., 0., 0.],
+            angular_velocity: [0.; 3],
+        }
+        .encode([0.; 3], &vehicle::chassis::Controls::new(4).unwrap())
+        .unwrap();
+        let (header, body) = Sample {
+            physics: physics.clone(),
+            flag: false,
+        }
+        .encode()
+        .unwrap();
+        let movement = Movement {
+            header: Some(header.span()),
+            records: vec![MovementRecord {
+                id: ids.vehicle,
+                component: 0,
+                data: body.span(),
+            }],
+        };
+        let before = world.objects().snapshot();
+        assert!(
+            reports
+                .receive_ai(&mut world, 2, 100, &movement, &cars, now)
+                .is_err()
+        );
+        let wrong = BTreeMap::from([(ids.vehicle + 1, 1)]);
+        assert!(
+            reports
+                .receive_ai(&mut world, 1, 100, &movement, &wrong, now)
+                .is_err()
+        );
+        assert_eq!(world.objects().snapshot(), before);
+        assert_eq!(
+            reports
+                .receive_ai(&mut world, 1, 100, &movement, &cars, now)
+                .unwrap()
+                .len(),
+            1
+        );
+        let accepted = world.ai_vehicle_physics(1, 100, 1).unwrap();
+        assert_eq!(accepted, physics);
+        assert_eq!(accepted.controls.value3, 4);
+        assert!(
+            reports
+                .receive_ai(&mut world, 1, 100, &movement, &cars, now)
+                .unwrap()
+                .is_empty()
+        );
+        let mut invalid = movement.clone();
+        invalid.records.push(invalid.records[0].clone());
+        let before = world.objects().snapshot();
+        assert!(
+            reports
+                .receive_ai(&mut world, 1, 100, &invalid, &cars, now)
+                .is_err()
+        );
+        assert_eq!(world.objects().snapshot(), before);
+    }
+    let retained = world.ai_vehicle_physics(1, 100, 1).unwrap();
+    assert!(
+        population
+            .advance(&mut world, 1, 100, &content, 500, &[[0.; 3]])
+            .unwrap()
+            .records
+            .is_empty()
+    );
+    assert_eq!(world.ai_vehicle_physics(1, 100, 1).unwrap(), retained);
+    assert_eq!(
+        population.cars[&1].anchor,
+        retained.decode([0.; 3]).unwrap().position
+    );
+    let removed = population
+        .advance(&mut world, 1, 100, &content, 501, &[])
+        .unwrap();
+    assert!(removed.deleted.contains(&ids.vehicle));
+    assert!(population.delegated(&world, 1, 100).is_empty());
+    let (header, body) = Sample {
+        physics: retained,
+        flag: false,
+    }
+    .encode()
+    .unwrap();
+    let movement = Movement {
+        header: Some(header.span()),
+        records: vec![MovementRecord {
+            id: ids.vehicle,
+            component: 0,
+            data: body.span(),
+        }],
+    };
+    assert!(
+        reports
+            .receive_ai(&mut world, 1, 100, &movement, &cars, 502)
+            .is_err()
+    );
+    assert!(
+        reports
+            .receive_ai(&mut world, 1, 100, &movement, &BTreeMap::new(), 502)
+            .unwrap()
+            .is_empty()
+    );
 }

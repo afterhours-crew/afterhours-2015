@@ -28,9 +28,6 @@ const LIFETIME_MS: u64 = 90_000;
 struct Car {
     anchor: [f32; 3],
     expires: u64,
-    route: super::motion::Route,
-    basis: [[f32; 3]; 3],
-    speed: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -42,8 +39,6 @@ pub struct Population {
     due: u64,
     clock: u64,
     owner: Option<(u8, u64)>,
-    motion_clock: Option<super::motion::Clock>,
-    motion_ms: u64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -59,7 +54,6 @@ struct Placement {
     spline: u16,
     persona: usize,
     pose: vehicle::initialize::Pose,
-    route: super::motion::Route,
 }
 
 impl Population {
@@ -86,8 +80,6 @@ impl Population {
             due: 0,
             clock: 0,
             owner: None,
-            motion_clock: None,
-            motion_ms: 0,
         })
     }
 
@@ -95,8 +87,18 @@ impl Population {
         self.cars.len()
     }
 
-    pub fn observe_clock(&mut self, now: u64, physics: &vehicle::Physics) -> Result<(), Error> {
-        super::motion::Clock::observe(&mut self.motion_clock, now, physics)
+    pub fn delegated(&self, world: &Players, connection: u8, persona: u64) -> BTreeMap<u16, u64> {
+        if self.owner != Some((connection, persona)) {
+            return BTreeMap::new();
+        }
+        self.cars
+            .keys()
+            .filter_map(|&key| {
+                world
+                    .ai_ids(connection, persona, key)
+                    .map(|ids| (ids.vehicle, key))
+            })
+            .collect()
     }
 
     /// The caller commits this transaction only after reserving its outbound
@@ -123,14 +125,16 @@ impl Population {
         let mut next = self.clone();
         let mut world = players.clone();
         let mut changes = Changes::default();
+        for (&key, car) in &mut next.cars {
+            car.anchor = world
+                .ai_vehicle_physics(connection, persona, key)?
+                .decode([0.; 3])?
+                .position;
+        }
         let retire: Vec<_> = next
             .cars
             .iter()
-            .filter(|(_, car)| {
-                focus.is_empty()
-                    || now >= car.expires
-                    || (next.motion_clock.is_some() && now.saturating_sub(next.motion_ms) > 2_000)
-            })
+            .filter(|(_, car)| focus.is_empty() || now >= car.expires)
             .map(|(&key, _)| key)
             .collect();
         for key in retire {
@@ -140,15 +144,6 @@ impl Population {
             next.cars.remove(&key);
             next.authority.remove_group(key);
         }
-        next.drive(
-            &mut world,
-            connection,
-            persona,
-            content,
-            now,
-            focus,
-            &mut changes,
-        )?;
         if !focus.is_empty() && next.cars.len() < MAX_CARS && now >= next.due {
             if let Some(placement) = next.select(content, focus) {
                 next.spawn(
@@ -175,7 +170,7 @@ impl Population {
             return None;
         }
         let mut best: Option<(f32, Placement)> = None;
-        for (spline_index, spline) in content.splines.iter().enumerate() {
+        for spline in &content.splines {
             if spline.density == 0 {
                 continue;
             }
@@ -194,7 +189,7 @@ impl Population {
                 continue;
             }
             let persona = compatible[((self.next - 1) % compatible.len() as u64) as usize];
-            for (segment_index, segment) in spline.segments.iter().enumerate() {
+            for segment in &spline.segments {
                 for (point_index, pair) in segment.points.windows(2).enumerate() {
                     let position = pair[0];
                     let distance = focus
@@ -231,12 +226,6 @@ impl Population {
                         Placement {
                             spline: spline.index,
                             persona,
-                            route: super::motion::Route {
-                                spline: spline_index,
-                                segment: segment_index,
-                                point: point_index,
-                                offset: 0.,
-                            },
                             pose: vehicle::initialize::Pose {
                                 position,
                                 basis,
@@ -248,120 +237,6 @@ impl Population {
             }
         }
         best.map(|(_, p)| p)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn drive(
-        &mut self,
-        world: &mut Players,
-        connection: u8,
-        persona: u64,
-        content: &Content,
-        now: u64,
-        focus: &[[f32; 3]],
-        changes: &mut Changes,
-    ) -> Result<(), Error> {
-        if now.saturating_sub(self.motion_ms) < 100 {
-            return Ok(());
-        }
-        let elapsed = now.saturating_sub(self.motion_ms).min(2_000);
-        self.motion_ms = now;
-        let Some(clock) = &self.motion_clock else {
-            return Ok(());
-        };
-        let (identity, revision) = clock.stamp(now)?;
-        let headings: BTreeMap<_, _> = self
-            .cars
-            .iter()
-            .map(|(&key, car)| (key, car.basis))
-            .collect();
-        // Integrate the actual elapsed time in bounded steps. Publishing full
-        // cruise velocity after advancing only a fraction of that time makes
-        // the client extrapolate ahead and snap back at the next update.
-        let mut remaining = elapsed;
-        while remaining > 0 {
-            let step = remaining.min(50);
-            self.step(content, step as f32 / 1000., focus);
-            remaining -= step;
-        }
-        let mut ended = Vec::new();
-        for (&key, car) in &self.cars {
-            if car.expires == 0 {
-                ended.push(key);
-                continue;
-            }
-            let mut controls = vehicle::chassis::Controls::new(4)?;
-            controls.flags[3] = true;
-            let physics = vehicle::chassis::Motion {
-                identity,
-                revision,
-                position: car.anchor,
-                quaternion: vehicle::orientation::quaternion_from_basis(car.basis)?,
-                velocity: car.basis[2].map(|v| v * car.speed),
-                angular_velocity: super::motion::angular_velocity(
-                    headings[&key],
-                    car.basis,
-                    elapsed as f32 / 1000.,
-                )?,
-            }
-            .encode([0.; 3], &controls)?;
-            changes
-                .records
-                .extend(world.set_ai_vehicle_physics(connection, persona, key, physics)?);
-        }
-        for key in ended {
-            let removed = world.remove_ai_vehicle(connection, persona, key)?;
-            changes.records.extend(removed.records);
-            changes.deleted.extend(removed.deleted);
-            self.cars.remove(&key);
-            self.authority.remove_group(key);
-        }
-        Ok(())
-    }
-
-    fn step(&mut self, content: &Content, dt: f32, focus: &[[f32; 3]]) {
-        let positions: Vec<_> = self
-            .cars
-            .iter()
-            .map(|(&key, car)| (key, car.anchor))
-            .collect();
-        for (&key, car) in &mut self.cars {
-            if car.expires == 0 {
-                continue;
-            }
-            let obstacles: Vec<_> = positions
-                .iter()
-                .filter(|(other, _)| *other != key)
-                .map(|(_, p)| *p)
-                .chain(focus.iter().copied())
-                .collect();
-            let gap = super::motion::clearance(car.anchor, car.basis[2], &obstacles);
-            // Authored conservative traffic policy: 12 m/s cruise, 3 m/s²
-            // acceleration, 6 m/s² braking. Installed DesiredSpeed units are
-            // still under audit; do not silently treat those values as m/s.
-            let target = 12f32.min((2. * 6. * gap).sqrt());
-            let speed = if car.speed < target {
-                (car.speed + 3. * dt).min(target)
-            } else {
-                (car.speed - 6. * dt).max(target)
-            };
-            let distance = ((car.speed + speed) * 0.5 * dt).min(gap);
-            let Some(spline) = content.splines.get(car.route.spline) else {
-                car.expires = 0;
-                continue;
-            };
-            let Some((position, basis)) = car.route.travel(spline, distance) else {
-                car.expires = 0;
-                continue;
-            };
-            car.anchor = position;
-            car.basis = basis;
-            car.speed = if distance >= gap || distance == 0. {
-                0.
-            } else {
-                speed
-            };
-        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -489,9 +364,6 @@ impl Population {
             Car {
                 anchor: placement.pose.position,
                 expires: now.saturating_add(LIFETIME_MS),
-                route: placement.route,
-                basis: placement.pose.basis,
-                speed: 0.,
             },
         );
         Ok(())

@@ -472,15 +472,13 @@ already established external endpoint.
 The traffic construction API builds unowned vehicles from installed traffic
 profiles and explicit pose/speed inputs, without player inventory. Manager
 binding and constructor tests cover rollback and isolation. Prepared population
-supplies bounded creation, road following, timestamped chassis updates and
-retirement. Its authored traffic policy uses a 12 m/s cruise ceiling, bounded
-acceleration/braking and a forward obstacle corridor. It retires at disconnected
-road endpoints; it does not implement rigid-body collision physics or stock AI
-parity. Motion uses bounded elapsed-time substeps and a stable session clock;
-adjacent independent chassis updates can share a bounded publication without
-crossing lifecycle barriers. Installed cubic control points and distance tables
-drive continuous road tangents; angular velocity includes road pitch. Prepared
-traffic content version 2 rebuilds older caches. Pauses longer than two seconds
-retire stale traffic.
+supplies bounded creation, client simulation grants, validated physics reports
+and retirement. The host owns placement, AI goals and lifetime; the client
+simulates delegated cars. AI remains separate from player inventory and scoring.
+Only session-authorized spawn keys accept reports; stale reports cannot rewind
+state, and retirement removes their grants. Independent chassis updates can
+share bounded publications without crossing lifecycle barriers. Installed cubic
+control points provide initial road tangents; prepared traffic content version 2
+rebuilds older caches. The superseded host path-following policy is removed.
 The first moving test exposed uneven motion and periodic bounce; the fix and
 fresh live acceptance remain in progress (#114, #54).

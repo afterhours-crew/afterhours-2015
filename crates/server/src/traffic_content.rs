@@ -7,7 +7,6 @@
 use nfs_content::vehicle_profiles::traffic::Definition;
 use nfs_world::replication::{Error, vehicle::*};
 
-mod motion;
 pub mod population;
 
 pub struct Request<'a> {

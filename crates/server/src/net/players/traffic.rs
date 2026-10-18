@@ -35,7 +35,6 @@ impl PlayerListener {
             let physics = self
                 .players
                 .vehicle_physics(HOST_SELECTOR as u8, self.persona, car)?;
-            population.observe_clock(now_ms, &physics)?;
             focus.push(physics.decode([0.; 3])?.position);
         }
         let mut players = self.players.clone();
@@ -115,6 +114,14 @@ mod tests {
             PlayerListener::new(100).with_traffic(Some(std::sync::Arc::new(content)));
         listener.players = world;
         listener.traffic_population = Some(population);
+        let delegated = listener.movement_objects();
+        assert_eq!(delegated.len(), 1);
+        assert!(
+            listener
+                .players
+                .owned_vehicles(HOST_SELECTOR as u8, 100)
+                .is_empty()
+        );
         listener.session_backlog = 2;
         assert!(listener.disable_traffic());
         assert!(!listener.disable_traffic());
@@ -124,6 +131,7 @@ mod tests {
         listener.session_backlog = 0;
         listener.advance_traffic(2).unwrap();
         assert_eq!(listener.traffic_population.as_ref().unwrap().count(), 0);
+        assert!(listener.movement_objects().is_empty());
         assert_eq!(listener.pending_entries.len(), 2);
         let (detach, before) = &listener.pending_entries[0];
         assert!(before.is_empty() && detach.deleted.is_empty());

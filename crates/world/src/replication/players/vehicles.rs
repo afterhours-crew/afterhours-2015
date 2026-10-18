@@ -264,9 +264,22 @@ impl Players {
         self.change_physics(id, physics)
     }
 
-    /// Host-owned AI motion is authorized by its spawn key, never by a client
-    /// movement report or an arbitrary ghost ID. It does not grant that client
-    /// authority over AI cars.
+    /// AI state is authorized by the host's spawn key and session. Delegating
+    /// simulation is a separate host policy, not inventory ownership.
+    pub fn ai_vehicle_physics(
+        &self,
+        connection: u8,
+        persona: u64,
+        key: u64,
+    ) -> Result<vehicle::Physics, Error> {
+        let id = self
+            .ai_ids(connection, persona, key)
+            .ok_or(Error::UnknownObject)?
+            .vehicle;
+        self.physics_of(id)
+    }
+
+    /// Change AI physics only through the session's host-issued spawn key.
     pub fn set_ai_vehicle_physics(
         &mut self,
         connection: u8,
