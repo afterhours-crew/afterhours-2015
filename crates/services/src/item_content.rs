@@ -10,6 +10,7 @@
 //! V7 adds installed fitment conflicts for supported leaf selections.
 //! V8 explicitly opts in supported body-kit offers and their owned child trees.
 //! V9 adds explicit owned REP rewards; older formats grant no such items.
+//! V10 adds explicit car offers; older formats never infer purchasable cars.
 //! No format accepts captured
 //! instances, player ids or reply envelopes.
 use crate::{ContentError, SUPPORTED_BUILD_SHA256 as BUILD};
@@ -30,6 +31,7 @@ pub const ITEM_UNLOCK_VERSION: u8 = 6;
 pub const FITMENT_VERSION: u8 = 7;
 pub const BODY_KIT_VERSION: u8 = 8;
 pub const REP_REWARD_VERSION: u8 = 9;
+pub const CAR_OWNERSHIP_VERSION: u8 = 10;
 pub const MAX_STORE_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -38,6 +40,7 @@ pub struct ItemContent {
     inventory: Option<InventoryCatalog>,
     purchase_offers: Option<crate::purchase::Offers>,
     category_unlocks: Option<crate::category_unlocks::Policy>,
+    car_offers: Option<crate::garage::Offers>,
 }
 
 fn fields(value: &Value, names: &[&str]) -> Result<(), ContentError> {
@@ -100,7 +103,7 @@ impl ItemContent {
     }
     pub fn from_json(value: &Value) -> Result<Self, ContentError> {
         if value["version"].as_u64().is_some_and(|v| {
-            (u64::from(INVENTORY_VERSION)..=u64::from(REP_REWARD_VERSION)).contains(&v)
+            (u64::from(INVENTORY_VERSION)..=u64::from(CAR_OWNERSHIP_VERSION)).contains(&v)
         }) {
             return Self::inventory_from_json(value);
         }
@@ -132,6 +135,7 @@ impl ItemContent {
             inventory: None,
             purchase_offers: None,
             category_unlocks: None,
+            car_offers: None,
         })
     }
     pub fn inventory(&self) -> Option<&InventoryCatalog> {
@@ -142,6 +146,9 @@ impl ItemContent {
     }
     pub fn category_unlocks(&self) -> Option<&crate::category_unlocks::Policy> {
         self.category_unlocks.as_ref()
+    }
+    pub fn car_offers(&self) -> Option<&crate::garage::Offers> {
+        self.car_offers.as_ref()
     }
     fn inventory_from_json(value: &Value) -> Result<Self, ContentError> {
         let version = u8::try_from(word(&value["version"])?).map_err(|_| ContentError::Invalid)?;
@@ -176,6 +183,9 @@ impl ItemContent {
         }
         if version >= REP_REWARD_VERSION {
             expected.push("rep_rewards");
+        }
+        if version >= CAR_OWNERSHIP_VERSION {
+            expected.push("car_offers");
         }
         fields(value, &expected)?;
         if value["format"] != FORMAT || value["build_sha256"] != BUILD {
@@ -442,11 +452,35 @@ impl ItemContent {
         } else {
             None
         };
+        let car_offers = if version >= CAR_OWNERSHIP_VERSION {
+            let rows = value["car_offers"]
+                .as_array()
+                .filter(|r| r.len() <= 512)
+                .ok_or(ContentError::Invalid)?;
+            let entries = rows
+                .iter()
+                .map(|r| {
+                    fields(r, &["definition", "minimum_rep_score"])?;
+                    let score = r["minimum_rep_score"]
+                        .as_i64()
+                        .and_then(|n| i32::try_from(n).ok())
+                        .ok_or(ContentError::Invalid)?;
+                    Ok((guid(&r["definition"])?, score))
+                })
+                .collect::<Result<Vec<_>, ContentError>>()?;
+            Some(
+                crate::garage::Offers::new(&inventory, entries)
+                    .map_err(|_| ContentError::Invalid)?,
+            )
+        } else {
+            None
+        };
         Ok(Self {
             catalog: inventory.bindings().clone(),
             inventory: Some(inventory),
             purchase_offers,
             category_unlocks,
+            car_offers,
         })
     }
     pub fn to_json(&self) -> Value {
@@ -534,6 +568,14 @@ impl ItemContent {
                             .collect::<Vec<_>>()
                     );
                 }
+            }
+            if let Some(cars) = &self.car_offers {
+                document["version"] = json!(CAR_OWNERSHIP_VERSION);
+                document["car_offers"] = json!(
+                    cars.entries()
+                        .map(|(g, s)| json!({"definition":hex(g),"minimum_rep_score":s}))
+                        .collect::<Vec<_>>()
+                );
             }
             return document;
         }
@@ -681,6 +723,64 @@ mod tests {
                 .item_unlocks()
                 .unwrap()
                 .rewards()
+                .is_none()
+        );
+    }
+    #[test]
+    fn v10_car_offers_require_explicit_valid_scope_and_round_trip() {
+        let mut value = inventory_document();
+        value["version"] = json!(CAR_OWNERSHIP_VERSION);
+        value["initial_definitions"] = json!([]);
+        value["definitions"][0]["class"] = json!("RaceVehicleItemData");
+        value["definitions"][0]["default_derived_hex"] = json!("00".repeat(68));
+        value["definitions"][0]["flags"]["uses_scope"] = json!(true);
+        for name in [
+            "purchase_offers",
+            "body_kits",
+            "vehicle_scopes",
+            "part_locations",
+            "purchase_requirements",
+            "item_unlocks",
+            "fitment_restrictions",
+            "rep_rewards",
+        ] {
+            value[name] = json!([]);
+        }
+        value["category_unlocks"] = Value::Null;
+        value["car_offers"] =
+            json!([{"definition":"11111111111111111111111111111111","minimum_rep_score":0}]);
+        let parsed = ItemContent::from_json(&value).unwrap();
+        assert_eq!(parsed.to_json(), value);
+        assert_eq!(parsed.car_offers().unwrap().entries().count(), 1);
+        for mutation in 0..10 {
+            let mut bad = value.clone();
+            match mutation {
+                0 => bad["definitions"][0]["flags"]["uses_scope"] = json!(false),
+                1 => bad["definitions"][0]["flags"]["requires_owner"] = json!(true),
+                2 => bad["definitions"][0]["flags"]["deprecated"] = json!(true),
+                3 => bad["definitions"][0]["flags"]["purchasable"] = json!(false),
+                4 => bad["definitions"][0]["quantity"] = json!(2),
+                5 => bad["car_offers"][0]["minimum_rep_score"] = json!(-1),
+                6 => bad["car_offers"][0]["minimum_rep_score"] = json!(u32::MAX),
+                7 => {
+                    bad.as_object_mut().unwrap().remove("car_offers");
+                }
+                8 => {
+                    bad["car_offers"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(value["car_offers"][0].clone());
+                }
+                _ => bad["car_offers"][0]["definition"] = json!("22".repeat(16)),
+            }
+            assert!(ItemContent::from_json(&bad).is_err(), "mutation {mutation}");
+        }
+        value["version"] = json!(REP_REWARD_VERSION);
+        value.as_object_mut().unwrap().remove("car_offers");
+        assert!(
+            ItemContent::from_json(&value)
+                .unwrap()
+                .car_offers()
                 .is_none()
         );
     }

@@ -35,6 +35,11 @@ pub(super) struct State {
     edits: BTreeMap<u16, EquipmentRequest>,
     committed: VecDeque<EquipmentRequest>,
 }
+impl State {
+    pub(super) fn discard_previews(&mut self) {
+        self.edits.clear();
+    }
+}
 
 impl PlayerListener {
     pub(in crate::net) fn take_equipment(&mut self) -> Option<EquipmentRequest> {
@@ -92,8 +97,8 @@ impl PlayerListener {
                     | Operation::Handling { vehicle, .. } => vehicle,
                     _ => {
                         // These RPCs omit the car reference. Resolve only this
-                        // player's garage car, never another player's display
-                        // car or a world lifetime. Ambiguous selection fails.
+                        // player's primary slot. Other owned display cars are
+                        // independent inventories, not alternative selections.
                         let mut cars = players
                             .owned_vehicles(HOST_SELECTOR as u8, self.persona)
                             .into_iter()
@@ -106,7 +111,11 @@ impl PlayerListener {
                                             call.player,
                                             *vehicle,
                                         )
-                                        .is_some()
+                                        .is_some_and(|(_, car)| {
+                                            self.inventory.as_ref().is_some_and(|inventory| {
+                                                inventory.slots.values()[0] == Some(car)
+                                            })
+                                        })
                             });
                         let vehicle = cars.next().ok_or(replication::Error::UnknownObject)?;
                         if cars.next().is_some() {

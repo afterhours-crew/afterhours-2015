@@ -259,6 +259,31 @@ pub(super) fn parse(p: &Value, classes: &ItemCatalog) -> Result<Parsed, ParseErr
                             .collect::<Result<_, _>>()?,
                     }
                 }
+                Some("light") => {
+                    keys(
+                        r,
+                        &["guid", "class_name", "kind", "guids", "rear", "extent"],
+                        &[],
+                    )?;
+                    mesh::Input::Light {
+                        guids: guids(&r["guids"])?,
+                        rear: boolean(&r["rear"])?,
+                        extent: float(&r["extent"])?,
+                    }
+                }
+                Some("spoiler") => {
+                    keys(
+                        r,
+                        &["guid", "class_name", "kind", "guids", "extent", "selector"],
+                        &[],
+                    )?;
+                    mesh::Input::Spoiler {
+                        guids: guids(&r["guids"])?,
+                        extent: float(&r["extent"])?,
+                        selector: i32::try_from(r["selector"].as_i64().ok_or(ParseError::Invalid)?)
+                            .map_err(|_| ParseError::Invalid)?,
+                    }
+                }
                 _ => return Err(ParseError::Invalid),
             };
             Ok((id, input))

@@ -16,6 +16,7 @@ pub mod control_catalogs;
 pub mod departure;
 pub mod equipment;
 pub mod fresh_account;
+pub mod garage;
 pub mod group;
 pub mod inventory;
 pub mod item_builder;

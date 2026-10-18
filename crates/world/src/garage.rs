@@ -33,6 +33,7 @@ impl Slots {
 pub struct Binding {
     pub endpoint: Endpoint,
     pub participant: u16,
+    /// Zero clears the slot; nonzero values name an owned inventory item.
     pub item: u64,
 }
 impl Binding {
@@ -42,7 +43,6 @@ impl Binding {
             || self.participant == 0
             || self.participant > 8191
             || self.endpoint.selector > 511
-            || self.item == 0
         {
             return Err(Error::Bound);
         }

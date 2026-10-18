@@ -13,6 +13,7 @@ mod derived;
 mod dyno;
 mod inventory;
 mod purchase;
+mod sell;
 mod update;
 pub use derived::{DefinitionClass, Derived, Layout};
 pub use dyno::DynoStats;
@@ -20,6 +21,7 @@ pub use inventory::{
     Definition, DefinitionFlags, InitialInventory, InventoryCatalog, OwnershipLevel,
 };
 pub use purchase::{PurchaseReply, PurchaseRequest, PurchaseSelection};
+pub use sell::{SellReply, SellRequest};
 pub use update::{ChangeNotification, UpdateNotification};
 
 /// Owned and Purchasable construction paths, respectively.
@@ -27,6 +29,7 @@ pub const OWNED: u8 = 2;
 pub const PURCHASABLE: u8 = 4;
 pub const LOAD_INVENTORY: u8 = 0x10;
 pub const PURCHASE_ITEMS: u8 = 0x02;
+pub const SELL_ITEMS: u8 = 0x04;
 
 mod handling;
 pub use handling::HandlingChanges;
@@ -48,8 +51,8 @@ impl Derived {
 
 /// Local resource policies, not recovered native maxima.
 pub const MAX_BYTES: usize = super::files::MAX_BYTES;
-pub const MAX_ITEMS: usize = 4096;
-pub const MAX_COLLECTION: usize = 4096;
+pub const MAX_ITEMS: usize = 8192;
+pub const MAX_COLLECTION: usize = 8192;
 pub const MAX_REFERENCES: usize = 32768;
 pub const MAX_DEPTH: usize = 32;
 pub const MAX_WORDS: usize = 4096;

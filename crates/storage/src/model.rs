@@ -13,7 +13,7 @@ use std::{
 };
 
 /// Items per account, bounded by local policy.
-pub const MAX_ITEMS: usize = 4096;
+pub const MAX_ITEMS: usize = 8192;
 /// Nested references per list.
 pub const MAX_NESTED: usize = 256;
 /// Opaque derived bytes per item, bounded by local policy.

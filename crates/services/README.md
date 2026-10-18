@@ -103,6 +103,21 @@ produces an error without advancing service state.
 The local initial garage policy selects the lowest owned root vehicle ID;
 it is an explicit local policy, not verified official fresh-account selection.
 
+`garage` manages five persistent slots. A purchase atomically reserves an empty
+secondary slot, debits the installed price and creates a distinct car with its
+stock parts. Shared account wraps are granted only when missing. Selection swaps
+an identified secondary car with the primary. Resale requires a secondary car,
+credits its stored sale price, removes its installed and spare descendants, and
+retains account-owned wraps. Select another car before selling the primary.
+
+Car transactions use server-issued account session epochs and bounded persistent
+sequence receipts. A repeated successful command in the same epoch returns the
+original result; superseded or evicted commands cannot charge again. A new
+connection receives a fresh epoch, so its restarted sequence space remains
+independent. The socket edge serializes these writes with equipment and REP,
+waits for purchase-result delivery before displaying new item references, and
+replaces only garage slots whose car identities changed.
+
 Tests construct item definitions, rows and accounts, including separate-account
 initialization races, failed commits, retries and SQLite restart persistence.
 Control-service tests cover malformed and noncanonical requests, resource bounds,

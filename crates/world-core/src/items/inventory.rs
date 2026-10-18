@@ -202,6 +202,26 @@ impl InventoryCatalog {
         result.collection.encode(&self.bindings)?;
         Ok(result)
     }
+    /// Construct a distinct root car and its stock subtree. This does not grant
+    /// ownership, allocate a garage slot or authorize an installed car offer.
+    /// The caller owns the monotonic identity reservation and transaction.
+    pub fn instantiate_vehicle(
+        &self,
+        guid: Guid,
+        first_id: u64,
+    ) -> Result<InitialInventory, Error> {
+        if first_id == 0 || self.definition(&guid)?.class != DefinitionClass::RaceVehicleItemData {
+            return Err(Error::Shape);
+        }
+        let mut result = InitialInventory {
+            collection: Collection::default(),
+            next_id: first_id,
+        };
+        self.instantiate(guid, 0, 0, &mut result)?;
+        result.collection.roots = result.collection.items.keys().copied().collect();
+        result.collection.encode(&self.bindings)?;
+        Ok(result)
+    }
     fn instantiate(
         &self,
         guid: Guid,

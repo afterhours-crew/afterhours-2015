@@ -205,6 +205,8 @@ pub fn assets() -> Vec<Asset> {
             vec![],
             vec![
                 ("DownforceSetting", Field::Int(5)),
+                ("AnimationExtent", Field::Float(0.75)),
+                ("AnimationId", Field::Int(-1)),
                 ("SpoilerTuning", Field::RawPointer(0)),
                 ("WideCollision", Field::Bool(false)),
                 ("PerformanceModifier", Field::RawPointer(0)),

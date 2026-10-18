@@ -7,7 +7,7 @@ use nfs_protocol::world::{
     BitSpan,
     rpc::{Envelope, Limits, RouteProfile},
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Binding {
@@ -137,8 +137,28 @@ impl Loaded {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Pending {
     entries: BTreeMap<(u16, u16, u16), (Binding, bool)>,
+    retired: VecDeque<Loaded>,
 }
 impl Pending {
+    /// Retire only a fully loaded lifetime. Its repeated ACK is harmless, but
+    /// cannot complete a replacement lifetime in this slot.
+    pub fn remove_slot(
+        &mut self,
+        scene: u16,
+        selector: u16,
+        participant: u16,
+    ) -> Result<(), Error> {
+        let key = (scene, selector, participant);
+        let Some((binding, true)) = self.entries.get(&key).copied() else {
+            return Err(Error::Shape);
+        };
+        self.entries.remove(&key);
+        if self.retired.len() == 1280 {
+            self.retired.pop_front();
+        }
+        self.retired.push_back(binding.expected());
+        Ok(())
+    }
     /// Replace a loaded garage slot with a newly prepared lifetime. A late ACK
     /// for the old car cannot satisfy this binding.
     pub fn replace_slot(&mut self, binding: Binding) -> Result<Option<Binding>, Error> {
@@ -158,7 +178,7 @@ impl Pending {
             return Err(Error::Shape);
         }
         let mut next = self.clone();
-        next.entries.remove(&key);
+        next.remove_slot(key.0, key.1, key.2)?;
         let result = next.offer(binding)?;
         *self = next;
         Ok(result)
@@ -167,6 +187,10 @@ impl Pending {
         self.entries
             .keys()
             .any(|&(s, r, _)| (s, r) == (scene, selector))
+            || self
+                .retired
+                .iter()
+                .any(|r| (r.scene, r.selector) == (scene, selector))
     }
     pub fn offer(&mut self, b: Binding) -> Result<Option<Binding>, Error> {
         b.encode()?;
@@ -209,6 +233,9 @@ impl Pending {
         a.encode()?;
         if !owns(a.participant) {
             return Err(Error::UnknownObject);
+        }
+        if self.retired.contains(&a) {
+            return Ok(false);
         }
         let (b, done) = self
             .entries

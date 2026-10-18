@@ -126,9 +126,9 @@ Both axles' green paint was visible in free roam; the yellow lip was difficult
 to distinguish under the outdoor night lighting. The saved account retained
 the exact paint values and size selection, with no further cash deduction.
 
-Paint requests omit a vehicle reference. For now they require one unambiguous
-owned garage car; active-car selection across multiple owned cars belongs to
-the separate [car ownership and garage management issue][garage-mgmt].
+Paint requests omit a vehicle reference and resolve against the active owned
+garage car. Selection across multiple owned cars is covered by the completed
+[car ownership and garage management issue][garage-mgmt].
 Size requests must identify an installed owned rim and a size that fits its
 authored axle dimensions.
 
