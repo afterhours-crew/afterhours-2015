@@ -42,13 +42,15 @@ databases. Game files and service access are unnecessary. See the
 
 ## Build and run
 
-Published GitHub releases built with the [bundle workflow](.github/workflows/release.yml)
+GitHub releases prepared with the [bundle workflow](.github/workflows/release.yml)
 include `Afterhours-windows-x64.zip`: one terminal executable with its documentation
 and licenses. Drop `Afterhours.exe` beside `NFS16.exe` and double-click it.
 Follow the [tester quickstart](docs/TESTER-QUICKSTART.md) for activation requirements,
 setup progress, local saves and feedback. Earlier source-only checkpoints do not
-contain this bundle. Publishing a release builds its exact tag; no release is
-created by the build itself.
+contain this bundle. For future releases, pushing a version tag builds and tests
+its exact source, then attaches the finished assets to an unpublished draft.
+Maintainers [review and publish that draft](docs/RELEASING.md); publication does
+not rebuild the binary.
 
 To build from source, start with the [setup guide](docs/LOCAL-LAUNCHER.md), which lists
 the build tools, supported game installation and activation requirements.
