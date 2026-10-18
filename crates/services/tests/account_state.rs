@@ -25,13 +25,13 @@ impl Root {
         Self::with_stamp(stamp)
     }
     fn with_stamp(stamp: u128) -> Self {
-        let root = Self(std::env::temp_dir().join(format!(
+        let path = std::env::temp_dir().join(format!(
             "account-services-{}-{stamp}-{}",
             std::process::id(),
             NEXT_ROOT.fetch_add(1, Ordering::Relaxed)
-        )));
-        std::fs::create_dir(&root.0).unwrap();
-        root
+        ));
+        std::fs::create_dir(&path).unwrap();
+        Self(path)
     }
     fn file(&self, name: &str, value: &Value) -> PathBuf {
         let path = self.0.join(name);
