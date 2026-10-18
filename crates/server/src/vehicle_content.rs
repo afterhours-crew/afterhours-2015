@@ -383,7 +383,7 @@ impl Content {
                 Kind::Tuning => Some(wheels.update(true)),
                 Kind::Tagged => Some(lifecycle::LockOn::default().update(true)),
                 Kind::NibblesGuid => Some(lifecycle::Audio::default().update(true)),
-                Kind::FourBit => Some(Update::Noop),
+                Kind::FourBit | Kind::Empty => Some(Update::Noop),
                 Kind::Appearance => Some(appearance.update(63)?),
                 Kind::Mesh(_) => Some(mesh.update(true)),
                 Kind::GuidFloat => Some(d.health.update(3)?),

@@ -53,6 +53,7 @@ impl Rules {
             "tuning",
             "appearance",
             "four_bit",
+            "empty",
             "tagged",
             "nibbles_guid",
             "mesh",

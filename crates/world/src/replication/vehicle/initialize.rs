@@ -115,7 +115,7 @@ pub fn fresh(
                 lifecycle.authority_group,
                 *components.next().ok_or(Error::Shape)?,
             )?),
-            Kind::Bool | Kind::Mesh(_) => Initial::Empty,
+            Kind::Bool | Kind::Mesh(_) | Kind::Empty => Initial::Empty,
             Kind::TripleNibbles
             | Kind::Tuning
             | Kind::Tagged
@@ -259,6 +259,18 @@ mod tests {
             Kind::Tuning,
         ])
         .unwrap()
+    }
+    #[test]
+    fn empty_component_keeps_later_rpc_selectors_and_authority_unchanged() {
+        let f = Fixture::new();
+        let before = profile();
+        let mut kinds = before.kinds().to_vec();
+        kinds.insert(7, Kind::Empty);
+        let profile = Profile::new(kinds).unwrap();
+        let old = fresh(&before, f.items(), f.lifecycle(), &mut Registry::default()).unwrap();
+        let mut new = fresh(&profile, f.items(), f.lifecycle(), &mut Registry::default()).unwrap();
+        assert_eq!(new.fields.remove(7), Initial::Empty);
+        assert_eq!(new, old);
     }
     #[test]
     fn composition_keeps_current_pose_separate_from_spawn_and_round_trips() {

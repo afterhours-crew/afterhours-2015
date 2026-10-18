@@ -50,9 +50,13 @@ pub struct MeshKind {
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Kind {
-    Root { property_owner: bool },
+    Root {
+        property_owner: bool,
+    },
     Chassis,
-    Part { variants: u16 },
+    Part {
+        variants: u16,
+    },
     TripleNibbles,
     Bool,
     Wheel,
@@ -60,6 +64,8 @@ pub enum Kind {
     Tuning,
     Tagged,
     NibblesGuid,
+    /// A serializer with empty initial/update payloads, retaining its update bit.
+    Empty,
     FourBit,
     Appearance,
     Mesh(Vec<MeshKind>),

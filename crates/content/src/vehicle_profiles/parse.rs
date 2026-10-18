@@ -106,6 +106,7 @@ fn profile(v: &Value) -> Result<Profile, ParseError> {
             Some("tagged") => (Kind::Tagged, None),
             Some("nibbles_guid") => (Kind::NibblesGuid, None),
             Some("four_bit") => (Kind::FourBit, None),
+            Some("empty") => (Kind::Empty, None),
             Some("appearance") => (Kind::Appearance, None),
             Some("guid_float") => (Kind::GuidFloat, None),
             _ => return Err(ParseError::Invalid),

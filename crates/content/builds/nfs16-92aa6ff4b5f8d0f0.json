@@ -811,7 +811,7 @@
       "SpatialPrefabBlueprint": null,
       "SpatialPrefabReferenceObjectData": null,
       "SpoilerCustomizationComponentData": null,
-      "SuspensionComponentData": null,
+      "SuspensionComponentData": "empty",
       "SwitchPropertyFloatEntityData": null,
       "TimelineEntityData": null,
       "TireCustomizationComponentData": null,
