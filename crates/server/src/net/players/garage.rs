@@ -15,7 +15,7 @@ pub(in crate::net) enum GarageOperation {
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(in crate::net) struct GarageRequest {
-    pub player: u16,
+    pub participant: u16,
     pub operation: GarageOperation,
 }
 impl PlayerListener {
@@ -110,16 +110,14 @@ impl PlayerListener {
         };
         let Some(call) = Binding::new(scene, rpc.selector)
             .map_err(|_| replication::Error::Shape)?
-            .read(body, |player| {
-                players.owns(HOST_SELECTOR as u8, self.persona, player)
+            .read(body, |participant| {
+                players.owns_participant(HOST_SELECTOR as u8, self.persona, participant)
             })
             .map_err(|_| replication::Error::Shape)?
         else {
             return Ok(false);
         };
-        let participant = players
-            .participant_for_player(HOST_SELECTOR as u8, self.persona, call.player)
-            .ok_or(replication::Error::UnknownObject)?;
+        let participant = call.participant;
         if !self.participants.in_customization().contains(&participant) {
             return Err(replication::Error::Shape);
         }
@@ -138,7 +136,7 @@ impl PlayerListener {
             Operation::Sold { secondary } => GarageOperation::Sold { secondary },
         };
         let request = GarageRequest {
-            player: call.player,
+            participant,
             operation,
         };
         if !pending.contains(&request) {

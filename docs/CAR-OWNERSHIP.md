@@ -15,6 +15,8 @@ Selecting a secondary car swaps it with the active slot. Requests without an
 explicit car reference resolve against the active slot. Explicit part and tuning
 requests retain their ownership checks. Selection and each car's inventory are
 persisted; switching cars discards unsaved appearance previews.
+Garage selection and placement commands identify the owned participant object;
+the separate player object is rejected on this route.
 
 The garage Sell action accepts one owned secondary car. Select another car before
 selling the active car. A sale credits the vehicle's stored sale price and removes

@@ -136,14 +136,13 @@ fn ack_cars(listener: &mut PlayerListener, participant: u16) {
     listener.pending.clear();
     listener.pending_content.clear();
 }
-fn command(
-    listener: &mut PlayerListener,
+fn command_body(
     scene: u16,
-    player: u16,
+    participant: u16,
     method: u32,
     slot: u32,
     item: Option<u64>,
-) {
+) -> BitWriter {
     let mut payload = BitWriter::new();
     payload
         .put(5, 9)
@@ -157,9 +156,20 @@ fn command(
     body.put(0, 64)
         .put(2, 8)
         .put(scene.into(), 13)
-        .put(player.into(), 13)
+        .put(participant.into(), 13)
         .put(payload.bytes().len() as u64, 9)
         .put_span(payload.span());
+    body
+}
+fn command(
+    listener: &mut PlayerListener,
+    scene: u16,
+    participant: u16,
+    method: u32,
+    slot: u32,
+    item: Option<u64>,
+) {
+    let body = command_body(scene, participant, method, slot, item);
     let mut pending = listener.garage_commands.clone();
     assert!(
         listener
@@ -167,6 +177,36 @@ fn command(
             .unwrap()
     );
     listener.garage_commands = pending;
+}
+
+#[test]
+fn garage_commands_authorize_participant_not_player_or_foreign_object() {
+    let (mut listener, _, _, _, scene, player, car) = fixture();
+    let participant = setup(&mut listener, player, car);
+    assert_ne!(participant, player);
+    let mut pending = VecDeque::new();
+    for foreign in [player, car, 8191] {
+        let body = command_body(scene, foreign, 3, 0, Some(123));
+        assert_eq!(
+            listener.stage_garage(&listener.players, body.span(), &mut pending),
+            Err(replication::Error::Shape)
+        );
+        assert!(pending.is_empty());
+    }
+    let body = command_body(scene, participant, 3, 0, Some(123));
+    assert!(
+        listener
+            .stage_garage(&listener.players, body.span(), &mut pending)
+            .unwrap()
+    );
+    assert_eq!(pending.front().unwrap().participant, participant);
+    assert_eq!(
+        pending.front().unwrap().operation,
+        super::super::super::garage::GarageOperation::Place {
+            item: 123,
+            secondary: 0
+        }
+    );
 }
 
 #[tokio::test]
@@ -209,10 +249,10 @@ async fn buy_switch_customize_and_sell_keep_durable_and_visible_cars_in_sync() {
         40
     );
     ack_cars(&mut listener, participant);
-    command(&mut listener, scene, player, 3, 0, Some(second));
+    command(&mut listener, scene, participant, 3, 0, Some(second));
     jobs.start(&mut listener, 12, Timestamp(12));
     assert!(jobs.completed(&mut listener).await);
-    command(&mut listener, scene, player, 2, 0, None);
+    command(&mut listener, scene, participant, 2, 0, None);
     jobs.start(&mut listener, 13, Timestamp(13));
     assert!(jobs.completed(&mut listener).await);
     ack_cars(&mut listener, participant);
@@ -231,7 +271,7 @@ async fn buy_switch_customize_and_sell_keep_durable_and_visible_cars_in_sync() {
     jobs.start(&mut listener, 14, Timestamp(14));
     assert!(jobs.completed(&mut listener).await);
     let _ = crate::net::items::tests::deliver_notification(&mut jobs);
-    command(&mut listener, scene, player, 2, 0, None);
+    command(&mut listener, scene, participant, 2, 0, None);
     jobs.start(&mut listener, 15, Timestamp(15));
     assert!(jobs.completed(&mut listener).await);
     ack_cars(&mut listener, participant);
@@ -274,7 +314,7 @@ async fn buy_switch_customize_and_sell_keep_durable_and_visible_cars_in_sync() {
         listener.inventory.as_ref().unwrap().items.items[&1],
         before.items[&1]
     );
-    command(&mut listener, scene, player, 4, 0, None);
+    command(&mut listener, scene, participant, 4, 0, None);
     jobs.start(&mut listener, 18, Timestamp(18));
     assert!(jobs.completed(&mut listener).await);
 }

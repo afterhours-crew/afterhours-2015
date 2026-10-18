@@ -19,7 +19,7 @@ pub enum Operation {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Call {
-    pub player: u16,
+    pub participant: u16,
     pub operation: Operation,
 }
 
@@ -71,8 +71,8 @@ impl Binding {
         {
             return Err(Error::Shape);
         }
-        let player = envelope.references()[1];
-        if player == 0 || !owns(player) {
+        let participant = envelope.references()[1];
+        if participant == 0 || !owns(participant) {
             return Err(Error::Ownership);
         }
         let args = route.arguments();
@@ -98,7 +98,10 @@ impl Binding {
             4 => Operation::Sold { secondary },
             _ => unreachable!(),
         };
-        Ok(Some(Call { player, operation }))
+        Ok(Some(Call {
+            participant,
+            operation,
+        }))
     }
 }
 
@@ -127,7 +130,7 @@ mod tests {
         body
     }
     #[test]
-    fn secondary_slot_and_item_are_distinct_from_the_player_reference() {
+    fn secondary_slot_and_item_are_distinct_from_the_participant_reference() {
         let binding = Binding::new(10, 6).unwrap();
         for slot in 0..4 {
             for (method, item, operation) in [
@@ -158,7 +161,7 @@ mod tests {
                 assert_eq!(
                     binding.read(body.span(), |p| p == 77),
                     Ok(Some(Call {
-                        player: 77,
+                        participant: 77,
                         operation
                     }))
                 );
