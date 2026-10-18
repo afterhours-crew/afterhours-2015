@@ -287,3 +287,10 @@ occurrence or its own interface. Unknown delivery types, ambiguous occurrences,
 unregistered network buses and excessive table sizes fail extraction. The caller
 still owns event timing, lifecycle policy and live identities; this API fires no
 events and adds no prepared runtime file.
+
+`vehicle_profiles::traffic::extract` resolves a requested installed traffic
+bundle's component order, asset catalog, property buses, physics and health
+inputs. Its strict `Definition` omits player customization and inventory fields;
+player definitions retain their existing requirements. Unknown components fail
+extraction. This API supplies constructor inputs, not population or AI policy,
+and does not yet add a prepared runtime file.

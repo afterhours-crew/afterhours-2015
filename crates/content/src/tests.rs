@@ -475,6 +475,44 @@ fn vehicle_profiles_reject_ambiguous_missing_and_cyclic_graphs() {
 }
 
 #[test]
+fn traffic_profiles_follow_the_constructed_subset_without_player_defaults() {
+    use vehicle_profiles::traffic;
+    let install = install_with(&synthetic::vehicles::traffic_assets());
+    let mut index = assets::AssetIndex::open(&install.game(), &install.options()).unwrap();
+    let row = traffic::extract(&mut index, synthetic::vehicles::BUNDLE).unwrap();
+    let d = traffic::Definition::from_json(&row).unwrap();
+    assert_eq!(d.asset_type, 20);
+    assert_eq!(d.asset_index, 0);
+    assert_eq!(d.profile.kinds().len(), 12);
+    assert_eq!(d.parts, [(2, true)].into());
+    assert_eq!(d.resting.mass, 1000.);
+    assert_eq!((d.team, d.mode), (1, 2));
+    assert_eq!(
+        row["health"]["profile"]["points"],
+        serde_json::json!([70, 30])
+    );
+    assert!(row.get("appearance").is_none());
+    assert!(row.get("definitions").is_none());
+    assert!(vehicle_profiles::Definition::from_json(&row).is_err());
+    for field in ["mode", "parts", "asset", "buses", "health"] {
+        let mut wrong = row.clone();
+        wrong[field] = serde_json::Value::Null;
+        assert!(traffic::Definition::from_json(&wrong).is_err(), "{field}");
+    }
+    for kind in ["rpc", "wheel", "guid_float"] {
+        let mut missing = row.clone();
+        missing["profile"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|r| r["kind"] != kind);
+        assert!(traffic::Definition::from_json(&missing).is_err());
+    }
+    let player = install_with(&assets());
+    let mut player_index = assets::AssetIndex::open(&player.game(), &player.options()).unwrap();
+    assert!(traffic::extract(&mut player_index, synthetic::vehicles::BUNDLE).is_err());
+}
+
+#[test]
 fn startup_resolves_roles_by_name_and_traffic_by_construction_order() {
     let install = install_with(&assets());
     let prepared = install.prepare().unwrap();

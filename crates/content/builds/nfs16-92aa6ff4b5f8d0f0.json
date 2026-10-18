@@ -838,7 +838,17 @@
       "VisualEnvironmentBlueprint": null,
       "VisualEnvironmentEntityData": null,
       "VisualEnvironmentReferenceObjectData": null,
-      "WheelCustomizationComponentData": "tuning"
+      "WheelCustomizationComponentData": "tuning",
+      "TrafficComponentData": "rpc",
+      "RaceWheelRimComponentData": "part",
+      "RaceWheelTireComponentData": "part",
+      "ActiveCameraDistanceReporterEntityData": null,
+      "DeltaEntityData": null,
+      "PropertyDebugEntityData": null,
+      "RaceSoundEntityData": null,
+      "RandomIntEntityData": null,
+      "SoundAssetEntityData": null,
+      "SpotLightEntityData": null
     },
     "bus_classes": [
       "RaceVehicleBlueprint",

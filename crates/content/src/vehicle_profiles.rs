@@ -14,6 +14,7 @@ mod fields;
 mod graph;
 mod parse;
 mod rules;
+pub mod traffic;
 pub use crate::vehicle_parts::ParseError;
 pub(crate) use extract::build;
 pub use rules::Rules;

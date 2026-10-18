@@ -6,6 +6,7 @@ use super::*;
 use std::collections::BTreeMap;
 
 mod actors;
+pub mod ai;
 mod locations;
 mod manager;
 mod vehicles;
@@ -47,6 +48,7 @@ pub struct Players {
     /// Garage display cars prepared while the participant still drives the world car.
     staged_vehicles: BTreeMap<(u16, u64), u16>,
     goal_allocation_serial: u8,
+    ai: BTreeMap<(u8, u64, u64), ai::Instance>,
 }
 
 /// Native runtime index of the player on `connection` and local `slot`.

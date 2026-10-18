@@ -98,6 +98,25 @@ fn profile(
     aliases: &[String],
     rules: &Rules,
 ) -> Result<Json, Error> {
+    let (root, blueprint, nodes) = composition(index, bundle, rules)?;
+    let meshes = meshes(&mut index.assets, &root, &blueprint, &nodes, rules)?;
+    let mut row = defaults::build(&mut index.assets, &nodes)?;
+    let fixed = fields(index, bundle, &root, &blueprint, &nodes, &meshes, rules)?;
+    row.as_object_mut()
+        .expect("defaults object")
+        .extend(fixed.as_object().expect("profile object").clone());
+    row["definitions"] = json!(aliases);
+    row["meshes"] = json!(meshes);
+    Definition::from_json(&row)
+        .map_err(|e| bad(&format!("invalid derived profile {bundle}: {e:?}")))?;
+    Ok(row)
+}
+
+pub(super) fn composition(
+    index: &mut AssetIndex,
+    bundle: &str,
+    rules: &Rules,
+) -> Result<(Key, Object, Vec<Node>), Error> {
     let bundle_key = (bundle.to_lowercase(), 0);
     let bundle_object = object(&mut index.assets, &bundle_key)?;
     if bundle_object.class != "BlueprintBundle" {
@@ -111,11 +130,22 @@ fn profile(
         "RaceVehicleBlueprint",
     )?;
     let nodes = graph::read(&mut index.assets, root.clone(), rules)?;
-    let meshes = meshes(&mut index.assets, &root, &blueprint, &nodes, rules)?;
+    Ok((root, blueprint, nodes))
+}
+
+pub(super) fn fields(
+    index: &mut AssetIndex,
+    bundle: &str,
+    root: &Key,
+    blueprint: &Object,
+    nodes: &[Node],
+    meshes: &[Json],
+    rules: &Rules,
+) -> Result<Json, Error> {
     let mut serializers = Vec::new();
     let mut parts = Vec::new();
     let mut buses = Vec::new();
-    for node in &nodes {
+    for node in nodes {
         if rules.bus_classes.contains(&node.object.class) {
             buses.push(json!({"path":node.path,"flags":word(&node.object.fields,"Flags")?}));
         }
@@ -154,16 +184,9 @@ fn profile(
     let blueprint_name = text(&blueprint.fields, "Name")?;
     let reference = index.reference(bundle, &root.0)?;
     let catalog = index.catalog(bundle)?;
-    let mut row = defaults::build(&mut index.assets, &nodes)?;
-    let fixed = json!({"definitions":aliases,"blueprint":blueprint_name,"bundle":bundle,
+    Ok(json!({"blueprint":blueprint_name,"bundle":bundle,
         "asset":{"type_id":reference.class_id,"local_index":reference.local_index},"catalog":catalog,
-        "profile":serializers,"parts":parts,"buses":buses,"meshes":meshes});
-    row.as_object_mut()
-        .expect("defaults object")
-        .extend(fixed.as_object().expect("profile object").clone());
-    Definition::from_json(&row)
-        .map_err(|e| bad(&format!("invalid derived profile {blueprint_name}: {e:?}")))?;
-    Ok(row)
+        "profile":serializers,"parts":parts,"buses":buses}))
 }
 
 pub(crate) fn build(index: &mut AssetIndex, classes: &Catalog) -> Result<Vec<u8>, Error> {

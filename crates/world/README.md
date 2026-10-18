@@ -48,3 +48,11 @@ player. Vehicle binding updates the manager, participant and view atomically;
 detachment clears view seats before vehicle deletion. Creation and retry handling
 share the listener transaction, so full output queues cannot leave unpublished
 view state. Numeric view fields whose meaning is unresolved remain explicit.
+
+Traffic components support RPC-only initialization and empty updates. The shared
+vehicle constructor also accepts explicit component inputs without an inventory.
+Players keeps a separate bounded AI registry in the shared ghost namespace:
+participant, actor and car creation commits together, retry keys are per session,
+and goals and connection cleanup preserve ownership and roll back failures.
+Actor configuration is explicit. These APIs do not yet establish live traffic,
+client delegation or rival behavior; those remain tracked in issue #54.

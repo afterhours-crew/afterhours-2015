@@ -47,6 +47,7 @@ pub fn rules() -> Rules {
         ("RaceVehicleAudioComponentData", "nibbles_guid"),
         ("MeshCustomizationNetworkComponentData", "mesh"),
         ("RaceVehicleHealthComponentData", "guid_float"),
+        ("TrafficComponentData", "rpc"),
     ]
     .map(|(a, b)| (a.to_owned(), Some(b.to_owned())))
     .into_iter()
@@ -74,6 +75,17 @@ pub fn rules() -> Rules {
 
 pub fn assets() -> Vec<Asset> {
     assets_with(|_, _| {})
+}
+
+/// Authored smaller composition using the same physics/health assets. The
+/// disconnected customization objects are deliberately retained: extraction
+/// must follow construction edges, not count every object in the partition.
+pub fn traffic_assets() -> Vec<Asset> {
+    assets_with(|fields, objects| {
+        fields[3].1 = Field::Structs("LinkConnection", vec![]);
+        objects[0].1[1].1 = Field::RawPointers(vec![3, 6, 7, 8, 9, 10, 11, 14, 15, 18, 21]);
+        objects[13] = ("TrafficComponentData", vec![]);
+    })
 }
 
 /// Edit the blueprint fields or its unexported objects for malformed-input tests.
