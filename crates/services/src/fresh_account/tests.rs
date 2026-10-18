@@ -6,23 +6,53 @@ use nfs_storage::{InventoryRepository, SqliteRepository};
 use nfs_world_core::items::{
     Definition, DefinitionClass, DefinitionFlags, Derived, Layout, OwnershipLevel,
 };
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
-struct Root(PathBuf);
+struct Root(PathBuf, PathBuf);
 impl Root {
     fn new() -> Self {
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        Self(std::env::temp_dir().join(format!("fresh-account-{}-{stamp}", std::process::id())))
+        Self::with_stamp(stamp)
+    }
+    fn with_stamp(stamp: u128) -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "fresh-account-{}-{stamp}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&path).unwrap();
+        Self(path.join("account"), path)
     }
 }
 impl Drop for Root {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        let _ = std::fs::remove_dir_all(&self.1);
     }
 }
+
+#[test]
+fn coincident_fixture_clocks_preserve_separate_data_and_cleanup() {
+    let first = Root::with_stamp(0);
+    let second = Root::with_stamp(0);
+    let prepared = prepare(5);
+    assert!(!first.0.exists());
+    assert!(!second.0.exists());
+    prepared.publish(&first.0).unwrap();
+    prepared.publish(&second.0).unwrap();
+    std::fs::write(first.0.join("owned"), b"first").unwrap();
+    std::fs::write(second.0.join("owned"), b"second").unwrap();
+    assert_eq!(std::fs::read(first.0.join("owned")).unwrap(), b"first");
+    drop(first);
+    assert_eq!(std::fs::read(second.0.join("owned")).unwrap(), b"second");
+}
+
 fn policy() -> Value {
     json!({"format":"nfs-fresh-account-policy","version":1,"build_sha256":BUILD,"screenshot_count_max":20,
     "entitlements":{"scopes":[["synthetic"]],"grants":[

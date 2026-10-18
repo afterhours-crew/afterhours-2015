@@ -8,7 +8,10 @@ use nfs_storage::{
 };
 use std::{
     path::PathBuf,
-    sync::{Arc, Barrier},
+    sync::{
+        Arc, Barrier,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 struct Root(PathBuf);
 impl Root {
@@ -17,7 +20,17 @@ impl Root {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        Self(std::env::temp_dir().join(format!("settings-storage-{}-{stamp}", std::process::id())))
+        Self::with_stamp(stamp)
+    }
+    fn with_stamp(stamp: u128) -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "settings-storage-{}-{stamp}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&path).unwrap();
+        Self(path)
     }
 }
 impl Drop for Root {
@@ -27,6 +40,20 @@ impl Drop for Root {
 }
 fn account(n: u8) -> AccountId {
     AccountId::from_owned_config([n; 16]).unwrap()
+}
+
+#[test]
+fn coincident_fixture_clocks_preserve_separate_settings_and_cleanup() {
+    let first = Root::with_stamp(0);
+    let second = Root::with_stamp(0);
+    let one = Repository::open_owned_directory(&first.0).unwrap();
+    let two = Repository::open_owned_directory(&second.0).unwrap();
+    assert!(one.compare_exchange(account(1), None, b"first").unwrap());
+    assert!(two.compare_exchange(account(1), None, b"second").unwrap());
+    assert_eq!(one.read(account(1)).unwrap().unwrap().bytes, b"first");
+    drop(one);
+    drop(first);
+    assert_eq!(two.read(account(1)).unwrap().unwrap().bytes, b"second");
 }
 
 #[test]
