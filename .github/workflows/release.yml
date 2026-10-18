@@ -1,21 +1,29 @@
 name: Windows tester bundle
 
 on:
-  release:
-    types: [published]
+  push:
+    tags: ['v[0-9]*']
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Existing version tag to prepare as a draft; blank builds a development artifact'
+        required: false
+        type: string
   pull_request:
     paths:
       - .github/workflows/release.yml
       - tools/Package-TerminalBundle.ps1
+      - tools/Publish-TerminalDraft.ps1
+      - tools/Test-TerminalDraft.ps1
       - crates/bundle/**
       - docs/TESTER-QUICKSTART.md
+      - docs/RELEASING.md
 
 permissions:
   contents: read
 
 concurrency:
-  group: terminal-bundle-${{ github.ref }}
+  group: terminal-bundle-${{ inputs.release_tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -27,13 +35,14 @@ jobs:
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_TERM_COLOR: always
-      AFTERHOURS_RELEASE: ${{ github.event.release.tag_name || 'development' }}
+      AFTERHOURS_RELEASE: ${{ inputs.release_tag || (github.event_name == 'push' && github.ref_name) || 'development' }}
       AFTERHOURS_REVISION: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
-          # A published release builds its tag, never a moving default branch.
-          ref: ${{ github.event.release.tag_name || github.sha }}
+          # Pushes use their fixed event SHA; manual preparation resolves a tag.
+          ref: ${{ inputs.release_tag && format('refs/tags/{0}', inputs.release_tag) || github.sha }}
+          fetch-depth: 0
           persist-credentials: false
       - name: Install pinned Rust toolchain
         run: |
@@ -41,6 +50,23 @@ jobs:
           rustup target add x86_64-pc-windows-msvc
           rustup show active-toolchain
           Get-Command perl
+      - name: Validate release identity
+        run: |
+          if ($env:AFTERHOURS_RELEASE -eq 'development') { exit 0 }
+          if ($env:AFTERHOURS_RELEASE -notmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$') {
+            throw 'Use a version tag such as v0.3.1.'
+          }
+          $revision = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve checkout.' }
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "AFTERHOURS_REVISION=$revision"
+          $tagRevision = git rev-parse --verify "refs/tags/$($env:AFTERHOURS_RELEASE)^{commit}"
+          if ($LASTEXITCODE -ne 0 -or $tagRevision.Trim() -ne $revision) { throw 'Tag does not match checkout.' }
+          $metadata = cargo metadata --no-deps --locked --format-version 1 | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot read bundle version.' }
+          $bundle = $metadata.packages | Where-Object name -EQ 'nfs-afterhours-bundle'
+          if ("v$($bundle.version)" -cne $env:AFTERHOURS_RELEASE) { throw 'Tag must match the bundle package version.' }
+      - name: Test draft publication guards
+        run: ./tools/Test-TerminalDraft.ps1
       - uses: Swatinem/rust-cache@v2
         with:
           key: terminal-release
@@ -77,14 +103,14 @@ jobs:
             ${{ steps.package.outputs.directory }}/SHA256SUMS.txt
             ${{ steps.package.outputs.directory }}/build-info.json
           if-no-files-found: error
-      - name: Attach bundle to the published release
-        if: github.event_name == 'release'
+      - name: Prepare unpublished release with verified assets
+        if: env.AFTERHOURS_RELEASE != 'development' && github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           AFTERHOURS_PACKAGE_DIR: ${{ steps.package.outputs.directory }}
         run: |
-          $assets = @('Afterhours-windows-x64.zip', 'SHA256SUMS.txt', 'build-info.json') |
-            ForEach-Object { Join-Path $env:AFTERHOURS_PACKAGE_DIR $_ }
-          gh release upload "$env:AFTERHOURS_RELEASE" @assets
+          $revision = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve built revision.' }
+          ./tools/Publish-TerminalDraft.ps1 -PackageDirectory $env:AFTERHOURS_PACKAGE_DIR -Release $env:AFTERHOURS_RELEASE -Revision $revision -Repository $env:GH_REPO
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
