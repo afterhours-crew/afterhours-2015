@@ -911,6 +911,7 @@ pub fn write(root: &Path, assets: &[Asset]) -> std::io::Result<(Options, [u8; 64
             participant_logic: crate::BuildIdentity::supported().participant_logic,
             traffic_spline_class_id: 72,
             traffic_links: traffic::links(),
+            rival_links: crate::BuildIdentity::supported().rival_links,
             scenes: crate::scenes::Rules {
                 level: RUNTIME_LEVEL.to_owned(),
                 classes: [

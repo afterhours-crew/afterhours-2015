@@ -10,7 +10,7 @@ for example `nfs16-92aa6ff4b5f8d0f0.json`.
 
 | Field | Meaning |
 | --- | --- |
-| `format`, `version` | `nfs-build-profile`, `12` |
+| `format`, `version` | `nfs-build-profile`, `13` |
 | `description` | Human-readable identification of the build |
 | `executable`, `executable_sha256` | File name in the installation root and its exact digest |
 | `world_mac_template.rva`, `.sha256` | Relative virtual address (hex) of the 64-byte world MAC template inside the executable image, and the digest the bytes must have. The bytes themselves are read from the player's executable, never stored here |
@@ -37,3 +37,7 @@ preparation. launchers lists classes whose emitted serializer is a launcher
 endpoint; each must have an RPC-compatible kind. These are type-level protocol
 rules, not scene instances, per-scene serializer arrays or game asset content.
 The cache fingerprint includes all profile fields.
+
+`rival_links` supplies roaming-manager racer/member ports, specific-provider and
+persona-set ports, primary/secondary activation volumes, spawn points and the
+participant/actor managers. It contains identifiers, not authored racer data.

@@ -300,3 +300,16 @@ member links. Unknown providers, missing scene registrations and ambiguous links
 fail preparation. Version 3 rebuilds older traffic caches. Completely collapsed
 authored curve segments remain in the road and speed tables but have no spawn
 tangent. Population and AI lifecycle belong to the server.
+
+`rivals::extract` resolves the roaming-racer manager, its participant/actor
+bindings, authored activation volumes, spawn transforms and linked personas.
+Specific providers require all configured tag hashes. Persona styles construct
+ephemeral item collections with ordered part/kit replacement, paint, alignment
+and rim settings; explicit persona additions follow the style. They allocate no
+account items or garage slots. Performance additions are applied before chassis
+quantization and grip overrides preserve the transmission selection.
+
+The `rivals` example audits these inputs against an installation and an existing
+prepared-content directory. The server's `rival_vehicles` example additionally
+constructs and encodes complete vehicle components with synthetic mesh identities.
+These APIs do not yet add a prepared rival file or enable a live rival population.

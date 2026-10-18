@@ -291,6 +291,22 @@ impl Content {
         authority: &mut authority::Registry,
         resolve_level: impl FnMut(&str) -> Option<u16>,
     ) -> Result<Body, Error> {
+        self.construct_with_overrides(
+            request,
+            customization::SpawnOverrides::default(),
+            authority,
+            resolve_level,
+        )
+    }
+    /// Build both creation and current chassis state from the same unquantized
+    /// persona modifiers. Player construction continues to use no overrides.
+    pub fn construct_with_overrides(
+        &self,
+        request: Request<'_>,
+        overrides: customization::SpawnOverrides,
+        authority: &mut authority::Registry,
+        resolve_level: impl FnMut(&str) -> Option<u16>,
+    ) -> Result<Body, Error> {
         let item = request
             .items
             .items
@@ -314,14 +330,17 @@ impl Content {
         };
         let spawn = initialize::Spawn::new(position, request.basis[2], request.speed)?;
         let mut pending = authority.clone();
-        let creation = initialize::fresh(
+        let custom = Customization::from_vehicle_with_overrides(
+            request.items,
+            &self.custom,
+            request.vehicle,
+            overrides,
+        )?;
+        let nos = nos::State::from_vehicle(request.items, &self.nos, request.vehicle)?;
+        let creation = initialize::with_inputs(
             &d.profile,
-            initialize::Items {
-                collection: request.items,
-                vehicle: request.vehicle,
-                customization: &self.custom,
-                nos: &self.nos,
-            },
+            &custom,
+            nos,
             initialize::Lifecycle {
                 root: &root,
                 pose: initialize::Pose {
@@ -336,7 +355,6 @@ impl Content {
             },
             &mut pending,
         )?;
-        let custom = Customization::from_vehicle(request.items, &self.custom, request.vehicle)?;
         let mut chassis = chassis::State::new(
             position,
             orientation::quaternion_from_basis(request.basis)?,

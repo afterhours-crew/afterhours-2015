@@ -31,6 +31,7 @@ pub mod participant_logic;
 mod progress;
 pub mod progression;
 mod reputation;
+pub mod rivals;
 pub mod road_network;
 mod scan;
 pub mod scenes;
@@ -81,6 +82,7 @@ pub struct BuildIdentity {
     pub participant_logic: participant_logic::Rules,
     pub traffic_spline_class_id: u16,
     pub traffic_links: traffic::Links,
+    pub rival_links: rivals::Links,
 }
 
 impl BuildIdentity {

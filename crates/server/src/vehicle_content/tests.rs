@@ -276,6 +276,47 @@ fn late_missing_asset_or_bad_items_roll_back_authority_registration() {
 }
 
 #[test]
+fn persona_creation_keeps_modifiers_through_initial_update_and_failure_rolls_back() {
+    let (json, catalog, items) = fixture();
+    let before = items.clone();
+    let content = Content::from_json(&json, &catalog).unwrap();
+    let overrides = customization::SpawnOverrides {
+        performance: 0.4,
+        grip: Some(4),
+    };
+    let mut authority = authority::Registry::default();
+    let body = content
+        .construct_with_overrides(request(&items), overrides, &mut authority, |_| Some(7))
+        .unwrap();
+    let Initial::Chassis(initial) = &body.creation.as_ref().unwrap().fields[1] else {
+        panic!("chassis creation")
+    };
+    let Some(Update::Chassis(update)) = &body.updates[1] else {
+        panic!("chassis update")
+    };
+    // The initial motion update leaves creation customization intact.
+    assert_eq!(update.custom, None);
+    assert_eq!(initial.custom.value, 102);
+    assert_eq!(initial.custom.tuning[8], 4);
+    assert_eq!(initial.custom.tuning[5..8], [0, 10, 0]);
+    assert_eq!(items, before);
+    let mut failed = authority::Registry::default();
+    assert!(
+        content
+            .construct_with_overrides(request(&items), overrides, &mut failed, |_| None)
+            .is_err()
+    );
+    assert_eq!(failed, authority::Registry::default());
+    let ordinary = content
+        .construct(request(&items), &mut failed, |_| Some(7))
+        .unwrap();
+    let Initial::Chassis(player) = &ordinary.creation.unwrap().fields[1] else {
+        panic!("chassis creation")
+    };
+    assert_eq!(player.custom.value, 0);
+}
+
+#[test]
 fn loader_rejects_dynamic_fields_wrong_catalogs_and_inconsistent_static_shapes() {
     let (original, catalog, _) = fixture();
     Content::from_json(&original, &catalog).unwrap();
