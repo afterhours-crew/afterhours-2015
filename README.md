@@ -66,7 +66,7 @@ same launcher, server and process supervision as the separate tools.
 Replace the game path with your installation directory. The build produces
 `target/release/nfs-server` and `target/release/nfs-afterhours` (`.exe` on
 Windows). The launcher prepares local content and an account, starts both the
-server and game, and keeps logs visible in the terminal. Wait for `ready`
+server and game, and keeps logs visible in the terminal. Wait for **Ready to play**
 before pressing Space. Normal game exit also stops the server. On Linux or
 macOS, `nfs-afterhours serve` runs the server without a game. Running
 Afterhours does not require administrator access; installing third-party build

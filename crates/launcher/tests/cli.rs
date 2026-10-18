@@ -348,11 +348,18 @@ fn a_serve_session_prepares_runs_reports_and_stops() {
         "supervisor diagnostics stay off stdout"
     );
     let console = text(&out.stderr);
-    for state in ["preparing", "ready", "stopping", "finished"] {
-        assert!(
-            console.contains(&format!("] {state} :")),
-            "{state} missing from console:\n{console}"
-        );
+    let mut previous = 0;
+    for heading in [
+        "Preparing your game data",
+        "Server is running",
+        "Closing your session",
+        "All done",
+    ] {
+        let position = console
+            .find(heading)
+            .unwrap_or_else(|| panic!("{heading} missing from console:\n{console}"));
+        assert!(position >= previous, "session headings are out of order");
+        previous = position;
     }
     assert!(
         console.contains("fake server starting"),

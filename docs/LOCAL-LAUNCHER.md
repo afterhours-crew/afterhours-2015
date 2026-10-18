@@ -147,7 +147,7 @@ nfs-afterhours status
 ```
 
 Pass the same `--data-dir` to every command if you selected a custom location.
-`ready` means server listeners and guarded routing are ready; it does not mean the
+**Ready to play** means server listeners and guarded routing are ready; it does not mean the
 game has logged in or reached a playable world. Continue through the normal game
 menus yourself. The launcher never presses keys or accepts agreements.
 
@@ -422,7 +422,7 @@ and back up the stopped data directory. Keep the EA app closed. Disconnect the
 machine's external network yourself (unplug Ethernet and disconnect Wi-Fi),
 restart Windows while remaining disconnected, and run the same `start` command
 from an ordinary terminal. No firewall or service changes are required.
-Wait for `ready`, then reach the menu, garage and free roam, return with PageDown,
+Wait for **Ready to play**, then reach the menu, garage and free roam, return with PageDown,
 and quit normally. Start again while still disconnected and verify the same
 saved garage. Keep the network disconnected through both complete shutdowns.
 
