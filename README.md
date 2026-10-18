@@ -92,8 +92,9 @@ Once the toolchain and dependencies are cached, add `--offline` to Cargo build,
 Clippy and test commands. No private repository, account profile or recording is
 needed. Passing these tests establishes the covered component behavior, not
 offline play or launcher independence. New local accounts start after the
-unsupported scripted prologue; story progression and multi-car garage management
-remain unfinished. The [garage customization guide](docs/GARAGE-UPGRADES.md)
+unsupported scripted prologue; story progression remains unfinished. Car ownership,
+five garage slots and warehouse storage have passed their documented live checks.
+The [garage customization guide](docs/GARAGE-UPGRADES.md)
 records supported purchases, tuning, appearance, wraps and resets. A guarded
 local launch procedure
 has reached free roam after a Windows restart without the EA app or service and

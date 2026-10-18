@@ -3,7 +3,8 @@
 Implementation and game acceptance are tracked in [issue #52][tracking]. The
 five-slot and warehouse scopes passed combined live checks on 2026-10-18,
 including fresh game/server restarts. [Issue #98][warehouse] records warehouse
-acceptance; the milestone is ready for owner review in PR #97.
+acceptance. The owner accepted the milestone and requested its merge and release
+on 2026-10-18; the implementation is delivered in PR #97.
 
 The local account owns five garage slots. Slot zero is the active car; the other
 four hold secondary cars. Buying an eligible car reserves a free secondary slot,
