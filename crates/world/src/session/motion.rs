@@ -8,12 +8,12 @@ use crate::replication::{
     vehicle,
 };
 
-fn physics(record: &Record) -> bool {
+fn snapshot(record: &Record) -> bool {
     if record.initial.is_some() {
         return false;
     }
     let Update::Vehicle { fields, .. } = &record.update else {
-        return false;
+        return matches!(&record.update, Update::ParticipantLocationMap(map) if map.groups.is_some());
     };
     let mut present = fields.iter().flatten();
     matches!(present.next(), Some(vehicle::Update::Chassis(c))
@@ -21,29 +21,73 @@ fn physics(record: &Record) -> bool {
         && present.next().is_none()
 }
 
-/// Adjacent motion for different cars can share a publication. Never combine
-/// lifecycle/appearance changes, relative origins or two states of the same car.
-/// RPC and deletion barriers are checked by the caller and the section guards.
+/// Coalesce unsent absolute snapshots, retaining the newest sample per car.
+/// Location snapshots can share the frame while their participant set is stable.
+/// Lifecycle/appearance changes, relative origins and RPCs remain barriers.
 pub(super) fn combine(previous: &Section, next: &Section) -> Option<Section> {
     for section in [previous, next] {
         if !section.deleted.is_empty()
             || section.records.is_empty()
             || section.setup != Some(Setup::RawEscape([0; 3]))
-            || !section.records.iter().all(physics)
+            || !section.records.iter().all(snapshot)
         {
             return None;
         }
     }
-    if previous
-        .records
-        .iter()
-        .any(|old| next.records.iter().any(|new| old.id == new.id))
-    {
-        return None;
-    }
     let mut combined = previous.clone();
-    combined.records.extend(next.records.iter().cloned());
+    for new in &next.records {
+        if let Some(old) = combined.records.iter_mut().find(|old| old.id == new.id) {
+            if !supersedes(old, new) {
+                return None;
+            }
+            *old = new.clone();
+        } else {
+            combined.records.push(new.clone());
+        }
+    }
     Some(combined)
+}
+
+fn supersedes(old: &Record, new: &Record) -> bool {
+    match (&old.update, &new.update) {
+        (
+            Update::Vehicle {
+                binding: a,
+                fields: af,
+            },
+            Update::Vehicle {
+                binding: b,
+                fields: bf,
+            },
+        ) if a == b => {
+            let revision = |fields: &[Option<vehicle::Update>]| {
+                fields.iter().flatten().find_map(|field| match field {
+                    vehicle::Update::Chassis(c) => c.physics.as_ref().map(|p| p.identity_words[2]),
+                    _ => None,
+                })
+            };
+            matches!((revision(af), revision(bf)), (Some(a), Some(b)) if b > a)
+        }
+        (Update::ParticipantLocationMap(a), Update::ParticipantLocationMap(b)) => {
+            // A map is a complete replacement, but membership changes can
+            // accompany vehicle transitions and must preserve their ordering.
+            let membership = |map: &crate::replication::location_map::Update| {
+                map.groups.as_ref().map(|groups| {
+                    groups
+                        .iter()
+                        .map(|g| {
+                            (
+                                g.value,
+                                g.entries.iter().map(|e| e.participant).collect::<Vec<_>>(),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+            };
+            membership(a) == membership(b)
+        }
+        _ => false,
+    }
 }
 
 /// Keep the original pacing phase when a poll runs slightly late. Resetting to
