@@ -166,7 +166,9 @@ pub struct Job(Owned);
 
 impl Job {
     /// Create an anonymous job with kill-on-close and place the current
-    /// process in it. The caller must have checked [`in_job`] first.
+    /// process in it. On supported Windows versions an inherited job becomes
+    /// an ancestor of this new, empty job. Windows rejects incompatible job
+    /// restrictions; no ancestor job is modified and no breakaway is requested.
     pub fn attach_current_process() -> std::io::Result<Job> {
         // SAFETY: null security attributes and name create an anonymous job.
         let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };

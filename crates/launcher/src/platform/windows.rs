@@ -44,14 +44,20 @@ impl SessionGuard for JobGuard {
 }
 
 impl JobGuard {
-    /// Create the session job and place this process in it. Refuses when the
-    /// process is already inside a job, because kill-on-close would then
-    /// apply to a tree we do not own.
+    /// Create a new session job and place this process in it. Windows nests
+    /// it under any inherited job, preserving the ancestor's restrictions.
+    /// Kill-on-close applies only to our job and its descendants; we never
+    /// adopt or change an inherited job. Incompatible restrictions fail here
+    /// before any session children are spawned.
     pub fn attach() -> Result<JobGuard> {
-        WindowsPlatform.refuse_inside_job()?;
-        Ok(JobGuard {
-            job: sys::Job::attach_current_process()?,
-        })
+        let job = sys::Job::attach_current_process().map_err(|error| {
+            Failure::refused(format!(
+                "Windows could not create an isolated Afterhours session job: {error}. \
+                 An inherited job may have incompatible restrictions. \
+                 No game or server has been started."
+            ))
+        })?;
+        Ok(JobGuard { job })
     }
 
     /// Whether a process is in this session's job.
@@ -66,14 +72,6 @@ impl Platform for WindowsPlatform {
         if nfs_afterhours_sys::is_privileged()? {
             return Err(Failure::refused(
                 "Run nfs-afterhours from an ordinary, non-administrator terminal.",
-            ));
-        }
-        Ok(())
-    }
-    fn refuse_inside_job(&self) -> Result<()> {
-        if sys::in_job()? {
-            return Err(Failure::refused(
-                "Run nfs-afterhours from an ordinary terminal, outside an IDE or agent process job.",
             ));
         }
         Ok(())
@@ -97,10 +95,7 @@ impl Platform for WindowsPlatform {
         sys::process_exists(pid)
     }
     fn attach_session_guard(&self) -> Result<Box<dyn SessionGuard>> {
-        self.refuse_inside_job()?;
-        Ok(Box::new(JobGuard {
-            job: sys::Job::attach_current_process()?,
-        }))
+        Ok(Box::new(JobGuard::attach()?))
     }
     fn spawn(&self, spec: &SpawnSpec) -> Result<Box<dyn ChildProcess>> {
         Ok(Box::new(StdChild::spawn(spec)?))

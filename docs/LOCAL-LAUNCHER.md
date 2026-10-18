@@ -57,10 +57,11 @@ cache is separate from the installed game's activation state described below.
 - A legitimately installed, previously activated Need for Speed (2015) PC game.
   Keep the existing installation and license cache. Fresh activation, expired
   caches and running after uninstalling all EA software are not established.
-- For `start`: 64-bit Windows and an ordinary terminal (Windows Terminal,
-  Command Prompt or PowerShell), running without elevation and outside an IDE
-  or agent process job. `serve` also runs on Linux and macOS as an ordinary
-  user, not root.
+- For `start`: 64-bit Windows, running without elevation. The bundle can be
+  double-clicked in File Explorer; the CLI also works in Windows Terminal,
+  Command Prompt or PowerShell. An inherited Windows job is supported when
+  Windows permits a nested session job. `serve` also runs on Linux and macOS
+  as an ordinary user, not root.
 - For `start`: existing 32-bit `HKLM\SOFTWARE\Origin\ClientPath` registration.
   The tested registration names `EADesktop.exe`. `Origin.exe` compatibility is
   implemented but has not been tested live. Other names are refused.
@@ -294,7 +295,7 @@ There is no upload/export feature that silently sends them anywhere.
 | Unsupported hash | Use the supported installation; do not weaken guards. |
 | Existing game/EA process or occupied port 3216 | Close the conflicting application yourself, then retry. |
 | Missing/unrecognized registration | This installation is outside the supported launch path. No automatic repair or admin fallback runs. |
-| Already inside a process job | Run from an ordinary terminal outside the IDE/agent. No automatic desktop handoff or elevation is attempted. |
+| Windows could not create an isolated session job | The accompanying Windows error identifies the failed operation. A parent application may impose incompatible job restrictions; retry from File Explorer or an ordinary terminal. Afterhours preserves parent restrictions and refuses before starting children if isolation fails. |
 | Exit code 1 before a session starts | Read the refusal on standard error; nothing was changed. |
 | Exit code 3 | Read the session's `status.json` and logs in the printed session directory. Preserve existing state. |
 | `activation` | Respond to the installed game's dialog yourself, or cancel with `stop`. Launcher-free operation still depends on valid installed activation state. |
