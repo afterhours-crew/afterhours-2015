@@ -140,6 +140,10 @@ impl std::fmt::Display for Action {
 /// by the front-end process before the supervisor starts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Request {
+    /// Select the server role of the single-executable distribution. Old
+    /// requests continue to select a standalone server.
+    #[serde(default)]
+    pub bundled_server: bool,
     pub version: u32,
     pub id: String,
     pub action: Action,
@@ -152,6 +156,14 @@ pub struct Request {
 }
 
 impl Request {
+    /// Server children select the bundled role explicitly, including setup
+    /// tools and the SDK-named compatibility copy.
+    pub fn server_arguments(&self, mut arguments: Vec<String>) -> Vec<String> {
+        if self.bundled_server {
+            arguments.insert(0, crate::commands::BUNDLED_SERVER_FLAG.into());
+        }
+        arguments
+    }
     pub fn validate(&self) -> Result<()> {
         if self.version != VERSION
             || !is_id(&self.id)
@@ -303,6 +315,7 @@ mod tests {
     #[test]
     fn request_validation_requires_a_game_only_for_start() {
         let mut request = Request {
+            bundled_server: false,
             version: 1,
             id: "d".repeat(32),
             action: Action::Serve,
@@ -314,6 +327,23 @@ mod tests {
             record_protocol: false,
         };
         request.validate().unwrap();
+        let plain = vec![
+            "prepare-local".to_owned(),
+            "--root".to_owned(),
+            "data".to_owned(),
+        ];
+        assert_eq!(request.server_arguments(plain.clone()), plain);
+        let mut legacy = serde_json::to_value(&request).unwrap();
+        legacy.as_object_mut().unwrap().remove("bundled_server");
+        assert!(
+            !serde_json::from_value::<Request>(legacy)
+                .unwrap()
+                .bundled_server
+        );
+        request.bundled_server = true;
+        let selected = request.server_arguments(plain.clone());
+        assert_eq!(selected[0], crate::commands::BUNDLED_SERVER_FLAG);
+        assert_eq!(selected[1..], plain);
         request.action = Action::Start;
         assert!(request.validate().is_err());
         request.game_directory = Some(PathBuf::from("game"));

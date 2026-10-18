@@ -15,9 +15,16 @@ Cold disconnected startup, prolonged activation waiting and activation cancellat
 see [validation](#developer-validation-and-current-limits). Complete progression
 remains open.
 
-This is a **source-only distribution**. You must compile `nfs-server` and
-`nfs-afterhours` before running; no executable, installer or game content is
-shipped. All build and runtime source is in this public repository.
+For releases containing `Afterhours-windows-x64.zip`, use the
+[terminal tester quickstart](TESTER-QUICKSTART.md). Its `Afterhours.exe` bundles
+these same server and launcher implementations. With no arguments it starts
+using the game folder beside the executable and keeps the terminal open after
+completion or failure. It prints the real extraction stages and cache reuse,
+and keeps installed activation requirements explicit. Game data is generated
+locally; none is shipped. Existing source-only checkpoints have no binary bundle.
+
+The build instructions below are for contributors and users of the separate
+`nfs-server` and `nfs-afterhours` tools. All source lives in this repository.
 
 ## Install the build tools
 
@@ -50,10 +57,11 @@ cache is separate from the installed game's activation state described below.
 - A legitimately installed, previously activated Need for Speed (2015) PC game.
   Keep the existing installation and license cache. Fresh activation, expired
   caches and running after uninstalling all EA software are not established.
-- For `start`: 64-bit Windows and an ordinary terminal (Windows Terminal,
-  Command Prompt or PowerShell), running without elevation and outside an IDE
-  or agent process job. `serve` also runs on Linux and macOS as an ordinary
-  user, not root.
+- For `start`: 64-bit Windows, running without elevation. The bundle can be
+  double-clicked in File Explorer; the CLI also works in Windows Terminal,
+  Command Prompt or PowerShell. An inherited Windows job is supported when
+  Windows permits a nested session job. `serve` also runs on Linux and macOS
+  as an ordinary user, not root.
 - For `start`: existing 32-bit `HKLM\SOFTWARE\Origin\ClientPath` registration.
   The tested registration names `EADesktop.exe`. `Origin.exe` compatibility is
   implemented but has not been tested live. Other names are refused.
@@ -131,7 +139,7 @@ The first start generates and validates content, creates an independent identity
 and saved database, starts loopback services, and opens the game. Subsequent starts
 reuse verified content and the same account. Preparation can take a minute or
 more. The command stays in the foreground and prints preparation, server
-diagnostics and session status in the same terminal. Wait for the `ready` line
+diagnostics and session status in the same terminal. Wait for **Ready to play**
 before pressing Space in the game. You can also check from a second terminal:
 
 ```sh
@@ -139,12 +147,12 @@ nfs-afterhours status
 ```
 
 Pass the same `--data-dir` to every command if you selected a custom location.
-`ready` means server listeners and guarded routing are ready; it does not mean the
+**Ready to play** means server listeners and guarded routing are ready; it does not mean the
 game has logged in or reached a playable world. Continue through the normal game
 menus yourself. The launcher never presses keys or accepts agreements.
 
 If the installed activation helper opens a sign-in window, the launcher prints
-`activation` and waits for you without a startup timeout. It does not read or
+**EA activation needs your attention** and waits without a startup timeout. It does not read or
 submit credentials. This is EA's activation requirement, separate from your local
 Afterhours account; local play is not ready while it waits. You can cancel with
 `nfs-afterhours stop` from another terminal. If activation replaces the original
@@ -154,6 +162,12 @@ never adopts a different game process without the original identity guards.
 `--player-name "My Driver"` sets the first account's display name. It does not
 rename or replace an existing account. New accounts start **after the scripted
 prologue**; the official prologue and complete progression are not yet supported.
+Launcher-created tester accounts start one level below the installed REP cap
+(level 69 of 70 on the supported build), with $10,000,000. These resources are
+committed with the new account; existing accounts are reused without a top-up.
+This is a local testing preset, not earned rewards or completed career events.
+Stage headings and labeled colors distinguish progress, success, activation waits
+and errors. Redirected output and `NO_COLOR=1` remain plain; JSON is uncolored.
 The local challenge menu uses three fixed preview objectives derived from installed
 type metadata. It grants no challenge rewards and does not implement rotating
 schedules or challenge completion. No remote product entitlements are granted.
@@ -287,7 +301,7 @@ There is no upload/export feature that silently sends them anywhere.
 | Unsupported hash | Use the supported installation; do not weaken guards. |
 | Existing game/EA process or occupied port 3216 | Close the conflicting application yourself, then retry. |
 | Missing/unrecognized registration | This installation is outside the supported launch path. No automatic repair or admin fallback runs. |
-| Already inside a process job | Run from an ordinary terminal outside the IDE/agent. No automatic desktop handoff or elevation is attempted. |
+| Windows could not create an isolated session job | The accompanying Windows error identifies the failed operation. A parent application may impose incompatible job restrictions; retry from File Explorer or an ordinary terminal. Afterhours preserves parent restrictions and refuses before starting children if isolation fails. |
 | Exit code 1 before a session starts | Read the refusal on standard error; nothing was changed. |
 | Exit code 3 | Read the session's `status.json` and logs in the printed session directory. Preserve existing state. |
 | `activation` | Respond to the installed game's dialog yourself, or cancel with `stop`. Launcher-free operation still depends on valid installed activation state. |
@@ -408,7 +422,7 @@ and back up the stopped data directory. Keep the EA app closed. Disconnect the
 machine's external network yourself (unplug Ethernet and disconnect Wi-Fi),
 restart Windows while remaining disconnected, and run the same `start` command
 from an ordinary terminal. No firewall or service changes are required.
-Wait for `ready`, then reach the menu, garage and free roam, return with PageDown,
+Wait for **Ready to play**, then reach the menu, garage and free roam, return with PageDown,
 and quit normally. Start again while still disconnected and verify the same
 saved garage. Keep the network disconnected through both complete shutdowns.
 

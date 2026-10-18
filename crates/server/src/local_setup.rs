@@ -112,12 +112,20 @@ pub fn prepare(root: &Path, game: &Path) -> Result<Value, Box<dyn std::error::Er
     let root = std::path::absolute(root)?;
     let game = std::path::absolute(game)?;
     validate_paths(&root, &game)?;
-    let generated =
-        crate::install_content::resolve(&root, &game, None, &nfs_content::Options::default())?;
+    let generated = crate::install_content::resolve_with_progress(
+        &root,
+        &game,
+        None,
+        &nfs_content::Options::default(),
+        &mut |progress| eprintln!("[content] {progress}"),
+    )?;
+    eprintln!("[setup] Reading garage, challenge and world settings...");
     let mut index = nfs_content::assets::AssetIndex::open(&game, &nfs_content::Options::default())?;
     let thresholds: Value =
         serde_json::from_slice(&std::fs::read(&generated.reputation_thresholds)?)?;
+    eprintln!("[setup] Preparing garage entry, exit and upgrades...");
     let garage = garage::build(&mut index, &thresholds["thresholds"])?;
+    eprintln!("[setup] Preparing local server rules and preview challenges...");
     let mut documents = policy::documents();
     documents.insert(
         "challenge-content",
@@ -125,6 +133,7 @@ pub fn prepare(root: &Path, game: &Path) -> Result<Value, Box<dyn std::error::Er
     );
     documents.insert("garage-logic", garage);
     let mut world: Value = serde_json::from_slice(&std::fs::read(&generated.world_content)?)?;
+    eprintln!("[setup] Preparing your free-roam starting location...");
     let services = index.local_world_services("levels/genesis01/gameplay")?;
     let site = |s: nfs_world::world_activation::Site| json!({"scene_key":s.scene_key,"serializer":s.serializer});
     world["roles"]["free_roam"] = json!({"volumes":[],"presence":site(services.presence),"streamed":site(services.streamed),"location":site(services.location)});
@@ -137,6 +146,7 @@ pub fn prepare(root: &Path, game: &Path) -> Result<Value, Box<dyn std::error::Er
         .collect();
     let directory = root.join("artifacts/local-config").join(digest);
     if directory.exists() {
+        eprintln!("[setup] Checking and reusing your local server settings...");
         for (name, value) in &documents {
             let path = directory.join(format!("{name}.json"));
             let expected = serde_json::to_vec(value)?;
@@ -147,6 +157,7 @@ pub fn prepare(root: &Path, game: &Path) -> Result<Value, Box<dyn std::error::Er
             }
         }
     } else {
+        eprintln!("[setup] Saving your local server settings...");
         std::fs::create_dir_all(directory.parent().ok_or("configuration parent")?)?;
         let temporary = directory.with_extension(format!("partial-{}", std::process::id()));
         std::fs::create_dir(&temporary)?;
@@ -164,6 +175,7 @@ pub fn prepare(root: &Path, game: &Path) -> Result<Value, Box<dyn std::error::Er
             )
         })
         .collect();
+    eprintln!("[setup] Local server settings ready.");
     Ok(
         json!({"prepared":true,"policy_revision":1,"install_content":generated.summary(),"files":files}),
     )

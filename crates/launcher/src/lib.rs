@@ -36,6 +36,7 @@ pub mod preflight;
 pub mod records;
 pub mod session;
 pub mod supervisor;
+pub mod terminal;
 
 /// Test support shared by the unit tests: unique scratch directories.
 #[cfg(test)]

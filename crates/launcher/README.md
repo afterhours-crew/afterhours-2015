@@ -4,6 +4,16 @@ Command-line launcher for the Afterhours 2015 local server and, on Windows,
 the installed game. It replaces the PowerShell and C# scripts that used to
 live under `launcher/`.
 
+The sibling `nfs-afterhours-bundle` package links this launcher and `nfs-server`
+into one terminal executable, `Afterhours.exe`. Its server children use the
+explicit `--afterhours-server` dispatch flag, recorded as `bundled_server` in
+the session request. The same supervisor owns preparation, activation waits,
+temporary routing and cleanup. Missing `bundled_server` defaults to false for
+existing records; an explicit `--server` uses the standalone-server contract.
+
+Preparation progress goes to stderr and names actual extraction, verification,
+cache reuse, account and service steps. JSON results on stdout remain parseable.
+
 ```text
 nfs-afterhours check   --game-dir <DIR>     verify installation, paths, registration; change nothing
 nfs-afterhours setup   --game-dir <DIR>     prepare content and the local account; start nothing
@@ -31,7 +41,7 @@ A session is one run of `setup`, `serve` or `start`. The front-end command
 runs preflight, creates `artifacts/launcher/<session-id>/` in the data
 directory, writes `request.json` there and starts a second copy of itself
 with the hidden `supervise` subcommand. The supervisor holds the
-data-directory lock, on Windows joins a job object with kill-on-close, and
+data-directory lock, on Windows creates its own job object with kill-on-close, and
 runs the session state machine:
 
 ```text
@@ -55,6 +65,15 @@ earlier failure, and the job stays armed so process exit still kills the tree.
 so your terminal is never placed in the session job, and so a supervisor
 crash is handled by Windows closing the whole tree rather than by code that
 just crashed.
+
+**Inherited Windows jobs.** Windows may place even a desktop-launched process
+in a job. The supervisor creates a new, empty job nested under any inherited
+job, retaining the parent's restrictions. Its cleanup owns only the supervisor
+and its descendants, not ancestor or sibling processes. Incompatible job limits
+produce a Windows error before children start. Windows subprocess regressions
+exercise normal cleanup and a forcibly terminated supervisor, verifying that
+session children exit while an unrelated sibling remains alive. These tests do
+not launch the game or validate activation.
 
 **Decisions are portable, actions are not.** The state machine in
 `supervisor.rs` only decides what to do next. It calls a `Steps` trait, which

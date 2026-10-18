@@ -73,8 +73,6 @@ pub trait SessionGuard {
 pub trait Platform {
     /// Refuse to run with elevated or root privileges.
     fn refuse_privileged(&self) -> Result<()>;
-    /// Refuse to run inside an existing process job (Windows); no-op elsewhere.
-    fn refuse_inside_job(&self) -> Result<()>;
     /// The installed client registration, if this platform has one.
     fn registered_client_path(&self) -> Result<Option<String>>;
     /// Names of running processes among `names` (without extension).

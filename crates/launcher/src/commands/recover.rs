@@ -70,6 +70,7 @@ mod tests {
 
     fn context(data: &std::path::Path) -> Context {
         Context {
+            bundled_server: None,
             data_dir: data.to_path_buf(),
             json: true,
         }

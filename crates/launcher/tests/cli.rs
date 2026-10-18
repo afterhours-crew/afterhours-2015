@@ -50,6 +50,50 @@ fn text(bytes: &[u8]) -> String {
 }
 
 #[test]
+fn terminal_colors_respect_redirection_no_color_and_leave_json_plain() {
+    let root = scratch("colors");
+    for (force, no_color, expect_color) in [
+        (false, false, false),
+        (true, false, true),
+        (true, true, false),
+    ] {
+        let mut command = bin();
+        command
+            .env_remove("CLICOLOR_FORCE")
+            .env_remove("NO_COLOR")
+            .env_remove("CLICOLOR");
+        if force {
+            command.env("CLICOLOR_FORCE", "1");
+        }
+        if no_color {
+            command.env("NO_COLOR", "1");
+        }
+        let output = command
+            .args(["check", "--game-dir"])
+            .arg(root.join("missing-game"))
+            .arg("--server")
+            .arg(env!("CARGO_BIN_EXE_nfs-afterhours"))
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let error = text(&output.stderr);
+        assert!(error.contains("Checking your game"));
+        assert!(error.contains("ERROR"));
+        assert_eq!(error.contains('\u{1b}'), expect_color, "{error:?}");
+    }
+    let output = bin()
+        .env("CLICOLOR_FORCE", "1")
+        .env_remove("NO_COLOR")
+        .args(["status", "--json", "--data-dir"])
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert!(!text(&output.stdout).contains('\u{1b}'));
+    serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn help_lists_every_public_subcommand_and_the_exit_table() {
     let out = run(&["--help"]);
     assert_eq!(out.status.code(), Some(0));
@@ -304,11 +348,18 @@ fn a_serve_session_prepares_runs_reports_and_stops() {
         "supervisor diagnostics stay off stdout"
     );
     let console = text(&out.stderr);
-    for state in ["preparing", "ready", "stopping", "finished"] {
-        assert!(
-            console.contains(&format!("] {state} :")),
-            "{state} missing from console:\n{console}"
-        );
+    let mut previous = 0;
+    for heading in [
+        "Preparing your game data",
+        "Server is running",
+        "Closing your session",
+        "All done",
+    ] {
+        let position = console
+            .find(heading)
+            .unwrap_or_else(|| panic!("{heading} missing from console:\n{console}"));
+        assert!(position >= previous, "session headings are out of order");
+        previous = position;
     }
     assert!(
         console.contains("fake server starting"),
@@ -322,7 +373,7 @@ fn a_serve_session_prepares_runs_reports_and_stops() {
     );
     let again = run(&["--data-dir", &data_arg, "stop"]);
     assert_eq!(again.status.code(), Some(0));
-    assert!(text(&again.stdout).contains("account data is preserved"));
+    assert!(text(&again.stdout).contains("Your local save is kept for next time."));
     assert!(run_dir.join("server.stdout.jsonl").exists());
     assert!(run_dir.join("prepare.stdout.json").exists());
     std::fs::remove_dir_all(base).unwrap();

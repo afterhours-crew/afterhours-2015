@@ -256,6 +256,48 @@ impl Prepared {
     pub fn identity(&self) -> &Identity {
         &self.identity
     }
+    /// Set explicit local starting resources before the account is published.
+    /// Reuse the canonical bank/REP operations in a disposable in-memory
+    /// repository, then fold the resulting tables into the one creation batch.
+    /// This never opens or adjusts an existing account on disk and does not
+    /// award earned-REP rewards or overwrite the five driving-style scores.
+    pub fn with_starting_resources(
+        mut self,
+        tables: &persistent::Catalog,
+        thresholds: &crate::reputation::Thresholds,
+        level: u32,
+        cash: crate::bank::Balance,
+    ) -> Result<Self, Error> {
+        use nfs_storage::InventoryRepository;
+        let account = self.identity.storage_account();
+        let memory = MemoryRepository::new();
+        memory.open(account).map_err(|_| Error::Storage)?;
+        let initial = memory
+            .apply(account, &self.batch, self.now)
+            .map_err(|_| Error::Storage)?;
+        let snapshot = crate::reputation::set_for_operator(
+            &memory,
+            account,
+            tables,
+            thresholds,
+            initial.generation,
+            level,
+            self.now,
+        )
+        .map_err(|_| Error::Progression)?;
+        let snapshot =
+            crate::bank::set_for_operator(&memory, account, snapshot.generation, cash, self.now)
+                .map_err(|_| Error::Storage)?;
+        self.batch.ops.retain(|op| !matches!(op, Op::SetTable(..)));
+        self.batch.ops.extend(
+            snapshot
+                .tables
+                .into_iter()
+                .map(|(key, table)| Op::SetTable(key, table)),
+        );
+        self.batch.validate().map_err(|_| Error::Bounds)?;
+        Ok(self)
+    }
     /// Require a new state directory. SQLite publishes account domains and
     /// inventory atomically; an allocated directory may remain after a failure.
     /// Existing directories and profiles are never reset, replaced or removed.

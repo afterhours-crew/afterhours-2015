@@ -117,6 +117,16 @@ garage" step does. With explicit content files it needs `--progression-content
 `--progression fresh`, keeps the asset-default tables, i.e. the start of the
 prologue, whose scripted events this server does not run.
 
+With `--game-dir`, `--starting-resources tester` initializes REP at one level
+below the installed cap and cash at $10,000,000. The launcher selects this for
+new tester accounts. The standalone command defaults to `--starting-resources
+standard`, retaining the ordinary initial state. The tester preset requires
+installed REP thresholds, uses the canonical bank/REP operations in memory,
+and publishes resources in the same transaction as the new account. It does
+not replay earned rewards or complete more objectives. The JSON creation result
+includes `starting_level` and `starting_cash` (null for the standard preset).
+Existing directories are still refused; no saved account is modified.
+
 All paths follow the current directory. The parent of `--state-directory` must
 exist and the final directory must be new. Names are nonempty UTF-8, at most 32
 bytes, with no control characters. The JSON result contains `created: true` and

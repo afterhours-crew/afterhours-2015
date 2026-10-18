@@ -55,6 +55,8 @@ fn require_hash(game: &Path, relative: &str, expected: &str) -> Result<()> {
 
 /// Run every check and describe the result.
 pub fn run(platform: &dyn Platform, input: Input<'_>) -> Result<Preflight> {
+    crate::terminal::heading("Checking your game");
+    crate::terminal::step("Checking permissions and your game and save folders...");
     platform.refuse_privileged()?;
     let game = match input.game_directory {
         Some(game) => Some(platform::existing_absolute(game, "Game directory")?),
@@ -74,9 +76,12 @@ pub fn run(platform: &dyn Platform, input: Input<'_>) -> Result<Preflight> {
     let mut game_sha256 = None;
     let mut activation_sha256 = None;
     if let Some(game) = &game {
+        crate::terminal::step("Checking that your game version is supported...");
         require_hash(game, platform::GAME_EXECUTABLE, GAME_SHA256)?;
+        crate::terminal::success("Game version supported.");
         game_sha256 = Some(GAME_SHA256.to_owned());
         if input.for_game {
+            crate::terminal::step("Checking the installed EA activation helper...");
             require_hash(game, platform::ACTIVATION_HELPER, ACTIVATION_SHA256)?;
             activation_sha256 = Some(ACTIVATION_SHA256.to_owned());
         }
@@ -84,6 +89,9 @@ pub fn run(platform: &dyn Platform, input: Input<'_>) -> Result<Preflight> {
     let mut registered_client_path = None;
     let mut compatibility_name = None;
     if input.for_game {
+        crate::terminal::step(
+            "Checking EA installation settings and looking for running game or EA apps...",
+        );
         let registration = platform.registered_client_path()?.ok_or_else(|| {
             Failure::refused(
                 "Existing game launcher registration is missing or unsupported. Afterhours does not install or modify it.",
@@ -104,11 +112,17 @@ pub fn run(platform: &dyn Platform, input: Input<'_>) -> Result<Preflight> {
             )));
         }
     }
+    crate::terminal::step("Checking the local server...");
+    let server_sha256 = digest::sha256_file(&server)?;
+    crate::terminal::success("Startup checks passed.");
+    if input.for_game {
+        crate::terminal::note("The game will check its activation when it opens.");
+    }
     Ok(Preflight {
         version: records::VERSION,
         game_directory: game,
         data_directory: data,
-        server_sha256: digest::sha256_file(&server)?,
+        server_sha256,
         server_path: server,
         game_sha256,
         activation_sha256,
@@ -139,9 +153,6 @@ mod tests {
             } else {
                 Ok(())
             }
-        }
-        fn refuse_inside_job(&self) -> Result<()> {
-            Ok(())
         }
         fn registered_client_path(&self) -> Result<Option<String>> {
             Ok(self.registration.clone())

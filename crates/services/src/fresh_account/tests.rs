@@ -82,6 +82,99 @@ fn catalog() -> InventoryCatalog {
 fn prepare(label: u8) -> Prepared {
     prepare_with(label, &persistent::tests::catalog(), &[]).unwrap()
 }
+
+#[test]
+fn starting_resources_publish_atomically_and_never_reset_an_existing_save() {
+    use crate::{
+        bank::Balance,
+        reputation::{Field, Scores, Thresholds},
+    };
+    let mut content = persistent::tests::content();
+    let rep = content["tables"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|table| table["name"] == "RepValuesTable")
+        .unwrap();
+    rep["columns"] = json!(
+        [
+            "RepScore",
+            "RepLevel",
+            "BuildScore",
+            "CrewScore",
+            "OutlawScore",
+            "SpeedScore",
+            "StyleScore"
+        ]
+        .map(
+            |name| json!({"name":name,"key":persistent::key(name),"value_type":"int","default":"7"})
+        )
+    );
+    let tables = persistent::Catalog::from_json(&content).unwrap();
+    let thresholds = Thresholds::new(vec![0, 100, 300]).unwrap();
+    let root = Root::new();
+    let prepared = prepare_with(31, &tables, &[])
+        .unwrap()
+        .with_starting_resources(&tables, &thresholds, 2, Balance(10_000_000))
+        .unwrap();
+    let account = prepared.identity().storage_account();
+    assert!(
+        !root.0.exists(),
+        "resource preparation must remain in memory"
+    );
+    prepared.publish(&root.0).unwrap();
+    {
+        let repository = SqliteRepository::open_owned_directory(&root.0).unwrap();
+        let saved = repository.snapshot(account).unwrap();
+        assert_eq!(saved.generation, 1, "one atomic creation batch");
+        assert_eq!(Balance::from_snapshot(&saved), Ok(Balance(10_000_000)));
+        let scores = Scores::load(&tables.view(&saved).unwrap()).unwrap();
+        assert_eq!(scores.total, 100);
+        assert_eq!(
+            [
+                scores.build,
+                scores.crew,
+                scores.outlaw,
+                scores.speed,
+                scores.style
+            ],
+            [7; 5]
+        );
+        assert_eq!(thresholds.evaluate(scores).get(Field::Level), 2);
+        assert_eq!(
+            saved.tables[&persistent::key("RepValuesTable")].rows[&0][&persistent::key("RepLevel")],
+            Cell::Int(2)
+        );
+        assert!(!saved.items.is_empty());
+        assert!(saved.garage.is_some());
+        crate::bank::set_for_operator(
+            &repository,
+            account,
+            saved.generation,
+            Balance(123),
+            Timestamp(18),
+        )
+        .unwrap();
+    }
+    assert_eq!(prepared.publish(&root.0), Err(Error::DestinationExists));
+    let reopened = SqliteRepository::open_owned_directory(&root.0).unwrap();
+    let saved = reopened.snapshot(account).unwrap();
+    assert_eq!(Balance::from_snapshot(&saved), Ok(Balance(123)));
+    assert_eq!(
+        thresholds
+            .evaluate(Scores::load(&tables.view(&saved).unwrap()).unwrap())
+            .get(Field::Level),
+        2
+    );
+    for invalid in [0, 4] {
+        assert!(
+            prepare_with(32, &tables, &[])
+                .unwrap()
+                .with_starting_resources(&tables, &thresholds, invalid, Balance(10_000_000))
+                .is_err()
+        );
+    }
+}
 /// The synthetic table catalog with the real objective columns.
 fn objective_tables() -> persistent::Catalog {
     let mut v = persistent::tests::content();

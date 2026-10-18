@@ -42,8 +42,15 @@ databases. Game files and service access are unnecessary. See the
 
 ## Build and run
 
-Afterhours is distributed as source: **no server executable or installer is
-included**. Start with the [setup guide](docs/LOCAL-LAUNCHER.md), which lists
+Published GitHub releases built with the [bundle workflow](.github/workflows/release.yml)
+include `Afterhours-windows-x64.zip`: one terminal executable with its documentation
+and licenses. Drop `Afterhours.exe` beside `NFS16.exe` and double-click it.
+Follow the [tester quickstart](docs/TESTER-QUICKSTART.md) for activation requirements,
+setup progress, local saves and feedback. Earlier source-only checkpoints do not
+contain this bundle. Publishing a release builds its exact tag; no release is
+created by the build itself.
+
+To build from source, start with the [setup guide](docs/LOCAL-LAUNCHER.md), which lists
 the build tools, supported game installation and activation requirements.
 Once those prerequisites are installed, open an ordinary, unelevated terminal:
 
@@ -54,10 +61,14 @@ cargo build --release -p nfs-server -p nfs-afterhours --locked
 ./target/release/nfs-afterhours start --game-dir "F:\EA Games\Need for Speed"
 ```
 
+Build the combined terminal executable with
+`cargo build --release -p nfs-afterhours-bundle --locked`. Its runtime uses the
+same launcher, server and process supervision as the separate tools.
+
 Replace the game path with your installation directory. The build produces
 `target/release/nfs-server` and `target/release/nfs-afterhours` (`.exe` on
 Windows). The launcher prepares local content and an account, starts both the
-server and game, and keeps logs visible in the terminal. Wait for `ready`
+server and game, and keeps logs visible in the terminal. Wait for **Ready to play**
 before pressing Space. Normal game exit also stops the server. On Linux or
 macOS, `nfs-afterhours serve` runs the server without a game. Running
 Afterhours does not require administrator access; installing third-party build

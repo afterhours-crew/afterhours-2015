@@ -15,6 +15,7 @@ members = [
     "crates/content",
     "crates/launcher",
     "crates/launcher-sys",
+    "crates/bundle",
 ]
 resolver = "3"
 

@@ -29,9 +29,6 @@ impl Platform for UnixPlatform {
         }
         Ok(())
     }
-    fn refuse_inside_job(&self) -> Result<()> {
-        Ok(())
-    }
     fn registered_client_path(&self) -> Result<Option<String>> {
         Ok(None)
     }

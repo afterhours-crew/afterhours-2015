@@ -10,6 +10,58 @@ use nfs_services::persistent::{Catalog, required_tables};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 struct TempDir(PathBuf);
+
+#[test]
+fn progress_tracks_real_extraction_cache_reuse_and_failed_work() {
+    let install = install_with(&assets());
+    let mut events = Vec::new();
+    let first = prepare_with_progress(
+        &install.game(),
+        &install.cache(),
+        &install.options(),
+        &mut |event| events.push(event),
+    )
+    .unwrap();
+    assert!(first.built);
+    assert_eq!(events.first(), Some(&Progress::Fingerprinting));
+    assert_eq!(events.last(), Some(&Progress::Ready));
+    for kind in Kind::ALL {
+        let begin = events
+            .iter()
+            .position(|e| *e == Progress::Extracting(kind))
+            .unwrap();
+        let bytes = std::fs::metadata(first.path(kind)).unwrap().len() as usize;
+        assert_eq!(events[begin + 1], Progress::Extracted { kind, bytes });
+    }
+    events.clear();
+    let second = prepare_with_progress(
+        &install.game(),
+        &install.cache(),
+        &install.options(),
+        &mut |event| events.push(event),
+    )
+    .unwrap();
+    assert!(!second.built);
+    assert_eq!(
+        events,
+        [
+            Progress::Fingerprinting,
+            Progress::CacheCheck,
+            Progress::CacheReused,
+            Progress::Ready
+        ]
+    );
+    events.clear();
+    let mut invalid = install.options();
+    invalid.identity.executable_sha256 = "0".repeat(64);
+    assert!(
+        prepare_with_progress(&install.game(), &install.cache(), &invalid, &mut |event| {
+            events.push(event)
+        })
+        .is_err()
+    );
+    assert_eq!(events, [Progress::Fingerprinting]);
+}
 impl TempDir {
     fn new() -> Self {
         static NEXT: AtomicU32 = AtomicU32::new(0);

@@ -24,7 +24,7 @@ use std::path::Path;
 
 /// `check`: preflight only.
 pub fn check(context: &Context, args: &GameArgs) -> Result<()> {
-    let server = server_path(args)?;
+    let server = server_path(context, args)?;
     let report = preflight::run(
         &platform::native(),
         preflight::Input {
@@ -82,7 +82,7 @@ pub fn launch(context: &Context, action: Action, args: &SessionArgs) -> Result<(
             "Starting the game is supported on Windows only. Use `nfs-afterhours serve` here.",
         ));
     }
-    let server = server_path(&args.game)?;
+    let server = server_path(context, &args.game)?;
     let report = preflight::run(
         &platform::native(),
         preflight::Input {
@@ -111,6 +111,7 @@ pub fn launch(context: &Context, action: Action, args: &SessionArgs) -> Result<(
             data_directory: data.clone(),
             server_path: report.server_path.clone(),
             server_sha256: report.server_sha256.clone(),
+            bundled_server: context.bundled_server.is_some() && args.game.server.is_none(),
             player_name: args.player_name.clone(),
             record_protocol: args.record_protocol,
         };
@@ -119,8 +120,8 @@ pub fn launch(context: &Context, action: Action, args: &SessionArgs) -> Result<(
         (request_path, run)
     };
     if !context.json {
-        println!("Afterhours {action} - data: {}", data.display());
-        println!("Session logs: {}", run.display());
+        crate::terminal::detail("Saves and cache", data.display());
+        crate::terminal::detail("Session logs", run.display());
     }
     let status = std::process::Command::new(std::env::current_exe()?)
         .arg("supervise")

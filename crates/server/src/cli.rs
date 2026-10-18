@@ -56,9 +56,6 @@ struct Args {
     generated: Option<serde_json::Value>,
 }
 
-fn parse() -> Result<Args, String> {
-    parse_from(std::env::args_os().skip(1))
-}
 fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args, String> {
     let mut root = std::env::current_dir().map_err(|e| e.to_string())?;
     let (mut output, mut stop_file, mut world_content) = (None, None, None);
@@ -434,37 +431,37 @@ fn inventory_config(args: &Args) -> Result<Option<net::InventoryProfile>, Failur
 }
 
 pub fn main() -> std::process::ExitCode {
-    if std::env::args_os().nth(1).is_some_and(|a| a == "bank") {
-        return nfs_server::bank_account::main(std::env::args_os().skip(2));
+    main_from(std::env::args_os().skip(1))
+}
+
+/// Server entry point shared by the standalone and terminal bundle binaries.
+/// The iterator contains only server arguments (no executable or role flag).
+pub fn main_from(args: impl Iterator<Item = std::ffi::OsString>) -> std::process::ExitCode {
+    let mut args = args.peekable();
+    match args.peek().and_then(|arg| arg.to_str()) {
+        Some("bank") => {
+            args.next();
+            return nfs_server::bank_account::main(args);
+        }
+        Some("reputation") => {
+            args.next();
+            return nfs_server::reputation_account::main(args);
+        }
+        Some("prepare-local") => {
+            args.next();
+            return nfs_server::local_setup::main(args);
+        }
+        Some("prepare-content") => {
+            args.next();
+            return nfs_server::prepare_content::main(args);
+        }
+        Some("create-account") => {
+            args.next();
+            return nfs_server::fresh_account::main(args);
+        }
+        _ => {}
     }
-    if std::env::args_os()
-        .nth(1)
-        .is_some_and(|a| a == "reputation")
-    {
-        return nfs_server::reputation_account::main(std::env::args_os().skip(2));
-    }
-    if std::env::args_os()
-        .nth(1)
-        .is_some_and(|a| a == "prepare-local")
-    {
-        return nfs_server::local_setup::main(std::env::args_os().skip(2));
-    }
-    if std::env::args_os()
-        .nth(1)
-        .is_some_and(|a| a == "prepare-content")
-    {
-        return nfs_server::prepare_content::main(std::env::args_os().skip(2));
-    }
-    if std::env::args_os()
-        .nth(1)
-        .is_some_and(|a| a == "create-account")
-    {
-        return nfs_server::fresh_account::main(std::env::args_os().skip(2));
-    }
-    if std::env::args_os()
-        .nth(1)
-        .is_some_and(|a| a == "--help" || a == "-h")
-    {
+    if args.peek().is_some_and(|a| a == "--help" || a == "-h") {
         println!(
             "nfs-server: owned local NFS 2015 services\n\nUsage: nfs-server --root <data-directory> --output <new-recording-directory> [configuration options]\n\nPrepare complete local policy: nfs-server prepare-local --game-dir <installation> --root <data-directory>\n\nPrepare game content: nfs-server prepare-content --game-dir <installation>\n[--root <data-directory>] [--content-cache <directory>]\n\nCreate account: nfs-server create-account --name <name> --state-directory <new-directory>\n--account-policy <policy.json> --item-content <items.json> --persistent-content <tables.json>\n\nRequired control configuration: --bootstrap-config, --auth-config,\n--group-policy, --matchmaking-admission, --matchmaking-policy, --world-policy,\n--control-catalogs, --stat-definitions, --challenge-content, --item-licenses,\n--owned-local-social and --owned-menu-awards.\n\nGarage configuration: --world-content (version 4 or 5), --world-mac-template,\n--item-content, --state-directory, --local-account, --persistent-content,\n--progression-content, --vehicle-content, --garage-layout, --sequence-content,\n--garage-logic.\n\nGame content: --game-dir <installation> builds --item-content,\n--persistent-content and --world-mac-template on first start, supplies\n--stat-definitions, --item-licenses, --control-catalogs and\n--reputation-thresholds, --scene-catalog, --world-content, --garage-layout,\n--vehicle-content, --vehicle-parts, --progression-content and --sequence-content unless explicitly overridden, and caches the outputs\n(--content-cache, default artifacts/content under --root).\n\nAccount state is read from SQLite. Optional one-time imports: --local-identity,\n--entitlement-state, --kickback-state, --speedwall-state, --user-settings.\n\nOptional: --lsx-port (3216 for the game), --redirector-port, --idle-seconds, --qos-seconds, --stop-file, --record-protocol.\nRaw protocol recording is disabled by default and bounded when enabled.\nAll listeners are loopback. No manifest, captured reply store or external\nauthentication is used. See crates/server/README.md for schemas and limitations."
         );
@@ -474,7 +471,7 @@ pub fn main() -> std::process::ExitCode {
         .with_writer(std::io::stderr)
         .with_ansi(false)
         .init();
-    let mut args = match parse() {
+    let mut args = match parse_from(args) {
         Ok(args) => args,
         Err(message) => {
             eprintln!("{message}");

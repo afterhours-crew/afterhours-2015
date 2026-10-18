@@ -56,6 +56,17 @@ pub fn resolve(
     cache: Option<&Path>,
     options: &Options,
 ) -> Result<Generated, nfs_content::Error> {
+    resolve_with_progress(base, game_dir, cache, options, &mut |_| {})
+}
+
+/// Resolve content with the caller's preparation progress sink.
+pub fn resolve_with_progress(
+    base: &Path,
+    game_dir: &Path,
+    cache: Option<&Path>,
+    options: &Options,
+    report: &mut dyn FnMut(nfs_content::Progress),
+) -> Result<Generated, nfs_content::Error> {
     // The CLI resolves content paths against its root again when loading them.
     // Make generated paths absolute so relative deployment roots are applied once.
     let base = std::path::absolute(if base.as_os_str().is_empty() {
@@ -64,7 +75,8 @@ pub fn resolve(
         base
     })?;
     let cache = base.join(cache.unwrap_or(Path::new(DEFAULT_CACHE)));
-    let prepared = nfs_content::prepare(&base.join(game_dir), &cache, options)?;
+    let prepared =
+        nfs_content::prepare_with_progress(&base.join(game_dir), &cache, options, report)?;
     Ok(Generated {
         item_content: prepared.path(Kind::ItemContent),
         persistent_content: prepared.path(Kind::PersistentContent),

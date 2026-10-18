@@ -134,7 +134,11 @@ fn temporary(root: &Path, digest: &str) -> PathBuf {
 pub fn prepare(
     root: &Path,
     fingerprint: Fingerprint,
-    build: impl FnOnce(&Fingerprint) -> Result<BTreeMap<Kind, Vec<u8>>, Error>,
+    build: impl FnOnce(
+        &Fingerprint,
+        &mut dyn FnMut(crate::Progress),
+    ) -> Result<BTreeMap<Kind, Vec<u8>>, Error>,
+    report: &mut dyn FnMut(crate::Progress),
 ) -> Result<Prepared, Error> {
     if fingerprint.digest.len() != 64 || !fingerprint.digest.bytes().all(|b| b.is_ascii_hexdigit())
     {
@@ -147,17 +151,21 @@ pub fn prepare(
         fingerprint: fingerprint.clone(),
         built,
     };
+    report(crate::Progress::CacheCheck);
     if dir.exists() {
         if verify(&dir, &fingerprint).is_ok() {
+            report(crate::Progress::CacheReused);
             return Ok(found(false));
         }
         remove_entry(&dir)?;
     }
-    let outputs = build(&fingerprint)?;
+    report(crate::Progress::CacheRebuilding);
+    let outputs = build(&fingerprint, report)?;
     if Kind::ALL.iter().any(|k| !outputs.contains_key(k)) || outputs.len() != Kind::ALL.len() {
         return Err(Error::Cache("builder output set"));
     }
     let temp = temporary(root, &fingerprint.digest);
+    report(crate::Progress::Publishing);
     std::fs::create_dir(&temp)?;
     let written = (|| {
         for (kind, bytes) in &outputs {

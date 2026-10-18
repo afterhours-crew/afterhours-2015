@@ -83,6 +83,19 @@ clap_derive, clap_lex, anstyle and heck, all MIT OR Apache-2.0. The
 operating-system crate uses windows-sys 0.61.2 and libc 0.2.190, both
 MIT OR Apache-2.0 and already locked by other crates.
 
+Terminal presentation uses anstream 1.0.0 and anstyle 1.0.14 (MIT OR Apache-2.0).
+New locked transitive dependencies are anstyle-parse 1.0.0, anstyle-query 1.1.5,
+anstyle-wincon 3.0.11, colorchoice 1.0.5, is_terminal_polyfill 1.70.2,
+once_cell_polyfill 1.70.2 and utf8parse 0.2.2, all MIT OR Apache-2.0.
+Only the terminal output is styled; saved child logs and JSON remain plain.
+
+The Windows bundle embeds its owner-supplied icon at build time with
+embed-resource 3.0.12 (MIT). Its newly locked build dependencies are
+equivalent, hashbrown, indexmap, rustc_version, semver, serde_spanned, toml,
+toml_datetime, toml_parser and toml_writer (MIT OR Apache-2.0), plus vswhom,
+vswhom-sys, winnow and winreg (MIT). They are build tools, not runtime services;
+the package notices include their license texts.
+
 Loopback discovery and QoS support uses httparse 1.10.1 (MIT OR Apache-2.0)
 and openssl 0.10.81 (Apache-2.0). Its vendored build uses openssl-src
 300.6.1+3.6.3 (MIT OR Apache-2.0 wrapper; OpenSSL 3.6.3 is Apache-2.0).
