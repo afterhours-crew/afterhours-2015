@@ -25,10 +25,13 @@ impl Route {
     ) -> Option<([f32; 3], [[f32; 3]; 3])> {
         for _ in 0..512 {
             let segment = spline.segments.get(self.segment)?;
+            if segment.points.len() != segment.curve.point_count() {
+                return None;
+            }
             if self.point + 1 >= segment.points.len() {
                 let end = *segment.points.last()?;
                 let next = spline.segments.get(self.segment + 1)?;
-                if super::population::distance_squared(end, *next.points.first()?) > 1. {
+                if super::population::distance_squared(end, *next.points.first()?) > 0.01 * 0.01 {
                     return None;
                 }
                 self.segment += 1;
@@ -36,10 +39,9 @@ impl Route {
                 self.offset = 0.;
                 continue;
             }
-            let a = segment.points[self.point];
-            let b = segment.points[self.point + 1];
-            let length = super::population::distance_squared(a, b).sqrt();
-            if length > 100. || !length.is_finite() {
+            let start = segment.curve.distance_at_point(self.point)?;
+            let length = segment.curve.distance_at_point(self.point + 1)? - start;
+            if length > 1000. || !length.is_finite() || self.offset < 0. || self.offset > length {
                 return None;
             }
             if length < 0.001 || self.offset + distance >= length {
@@ -49,12 +51,40 @@ impl Route {
                 continue;
             }
             self.offset += distance;
-            let fraction = self.offset / length;
-            let position = std::array::from_fn(|i| a[i] + (b[i] - a[i]) * fraction);
-            return Some((position, super::population::road_basis(a, b)?));
+            let (position, tangent) = segment.curve.sample(start + self.offset)?;
+            return Some((position, super::population::road_basis([0.; 3], tangent)?));
         }
         None
     }
+}
+
+/// World-space angular velocity over the complete published interval, including
+/// road pitch. Quaternion sign changes do not represent a physical full turn.
+pub(super) fn angular_velocity(
+    before: [[f32; 3]; 3],
+    after: [[f32; 3]; 3],
+    seconds: f32,
+) -> Result<[f32; 3], Error> {
+    if !seconds.is_finite() || seconds <= 0. {
+        return Err(Error::Bound);
+    }
+    let [x, y, z, w] = vehicle::orientation::quaternion_from_basis(after)?;
+    let [a, b, c, d] = vehicle::orientation::quaternion_from_basis(before)?;
+    let mut q = [
+        -w * a + x * d - y * c + z * b,
+        -w * b + x * c + y * d - z * a,
+        -w * c - x * b + y * a + z * d,
+        w * d + x * a + y * b + z * c,
+    ];
+    if q[3] < 0. {
+        q = q.map(|v| -v);
+    }
+    let sin = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2]).sqrt();
+    if sin < 1e-6 {
+        return Ok([0.; 3]);
+    }
+    let scale = 2. * sin.atan2(q[3]) / (sin * seconds);
+    Ok([q[0] * scale, q[1] * scale, q[2] * scale])
 }
 
 #[derive(Clone, Debug)]
@@ -119,6 +149,34 @@ mod tests {
     use nfs_content::traffic::Segment;
 
     #[test]
+    fn angular_motion_includes_pitch_and_uses_the_short_arc_at_yaw_wrap() {
+        let basis = |yaw: f32, pitch: f32| {
+            super::super::population::road_basis(
+                [0.; 3],
+                [
+                    yaw.sin() * pitch.cos(),
+                    pitch.sin(),
+                    yaw.cos() * pitch.cos(),
+                ],
+            )
+            .unwrap()
+        };
+        let pitch = angular_velocity(basis(0., 0.), basis(0., 0.1), 0.5).unwrap();
+        assert!((pitch[0] + 0.2).abs() < 1e-5 && pitch[1].abs() < 1e-5 && pitch[2].abs() < 1e-5);
+        let yaw = angular_velocity(
+            basis(179f32.to_radians(), 0.),
+            basis(-179f32.to_radians(), 0.),
+            0.1,
+        )
+        .unwrap();
+        assert!((yaw[1] - 20f32.to_radians()).abs() < 1e-4);
+        assert_eq!(
+            angular_velocity(basis(1., 0.2), basis(1., 0.2), 0.1).unwrap(),
+            [0.; 3]
+        );
+    }
+
+    #[test]
     fn network_report_latency_cannot_change_the_host_motion_clock() {
         let mut anchor = None;
         let mut motion = vehicle::chassis::Motion {
@@ -158,11 +216,33 @@ mod tests {
             segments: vec![
                 Segment {
                     speed: 35.,
-                    points: vec![[0.; 3], [0.; 3], [10., 0., 0.]],
+                    points: vec![[0.; 3], [10., 0., 0.]],
+                    curve: nfs_content::traffic::Curve::new(
+                        [
+                            [0.; 3],
+                            [10. / 3., 0., 0.],
+                            [20. / 3., 0., 0.],
+                            [10., 0., 0.],
+                        ],
+                        vec![1.],
+                        vec![10.],
+                    )
+                    .unwrap(),
                 },
                 Segment {
                     speed: 35.,
                     points: vec![[10., 0., 0.], [10., 0., 10.]],
+                    curve: nfs_content::traffic::Curve::new(
+                        [
+                            [10., 0., 0.],
+                            [10., 0., 10. / 3.],
+                            [10., 0., 20. / 3.],
+                            [10., 0., 10.],
+                        ],
+                        vec![1.],
+                        vec![10.],
+                    )
+                    .unwrap(),
                 },
             ],
         };

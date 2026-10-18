@@ -125,24 +125,46 @@ pub(super) fn install(assets: &mut Vec<Asset>) {
                             "Spline",
                             Field::Struct(
                                 "SplineData",
-                                vec![(
-                                    "SegmentPoints",
-                                    Field::Structs(
-                                        "Vec3",
-                                        vec![
-                                            vec![
-                                                ("x", Field::Float(2.)),
-                                                ("y", Field::Float(3.)),
-                                                ("z", Field::Float(4.)),
-                                            ],
-                                            vec![
-                                                ("x", Field::Float(12.)),
-                                                ("y", Field::Float(3.)),
-                                                ("z", Field::Float(4.)),
-                                            ],
-                                        ],
+                                vec![
+                                    (
+                                        "MatrixFormData",
+                                        Field::Struct(
+                                            "MatrixForm",
+                                            vec![(
+                                                "BaseData",
+                                                Field::Struct(
+                                                    "CubicBase",
+                                                    vec![
+                                                        ("P0", point(2.)),
+                                                        ("P1", point(2. + 10. / 3.)),
+                                                        ("P2", point(2. + 20. / 3.)),
+                                                        ("P3", point(12.)),
+                                                    ],
+                                                ),
+                                            )],
+                                        ),
                                     ),
-                                )],
+                                    ("SegmentEndTime", Field::Floats(vec![1.])),
+                                    ("SegmentEndDistance", Field::Floats(vec![10.])),
+                                    (
+                                        "SegmentPoints",
+                                        Field::Structs(
+                                            "Vec3",
+                                            vec![
+                                                vec![
+                                                    ("x", Field::Float(2.)),
+                                                    ("y", Field::Float(3.)),
+                                                    ("z", Field::Float(4.)),
+                                                ],
+                                                vec![
+                                                    ("x", Field::Float(12.)),
+                                                    ("y", Field::Float(3.)),
+                                                    ("z", Field::Float(4.)),
+                                                ],
+                                            ],
+                                        ),
+                                    ),
+                                ],
                             ),
                         ),
                     ],
@@ -186,4 +208,15 @@ pub(super) fn install(assets: &mut Vec<Asset>) {
             vec![],
         ),
     ]);
+}
+
+fn point(x: f32) -> Field {
+    Field::Struct(
+        "Vec3",
+        vec![
+            ("x", Field::Float(x)),
+            ("y", Field::Float(3.)),
+            ("z", Field::Float(4.)),
+        ],
+    )
 }

@@ -20,6 +20,8 @@ pub const MAX_SEGMENTS: usize = 16384;
 pub const MAX_POINTS: usize = 131072;
 const MAX_SEGMENT_POINTS: usize = 4096;
 type Key = (String, usize);
+mod curve;
+pub use curve::Curve;
 
 #[derive(Clone, Debug)]
 pub struct Persona {
@@ -33,6 +35,7 @@ pub struct Segment {
     /// Authored desired speed, retained in the asset's native units.
     pub speed: f32,
     pub points: Vec<[f32; 3]>,
+    pub curve: Curve,
 }
 #[derive(Clone, Debug)]
 pub struct Spline {
@@ -80,7 +83,7 @@ impl Content {
             ],
         )?;
         if v["format"] != "nfs-traffic-content"
-            || v["version"] != 1
+            || v["version"] != 2
             || v["build_sha256"] != nfs_services::SUPPORTED_BUILD_SHA256
         {
             return Err(bad("content identity"));
@@ -161,7 +164,10 @@ impl Content {
                 if total_segments > MAX_SEGMENTS {
                     return Err(bad("segment bound"));
                 }
-                json_keys(value, &["speed", "points"])?;
+                json_keys(
+                    value,
+                    &["speed", "points", "controls", "times", "distances"],
+                )?;
                 let speed = json_float(&value["speed"])?;
                 if !(0. ..=500.).contains(&speed) {
                     return Err(bad("segment speed"));
@@ -181,7 +187,30 @@ impl Content {
                     }
                     points.push([json_float(&p[0])?, json_float(&p[1])?, json_float(&p[2])?]);
                 }
-                segments.push(Segment { speed, points });
+                let controls = json_array(&value["controls"], 4)?
+                    .iter()
+                    .map(|v| {
+                        if json_array(v, 3)?.len() != 3 {
+                            return Err(bad("curve control"));
+                        }
+                        Ok([json_float(&v[0])?, json_float(&v[1])?, json_float(&v[2])?])
+                    })
+                    .collect::<Result<Vec<_>, Error>>()?
+                    .try_into()
+                    .map_err(|_| bad("curve controls"))?;
+                let floats = |key| {
+                    json_array(&value[key], MAX_SEGMENT_POINTS)?
+                        .iter()
+                        .map(json_float)
+                        .collect::<Result<Vec<_>, Error>>()
+                };
+                let curve = Curve::new(controls, floats("times")?, floats("distances")?)?;
+                curve.validate_points(&points)?;
+                segments.push(Segment {
+                    speed,
+                    points,
+                    curve,
+                });
             }
             splines.push(Spline {
                 index,
@@ -487,7 +516,40 @@ pub fn extract(index: &mut AssetIndex) -> Result<Json, Error> {
                 if total_points > MAX_POINTS {
                     return Err(bad("point bound"));
                 }
-                segments.push(json!({"speed":speed,"points":p}));
+                let spline = field(&segment, "Spline")?
+                    .as_fields()
+                    .ok_or_else(|| bad("spline"))?;
+                let base = spline
+                    .get("MatrixFormData")
+                    .and_then(Value::as_fields)
+                    .and_then(|v| v.get("BaseData"))
+                    .and_then(Value::as_fields)
+                    .ok_or_else(|| bad("curve controls"))?;
+                let controls = ["P0", "P1", "P2", "P3"]
+                    .into_iter()
+                    .map(|name| {
+                        let f = base
+                            .get(name)
+                            .and_then(Value::as_fields)
+                            .ok_or_else(|| bad("curve control"))?;
+                        Ok([
+                            float(f.get("x").ok_or_else(|| bad("x"))?)?,
+                            float(f.get("y").ok_or_else(|| bad("y"))?)?,
+                            float(f.get("z").ok_or_else(|| bad("z"))?)?,
+                        ])
+                    })
+                    .collect::<Result<Vec<_>, Error>>()?;
+                let floats = |key| {
+                    spline
+                        .get(key)
+                        .and_then(Value::as_array)
+                        .filter(|v| v.len() < MAX_SEGMENT_POINTS)
+                        .ok_or_else(|| bad("curve table"))?
+                        .iter()
+                        .map(float)
+                        .collect::<Result<Vec<_>, Error>>()
+                };
+                segments.push(json!({"speed":speed,"points":p,"controls":controls,"times":floats("SegmentEndTime")?,"distances":floats("SegmentEndDistance")?}));
             }
         }
         // Preserve empty definitions and their catalog positions. Only usable
@@ -495,7 +557,7 @@ pub fn extract(index: &mut AssetIndex) -> Result<Json, Error> {
         splines.push(json!({"index":ordinal,"density":density,"tags":tags(index,&key,&value)?,"segments":segments}));
     }
     Ok(
-        json!({"format":"nfs-traffic-content","version":1,"build_sha256":nfs_services::SUPPORTED_BUILD_SHA256,
+        json!({"format":"nfs-traffic-content","version":2,"build_sha256":nfs_services::SUPPORTED_BUILD_SHA256,
         "scene":scene_key(&gameplay),"spline_class":spline_class,"spline_count":count,
         "managers":{"participants":participant_manager.ok_or_else(||bad("missing participant manager"))?,"actors":actor_manager.ok_or_else(||bad("missing actor manager"))?},
         "density":density.ok_or_else(||bad("missing traffic manager"))?,"personas":personas,"vehicles":definitions.into_values().collect::<Vec<_>>(),"splines":splines}),

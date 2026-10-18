@@ -71,6 +71,12 @@ pub(crate) fn fixture_with(connection: u8) -> (Population, Players, Content) {
             segments: vec![Segment {
                 speed: 15.,
                 points: (0..20).map(|i| [i as f32 * 15., 0., 0.]).collect(),
+                curve: nfs_content::traffic::Curve::new(
+                    [[0.; 3], [95., 0., 0.], [190., 0., 0.], [285., 0., 0.]],
+                    (1..20).map(|i| i as f32 / 19.).collect(),
+                    (1..20).map(|i| i as f32 * 15.).collect(),
+                )
+                .unwrap(),
             }],
         }],
     };
@@ -250,6 +256,17 @@ fn host_motion_advances_and_stops_without_granting_client_authority() {
 fn delayed_publication_integrates_the_same_road_distance_as_regular_updates() {
     let (mut regular, mut world, mut content) = fixture();
     content.splines[0].segments[0].points = vec![[50., 0., 0.], [100., 0., 0.]];
+    content.splines[0].segments[0].curve = nfs_content::traffic::Curve::new(
+        [
+            [50., 0., 0.],
+            [50. + 50. / 3., 0., 0.],
+            [50. + 100. / 3., 0., 0.],
+            [100., 0., 0.],
+        ],
+        vec![1.],
+        vec![50.],
+    )
+    .unwrap();
     regular
         .advance(&mut world, 1, 100, &content, 0, &[[0.; 3]])
         .unwrap();

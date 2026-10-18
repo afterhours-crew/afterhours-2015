@@ -216,7 +216,14 @@ impl Population {
                     if best.as_ref().is_some_and(|(d, _)| *d <= distance) {
                         continue;
                     }
-                    let Some(basis) = road_basis(pair[0], pair[1]) else {
+                    let Some((_, tangent)) = segment
+                        .curve
+                        .distance_at_point(point_index)
+                        .and_then(|d| segment.curve.sample(d))
+                    else {
+                        continue;
+                    };
+                    let Some(basis) = road_basis([0.; 3], tangent) else {
                         continue;
                     };
                     best = Some((
@@ -266,7 +273,7 @@ impl Population {
         let headings: BTreeMap<_, _> = self
             .cars
             .iter()
-            .map(|(&key, car)| (key, car.basis[2][0].atan2(car.basis[2][2])))
+            .map(|(&key, car)| (key, car.basis))
             .collect();
         // Integrate the actual elapsed time in bounded steps. Publishing full
         // cruise velocity after advancing only a fraction of that time makes
@@ -285,17 +292,17 @@ impl Population {
             }
             let mut controls = vehicle::chassis::Controls::new(4)?;
             controls.flags[3] = true;
-            let yaw = car.basis[2][0].atan2(car.basis[2][2]);
-            let turn = (yaw - headings[&key] + std::f32::consts::PI)
-                .rem_euclid(std::f32::consts::TAU)
-                - std::f32::consts::PI;
             let physics = vehicle::chassis::Motion {
                 identity,
                 revision,
                 position: car.anchor,
                 quaternion: vehicle::orientation::quaternion_from_basis(car.basis)?,
                 velocity: car.basis[2].map(|v| v * car.speed),
-                angular_velocity: [0., turn / (elapsed as f32 / 1000.), 0.],
+                angular_velocity: super::motion::angular_velocity(
+                    headings[&key],
+                    car.basis,
+                    elapsed as f32 / 1000.,
+                )?,
             }
             .encode([0.; 3], &controls)?;
             changes

@@ -478,6 +478,9 @@ acceleration/braking and a forward obstacle corridor. It retires at disconnected
 road endpoints; it does not implement rigid-body collision physics or stock AI
 parity. Motion uses bounded elapsed-time substeps and a stable session clock;
 adjacent independent chassis updates can share a bounded publication without
-crossing lifecycle barriers. Pauses longer than two seconds retire stale traffic.
+crossing lifecycle barriers. Installed cubic control points and distance tables
+drive continuous road tangents; angular velocity includes road pitch. Prepared
+traffic content version 2 rebuilds older caches. Pauses longer than two seconds
+retire stale traffic.
 The first moving test exposed uneven motion and periodic bounce; the fix and
 fresh live acceptance remain in progress (#114, #54).

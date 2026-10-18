@@ -130,6 +130,8 @@ pub enum Field {
     RawPointers(Vec<u32>),
     /// Array of signed 32-bit integers.
     Ints(Vec<i32>),
+    /// Array of 32-bit floats.
+    Floats(Vec<f32>),
     /// Array of structs, each a list of `Float`/`Int`/`CString` members.
     Structs(&'static str, Vec<Vec<(&'static str, Field)>>),
     /// Inline struct of scalar members.
@@ -237,6 +239,13 @@ impl PartitionWriter {
                 let (class, _) = self.struct_class(type_name, &nested);
                 let array = self.class("array", 4, vec![("member".into(), 0x02, class, 0)]);
                 rows.push((member.to_string(), 0x04, array, offset));
+            } else if matches!(field, Field::Floats(_)) {
+                let array = self.class(
+                    "array",
+                    4,
+                    vec![("member".into(), scalar_code(&Field::Float(0.)), 0, 0)],
+                );
+                rows.push((member.to_string(), 0x04, array, offset));
             } else if let Field::Enum(type_name, _, _) = field {
                 let mut enumerators: Vec<(String, u8, u16, u32)> = Vec::new();
                 for item in items {
@@ -273,7 +282,7 @@ impl PartitionWriter {
     fn inline(&mut self, field: &Field) -> Vec<u8> {
         if let Field::Struct(_, fields) = field {
             fields.iter().flat_map(|(_, f)| self.inline(f)).collect()
-        } else if matches!(field, Field::Structs(_, _)) {
+        } else if matches!(field, Field::Structs(_, _) | Field::Floats(_)) {
             self.object(&[("inline_array", field.clone())]).1
         } else {
             self.scalar(field).to_vec()
@@ -352,6 +361,21 @@ impl PartitionWriter {
                 Field::Ints(list) => {
                     let array_class =
                         self.class("array", 4, vec![("member".to_string(), 0x0F, 0, 0)]);
+                    let at = self.array_data.len() as u32;
+                    for value in list {
+                        self.array_data.extend_from_slice(&value.to_le_bytes());
+                    }
+                    self.arrays
+                        .push((at, list.len() as u32, i32::from(array_class)));
+                    rows.push((name.to_string(), 0x04, array_class, offset));
+                    payload.extend_from_slice(&((self.arrays.len() - 1) as u32).to_le_bytes());
+                }
+                Field::Floats(list) => {
+                    let array_class = self.class(
+                        "array",
+                        4,
+                        vec![("member".to_string(), scalar_code(&Field::Float(0.)), 0, 0)],
+                    );
                     let at = self.array_data.len() as u32;
                     for value in list {
                         self.array_data.extend_from_slice(&value.to_le_bytes());

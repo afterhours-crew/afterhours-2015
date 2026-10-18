@@ -215,7 +215,7 @@ fn traffic_loader_rejects_broken_closure_catalog_and_geometry() {
         serde_json::from_slice(&std::fs::read(prepared.path(Kind::TrafficContent)).unwrap())
             .unwrap();
     for (path, bad) in [
-        ("/version", serde_json::json!(2)),
+        ("/version", serde_json::json!(3)),
         (
             "/managers/actors",
             value["managers"]["participants"].clone(),
@@ -227,6 +227,13 @@ fn traffic_loader_rejects_broken_closure_catalog_and_geometry() {
         ("/splines/1/index", serde_json::json!(0)),
         ("/splines/1/segments/0/speed", serde_json::json!(-1)),
         ("/splines/1/segments/0/points/0", serde_json::json!([0, 1])),
+        (
+            "/splines/1/segments/0/points/0",
+            serde_json::json!([100, 3, 4]),
+        ),
+        ("/splines/1/segments/0/controls", serde_json::json!([])),
+        ("/splines/1/segments/0/times", serde_json::json!([0.])),
+        ("/splines/1/segments/0/distances", serde_json::json!([-1.])),
         ("/density", serde_json::json!(101)),
         ("/vehicles", serde_json::json!([])),
     ] {
