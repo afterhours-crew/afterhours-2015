@@ -203,6 +203,31 @@ impl Profile {
                         now,
                     )
                     .map_err(Error::Garage)?,
+                    GarageOperation::MoveToWarehouse { item, secondary } => {
+                        garage::move_to_warehouse(
+                            service.repository.as_ref(),
+                            account,
+                            &service.catalog,
+                            item,
+                            secondary,
+                            now,
+                        )
+                        .map_err(Error::Garage)?
+                    }
+                    GarageOperation::TakeFromWarehouse {
+                        item,
+                        secondary,
+                        previous,
+                    } => garage::take_from_warehouse(
+                        service.repository.as_ref(),
+                        account,
+                        &service.catalog,
+                        item,
+                        secondary,
+                        previous,
+                        now,
+                    )
+                    .map_err(Error::Garage)?,
                     GarageOperation::Sold { secondary } => {
                         if previous.slots.values()[usize::from(secondary) + 1].is_some() {
                             return Err(Error::Garage(garage::Error::Rejected(

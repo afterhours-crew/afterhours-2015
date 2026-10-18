@@ -15,6 +15,10 @@ pub enum Operation {
     Place { secondary: u8, item: u64 },
     /// Clear the secondary display after its owned item was sold.
     Sold { secondary: u8 },
+    /// Keep the owned car and clear this parked slot.
+    MoveToWarehouse { secondary: u8 },
+    /// Retrieve or swap an already owned warehouse car into this parked slot.
+    TakeFromWarehouse { secondary: u8, item: u64 },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -61,7 +65,7 @@ impl Binding {
             .map_err(|_| Error::Shape)?;
         if envelope.references().first() != Some(&self.scene)
             || route.selector() != self.selector
-            || !matches!(route.method_index(), 2..=4)
+            || !matches!(route.method_index(), 2..=6)
         {
             return Ok(None);
         }
@@ -76,7 +80,13 @@ impl Binding {
             return Err(Error::Ownership);
         }
         let args = route.arguments();
-        if args.len() != if route.method_index() == 3 { 103 } else { 39 } {
+        if args.len()
+            != if matches!(route.method_index(), 3 | 6) {
+                103
+            } else {
+                39
+            }
+        {
             return Err(Error::Shape);
         }
         let secondary = args.read_u32(0, 32).map_err(|_| Error::Shape)?;
@@ -86,16 +96,21 @@ impl Binding {
         let secondary = secondary as u8;
         let operation = match route.method_index() {
             2 => Operation::Select { secondary },
-            3 => {
+            3 | 6 => {
                 let low = args.read_u32(32, 32).map_err(|_| Error::Shape)?;
                 let high = args.read_u32(64, 32).map_err(|_| Error::Shape)?;
                 let item = u64::from(low) | (u64::from(high) << 32);
                 if item == 0 {
                     return Err(Error::Shape);
                 }
-                Operation::Place { secondary, item }
+                if route.method_index() == 3 {
+                    Operation::Place { secondary, item }
+                } else {
+                    Operation::TakeFromWarehouse { secondary, item }
+                }
             }
             4 => Operation::Sold { secondary },
+            5 => Operation::MoveToWarehouse { secondary },
             _ => unreachable!(),
         };
         Ok(Some(Call {
@@ -156,6 +171,21 @@ mod tests {
                         secondary: slot as u8,
                     },
                 ),
+                (
+                    5,
+                    None,
+                    Operation::MoveToWarehouse {
+                        secondary: slot as u8,
+                    },
+                ),
+                (
+                    6,
+                    Some(0xf123456789abcdef),
+                    Operation::TakeFromWarehouse {
+                        secondary: slot as u8,
+                        item: 0xf123456789abcdef,
+                    },
+                ),
             ] {
                 let body = wire(method, slot, item, &[10, 77]);
                 assert_eq!(
@@ -183,11 +213,16 @@ mod tests {
             wire(3, 0, None, &[10, 77]),
             wire(2, 0, Some(1), &[10, 77]),
             wire(2, 0, None, &[10, 77, 88]),
+            wire(5, 4, None, &[10, 77]),
+            wire(5, 0, Some(1), &[10, 77]),
+            wire(6, 0, Some(0), &[10, 77]),
+            wire(6, 0, None, &[10, 77]),
+            wire(6, 4, Some(1), &[10, 77]),
         ] {
             assert_eq!(binding.read(body.span(), |_| true), Err(Error::Shape));
         }
         assert_eq!(
-            binding.read(wire(5, 0, None, &[10, 77]).span(), |_| true),
+            binding.read(wire(7, 0, None, &[10, 77]).span(), |_| true),
             Ok(None)
         );
         assert_eq!(Binding::new(0, 0), Err(Error::Binding));

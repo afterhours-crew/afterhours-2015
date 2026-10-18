@@ -192,11 +192,15 @@ fn bounds_static_depth_edges_and_exponential_instance_expansion() {
         InventoryCatalog::new([([1; 16], too_wide)], vec![]),
         Err(Error::Bound)
     );
-    let graph = (1..=13)
+    // A binary tree must exceed the current item budget, independently of the
+    // static definition/depth limits.
+    let levels = u8::try_from(MAX_ITEMS.ilog2() + 1).unwrap();
+    assert!((1_usize << levels) - 1 > MAX_ITEMS);
+    let graph = (1..=levels)
         .map(|n| {
             (
                 [n; 16],
-                definition(if n == 13 {
+                definition(if n == levels {
                     vec![]
                 } else {
                     vec![[n + 1; 16]; 2]

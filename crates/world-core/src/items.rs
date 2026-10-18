@@ -51,8 +51,8 @@ impl Derived {
 
 /// Local resource policies, not recovered native maxima.
 pub const MAX_BYTES: usize = super::files::MAX_BYTES;
-pub const MAX_ITEMS: usize = 4096;
-pub const MAX_COLLECTION: usize = 4096;
+pub const MAX_ITEMS: usize = 8192;
+pub const MAX_COLLECTION: usize = 8192;
 pub const MAX_REFERENCES: usize = 32768;
 pub const MAX_DEPTH: usize = 32;
 pub const MAX_WORDS: usize = 4096;

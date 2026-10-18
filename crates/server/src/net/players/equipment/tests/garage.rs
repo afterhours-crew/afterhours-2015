@@ -295,6 +295,37 @@ async fn buy_switch_customize_and_sell_keep_durable_and_visible_cars_in_sync() {
     ack_cars(&mut listener, participant, &mut wire);
     let before = listener.inventory.as_ref().unwrap().items.clone();
     assert_ne!(before.items[&1].derived, before.items[&second].derived);
+    command(&mut listener, scene, participant, 5, 0, None);
+    jobs.start(&mut listener, 16, Timestamp(16));
+    assert!(jobs.completed(&mut listener).await);
+    assert_eq!(
+        listener.inventory.as_ref().unwrap().slots.values(),
+        [Some(1), None, None, None, None]
+    );
+    assert_eq!(listener.inventory.as_ref().unwrap().items, before);
+    let stored_ghost = listener.pending.front().unwrap().deleted[0];
+    ack_cars(&mut listener, participant, &mut wire);
+    assert!(wire.get(stored_ghost).is_none());
+    command(&mut listener, scene, participant, 5, 0, None);
+    assert!(listener.garage_commands.is_empty());
+    command(&mut listener, scene, participant, 6, 3, Some(second));
+    jobs.start(&mut listener, 17, Timestamp(17));
+    assert!(jobs.completed(&mut listener).await);
+    assert_eq!(
+        listener.inventory.as_ref().unwrap().slots.values(),
+        [Some(1), None, None, None, Some(second)]
+    );
+    assert_eq!(listener.inventory.as_ref().unwrap().items, before);
+    ack_cars(&mut listener, participant, &mut wire);
+    command(&mut listener, scene, participant, 5, 3, None);
+    jobs.start(&mut listener, 18, Timestamp(18));
+    assert!(jobs.completed(&mut listener).await);
+    ack_cars(&mut listener, participant, &mut wire);
+    command(&mut listener, scene, participant, 6, 0, Some(second));
+    jobs.start(&mut listener, 19, Timestamp(19));
+    assert!(jobs.completed(&mut listener).await);
+    ack_cars(&mut listener, participant, &mut wire);
+    assert_eq!(listener.inventory.as_ref().unwrap().items, before);
     transfer(
         &mut listener,
         0,
@@ -306,7 +337,7 @@ async fn buy_switch_customize_and_sell_keep_durable_and_visible_cars_in_sync() {
         .encode()
         .unwrap(),
     );
-    jobs.start(&mut listener, 16, Timestamp(16));
+    jobs.start(&mut listener, 20, Timestamp(20));
     assert!(jobs.completed(&mut listener).await);
     let bytes = deliver_car_reply(&mut jobs);
     assert!(
@@ -317,7 +348,7 @@ async fn buy_switch_customize_and_sell_keep_durable_and_visible_cars_in_sync() {
             .items
             .contains_key(&second)
     );
-    jobs.start(&mut listener, 17, Timestamp(17));
+    jobs.start(&mut listener, 21, Timestamp(21));
     assert_eq!(
         listener.inventory.as_ref().unwrap().slots.values(),
         [Some(1), None, None, None, None]
@@ -340,6 +371,6 @@ async fn buy_switch_customize_and_sell_keep_durable_and_visible_cars_in_sync() {
     ack_cars(&mut listener, participant, &mut wire);
     assert!(wire.get(sold_ghost).is_none());
     command(&mut listener, scene, participant, 4, 0, None);
-    jobs.start(&mut listener, 18, Timestamp(18));
+    jobs.start(&mut listener, 22, Timestamp(22));
     assert!(jobs.completed(&mut listener).await);
 }

@@ -9,9 +9,26 @@ use std::sync::Arc;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(in crate::net) enum GarageOperation {
-    Select { item: u64, previous_primary: u64 },
-    Place { item: u64, secondary: u8 },
-    Sold { secondary: u8 },
+    Select {
+        item: u64,
+        previous_primary: u64,
+    },
+    Place {
+        item: u64,
+        secondary: u8,
+    },
+    Sold {
+        secondary: u8,
+    },
+    MoveToWarehouse {
+        item: u64,
+        secondary: u8,
+    },
+    TakeFromWarehouse {
+        item: u64,
+        secondary: u8,
+        previous: Option<u64>,
+    },
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(in crate::net) struct GarageRequest {
@@ -134,6 +151,20 @@ impl PlayerListener {
             },
             Operation::Place { secondary, item } => GarageOperation::Place { secondary, item },
             Operation::Sold { secondary } => GarageOperation::Sold { secondary },
+            Operation::MoveToWarehouse { secondary } => {
+                let Some(item) = slots[usize::from(secondary) + 1] else {
+                    // A repeated clear of an empty slot has no effect.
+                    return Ok(true);
+                };
+                GarageOperation::MoveToWarehouse { item, secondary }
+            }
+            Operation::TakeFromWarehouse { secondary, item } => {
+                GarageOperation::TakeFromWarehouse {
+                    item,
+                    secondary,
+                    previous: slots[usize::from(secondary) + 1],
+                }
+            }
         };
         let request = GarageRequest {
             participant,

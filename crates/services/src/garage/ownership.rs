@@ -70,7 +70,7 @@ pub struct Changed {
 fn id(value: u64) -> Result<ItemId, Error> {
     ItemId::new(value).ok_or(Error::Rejected(Reason::Shape))
 }
-fn slots(snapshot: &Snapshot, catalog: &InventoryCatalog) -> Result<GarageSlots, Error> {
+pub(super) fn slots(snapshot: &Snapshot, catalog: &InventoryCatalog) -> Result<GarageSlots, Error> {
     inventory::collection(snapshot, catalog.bindings())?;
     let slots = snapshot.garage.ok_or(Error::Rejected(Reason::Owner))?;
     if slots.0[0].is_none() {

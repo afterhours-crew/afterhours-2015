@@ -279,6 +279,7 @@ impl Config {
 pub fn local_configuration() -> Json {
     use serde_json::json;
     let mut settings = Vec::new();
+    let warehouse_capacity = crate::garage::WAREHOUSE_CAPACITY.to_string();
     for name in SCALAR_KEYS {
         let value = match *name {
             "associationListSkipInitialSet" | "autoReconnectEnabled" => "false",
@@ -286,7 +287,7 @@ pub fn local_configuration() -> Json {
             "connIdleTimeout" | "xlspConnectionIdleTimeout" => "5m",
             "defaultRequestTimeout" => "60s",
             "pingPeriod" => "20s",
-            "maximumNumberOfVehiclesInWarehouse" => "100",
+            "maximumNumberOfVehiclesInWarehouse" => warehouse_capacity.as_str(),
             "userManagerMaxCachedUsers" => "128",
             "providerOnlineUserRefresh"
             | "playersYouMayKnowScreenUpdateRate"

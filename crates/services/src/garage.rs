@@ -10,8 +10,10 @@ mod ledger;
 mod ownership;
 #[cfg(test)]
 mod tests;
+mod warehouse;
 pub use ledger::{CommandId, open_session};
 pub use ownership::{Changed, Offers, buy, place, select, sell};
+pub use warehouse::{WAREHOUSE_CAPACITY, move_to_warehouse, take_from_warehouse};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Reason {

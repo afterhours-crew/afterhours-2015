@@ -13,6 +13,7 @@ use nfs_world_core::items::{
     OwnershipLevel, PurchaseRequest, PurchaseSelection, SellRequest,
 };
 use std::sync::{Arc, Barrier};
+mod warehouse;
 fn who(n: u8) -> AccountId {
     AccountId::from_owned_config([n; 16]).unwrap()
 }
