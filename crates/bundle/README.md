@@ -5,6 +5,13 @@ on Windows. It links the existing launcher and server libraries; no game content
 or separate server payload is embedded. With no arguments it starts against the
 game beside the executable. Explicit commands preserve the CLI interface.
 
+Windows builds embed the supplied Afterhours icon from
+`resources/afterhours.ico`, including all seven sizes (16–256 pixels). It is
+compiled with the Windows SDK resource compiler and linked into the executable;
+users do not need a separate icon file. Changing the ICO triggers a rebuild.
+Non-Windows builds skip the resource step. Missing Windows resource tools fail
+the build instead of silently omitting the icon.
+
 The launcher and server still run as separate supervised processes using this
 same executable. Server children explicitly select `--afterhours-server`; this
 also works for the verified SDK compatibility copy. File names do not select
