@@ -33,6 +33,7 @@ pub enum Kind {
     SubLevel,
     ScriptedSplineGoal,
     TrafficGoal,
+    WanderGoal,
 }
 impl Kind {
     pub fn index(self) -> u8 {
@@ -47,6 +48,7 @@ impl Kind {
             Self::SubLevel => 24,
             Self::ScriptedSplineGoal => 20,
             Self::TrafficGoal => 26,
+            Self::WanderGoal => 27,
         }
     }
     fn from_index(index: u8) -> Result<Self, Error> {
@@ -61,6 +63,7 @@ impl Kind {
             24 => Ok(Self::SubLevel),
             20 => Ok(Self::ScriptedSplineGoal),
             26 => Ok(Self::TrafficGoal),
+            27 => Ok(Self::WanderGoal),
             _ => Err(Error::Unsupported),
         }
     }
@@ -172,6 +175,7 @@ pub enum Initial {
     PlayerManager,
     ScriptedSplineGoal(spline::Initial),
     TrafficGoal(traffic::Initial),
+    WanderGoal(wander::Initial),
     Actor(ActorInit),
     Entity {
         prefix: entity::creation::Prefix,
@@ -196,6 +200,7 @@ impl Initial {
             Self::PlayerManager => Kind::PlayerManager,
             Self::ScriptedSplineGoal(_) => Kind::ScriptedSplineGoal,
             Self::TrafficGoal(_) => Kind::TrafficGoal,
+            Self::WanderGoal(_) => Kind::WanderGoal,
             Self::Entity { .. } | Self::Vehicle { .. } => Kind::Entity,
             Self::Participant(_) => Kind::Participant,
             Self::ParticipantLocationMap => Kind::ParticipantLocationMap,
@@ -211,6 +216,7 @@ pub enum Update {
     PlayerManager(player_manager::Update),
     ScriptedSplineGoal,
     TrafficGoal,
+    WanderGoal,
     Actor(ActorUpdate),
     Entity {
         binding: std::sync::Arc<entity::creation::Binding>,
@@ -234,6 +240,7 @@ impl Update {
             Self::PlayerManager(_) => Kind::PlayerManager,
             Self::ScriptedSplineGoal => Kind::ScriptedSplineGoal,
             Self::TrafficGoal => Kind::TrafficGoal,
+            Self::WanderGoal => Kind::WanderGoal,
             Self::Actor(_) => Kind::Actor,
             Self::Entity { .. } | Self::Vehicle { .. } => Kind::Entity,
             Self::Participant(_) => Kind::Participant,
@@ -344,6 +351,7 @@ impl Reader<'_> {
                 return Err(Error::Unsupported);
             }
             Kind::PlayerManager => Initial::PlayerManager,
+            Kind::WanderGoal => Initial::WanderGoal(wander::Initial::read(self)?),
             Kind::ParticipantLocationMap => Initial::ParticipantLocationMap,
             Kind::PlayerView => Initial::PlayerView(player_view::Initial::read(self)?),
             Kind::Actor => Initial::Actor(ActorInit {
@@ -379,6 +387,7 @@ impl Reader<'_> {
             Kind::PlayerView => Update::PlayerView(player_view::Update::read(self)?),
             Kind::ScriptedSplineGoal => Update::ScriptedSplineGoal,
             Kind::TrafficGoal => Update::TrafficGoal,
+            Kind::WanderGoal => Update::WanderGoal,
             Kind::SubLevel | Kind::Entity => return Err(Error::Unsupported),
             Kind::Participant => Update::Participant(ParticipantUpdate {
                 player: self.optional(Self::reference)?,
@@ -500,6 +509,7 @@ impl Writer {
             Initial::PlayerView(v) => v.write(self)?,
             Initial::ScriptedSplineGoal(v) => v.write(self)?,
             Initial::TrafficGoal(v) => v.write(self)?,
+            Initial::WanderGoal(v) => v.write(self)?,
             Initial::Actor(v) => {
                 self.reference(&v.participant)?;
                 self.bit(v.flag_a)?;
@@ -535,6 +545,7 @@ impl Writer {
             Update::PlayerView(v) => v.write(self)?,
             Update::ScriptedSplineGoal => {}
             Update::TrafficGoal => {}
+            Update::WanderGoal => {}
             Update::Participant(v) => {
                 self.optional(&v.player, Self::reference)?;
                 self.optional(&v.entity, Self::reference)?;
@@ -685,6 +696,7 @@ pub mod entity;
 mod entity_record;
 pub mod spline;
 pub mod traffic;
+pub mod wander;
 
 pub mod location_map;
 pub mod player_manager;

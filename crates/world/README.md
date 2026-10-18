@@ -13,6 +13,9 @@ Traffic-goal records encode a bounded allocation counter and an explicit asset
 reference using the installed spline catalog. Creation, empty updates and
 deletion are supported by the replication codec; traffic population and simulation
 are tracked separately in [#54](https://github.com/afterhours-crew/afterhours-2015/issues/54).
+Wandering goals use the same allocation counter and retain three constructor
+flags, with no asset or incremental body. Owned AI assignment and cleanup cover
+both goal types; this codec support alone does not establish live rivals.
 
 Supply scene serializer catalogs and current registration data explicitly. Root
 traffic slots, gameplay/startup roles and garage scene selection belong to

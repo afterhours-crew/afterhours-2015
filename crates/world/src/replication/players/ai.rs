@@ -208,6 +208,39 @@ impl Players {
         key: u64,
         mut initial: traffic::Initial,
     ) -> Result<(Record, Record), Error> {
+        self.start_ai_goal(connection, persona, key, |serial| {
+            initial.allocation_serial = serial;
+            (Initial::TrafficGoal(initial), Update::TrafficGoal)
+        })
+    }
+
+    /// Attach the native wandering goal to an owned AI actor. Its allocation
+    /// counter is shared with all other goals; failed assignment is atomic.
+    pub fn start_ai_wander_goal(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        key: u64,
+        flags: [bool; 3],
+    ) -> Result<(Record, Record), Error> {
+        self.start_ai_goal(connection, persona, key, |serial| {
+            (
+                Initial::WanderGoal(wander::Initial {
+                    allocation_serial: serial,
+                    flags,
+                }),
+                Update::WanderGoal,
+            )
+        })
+    }
+
+    fn start_ai_goal(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        key: u64,
+        create: impl FnOnce(u8) -> (Initial, Update),
+    ) -> Result<(Record, Record), Error> {
         let instance = self
             .ai
             .get(&(connection, persona, key))
@@ -216,9 +249,9 @@ impl Players {
             return Err(Error::DuplicateObject);
         }
         let allocation_serial = (self.goal_allocation_serial + 1) & 63;
-        initial.allocation_serial = allocation_serial;
+        let (initial, update) = create(allocation_serial);
         let mut next = self.objects.clone();
-        let goal = next.spawn(Initial::TrafficGoal(initial), Update::TrafficGoal)?;
+        let goal = next.spawn(initial, update)?;
         let assigned = next
             .change(
                 instance.ids.actor,
@@ -398,6 +431,82 @@ mod tests {
             allocation_serial: 63,
             asset_mode: 2,
         }
+    }
+
+    #[test]
+    fn wandering_and_traffic_share_serials_and_keep_owned_lifecycles_isolated() {
+        let mut world = world();
+        let (car, content) = car();
+        for (connection, persona) in [(1, 100), (2, 200)] {
+            world
+                .spawn_ai_vehicle(connection, persona, request(1), car.clone(), &content)
+                .unwrap();
+        }
+        let before = world.objects.snapshot();
+        assert!(matches!(
+            world.start_ai_wander_goal(2, 100, 1, [false, false, true]),
+            Err(Error::UnknownObject)
+        ));
+        assert_eq!(world.objects.snapshot(), before);
+        world.goal_allocation_serial = 62;
+        let (traffic, _) = world.start_ai_traffic_goal(1, 100, 1, goal()).unwrap();
+        assert!(
+            matches!(traffic.initial, Some(Initial::TrafficGoal(v)) if v.allocation_serial == 63)
+        );
+        let (wander, assigned) = world
+            .start_ai_wander_goal(2, 200, 1, [false, false, true])
+            .unwrap();
+        assert_eq!(
+            wander.initial,
+            Some(Initial::WanderGoal(wander::Initial {
+                allocation_serial: 0,
+                flags: [false, false, true],
+            }))
+        );
+        assert!(
+            matches!(assigned.update, Update::Actor(v) if v.references_a == Some(vec![wander.id]))
+        );
+        let before = world.objects.snapshot();
+        assert!(matches!(
+            world.start_ai_wander_goal(2, 200, 1, [true; 3]),
+            Err(Error::DuplicateObject)
+        ));
+        assert_eq!(world.objects.snapshot(), before);
+        assert_eq!(world.goal_allocation_serial, 0);
+        assert!(
+            world
+                .remove_ai_for_connection(2)
+                .unwrap()
+                .deleted
+                .contains(&wander.id)
+        );
+        assert!(world.objects.get(traffic.id).is_some());
+        assert_eq!(
+            world.remove_ai_for_connection(2).unwrap(),
+            Removed::default()
+        );
+    }
+
+    #[test]
+    fn failed_wandering_actor_assignment_consumes_neither_id_nor_serial() {
+        let mut world = world();
+        let (car, content) = car();
+        let actor = world
+            .spawn_ai_vehicle(1, 100, request(1), car, &content)
+            .unwrap()
+            .unwrap()
+            .ids
+            .actor;
+        // Inject a stale actor reference to exercise failure after goal encoding.
+        world.objects.remove(actor).unwrap();
+        let before = world.objects.snapshot();
+        assert!(matches!(
+            world.start_ai_wander_goal(1, 100, 1, [false, false, true]),
+            Err(Error::UnknownObject)
+        ));
+        assert_eq!(world.objects.snapshot(), before);
+        assert_eq!(world.goal_allocation_serial, 0);
+        assert!(world.ai[&(1, 100, 1)].goal.is_none());
     }
     #[test]
     fn ai_uses_null_player_identity_and_cannot_be_used_as_owned_inventory() {

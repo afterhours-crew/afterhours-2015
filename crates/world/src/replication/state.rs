@@ -500,6 +500,7 @@ impl Update {
             }
             (Self::ScriptedSplineGoal, Self::ScriptedSplineGoal) => {}
             (Self::TrafficGoal, Self::TrafficGoal) => {}
+            (Self::WanderGoal, Self::WanderGoal) => {}
             (Self::Participant(a), Self::Participant(b)) => {
                 replace(&mut a.player, &b.player);
                 replace(&mut a.entity, &b.entity);
