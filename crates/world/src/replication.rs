@@ -32,6 +32,7 @@ pub enum Kind {
     Player,
     SubLevel,
     ScriptedSplineGoal,
+    TrafficGoal,
 }
 impl Kind {
     pub fn index(self) -> u8 {
@@ -45,6 +46,7 @@ impl Kind {
             Self::Player => 14,
             Self::SubLevel => 24,
             Self::ScriptedSplineGoal => 20,
+            Self::TrafficGoal => 26,
         }
     }
     fn from_index(index: u8) -> Result<Self, Error> {
@@ -58,6 +60,7 @@ impl Kind {
             14 => Ok(Self::Player),
             24 => Ok(Self::SubLevel),
             20 => Ok(Self::ScriptedSplineGoal),
+            26 => Ok(Self::TrafficGoal),
             _ => Err(Error::Unsupported),
         }
     }
@@ -168,6 +171,7 @@ pub enum Initial {
     PlayerView(player_view::Initial),
     PlayerManager,
     ScriptedSplineGoal(spline::Initial),
+    TrafficGoal(traffic::Initial),
     Actor(ActorInit),
     Entity {
         prefix: entity::creation::Prefix,
@@ -191,6 +195,7 @@ impl Initial {
             Self::Actor(_) => Kind::Actor,
             Self::PlayerManager => Kind::PlayerManager,
             Self::ScriptedSplineGoal(_) => Kind::ScriptedSplineGoal,
+            Self::TrafficGoal(_) => Kind::TrafficGoal,
             Self::Entity { .. } | Self::Vehicle { .. } => Kind::Entity,
             Self::Participant(_) => Kind::Participant,
             Self::ParticipantLocationMap => Kind::ParticipantLocationMap,
@@ -205,6 +210,7 @@ pub enum Update {
     PlayerView(player_view::Update),
     PlayerManager(player_manager::Update),
     ScriptedSplineGoal,
+    TrafficGoal,
     Actor(ActorUpdate),
     Entity {
         binding: std::sync::Arc<entity::creation::Binding>,
@@ -227,6 +233,7 @@ impl Update {
         match self {
             Self::PlayerManager(_) => Kind::PlayerManager,
             Self::ScriptedSplineGoal => Kind::ScriptedSplineGoal,
+            Self::TrafficGoal => Kind::TrafficGoal,
             Self::Actor(_) => Kind::Actor,
             Self::Entity { .. } | Self::Vehicle { .. } => Kind::Entity,
             Self::Participant(_) => Kind::Participant,
@@ -333,7 +340,7 @@ impl Reader<'_> {
     }
     fn initial(&mut self, kind: Kind) -> Result<Initial, Error> {
         Ok(match kind {
-            Kind::SubLevel | Kind::Entity | Kind::ScriptedSplineGoal => {
+            Kind::SubLevel | Kind::Entity | Kind::ScriptedSplineGoal | Kind::TrafficGoal => {
                 return Err(Error::Unsupported);
             }
             Kind::PlayerManager => Initial::PlayerManager,
@@ -371,6 +378,7 @@ impl Reader<'_> {
             }
             Kind::PlayerView => Update::PlayerView(player_view::Update::read(self)?),
             Kind::ScriptedSplineGoal => Update::ScriptedSplineGoal,
+            Kind::TrafficGoal => Update::TrafficGoal,
             Kind::SubLevel | Kind::Entity => return Err(Error::Unsupported),
             Kind::Participant => Update::Participant(ParticipantUpdate {
                 player: self.optional(Self::reference)?,
@@ -491,6 +499,7 @@ impl Writer {
             Initial::PlayerManager | Initial::ParticipantLocationMap => {}
             Initial::PlayerView(v) => v.write(self)?,
             Initial::ScriptedSplineGoal(v) => v.write(self)?,
+            Initial::TrafficGoal(v) => v.write(self)?,
             Initial::Actor(v) => {
                 self.reference(&v.participant)?;
                 self.bit(v.flag_a)?;
@@ -525,6 +534,7 @@ impl Writer {
             Update::ParticipantLocationMap(v) => v.write(self)?,
             Update::PlayerView(v) => v.write(self)?,
             Update::ScriptedSplineGoal => {}
+            Update::TrafficGoal => {}
             Update::Participant(v) => {
                 self.optional(&v.player, Self::reference)?;
                 self.optional(&v.entity, Self::reference)?;
@@ -611,6 +621,9 @@ impl Record {
         if kind == Kind::ScriptedSplineGoal {
             return Self::decode_spline(input, bound, None);
         }
+        if kind == Kind::TrafficGoal {
+            return Self::decode_traffic(input, bound, None);
+        }
         if kind == Kind::SubLevel {
             return Self::decode_scene(input, id, create, r.pos, content, profile);
         }
@@ -671,6 +684,7 @@ impl Record {
 pub mod entity;
 mod entity_record;
 pub mod spline;
+pub mod traffic;
 
 pub mod location_map;
 pub mod player_manager;

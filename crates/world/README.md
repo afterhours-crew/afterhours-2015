@@ -9,6 +9,11 @@ The host queues typed replication sections and ordered RPC notifications. It
 checks observer bindings, object lifetimes, loading reports, resource bounds and
 backpressure before committing a queued change. There is no captured-frame queue.
 
+Traffic-goal records encode a bounded allocation counter and an explicit asset
+reference using the installed spline catalog. Creation, empty updates and
+deletion are supported by the replication codec; traffic population and simulation
+are tracked separately in [#54](https://github.com/afterhours-crew/afterhours-2015/issues/54).
+
 Supply scene serializer catalogs and current registration data explicitly. Root
 traffic slots, gameplay/startup roles and garage scene selection belong to
 deployment configuration; the library contains no game content-key table or asset

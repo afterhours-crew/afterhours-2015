@@ -498,6 +498,7 @@ impl Update {
                 replace(&mut a.groups, &b.groups)
             }
             (Self::ScriptedSplineGoal, Self::ScriptedSplineGoal) => {}
+            (Self::TrafficGoal, Self::TrafficGoal) => {}
             (Self::Participant(a), Self::Participant(b)) => {
                 replace(&mut a.player, &b.player);
                 replace(&mut a.entity, &b.entity);
