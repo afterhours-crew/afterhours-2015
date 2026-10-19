@@ -161,9 +161,18 @@ pub struct Request {
     /// [`crate::events`]) instead of human console text.
     #[serde(default)]
     pub events: bool,
+    /// Start the server so the game can connect: under the compatibility
+    /// name with the launcher-services port. Always so for `start`; for
+    /// `serve` it lets a play request start the game later.
+    #[serde(default)]
+    pub game_support: bool,
 }
 
 impl Request {
+    /// Whether the server is started for the game, as `start` does.
+    pub fn serves_game(&self) -> bool {
+        self.action == Action::Start || self.game_support
+    }
     /// Server children select the bundled role explicitly, including setup
     /// tools and the SDK-named compatibility copy.
     pub fn server_arguments(&self, mut arguments: Vec<String>) -> Vec<String> {
@@ -227,6 +236,16 @@ pub struct Status {
     pub version: u32,
     /// Session ID: 32 lowercase hexadecimal characters.
     pub id: String,
+    /// What the session was started as. `serve` hosts the server and may
+    /// start the game on request; `null` only in records written before
+    /// this field existed.
+    #[serde(default)]
+    pub action: Option<Action>,
+    /// Whether the session's game process is running: from its start until
+    /// it exits. With `action` `serve` this tells hosting from playing.
+    /// Always `false` for an interrupted session.
+    #[serde(default)]
+    pub game_running: bool,
     /// When this state was recorded, UTC. Records written by the old
     /// PowerShell launcher use a longer ISO 8601 form with an offset.
     pub utc: String,
@@ -278,6 +297,7 @@ mod tests {
         assert_eq!(status.state, State::Ready);
         assert_eq!(status.game_pid, None);
         assert!(status.state.is_live());
+        assert_eq!((status.action, status.game_running), (None, false));
         let account: AccountRecord = serde_json::from_str(
             r#"{"version":1,"local_account":"0123456789abcdef0123456789abcdef","progression":"post-intro"}"#,
         )
@@ -356,6 +376,7 @@ mod tests {
             player_name: "Driver".into(),
             record_protocol: false,
             events: false,
+            game_support: false,
         };
         request.validate().unwrap();
         let plain = vec![
@@ -367,13 +388,22 @@ mod tests {
         let mut legacy = serde_json::to_value(&request).unwrap();
         legacy.as_object_mut().unwrap().remove("bundled_server");
         legacy.as_object_mut().unwrap().remove("events");
+        legacy.as_object_mut().unwrap().remove("game_support");
         let legacy = serde_json::from_value::<Request>(legacy).unwrap();
-        assert!(!legacy.bundled_server && !legacy.events);
+        assert!(!legacy.bundled_server && !legacy.events && !legacy.game_support);
+        assert!(
+            !legacy.serves_game(),
+            "a serve request without the field serves no game"
+        );
         request.bundled_server = true;
         let selected = request.server_arguments(plain.clone());
         assert_eq!(selected[0], crate::commands::BUNDLED_SERVER_FLAG);
         assert_eq!(selected[1..], plain);
+        request.game_support = true;
+        assert!(request.serves_game());
+        request.game_support = false;
         request.action = Action::Start;
+        assert!(request.serves_game(), "start always serves the game");
         assert!(request.validate().is_err());
         request.game_directory = Some(PathBuf::from("game"));
         request.validate().unwrap();

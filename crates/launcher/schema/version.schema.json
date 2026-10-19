@@ -18,6 +18,11 @@
           "const": "events",
           "description": "`--events` on `setup`, `serve` and `start`.",
           "type": "string"
+        },
+        {
+          "const": "play",
+          "description": "`play`: start the game inside a running `serve` session (Windows).",
+          "type": "string"
         }
       ]
     }

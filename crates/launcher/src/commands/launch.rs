@@ -79,14 +79,23 @@ fn new_session_id() -> String {
 /// `setup`, `serve` and `start`: preflight, write the request, supervise.
 /// With `--json` the final status is printed as one object; with
 /// `--events` the whole session is a JSON-lines stream ending in `final`.
-pub fn launch(context: &Context, action: Action, args: &SessionArgs) -> Result<()> {
+/// `server_only` keeps a Windows `serve` session from hosting the game.
+pub fn launch(
+    context: &Context,
+    action: Action,
+    args: &SessionArgs,
+    server_only: bool,
+) -> Result<()> {
     let mut emitter = if args.events {
         crate::terminal::silence();
         Emitter::stdout()
     } else {
         Emitter::disabled()
     };
-    let (record, result) = match start_session(context, action, args, &mut emitter) {
+    let game_support = action == Action::Start
+        || (action == Action::Serve && platform::supports_game_launch() && !server_only);
+    let started = start_session(context, action, args, game_support, &mut emitter);
+    let (record, result) = match started {
         Ok((run, exit)) => match completed_status(&run) {
             Ok(record) => {
                 let result = outcome(&run, exit, record.as_ref());
@@ -112,11 +121,13 @@ pub fn launch(context: &Context, action: Action, args: &SessionArgs) -> Result<(
 
 /// Preflight, create the session directory and request, then run the
 /// supervisor to completion. Returns the session directory and the
-/// supervisor's exit code (`None` when it was terminated).
+/// supervisor's exit code (`None` when it was terminated). With
+/// `game_support` the game checks run and the server starts as for `start`.
 fn start_session(
     context: &Context,
     action: Action,
     args: &SessionArgs,
+    game_support: bool,
     emitter: &mut Emitter,
 ) -> Result<(PathBuf, Option<i32>)> {
     if action == Action::Start && !platform::supports_game_launch() {
@@ -131,7 +142,7 @@ fn start_session(
             game_directory: Some(&args.game.game_dir),
             data_directory: &context.data_dir,
             server_path: &server,
-            for_game: action == Action::Start,
+            for_game: game_support,
         },
     )?;
     let data = report.data_directory.clone();
@@ -157,6 +168,7 @@ fn start_session(
             player_name: args.player_name.clone(),
             record_protocol: args.record_protocol,
             events: args.events,
+            game_support,
         };
         let request_path = run.join("request.json");
         records::write_new_json(&request_path, &request)?;
@@ -221,6 +233,7 @@ fn completed_status(run: &Path) -> Result<Option<records::Status>> {
     let mut record: records::Status = records::read_json(&path)?;
     if record.state.is_live() {
         record.state = records::State::Interrupted;
+        record.game_running = false;
         record.message = "Supervisor exited before recording completion. Inspect owned processes before restarting; account data is preserved.".into();
     }
     Ok(Some(record))
@@ -253,7 +266,7 @@ pub fn supervise(request_path: &Path) -> Result<()> {
     let _lock = match started {
         Ok(lock) => lock,
         Err(failure) => {
-            record_refusal(&run, &request.id, &failure, &mut emitter);
+            record_refusal(&run, &request.id, request.action, &failure, &mut emitter);
             return Err(failure);
         }
     };
@@ -262,7 +275,7 @@ pub fn supervise(request_path: &Path) -> Result<()> {
     let mut live = match LiveSession::new(request, data, run.clone(), emitter) {
         Ok(live) => live,
         Err(failure) => {
-            record_refusal(&run, &id, &failure, &mut Emitter::disabled());
+            record_refusal(&run, &id, action, &failure, &mut Emitter::disabled());
             return Err(failure);
         }
     };
@@ -276,10 +289,12 @@ pub fn supervise(request_path: &Path) -> Result<()> {
 
 /// Record why a supervisor stopped before its session began, so `sessions`
 /// and the event stream show the reason. Never replaces an existing status.
-fn record_refusal(run: &Path, id: &str, failure: &Failure, emitter: &mut Emitter) {
+fn record_refusal(run: &Path, id: &str, action: Action, failure: &Failure, emitter: &mut Emitter) {
     let record = Status {
         version: records::VERSION,
         id: id.to_owned(),
+        action: Some(action),
+        game_running: false,
         utc: crate::clock::now_iso(),
         state: records::State::Failed,
         message: failure.message.clone(),
@@ -315,6 +330,8 @@ mod tests {
             state: records::State::Ready,
             message: "ready".into(),
             worker_pid: 123,
+            action: Some(crate::records::Action::Serve),
+            game_running: false,
             game_pid: Some(456),
             server_pid: Some(789),
         };
@@ -348,6 +365,8 @@ mod tests {
             state: records::State::Finished,
             message: "done".into(),
             worker_pid: 1,
+            action: Some(crate::records::Action::Serve),
+            game_running: false,
             game_pid: None,
             server_pid: None,
         };
@@ -382,7 +401,7 @@ mod tests {
         let capture = crate::events::Capture::default();
         let mut emitter = Emitter::to(capture.clone());
         let failure = Failure::refused("Another Afterhours session holds this data directory.");
-        record_refusal(&run, &"b".repeat(32), &failure, &mut emitter);
+        record_refusal(&run, &"b".repeat(32), Action::Serve, &failure, &mut emitter);
         let stored: Status = records::read_json(&run.join("status.json")).unwrap();
         assert_eq!(stored.state, records::State::Failed);
         assert_eq!(stored.message, failure.message);
@@ -394,6 +413,7 @@ mod tests {
         record_refusal(
             &run,
             &"b".repeat(32),
+            Action::Serve,
             &Failure::internal("later"),
             &mut emitter,
         );

@@ -1,6 +1,26 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "definitions": {
+    "Action": {
+      "description": "What a session was asked to do.",
+      "oneOf": [
+        {
+          "const": "setup",
+          "description": "Prepare content and the account; start nothing.",
+          "type": "string"
+        },
+        {
+          "const": "serve",
+          "description": "Prepare, then run the server without a game.",
+          "type": "string"
+        },
+        {
+          "const": "start",
+          "description": "Prepare, run the server, start and route the game.",
+          "type": "string"
+        }
+      ]
+    },
     "State": {
       "description": "Session states, in the order a successful session passes through them.",
       "oneOf": [
@@ -49,6 +69,18 @@
     "Status": {
       "description": "`artifacts/launcher/<id>/status.json`: the supervisor's latest state.\nAlso the final record of `setup`, `serve` and `start` with `--json`.",
       "properties": {
+        "action": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Action"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "What the session was started as. `serve` hosts the server and may\nstart the game on request; `null` only in records written before\nthis field existed."
+        },
         "game_pid": {
           "format": "uint32",
           "minimum": 0,
@@ -56,6 +88,11 @@
             "integer",
             "null"
           ]
+        },
+        "game_running": {
+          "default": false,
+          "description": "Whether the session's game process is running: from its start until\nit exits. With `action` `serve` this tells hosting from playing.\nAlways `false` for an interrupted session.",
+          "type": "boolean"
         },
         "id": {
           "description": "Session ID: 32 lowercase hexadecimal characters.",
@@ -96,6 +133,8 @@
       "required": [
         "version",
         "id",
+        "action",
+        "game_running",
         "utc",
         "state",
         "message",

@@ -243,6 +243,8 @@ mod tests {
             state,
             message: "m".into(),
             worker_pid: 1,
+            action: Some(crate::records::Action::Serve),
+            game_running: false,
             game_pid: None,
             server_pid: None,
         }

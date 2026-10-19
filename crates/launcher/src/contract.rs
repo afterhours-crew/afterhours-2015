@@ -52,6 +52,10 @@ impl Record for StopReport {
     const NAME: &'static str = "stop";
     const VERSION: u32 = 1;
 }
+impl Record for PlayReport {
+    const NAME: &'static str = "play";
+    const VERSION: u32 = 1;
+}
 impl Record for RecoverReport {
     const NAME: &'static str = "recover";
     const VERSION: u32 = 1;
@@ -103,7 +107,7 @@ fn info<T: Record>() -> RecordInfo {
 }
 
 /// Every record, sorted by name.
-pub fn records() -> [RecordInfo; 10] {
+pub fn records() -> [RecordInfo; 11] {
     let mut all = [
         info::<Preflight>(),
         info::<events::Event>(),
@@ -114,6 +118,7 @@ pub fn records() -> [RecordInfo; 10] {
         info::<sessions::SessionList>(),
         info::<StatusReport>(),
         info::<StopReport>(),
+        info::<PlayReport>(),
         info::<VersionReport>(),
     ];
     all.sort_by_key(|r| r.name);
@@ -217,6 +222,28 @@ impl StopReport {
     }
 }
 
+/// `play --json`: the request was written. Failures, such as no running
+/// `serve` session or a game already running, exit with code 4 or 1.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct PlayReport {
+    pub version: u32,
+    /// The session's status when the request was made. The game's progress
+    /// follows in the session's later statuses and events.
+    pub status: Status,
+    /// The play request file the serving supervisor consumes.
+    pub play_file: PathBuf,
+}
+
+impl PlayReport {
+    pub fn new(status: Status, play_file: PathBuf) -> Self {
+        Self {
+            version: <Self as Record>::VERSION,
+            status,
+            play_file,
+        }
+    }
+}
+
 /// `recover --json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct RecoverReport {
@@ -249,13 +276,16 @@ pub enum Capability {
     Sessions,
     /// `--events` on `setup`, `serve` and `start`.
     Events,
+    /// `play`: start the game inside a running `serve` session (Windows).
+    Play,
 }
 
 /// Capabilities of this build, in a fixed order.
-pub const CAPABILITIES: [Capability; 3] = [
+pub const CAPABILITIES: [Capability; 4] = [
     Capability::Profile,
     Capability::Sessions,
     Capability::Events,
+    Capability::Play,
 ];
 
 /// Identity of the program the launcher library is running in.
@@ -515,6 +545,8 @@ mod tests {
             state: State::Ready,
             message: "Server is ready.".into(),
             worker_pid: 10,
+            action: Some(crate::records::Action::Serve),
+            game_running: false,
             game_pid: None,
             server_pid: Some(11),
         }
@@ -628,6 +660,7 @@ mod tests {
         testing::validate("status", &StatusReport::new(None));
         testing::validate("status", &StatusReport::new(Some(status())));
         testing::validate("session-status", &status());
+        testing::validate("play", &PlayReport::new(status(), PathBuf::from("play")));
         testing::validate(
             "stop",
             &StopReport::new(

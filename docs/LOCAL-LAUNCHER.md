@@ -199,9 +199,19 @@ nfs-afterhours stop
 `serve` prepares like `setup`, starts `nfs-server` directly on loopback and
 supervises it until it exits, a stop is requested or you press Ctrl+C. On Linux
 and macOS point `--game-dir` at a copy of the installation directory; the
-content readers need its files, not a running game. The server leaves the LSX
-port disabled in this mode. Non-loopback listening for a remote client is not
-yet implemented and is tracked separately.
+content readers need its files, not a running game, and the server leaves the
+LSX port disabled. Non-loopback listening for a remote client is not yet
+implemented and is tracked separately.
+
+On Windows a `serve` session can also host the game. It runs the same checks as
+`start` and starts the server the same way, so close EA Desktop and the game
+first; `serve --server-only` skips that and serves without game support. While
+it runs, `nfs-afterhours play` asks it to start the game in the same session:
+activation, routing and statuses work as for `start`. When the game exits the
+session goes back to serving, and `play` can start it again; `stop` closes the
+game first, then the server. `play` exits with code 4 without a running session
+and 1 when the session cannot start a game (not `serve`, `--server-only`,
+stopping, or a game already running). Not yet tested live.
 
 Quitting normally in the game also shuts down the server. Stop first requests
 normal game closure, then terminates only its owned process tree if closure does

@@ -203,6 +203,10 @@ pub const CONFLICTING_PROCESSES: &[&str] = &[
     "EADesktopDebug",
     "OriginDebug",
 ];
+/// Processes that keep `play` from starting the game: the game itself and the
+/// EA applications. The `Debug` names of [`CONFLICTING_PROCESSES`] are left
+/// out because a serving session's own server runs under one of them.
+pub const PLAY_CONFLICTS: &[&str] = &["NFS16", "NFS16_trial", "EADesktop", "Origin"];
 /// Loopback port the game expects the launcher services on.
 pub const LSX_PORT: u16 = 3216;
 
@@ -226,6 +230,27 @@ pub fn existing_absolute(path: &Path, what: &str) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn play_conflicts_never_include_the_compatibility_server_name() {
+        for (_, name) in [
+            (
+                "eadesktop",
+                crate::compat::compatibility_name(r"C:\EA\EADesktop.exe"),
+            ),
+            (
+                "origin",
+                crate::compat::compatibility_name(r"C:\Origin\Origin.exe"),
+            ),
+        ] {
+            let stem = name.unwrap().trim_end_matches(".exe");
+            assert!(CONFLICTING_PROCESSES.contains(&stem), "{stem}");
+            assert!(!PLAY_CONFLICTS.contains(&stem), "{stem}");
+        }
+        for name in PLAY_CONFLICTS {
+            assert!(CONFLICTING_PROCESSES.contains(name), "{name}");
+        }
+    }
 
     #[test]
     fn a_bound_port_is_reported_busy_and_a_free_one_free() {

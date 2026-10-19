@@ -47,6 +47,8 @@ fn status(dir: &Path, id: &str, state: State, recorded: SystemTime) {
         state,
         message: format!("{state} message"),
         worker_pid: 1,
+        action: Some(crate::records::Action::Serve),
+        game_running: false,
         game_pid: None,
         server_pid: Some(2),
     };

@@ -17,10 +17,11 @@ cache reuse, account and service steps. JSON results on stdout remain parseable.
 ```text
 nfs-afterhours check   --game-dir <DIR>     verify installation, paths, registration; change nothing
 nfs-afterhours setup   --game-dir <DIR>     prepare content and the local account; start nothing
-nfs-afterhours serve   --game-dir <DIR>     run the server without a game (every platform)
+nfs-afterhours serve   --game-dir <DIR>     run the server (every platform); on Windows `play` can join
 nfs-afterhours start   --game-dir <DIR>     run the server, start and route the game (Windows)
 nfs-afterhours status                       report the current session
 nfs-afterhours stop                         ask the live session to close the game, then the server
+nfs-afterhours play                         ask the running serve session to start the game (Windows)
 nfs-afterhours profile [--account-id <ID>]  show a saved driver's profile; change nothing
                        [--game-dir <DIR>]   (car names come from the installed game,
                        [--language <LOCALE>] read-only, in the game's locale)
@@ -54,7 +55,8 @@ field and a JSON Schema (draft 7) generated from the Rust type that prints it:
 | `check` | `check --json` |
 | `status` | `status --json`: `{"version", "session"}`, `session` `null` before any session |
 | `stop` | `stop --json`: `outcome` `requested` or `already-over`, with the status |
-| `session-status` | `setup`/`serve`/`start --json` (the final status); also `status.json` |
+| `play` | `play --json`: the status when the request was written and the request file |
+| `session-status` | `setup`/`serve`/`start --json` (the final status); also `status.json`. It carries the session's `action` and `game_running`, so `serve` without a game is hosting and with one is playing |
 | `event` | each line of `setup`/`serve`/`start --events` |
 | `profile`, `profile-list` | `profile --json`, `profile --list --json` |
 | `sessions` | `sessions --json` |
@@ -72,8 +74,8 @@ strict checker that rejects any property a schema does not describe.
 `version --json` is the record to read first: program (`Afterhours` or
 `nfs-afterhours`), package version, release tag, source revision (`null` for
 local builds), whether this platform can launch the game, the current version
-of every record, and `capabilities`: `profile`, `sessions` and `events` today.
-`world-settings` is planned. A screen whose capability is missing should say
+of every record, and `capabilities`: `profile`, `sessions`, `events` and
+`play` today. `world-settings` is planned. A screen whose capability is missing should say
 the feature is not available yet.
 
 Versioning: until the desktop launcher's first release, every record stays at
@@ -109,6 +111,34 @@ stopping the session: the supervisor outlives a closed launcher window, and
 refused before its session begins (another session holds the data directory,
 a stop arrived, the server changed) records that reason as a `failed` status.
 
+### Playing in a serve session
+
+On Windows a `serve` session is ready to host the game unless it was started
+with `--server-only`: its preflight runs the same game checks as `start`
+(activation helper, client registration, no game or EA app running, port 3216
+free) and its server starts as for `start`, under the compatibility name and
+with the launcher-services port. Without the game checks passing, `serve`
+refuses, exactly as `start` does; `--server-only` serves anyway, without game
+support, as on Linux and macOS.
+
+`play` writes a `play` request into the current session directory, as `stop`
+does, after checking that the current session is a live `serve` session with
+game support, not stopping, with no game starting, running or already
+requested, and that no game or EA app process is running. Otherwise it exits
+with 4 (no live session) or 1 (anything else) and writes nothing. The serving
+supervisor consumes the request and runs the game steps of `start` in the same
+session and job: `starting`, `activation` if the EA helper shows a window,
+routing, then `ready` with `game_running` true. Statuses and events flow as
+for `start`; each game gets its own logs (`game`, then `game-2`, ...).
+
+When that game exits, or fails to start, the supervisor closes it if needed,
+finishes its routing lease, drains its logs and returns to `ready` with
+`game_running` false and a message with any exit code or reason; the server
+keeps running and `play` may start another game. `stop` still closes the game
+first, then the server, also while the game is starting. A failure to close
+the game or finish its lease, or a server exit, ends the session through the
+normal cleanup.
+
 ## Sessions
 
 `sessions` lists `artifacts/launcher/<id>/` newest first (by when the session
@@ -141,12 +171,16 @@ runs the session state machine:
 
 ```text
 preparing  -> nfs-server prepare-local, then create-account on first use
-starting   -> server ready; game started with the date marker       (start only)
+starting   -> server ready; game started with the date marker       (start, or play in serve)
 activation -> the installed activation helper shows a window; no timeout
-ready      -> routing applied (start) or server listening (serve)
+ready      -> routing applied (start, play) or server listening (serve)
 stopping   -> a stop request arrived; close the game, then the server
 finished | failed
 ```
+
+In `serve`, a play request moves `ready` through `starting` (and
+`activation`) back to `ready` with the game, and its exit back to `ready`
+serving.
 
 Cleanup always runs after the session body, in a fixed order: close the game
 if it is still running, retire the routing lease once the game's lifetime has

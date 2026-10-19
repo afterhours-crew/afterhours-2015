@@ -94,6 +94,18 @@
     "Status": {
       "description": "`artifacts/launcher/<id>/status.json`: the supervisor's latest state.\nAlso the final record of `setup`, `serve` and `start` with `--json`.",
       "properties": {
+        "action": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Action"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "What the session was started as. `serve` hosts the server and may\nstart the game on request; `null` only in records written before\nthis field existed."
+        },
         "game_pid": {
           "format": "uint32",
           "minimum": 0,
@@ -101,6 +113,11 @@
             "integer",
             "null"
           ]
+        },
+        "game_running": {
+          "default": false,
+          "description": "Whether the session's game process is running: from its start until\nit exits. With `action` `serve` this tells hosting from playing.\nAlways `false` for an interrupted session.",
+          "type": "boolean"
         },
         "id": {
           "description": "Session ID: 32 lowercase hexadecimal characters.",
@@ -141,6 +158,8 @@
       "required": [
         "version",
         "id",
+        "action",
+        "game_running",
         "utc",
         "state",
         "message",

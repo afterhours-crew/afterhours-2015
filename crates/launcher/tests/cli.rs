@@ -99,8 +99,8 @@ fn help_lists_every_public_subcommand_and_the_exit_table() {
     assert_eq!(out.status.code(), Some(0));
     let help = text(&out.stdout);
     for sub in [
-        "check", "setup", "serve", "start", "status", "stop", "profile", "sessions", "version",
-        "schema", "recover",
+        "check", "setup", "serve", "start", "status", "stop", "play", "profile", "sessions",
+        "version", "schema", "recover",
     ] {
         assert!(
             help.contains(&format!("\n  {sub}")),
@@ -139,6 +139,14 @@ fn status_and_stop_on_an_unused_data_directory() {
     assert_eq!(text(&out.stdout).trim(), r#"{"version":1,"session":null}"#);
     let out = run(&["--data-dir", data.to_str().unwrap(), "stop"]);
     assert_eq!(out.status.code(), Some(4), "{}", text(&out.stderr));
+    let out = run(&["--data-dir", data.to_str().unwrap(), "play", "--json"]);
+    assert_eq!(out.status.code(), Some(4), "{}", text(&out.stderr));
+    assert!(out.stdout.is_empty(), "a refused play prints no record");
+    assert!(text(&out.stderr).contains("nfs-afterhours serve"));
+    assert!(
+        std::fs::read_dir(&data).unwrap().next().is_none(),
+        "play wrote nothing"
+    );
     std::fs::remove_dir_all(data).unwrap();
 }
 
@@ -155,7 +163,7 @@ fn version_reports_records_and_capabilities_and_schema_prints_each_one() {
     assert_eq!(report["program_version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(
         report["capabilities"],
-        serde_json::json!(["profile", "sessions", "events"])
+        serde_json::json!(["profile", "sessions", "events", "play"])
     );
     assert_eq!(report["os"], std::env::consts::OS);
     let records = report["records"].as_object().unwrap();
@@ -182,7 +190,7 @@ fn version_reports_records_and_capabilities_and_schema_prints_each_one() {
         assert_eq!(&schema["properties"]["version"]["const"], version, "{name}");
     }
     let text_version = run(&["version"]);
-    assert!(text(&text_version.stdout).contains("capabilities: profile, sessions, events"));
+    assert!(text(&text_version.stdout).contains("capabilities: profile, sessions, events, play"));
     assert_eq!(run(&["schema", "nothing"]).status.code(), Some(2));
 }
 
@@ -602,6 +610,13 @@ fn a_serve_session_prepares_runs_reports_and_stops() {
         std::thread::sleep(std::time::Duration::from_millis(50));
     };
     assert!(ready.contains("\"server_pid\":"), "{ready}");
+    assert!(ready.contains("\"action\":\"serve\""), "{ready}");
+    assert!(ready.contains("\"game_running\":false"), "{ready}");
+    // Only Windows hosts the game; the serving session is left as it was.
+    let play = run(&["--data-dir", &data_arg, "play"]);
+    assert_eq!(play.status.code(), Some(1), "{}", text(&play.stderr));
+    assert!(text(&play.stderr).contains("Windows only"));
+    assert!(!run_dir.join("play").exists());
     assert!(
         data.join("account.json").exists(),
         "account pointer written"
@@ -715,6 +730,13 @@ fn a_serve_session_streams_its_states_and_diagnostics_as_json_lines() {
         .map(|e| e["status"]["state"].as_str().unwrap())
         .collect();
     assert_eq!(states, ["preparing", "ready", "stopping", "finished"]);
+    assert!(
+        events
+            .iter()
+            .filter(|e| e["event"] == "status")
+            .all(|e| e["status"]["action"] == "serve" && e["status"]["game_running"] == false),
+        "every status names its action and that no game runs"
+    );
     let diagnostics: Vec<(&str, &str)> = events
         .iter()
         .filter(|e| e["event"] == "diagnostic")

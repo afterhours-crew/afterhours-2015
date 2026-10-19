@@ -105,6 +105,22 @@ pub struct SessionArgs {
     pub events: bool,
 }
 
+/// Arguments for `serve`.
+#[derive(Debug, Clone, Args)]
+pub struct ServeArgs {
+    #[command(flatten)]
+    pub session: SessionArgs,
+
+    /// Serve without game support, so `play` is unavailable (Windows).
+    ///
+    /// By default a Windows serve session is ready to host the game: it runs
+    /// the same checks as `start` (activation helper, registration, no EA
+    /// app or game running, port 3216 free) and starts the server as `start`
+    /// does. With this flag none of that applies, as on other platforms.
+    #[arg(long)]
+    pub server_only: bool,
+}
+
 /// Arguments for `sessions`.
 #[derive(Debug, Clone, Args)]
 pub struct SessionsArgs {
@@ -160,11 +176,13 @@ pub enum Command {
     /// local account on first use. Existing accounts are reused, never reset.
     Setup(SessionArgs),
 
-    /// Run the server without launching the game. Works on every platform.
+    /// Run the server; on Windows the game can join later with `play`.
     ///
     /// Prepares like `setup`, then starts the server on loopback and
-    /// supervises it until it exits, a stop is requested or Ctrl+C.
-    Serve(SessionArgs),
+    /// supervises it until it exits, a stop is requested or Ctrl+C. Works on
+    /// every platform. On Windows `play` starts the game inside this session;
+    /// when the game exits, the server keeps running.
+    Serve(ServeArgs),
 
     /// Run the server, then start and route the installed game. Windows only.
     ///
@@ -185,6 +203,17 @@ pub enum Command {
     /// Writes a stop request the supervisor consumes. Never kills a process
     /// by identifier. Exits with code 4 when there is no live session.
     Stop,
+
+    /// Ask the running `serve` session to start the game. Windows only.
+    ///
+    /// Writes a play request the serving supervisor consumes. It then starts,
+    /// routes and supervises the game exactly as `start` does, in the same
+    /// session; follow it with `status` or the session's event stream. When
+    /// the game exits the session goes back to serving. Exits with code 4
+    /// when no session runs and 1 when the session cannot start the game:
+    /// not a serve session, served with --server-only, stopping, or a game
+    /// already running or requested.
+    Play,
 
     /// Show a saved driver's profile, or list every saved driver; change nothing.
     ///
@@ -331,7 +360,35 @@ mod tests {
     fn contract_commands_parse_and_bound_their_arguments() {
         let serve = Cli::try_parse_from(["nfs-afterhours", "serve", "--game-dir", "G", "--events"])
             .unwrap();
-        assert!(matches!(serve.command, Command::Serve(args) if args.events));
+        assert!(
+            matches!(serve.command, Command::Serve(args) if args.session.events && !args.server_only)
+        );
+        let serve = Cli::try_parse_from([
+            "nfs-afterhours",
+            "serve",
+            "--game-dir",
+            "G",
+            "--server-only",
+        ])
+        .unwrap();
+        assert!(matches!(serve.command, Command::Serve(args) if args.server_only));
+        assert!(
+            Cli::try_parse_from([
+                "nfs-afterhours",
+                "start",
+                "--game-dir",
+                "G",
+                "--server-only"
+            ])
+            .is_err(),
+            "--server-only is a serve option"
+        );
+        assert!(matches!(
+            Cli::try_parse_from(["nfs-afterhours", "play", "--json"])
+                .unwrap()
+                .command,
+            Command::Play
+        ));
         match Cli::try_parse_from(["nfs-afterhours", "sessions"])
             .unwrap()
             .command
