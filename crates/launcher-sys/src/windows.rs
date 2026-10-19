@@ -17,8 +17,8 @@ use std::{
 };
 use windows_sys::Win32::{
     Foundation::{
-        CloseHandle, ERROR_INSUFFICIENT_BUFFER, FILETIME, HANDLE, HWND, INVALID_HANDLE_VALUE,
-        LPARAM, WAIT_OBJECT_0, WAIT_TIMEOUT,
+        CloseHandle, ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_PARAMETER, FILETIME, HANDLE, HWND,
+        INVALID_HANDLE_VALUE, LPARAM, WAIT_OBJECT_0, WAIT_TIMEOUT,
     },
     NetworkManagement::IpHelper::GetExtendedTcpTable,
     Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation},
@@ -515,14 +515,17 @@ unsafe extern "system" {
 pub struct Thread(Owned);
 
 impl Thread {
-    /// Open a thread for information queries only.
-    pub fn open(tid: u32) -> std::io::Result<Thread> {
+    /// Open a snapshot candidate for information queries only. `None` means
+    /// Windows no longer recognizes the identifier; the caller must take a
+    /// fresh snapshot, and must still verify ownership and lifetime on success.
+    pub fn open_snapshot(tid: u32) -> std::io::Result<Option<Thread>> {
         // SAFETY: plain identifier and access mask; the handle is checked.
         let handle = unsafe { OpenThread(THREAD_QUERY_INFORMATION, 0, tid) };
         if handle.is_null() {
-            return Err(last_error("Open game thread"));
+            let error = std::io::Error::last_os_error();
+            return snapshot_open_error(error);
         }
-        Ok(Thread(Owned(handle)))
+        Ok(Some(Thread(Owned(handle))))
     }
 
     /// Query `ThreadBasicInformation`.
@@ -553,6 +556,17 @@ impl Thread {
             pid: value.unique_process as u64,
             tid: value.unique_thread as u64,
         })
+    }
+}
+
+fn snapshot_open_error(error: std::io::Error) -> std::io::Result<Option<Thread>> {
+    if error.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) {
+        Ok(None)
+    } else {
+        Err(std::io::Error::new(
+            error.kind(),
+            format!("Open game thread: {error}"),
+        ))
     }
 }
 
@@ -833,11 +847,49 @@ mod tests {
 
     #[test]
     fn thread_information_identifies_our_own_thread() {
-        let tid = thread_ids(std::process::id(), 1024).unwrap()[0];
-        let info = Thread::open(tid).unwrap().info().unwrap();
+        // SAFETY: reads the calling thread's identifier without side effects.
+        let tid = unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() };
+        let info = Thread::open_snapshot(tid).unwrap().unwrap().info().unwrap();
         assert_eq!(info.pid, u64::from(std::process::id()));
         assert_eq!(info.tid, u64::from(tid));
         assert!(info.teb > 0);
+    }
+
+    #[test]
+    fn missing_snapshot_thread_is_retryable_but_other_errors_are_not() {
+        // Windows never assigns thread identifier zero. Exercise OpenThread's
+        // actual missing-identifier result without relying on ID reuse timing.
+        assert!(Thread::open_snapshot(0).unwrap().is_none());
+        for code in [5, 6, 8] {
+            let result = snapshot_open_error(std::io::Error::from_raw_os_error(code));
+            assert!(result.is_err(), "unexpected retry for error {code}");
+        }
+        assert!(snapshot_open_error(std::io::Error::other("87")).is_err());
+    }
+
+    #[test]
+    fn opened_candidate_reports_exit_before_environment_is_read() {
+        let (id_tx, id_rx) = std::sync::mpsc::channel();
+        let (exit_tx, exit_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            // SAFETY: reads this worker's identifier without side effects.
+            let tid = unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() };
+            id_tx.send(tid).unwrap();
+            exit_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+        });
+        let tid = id_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let thread = Thread::open_snapshot(tid).unwrap().unwrap();
+        assert_eq!(thread.info().unwrap().exit_status, 259);
+        exit_tx.send(()).unwrap();
+        worker.join().unwrap();
+        let info = thread.info().unwrap();
+        assert_eq!(info.pid, u64::from(std::process::id()));
+        assert_eq!(info.tid, u64::from(tid));
+        assert_ne!(info.exit_status, 259);
     }
 
     #[test]
