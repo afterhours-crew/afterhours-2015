@@ -100,7 +100,7 @@ fn help_lists_every_public_subcommand_and_the_exit_table() {
     let help = text(&out.stdout);
     for sub in [
         "check", "setup", "serve", "start", "status", "stop", "play", "profile", "sessions",
-        "version", "schema", "recover",
+        "settings", "version", "schema", "recover",
     ] {
         assert!(
             help.contains(&format!("\n  {sub}")),
@@ -163,7 +163,7 @@ fn version_reports_records_and_capabilities_and_schema_prints_each_one() {
     assert_eq!(report["program_version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(
         report["capabilities"],
-        serde_json::json!(["profile", "sessions", "events", "play"])
+        serde_json::json!(["profile", "sessions", "events", "play", "world-settings"])
     );
     assert_eq!(report["os"], std::env::consts::OS);
     let records = report["records"].as_object().unwrap();
@@ -190,7 +190,10 @@ fn version_reports_records_and_capabilities_and_schema_prints_each_one() {
         assert_eq!(&schema["properties"]["version"]["const"], version, "{name}");
     }
     let text_version = run(&["version"]);
-    assert!(text(&text_version.stdout).contains("capabilities: profile, sessions, events, play"));
+    assert!(
+        text(&text_version.stdout)
+            .contains("capabilities: profile, sessions, events, play, world-settings")
+    );
     assert_eq!(run(&["schema", "nothing"]).status.code(), Some(2));
 }
 

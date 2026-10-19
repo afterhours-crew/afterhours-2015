@@ -60,6 +60,10 @@ impl Record for RecoverReport {
     const NAME: &'static str = "recover";
     const VERSION: u32 = 1;
 }
+impl Record for SettingsReport {
+    const NAME: &'static str = "settings";
+    const VERSION: u32 = 1;
+}
 impl Record for VersionReport {
     const NAME: &'static str = "version";
     const VERSION: u32 = 1;
@@ -107,7 +111,7 @@ fn info<T: Record>() -> RecordInfo {
 }
 
 /// Every record, sorted by name.
-pub fn records() -> [RecordInfo; 11] {
+pub fn records() -> [RecordInfo; 12] {
     let mut all = [
         info::<Preflight>(),
         info::<events::Event>(),
@@ -116,6 +120,7 @@ pub fn records() -> [RecordInfo; 11] {
         info::<RecoverReport>(),
         info::<Status>(),
         info::<sessions::SessionList>(),
+        info::<SettingsReport>(),
         info::<StatusReport>(),
         info::<StopReport>(),
         info::<PlayReport>(),
@@ -244,6 +249,41 @@ impl PlayReport {
     }
 }
 
+/// `settings --json`: the saved traffic and rival amounts, which every later
+/// `setup`, `serve` and `start` uses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct SettingsReport {
+    pub version: u32,
+    /// Ambient traffic as a percentage of the original amount; 0 turns it
+    /// off and 100 is the original.
+    pub traffic_percent: u16,
+    /// Most roaming rivals active at once; 0 turns them off and `null`
+    /// keeps the original number.
+    pub rival_limit: Option<u16>,
+    /// Largest `traffic_percent` this build accepts.
+    pub max_traffic_percent: u16,
+    /// Largest `rival_limit` this build accepts.
+    pub max_rivals: u16,
+    /// `settings.json` in the data directory; it may not exist yet.
+    pub file: PathBuf,
+    /// Whether this command saved the file.
+    pub saved: bool,
+}
+
+impl SettingsReport {
+    pub fn new(settings: &crate::settings::Settings, file: PathBuf, saved: bool) -> Self {
+        Self {
+            version: <Self as Record>::VERSION,
+            traffic_percent: settings.traffic_percent,
+            rival_limit: settings.rival_limit,
+            max_traffic_percent: crate::settings::MAX_TRAFFIC_PERCENT,
+            max_rivals: crate::settings::MAX_RIVALS,
+            file,
+            saved,
+        }
+    }
+}
+
 /// `recover --json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct RecoverReport {
@@ -278,14 +318,18 @@ pub enum Capability {
     Events,
     /// `play`: start the game inside a running `serve` session (Windows).
     Play,
+    /// `settings`, and `--traffic` and `--rivals` on `setup`, `serve` and
+    /// `start`: the amounts of traffic and roaming rivals.
+    WorldSettings,
 }
 
 /// Capabilities of this build, in a fixed order.
-pub const CAPABILITIES: [Capability; 4] = [
+pub const CAPABILITIES: [Capability; 5] = [
     Capability::Profile,
     Capability::Sessions,
     Capability::Events,
     Capability::Play,
+    Capability::WorldSettings,
 ];
 
 /// Identity of the program the launcher library is running in.

@@ -11,6 +11,7 @@ mod launch;
 mod profile;
 mod recover;
 mod sessions;
+mod settings;
 mod status;
 mod version;
 
@@ -114,6 +115,7 @@ fn dispatch(cli: Cli, bundled_server: Option<PathBuf>, build: Build) -> Result<(
         Command::Play => status::play(&context),
         Command::Profile(args) => profile::profile(&context, &args),
         Command::Sessions(args) => sessions::sessions(&context, &args),
+        Command::Settings(args) => settings::settings(&context, &args),
         Command::Recover { account_id } => recover::recover(&context, &account_id),
         Command::Supervise { request } => launch::supervise(&request),
         Command::Version | Command::Schema { .. } => unreachable!("handled above"),

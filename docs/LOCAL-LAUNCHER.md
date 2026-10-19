@@ -196,6 +196,11 @@ also edit that file directly; the start output shows the values in use:
 malformed settings are refused rather than ignored. More traffic or rivals than the
 original costs client performance.
 
+`nfs-afterhours settings` prints the saved values without starting anything, and
+`nfs-afterhours settings --traffic 200 --rivals original` saves new ones for the next
+session. Saving is refused while a session runs, because a running session keeps the
+values it started with.
+
 Every subcommand accepts `--json` to print one JSON object instead of text, and
 exits with a documented code (`nfs-afterhours --help` lists them): 0 success,
 1 refused with nothing changed, 2 bad command line, 3 session failed, 4 nothing
