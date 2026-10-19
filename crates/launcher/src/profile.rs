@@ -18,6 +18,7 @@
 //! strings so JavaScript consumers keep every digit.
 
 pub mod content;
+pub mod names;
 
 use crate::{
     clock,
@@ -25,6 +26,7 @@ use crate::{
     paths, records,
 };
 use content::{Content, Need, Source, Vehicle};
+use names::{Localization, Names};
 use nfs_services::{
     authentication::Identity,
     bank::Balance,
@@ -181,6 +183,10 @@ pub struct Item {
     pub definition: String,
     /// Definition class from the installed item content.
     pub class: Option<&'static str>,
+    /// The game's localized name of a car, read from the installation:
+    /// `names.long`. `null` for other items or when it did not resolve.
+    pub name: Option<String>,
+    pub names: Option<Names>,
     /// Blueprint from the installed vehicle content, for cars.
     pub vehicle: Option<Vehicle>,
 }
@@ -221,10 +227,11 @@ pub struct Car {
     pub id: String,
     /// Definition GUID as 32 lowercase hexadecimal characters.
     pub definition: String,
-    /// The blueprint label from the installed vehicle content, such as
-    /// `Ford MustangGT 2015`; not the game's localized name. `null` when the
-    /// vehicle content does not list the definition.
-    pub display_name: Option<String>,
+    /// The game's localized name, read from the installation's text
+    /// database: `names.long`. `null` when it did not resolve; the blueprint
+    /// name stays in `vehicle.label`.
+    pub name: Option<String>,
+    pub names: Option<Names>,
     pub vehicle: Option<Vehicle>,
     pub location: CarLocation,
     /// Garage slot 0-4; `null` in the warehouse.
@@ -313,6 +320,8 @@ pub struct Profile {
     pub counts: Counts,
     pub save: Save,
     pub content: Option<Source>,
+    /// Where car names came from; `null` when none could be read.
+    pub localization: Option<Localization>,
     pub warnings: Vec<String>,
 }
 
@@ -436,9 +445,19 @@ fn reputation(loaded: &Loaded, thresholds: Option<&Thresholds>) -> Reputation {
     }
 }
 
+/// A definition's localized names, when the installation lists it.
+fn localized(content: &Content, definition: &[u8; 16]) -> Option<Names> {
+    content
+        .car_names
+        .as_ref()
+        .and_then(|names| names.get(definition))
+        .map(|entry| entry.names.clone())
+}
+
 fn item(snapshot: &Snapshot, id: ItemId, content: &Content) -> Option<Item> {
     let record = snapshot.items.get(&id)?;
     let definition = record.definition.0;
+    let names = localized(content, &definition);
     Some(Item {
         id: id.get().to_string(),
         definition: hex(&definition),
@@ -447,6 +466,8 @@ fn item(snapshot: &Snapshot, id: ItemId, content: &Content) -> Option<Item> {
             .as_ref()
             .and_then(|items| items.catalog.class(&definition).ok())
             .map(|class| class.name()),
+        name: names.as_ref().and_then(|names| names.long.clone()),
+        names,
         vehicle: content
             .vehicles
             .as_ref()
@@ -520,10 +541,12 @@ fn cars(snapshot: &Snapshot, content: &Content) -> Option<(Vec<Car>, CarSummary)
                 .as_ref()
                 .and_then(|vehicles| vehicles.get(&record.definition.0))
                 .cloned();
+            let names = localized(content, &record.definition.0);
             let car = Car {
                 id: record.id.get().to_string(),
                 definition: hex(&record.definition.0),
-                display_name: vehicle.as_ref().map(|v| v.label.clone()),
+                name: names.as_ref().and_then(|names| names.long.clone()),
+                names,
                 vehicle,
                 location: match slot {
                     Some(0) => CarLocation::Active,
@@ -652,6 +675,32 @@ pub fn build(
         warnings.push("The save has no garage yet.".into());
     }
     let (cars, car_summary) = cars(snapshot, content).unzip();
+    if let Some(names) = &content.car_names {
+        // Owned cars, or the garage's items when cars cannot be classified.
+        let definitions: BTreeSet<&str> = match &cars {
+            Some(cars) => cars.iter().map(|car| car.definition.as_str()).collect(),
+            None => garage
+                .iter()
+                .flat_map(|garage| &garage.slots)
+                .filter_map(|slot| slot.item.as_ref())
+                .map(|item| item.definition.as_str())
+                .collect(),
+        };
+        for definition in definitions {
+            let entry = content::guid(definition).and_then(|guid| names.get(&guid));
+            match entry {
+                None => warnings.push(format!(
+                    "The installation lists no car item for definition {definition}; it has no localized name."
+                )),
+                Some(entry) if !entry.unresolved.is_empty() => warnings.push(format!(
+                    "Car {definition}: {} not in the {} text database.",
+                    entry.unresolved.join(", "),
+                    names.locale
+                )),
+                Some(_) => {}
+            }
+        }
+    }
     let classes = content.items.as_ref().map(|items| {
         let mut by_class = BTreeMap::new();
         let mut unresolved = 0;
@@ -707,6 +756,7 @@ pub fn build(
                 .collect(),
         },
         content: content.source.clone(),
+        localization: content.localization.clone(),
         warnings,
     }
 }
@@ -868,6 +918,96 @@ pub fn parse_account(id: &str) -> Result<AccountId> {
 /// directory's own records.
 pub fn content(data: &Path, explicit: Option<&Path>, need: Need) -> Result<Content> {
     Ok(Content::load(content::locate(data, explicit)?, need))
+}
+
+/// The game's registration, as [`crate::platform::game_registration`]
+/// reads it; tests supply their own.
+#[derive(Clone, Debug, Default)]
+pub struct Registration {
+    pub install_dir: Option<PathBuf>,
+    pub locale: Option<String>,
+}
+
+/// The game directory the current session was started with.
+fn session_game_directory(data: &Path) -> Option<PathBuf> {
+    let pointer: records::SessionPointer =
+        records::read_json(&data.join(crate::session::POINTER_FILE)).ok()?;
+    if pointer.version != records::VERSION || !records::is_id(&pointer.id) {
+        return None;
+    }
+    let request: records::Request =
+        records::read_json(&paths::session_dir(data, &pointer.id).join("request.json")).ok()?;
+    request
+        .game_directory
+        .filter(|directory| directory.is_dir())
+}
+
+/// Read localized car names into `content` from an installation: `game`,
+/// else the one the current session started, else the registered one; in
+/// `language`, else the game's registered locale, else [`names::DEFAULT_LOCALE`].
+/// An explicit argument that cannot be used is refused. Anything else
+/// unavailable becomes a warning and leaves the names `null`.
+pub fn localize(
+    content: &mut Content,
+    data: &Path,
+    game: Option<&Path>,
+    language: Option<&str>,
+    registration: Registration,
+) -> Result<()> {
+    let (locale, locale_from) = match language {
+        Some(locale) if names::is_locale(locale) => (locale.to_owned(), "argument"),
+        Some(_) => {
+            return Err(Failure::refused("--language takes a locale such as en_US."));
+        }
+        None => match registration
+            .locale
+            .filter(|locale| names::is_locale(locale))
+        {
+            Some(locale) => (locale, "registry"),
+            None => (names::DEFAULT_LOCALE.to_owned(), "default"),
+        },
+    };
+    let installation = match game {
+        Some(directory) => {
+            let directory = paths::normalize(directory)?;
+            if !directory.is_dir() {
+                return Err(Failure::refused(
+                    "--game-dir must be an existing directory.",
+                ));
+            }
+            Some((directory, "argument"))
+        }
+        None => session_game_directory(data)
+            .map(|directory| (directory, "current-session"))
+            .or_else(|| {
+                registration
+                    .install_dir
+                    .filter(|directory| directory.is_dir())
+                    .map(|directory| (directory, "registry"))
+            }),
+    };
+    let Some((game_directory, game_directory_from)) = installation else {
+        content
+            .warnings
+            .push("No game installation found; car names are unavailable. Pass --game-dir.".into());
+        return Ok(());
+    };
+    match names::read(&game_directory, &locale, nfs_frostbite::Limits::default()) {
+        Ok(names) => {
+            content.localization = Some(Localization {
+                locale,
+                locale_from,
+                game_directory,
+                game_directory_from,
+                cars: names.len(),
+            });
+            content.car_names = Some(names);
+        }
+        Err(why) => content
+            .warnings
+            .push(format!("Car names are unavailable: {why}.")),
+    }
+    Ok(())
 }
 
 #[cfg(test)]

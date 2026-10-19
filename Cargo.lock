@@ -348,6 +348,7 @@ dependencies = [
  "anstyle",
  "clap",
  "nfs-afterhours-sys",
+ "nfs-frostbite",
  "nfs-services",
  "nfs-storage",
  "nfs-world-core",

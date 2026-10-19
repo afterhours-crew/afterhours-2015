@@ -22,6 +22,8 @@ nfs-afterhours start   --game-dir <DIR>     run the server, start and route the 
 nfs-afterhours status                       report the current session
 nfs-afterhours stop                         ask the live session to close the game, then the server
 nfs-afterhours profile [--account-id <ID>]  show a saved driver's profile; change nothing
+                       [--game-dir <DIR>]   (car names come from the installed game,
+                       [--language <LOCALE>] read-only, in the game's locale)
 nfs-afterhours profile --list               list every saved driver in the data directory
 nfs-afterhours sessions [--limit N] [--id <ID>]  summarize session folders and logs; change nothing
 nfs-afterhours version                      program, JSON record versions and capabilities
@@ -184,14 +186,26 @@ The JSON contract, version 1:
   `save.updated_at_ms`.
 - Item IDs and the persona ID are decimal strings, so JavaScript keeps every
   digit. Definition GUIDs are 32 lowercase hexadecimal characters.
-- A car's `vehicle.label` is its blueprint asset name without `Car_` and with
-  spaces for underscores, not the game's localized display name.
+- A car's `name` is the game's own localized name and `names` its long,
+  medium and short forms (`name` is `names.long`), read from the player's
+  installation each time, never cached or shipped. They are `null` when a
+  string does not resolve, with a warning naming the string ID. The
+  blueprint stays separate: `vehicle.label` is the blueprint asset name
+  without `Car_` and with spaces for underscores.
+- The installation is `--game-dir`, else the one the current session
+  started, else the game's registered one; the locale is `--language`, else
+  the game's registered locale, else `en_US`. `localization` reports both
+  and where they came from, or is `null` with a warning when no names could
+  be read. Locales whose text database uses a multi-byte encoding (Japanese
+  and Traditional Chinese) are not decoded: their names stay `null` rather
+  than guessed. Reading names takes about a quarter of a second in a
+  release build.
 - `cars` lists every owned car, as the server defines one for purchases,
   sales and the warehouse (docs/CAR-OWNERSHIP.md): a root item of the
   race-vehicle class in the owned state. Order: the active car (slot 0),
   garage slots 1-4, then the warehouse (owned cars outside the five slots)
-  by item ID. Each has its `location` and `slot`, `display_name` (the
-  blueprint label, as above), `installed_parts` (records reachable through
+  by item ID. Each has its `location` and `slot`, `name`, `names` and
+  `vehicle` (as above), `installed_parts` (records reachable through
   installed links, nested parts and an installed library wrap included),
   `spare_parts` (records the car owns that are not installed: replaced stock
   parts and purchased spares), `item_records` (its ownership tree, car

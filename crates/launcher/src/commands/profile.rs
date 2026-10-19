@@ -29,7 +29,18 @@ pub fn profile(context: &Context, args: &ProfileArgs) -> Result<()> {
         })?,
     };
     profile::parse_account(&id)?;
-    let content = profile::content(saves.data(), args.content_dir.as_deref(), Need::Full)?;
+    let mut content = profile::content(saves.data(), args.content_dir.as_deref(), Need::Full)?;
+    let (install_dir, locale) = crate::platform::game_registration();
+    profile::localize(
+        &mut content,
+        saves.data(),
+        args.game_dir.as_deref(),
+        args.language.as_deref(),
+        profile::Registration {
+            install_dir,
+            locale,
+        },
+    )?;
     let profile = saves.profile(&id, &content)?;
     context.emit(&profile, || text(&profile))
 }
@@ -110,10 +121,11 @@ fn text(p: &Profile) -> String {
         for slot in &garage.slots {
             let label = slot.item.as_ref().map_or_else(
                 || "empty".to_owned(),
-                |item| match (&item.vehicle, item.class) {
-                    (Some(vehicle), _) => vehicle.label.clone(),
-                    (None, Some(class)) => format!("{class} {}", item.definition),
-                    (None, None) => format!("item {}", item.definition),
+                |item| match (&item.name, &item.vehicle, item.class) {
+                    (Some(name), _, _) => name.clone(),
+                    (None, Some(vehicle), _) => vehicle.label.clone(),
+                    (None, None, Some(class)) => format!("{class} {}", item.definition),
+                    (None, None, None) => format!("item {}", item.definition),
                 },
             );
             let primary = if slot.primary { " (primary)" } else { "" };
@@ -137,8 +149,9 @@ fn text(p: &Profile) -> String {
                 _ => "warehouse".to_owned(),
             };
             let name = car
-                .display_name
+                .name
                 .clone()
+                .or_else(|| car.vehicle.as_ref().map(|vehicle| vehicle.label.clone()))
                 .unwrap_or_else(|| format!("car {}", car.definition));
             let _ = writeln!(
                 out,

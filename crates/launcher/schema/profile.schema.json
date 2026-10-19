@@ -25,13 +25,6 @@
           "description": "Definition GUID as 32 lowercase hexadecimal characters.",
           "type": "string"
         },
-        "display_name": {
-          "description": "The blueprint label from the installed vehicle content, such as\n`Ford MustangGT 2015`; not the game's localized name. `null` when the\nvehicle content does not list the definition.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "id": {
           "type": "string"
         },
@@ -49,6 +42,23 @@
         },
         "location": {
           "$ref": "#/definitions/CarLocation"
+        },
+        "name": {
+          "description": "The game's localized name, read from the installation's text\ndatabase: `names.long`. `null` when it did not resolve; the blueprint\nname stays in `vehicle.label`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "names": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CarNames"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "sale_price": {
           "description": "The stored sale price: the cash that selling this car credits.",
@@ -85,7 +95,8 @@
       "required": [
         "id",
         "definition",
-        "display_name",
+        "name",
+        "names",
         "vehicle",
         "location",
         "slot",
@@ -115,6 +126,36 @@
           "type": "string"
         }
       ]
+    },
+    "CarNames": {
+      "description": "A car's three names in one language. A name is `null` when its string ID\nis absent from the text database or uses an encoding this reader does\nnot decode.",
+      "properties": {
+        "long": {
+          "description": "The longest form; a car's `name` repeats it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "medium": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "short": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "long",
+        "medium",
+        "short"
+      ],
+      "type": "object"
     },
     "CarSummary": {
       "description": "Totals over [`Car`]s.",
@@ -425,6 +466,23 @@
         "id": {
           "type": "string"
         },
+        "name": {
+          "description": "The game's localized name of a car, read from the installation:\n`names.long`. `null` for other items or when it did not resolve.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "names": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CarNames"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "vehicle": {
           "anyOf": [
             {
@@ -441,7 +499,43 @@
         "id",
         "definition",
         "class",
+        "name",
+        "names",
         "vehicle"
+      ],
+      "type": "object"
+    },
+    "Localization": {
+      "description": "Where a profile's car names came from.",
+      "properties": {
+        "cars": {
+          "description": "Car definitions the installation lists.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "game_directory": {
+          "type": "string"
+        },
+        "game_directory_from": {
+          "description": "`argument`, `current-session` or `registry`.",
+          "type": "string"
+        },
+        "locale": {
+          "description": "The text database's locale, such as `en_US`.",
+          "type": "string"
+        },
+        "locale_from": {
+          "description": "`argument`, `registry` (the game's own registration) or `default`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "locale",
+        "locale_from",
+        "game_directory",
+        "game_directory_from",
+        "cars"
       ],
       "type": "object"
     },
@@ -684,6 +778,17 @@
         }
       ]
     },
+    "localization": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Localization"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Where car names came from; `null` when none could be read."
+    },
     "reputation": {
       "anyOf": [
         {
@@ -734,6 +839,7 @@
     "counts",
     "save",
     "content",
+    "localization",
     "warnings"
   ],
   "title": "Profile",

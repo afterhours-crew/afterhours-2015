@@ -421,7 +421,10 @@ fn profile_reads_a_saved_driver_and_reports_missing_accounts() {
     .unwrap();
     let save = accounts.join(format!("{id}.sqlite"));
     let before = std::fs::read(&save).unwrap();
-    let out = run(&["profile", "--json", "--data-dir", dir]);
+    // An empty game directory: no test reads a registered installation.
+    let no_game = scratch("profile-no-game");
+    let game = no_game.to_str().unwrap();
+    let out = run(&["profile", "--json", "--data-dir", dir, "--game-dir", game]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let profile: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(profile["identity"]["display_name"], "Cli Tester");
@@ -431,7 +434,11 @@ fn profile_reads_a_saved_driver_and_reports_missing_accounts() {
     assert_eq!(profile["active"], true);
     assert!(profile["reputation"].is_null(), "no content, no REP schema");
     assert!(!profile["warnings"].as_array().unwrap().is_empty());
-    let out = run(&["profile", "--data-dir", dir]);
+    assert!(
+        profile["localization"].is_null(),
+        "no installation, no names"
+    );
+    let out = run(&["profile", "--data-dir", dir, "--game-dir", game]);
     let shown = text(&out.stdout);
     assert!(
         shown.contains("Cli Tester (selected)") && shown.contains("Bank $0"),
@@ -446,6 +453,8 @@ fn profile_reads_a_saved_driver_and_reports_missing_accounts() {
         dir,
         "--account-id",
         &"7b".repeat(16),
+        "--game-dir",
+        game,
     ]);
     assert_eq!(out.status.code(), Some(4));
     let out = run(&["profile", "--data-dir", dir, "--account-id", "nope"]);
@@ -467,16 +476,31 @@ fn profile_reads_a_saved_driver_and_reports_missing_accounts() {
             .clone()
     };
     assert_eq!(
-        generation(run(&["profile", "--json", "--data-dir", dir])),
+        generation(run(&[
+            "profile",
+            "--json",
+            "--data-dir",
+            dir,
+            "--game-dir",
+            game
+        ])),
         1
     );
     writer.execute_batch("COMMIT;").unwrap();
     assert_eq!(
-        generation(run(&["profile", "--json", "--data-dir", dir])),
+        generation(run(&[
+            "profile",
+            "--json",
+            "--data-dir",
+            dir,
+            "--game-dir",
+            game
+        ])),
         6
     );
     drop(writer);
     std::fs::remove_dir_all(data).unwrap();
+    std::fs::remove_dir_all(no_game).unwrap();
 }
 
 #[cfg(unix)]

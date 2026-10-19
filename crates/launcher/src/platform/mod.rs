@@ -112,6 +112,26 @@ pub fn default_data_dir() -> Option<PathBuf> {
     }
 }
 
+/// The game's own registration: its installation directory and the locale
+/// the game runs in, from the 32-bit `SOFTWARE\EA Games\Need for Speed`
+/// key. Read only; both are `None` where there is no such registry or value.
+pub fn game_registration() -> (Option<PathBuf>, Option<String>) {
+    #[cfg(windows)]
+    {
+        const KEY: &str = "SOFTWARE\\EA Games\\Need for Speed";
+        let read = |value| {
+            nfs_afterhours_sys::windows::local_machine_string_32(KEY, value)
+                .ok()
+                .flatten()
+        };
+        (read("Install Dir").map(PathBuf::from), read("Locale"))
+    }
+    #[cfg(not(windows))]
+    {
+        (None, None)
+    }
+}
+
 /// The folder where the game writes `CrashDump_*.dmp`:
 /// `Documents\Need For Speed\Temp`. The Documents folder is looked up from
 /// the environment (the profile's `Documents`, then a OneDrive one), so a

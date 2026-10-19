@@ -159,6 +159,9 @@ pub struct Content {
     pub tables: Option<persistent::Catalog>,
     pub items: Option<ItemContent>,
     pub vehicles: Option<Vehicles>,
+    /// Localized car names read from the installation; see [`super::localize`].
+    pub car_names: Option<super::names::CarNames>,
+    pub localization: Option<super::names::Localization>,
     pub warnings: Vec<String>,
 }
 

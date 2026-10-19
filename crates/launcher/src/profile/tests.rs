@@ -494,12 +494,17 @@ fn cars_cover_the_garage_and_the_warehouse_with_parts_spares_and_prices() {
             ("60", CarLocation::Warehouse, None, 0, 1, 2, 0),
         ]
     );
-    assert_eq!(cars[0].display_name.as_deref(), Some("Ford MustangGT 2015"));
+    assert_eq!(
+        cars[0].vehicle.as_ref().map(|v| v.label.as_str()),
+        Some("Ford MustangGT 2015")
+    );
     assert_eq!(cars[0].definition, CAR);
     assert_eq!(
-        cars[1].display_name, None,
-        "no vehicle profile, no guessed name"
+        (&cars[0].name, &cars[0].names),
+        (&None, &None),
+        "no installation was read, so no localized name"
     );
+    assert_eq!(cars[1].vehicle, None, "no vehicle profile, no guessed name");
     assert_eq!(
         p.car_summary,
         Some(CarSummary {
@@ -747,4 +752,193 @@ fn a_linked_account_directory_is_refused() {
     assert!(Saves::open(&data).is_err());
     std::fs::remove_dir_all(data).unwrap();
     std::fs::remove_dir_all(elsewhere).unwrap();
+}
+
+/// An installation naming car CAR in English; CAR2's short name is absent.
+fn named_installation(root: &Path) {
+    names::tests::write_installation(
+        root,
+        &[
+            (CAR, ["ID_CAR_LONG", "ID_CAR_MEDIUM", "ID_CAR_SHORT"]),
+            (CAR2, ["ID_CAR2_LONG", "ID_CAR2_MEDIUM", "ID_CAR2_SHORT"]),
+        ],
+        &[
+            ("ID_CAR_LONG", b"Maker Test Car (2015)"),
+            ("ID_CAR_MEDIUM", b"Maker Test Car"),
+            ("ID_CAR_SHORT", b"Test Car"),
+            ("ID_CAR2_LONG", b"Maker Other Car (1999)"),
+            ("ID_CAR2_MEDIUM", b"Maker Other Car"),
+        ],
+        0,
+    );
+}
+
+/// A current session whose request names `game` as its installation.
+fn started_with(data: &Path, game: &Path) {
+    let id = "d".repeat(32);
+    let session = paths::session_dir(data, &id);
+    std::fs::create_dir_all(&session).unwrap();
+    std::fs::write(
+        data.join(crate::session::POINTER_FILE),
+        json!({"version": 1, "id": id}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        session.join("request.json"),
+        json!({"version": 1, "id": id, "action": "start", "game_directory": game,
+            "data_directory": data, "server_path": "server", "server_sha256": "0".repeat(64),
+            "player_name": "Driver", "record_protocol": false})
+        .to_string(),
+    )
+    .unwrap();
+}
+
+fn localized_profile(
+    data: &Path,
+    game: Option<&Path>,
+    language: Option<&str>,
+    registration: Registration,
+) -> Profile {
+    let saves = Saves::open(data).unwrap();
+    let mut content = content(data, None, Need::Full).unwrap();
+    localize(&mut content, data, game, language, registration).unwrap();
+    let profile = saves.profile(&id(3), &content).unwrap();
+    crate::contract::testing::validate("profile", &profile);
+    profile
+}
+
+#[test]
+fn car_names_come_from_the_installation_the_session_started() {
+    let data = crate::testing::scratch("profile-names");
+    let game = crate::testing::scratch("profile-names-game");
+    fleet_save(&data, 3);
+    install_content(&data);
+    named_installation(&game);
+    started_with(&data, &game);
+    let p = localized_profile(&data, None, None, Registration::default());
+    assert_eq!(
+        p.localization,
+        Some(Localization {
+            locale: "en_US".into(),
+            locale_from: "default",
+            game_directory: game.clone(),
+            game_directory_from: "current-session",
+            cars: 2,
+        })
+    );
+    let cars = p.cars.clone().unwrap();
+    assert_eq!(cars[0].name.as_deref(), Some("Maker Test Car (2015)"));
+    assert_eq!(
+        cars[0].names,
+        Some(Names {
+            long: Some("Maker Test Car (2015)".into()),
+            medium: Some("Maker Test Car".into()),
+            short: Some("Test Car".into()),
+        })
+    );
+    assert_eq!(
+        cars[0].vehicle.as_ref().map(|v| v.label.as_str()),
+        Some("Ford MustangGT 2015"),
+        "the blueprint name stays beside the localized one"
+    );
+    assert_eq!(cars[1].name.as_deref(), Some("Maker Other Car (1999)"));
+    assert_eq!(cars[1].names.as_ref().unwrap().short, None);
+    let garage = p.garage.clone().unwrap();
+    assert_eq!(
+        garage.slots[0].item.as_ref().unwrap().name.as_deref(),
+        Some("Maker Test Car (2015)")
+    );
+    assert_eq!(garage.primary_vehicle, garage.slots[0].item);
+    let names: Vec<_> = p
+        .warnings
+        .iter()
+        .filter(|w| w.contains("text database") || w.contains("localized"))
+        .collect();
+    assert_eq!(names.len(), 1, "one per definition: {:?}", p.warnings);
+    assert!(names[0].contains(CAR2) && names[0].contains("ID_CAR2_SHORT"));
+    let value = serde_json::to_value(&p).unwrap();
+    assert_eq!(value["cars"][0]["name"], "Maker Test Car (2015)");
+    assert_eq!(
+        value["garage"]["slots"][3]["item"]["name"],
+        "Maker Other Car (1999)"
+    );
+    assert_eq!(value["localization"]["locale"], "en_US");
+    std::fs::remove_dir_all(data).unwrap();
+    std::fs::remove_dir_all(game).unwrap();
+}
+
+#[test]
+fn installation_and_locale_come_from_arguments_then_the_registry() {
+    let data = crate::testing::scratch("profile-names-choice");
+    let game = crate::testing::scratch("profile-names-choice-game");
+    fleet_save(&data, 3);
+    install_content(&data);
+    named_installation(&game);
+    let registered = || Registration {
+        install_dir: Some(game.clone()),
+        locale: Some("en_US".into()),
+    };
+    let p = localized_profile(&data, None, None, registered());
+    let used = p.localization.clone().unwrap();
+    assert_eq!(
+        (used.game_directory_from, used.locale_from),
+        ("registry", "registry")
+    );
+    let p = localized_profile(&data, Some(&game), Some("en_US"), Registration::default());
+    let used = p.localization.clone().unwrap();
+    assert_eq!(
+        (used.game_directory_from, used.locale_from),
+        ("argument", "argument")
+    );
+    // A locale the installation has no single-byte database for names nothing.
+    for (language, why) in [("de_DE", "no de_DE"), ("ja_JP", "multi-byte")] {
+        let p = localized_profile(&data, Some(&game), Some(language), Registration::default());
+        assert!(p.localization.is_none());
+        assert!(p.cars.unwrap().iter().all(|car| car.name.is_none()));
+        assert!(
+            p.warnings.iter().any(|w| w.contains(why)),
+            "{:?}",
+            p.warnings
+        );
+    }
+    // An unusable registered locale falls back to the default.
+    let p = localized_profile(
+        &data,
+        None,
+        None,
+        Registration {
+            locale: Some("english".into()),
+            ..registered()
+        },
+    );
+    assert_eq!(p.localization.unwrap().locale_from, "default");
+    // Nothing to read from: names stay null with one warning.
+    let p = localized_profile(&data, None, None, Registration::default());
+    assert!(p.localization.is_none());
+    assert!(
+        p.warnings
+            .iter()
+            .any(|w| w.contains("No game installation")),
+        "{:?}",
+        p.warnings
+    );
+    // Explicit arguments that cannot be used are refused.
+    let mut content = content(&data, None, Need::Full).unwrap();
+    for (game, language) in [
+        (Some(game.join("absent")), None),
+        (None, Some("en-us")),
+        (None, Some("../..")),
+    ] {
+        let refused = localize(
+            &mut content,
+            &data,
+            game.as_deref(),
+            language,
+            Registration::default(),
+        )
+        .unwrap_err();
+        assert_eq!(refused.exit, crate::exit::Exit::Refused);
+    }
+    std::fs::remove_dir_all(data).unwrap();
+    std::fs::remove_dir_all(game).unwrap();
 }

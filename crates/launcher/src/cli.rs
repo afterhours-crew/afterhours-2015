@@ -130,9 +130,19 @@ pub struct ProfileArgs {
     pub account_id: Option<String>,
 
     /// Prepared content directory for REP thresholds, table schemas and car
-    /// names. Defaults to the one the current session prepared.
+    /// blueprints. Defaults to the one the current session prepared.
     #[arg(long, value_name = "DIR")]
     pub content_dir: Option<PathBuf>,
+
+    /// Installed game to read localized car names from, read-only. Defaults
+    /// to the one the current session started, then the registered one.
+    #[arg(long, value_name = "DIR", conflicts_with = "list")]
+    pub game_dir: Option<PathBuf>,
+
+    /// Locale of the car names, such as en_US or de_DE. Defaults to the
+    /// game's registered locale, then en_US.
+    #[arg(long, value_name = "LOCALE", conflicts_with = "list")]
+    pub language: Option<String>,
 }
 
 #[derive(Debug, Clone, Subcommand)]
