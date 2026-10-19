@@ -31,8 +31,10 @@ function gh {
 }
 function Write-Package {
     [IO.File]::WriteAllText((Join-Path $root 'Afterhours-windows-x64.zip'), 'constructed archive bytes')
+    [IO.File]::WriteAllText((Join-Path $root 'Afterhours-contract.zip'), 'constructed contract bytes')
     $hash = (Get-FileHash -LiteralPath (Join-Path $root 'Afterhours-windows-x64.zip')).Hash.ToLowerInvariant()
-    "$hash  Afterhours-windows-x64.zip" | Set-Content -LiteralPath (Join-Path $root 'SHA256SUMS.txt')
+    $contractHash = (Get-FileHash -LiteralPath (Join-Path $root 'Afterhours-contract.zip')).Hash.ToLowerInvariant()
+    "$hash  Afterhours-windows-x64.zip`n$contractHash  Afterhours-contract.zip" | Set-Content -LiteralPath (Join-Path $root 'SHA256SUMS.txt')
     @{
         release = 'v0.3.1'; revision = $revision; dirty_source = $false
         executable_version = "Afterhours 0.3.1 (v0.3.1 / $revision)"
@@ -55,10 +57,10 @@ try {
     if ($call[0] -ne 'release' -or $call[1] -ne 'create' -or $call[2] -ne 'v0.3.1' -or
         $call -notcontains '--draft' -or $call -notcontains '--verify-tag' -or
         $call -contains '--clobber' -or $call -contains '--latest') { throw 'Unexpected publication command.' }
-    foreach ($asset in @('Afterhours-windows-x64.zip', 'SHA256SUMS.txt', 'build-info.json')) {
+    foreach ($asset in @('Afterhours-windows-x64.zip', 'SHA256SUMS.txt', 'build-info.json', 'Afterhours-contract.zip')) {
         if ($call -notcontains (Join-Path $root $asset)) { throw "Missing asset: $asset" }
     }
-    Write-Output 'Passed: complete package creates an unpublished draft with three assets'
+    Write-Output 'Passed: complete package creates an unpublished draft with four assets'
 
     $global:AfterhoursDraftTestState.tagLines = @("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`trefs/tags/v0.3.1", "$revision`trefs/tags/v0.3.1^{}")
     & $publish
@@ -76,6 +78,12 @@ try {
     Assert-Refused 'wrong built revision' { & $publisher -PackageDirectory $root -Release v0.3.1 -Revision ('a' * 40) -Repository test-owner/test-repo }
     Add-Content -LiteralPath (Join-Path $root 'Afterhours-windows-x64.zip') -Value changed
     Assert-Refused 'changed archive' $publish
+    Write-Package
+    Add-Content -LiteralPath (Join-Path $root 'Afterhours-contract.zip') -Value changed
+    Assert-Refused 'changed contract archive' $publish
+    Write-Package
+    Remove-Item -LiteralPath (Join-Path $root 'Afterhours-contract.zip')
+    Assert-Refused 'missing contract archive' $publish
     Write-Package
     $manifest = Get-Content -LiteralPath (Join-Path $root 'build-info.json') -Raw | ConvertFrom-Json
     $manifest.dirty_source = $true
@@ -98,8 +106,8 @@ try {
     $global:AfterhoursDraftTestState.ghExit = 1
     Assert-Refused 'failed creation/upload is not edited/retried' $publish 1
 } finally {
-    # Only these three known temporary files belong to this test; no recursive deletion.
-    foreach ($name in @('Afterhours-windows-x64.zip', 'SHA256SUMS.txt', 'build-info.json')) {
+    # Only these four known temporary files belong to this test; no recursive deletion.
+    foreach ($name in @('Afterhours-windows-x64.zip', 'SHA256SUMS.txt', 'build-info.json', 'Afterhours-contract.zip')) {
         Remove-Item -LiteralPath (Join-Path $root $name) -ErrorAction SilentlyContinue
     }
     Remove-Item -LiteralPath $root

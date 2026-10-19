@@ -56,6 +56,8 @@ pub struct Global {
     pub data_dir: Option<PathBuf>,
 
     /// Print results as one JSON object instead of text.
+    ///
+    /// Each object has a `version`; `schema <record>` prints its JSON Schema.
     #[arg(long, global = true)]
     pub json: bool,
 }
@@ -91,6 +93,28 @@ pub struct SessionArgs {
     /// Review them before sharing. Off by default.
     #[arg(long)]
     pub record_protocol: bool,
+
+    /// Report the session as JSON lines on stdout instead of console text.
+    ///
+    /// One object per line: `session` when the session directory exists,
+    /// `status` for every state change, `diagnostic` for each line the
+    /// server, game or preparation writes to stderr, and `final` last with
+    /// the exit code. Schema: `nfs-afterhours schema event`. Human output
+    /// is silenced; the session keeps running if the reader goes away.
+    #[arg(long)]
+    pub events: bool,
+}
+
+/// Arguments for `sessions`.
+#[derive(Debug, Clone, Args)]
+pub struct SessionsArgs {
+    /// Most sessions to list, newest first (1-200).
+    #[arg(long, value_name = "N", default_value_t = 20, value_parser = clap::value_parser!(u16).range(1..=200))]
+    pub limit: u16,
+
+    /// Show only the session with this 32-character ID.
+    #[arg(long, value_name = "ID")]
+    pub id: Option<String>,
 }
 
 /// Arguments for `profile`.
@@ -161,6 +185,32 @@ pub enum Command {
     /// distances, times and speeds are not confirmed. Exits with code 4
     /// when there is no saved account to show.
     Profile(ProfileArgs),
+
+    /// List the session folders and summarize their logs; change nothing.
+    ///
+    /// Read-only, newest first. For each session: action, start and end,
+    /// final state and message, every file with its size and line count,
+    /// server log levels and unsupported-operation warnings grouped by
+    /// service and route, the protocol recording folder and, on Windows,
+    /// game crash dumps written during the session. Every read is bounded.
+    Sessions(SessionsArgs),
+
+    /// Show the version, the JSON record versions and the capabilities.
+    ///
+    /// With --json, the record a desktop front end checks before using any
+    /// other command: program and release, source revision, the version of
+    /// every JSON record and the optional features this build provides.
+    Version,
+
+    /// Print the JSON Schema of one --json record or event line.
+    ///
+    /// The schemas are generated from the types that print the records and
+    /// ship with each release. Record names are listed by `version --json`.
+    Schema {
+        /// Record name, such as status, sessions or event.
+        #[arg(value_name = "RECORD", value_parser = clap::builder::PossibleValuesParser::new(crate::contract::record_names()))]
+        name: String,
+    },
 
     /// Restore the account pointer for an existing saved database.
     ///
@@ -265,5 +315,25 @@ mod tests {
                 .is_err(),
             "a listing shows every account"
         );
+    }
+
+    #[test]
+    fn contract_commands_parse_and_bound_their_arguments() {
+        let serve = Cli::try_parse_from(["nfs-afterhours", "serve", "--game-dir", "G", "--events"])
+            .unwrap();
+        assert!(matches!(serve.command, Command::Serve(args) if args.events));
+        match Cli::try_parse_from(["nfs-afterhours", "sessions"])
+            .unwrap()
+            .command
+        {
+            Command::Sessions(args) => assert_eq!((args.limit, args.id), (20, None)),
+            other => panic!("{other:?}"),
+        }
+        assert!(Cli::try_parse_from(["nfs-afterhours", "sessions", "--limit", "0"]).is_err());
+        assert!(Cli::try_parse_from(["nfs-afterhours", "sessions", "--limit", "201"]).is_err());
+        assert!(Cli::try_parse_from(["nfs-afterhours", "--json", "version"]).is_ok());
+        assert!(Cli::try_parse_from(["nfs-afterhours", "schema", "event"]).is_ok());
+        assert!(Cli::try_parse_from(["nfs-afterhours", "schema", "nothing"]).is_err());
+        assert!(Cli::try_parse_from(["nfs-afterhours", "schema"]).is_err());
     }
 }

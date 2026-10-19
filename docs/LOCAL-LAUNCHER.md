@@ -175,7 +175,10 @@ schedules or challenge completion. No remote product entitlements are granted.
 Every subcommand accepts `--json` to print one JSON object instead of text, and
 exits with a documented code (`nfs-afterhours --help` lists them): 0 success,
 1 refused with nothing changed, 2 bad command line, 3 session failed, 4 nothing
-to act on, 5 input/output error.
+to act on, 5 input/output error. Each JSON object has a version and a JSON
+Schema (`nfs-afterhours schema <record>`); `nfs-afterhours version --json` lists
+them. The contract for desktop front ends is described in
+`crates/launcher/README.md`.
 
 ## Check, setup, serve and stop
 
@@ -254,6 +257,19 @@ format is described in `crates/launcher/README.md`. Saved stats are printed as
 raw stored integers because the game's units are not confirmed. If no complete
 account database exists, keep the failed directory for diagnosis and choose a new
 data directory. Do not overwrite it with someone else's profile.
+
+To review earlier sessions without opening their folders:
+
+```sh
+nfs-afterhours sessions                 # newest 20 sessions under artifacts/launcher
+nfs-afterhours sessions --id <ID>       # one session
+```
+
+Each session shows its action, start, final state and message, its files with
+sizes and line counts, server log levels, the server's `unsupported operation
+received` warnings grouped by service and route, whether its protocol recording
+folder exists and, on Windows, game crash dumps from `Documents\Need For
+Speed\Temp` written during the session. It reads only, with bounded reads.
 
 Configuration generations and executable copies are immutable and hash checked.
 A failed copy/preparation may leave a `.partial` directory/file. It is not used on

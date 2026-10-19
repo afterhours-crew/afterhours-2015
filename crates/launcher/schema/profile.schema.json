@@ -1,0 +1,578 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "Bank": {
+      "properties": {
+        "balance": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "formatted": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "balance",
+        "formatted"
+      ],
+      "type": "object"
+    },
+    "Categories": {
+      "properties": {
+        "build": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Cell"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "crew": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Cell"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "outlaw": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Cell"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "speed": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Cell"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "style": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Cell"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "build",
+        "crew",
+        "outlaw",
+        "speed",
+        "style"
+      ],
+      "type": "object"
+    },
+    "Cell": {
+      "description": "One stored integer: the value the server serves (the schema default when\nthe save has no cell) and whether the save holds the cell itself.",
+      "properties": {
+        "stored": {
+          "type": "boolean"
+        },
+        "value": {
+          "format": "int32",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "value",
+        "stored"
+      ],
+      "type": "object"
+    },
+    "Columns": {
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "$ref": "#/definitions/Cell"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "description": "Stored cells by column name, in schema order. A column the installed schema lacks is `null`.",
+      "type": "object"
+    },
+    "ContentSource": {
+      "description": "Where the content came from, reported with the profile.",
+      "properties": {
+        "chosen_by": {
+          "description": "`argument`, `current-session` or `only-cache`.",
+          "type": "string"
+        },
+        "directory": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "directory",
+        "chosen_by"
+      ],
+      "type": "object"
+    },
+    "Counts": {
+      "properties": {
+        "activities": {
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "collectibles": {
+          "description": "Saved rows; `null` when the save has no such table yet.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "items": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "items_by_class": {
+          "additionalProperties": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "description": "Owned items per definition class; `null` without item content.",
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "livery_bytes": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "livery_records": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "points_of_interest": {
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "unresolved_items": {
+          "description": "Owned items whose definition the item content does not list.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "items",
+        "items_by_class",
+        "unresolved_items",
+        "livery_records",
+        "livery_bytes",
+        "collectibles",
+        "activities",
+        "points_of_interest"
+      ],
+      "type": "object"
+    },
+    "Domain": {
+      "properties": {
+        "bytes": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "revision",
+        "bytes"
+      ],
+      "type": "object"
+    },
+    "Driver": {
+      "properties": {
+        "account_id": {
+          "type": "string"
+        },
+        "display_name": {
+          "type": "string"
+        },
+        "persona_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "display_name",
+        "persona_id",
+        "account_id"
+      ],
+      "type": "object"
+    },
+    "Garage": {
+      "description": "The five ordered garage slots; slot 0 is the primary vehicle.",
+      "properties": {
+        "primary_vehicle": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Item"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "slots": {
+          "items": {
+            "$ref": "#/definitions/Slot"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "slots",
+        "primary_vehicle"
+      ],
+      "type": "object"
+    },
+    "Item": {
+      "properties": {
+        "class": {
+          "description": "Definition class from the installed item content.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "definition": {
+          "description": "Definition GUID as 32 lowercase hexadecimal characters.",
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "vehicle": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Vehicle"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Blueprint from the installed vehicle content, for cars."
+        }
+      },
+      "required": [
+        "id",
+        "definition",
+        "class",
+        "vehicle"
+      ],
+      "type": "object"
+    },
+    "Reputation": {
+      "description": "REP as `nfs_services::reputation` presents it. `level` and the\nthresholds are evaluated from `score`; `stored_level` is the saved\n`RepLevel` cell, which is not an input to that evaluation.",
+      "properties": {
+        "categories": {
+          "$ref": "#/definitions/Categories"
+        },
+        "current_threshold": {
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "level": {
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "maximum_level": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "next_threshold": {
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "score": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Cell"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stored_level": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Cell"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "score",
+        "stored_level",
+        "categories",
+        "level",
+        "current_threshold",
+        "next_threshold",
+        "maximum_level"
+      ],
+      "type": "object"
+    },
+    "Save": {
+      "properties": {
+        "domains": {
+          "additionalProperties": {
+            "$ref": "#/definitions/Domain"
+          },
+          "description": "Present account domains and their revisions.",
+          "type": "object"
+        },
+        "file_bytes": {
+          "description": "Main database file only; recent commits may still be in its log.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "type": "string"
+        },
+        "schema_version": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "updated_at_ms": {
+          "description": "Milliseconds since the Unix epoch, from the server's clock.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "updated_at_utc": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "schema_version",
+        "generation",
+        "updated_at_ms",
+        "updated_at_utc",
+        "file_bytes",
+        "domains"
+      ],
+      "type": "object"
+    },
+    "Slot": {
+      "properties": {
+        "index": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "item": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Item"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "primary": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "index",
+        "primary",
+        "item"
+      ],
+      "type": "object"
+    },
+    "Vehicle": {
+      "description": "A vehicle's blueprint from the installed vehicle content. `label` is the\nblueprint's asset name with the `Car_` prefix removed and underscores as\nspaces; it is not the game's localized display name.",
+      "properties": {
+        "asset_name": {
+          "type": "string"
+        },
+        "blueprint": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "blueprint",
+        "asset_name",
+        "label"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "`profile --json`: one saved driver.",
+  "properties": {
+    "account_id": {
+      "type": "string"
+    },
+    "active": {
+      "description": "Whether `account.json` selects this account.",
+      "type": "boolean"
+    },
+    "bank": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Bank"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "content": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ContentSource"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "counts": {
+      "$ref": "#/definitions/Counts"
+    },
+    "garage": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Garage"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "identity": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Driver"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "reputation": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Reputation"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "save": {
+      "$ref": "#/definitions/Save"
+    },
+    "tables": {
+      "additionalProperties": {
+        "$ref": "#/definitions/Columns"
+      },
+      "description": "Single-row tables by stored table and column name.",
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "version": {
+      "const": 1,
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "warnings": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "version",
+    "account_id",
+    "active",
+    "identity",
+    "bank",
+    "reputation",
+    "tables",
+    "garage",
+    "counts",
+    "save",
+    "content",
+    "warnings"
+  ],
+  "title": "Profile",
+  "type": "object"
+}

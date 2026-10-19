@@ -8,12 +8,14 @@
 //! are created with create-new semantics or replaced atomically through a
 //! temporary file and rename, so a reader never observes a partial record.
 //! The formats are the same ones the PowerShell launcher wrote, so existing
-//! data directories keep working.
+//! data directories keep working. [`Status`] and [`Preflight`] are also
+//! command output and part of the JSON contract in [`crate::contract`].
 
 use crate::{
     exit::{Failure, Result},
     paths,
 };
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
     io::Write,
@@ -89,10 +91,12 @@ pub struct SessionPointer {
 }
 
 /// `account.json`: which saved account this data directory uses.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AccountRecord {
     pub version: u32,
+    /// The 32-character account ID; the save is `artifacts/account/<id>.sqlite`.
     pub local_account: String,
+    /// Story progression the account was created with, `post-intro`.
     pub progression: String,
 }
 
@@ -115,7 +119,7 @@ impl AccountRecord {
 }
 
 /// What a session was asked to do.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Action {
     /// Prepare content and the account; start nothing.
@@ -153,6 +157,10 @@ pub struct Request {
     pub server_sha256: String,
     pub player_name: String,
     pub record_protocol: bool,
+    /// Report the session as JSON lines on standard output (see
+    /// [`crate::events`]) instead of human console text.
+    #[serde(default)]
+    pub events: bool,
 }
 
 impl Request {
@@ -177,15 +185,22 @@ impl Request {
 }
 
 /// Session states, in the order a successful session passes through them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum State {
+    /// Reading the installation, preparing content and the account.
     Preparing,
+    /// The server is ready and the game is starting (`start` only).
     Starting,
+    /// The installed EA activation helper shows a window; no timeout.
     Activation,
+    /// Routing applied (`start`) or the server is listening (`serve`).
     Ready,
+    /// A stop was requested; closing the game, then the server.
     Stopping,
+    /// The session ended normally.
     Finished,
+    /// The session ended with an error; `message` says why.
     Failed,
     /// Derived on read, never written: a live state whose supervisor is gone.
     Interrupted,
@@ -206,32 +221,47 @@ impl std::fmt::Display for State {
 }
 
 /// `artifacts/launcher/<id>/status.json`: the supervisor's latest state.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Also the final record of `setup`, `serve` and `start` with `--json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Status {
     pub version: u32,
+    /// Session ID: 32 lowercase hexadecimal characters.
     pub id: String,
+    /// When this state was recorded, UTC. Records written by the old
+    /// PowerShell launcher use a longer ISO 8601 form with an offset.
     pub utc: String,
     pub state: State,
+    /// What the session is doing or why it ended, for a person to read.
     pub message: String,
+    /// Supervisor process ID when recorded. Process IDs may be reused after
+    /// the process exits; verify identity before acting on one.
     pub worker_pid: u32,
     pub game_pid: Option<u32>,
     pub server_pid: Option<u32>,
 }
 
 /// `check` output.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Preflight {
     pub version: u32,
     pub game_directory: Option<PathBuf>,
     pub data_directory: PathBuf,
     pub server_path: PathBuf,
+    /// SHA-256 of the server executable, lowercase hexadecimal.
     pub server_sha256: String,
+    /// SHA-256 of the installed `NFS16.exe`; `null` when no game was checked.
     pub game_sha256: Option<String>,
+    /// SHA-256 of the installed activation helper; `null` when not checked.
     pub activation_sha256: Option<String>,
+    /// The existing EA client registration the game uses, read-only.
     pub registered_client_path: Option<String>,
+    /// File name the server runs under so the game accepts it (`start` only).
     pub compatibility_name: Option<String>,
+    /// Always `false`: the launcher never needs administrator rights.
     pub requires_administrator: bool,
+    /// Always empty: the launcher changes no machine-wide setting.
     pub machine_changes: Vec<String>,
+    /// `checked during setup`: `check` itself writes nothing.
     pub directory_write_access: String,
 }
 
@@ -325,6 +355,7 @@ mod tests {
             server_sha256: "e".repeat(64),
             player_name: "Driver".into(),
             record_protocol: false,
+            events: false,
         };
         request.validate().unwrap();
         let plain = vec![
@@ -335,11 +366,9 @@ mod tests {
         assert_eq!(request.server_arguments(plain.clone()), plain);
         let mut legacy = serde_json::to_value(&request).unwrap();
         legacy.as_object_mut().unwrap().remove("bundled_server");
-        assert!(
-            !serde_json::from_value::<Request>(legacy)
-                .unwrap()
-                .bundled_server
-        );
+        legacy.as_object_mut().unwrap().remove("events");
+        let legacy = serde_json::from_value::<Request>(legacy).unwrap();
+        assert!(!legacy.bundled_server && !legacy.events);
         request.bundled_server = true;
         let selected = request.server_arguments(plain.clone());
         assert_eq!(selected[0], crate::commands::BUNDLED_SERVER_FLAG);

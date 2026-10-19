@@ -6,17 +6,19 @@
 
 use super::Context;
 use crate::{
+    contract::{self, StatusReport, StopReport},
     exit::{Failure, Result},
     session::{self, StopOutcome},
 };
 
 /// `status`: print the current session's status record.
 pub fn status(context: &Context) -> Result<()> {
-    match session::current_status(&context.data_dir)? {
-        None => context.emit(&serde_json::json!({"state": "none"}), || {
+    let report = StatusReport::new(session::current_status(&context.data_dir)?);
+    match &report.session {
+        None => context.emit(&report, || {
             "No Afterhours session has been started.".to_owned()
         }),
-        Some(status) => context.emit(&status, || {
+        Some(status) => context.emit(&report, || {
             format!(
                 "{} : {} (session {}, {})\nRecorded process IDs: supervisor {}, server {}, game {}. Verify identity before stopping a recorded process.",
                 status.state, status.message, status.id, status.utc,
@@ -34,12 +36,15 @@ pub fn stop(context: &Context) -> Result<()> {
         StopOutcome::NoSession => Err(Failure::no_session(
             "No Afterhours session has been started.",
         )),
-        StopOutcome::AlreadyOver(status) => context.emit(
-            &serde_json::json!({"outcome": "already-over", "status": status}),
-            || status.message.clone(),
-        ),
-        StopOutcome::Requested(path) => context.emit(
-            &serde_json::json!({"outcome": "requested", "stop_file": path}),
+        StopOutcome::AlreadyOver(status) => {
+            let message = status.message.clone();
+            context.emit(
+                &StopReport::new(contract::StopOutcome::AlreadyOver, status, None),
+                || message,
+            )
+        }
+        StopOutcome::Requested { stop_file, status } => context.emit(
+            &StopReport::new(contract::StopOutcome::Requested, status, Some(stop_file)),
             || "Requested game shutdown, followed by server shutdown.".to_owned(),
         ),
     }

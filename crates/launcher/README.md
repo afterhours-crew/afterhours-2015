@@ -23,6 +23,9 @@ nfs-afterhours status                       report the current session
 nfs-afterhours stop                         ask the live session to close the game, then the server
 nfs-afterhours profile [--account-id <ID>]  show a saved driver's profile; change nothing
 nfs-afterhours profile --list               list every saved driver in the data directory
+nfs-afterhours sessions [--limit N] [--id <ID>]  summarize session folders and logs; change nothing
+nfs-afterhours version                      program, JSON record versions and capabilities
+nfs-afterhours schema <RECORD>              print the JSON Schema of one --json record
 nfs-afterhours recover --account-id <ID>    restore account.json for an existing database
 ```
 
@@ -33,9 +36,97 @@ walkthrough see [docs/LOCAL-LAUNCHER.md](../../docs/LOCAL-LAUNCHER.md).
 Progress and child diagnostics go to stderr; command results go to stdout.
 With `--json`, a completed session prints one final status object on stdout,
 including `interrupted` if its supervisor died. Errors still have a nonzero
-exit code and a message on stderr. Observe an active session with a separate
-`status --json` command. Recorded process IDs may be stale; verify process
-identity before stopping an orphan after a Unix supervisor crash.
+exit code and a message on stderr. Observe an active session with `--events`
+on the command that starts it, or with a separate `status --json` command.
+Recorded process IDs may be stale; verify process identity before stopping an
+orphan after a Unix supervisor crash.
+
+## JSON contract
+
+A desktop front end (the Tauri launcher) uses this program only through its
+JSON output. Every object it prints is a *record* with a name, a `version`
+field and a JSON Schema (draft 7) generated from the Rust type that prints it:
+
+| Record | Printed by |
+| --- | --- |
+| `check` | `check --json` |
+| `status` | `status --json`: `{"version", "session"}`, `session` `null` before any session |
+| `stop` | `stop --json`: `outcome` `requested` or `already-over`, with the status |
+| `session-status` | `setup`/`serve`/`start --json` (the final status); also `status.json` |
+| `event` | each line of `setup`/`serve`/`start --events` |
+| `profile`, `profile-list` | `profile --json`, `profile --list --json` |
+| `sessions` | `sessions --json` |
+| `recover` | `recover --json` |
+| `version` | `version --json` |
+
+The schemas are committed in [`schema/`](schema/), printed by `schema
+<record>` and shipped with every release, inside the bundle and as
+`Afterhours-contract.zip` next to `version.json`. `contract::tests` fails when
+a committed schema differs from its type; regenerate with
+`AFTERHOURS_UPDATE_SCHEMAS=1 cargo test -p nfs-afterhours --lib contract` and
+review the diff. Unit tests validate real records against the schemas with a
+strict checker that rejects any property a schema does not describe.
+
+`version --json` is the record to read first: program (`Afterhours` or
+`nfs-afterhours`), package version, release tag, source revision (`null` for
+local builds), whether this platform can launch the game, the current version
+of every record, and `capabilities`: `profile`, `sessions` and `events` today.
+`world-settings` is planned. A screen whose capability is missing should say
+the feature is not available yet.
+
+Versioning: until the desktop launcher's first release, every record stays at
+version 1 and may change in lockstep with the launcher. From that release on,
+removing or renaming a field, changing its type or meaning, or removing an
+enum value bumps that record's version; adding a field or an enum value does
+not, so readers must ignore unknown properties. Errors are not records: they
+are the exit code plus a message on stderr (in event mode, the `final` line).
+
+### Event stream
+
+`setup`, `serve` and `start` with `--events` print JSON lines on stdout
+(issue #86). Each line is an `event` record with `version`, `utc` and `event`:
+
+- `session`: the session ID, action, data directory and session directory,
+  once the session directory exists and the supervisor starts.
+- `status`: every state the supervisor records, exactly as `status.json`
+  holds it (`preparing`, `starting`, `activation`, `ready`, `stopping`,
+  `finished` or `failed`).
+- `diagnostic`: one line a child wrote to stderr, with `source` `prepare`,
+  `create-account`, `server` or `game`. Lines over 16 KiB are split; if the
+  supervisor falls behind, a line saying output was skipped stands in for it.
+- `final`: always the last line, also when preflight refused the command
+  before a session existed: `exit_code`, `message` (`null` on success) and the
+  final `status` (`null` if none was recorded).
+
+The front-end process writes `session` and `final`; the supervisor it starts
+inherits stdout and writes `status` and `diagnostic`, so the lines never
+interleave. Human console text is silenced in this mode. A failed write, for
+example after the reader closed the pipe, disables further events without
+stopping the session: the supervisor outlives a closed launcher window, and
+`status --json` and `sessions --json` still observe it. A supervisor that is
+refused before its session begins (another session holds the data directory,
+a stop arrived, the server changed) records that reason as a `failed` status.
+
+## Sessions
+
+`sessions` lists `artifacts/launcher/<id>/` newest first (by when the session
+was requested), 20 by default and at most 200. For each session it reports the
+action from `request.json`, `status.json`'s latest state and message (a live
+state without its supervisor reads as `interrupted`, as in `status`), start
+and end times, every ordinary file with its size, line count and whether it
+reached the 4 MiB log bound, the levels in `server.stderr.log`, its `unsupported
+operation received` warnings grouped by service and route (a Blaze route's
+per-request `correlation` is dropped so repeats group together), whether
+`artifacts/runs/<id>/` exists, and on Windows the game's
+`Documents\Need For Speed\Temp\CrashDump_*.dmp` files written from the request
+until two minutes after the last status. It also reports whether the EA
+Desktop log folder exists.
+
+It writes and locks nothing. Every read is bounded: 4096 session folders,
+256 entries and 64 listed files per session, 8 MiB per scanned file, 256 MiB
+of scanning per call, 16 KiB per parsed log line, 256 warning groups, 4096
+crash dump folder entries and 32 dumps per session. A damaged or oversized
+record becomes a warning on its session; the listing continues.
 
 ## What it does
 
@@ -167,6 +258,9 @@ existing data directories keep working.
 | `platform/` | the `Platform` trait, the shared child with bounded log pumps, and the Windows and Unix implementations; `platform/windows/lease` is the routing lease |
 | `endpoint` | the 13-byte transaction over abstract memory, tested with injected faults |
 | `profile` | read-only profiles from account saves; `profile/content` picks and loads the prepared content |
+| `contract` | record names, versions, capabilities and schema generation; the strict test validator |
+| `sessions` | read-only session folder summaries and the server log scanner |
+| `events` | the JSON-lines event stream |
 | `paths`, `records`, `session`, `install`, `digest`, `compat`, `marker`, `clock` | portable pieces with their own unit tests |
 
 ## Testing
@@ -178,7 +272,9 @@ cargo test -p nfs-afterhours -p nfs-afterhours-sys
 Unit tests need no game, server or network. The integration tests in
 `tests/cli.rs` drive the built binary; on Unix they run a complete `serve`
 session against a shell script standing in for the server, observe it from a
-second process through `status`, stop it, and also kill a supervisor to see
-`interrupted` reported. The Windows process-layer tests run in CI on a
+second process through `status`, stop it, read the same session as an event
+stream, and also kill a supervisor to see `interrupted` reported. On every
+platform they check `version`, `schema`, `sessions` and a refused event
+stream. The Windows process-layer tests run in CI on a
 Windows runner. Live acceptance on the supported installation is recorded in
 `docs/LOCAL-LAUNCHER.md`, not claimed by tests.

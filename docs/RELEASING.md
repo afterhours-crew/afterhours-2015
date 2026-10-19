@@ -26,8 +26,13 @@ then smoke-tests and packages it. After checking the remote tag still identifies
 the built commit, it creates a **draft** containing:
 
 - `Afterhours-windows-x64.zip`
-- `SHA256SUMS.txt`
+- `SHA256SUMS.txt` (checksums of both ZIP files)
 - `build-info.json`
+- `Afterhours-contract.zip`: the executable's `version --json` as
+  `version.json` and the JSON Schemas of its command-line records under
+  `schema/`, for the desktop launcher's generated types. Packaging refuses a
+  schema that differs from what the built executable prints. The tester ZIP
+  carries the same `schema/` folder.
 
 An initial build can take a while, especially without a reusable dependency
 cache. The release stays unpublished throughout preparation. PR builds and
@@ -38,7 +43,7 @@ only. A manual development run on main can also populate main's build cache.
 
 Wait for the workflow to succeed, then open the draft in GitHub Releases. Review
 the generated notes, describe supported changes and remaining limitations, and
-verify the three assets are present. The build manifest must identify the tag's
+verify the four assets are present. The build manifest must identify the tag's
 commit and a clean source tree. Download the ZIP and verify its checksum before
 sharing it.
 

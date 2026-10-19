@@ -1,0 +1,159 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "State": {
+      "description": "Session states, in the order a successful session passes through them.",
+      "oneOf": [
+        {
+          "const": "preparing",
+          "description": "Reading the installation, preparing content and the account.",
+          "type": "string"
+        },
+        {
+          "const": "starting",
+          "description": "The server is ready and the game is starting (`start` only).",
+          "type": "string"
+        },
+        {
+          "const": "activation",
+          "description": "The installed EA activation helper shows a window; no timeout.",
+          "type": "string"
+        },
+        {
+          "const": "ready",
+          "description": "Routing applied (`start`) or the server is listening (`serve`).",
+          "type": "string"
+        },
+        {
+          "const": "stopping",
+          "description": "A stop was requested; closing the game, then the server.",
+          "type": "string"
+        },
+        {
+          "const": "finished",
+          "description": "The session ended normally.",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "description": "The session ended with an error; `message` says why.",
+          "type": "string"
+        },
+        {
+          "const": "interrupted",
+          "description": "Derived on read, never written: a live state whose supervisor is gone.",
+          "type": "string"
+        }
+      ]
+    },
+    "Status": {
+      "description": "`artifacts/launcher/<id>/status.json`: the supervisor's latest state.\nAlso the final record of `setup`, `serve` and `start` with `--json`.",
+      "properties": {
+        "game_pid": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "Session ID: 32 lowercase hexadecimal characters.",
+          "type": "string"
+        },
+        "message": {
+          "description": "What the session is doing or why it ended, for a person to read.",
+          "type": "string"
+        },
+        "server_pid": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/definitions/State"
+        },
+        "utc": {
+          "description": "When this state was recorded, UTC. Records written by the old\nPowerShell launcher use a longer ISO 8601 form with an offset.",
+          "type": "string"
+        },
+        "version": {
+          "const": 1,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "worker_pid": {
+          "description": "Supervisor process ID when recorded. Process IDs may be reused after\nthe process exits; verify identity before acting on one.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "id",
+        "utc",
+        "state",
+        "message",
+        "worker_pid",
+        "game_pid",
+        "server_pid"
+      ],
+      "type": "object"
+    },
+    "StopOutcome": {
+      "description": "What `stop` did.",
+      "oneOf": [
+        {
+          "const": "requested",
+          "description": "A stop request was written; the supervisor closes the game, then the\nserver. Watch `status` or the event stream for `finished`.",
+          "type": "string"
+        },
+        {
+          "const": "already-over",
+          "description": "The current session had already ended; nothing was written.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "description": "`stop --json`. With no session at all, `stop` exits with code 4 instead.",
+  "properties": {
+    "outcome": {
+      "$ref": "#/definitions/StopOutcome"
+    },
+    "status": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/Status"
+        }
+      ],
+      "description": "The current session's status when the request was made."
+    },
+    "stop_file": {
+      "description": "The stop request file, for `requested`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "version": {
+      "const": 1,
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version",
+    "outcome",
+    "status",
+    "stop_file"
+  ],
+  "title": "StopReport",
+  "type": "object"
+}

@@ -15,6 +15,7 @@ use crate::{
     paths, records,
 };
 use nfs_services::{item_content::ItemContent, persistent, reputation::Thresholds};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -39,7 +40,8 @@ pub enum Need {
 }
 
 /// Where the content came from, reported with the profile.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(rename = "ContentSource")]
 pub struct Source {
     pub directory: PathBuf,
     /// `argument`, `current-session` or `only-cache`.
@@ -49,7 +51,7 @@ pub struct Source {
 /// A vehicle's blueprint from the installed vehicle content. `label` is the
 /// blueprint's asset name with the `Car_` prefix removed and underscores as
 /// spaces; it is not the game's localized display name.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Vehicle {
     pub blueprint: String,
     pub asset_name: String,

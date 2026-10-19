@@ -105,21 +105,30 @@ pub fn current_status(data: &Path) -> Result<Option<Status>> {
         return Err(Failure::refused("Session status identity mismatch."));
     }
     if status.state.is_live() {
-        match lock_is_held(&data)? {
-            None => {
-                status.state = State::Interrupted;
-                status.message =
-                    "Supervisor lock is missing. Inspect the data directory before restarting."
-                        .into();
-            }
-            Some(false) => {
-                status.state = State::Interrupted;
-                status.message = "Supervisor is no longer running. Its owned processes were closed or are orphaned; saved account data is preserved. Start again to recover.".into();
-            }
-            Some(true) => {}
-        }
+        derive_interrupted(&mut status, lock_is_held(&data)?);
     }
     Ok(Some(status))
+}
+
+/// Report a live status as `interrupted` unless a supervisor holds the
+/// data-directory lock (`lock` as [`lock_is_held`] returns it). Only the
+/// current session can have a supervisor; pass `Some(false)` for any other.
+pub fn derive_interrupted(status: &mut Status, lock: Option<bool>) {
+    if !status.state.is_live() {
+        return;
+    }
+    match lock {
+        None => {
+            status.state = State::Interrupted;
+            status.message =
+                "Supervisor lock is missing. Inspect the data directory before restarting.".into();
+        }
+        Some(false) => {
+            status.state = State::Interrupted;
+            status.message = "Supervisor is no longer running. Its owned processes were closed or are orphaned; saved account data is preserved. Start again to recover.".into();
+        }
+        Some(true) => {}
+    }
 }
 
 /// Outcome of a stop request.
@@ -130,7 +139,7 @@ pub enum StopOutcome {
     /// The session is already over; carries its final message.
     AlreadyOver(Status),
     /// A stop file was written for the live supervisor to consume.
-    Requested(PathBuf),
+    Requested { stop_file: PathBuf, status: Status },
 }
 
 /// Ask the live supervisor to close the game, then the server.
@@ -150,7 +159,10 @@ pub fn request_stop(data: &Path) -> Result<StopOutcome> {
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(e) => return Err(e.into()),
     }
-    Ok(StopOutcome::Requested(stop))
+    Ok(StopOutcome::Requested {
+        stop_file: stop,
+        status,
+    })
 }
 
 #[cfg(test)]
@@ -242,10 +254,11 @@ mod tests {
         write_status(&data, &id, State::Ready);
         let _held = Lock::acquire(&data).unwrap();
         let first = request_stop(&data).unwrap();
-        let StopOutcome::Requested(path) = &first else {
+        let StopOutcome::Requested { stop_file, status } = &first else {
             panic!("{first:?}")
         };
-        assert!(path.exists());
+        assert!(stop_file.exists());
+        assert_eq!(status.state, State::Ready);
         assert_eq!(
             request_stop(&data).unwrap(),
             first,

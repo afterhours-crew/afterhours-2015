@@ -18,7 +18,7 @@ if ($Release -notmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-
 if ($Revision -notmatch '^[0-9a-f]{40}$') { throw 'Expected the exact built commit SHA.' }
 if ($Repository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') { throw 'Expected owner/repository.' }
 $package = (Resolve-Path -LiteralPath $PackageDirectory).Path
-$assets = @('Afterhours-windows-x64.zip', 'SHA256SUMS.txt', 'build-info.json') |
+$assets = @('Afterhours-windows-x64.zip', 'SHA256SUMS.txt', 'build-info.json', 'Afterhours-contract.zip') |
     ForEach-Object { (Resolve-Path -LiteralPath (Join-Path $package $_)).Path }
 $info = Get-Content -LiteralPath $assets[2] -Raw | ConvertFrom-Json
 $version = $Release.Substring(1)
@@ -28,8 +28,9 @@ if ($info.release -cne $Release -or $info.revision -cne $Revision -or
     throw 'Package identity must match the clean, versioned release build.'
 }
 $archiveHash = (Get-FileHash -LiteralPath $assets[0] -Algorithm SHA256).Hash.ToLowerInvariant()
-$checksum = (Get-Content -LiteralPath $assets[1] -Raw).Trim()
-if ($checksum -cne "$archiveHash  Afterhours-windows-x64.zip") { throw 'Archive checksum mismatch.' }
+$contractHash = (Get-FileHash -LiteralPath $assets[3] -Algorithm SHA256).Hash.ToLowerInvariant()
+$checksum = (Get-Content -LiteralPath $assets[1] -Raw).Replace("`r`n", "`n").Trim()
+if ($checksum -cne "$archiveHash  Afterhours-windows-x64.zip`n$contractHash  Afterhours-contract.zip") { throw 'Archive checksum mismatch.' }
 
 # Check the remote again after the long build. Support annotated and lightweight
 # tags, and refuse a tag moved to a different commit while compilation ran.
@@ -59,7 +60,7 @@ try {
     @"
 Download **Afterhours-windows-x64.zip**, extract it, and put **Afterhours.exe** beside **NFS16.exe** in your supported, activated game installation. Close the game and Afterhours before replacing an older executable, then double-click Afterhours.exe as an ordinary user.
 
-The ZIP, SHA256SUMS.txt and build-info.json were prepared from commit $Revision after the build, tests and package smoke checks passed. Review these notes and the assets before publishing this draft.
+The ZIP, SHA256SUMS.txt and build-info.json were prepared from commit $Revision after the build, tests and package smoke checks passed. Afterhours-contract.zip holds the executable's ``version --json`` record and the JSON Schemas of its command-line records for desktop launchers. Review these notes and the assets before publishing this draft.
 
 [Tester quickstart](https://github.com/afterhours-crew/afterhours-2015/blob/$Release/docs/TESTER-QUICKSTART.md)
 

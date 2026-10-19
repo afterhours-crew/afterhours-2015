@@ -233,7 +233,9 @@ fn select(data: &Path, n: u8) {
 fn read(data: &Path, n: u8) -> Profile {
     let saves = Saves::open(data).unwrap();
     let content = content(data, None, Need::Full).unwrap();
-    saves.profile(&id(n), &content).unwrap()
+    let profile = saves.profile(&id(n), &content).unwrap();
+    crate::contract::testing::validate("profile", &profile);
+    profile
 }
 
 #[test]
@@ -477,6 +479,7 @@ fn listing_reports_every_save_isolates_damaged_ones_and_is_bounded() {
     let listing = saves
         .list(&content(&data, None, Need::Summary).unwrap())
         .unwrap();
+    crate::contract::testing::validate("profile-list", &listing);
     assert!(!listing.truncated);
     let ids: Vec<_> = listing
         .accounts
@@ -499,6 +502,7 @@ fn listing_reports_every_save_isolates_damaged_ones_and_is_bounded() {
         std::fs::write(directory.join(format!("{}.sqlite", id(n))), b"").unwrap();
     }
     let listing = saves.list(&Content::default()).unwrap();
+    crate::contract::testing::validate("profile-list", &listing);
     assert!(listing.truncated);
     assert_eq!(listing.accounts.len(), MAX_ACCOUNTS);
     std::fs::remove_dir_all(data).unwrap();

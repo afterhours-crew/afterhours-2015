@@ -32,6 +32,7 @@ use nfs_services::{
     reputation::{Field, Scores, Thresholds},
 };
 use nfs_storage::{AccountId, Inspection, ItemId, Snapshot, SqliteRepository, account::Kind};
+use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Serialize, Serializer};
 use std::{
     collections::BTreeMap,
@@ -99,7 +100,7 @@ const STORE_TABLES: [(&str, &[&str]); 5] = [
 
 /// One stored integer: the value the server serves (the schema default when
 /// the save has no cell) and whether the save holds the cell itself.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Cell {
     pub value: i32,
     pub stored: bool,
@@ -114,6 +115,19 @@ impl Serialize for Columns {
         serializer.collect_map(self.0.iter().map(|(name, cell)| (name, cell)))
     }
 }
+impl JsonSchema for Columns {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Columns".into()
+    }
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        let cell = generator.subschema_for::<Option<Cell>>();
+        json_schema!({
+            "description": "Stored cells by column name, in schema order. A column the installed schema lacks is `null`.",
+            "type": "object",
+            "additionalProperties": cell,
+        })
+    }
+}
 impl Columns {
     pub fn get(&self, name: &str) -> Option<Cell> {
         self.0
@@ -123,20 +137,20 @@ impl Columns {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Driver {
     pub display_name: String,
     pub persona_id: String,
     pub account_id: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Bank {
     pub balance: u32,
     pub formatted: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Categories {
     pub build: Option<Cell>,
     pub crew: Option<Cell>,
@@ -148,7 +162,7 @@ pub struct Categories {
 /// REP as `nfs_services::reputation` presents it. `level` and the
 /// thresholds are evaluated from `score`; `stored_level` is the saved
 /// `RepLevel` cell, which is not an input to that evaluation.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Reputation {
     pub score: Option<Cell>,
     pub stored_level: Option<Cell>,
@@ -159,7 +173,7 @@ pub struct Reputation {
     pub maximum_level: Option<u32>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Item {
     pub id: String,
     /// Definition GUID as 32 lowercase hexadecimal characters.
@@ -170,7 +184,7 @@ pub struct Item {
     pub vehicle: Option<Vehicle>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Slot {
     pub index: usize,
     pub primary: bool,
@@ -178,13 +192,13 @@ pub struct Slot {
 }
 
 /// The five ordered garage slots; slot 0 is the primary vehicle.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Garage {
     pub slots: Vec<Slot>,
     pub primary_vehicle: Option<Item>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Counts {
     pub items: usize,
     /// Owned items per definition class; `null` without item content.
@@ -199,13 +213,13 @@ pub struct Counts {
     pub points_of_interest: Option<usize>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Domain {
     pub revision: u64,
     pub bytes: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Save {
     pub path: PathBuf,
     pub schema_version: i64,
@@ -219,7 +233,8 @@ pub struct Save {
     pub domains: BTreeMap<&'static str, Domain>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+/// `profile --json`: one saved driver.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Profile {
     pub version: u32,
     pub account_id: String,
@@ -238,7 +253,8 @@ pub struct Profile {
 }
 
 /// One line of the account list.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(rename = "ProfileEntry")]
 pub struct Entry {
     pub account_id: String,
     pub active: bool,
@@ -253,7 +269,9 @@ pub struct Entry {
     pub error: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+/// `profile --list --json`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(rename = "ProfileList")]
 pub struct Listing {
     pub version: u32,
     pub accounts: Vec<Entry>,

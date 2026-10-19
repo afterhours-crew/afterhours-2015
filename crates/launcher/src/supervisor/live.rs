@@ -17,6 +17,7 @@
 use super::{GamePoll, Steps};
 use crate::{
     clock,
+    events::{DiagnosticSource, Emitter},
     exit::{Failure, Result},
     paths,
     platform::{self, ChildProcess, Platform, SpawnSpec},
@@ -67,6 +68,8 @@ pub struct LiveSession {
     account: Option<AccountRecord>,
     server_executable: Option<PathBuf>,
     ready: Option<ServerReady>,
+    /// The JSON-lines stream when the request asked for events.
+    events: Emitter,
     #[cfg(windows)]
     job: Option<platform::windows::JobGuard>,
     #[cfg(windows)]
@@ -98,7 +101,9 @@ fn wait_child_exit(child: &mut dyn ChildProcess, grace: Duration) -> Result<()> 
 impl LiveSession {
     /// Build a session for a validated request whose data directory is
     /// locked by the caller. On Windows this attaches the session job.
-    pub fn new(request: Request, data: PathBuf, run: PathBuf) -> Result<Self> {
+    /// Status changes and child diagnostics go to `events` when it is
+    /// enabled, and to the console otherwise.
+    pub fn new(request: Request, data: PathBuf, run: PathBuf, events: Emitter) -> Result<Self> {
         #[cfg(windows)]
         let job = Some(platform::windows::JobGuard::attach()?);
         Ok(Self {
@@ -113,6 +118,7 @@ impl LiveSession {
             account: None,
             server_executable: None,
             ready: None,
+            events,
             #[cfg(windows)]
             job,
             #[cfg(windows)]
@@ -127,14 +133,24 @@ impl LiveSession {
             .ok_or_else(|| Failure::refused("This action needs --game-dir."))
     }
 
+    /// Pass a child's diagnostic text to the event stream or the console.
+    fn forward(&mut self, source: DiagnosticSource, text: &str) {
+        if self.events.enabled() {
+            self.events.diagnostic(source, text);
+        } else {
+            terminal::raw(text);
+        }
+    }
+
     fn echo_diagnostics(&mut self) {
-        for child in [self.server.as_mut(), self.game.as_mut()]
-            .into_iter()
-            .flatten()
-        {
-            let text = child.drain_diagnostics();
-            if !text.is_empty() {
-                eprint!("{text}");
+        let server = self.server.as_mut().map(|s| s.drain_diagnostics());
+        let game = self.game.as_mut().map(|g| g.drain_diagnostics());
+        for (source, text) in [
+            (DiagnosticSource::Server, server),
+            (DiagnosticSource::Game, game),
+        ] {
+            if let Some(text) = text {
+                self.forward(source, &text);
             }
         }
     }
@@ -156,16 +172,26 @@ impl LiveSession {
             capture_first_line: false,
         };
         let mut child = self.platform.spawn(&spec)?;
+        let source = if name == "create-account" {
+            DiagnosticSource::CreateAccount
+        } else {
+            DiagnosticSource::Prepare
+        };
         let mut diagnostics = terminal::Diagnostics::default();
+        let mut pass = |events: &mut Emitter, text: &str| {
+            if events.enabled() {
+                events.diagnostic(source, text);
+            } else if !text.is_empty() {
+                diagnostics.push(text);
+            }
+        };
         let deadline = Instant::now() + PREPARATION_DEADLINE;
         while !child.exited() || !child.logs_finished() {
-            let text = child.drain_diagnostics();
-            if !text.is_empty() {
-                diagnostics.push(&text);
-            }
+            pass(&mut self.events, &child.drain_diagnostics());
             child.check_logs()?;
             if Instant::now() > deadline || self.stop_file_present() {
                 child.kill();
+                self.events.flush(source);
                 return Err(Failure::session(
                     "Preparation cancelled or exceeded ten minutes.",
                 ));
@@ -173,7 +199,8 @@ impl LiveSession {
             std::thread::sleep(Duration::from_millis(100));
         }
         child.check_logs()?;
-        diagnostics.push(&child.drain_diagnostics());
+        pass(&mut self.events, &child.drain_diagnostics());
+        self.events.flush(source);
         diagnostics.finish();
         if child.exit_code() != Some(0) || child.output_truncated() {
             return Err(Failure::session(format!(
@@ -368,6 +395,11 @@ impl Steps for LiveSession {
         if let Err(e) = records::replace_json(&self.run.join("status.json"), &record) {
             terminal::error(format_args!("Could not save the session status: {e}"));
         }
+        if matches!(state, State::Finished | State::Failed) {
+            // Lines a child left unterminated precede the final state.
+            self.events.flush_all();
+        }
+        self.events.status(&record);
     }
 
     fn stop_requested(&mut self) -> bool {
@@ -446,7 +478,8 @@ impl Steps for LiveSession {
         let mut server = self.platform.spawn(&spec)?;
         let deadline = Instant::now() + SERVER_READY_DEADLINE;
         let line = loop {
-            eprint!("{}", server.drain_diagnostics());
+            let text = server.drain_diagnostics();
+            self.forward(DiagnosticSource::Server, &text);
             server.check_logs()?;
             if let Some(line) = server.first_line() {
                 break line?;
@@ -629,10 +662,12 @@ impl Steps for LiveSession {
 
     fn drain_logs(&mut self) -> Result<()> {
         let deadline = Instant::now() + DRAIN_GRACE;
-        for child in [self.game.as_mut(), self.server.as_mut()]
-            .into_iter()
-            .flatten()
-        {
+        for source in [DiagnosticSource::Game, DiagnosticSource::Server] {
+            let child = match source {
+                DiagnosticSource::Game => self.game.as_mut(),
+                _ => self.server.as_mut(),
+            };
+            let Some(child) = child else { continue };
             while !child.logs_finished() && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(50));
             }
@@ -642,13 +677,16 @@ impl Steps for LiveSession {
                     "Child diagnostics did not finish after process exit.",
                 ));
             }
+            let mut text = String::new();
             loop {
-                let text = child.drain_diagnostics();
-                if text.is_empty() {
+                let chunk = child.drain_diagnostics();
+                if chunk.is_empty() {
                     break;
                 }
-                eprint!("{text}");
+                text.push_str(&chunk);
             }
+            self.forward(source, &text);
+            self.events.flush(source);
         }
         Ok(())
     }

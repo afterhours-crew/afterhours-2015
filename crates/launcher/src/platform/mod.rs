@@ -112,6 +112,54 @@ pub fn default_data_dir() -> Option<PathBuf> {
     }
 }
 
+/// The folder where the game writes `CrashDump_*.dmp`:
+/// `Documents\Need For Speed\Temp`. The Documents folder is looked up from
+/// the environment (the profile's `Documents`, then a OneDrive one), so a
+/// Documents folder redirected elsewhere is not found. `None` where the
+/// game does not run.
+pub fn game_crash_dump_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        let candidates: Vec<PathBuf> = ["USERPROFILE", "OneDrive", "OneDriveConsumer"]
+            .into_iter()
+            .filter_map(std::env::var_os)
+            .map(|base| {
+                PathBuf::from(base)
+                    .join("Documents")
+                    .join("Need For Speed")
+                    .join("Temp")
+            })
+            .collect();
+        candidates
+            .iter()
+            .find(|dir| dir.is_dir())
+            .or(candidates.first())
+            .cloned()
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+/// The EA Desktop log folder, `%LOCALAPPDATA%\Electronic Arts\EA Desktop\Logs`.
+/// `None` where the game does not run.
+pub fn ea_desktop_logs_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("LOCALAPPDATA").map(|base| {
+            PathBuf::from(base)
+                .join("Electronic Arts")
+                .join("EA Desktop")
+                .join("Logs")
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
 /// Default server executable: `nfs-server` next to this executable, since
 /// both are built by the same `cargo build`.
 pub fn default_server_path() -> Option<PathBuf> {
