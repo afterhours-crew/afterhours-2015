@@ -48,7 +48,7 @@ fn choose(
     cars: &BTreeMap<u64, Car>,
     counts: &BTreeMap<usize, u32>,
 ) -> Option<Candidate> {
-    p.select(&p.query(&f), &f, &[f], cars, counts, [0; 2])
+    p.select(&p.query(&f, 100), &f, &[f], cars, counts, [0; 2])
 }
 
 #[test]
@@ -56,7 +56,7 @@ fn shaped_region_is_not_a_circle_and_other_focus_excludes_it() {
     let point = candidate(200., 150.);
     assert!(focus().eligible(&point));
     let p = model(&[point]);
-    let q = p.query(&focus());
+    let q = p.query(&focus(), 100);
     assert_eq!(q.candidates.len(), 1);
     assert!(choose(&p, focus(), &BTreeMap::new(), &BTreeMap::new()).is_some());
     let other = Focus {
@@ -99,7 +99,7 @@ fn query_uses_two_cells_in_each_axis_and_preserves_cell_order() {
         candidate(0., 0.),
     ];
     let p = model(&points);
-    let q = p.query(&focus());
+    let q = p.query(&focus(), 100);
     let actual: Vec<_> = q.candidates.iter().map(|c| c.position).collect();
     assert_eq!(
         actual,
@@ -113,18 +113,24 @@ fn query_uses_two_cells_in_each_axis_and_preserves_cell_order() {
     assert_eq!(q.target, 5); // One road, maximum factor9, truncated target5.
     assert_eq!(cell(-8192.9), 0); // Truncate before offset; do not floor.
     assert!(
-        p.query(&Focus {
-            position: [-20_000., 0., 0.],
-            ..focus()
-        })
+        p.query(
+            &Focus {
+                position: [-20_000., 0., 0.],
+                ..focus()
+            },
+            100
+        )
         .candidates
         .is_empty()
     );
     assert!(
-        p.query(&Focus {
-            position: [20_000., 0., 0.],
-            ..focus()
-        })
+        p.query(
+            &Focus {
+                position: [20_000., 0., 0.],
+                ..focus()
+            },
+            100
+        )
         .candidates
         .is_empty()
     );
@@ -253,7 +259,7 @@ fn selection_wraps_random_scan_once_and_caps_the_shortlist_at_twenty() {
         .map(|i| candidate(325. + i as f32 * 4., 0.))
         .collect();
     let p = model(&points);
-    let q = p.query(&focus());
+    let q = p.query(&focus(), 100);
     assert_eq!(q.candidates.len(), 26);
     for (random, expected) in [([0, 19], 19), ([12, 19], 5), ([26, 20], 0)] {
         let selected = p
@@ -325,4 +331,33 @@ fn linked_empty_roads_keep_their_ordinal_without_sampling_or_speed_entries() {
     let candidates: Vec<_> = policy.cells.iter().flatten().collect();
     assert!(!candidates.is_empty());
     assert!(candidates.iter().all(|c| c.road == 1));
+}
+
+#[test]
+fn traffic_amount_scales_the_target_and_each_road_quota() {
+    let points = [candidate(325., 0.)];
+    let mut p = model(&points);
+    // The original target here is 5 (see the shaped-region test).
+    let target = |percent| p.query(&focus(), percent).target;
+    assert_eq!(
+        (target(100), target(0), target(50), target(200), target(300)),
+        (5, 0, 3, 10, 15)
+    );
+    p.roads[0].quota = 3;
+    let pick = |p: &Policy, percent, count| {
+        let f = focus();
+        p.select(
+            &p.query(&f, percent),
+            &f,
+            &[f],
+            &BTreeMap::new(),
+            &BTreeMap::from([(0, count)]),
+            [0; 2],
+        )
+        .is_some()
+    };
+    // Quota 3 at 100 %, 6 at 200 %, 2 at 50 %.
+    assert!(pick(&p, 100, 2) && !pick(&p, 100, 3));
+    assert!(pick(&p, 200, 5) && !pick(&p, 200, 6));
+    assert!(pick(&p, 50, 1) && !pick(&p, 50, 2));
 }

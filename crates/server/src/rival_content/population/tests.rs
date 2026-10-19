@@ -976,3 +976,32 @@ fn rival_cars_carry_the_official_audio_state() {
         "{object}"
     );
 }
+
+#[test]
+fn rival_limit_caps_active_racers_and_zero_turns_them_off() {
+    let (mut p, mut world, mut registry, _) = fixture(1);
+    let data = Arc::make_mut(&mut p.content);
+    let template = data.data.racers[0].clone();
+    data.data.racers = (0..6)
+        .map(|i| {
+            let mut r = template.clone();
+            r.guid = [i + 1; 16];
+            r
+        })
+        .collect();
+    p.racers = vec![Racer::default(); 6];
+    let (mut capped, mut off) = (p.clone().with_limit(Some(2)), p.with_limit(Some(0)));
+    let (mut other, mut meshes) = (world.clone(), registry.clone());
+    for now in 0..30 {
+        capped
+            .advance(&mut world, &mut registry, 1, 100, input(now, &[focus()]))
+            .unwrap();
+        off.advance(&mut other, &mut meshes, 1, 100, input(now, &[focus()]))
+            .unwrap();
+    }
+    assert_eq!((capped.count(), world.ai_slot_count()), (2, 2));
+    assert_eq!(
+        (off.count(), other.ai_slot_count(), other.ai_count()),
+        (0, 0, 0)
+    );
+}

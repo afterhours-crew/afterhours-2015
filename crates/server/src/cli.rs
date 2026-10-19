@@ -56,6 +56,8 @@ struct Args {
     content_cache: Option<PathBuf>,
     /// Cache entry summary once `game_dir` has been resolved.
     generated: Option<serde_json::Value>,
+    /// Player-chosen traffic and roaming-rival amounts.
+    ai: nfs_server::ai_settings::AiSettings,
 }
 
 fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args, String> {
@@ -95,6 +97,7 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
     let mut bootstrap_config = None;
     let (mut auth_config, mut local_identity) = (None, None);
     let (mut game_dir, mut content_cache) = (None, None);
+    let (mut traffic_percent, mut rival_limit) = (100u16, None);
     while let Some(flag) = args.next() {
         let mut value = || {
             args.next()
@@ -177,6 +180,20 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
                     .and_then(|v| v.parse().ok())
                     .ok_or("bad idle")?
             }
+            Some("--traffic-percent") => {
+                traffic_percent = value()?
+                    .to_str()
+                    .and_then(|v| v.parse().ok())
+                    .ok_or("bad traffic percent")?
+            }
+            Some("--rival-limit") => {
+                rival_limit = Some(
+                    value()?
+                        .to_str()
+                        .and_then(|v| v.parse().ok())
+                        .ok_or("bad rival limit")?,
+                )
+            }
             Some("--qos-seconds") => {
                 qos_seconds = value()?
                     .to_str()
@@ -189,6 +206,8 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
     if !(1..=3600).contains(&idle_seconds) || !(1..=86_400).contains(&qos_seconds) {
         return Err("idle must be 1..3600 s and qos 1..86400 s".into());
     }
+    let ai = nfs_server::ai_settings::AiSettings::new(traffic_percent, rival_limit)
+        .map_err(|e| e.to_string())?;
     let generated = game_dir.is_some();
     if generated
         && (item_content.is_some() || persistent_content.is_some() || world_mac_template.is_some())
@@ -330,6 +349,7 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
         game_dir,
         content_cache,
         generated: None,
+        ai,
     })
 }
 
@@ -912,6 +932,7 @@ async fn run(args: Args) -> Result<(), Failure> {
         stats,
         owned_menu_awards: args.owned_menu_awards,
         owned_local_social: args.owned_local_social,
+        ai: args.ai,
         challenges,
         kickback,
         speedwall,
@@ -1077,6 +1098,35 @@ mod tests {
         "--item-licenses",
         "--control-catalogs",
     ];
+
+    #[test]
+    fn traffic_and_rival_amounts_default_to_the_original_and_are_bounded() {
+        let parsed = parse_from(configured().into_iter()).unwrap();
+        assert_eq!(parsed.ai, nfs_server::ai_settings::AiSettings::default());
+        let mut args = configured();
+        args.extend([
+            "--traffic-percent".into(),
+            "150".into(),
+            "--rival-limit".into(),
+            "2".into(),
+        ]);
+        let parsed = parse_from(args.into_iter()).unwrap();
+        assert_eq!(
+            (parsed.ai.traffic_percent(), parsed.ai.rival_limit()),
+            (150, Some(2))
+        );
+        for (flag, value) in [
+            ("--traffic-percent", "301"),
+            ("--traffic-percent", "-1"),
+            ("--traffic-percent", "lots"),
+            ("--rival-limit", "129"),
+            ("--rival-limit", "none"),
+        ] {
+            let mut args = configured();
+            args.extend([flag.into(), value.into()]);
+            assert!(parse_from(args.into_iter()).is_err(), "{flag} {value}");
+        }
+    }
 
     #[test]
     fn game_dir_replaces_generated_options_exclusively() {

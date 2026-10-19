@@ -93,6 +93,9 @@ pub(super) struct Policy {
 pub(super) struct Query<'a> {
     candidates: Vec<&'a Candidate>,
     pub target: usize,
+    /// Player-chosen traffic amount (percent of the original), applied to the
+    /// target and to each road's quota.
+    percent: u16,
 }
 
 impl Policy {
@@ -183,7 +186,7 @@ impl Policy {
         Ok(policy)
     }
 
-    pub fn query(&self, focus: &Focus) -> Query<'_> {
+    pub fn query(&self, focus: &Focus, percent: u16) -> Query<'_> {
         let predicted = focus.predicted();
         let x = cell(predicted[0] - 225.);
         let z = cell(predicted[2] - 225.);
@@ -203,8 +206,12 @@ impl Policy {
             }
         }
         let score = (roads.len() as f32 * factor) as u32;
-        let target = ((10. * (score as f32 / 16.).clamp(0., 1.)) as usize).clamp(2, 10);
-        Query { candidates, target }
+        let target = ((10. * (score as f32 / 16.).clamp(0., 1.)) as u32).clamp(2, 10);
+        Query {
+            candidates,
+            target: crate::ai_settings::scale(target, percent) as usize,
+            percent,
+        }
     }
 
     pub fn nearby(&self, focus: &Focus, cars: &BTreeMap<u64, Car>) -> usize {
@@ -252,7 +259,7 @@ impl Policy {
                 && !all.iter().any(|other| other.id != focus.id && horizontal_distance_squared(other.position, candidate.position) < INNER2)
                 && !cars.values().any(|car| dot(car.forward, candidate.basis[2]) > 0. && horizontal_distance_squared(car.anchor, candidate.position) <= 50. * 50.)
                 // An unseen road is permitted once; the count entry survives retirement.
-                && counts.get(&candidate.road).is_none_or(|&count| count < self.roads[candidate.road].quota)
+                && counts.get(&candidate.road).is_none_or(|&count| count < crate::ai_settings::scale(self.roads[candidate.road].quota, query.percent))
                 && self.approaching(focus, candidate)
         }).take(20).collect();
         (!eligible.is_empty()).then(|| *eligible[random[1] as usize % eligible.len()])

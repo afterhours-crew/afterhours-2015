@@ -92,6 +92,7 @@ pub(super) struct PlayerListener {
     rival_content: Option<std::sync::Arc<crate::rival_content::Content>>,
     rival_population: Option<crate::rival_content::population::Population>,
     rivals_failed: bool,
+    ai: crate::ai_settings::AiSettings,
     garage_presence: nfs_world::garage::presence::Presence,
     spawn_points: nfs_world::spawn_points::SpawnPoints,
     level_poll: nfs_world::level_poll::LevelPoll,
@@ -661,6 +662,7 @@ impl PlayerListener {
             rival_content: None,
             rival_population: None,
             rivals_failed: false,
+            ai: crate::ai_settings::AiSettings::default(),
             garage_presence: nfs_world::garage::presence::Presence::default(),
             spawn_points: nfs_world::spawn_points::SpawnPoints::default(),
             level_poll: nfs_world::level_poll::LevelPoll::default(),
@@ -728,6 +730,10 @@ impl PlayerListener {
         self.traffic_content = content;
         self
     }
+    pub(super) fn with_ai_settings(mut self, ai: crate::ai_settings::AiSettings) -> Self {
+        self.ai = ai;
+        self
+    }
     pub(super) fn with_arrivals(mut self, arrivals: Option<nfs_world::arrival::Arrivals>) -> Self {
         self.arrivals = arrivals;
         self
@@ -787,6 +793,7 @@ impl PlayerListener {
             .as_ref()
             .map(|content| {
                 crate::traffic_content::population::Population::new(bindings.clone(), content)
+                    .map(|p| p.with_traffic_percent(self.ai.traffic_percent()))
             })
             .transpose()?;
         let rival_population = self
@@ -797,6 +804,7 @@ impl PlayerListener {
                     return Err(replication::Error::Shape);
                 }
                 crate::rival_content::population::Population::new(&bindings, content.clone())
+                    .map(|p| p.with_limit(self.ai.rival_limit()))
             })
             .transpose()?;
         let rpc = Rpc {

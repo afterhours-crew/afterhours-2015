@@ -73,6 +73,8 @@ pub struct Config {
     pub stats: Option<Arc<nfs_services::stats::Catalog>>,
     pub owned_menu_awards: bool,
     pub owned_local_social: bool,
+    /// Player-chosen traffic and roaming-rival amounts.
+    pub ai: crate::ai_settings::AiSettings,
     pub challenges: Option<Arc<nfs_services::challenges::Catalog>>,
     pub kickback: Option<(nfs_storage::AccountId, Arc<nfs_services::kickback::State>)>,
     pub speedwall: Option<(nfs_storage::AccountId, Arc<nfs_services::speedwall::State>)>,
@@ -96,6 +98,7 @@ pub struct WorldServe {
     pub rivals: Option<Arc<crate::rival_content::Content>>,
     pub garage_logic: Option<Arc<crate::garage_logic::GarageLogic>>,
     pub scoring: Option<Arc<crate::scoring::Content>>,
+    pub ai: crate::ai_settings::AiSettings,
 }
 
 mod items;
@@ -692,6 +695,7 @@ pub async fn serve(
                 let sequences = config.sequences.clone();
                 let traffic = config.traffic.clone();
                 let rivals = config.rivals.clone();
+                let ai = config.ai;
                 let garage_logic = config.garage_logic.clone();
                 let scoring = config.scoring.clone();
                 let catalogs = config.catalogs.clone();
@@ -760,6 +764,7 @@ pub async fn serve(
                             rivals,
                             garage_logic,
                             scoring,
+                            ai,
                         },
                         n,
                         recorder.clone(),
@@ -829,6 +834,7 @@ pub async fn world_host(
         rivals,
         garage_logic,
         scoring,
+        ai,
     } = serve;
     let Some(binding) = start.recv().await else {
         return;
@@ -917,6 +923,7 @@ pub async fn world_host(
         .with_sequences(sequences)
         .with_traffic(traffic)
         .with_rivals(rivals)
+        .with_ai_settings(ai)
         .with_arrivals(arrivals)
         .with_returns(returns)
         .with_garage_logic(garage_logic)

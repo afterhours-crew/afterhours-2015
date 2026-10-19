@@ -49,7 +49,7 @@ pub const HANDOVER_OUT: f32 = 800.;
 const GOAL: [bool; 3] = [false, false, true];
 /// Official AI cars are created a quarter of the road width from the road's
 /// centre line, on the side opposite to up x forward: the driving lane
-/// (E990; official traffic always, rivals at the same distance).
+/// (E990: 168 of 186 official traffic creations; rivals at the same distance).
 const LANE_OFFSET: f32 = -0.25;
 /// A stalled tick never moves the host simulation farther than this.
 const MAX_STEP_MS: u64 = 10_000;
@@ -98,6 +98,9 @@ pub struct Population {
     cohort: usize,
     clock: Option<u64>,
     owner: Option<(u8, u64)>,
+    /// Player-chosen cap on racers active at once; `None` keeps the original
+    /// region-driven number.
+    limit: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -136,7 +139,14 @@ impl Population {
             cohort: 0,
             clock: None,
             owner: None,
+            limit: None,
         })
+    }
+
+    /// Cap the racers active at once (0 turns roaming rivals off).
+    pub fn with_limit(mut self, limit: Option<u16>) -> Self {
+        self.limit = limit.map(usize::from);
+        self
     }
 
     /// Active racers, with or without a car.
@@ -296,7 +306,10 @@ impl Population {
             }
             if racer.active.is_none() {
                 // Bounded publication activates at most one racer per tick.
-                if changes.activated.is_some() || world.ai_slot_count() >= ai::MAX_AI {
+                if changes.activated.is_some()
+                    || world.ai_slot_count() >= ai::MAX_AI
+                    || next.limit.is_some_and(|limit| next.count() >= limit)
+                {
                     continue;
                 }
                 let seed = random.wrapping_add((ordinal as u32).wrapping_mul(0x9e37_79b9));

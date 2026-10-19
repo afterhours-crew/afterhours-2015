@@ -502,3 +502,28 @@ fn delegated_traffic_reports_are_isolated_retry_safe_and_retired() {
             .is_empty()
     );
 }
+
+#[test]
+fn traffic_turned_off_spawns_nothing_and_more_traffic_still_spawns() {
+    let (p, mut world, c) = fixture();
+    let mut off = p.clone().with_traffic_percent(0);
+    let mut more = p.with_traffic_percent(200);
+    let mut other = world.clone();
+    for now in [0, 1001, 2002, 3003, 4004] {
+        assert!(
+            off.advance(&mut world, 1, 100, &c, input(now, &[focus()]))
+                .unwrap()
+                .spawned
+                .is_none()
+        );
+    }
+    assert_eq!((off.count(), world.ai_count()), (0, 0));
+    more.advance(&mut other, 1, 100, &c, input(0, &[focus()]))
+        .unwrap();
+    assert!(
+        more.advance(&mut other, 1, 100, &c, input(1001, &[focus()]))
+            .unwrap()
+            .spawned
+            .is_some()
+    );
+}

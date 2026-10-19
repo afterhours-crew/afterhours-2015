@@ -64,6 +64,8 @@ pub struct Population {
     next: u64,
     clock: u64,
     owner: Option<(u8, u64)>,
+    /// Player-chosen amount, percent of the original traffic (100 default).
+    traffic_percent: u16,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -123,7 +125,14 @@ impl Population {
             next: 1,
             clock: 0,
             owner: None,
+            traffic_percent: 100,
         })
+    }
+
+    /// Scale the original traffic by `percent` (0 turns traffic off).
+    pub fn with_traffic_percent(mut self, percent: u16) -> Self {
+        self.traffic_percent = percent;
+        self
     }
 
     pub fn count(&self) -> usize {
@@ -228,7 +237,11 @@ impl Population {
                 continue;
             }
             timer.elapsed -= timer.interval;
-            let query = next.policy.query(point);
+            let query = next.policy.query(point, next.traffic_percent);
+            if query.target == 0 {
+                // Traffic turned off by the player.
+                continue;
+            }
             let nearby = next.policy.nearby(point, &next.cars);
             timer.interval = (nearby as f32 / query.target as f32) * 2.;
             if nearby >= query.target {
