@@ -184,6 +184,19 @@ pub struct ProfileArgs {
     pub language: Option<String>,
 }
 
+/// Arguments for `settings`.
+#[derive(Debug, Clone, Args)]
+pub struct SettingsArgs {
+    /// Save the amount of ambient traffic, as a percentage of the original
+    /// (0-300); 0 turns traffic off.
+    #[arg(long, value_name = "PERCENT", value_parser = clap::value_parser!(u16).range(0..=300))]
+    pub traffic: Option<u16>,
+
+    /// Save the most roaming rivals active at once (0-128), or `original`.
+    #[arg(long, value_name = "COUNT", value_parser = crate::settings::parse_rivals)]
+    pub rivals: Option<crate::settings::Rivals>,
+}
+
 #[derive(Debug, Clone, Subcommand)]
 pub enum Command {
     /// Verify the installation, paths, registration and conflicts; change nothing.
@@ -265,6 +278,17 @@ pub enum Command {
     /// service and route, the protocol recording folder and, on Windows,
     /// game crash dumps written during the session. Every read is bounded.
     Sessions(SessionsArgs),
+
+    /// Show or change the saved traffic and rival amounts.
+    ///
+    /// Without options, prints the values in settings.json in the data
+    /// directory, or the original ones when there is no file yet, and
+    /// changes nothing. --traffic and --rivals save new values for later
+    /// sessions, as they do on `start` and `serve`; saving is refused while
+    /// a session holds the data directory, because a running session keeps
+    /// the values it started with. The record also gives the largest
+    /// values this build accepts.
+    Settings(SettingsArgs),
 
     /// Show the version, the JSON record versions and the capabilities.
     ///
@@ -430,6 +454,39 @@ mod tests {
         }
         assert!(Cli::try_parse_from(["nfs-afterhours", "sessions", "--limit", "0"]).is_err());
         assert!(Cli::try_parse_from(["nfs-afterhours", "sessions", "--limit", "201"]).is_err());
+        match Cli::try_parse_from(["nfs-afterhours", "settings"])
+            .unwrap()
+            .command
+        {
+            Command::Settings(args) => assert_eq!((args.traffic, args.rivals), (None, None)),
+            other => panic!("{other:?}"),
+        }
+        match Cli::try_parse_from([
+            "nfs-afterhours",
+            "settings",
+            "--traffic",
+            "200",
+            "--rivals",
+            "original",
+        ])
+        .unwrap()
+        .command
+        {
+            Command::Settings(args) => assert_eq!(
+                (args.traffic, args.rivals),
+                (Some(200), Some(crate::settings::Rivals::Original))
+            ),
+            other => panic!("{other:?}"),
+        }
+        for bad in [
+            ["--traffic", "301"],
+            ["--rivals", "129"],
+            ["--rivals", "lots"],
+        ] {
+            let mut line = vec!["nfs-afterhours", "settings"];
+            line.extend(bad);
+            assert!(Cli::try_parse_from(line).is_err(), "{bad:?}");
+        }
         assert!(Cli::try_parse_from(["nfs-afterhours", "--json", "version"]).is_ok());
         assert!(Cli::try_parse_from(["nfs-afterhours", "schema", "event"]).is_ok());
         assert!(Cli::try_parse_from(["nfs-afterhours", "schema", "nothing"]).is_err());

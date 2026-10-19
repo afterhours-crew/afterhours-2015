@@ -28,6 +28,8 @@ nfs-afterhours profile [--account-id <ID>]  show a saved driver's profile; chang
 nfs-afterhours profile --list               list every saved driver in the data directory
 nfs-afterhours car-images [--game-dir <DIR>]  decode car pictures from the game into the data folder
 nfs-afterhours sessions [--limit N] [--id <ID>]  summarize session folders and logs; change nothing
+nfs-afterhours settings [--traffic <PERCENT>] [--rivals <COUNT|original>]
+                                            show or save traffic and rivals for later sessions
 nfs-afterhours version                      program, JSON record versions and capabilities
 nfs-afterhours schema <RECORD>              print the JSON Schema of one --json record
 nfs-afterhours recover --account-id <ID>    restore account.json for an existing database
@@ -62,6 +64,7 @@ field and a JSON Schema (draft 7) generated from the Rust type that prints it:
 | `profile`, `profile-list` | `profile --json`, `profile --list --json` |
 | `car-images` | `car-images --json`: the image set, counts per size, formats and unresolved images |
 | `sessions` | `sessions --json` |
+| `settings` | `settings --json`: saved `traffic_percent` and `rival_limit`, the largest accepted values, and whether this command saved them |
 | `recover` | `recover --json` |
 | `version` | `version --json` |
 
@@ -76,8 +79,8 @@ strict checker that rejects any property a schema does not describe.
 `version --json` is the record to read first: program (`Afterhours` or
 `nfs-afterhours`), package version, release tag, source revision (`null` for
 local builds), whether this platform can launch the game, the current version
-of every record, and `capabilities`: `profile`, `sessions`, `events` and
-`play` today. `world-settings` is planned. A screen whose capability is missing should say
+of every record, and `capabilities`: `profile`, `sessions`, `events`, `play`,
+`car-images` and `world-settings` (the `settings` command) today. A screen whose capability is missing should say
 the feature is not available yet.
 
 Versioning: until the desktop launcher's first release, every record stays at
@@ -371,6 +374,7 @@ existing data directories keep working.
 | `contract` | record names, versions, capabilities and schema generation; the strict test validator |
 | `sessions` | read-only session folder summaries and the server log scanner |
 | `events` | the JSON-lines event stream |
+| `settings` | the saved traffic and rival amounts in `settings.json` and their server options |
 | `paths`, `records`, `session`, `install`, `digest`, `compat`, `marker`, `clock` | portable pieces with their own unit tests |
 
 ## Testing

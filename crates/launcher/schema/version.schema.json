@@ -28,6 +28,11 @@
           "const": "car-images",
           "description": "`car-images`, and per-car `image` in `profile`.",
           "type": "string"
+        },
+        {
+          "const": "world-settings",
+          "description": "`settings`, and `--traffic` and `--rivals` on `setup`, `serve` and\n`start`: the amounts of traffic and roaming rivals.",
+          "type": "string"
         }
       ]
     }

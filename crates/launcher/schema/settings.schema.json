@@ -1,0 +1,62 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "`settings --json`: the saved traffic and rival amounts, which every later\n`setup`, `serve` and `start` uses.",
+  "properties": {
+    "file": {
+      "description": "`settings.json` in the data directory; it may not exist yet.",
+      "type": "string"
+    },
+    "max_rivals": {
+      "description": "Largest `rival_limit` this build accepts.",
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "max_traffic_percent": {
+      "description": "Largest `traffic_percent` this build accepts.",
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "rival_limit": {
+      "description": "Most roaming rivals active at once; 0 turns them off and `null`\nkeeps the original number.",
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "saved": {
+      "description": "Whether this command saved the file.",
+      "type": "boolean"
+    },
+    "traffic_percent": {
+      "description": "Ambient traffic as a percentage of the original amount; 0 turns it\noff and 100 is the original.",
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "version": {
+      "const": 1,
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version",
+    "traffic_percent",
+    "rival_limit",
+    "max_traffic_percent",
+    "max_rivals",
+    "file",
+    "saved"
+  ],
+  "title": "SettingsReport",
+  "type": "object"
+}

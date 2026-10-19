@@ -109,6 +109,7 @@ fn help_lists_every_public_subcommand_and_the_exit_table() {
         "profile",
         "car-images",
         "sessions",
+        "settings",
         "version",
         "schema",
         "recover",
@@ -174,7 +175,14 @@ fn version_reports_records_and_capabilities_and_schema_prints_each_one() {
     assert_eq!(report["program_version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(
         report["capabilities"],
-        serde_json::json!(["profile", "sessions", "events", "play", "car-images"])
+        serde_json::json!([
+            "profile",
+            "sessions",
+            "events",
+            "play",
+            "car-images",
+            "world-settings"
+        ])
     );
     assert_eq!(report["os"], std::env::consts::OS);
     let records = report["records"].as_object().unwrap();
@@ -203,7 +211,7 @@ fn version_reports_records_and_capabilities_and_schema_prints_each_one() {
     let text_version = run(&["version"]);
     assert!(
         text(&text_version.stdout)
-            .contains("capabilities: profile, sessions, events, play, car-images")
+            .contains("capabilities: profile, sessions, events, play, car-images, world-settings")
     );
     assert_eq!(run(&["schema", "nothing"]).status.code(), Some(2));
 }
