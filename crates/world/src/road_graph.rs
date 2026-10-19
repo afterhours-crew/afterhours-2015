@@ -17,7 +17,9 @@ pub const MAX_NODES: usize = 8_192;
 pub const MAX_LANES: usize = 16_384;
 pub const MAX_LANE_POINTS: usize = 4_096;
 pub const MAX_NODE_LANES: usize = 16;
-/// Nearest-road searches look no farther than this (metres, horizontal).
+/// Widest accepted road (metres); installed widths are 4.5–50 m.
+pub const MAX_WIDTH: f32 = 500.0;
+/// Nearest-road searches look no farther than this (metres, 3D).
 pub const SEARCH_RADIUS: f32 = 128.0;
 const CELL: f32 = 64.0;
 
@@ -46,6 +48,9 @@ pub struct LaneInput {
     pub direction: Direction,
     /// Centre line from the start node towards the end node.
     pub points: Vec<[f32; 3]>,
+    /// Road width (`LaneWidth`, the whole road; E988) of each interval between
+    /// consecutive points.
+    pub widths: Vec<f32>,
 }
 
 #[derive(Clone, Debug)]
@@ -60,6 +65,7 @@ struct Lane {
     end: u32,
     direction: Direction,
     points: Vec<[f32; 3]>,
+    widths: Vec<f32>,
     /// Cumulative 3D length at each point; the last entry is the lane length.
     cumulative: Vec<f32>,
 }
@@ -71,15 +77,17 @@ pub struct Edge {
     pub forward: bool,
 }
 
-/// Position and unit 3D tangent in the direction of travel.
+/// Centre-line position, unit 3D tangent in the direction of travel and the
+/// road width there.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Pose {
     pub position: [f32; 3],
     pub tangent: [f32; 3],
+    pub width: f32,
 }
 
 /// Closest road point to a position: the lane, the distance from the lane's
-/// start node and the horizontal distance to it.
+/// start node and the 3D distance to it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Location {
     pub lane: u32,
@@ -145,6 +153,14 @@ impl Graph {
             if lane.points.len() < 2 || lane.points.len() > MAX_LANE_POINTS {
                 return Err(Error::Bound);
             }
+            if lane.widths.len() + 1 != lane.points.len() {
+                return Err(Error::Shape);
+            }
+            for &width in &lane.widths {
+                if !(0.0..=MAX_WIDTH).contains(&finite(width)?) {
+                    return Err(Error::Bound);
+                }
+            }
             let mut cumulative = Vec::with_capacity(lane.points.len());
             let mut total = 0.0f32;
             for (i, p) in lane.points.iter().enumerate() {
@@ -173,6 +189,7 @@ impl Graph {
                 end: lane.end as u32,
                 direction: lane.direction,
                 points: lane.points,
+                widths: lane.widths,
                 cumulative,
             });
         }
@@ -289,7 +306,11 @@ impl Graph {
         if !edge.forward {
             tangent = [-tangent[0], -tangent[1], -tangent[2]];
         }
-        Ok(Pose { position, tangent })
+        Ok(Pose {
+            position,
+            tangent,
+            width: lane.widths[i],
+        })
     }
 
     /// Allowed edges leaving `node`, each with its leaving tangent. A lane

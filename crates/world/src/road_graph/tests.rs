@@ -17,6 +17,7 @@ pub(crate) fn sample() -> Graph {
         start,
         end,
         direction,
+        widths: vec![10.0; points.len() - 1],
         points,
     };
     Graph::new(
@@ -173,6 +174,7 @@ fn unreachable_targets_are_none() {
             end: 1,
             direction: Direction::Forward,
             points: vec![[0.0; 3], [10.0, 0.0, 0.0]],
+            widths: vec![10.0],
         }],
     )
     .unwrap();
@@ -186,6 +188,7 @@ fn invalid_graphs_are_rejected() {
         start,
         end,
         direction: Direction::Any,
+        widths: vec![10.0; points.len().saturating_sub(1)],
         points,
     };
     assert_eq!(Graph::new(vec![], vec![]).unwrap_err(), Error::Bound);
@@ -234,12 +237,14 @@ fn nearest_road_point_keeps_the_level_of_a_bridge() {
                 end: 1,
                 direction: Direction::Any,
                 points: vec![[0.0, 0.0, 0.0], [100.0, 0.0, 0.0]],
+                widths: vec![10.0],
             },
             LaneInput {
                 start: 2,
                 end: 3,
                 direction: Direction::Any,
                 points: vec![[0.0, 10.0, 0.0], [100.0, 10.0, 0.0]],
+                widths: vec![10.0],
             },
         ],
     )
@@ -256,6 +261,7 @@ fn nearest_road_point_keeps_the_level_of_a_bridge() {
             end: 1,
             direction: Direction::Any,
             points: vec![[0.0, 0.0, 0.0], [100.0, 100.0, 0.0]],
+            widths: vec![10.0],
         }],
     )
     .unwrap();

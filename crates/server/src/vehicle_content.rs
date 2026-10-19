@@ -37,6 +37,11 @@ pub struct Content {
     appearance: appearance::Definitions,
     meshes: mesh::Definitions,
 }
+/// Audio state tail of an official roaming-rival car: every official rival
+/// creation carries 2 in the second tail nibble, and most carry this exact
+/// state (E981, E990). Observed constant; its meaning is not traced.
+const RIVAL_AUDIO_TAIL: [u8; 6] = [0, 2, 0, 0, 0, 0];
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Placement {
     /// Garage locator, axle-weighted resting height and installed reset mode.
@@ -432,7 +437,13 @@ impl Content {
                 Kind::Index => Some(nos::Runtime::new(1.)?.update(3)?),
                 Kind::Tuning => Some(wheels.update(true)),
                 Kind::Tagged => Some(lifecycle::LockOn::default().update(true)),
-                Kind::NibblesGuid => Some(lifecycle::Audio::default().update(true)),
+                Kind::NibblesGuid => {
+                    let mut audio = lifecycle::Audio::default();
+                    if request.placement == Placement::Rival {
+                        audio.set([0; 3], [0; 4], RIVAL_AUDIO_TAIL)?;
+                    }
+                    Some(audio.update(true))
+                }
                 Kind::FourBit | Kind::Rpc => Some(Update::Noop),
                 Kind::Appearance => Some(appearance.update(63)?),
                 Kind::Mesh(_) => Some(mesh.update(true)),

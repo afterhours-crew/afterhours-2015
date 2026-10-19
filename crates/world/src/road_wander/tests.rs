@@ -98,6 +98,7 @@ fn long_road() -> Graph {
         end,
         direction: Direction::Any,
         points: vec![a, b],
+        widths: vec![10.0],
     };
     Graph::new(
         nodes.clone(),

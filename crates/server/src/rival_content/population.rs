@@ -35,14 +35,22 @@ pub use nfs_world::road_wander::WANDER_SPEED;
 /// A rival participant and its world position for the rival map.
 pub type Location = (u16, [f32; 3]);
 
-/// Native roaming-manager retention: a Genesis view's outer radius (E986).
+/// Native roaming-manager retention: a Genesis view's outer radius, measured
+/// horizontally (E986).
 const VIEW: f32 = 400.;
-/// Farthest observed first appearance of an official rival car (E986).
+/// Farthest observed first appearance of an official rival car (E986). Like
+/// the removal, measured in 3D so a car never qualifies for both at once.
 pub const HANDOVER_IN: f32 = 790.;
-/// The native AI director removes a delegated car beyond this (E987).
+/// The native AI director removes a delegated car whose 3D distance from its
+/// player exceeds this (`04616330`: x, y and z differences squared and summed
+/// against 640,000; E987, E990).
 pub const HANDOVER_OUT: f32 = 800.;
 /// Official rival cars carry the WanderGoal flags (random offset only).
 const GOAL: [bool; 3] = [false, false, true];
+/// Official AI cars are created a quarter of the road width from the road's
+/// centre line, on the side opposite to up x forward: the driving lane
+/// (E990; official traffic always, rivals at the same distance).
+const LANE_OFFSET: f32 = -0.25;
 /// A stalled tick never moves the host simulation farther than this.
 const MAX_STEP_MS: u64 = 10_000;
 
@@ -240,10 +248,10 @@ impl Population {
         let mut world = players.clone();
         let mut meshes = registrations.clone();
         let mut changes = Changes::default();
-        let nearest = |position: [f32; 3]| {
+        let nearest = |position: [f32; 3], measure: fn([f32; 3], [f32; 3]) -> f32| {
             focus
                 .iter()
-                .map(|f| horizontal_squared(f.position, position))
+                .map(|f| measure(f.position, position))
                 .fold(f32::INFINITY, f32::min)
         };
         for ordinal in 0..next.racers.len() {
@@ -259,7 +267,7 @@ impl Population {
                 Some(active) => Some(next.position(&world, connection, persona, active)?),
                 None => None,
             };
-            let retained = position.is_some_and(|p| nearest(p) < VIEW * VIEW);
+            let retained = position.is_some_and(|p| nearest(p, horizontal_squared) < VIEW * VIEW);
             let racer = &mut next.racers[ordinal];
             if focus.is_empty() {
                 racer.region_active = false;
@@ -299,7 +307,10 @@ impl Population {
             let Some(active) = next.racers[ordinal].active.clone() else {
                 continue;
             };
-            let distance = nearest(next.position(&world, connection, persona, &active)?);
+            let distance = nearest(
+                next.position(&world, connection, persona, &active)?,
+                squared,
+            );
             match active.car {
                 Some(car) if distance > HANDOVER_OUT * HANDOVER_OUT => {
                     next.hand_back(&mut world, connection, persona, ordinal, car, &mut changes)?;
@@ -461,6 +472,8 @@ impl Population {
             .ok_or(Error::UnknownObject)?;
         let pose = active.wander.pose(&self.graph).map_err(|_| Error::Shape)?;
         let basis = road_basis(pose.tangent).ok_or(Error::Shape)?;
+        let locator =
+            std::array::from_fn(|i| pose.position[i] + basis[0][i] * LANE_OFFSET * pose.width);
         let content = self.content.clone();
         let provider = &content.data.personas[active.persona];
         let definition = content
@@ -480,10 +493,16 @@ impl Population {
                 registration.content_key,
                 sublevel::Profile::new(false, &[sublevel::Kind::Noop])?,
             )])?;
-            let creation = sublevel::passive::creation(
+            // Like the official host, the bundle scene names the root scene.
+            let root = world
+                .objects()
+                .scene(sublevel::root::CONTENT_KEY)
+                .map(|ghost| sublevel::Blueprint { ghost, sub_id: 1 });
+            let creation = sublevel::passive::creation_with_parent(
                 registration.level,
                 registration.content_key,
                 nfs_protocol::world::rpc::Serial::new(0).ok_or(Error::Shape)?,
+                root,
                 &scene_content,
             )?;
             let scenes =
@@ -513,7 +532,7 @@ impl Population {
             vehicle_content::Request {
                 items: &content.presets[active.persona],
                 vehicle: 1,
-                locator: pose.position,
+                locator,
                 basis,
                 origin: [0.; 3],
                 speed: Some(WANDER_SPEED),
@@ -601,6 +620,10 @@ fn normalized(v: [f32; 3]) -> Option<[f32; 3]> {
 
 fn horizontal_squared(a: [f32; 3], b: [f32; 3]) -> f32 {
     (a[0] - b[0]).powi(2) + (a[2] - b[2]).powi(2)
+}
+
+fn squared(a: [f32; 3], b: [f32; 3]) -> f32 {
+    horizontal_squared(a, b) + (a[1] - b[1]).powi(2)
 }
 
 #[cfg(test)]

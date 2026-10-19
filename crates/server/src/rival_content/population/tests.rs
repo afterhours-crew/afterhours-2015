@@ -12,8 +12,13 @@ use nfs_world::{
 };
 
 /// A 6 km by 3 km loop of two-way roads whose south side runs along z = 2,
-/// through the authored racer spawn.
+/// through the authored racer spawn. Zero width keeps the fixture's cars on
+/// the centre line; the lane offset has its own test.
 fn graph() -> Arc<Graph> {
+    road_loop(0.)
+}
+
+fn road_loop(width: f32) -> Arc<Graph> {
     let nodes = vec![
         [-3000., 0., 2.],
         [3000., 0., 2.],
@@ -26,6 +31,7 @@ fn graph() -> Arc<Graph> {
             end: (i + 1) % 4,
             direction: Direction::Any,
             points: vec![nodes[i], nodes[(i + 1) % 4]],
+            widths: vec![width],
         })
         .collect();
     Arc::new(Graph::new(nodes, lanes).unwrap())
@@ -383,7 +389,7 @@ fn native_view_retention_uses_current_pose_and_strict_horizontal_distance() {
     let motion = vehicle::chassis::Motion {
         identity: 100f64.to_bits(),
         revision: 2,
-        position: [1000., 800., 0.],
+        position: [1000., 300., 0.],
         quaternion: [0., 0., 0., 1.],
         velocity: [10., 0., 0.],
         angular_velocity: [0.; 3],
@@ -396,8 +402,9 @@ fn native_view_retention_uses_current_pose_and_strict_horizontal_distance() {
         .unwrap();
     // Outside the authored region and far above its height, but within view of
     // the *reported* vehicle. The authored spawn location is irrelevant here.
+    // The car stays within the 3D hand-back distance (720 m).
     let near = Focus {
-        position: [1399., -800., 0.],
+        position: [1399., -300., 0.],
         ..focus()
     };
     for now in 1..=20 {
@@ -706,7 +713,7 @@ fn host_drives_rivals_and_hands_cars_over_within_790_m_and_back_beyond_800_m() {
     // At exactly 800 m the car stays; beyond it the client loses the car but
     // the participant, actor and region retention stay. The binding and goal
     // are cleared before the reset-volume leave.
-    place(&mut world, key, [-800., 0., 0.], [-20., 0., 0.]);
+    place(&mut world, key, [-800., 1., 0.], [-20., 0., 0.]);
     assert!(
         p.advance(&mut world, &mut registry, 1, 100, input(20_001, &[focus()]))
             .unwrap()
@@ -784,6 +791,52 @@ fn host_drives_rivals_and_hands_cars_over_within_790_m_and_back_beyond_800_m() {
 }
 
 #[test]
+fn hand_over_distances_include_height() {
+    let (mut p, mut world, mut registry) = far_fixture();
+    p.advance(&mut world, &mut registry, 1, 100, input(0, &[focus()]))
+        .unwrap()
+        .activated
+        .unwrap();
+    // 700 m away horizontally but 922 m in 3D: no car yet. The racer stays
+    // active through its region until its cohort is evaluated again.
+    let above = Focus {
+        position: [300., 600., 2.],
+        ..focus()
+    };
+    let c = p
+        .advance(&mut world, &mut registry, 1, 100, input(1, &[above]))
+        .unwrap();
+    assert!(c.spawned.is_none() && c.deleted.is_empty());
+    assert_eq!((p.count(), world.ai_count()), (1, 0));
+    let level = Focus {
+        position: [300., 0., 2.],
+        ..focus()
+    };
+    let car = p
+        .advance(&mut world, &mut registry, 1, 100, input(2, &[level]))
+        .unwrap()
+        .spawned
+        .unwrap();
+    // A car 700 m away horizontally and 832 m in 3D is removed, as by the
+    // native AI director; the racer keeps its participant.
+    place(
+        &mut world,
+        RIVAL_KEY_START,
+        [-700., 450., 2.],
+        [-20., 0., 0.],
+    );
+    let c = p
+        .advance(&mut world, &mut registry, 1, 100, input(3, &[focus()]))
+        .unwrap();
+    assert!(c.deleted.contains(&car.vehicle));
+    assert!(!c.deleted.contains(&car.participant));
+    assert_eq!(
+        (p.count(), world.ai_count(), world.ai_slot_count()),
+        (1, 0, 1)
+    );
+}
+
+#[test]
 fn late_hand_over_error_rolls_back_registrations_and_the_bundle_scene() {
     let (mut p, mut world, mut registry) = far_fixture();
     p.advance(&mut world, &mut registry, 1, 100, input(0, &[focus()]))
@@ -833,4 +886,93 @@ fn cars_follow_the_road_slope() {
     assert!(close(right, [0., 0., -1.]));
     assert_eq!(road_basis([0., 1., 0.]), None);
     assert_eq!(road_basis([0.; 3]), None);
+}
+
+#[test]
+fn cars_are_handed_over_in_the_driving_lane() {
+    let (mut p, mut world, mut registry) = far_fixture();
+    p.graph = road_loop(10.);
+    p.advance(&mut world, &mut registry, 1, 100, input(0, &[focus()]))
+        .unwrap();
+    p.advance(&mut world, &mut registry, 1, 100, input(10_000, &[focus()]))
+        .unwrap()
+        .spawned
+        .unwrap();
+    let motion = world
+        .ai_vehicle_physics(1, 100, RIVAL_KEY_START)
+        .unwrap()
+        .decode([0.; 3])
+        .unwrap();
+    // Driving west (forward -x), up x forward is +z: the car starts a quarter
+    // of the 10 m road on the other side of the centre line (z = 2).
+    assert!(
+        (motion.position[0] - (1000. - 10. * WANDER_SPEED)).abs() < 0.01,
+        "{:?}",
+        motion.position
+    );
+    assert!(
+        (motion.position[2] - (2. - 2.5)).abs() < 0.01,
+        "{:?}",
+        motion.position
+    );
+    // The rival map follows the car.
+    let [(_, marker)] = p.locations(&world, 1, 100).unwrap()[..] else {
+        panic!()
+    };
+    assert!((marker[2] + 0.5).abs() < 0.01, "{marker:?}");
+}
+
+#[test]
+fn new_bundle_scenes_name_the_root_scene() {
+    use nfs_world::replication::sublevel::{Blueprint, Rpc, root};
+    let (mut p, mut world, mut registry, _) = fixture_mode(1, false);
+    let records = world
+        .create_scenes(
+            &[0],
+            vec![
+                root::creation(
+                    Rpc {
+                        selector: 0,
+                        serial: Serial::new(0).unwrap(),
+                    },
+                    [None; root::REFERENCES],
+                )
+                .unwrap(),
+            ],
+            &root::content().unwrap(),
+        )
+        .unwrap();
+    let root_ghost = records[0].id;
+    assert_eq!(world.objects().scene(root::CONTENT_KEY), Some(root_ghost));
+    let changes = spawn(&mut p, &mut world, &mut registry, 1);
+    let prefix = changes
+        .records
+        .iter()
+        .find_map(|r| match &r.initial {
+            Some(Initial::SubLevel { prefix, .. }) => Some(prefix.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        prefix.blueprint,
+        Some(Blueprint {
+            ghost: root_ghost,
+            sub_id: 1
+        })
+    );
+    // Published records stay encodable with the reference.
+    for record in &changes.records {
+        record.encode().unwrap();
+    }
+}
+
+#[test]
+fn rival_cars_carry_the_official_audio_state() {
+    let (mut p, mut world, mut registry, _) = fixture(1);
+    let ids = spawn(&mut p, &mut world, &mut registry, 1).spawned.unwrap();
+    let object = format!("{:?}", world.objects().get(ids.vehicle).unwrap());
+    assert!(
+        object.contains("head: [0, 0, 0], guid: [0, 0, 0, 0], tail: [0, 2, 0, 0, 0, 0]"),
+        "{object}"
+    );
 }

@@ -130,6 +130,8 @@ pub fn parse_graph(objects: &[Object]) -> Result<Graph, Error> {
         let (start, end) = (node("Start")?, node("End")?);
         let direction = direction(fields.get("LaneDirection"))?;
         let mut points: Vec<[f32; 3]> = Vec::new();
+        // Width of each interval: the segment that contributes its end point.
+        let mut widths: Vec<f32> = Vec::new();
         for entry in fields
             .get("Segments")
             .and_then(Value::as_array)
@@ -140,8 +142,12 @@ pub fn parse_graph(objects: &[Object]) -> Result<Graph, Error> {
                 .get(index)
                 .filter(|o| o.class == "LaneSegment")
                 .ok_or_else(|| bad("road lane segment"))?;
+            let width = float(segment.fields.get("LaneWidth"))?;
             for p in spline_points(segment)? {
                 if points.last() != Some(&p) {
+                    if !points.is_empty() {
+                        widths.push(width);
+                    }
                     points.push(p);
                 }
             }
@@ -153,12 +159,14 @@ pub fn parse_graph(objects: &[Object]) -> Result<Graph, Error> {
         };
         if squared(first, b) + squared(last, a) < squared(first, a) + squared(last, b) {
             points.reverse();
+            widths.reverse();
         }
         lanes.push(LaneInput {
             start,
             end,
             direction,
             points,
+            widths,
         });
     }
     Graph::new(nodes, lanes).map_err(|e| bad(&format!("road graph: {e}")))
@@ -304,7 +312,7 @@ mod tests {
 
     #[test]
     fn lanes_join_their_segments_between_nodes() {
-        let objects = vec![
+        let mut objects = vec![
             network_entity(),
             road_node(0.0, 0.0),
             road_node(0.0, 60.0),
@@ -322,6 +330,11 @@ mod tests {
             // Authored from the end node: reversed to run start to end.
             lane(2, 1, "LaneDirection_Any", &[3, 4]),
         ];
+        for (name, value) in &mut objects[4].fields.0 {
+            if name == "LaneWidth" {
+                *value = Value::Float32(20.0);
+            }
+        }
         let graph = parse_graph(&objects).unwrap();
         assert_eq!(graph.node_count(), 2);
         assert_eq!(graph.lane_count(), 2);
@@ -339,6 +352,18 @@ mod tests {
             [0.0, 0.0, 60.0]
         );
         assert_eq!(graph.head(edge(1, true)), Ok(0));
+        // Each interval keeps its own segment's road width, also when the
+        // lane is reversed.
+        let width = |e, at| graph.pose(e, at).unwrap().width;
+        assert_eq!(
+            (width(edge(0, true), 10.0), width(edge(0, true), 50.0)),
+            (12.0, 20.0)
+        );
+        assert_eq!(
+            (width(edge(1, true), 10.0), width(edge(1, true), 50.0)),
+            (20.0, 12.0)
+        );
+        assert_eq!(width(edge(0, false), 10.0), 20.0);
 
         let mut dangling = objects.clone();
         dangling[5] = lane(1, 3, "LaneDirection_Any", &[3]);
