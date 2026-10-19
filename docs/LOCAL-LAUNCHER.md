@@ -172,6 +172,30 @@ The local challenge menu uses three fixed preview objectives derived from instal
 type metadata. It grants no challenge rewards and does not implement rotating
 schedules or challenge completion. No remote product entitlements are granted.
 
+**Traffic and rivals.** The amount of ambient traffic and the number of roaming
+rivals are yours to choose; the defaults are the original game:
+
+```sh
+# Half the original traffic and at most two rivals at once.
+nfs-afterhours start --game-dir "F:\EA Games\Need for Speed" --traffic 50 --rivals 2
+# Back to the original amounts.
+nfs-afterhours start --game-dir "F:\EA Games\Need for Speed" --traffic 100 --rivals original
+```
+
+`--traffic` is a percentage of the original traffic from 0 (none) to 300.
+`--rivals` is the most roaming rivals active at once, from 0 (none) to 128, or
+`original` for the original number. Both are saved in `settings.json` in the data
+directory and apply to every later `start`, `serve` and `setup` until changed. You can
+also edit that file directly; the start output shows the values in use:
+
+```json
+{"traffic_percent": 50, "rival_limit": 2}
+```
+
+`rival_limit` set to `null` means the original number. Out-of-range, unknown or
+malformed settings are refused rather than ignored. More traffic or rivals than the
+original costs client performance.
+
 Every subcommand accepts `--json` to print one JSON object instead of text, and
 exits with a documented code (`nfs-afterhours --help` lists them): 0 success,
 1 refused with nothing changed, 2 bad command line, 3 session failed, 4 nothing

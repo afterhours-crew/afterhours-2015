@@ -412,7 +412,7 @@ fn remote_fires(
 
 /// Every other replicated car with decodable chassis physics, for the draft,
 /// proximity and speed-match queries. Other participants' cars are
-/// replicated into this world; traffic is client-side and absent here.
+/// replicated into this world, including client-simulated traffic.
 fn other_vehicles(players: &Players, own: u16) -> Vec<nfs_world::scoring::draft::Vehicle> {
     let mut others = Vec::new();
     for (id, object) in players.objects().iter() {

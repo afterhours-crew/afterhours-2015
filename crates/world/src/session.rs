@@ -15,6 +15,7 @@ use std::fmt;
 
 mod entry;
 mod files;
+mod motion;
 
 fn rpc_message(rpc: crate::participants::HostRpc) -> frame::Message<'static> {
     use crate::participants::HostRpc;
@@ -374,9 +375,7 @@ impl Host {
         if self.stage() == StageName::Closed {
             return Err(Error::Stage);
         }
-        if self.replication_queue.len() >= MAX_REPLICATION_QUEUE
-            || (!before.is_empty() && !self.rpc_queue.is_empty())
-        {
+        if !before.is_empty() && !self.rpc_queue.is_empty() {
             return Err(Error::Application(application::Error::Window));
         }
         // Reserve the host-owned timestamp before checking frame/queue bounds.
@@ -385,6 +384,29 @@ impl Host {
         let bits = replication_frame(&section, &before, 0)?.len();
         if bits > self.max_replication_frame_bits {
             return Err(Error::Application(application::Error::Bound));
+        }
+        if before.is_empty()
+            && self.rpc_queue.is_empty()
+            && let Some((tail, old_bits, calls)) = self.replication_queue.back()
+            && calls.is_empty()
+            && let Some(combined) = motion::combine(tail, &section)
+        {
+            let combined_bits = replication_frame(&combined, &[], 0)?.len();
+            let retained_bits = self.replication_bits - old_bits;
+            if combined_bits <= self.max_replication_frame_bits
+                && combined_bits <= MAX_REPLICATION_QUEUE_BITS - retained_bits
+            {
+                self.replication_bindings
+                    .apply(&section)
+                    .map_err(Error::Replication)?;
+                self.replication_bits = retained_bits + combined_bits;
+                *self.replication_queue.back_mut().expect("checked tail") =
+                    (combined, combined_bits, Vec::new());
+                return Ok(());
+            }
+        }
+        if self.replication_queue.len() >= MAX_REPLICATION_QUEUE {
+            return Err(Error::Application(application::Error::Window));
         }
         if bits > MAX_REPLICATION_QUEUE_BITS - self.replication_bits {
             return Err(Error::Application(application::Error::Window));
@@ -1009,7 +1031,11 @@ impl Host {
             self.replication_clock_ms = Some(now_ms);
             world.next_ex_sequence = (world.next_ex_sequence + notifications as u8) & 0x7f;
             world.acked_inputs = application.stats().inputs;
-            world.last_replication_ms = Some(now_ms);
+            world.last_replication_ms = Some(motion::slot(
+                world.last_replication_ms,
+                now_ms,
+                REPLICATION_INTERVAL_MS,
+            ));
             out.events.push(Event::Replication {
                 records,
                 fragments,
@@ -1034,7 +1060,11 @@ impl Host {
                     world.player_entry = entry::Entry::Entered;
                     world.next_ex_sequence = (world.next_ex_sequence + 1) & 0x7f;
                     world.acked_inputs = application.stats().inputs;
-                    world.last_replication_ms = Some(now_ms);
+                    world.last_replication_ms = Some(motion::slot(
+                        world.last_replication_ms,
+                        now_ms,
+                        REPLICATION_INTERVAL_MS,
+                    ));
                     out.events.push(Event::FirstPlayerEntered { player });
                 }
                 Err(e) => out.events.push(e),
@@ -1058,7 +1088,11 @@ impl Host {
                     self.rpc_queue.drain(..count);
                     world.next_ex_sequence = (world.next_ex_sequence + count as u8) & 0x7f;
                     world.acked_inputs = application.stats().inputs;
-                    world.last_replication_ms = Some(now_ms);
+                    world.last_replication_ms = Some(motion::slot(
+                        world.last_replication_ms,
+                        now_ms,
+                        REPLICATION_INTERVAL_MS,
+                    ));
                     out.events.push(Event::RpcNotifications {
                         count,
                         remaining: self.rpc_queue.len(),

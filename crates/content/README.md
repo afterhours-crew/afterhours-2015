@@ -40,6 +40,8 @@ let items = prepared.path(nfs_content::Kind::ItemContent);
 | `VehicleProfiles` | `vehicle-profiles.json` | Player vehicle blueprints reached through the item system: component profiles, mesh-link order, bus flags, registry identities, physics, appearance and health defaults |
 | `ProgressionContent` | `progression-content.json` | Main/intro persistence links, stable IDs, activation expressions, entity composition and explicit spawner-to-scene channel bindings |
 | `SequenceContent` | `sequence-content.json` | Waiting/exit sequence registries, manager bus and serializer, spawner channel links and the exit command's registered spline definition |
+| `TrafficContent` | `traffic-content.json` | Linked traffic personas in provider order, vehicle profiles, manager serializer ordinals and roads with owning scene catalogs |
+| `RivalContent` | `rival-content.json` | Roaming racer activation regions, spawn transforms, complete vehicle presets, provider and personality-library indices |
 | `WorldMacTemplate` | `world-mac-template.bin` | 64 bytes of the executable image at the build's known address, checked by digest |
 
 Derived defaults are the stored 32-bit patterns of each class's same-named
@@ -287,3 +289,37 @@ occurrence or its own interface. Unknown delivery types, ambiguous occurrences,
 unregistered network buses and excessive table sizes fail extraction. The caller
 still owns event timing, lifecycle policy and live identities; this API fires no
 events and adds no prepared runtime file.
+
+`vehicle_profiles::traffic::extract` resolves a requested installed traffic
+bundle's component order, asset catalog, property buses, physics and health
+inputs. Its strict `Definition` omits player customization and inventory fields;
+player definitions retain their existing requirements. Unknown components fail
+extraction. The prepared traffic document also follows manager road links through
+subworld interfaces and keeps each road's scene, local catalog index and catalog
+count separate from population order. Persona identities follow their provider's
+member links. Unknown providers, missing scene registrations and ambiguous links
+fail preparation. Version 4 rebuilds older traffic caches. Completely collapsed
+authored curve segments remain in the road and speed tables but have no spawn
+tangent. Population and AI lifecycle belong to the server.
+
+`rivals::extract` resolves the roaming-racer manager, its participant/actor
+bindings, authored activation volumes, spawn transforms and linked personas.
+Specific providers require all configured tag hashes. Persona styles construct
+ephemeral item collections with ordered part/kit replacement, paint, alignment
+and rim settings; explicit persona additions follow the style. They allocate no
+account items or garage slots. Performance additions are applied before chassis
+quantization and grip overrides preserve the transmission selection.
+
+The `rivals` example audits these inputs against an installation and an existing
+prepared-content directory. The server's `rival_vehicles` example additionally
+constructs and encodes complete vehicle components with synthetic mesh identities.
+Preparation writes `rival-content.json` with those inputs and the native ordered
+personality-library indices. The server consumes this bounded cache for its
+session-owned rival population; the audit examples alone do not prove live driving.
+
+Traffic version 4 and rival version 2 include the shared AI Alive-state binding.
+The builder follows the participant manager's initial-state link and the three
+spawn transitions, checks their client-notification flags, then resolves the
+destination's actual scene and serializer. Missing, ambiguous or unsupported
+sequences fail preparation. Build-profile ports and builder revision invalidate
+older caches; scene ordinals are not embedded in runtime policy.

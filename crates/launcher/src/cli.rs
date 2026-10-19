@@ -94,6 +94,20 @@ pub struct SessionArgs {
     #[arg(long)]
     pub record_protocol: bool,
 
+    /// Amount of ambient traffic, as a percentage of the original (0-300).
+    ///
+    /// 0 turns traffic off. Saved in settings.json in the data directory and
+    /// used by later sessions until changed. Default: 100.
+    #[arg(long, value_name = "PERCENT", value_parser = clap::value_parser!(u16).range(0..=300))]
+    pub traffic: Option<u16>,
+
+    /// Most roaming rivals active at once (0-128), or `original`.
+    ///
+    /// 0 turns rivals off; `original` restores the original number. Saved in
+    /// settings.json in the data directory like --traffic.
+    #[arg(long, value_name = "COUNT", value_parser = crate::settings::parse_rivals)]
+    pub rivals: Option<crate::settings::Rivals>,
+
     /// Report the session as JSON lines on stdout instead of console text.
     ///
     /// One object per line: `session` when the session directory exists,

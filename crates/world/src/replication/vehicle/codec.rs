@@ -301,7 +301,8 @@ pub(super) fn initial_read(r: &mut Reader<'_>, k: &Kind) -> Result<Initial, Erro
         | Kind::Tagged
         | Kind::NibblesGuid
         | Kind::Appearance
-        | Kind::GuidFloat => Initial::Rpc(read_rpc(r)?),
+        | Kind::GuidFloat
+        | Kind::Rpc => Initial::Rpc(read_rpc(r)?),
     })
 }
 pub(super) fn initial_write(w: &mut Writer, k: &Kind, v: &Initial) -> Result<(), Error> {
@@ -347,7 +348,8 @@ pub(super) fn initial_write(w: &mut Writer, k: &Kind, v: &Initial) -> Result<(),
             | Kind::Tagged
             | Kind::NibblesGuid
             | Kind::Appearance
-            | Kind::GuidFloat,
+            | Kind::GuidFloat
+            | Kind::Rpc,
             Initial::Rpc(rpc),
         ) => write_rpc(w, rpc)?,
         _ => return Err(Error::TypeMismatch),
@@ -399,7 +401,7 @@ pub(super) fn update_read(r: &mut Reader<'_>, k: &Kind) -> Result<Update, Error>
                 tail: bytes(r, 4)?,
             })
         })?),
-        Kind::FourBit => Update::Noop,
+        Kind::FourBit | Kind::Rpc => Update::Noop,
         Kind::Appearance => Update::Appearance(Box::new(appearance_read(r)?)),
         Kind::Mesh(profile) => Update::Mesh(r.optional(|r| mesh_read(r, profile))?),
         Kind::GuidFloat => Update::GuidFloat {
@@ -459,7 +461,7 @@ pub(super) fn update_write(w: &mut Writer, k: &Kind, v: &Update) -> Result<(), E
             put_dwords(w, &n.guid)?;
             put_bytes(w, &n.tail, 4)
         })?,
-        (Kind::FourBit, Update::Noop) => (),
+        (Kind::FourBit | Kind::Rpc, Update::Noop) => (),
         (Kind::Appearance, Update::Appearance(a)) => appearance_write(w, a)?,
         (Kind::Mesh(profile), Update::Mesh(v)) => {
             w.optional(v, |w, m| mesh_write(w, profile, m))?
@@ -531,6 +533,71 @@ mod mesh_tests {
         assert_eq!(
             mesh_write(&mut Writer(BitWriter::new()), &profile, &wrong),
             Err(Error::TypeMismatch)
+        );
+    }
+}
+
+#[cfg(test)]
+mod rpc_tests {
+    use super::*;
+
+    #[test]
+    fn rpc_only_component_consumes_exactly_nineteen_initial_bits_and_no_update_bits() {
+        // selector 0x155 (9 bits), serial 0x2aa (10 bits), followed by marker 101.
+        let bytes = [0xaa, 0xd5, 0x54];
+        let expected = Initial::Rpc(Rpc {
+            selector: 0x155,
+            serial: Serial::new(0x2aa).unwrap(),
+        });
+        let mut r = Reader {
+            span: BitSpan::new(&bytes, 0, 22).unwrap(),
+            pos: 0,
+        };
+        assert_eq!(initial_read(&mut r, &Kind::Rpc).unwrap(), expected);
+        assert_eq!(r.pos, 19);
+        assert_eq!(update_read(&mut r, &Kind::Rpc).unwrap(), Update::Noop);
+        assert_eq!(r.pos, 19);
+        assert_eq!(r.take(3).unwrap(), 5);
+        for bits in 0..19 {
+            let mut r = Reader {
+                span: BitSpan::new(&bytes, 0, bits).unwrap(),
+                pos: 0,
+            };
+            assert_eq!(initial_read(&mut r, &Kind::Rpc), Err(Error::Truncated));
+        }
+        let mut w = Writer(BitWriter::new());
+        initial_write(&mut w, &Kind::Rpc, &expected).unwrap();
+        update_write(&mut w, &Kind::Rpc, &Update::Noop).unwrap();
+        assert_eq!(w.0.len(), 19);
+        w.put(5, 3).unwrap();
+        assert_eq!(w.0.bytes(), bytes);
+        assert_eq!(
+            update_write(&mut w, &Kind::Rpc, &Update::Bool(None)),
+            Err(Error::TypeMismatch)
+        );
+    }
+
+    #[test]
+    fn empty_component_updates_still_have_outer_presence_flags() {
+        let p = Profile::new(vec![
+            Kind::Root {
+                property_owner: false,
+            },
+            Kind::Rpc,
+            Kind::Bool,
+        ])
+        .unwrap();
+        let body = Body {
+            creation: None,
+            updates: vec![None, Some(Update::Noop), Some(Update::Bool(Some(true)))],
+        };
+        let wire = body.encode(&p).unwrap();
+        assert_eq!(wire.len(), 5);
+        assert_eq!(wire.bytes(), [0x78]); // absent root, present RPC, present bool, set/value.
+        assert_eq!(Body::decode(wire.span(), &p, false).unwrap().body, body);
+        assert_eq!(
+            Body::decode(BitSpan::new(wire.bytes(), 0, 1).unwrap(), &p, false),
+            Err(Error::Truncated)
         );
     }
 }

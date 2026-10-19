@@ -95,6 +95,80 @@ fn build(c: &Collection, d: &Definitions) -> Customization {
 }
 
 #[test]
+fn persona_modifiers_precede_quantization_and_preserve_transmission_and_items() {
+    let (c, d) = fixture(vec![(AirFilterItemData, performance(0.001))]);
+    let before = c.clone();
+    let base = build(&c, &d);
+    assert_eq!(base.value, 0);
+    for (grip, assists) in [
+        (0, [0, 0, 0]),
+        (2, [0, 0, 0]),
+        (3, [0, 10, 0]),
+        (7, [0, 10, 0]),
+        (8, [10, 10, 10]),
+        (10, [10, 10, 10]),
+    ] {
+        let actual = Customization::from_vehicle_with_overrides(
+            &c,
+            &d,
+            1,
+            SpawnOverrides {
+                performance: 0.003,
+                grip: Some(grip),
+            },
+        )
+        .unwrap();
+        // Separately quantizing parts and modifier would incorrectly produce 0.
+        assert_eq!(actual.value, 1);
+        let mut expected = [grip; 32];
+        expected[5..8].copy_from_slice(&assists);
+        expected[31] = base.tuning[31];
+        assert_eq!(actual.tuning, expected);
+        assert_eq!(actual.list_a, base.list_a);
+        assert_eq!(actual.list_b, base.list_b);
+    }
+    assert_eq!(c, before);
+    assert_eq!(build(&c, &d), base);
+    assert_eq!(
+        Customization::from_vehicle_with_overrides(
+            &c,
+            &d,
+            1,
+            SpawnOverrides {
+                performance: 1.,
+                grip: None
+            }
+        )
+        .unwrap()
+        .value,
+        255
+    );
+    for overrides in [
+        SpawnOverrides {
+            performance: f32::NAN,
+            grip: None,
+        },
+        SpawnOverrides {
+            performance: f32::MAX,
+            grip: None,
+        },
+        SpawnOverrides {
+            performance: -0.1,
+            grip: None,
+        },
+        SpawnOverrides {
+            performance: 0.,
+            grip: Some(11),
+        },
+    ] {
+        assert_eq!(
+            Customization::from_vehicle_with_overrides(&c, &d, 1, overrides),
+            Err(Error::Bound)
+        );
+    }
+}
+
+#[test]
 fn empty_current_parts_use_native_constructor_defaults() {
     let (mut c, d) = fixture(vec![(AirFilterItemData, performance(0.8))]);
     c.items.get_mut(&1).unwrap().children.clear();

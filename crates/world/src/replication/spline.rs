@@ -71,6 +71,9 @@ pub struct Content {
     catalogs: BTreeMap<u16, Catalog>,
 }
 impl Content {
+    pub(super) fn catalog(&self, bundle: u16) -> Option<&Catalog> {
+        self.catalogs.get(&bundle)
+    }
     pub fn new(catalogs: Vec<Catalog>) -> Result<Self, Error> {
         if catalogs.is_empty() || catalogs.len() > MAX_CATALOGS {
             return Err(Error::Bound);

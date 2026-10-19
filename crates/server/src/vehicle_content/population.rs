@@ -332,10 +332,16 @@ impl Population {
                     registration.content_key,
                     sublevel::Profile::new(false, &[sublevel::Kind::Noop])?,
                 )])?;
-                let creation = sublevel::passive::creation(
+                // Like the official host, the bundle scene names the root scene.
+                let root = world
+                    .objects()
+                    .scene(sublevel::root::CONTENT_KEY)
+                    .map(|ghost| sublevel::Blueprint { ghost, sub_id: 1 });
+                let creation = sublevel::passive::creation_with_parent(
                     registration.level,
                     registration.content_key,
                     Serial::new(0).ok_or(Error::Shape)?,
+                    root,
                     &scene_content,
                 )?;
                 let scenes =
@@ -370,7 +376,7 @@ impl Population {
                     connection: Some(owner.connection),
                     owner: resource.clone(),
                     customization_attached: true,
-                    world: false,
+                    placement: super::Placement::Garage,
                     authority_group: group,
                     authority_components: &components,
                 },
@@ -586,7 +592,7 @@ impl Population {
                 connection: Some(owner.connection),
                 owner: resource,
                 customization_attached: false,
-                world: true,
+                placement: super::Placement::PlayerWorld,
                 authority_group: group,
                 authority_components: &components,
             },

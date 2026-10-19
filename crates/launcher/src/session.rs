@@ -395,6 +395,7 @@ mod tests {
             record_protocol: false,
             events: false,
             game_support,
+            settings: Default::default(),
         };
         let _ = std::fs::remove_file(run.join("request.json"));
         records::write_new_json(&run.join("request.json"), &request).unwrap();

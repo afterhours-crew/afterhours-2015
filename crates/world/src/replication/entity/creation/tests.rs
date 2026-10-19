@@ -94,6 +94,70 @@ fn explicit_prefix_fields_close_with_optional_parent_and_owner() {
 }
 
 #[test]
+fn creation_header_identifies_unknown_bundle_without_accepting_unresolved_asset() {
+    let known = content();
+    let other = Content::new(vec![Catalog::new(4, &[(10, 2), (12, 1)]).unwrap()], vec![]).unwrap();
+    for parent in [
+        None,
+        Some(Parent { reference: None }),
+        Some(Parent { reference: Some(8) }),
+    ] {
+        for owner in [None, Some(9)] {
+            let p = Prefix {
+                parent: parent.clone(),
+                owner,
+                asset: Asset {
+                    bundle: 4,
+                    ..asset()
+                },
+                ..prefix()
+            };
+            let wire = p.encode(&other).unwrap();
+            let mut shifted = BitWriter::new();
+            shifted.put(5, 3);
+            shifted.put_span(wire.span());
+            shifted.put(43, 6);
+            let input = shifted.span().after(3).unwrap();
+            let (header, bits) = Header::decode(input).unwrap();
+            assert_eq!(
+                header,
+                Header {
+                    parent: p.parent.clone(),
+                    blueprint: p.blueprint,
+                    sub_id: p.sub_id,
+                    owner,
+                    bundle: 4
+                }
+            );
+            assert_eq!(bits, wire.len() - 2);
+            assert_eq!(input.read_u32(bits, 2), Ok(2));
+            assert_eq!(input.read_u32(wire.len(), 6), Ok(43));
+            for end in 0..bits {
+                assert_eq!(
+                    Header::decode(input.slice(0, end).unwrap()),
+                    Err(Error::Truncated)
+                );
+            }
+            assert_eq!(
+                Header::decode(input.slice(0, bits).unwrap()).unwrap().0,
+                header
+            );
+            assert_eq!(Prefix::decode(input, &known), Err(Error::Unsupported));
+            assert_eq!(Prefix::decode(input, &other), Ok((p, wire.len())));
+        }
+    }
+    let base = prefix().encode(&known).unwrap();
+    for bit in [0, 48, 49, 50] {
+        let mut bytes = base.bytes().to_vec();
+        bytes[bit / 8] ^= 1 << (7 - bit % 8);
+        assert_eq!(
+            Header::decode(BitSpan::new(&bytes, 0, base.len()).unwrap()),
+            Err(Error::Unsupported)
+        );
+    }
+}
+
+#[test]
 fn unknown_transform_family_mode_and_catalog_stop_before_body() {
     let c = content();
     let base = prefix().encode(&c).unwrap();

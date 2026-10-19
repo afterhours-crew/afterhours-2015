@@ -50,9 +50,13 @@ pub struct MeshKind {
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Kind {
-    Root { property_owner: bool },
+    Root {
+        property_owner: bool,
+    },
     Chassis,
-    Part { variants: u16 },
+    Part {
+        variants: u16,
+    },
     TripleNibbles,
     Bool,
     Wheel,
@@ -64,6 +68,8 @@ pub enum Kind {
     Appearance,
     Mesh(Vec<MeshKind>),
     GuidFloat,
+    /// RPC initialization with no component update payload (traffic control).
+    Rpc,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Profile(Vec<Kind>);

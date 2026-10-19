@@ -2,13 +2,26 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-use super::{Body, Content, Creation, Error, Initial, Kind, Prefix, Rpc, Update};
+use super::{Blueprint, Body, Content, Creation, Error, Initial, Kind, Prefix, Rpc, Update};
 use nfs_protocol::world::rpc::Serial;
 
 pub fn creation(
     level_id: u16,
     content_key: u32,
     serial: Serial,
+    content: &Content,
+) -> Result<Creation, Error> {
+    creation_with_parent(level_id, content_key, serial, None, content)
+}
+
+/// A passive scene under `parent`. Official dynamic vehicle bundle scenes name
+/// the root scene (sub-object 1); the client passes the reference on to the
+/// sub-level it creates and discards the prefix words (E447, E990).
+pub fn creation_with_parent(
+    level_id: u16,
+    content_key: u32,
+    serial: Serial,
+    parent: Option<Blueprint>,
     content: &Content,
 ) -> Result<Creation, Error> {
     let profile = content.profile(content_key)?;
@@ -38,7 +51,7 @@ pub fn creation(
         prefix: Prefix {
             level_id,
             content_key,
-            blueprint: None,
+            blueprint: parent,
             word_a: 0,
             word_b: 0,
             constructor_word: None,

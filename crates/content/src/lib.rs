@@ -15,6 +15,7 @@
 //!
 //! The library is synchronous and owns no runtime: a server or launcher calls
 //! it before starting, or from a blocking worker.
+pub mod ai;
 pub mod assets;
 pub mod builds;
 mod cache;
@@ -31,6 +32,7 @@ pub mod participant_logic;
 mod progress;
 pub mod progression;
 mod reputation;
+pub mod rivals;
 pub mod road_network;
 mod scan;
 pub mod scenes;
@@ -41,6 +43,7 @@ mod stats;
 #[cfg(any(test, feature = "synthetic"))]
 pub mod synthetic;
 mod tables;
+pub mod traffic;
 pub use progress::Progress;
 pub mod vehicle_parts;
 pub mod vehicle_profiles;
@@ -58,7 +61,7 @@ pub const FORMAT: &str = "nfs-install-content";
 pub const VERSION: u64 = 1;
 /// Increment whenever a builder's output for an unchanged installation changes,
 /// so existing cache entries are rebuilt.
-pub const BUILDER_REVISION: u64 = 27;
+pub const BUILDER_REVISION: u64 = 34;
 /// Executable file name relative to the installation root.
 pub const EXECUTABLE: &str = "NFS16.exe";
 
@@ -78,6 +81,10 @@ pub struct BuildIdentity {
     pub progression: progression::Rules,
     pub sequences: sequences::Rules,
     pub participant_logic: participant_logic::Rules,
+    pub traffic_spline_class_id: u16,
+    pub traffic_links: traffic::Links,
+    pub rival_links: rivals::Links,
+    pub ai_links: ai::Links,
 }
 
 impl BuildIdentity {
@@ -123,10 +130,12 @@ pub enum Kind {
     /// Objective defaults, entity shapes and installed scene-channel bindings.
     ProgressionContent,
     SequenceContent,
+    TrafficContent,
+    RivalContent,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 14] = [
+    pub const ALL: [Kind; 16] = [
         Kind::ItemContent,
         Kind::PersistentContent,
         Kind::StatDefinitions,
@@ -141,6 +150,8 @@ impl Kind {
         Kind::VehicleProfiles,
         Kind::ProgressionContent,
         Kind::SequenceContent,
+        Kind::TrafficContent,
+        Kind::RivalContent,
     ];
     /// Manifest key.
     pub fn key(self) -> &'static str {
@@ -159,6 +170,8 @@ impl Kind {
             Self::VehicleProfiles => "vehicle_profiles",
             Self::ProgressionContent => "progression_content",
             Self::SequenceContent => "sequence_content",
+            Self::TrafficContent => "traffic_content",
+            Self::RivalContent => "rival_content",
         }
     }
     /// File name inside a cache entry.
@@ -178,6 +191,8 @@ impl Kind {
             Self::VehicleProfiles => "vehicle-profiles.json",
             Self::ProgressionContent => "progression-content.json",
             Self::SequenceContent => "sequence-content.json",
+            Self::TrafficContent => "traffic-content.json",
+            Self::RivalContent => "rival-content.json",
         }
     }
 }
@@ -404,6 +419,14 @@ fn build_with_progress(
     outputs.insert(
         Kind::SequenceContent,
         extract!(Kind::SequenceContent, sequences::build(&mut index)),
+    );
+    outputs.insert(
+        Kind::TrafficContent,
+        extract!(Kind::TrafficContent, traffic::build(&mut index)),
+    );
+    outputs.insert(
+        Kind::RivalContent,
+        extract!(Kind::RivalContent, rivals::build(&mut index)),
     );
     Ok(outputs)
 }

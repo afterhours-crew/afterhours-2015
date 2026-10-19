@@ -6,6 +6,7 @@ use super::*;
 use std::collections::BTreeMap;
 
 mod actors;
+pub mod ai;
 mod locations;
 mod manager;
 mod vehicles;
@@ -40,6 +41,9 @@ pub struct Players {
     views: BTreeMap<u16, u16>,
     view_serial: u16,
     location_maps: BTreeMap<(u8, u64), u16>,
+    /// Roaming-rival location map per owning session (location service slot 0)
+    /// and the host time its positions were last published.
+    rival_maps: BTreeMap<(u8, u64), (u16, u64)>,
     players: BTreeMap<(u8, u8), Player>,
     participants: BTreeMap<u16, u16>,
     actors: BTreeMap<u16, u16>,
@@ -47,6 +51,9 @@ pub struct Players {
     /// Garage display cars prepared while the participant still drives the world car.
     staged_vehicles: BTreeMap<(u16, u64), u16>,
     goal_allocation_serial: u8,
+    ai: BTreeMap<(u8, u64, u64), ai::Instance>,
+    /// Persistent AI participants whose cars come and go (roaming rivals).
+    ai_slots: BTreeMap<(u8, u64, u64), ai::Slot>,
 }
 
 /// Native runtime index of the player on `connection` and local `slot`.
@@ -181,6 +188,22 @@ impl Players {
             .filter_map(|&participant| self.runtime_index(connection, persona, participant));
         let index = indices.next()?;
         indices.next().is_none().then_some(index)
+    }
+    /// Resolve the sending local player for an event on a delegated AI object.
+    /// The AI participant itself has no Player or inventory ownership.
+    pub fn local_runtime_index(&self, connection: u8, persona: u64, slot: u8) -> Option<u8> {
+        self.participants
+            .keys()
+            .find_map(|&id| match &self.objects.get(id)?.initial {
+                Initial::Player(player)
+                    if player.value8 == connection
+                        && player.identity.persona == persona
+                        && player.value255 == slot =>
+                {
+                    Some(player.runtime_index)
+                }
+                _ => None,
+            })
     }
     pub fn local_slot(&self, connection: u8, persona: u64, participant: u16) -> Option<u8> {
         if !self.owns_participant(connection, persona, participant) {
@@ -498,5 +521,11 @@ mod tests {
         assert_eq!(world.account_runtime_index(2, 200), Some(1));
         assert_eq!(world.account_runtime_index(1, 200), None);
         assert_eq!(world.account_runtime_index(2, 100), None);
+        assert_eq!(world.local_runtime_index(1, 100, 0), Some(0));
+        assert_eq!(world.local_runtime_index(2, 200, 0), Some(1));
+        assert_eq!(world.local_runtime_index(1, 200, 0), None);
+        assert_eq!(world.local_runtime_index(2, 100, 0), None);
+        assert_eq!(world.local_runtime_index(1, 100, 1), None);
+        assert_eq!(world.local_runtime_index(1, 100, 255), None);
     }
 }

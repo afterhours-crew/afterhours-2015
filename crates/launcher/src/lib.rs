@@ -44,6 +44,7 @@ pub mod profile;
 pub mod records;
 pub mod session;
 pub mod sessions;
+pub mod settings;
 pub mod supervisor;
 pub mod terminal;
 
