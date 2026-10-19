@@ -340,8 +340,15 @@ fn traffic_amount_scales_the_target_and_each_road_quota() {
     // The original target here is 5 (see the shaped-region test).
     let target = |percent| p.query(&focus(), percent).target;
     assert_eq!(
-        (target(100), target(0), target(50), target(200), target(300)),
-        (5, 0, 3, 10, 15)
+        (
+            target(100),
+            target(0),
+            target(50),
+            target(200),
+            target(300),
+            target(500)
+        ),
+        (5, 0, 3, 10, 15, 25)
     );
     p.roads[0].quota = 3;
     let pick = |p: &Policy, percent, count| {
@@ -356,8 +363,9 @@ fn traffic_amount_scales_the_target_and_each_road_quota() {
         )
         .is_some()
     };
-    // Quota 3 at 100 %, 6 at 200 %, 2 at 50 %.
+    // Quota 3 at 100 %, 6 at 200 %, 15 at 500 %, 2 at 50 %.
     assert!(pick(&p, 100, 2) && !pick(&p, 100, 3));
     assert!(pick(&p, 200, 5) && !pick(&p, 200, 6));
+    assert!(pick(&p, 500, 14) && !pick(&p, 500, 15));
     assert!(pick(&p, 50, 1) && !pick(&p, 50, 2));
 }

@@ -15,9 +15,16 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 pub const FILE: &str = "settings.json";
-/// Same bounds as the server's `--traffic-percent` and `--rival-limit`.
-pub const MAX_TRAFFIC_PERCENT: u16 = 300;
-pub const MAX_RIVALS: u16 = 128;
+/// Same bounds as the server's `--traffic-percent` and `--rival-limit`:
+/// traffic up to 5x the original and up to 15 roaming rivals.
+pub const MAX_TRAFFIC_PERCENT: u16 = 500;
+pub const MAX_RIVALS: u16 = 15;
+/// A `rival_limit` above the game's own number adds rivals (the server
+/// activates other installed racers), rather than only capping them.
+pub const RIVALS_ABOVE_ORIGINAL: bool = true;
+/// Builds before the rival count accepted a cap up to this; such a saved
+/// value reads as [`MAX_RIVALS`].
+const OLDER_MAX_RIVALS: u16 = 128;
 const ORIGINAL_TRAFFIC: u16 = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,8 +33,9 @@ pub struct Settings {
     /// Ambient traffic as a percentage of the original amount; 0 turns it off.
     #[serde(default = "original_traffic")]
     pub traffic_percent: u16,
-    /// Most roaming rivals active at once; 0 turns them off. Null keeps the
-    /// original number.
+    /// Roaming rivals kept active; 0 turns them off. Null keeps the original
+    /// number. The game's own rivals are capped at it and, where the
+    /// installed racers allow, more are added up to it.
     #[serde(default)]
     pub rival_limit: Option<u16>,
 }
@@ -45,11 +53,11 @@ impl Default for Settings {
     }
 }
 
-/// `--rivals`: `original` or the most rivals active at once.
+/// `--rivals`: `original` or the number of rivals to keep active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rivals {
     Original,
-    AtMost(u16),
+    Count(u16),
 }
 
 /// Parse a `--rivals` value.
@@ -58,7 +66,7 @@ pub fn parse_rivals(value: &str) -> std::result::Result<Rivals, String> {
         return Ok(Rivals::Original);
     }
     match value.parse::<u16>() {
-        Ok(count) if count <= MAX_RIVALS => Ok(Rivals::AtMost(count)),
+        Ok(count) if count <= MAX_RIVALS => Ok(Rivals::Count(count)),
         _ => Err(format!("expected `original` or 0 to {MAX_RIVALS}")),
     }
 }
@@ -100,8 +108,8 @@ impl Settings {
         let rivals = match self.rival_limit {
             None => "original rivals".to_owned(),
             Some(0) => "no rivals".to_owned(),
-            Some(1) => "at most 1 rival".to_owned(),
-            Some(limit) => format!("at most {limit} rivals"),
+            Some(1) => "1 rival".to_owned(),
+            Some(count) => format!("{count} rivals"),
         };
         format!("{traffic}, {rivals}")
     }
@@ -113,7 +121,13 @@ pub fn load(data: &Path) -> Result<Settings> {
     if std::fs::symlink_metadata(&path).is_err() {
         return Ok(Settings::default());
     }
-    let settings: Settings = records::read_json(&path)?;
+    let mut settings: Settings = records::read_json(&path)?;
+    if settings
+        .rival_limit
+        .is_some_and(|limit| limit > MAX_RIVALS && limit <= OLDER_MAX_RIVALS)
+    {
+        settings.rival_limit = Some(MAX_RIVALS);
+    }
     settings.validate()?;
     Ok(settings)
 }
@@ -129,7 +143,7 @@ pub fn resolve(data: &Path, traffic: Option<u16>, rivals: Option<Rivals>) -> Res
     }
     match rivals {
         Some(Rivals::Original) => settings.rival_limit = None,
-        Some(Rivals::AtMost(limit)) => settings.rival_limit = Some(limit),
+        Some(Rivals::Count(count)) => settings.rival_limit = Some(count),
         None => {}
     }
     settings.validate()?;
@@ -156,7 +170,16 @@ mod tests {
             custom.server_arguments(),
             ["--traffic-percent", "150", "--rival-limit", "2"]
         );
-        assert_eq!(custom.describe(), "150% traffic, at most 2 rivals");
+        assert_eq!(custom.describe(), "150% traffic, 2 rivals");
+        let most = Settings {
+            traffic_percent: MAX_TRAFFIC_PERCENT,
+            rival_limit: Some(MAX_RIVALS),
+        };
+        assert_eq!(most.describe(), "500% traffic, 15 rivals");
+        assert_eq!(
+            most.server_arguments(),
+            ["--traffic-percent", "500", "--rival-limit", "15"]
+        );
         let off = Settings {
             traffic_percent: 0,
             rival_limit: Some(0),
@@ -172,9 +195,9 @@ mod tests {
     fn rivals_values_are_original_or_a_bounded_count() {
         assert_eq!(parse_rivals("original"), Ok(Rivals::Original));
         assert_eq!(parse_rivals("Original"), Ok(Rivals::Original));
-        assert_eq!(parse_rivals("0"), Ok(Rivals::AtMost(0)));
-        assert_eq!(parse_rivals("128"), Ok(Rivals::AtMost(128)));
-        for bad in ["129", "-1", "", "lots"] {
+        assert_eq!(parse_rivals("0"), Ok(Rivals::Count(0)));
+        assert_eq!(parse_rivals("15"), Ok(Rivals::Count(15)));
+        for bad in ["16", "128", "-1", "", "lots"] {
             assert!(parse_rivals(bad).is_err(), "{bad}");
         }
     }
@@ -191,7 +214,7 @@ mod tests {
             serde_json::json!({"traffic_percent": 100, "rival_limit": null})
         );
         // Command-line values are saved and later sessions keep them.
-        resolve(&dir, Some(40), Some(Rivals::AtMost(3))).unwrap();
+        resolve(&dir, Some(40), Some(Rivals::Count(3))).unwrap();
         let kept = resolve(&dir, None, None).unwrap();
         assert_eq!((kept.traffic_percent, kept.rival_limit), (40, Some(3)));
         let reset = resolve(&dir, None, Some(Rivals::Original)).unwrap();
@@ -205,9 +228,25 @@ mod tests {
                 rival_limit: Some(1)
             }
         );
+        // 5x traffic is accepted; a count saved by an older build (which
+        // took up to 128) reads as the largest count and is saved as such.
+        std::fs::write(
+            dir.join(FILE),
+            br#"{"traffic_percent": 500, "rival_limit": 40}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            load(&dir).unwrap(),
+            Settings {
+                traffic_percent: 500,
+                rival_limit: Some(MAX_RIVALS)
+            }
+        );
+        resolve(&dir, Some(400), None).unwrap();
+        assert_eq!(load(&dir).unwrap().rival_limit, Some(MAX_RIVALS));
         // Out-of-range, unknown or malformed settings are refused, not ignored.
         for bad in [
-            &br#"{"traffic_percent": 301}"#[..],
+            &br#"{"traffic_percent": 501}"#[..],
             br#"{"rival_limit": 129}"#,
             br#"{"traffic": 50}"#,
             br#"{"traffic_percent": -5}"#,
@@ -217,7 +256,7 @@ mod tests {
             assert!(load(&dir).is_err(), "{}", String::from_utf8_lossy(bad));
             assert!(resolve(&dir, Some(50), None).is_err());
         }
-        assert!(resolve(&dir.join("missing"), Some(301), None).is_err());
+        assert!(resolve(&dir.join("missing"), Some(501), None).is_err());
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

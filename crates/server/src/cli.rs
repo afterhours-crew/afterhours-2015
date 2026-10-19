@@ -1106,20 +1106,20 @@ mod tests {
         let mut args = configured();
         args.extend([
             "--traffic-percent".into(),
-            "150".into(),
+            "500".into(),
             "--rival-limit".into(),
-            "2".into(),
+            "15".into(),
         ]);
         let parsed = parse_from(args.into_iter()).unwrap();
         assert_eq!(
             (parsed.ai.traffic_percent(), parsed.ai.rival_limit()),
-            (150, Some(2))
+            (500, Some(15))
         );
         for (flag, value) in [
-            ("--traffic-percent", "301"),
+            ("--traffic-percent", "501"),
             ("--traffic-percent", "-1"),
             ("--traffic-percent", "lots"),
-            ("--rival-limit", "129"),
+            ("--rival-limit", "16"),
             ("--rival-limit", "none"),
         ] {
             let mut args = configured();

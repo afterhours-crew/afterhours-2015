@@ -25,7 +25,9 @@ pub use policy::Focus;
 #[cfg(test)]
 pub(crate) mod tests;
 
-pub const MAX_CARS: usize = ai::MAX_AI;
+/// Traffic shares the world's AI budget but leaves room for every rival car
+/// a player can choose, even at the largest traffic amount.
+pub const MAX_CARS: usize = ai::MAX_AI - crate::ai_settings::RIVAL_CAR_RESERVE;
 /// Disjoint host identity ranges for ambient traffic and roaming rivals.
 /// These are server bookkeeping keys, never client object IDs.
 pub(crate) const RIVAL_KEY_START: u64 = 1 << 40;

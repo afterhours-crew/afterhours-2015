@@ -70,12 +70,16 @@ mod tests {
         assert_eq!(values, settings::Settings::default());
         assert!(!report.saved && !report.file.exists());
         assert_eq!(
-            (report.max_traffic_percent, report.max_rivals),
-            (settings::MAX_TRAFFIC_PERCENT, settings::MAX_RIVALS)
+            (
+                report.max_traffic_percent,
+                report.max_rivals,
+                report.rivals_above_original
+            ),
+            (500, 15, true)
         );
         crate::contract::testing::validate("settings", &report);
 
-        let (values, report) = apply(&data, Some(200), Some(Rivals::AtMost(0))).unwrap();
+        let (values, report) = apply(&data, Some(200), Some(Rivals::Count(0))).unwrap();
         assert_eq!((values.traffic_percent, values.rival_limit), (200, Some(0)));
         assert!(report.saved && report.file.exists());
         assert_eq!((report.traffic_percent, report.rival_limit), (200, Some(0)));

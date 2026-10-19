@@ -257,13 +257,17 @@ pub struct SettingsReport {
     /// Ambient traffic as a percentage of the original amount; 0 turns it
     /// off and 100 is the original.
     pub traffic_percent: u16,
-    /// Most roaming rivals active at once; 0 turns them off and `null`
-    /// keeps the original number.
+    /// Roaming rivals kept active; 0 turns them off and `null` keeps the
+    /// original number.
     pub rival_limit: Option<u16>,
     /// Largest `traffic_percent` this build accepts.
     pub max_traffic_percent: u16,
     /// Largest `rival_limit` this build accepts.
     pub max_rivals: u16,
+    /// Whether a `rival_limit` above the game's own number adds roaming
+    /// rivals (other installed racers near the player, each at most once).
+    /// When `false` it only caps the game's own.
+    pub rivals_above_original: bool,
     /// `settings.json` in the data directory; it may not exist yet.
     pub file: PathBuf,
     /// Whether this command saved the file.
@@ -278,6 +282,7 @@ impl SettingsReport {
             rival_limit: settings.rival_limit,
             max_traffic_percent: crate::settings::MAX_TRAFFIC_PERCENT,
             max_rivals: crate::settings::MAX_RIVALS,
+            rivals_above_original: crate::settings::RIVALS_ABOVE_ORIGINAL,
             file,
             saved,
         }

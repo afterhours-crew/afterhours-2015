@@ -507,7 +507,7 @@ fn delegated_traffic_reports_are_isolated_retry_safe_and_retired() {
 fn traffic_turned_off_spawns_nothing_and_more_traffic_still_spawns() {
     let (p, mut world, c) = fixture();
     let mut off = p.clone().with_traffic_percent(0);
-    let mut more = p.with_traffic_percent(200);
+    let mut more = p.with_traffic_percent(crate::ai_settings::MAX_TRAFFIC_PERCENT);
     let mut other = world.clone();
     for now in [0, 1001, 2002, 3003, 4004] {
         assert!(
@@ -525,5 +525,14 @@ fn traffic_turned_off_spawns_nothing_and_more_traffic_still_spawns() {
             .unwrap()
             .spawned
             .is_some()
+    );
+}
+
+#[test]
+fn traffic_leaves_room_for_every_chosen_rival_car() {
+    assert_eq!(MAX_CARS + crate::ai_settings::RIVAL_CAR_RESERVE, ai::MAX_AI);
+    // One player's largest nearby target at 5x (50 cars) still fits.
+    assert!(
+        MAX_CARS >= crate::ai_settings::scale(10, crate::ai_settings::MAX_TRAFFIC_PERCENT) as usize
     );
 }
