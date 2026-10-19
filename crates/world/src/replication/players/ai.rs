@@ -83,12 +83,82 @@ pub(super) struct Instance {
     /// The requested control-suppression flag has been cleared after the
     /// car's first accepted client report.
     released: bool,
+    /// The persistent slot this car belongs to; removing the car then keeps
+    /// the slot's participant and actor.
+    slot: Option<u64>,
+}
+
+/// A persistent AI participant and actor whose car is created and removed
+/// separately. Official roaming rivals keep their participant for the whole
+/// time the racer is active while the host hands cars to and from the client
+/// (E986): each car gets its own goal, reset-volume entry and control hold.
+#[derive(Clone, Debug)]
+pub(super) struct Slot {
+    request: Request,
+    participant: u16,
+    actor: u16,
+    managers: Managers,
+    car: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SlotIds {
+    pub participant: u16,
+    pub actor: u16,
+    /// Spawn key of the slot's current car.
+    pub car: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SlotCreated {
+    pub ids: SlotIds,
+    pub records: Vec<Record>,
+    /// Participant add, actor binding and Alive enter; no reset tracking until
+    /// the slot has a car.
+    pub bound: Bound,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SlotAttached {
+    pub ids: Ids,
+    pub records: Vec<Record>,
+    /// Reset-volume enter for the participant, sent after the car is bound.
+    pub tracked: crate::world_activation::Notification,
+}
+
+fn validate_managers(managers: Managers) -> Result<(), Error> {
+    let manager_fields = [managers.participants, managers.actors];
+    if (managers.alive.scene == managers.scene
+        && manager_fields.contains(&managers.alive.serializer))
+        || (managers.reset_volumes.scene == managers.scene
+            && manager_fields.contains(&managers.reset_volumes.serializer))
+        || managers.reset_volumes == managers.alive
+    {
+        return Err(Error::Shape);
+    }
+    Ok(())
+}
+
+fn validate_request(request: &Request) -> Result<(), Error> {
+    if request.key == 0 || request.name.is_empty() || request.name.contains(&0) || request.mode > 2
+    {
+        return Err(Error::Shape);
+    }
+    if request.name.len() > 64 {
+        return Err(Error::Bound);
+    }
+    Ok(())
 }
 
 impl Players {
     /// Shared budget for all host-owned AI populations in this world.
     pub fn ai_count(&self) -> usize {
         self.ai.len()
+    }
+
+    /// Persistent AI participants in this world, with or without a car.
+    pub fn ai_slot_count(&self) -> usize {
+        self.ai_slots.len()
     }
 
     pub fn ai_ids(&self, connection: u8, persona: u64, key: u64) -> Option<Ids> {
@@ -108,16 +178,7 @@ impl Players {
         if self.account_runtime_index(connection, persona).is_none() {
             return Err(Error::UnknownObject);
         }
-        if request.key == 0
-            || request.name.is_empty()
-            || request.name.contains(&0)
-            || request.mode > 2
-        {
-            return Err(Error::Shape);
-        }
-        if request.name.len() > 64 {
-            return Err(Error::Bound);
-        }
+        validate_request(&request)?;
         let key = (connection, persona, request.key);
         if let Some(old) = self.ai.get(&key) {
             return if old.request == request && old.creation == creation {
@@ -191,12 +252,229 @@ impl Players {
                 goal: None,
                 managers: None,
                 released: false,
+                slot: None,
             },
         );
         Ok(Some(Spawned {
             ids,
             records: vec![participant, actor, vehicle, attached],
         }))
+    }
+
+    /// Whether `participant` is one of this session's AI participants.
+    pub(super) fn owns_ai_participant(
+        &self,
+        connection: u8,
+        persona: u64,
+        participant: u16,
+    ) -> bool {
+        self.ai.iter().any(|(&(c, p, _), instance)| {
+            c == connection && p == persona && instance.ids.participant == participant
+        }) || self.ai_slots.iter().any(|(&(c, p, _), slot)| {
+            c == connection && p == persona && slot.participant == participant
+        })
+    }
+
+    pub fn ai_slot(&self, connection: u8, persona: u64, key: u64) -> Option<SlotIds> {
+        self.ai_slots
+            .get(&(connection, persona, key))
+            .map(|slot| SlotIds {
+                participant: slot.participant,
+                actor: slot.actor,
+                car: slot.car,
+            })
+    }
+
+    /// Create a persistent AI participant and actor without a car and bind
+    /// them to the installed managers in one step. Retrying the same request
+    /// is inert; a different request under the same key is rejected.
+    pub fn create_ai_slot(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        request: Request,
+        managers: Managers,
+    ) -> Result<Option<SlotCreated>, Error> {
+        if self.account_runtime_index(connection, persona).is_none() {
+            return Err(Error::UnknownObject);
+        }
+        validate_request(&request)?;
+        validate_managers(managers)?;
+        let key = (connection, persona, request.key);
+        if let Some(old) = self.ai_slots.get(&key) {
+            return if old.request == request && old.managers == managers {
+                Ok(None)
+            } else {
+                Err(Error::DuplicateObject)
+            };
+        }
+        if self.ai_slots.len() >= MAX_AI {
+            return Err(Error::Bound);
+        }
+        let mut next = self.objects.clone();
+        let identity = NamedIdentity {
+            identity: Identity {
+                persona: 0,
+                bytes: Vec::new(),
+            },
+            name: request.name.clone(),
+        };
+        let participant = next.spawn(
+            Initial::Participant(ParticipantInit {
+                selector: 0,
+                serial: 0,
+                identity: identity.clone(),
+                player: 0,
+            }),
+            Update::Participant(ParticipantUpdate {
+                player: Some(0),
+                entity: None,
+                identity: Some(identity),
+            }),
+        )?;
+        let actor = next.spawn(
+            Initial::Actor(ActorInit {
+                participant: participant.id,
+                flag_a: request.flags[0],
+                flag_b: request.flags[1],
+                word_a: request.words[0],
+                word_b: request.words[1],
+            }),
+            Update::Actor(ActorUpdate {
+                flag_a: Some(request.flags[0]),
+                flag_b: Some(request.flags[1]),
+                word_pair: Some(request.words),
+                word_c: Some(request.mode),
+                ..ActorUpdate::default()
+            }),
+        )?;
+        let mut bound = next.bind_ai_managers(managers, participant.id, actor.id)?;
+        bound.enter = next.ai_state(managers.alive, participant.id, true)?;
+        let ids = SlotIds {
+            participant: participant.id,
+            actor: actor.id,
+            car: None,
+        };
+        self.objects = next;
+        self.ai_slots.insert(
+            key,
+            Slot {
+                request,
+                participant: ids.participant,
+                actor: ids.actor,
+                managers,
+                car: None,
+            },
+        );
+        Ok(Some(SlotCreated {
+            ids,
+            records: vec![participant, actor],
+            bound,
+        }))
+    }
+
+    /// Give a slot a new car under spawn key `car`. The car's participant is
+    /// the slot's; it enters the reset-volume collection and its control stays
+    /// held until the client's first report, like the official host (E986).
+    pub fn attach_ai_slot_vehicle(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        slot: u64,
+        car: u64,
+        creation: vehicle::EntityCreation,
+        content: &entity::creation::Content,
+    ) -> Result<SlotAttached, Error> {
+        let owner = self
+            .ai_slots
+            .get(&(connection, persona, slot))
+            .ok_or(Error::UnknownObject)?;
+        if owner.car.is_some() || car == 0 || self.ai.contains_key(&(connection, persona, car)) {
+            return Err(Error::DuplicateObject);
+        }
+        if self.ai.len() >= MAX_AI {
+            return Err(Error::Bound);
+        }
+        let mut next = self.objects.clone();
+        let vehicle = next.spawn_vehicle(creation.clone(), content)?;
+        let attached = next
+            .change(
+                owner.participant,
+                Update::Participant(ParticipantUpdate {
+                    entity: Some(vehicle.id),
+                    ..ParticipantUpdate::default()
+                }),
+            )?
+            .ok_or(Error::Shape)?;
+        let tracked = next.ai_tracking(owner.managers.reset_volumes, owner.participant, true)?;
+        let ids = Ids {
+            participant: owner.participant,
+            actor: owner.actor,
+            vehicle: vehicle.id,
+        };
+        let request = Request {
+            key: car,
+            ..owner.request.clone()
+        };
+        let managers = owner.managers;
+        self.objects = next;
+        self.ai.insert(
+            (connection, persona, car),
+            Instance {
+                request,
+                creation,
+                ids,
+                goal: None,
+                managers: Some(managers),
+                released: false,
+                slot: Some(slot),
+            },
+        );
+        if let Some(owner) = self.ai_slots.get_mut(&(connection, persona, slot)) {
+            owner.car = Some(car);
+        }
+        Ok(SlotAttached {
+            ids,
+            records: vec![vehicle, attached],
+            tracked,
+        })
+    }
+
+    /// Retire a slot with its car, if any, as one transaction.
+    pub fn remove_ai_slot(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        slot: u64,
+    ) -> Result<Removed, Error> {
+        let Some(owner) = self.ai_slots.get(&(connection, persona, slot)).cloned() else {
+            return Ok(Removed::default());
+        };
+        let car = owner.car.and_then(|key| {
+            self.ai
+                .get(&(connection, persona, key))
+                .map(|i| (key, i.clone()))
+        });
+        let mut next = self.objects.clone();
+        let result = self.retire(
+            &mut next,
+            connection,
+            persona,
+            Retired {
+                participant: owner.participant,
+                actor: owner.actor,
+                vehicle: car.as_ref().map(|(_, i)| i.ids.vehicle),
+                goal: car.as_ref().and_then(|(_, i)| i.goal),
+                alive: Some(owner.managers),
+                tracked: car.is_some().then_some(owner.managers),
+            },
+        )?;
+        self.objects = next;
+        if let Some((key, _)) = car {
+            self.ai.remove(&(connection, persona, key));
+        }
+        self.ai_slots.remove(&(connection, persona, slot));
+        Ok(result)
     }
 
     /// Bind the AI participant and actor to their installed scene managers.
@@ -210,15 +488,7 @@ impl Players {
         key: u64,
         managers: Managers,
     ) -> Result<Bound, Error> {
-        let manager_fields = [managers.participants, managers.actors];
-        if (managers.alive.scene == managers.scene
-            && manager_fields.contains(&managers.alive.serializer))
-            || (managers.reset_volumes.scene == managers.scene
-                && manager_fields.contains(&managers.reset_volumes.serializer))
-            || managers.reset_volumes == managers.alive
-        {
-            return Err(Error::Shape);
-        }
+        validate_managers(managers)?;
         let instance = self
             .ai
             .get(&(connection, persona, key))
@@ -316,27 +586,111 @@ impl Players {
 
     /// Retire one host spawn; repeated removal is inert. Manager snapshots release
     /// their references atomically with deletion, matching client death listeners.
+    /// A slot's car is detached instead: the participant and actor stay, the
+    /// car leaves the reset volumes and its control is held again (E986).
     pub fn remove_ai_vehicle(
         &mut self,
         connection: u8,
         persona: u64,
         key: u64,
     ) -> Result<Removed, Error> {
-        let Some(instance) = self.ai.get(&(connection, persona, key)) else {
+        let Some(instance) = self.ai.get(&(connection, persona, key)).cloned() else {
             return Ok(Removed::default());
         };
         let mut next = self.objects.clone();
-        let mut result = Removed::default();
-        if let Some(managers) = instance.managers {
+        let result = if let Some(slot) = instance.slot {
+            let result = self.detach(&mut next, &instance)?;
+            if let Some(owner) = self.ai_slots.get_mut(&(connection, persona, slot)) {
+                owner.car = None;
+            }
             result
-                .leave
-                .extend(next.ai_state(managers.alive, instance.ids.participant, false)?);
+        } else {
+            self.retire(
+                &mut next,
+                connection,
+                persona,
+                Retired {
+                    participant: instance.ids.participant,
+                    actor: instance.ids.actor,
+                    vehicle: Some(instance.ids.vehicle),
+                    goal: instance.goal,
+                    alive: instance.managers,
+                    tracked: instance.managers,
+                },
+            )?
+        };
+        self.objects = next;
+        self.ai.remove(&(connection, persona, key));
+        Ok(result)
+    }
+
+    /// Remove a slot car, keeping its participant and actor.
+    fn detach(&self, next: &mut state::World, instance: &Instance) -> Result<Removed, Error> {
+        let mut result = Removed::default();
+        result.records.extend(next.change(
+            instance.ids.participant,
+            Update::Participant(ParticipantUpdate {
+                entity: Some(0),
+                ..ParticipantUpdate::default()
+            }),
+        )?);
+        if let Some(goal) = instance.goal {
+            result.records.extend(next.change(
+                instance.ids.actor,
+                Update::Actor(ActorUpdate {
+                    references_a: Some(Vec::new()),
+                    references_b: Some(Vec::new()),
+                    ..ActorUpdate::default()
+                }),
+            )?);
+            next.remove(goal)?;
+            result.deleted.push(goal);
+        }
+        next.remove(instance.ids.vehicle)?;
+        result.deleted.push(instance.ids.vehicle);
+        if instance.request.flags[1] && instance.released {
+            result.records.extend(next.change(
+                instance.ids.actor,
+                Update::Actor(ActorUpdate {
+                    flag_b: Some(true),
+                    ..ActorUpdate::default()
+                }),
+            )?);
+        }
+        if let Some(managers) = instance.managers {
             result.untracked.push(next.ai_tracking(
                 managers.reset_volumes,
                 instance.ids.participant,
                 false,
             )?);
-            next.release_ai_managers(managers, instance.ids.participant, instance.ids.actor)?;
+        }
+        Ok(result)
+    }
+
+    /// Delete a participant, its actor and optional car and goal, leaving the
+    /// managers, reset volumes and the session's rival map in one transaction.
+    fn retire(
+        &self,
+        next: &mut state::World,
+        connection: u8,
+        persona: u64,
+        retired: Retired,
+    ) -> Result<Removed, Error> {
+        let mut result = Removed::default();
+        if let Some(managers) = retired.alive {
+            result
+                .leave
+                .extend(next.ai_state(managers.alive, retired.participant, false)?);
+        }
+        if let Some(managers) = retired.tracked {
+            result.untracked.push(next.ai_tracking(
+                managers.reset_volumes,
+                retired.participant,
+                false,
+            )?);
+        }
+        if let Some(managers) = retired.alive {
+            next.release_ai_managers(managers, retired.participant, retired.actor)?;
         }
         // A listed rival must leave the session's map before its participant
         // can be deleted; the map update precedes the deletion on wire.
@@ -357,7 +711,7 @@ impl Players {
                     entries: g
                         .entries
                         .iter()
-                        .filter(|e| e.participant != instance.ids.participant)
+                        .filter(|e| e.participant != retired.participant)
                         .cloned()
                         .collect(),
                 })
@@ -372,16 +726,18 @@ impl Players {
                 )?);
             }
         }
-        result.records.extend(next.change(
-            instance.ids.participant,
-            Update::Participant(ParticipantUpdate {
-                entity: Some(0),
-                ..ParticipantUpdate::default()
-            }),
-        )?);
-        if let Some(goal) = instance.goal {
+        if retired.vehicle.is_some() {
             result.records.extend(next.change(
-                instance.ids.actor,
+                retired.participant,
+                Update::Participant(ParticipantUpdate {
+                    entity: Some(0),
+                    ..ParticipantUpdate::default()
+                }),
+            )?);
+        }
+        if let Some(goal) = retired.goal {
+            result.records.extend(next.change(
+                retired.actor,
                 Update::Actor(ActorUpdate {
                     references_a: Some(Vec::new()),
                     references_b: Some(Vec::new()),
@@ -391,36 +747,45 @@ impl Players {
             next.remove(goal)?;
             result.deleted.push(goal);
         }
-        for id in [
-            instance.ids.vehicle,
-            instance.ids.actor,
-            instance.ids.participant,
-        ] {
+        for id in retired
+            .vehicle
+            .into_iter()
+            .chain([retired.actor, retired.participant])
+        {
             next.remove(id)?;
             result.deleted.push(id);
         }
-        self.objects = next;
-        self.ai.remove(&(connection, persona, key));
         Ok(result)
     }
 
     /// Session cleanup is all-or-nothing even when a retained scene reference
     /// prevents one of this connection's AI participants from being retired.
     pub fn remove_ai_for_connection(&mut self, connection: u8) -> Result<Removed, Error> {
-        let keys: Vec<_> = self
-            .ai
+        let slots: Vec<_> = self
+            .ai_slots
             .keys()
             .filter(|(c, _, _)| *c == connection)
             .copied()
             .collect();
         let mut next = self.clone();
         let mut result = Removed::default();
-        for (c, p, k) in keys {
-            let removed = next.remove_ai_vehicle(c, p, k)?;
+        let mut merge = |removed: Removed| {
             result.leave.extend(removed.leave);
             result.untracked.extend(removed.untracked);
             result.records.extend(removed.records);
             result.deleted.extend(removed.deleted);
+        };
+        for (c, p, k) in slots {
+            merge(next.remove_ai_slot(c, p, k)?);
+        }
+        let keys: Vec<_> = next
+            .ai
+            .keys()
+            .filter(|(c, _, _)| *c == connection)
+            .copied()
+            .collect();
+        for (c, p, k) in keys {
+            merge(next.remove_ai_vehicle(c, p, k)?);
         }
         *self = next;
         Ok(result)
@@ -460,6 +825,16 @@ impl Players {
             .released = true;
         Ok(Some(record))
     }
+}
+
+/// What [`Players::retire`] deletes and leaves.
+struct Retired {
+    participant: u16,
+    actor: u16,
+    vehicle: Option<u16>,
+    goal: Option<u16>,
+    alive: Option<Managers>,
+    tracked: Option<Managers>,
 }
 
 #[cfg(test)]
@@ -1200,6 +1575,184 @@ mod tests {
         assert!(
             matches!(&fields[1], sublevel::Initial::RpcReferences {value,..} if value == &vec![b.participant])
         );
+        for record in world.objects.snapshot() {
+            record.encode().unwrap();
+        }
+    }
+
+    fn rival_request(key: u64) -> Request {
+        Request {
+            key,
+            name: b"ID_AIPERSONA_ROAMER_040".to_vec(),
+            flags: [true, true],
+            words: [7, 16],
+            mode: 2,
+        }
+    }
+
+    #[test]
+    fn persistent_slots_keep_their_participant_while_cars_come_and_go() {
+        let mut world = world();
+        let (managers, scene) = managers(&mut world);
+        let (car, content) = car();
+        // Invalid managers and unknown sessions fail without mutation.
+        let before = world.objects.snapshot();
+        assert_eq!(
+            world.create_ai_slot(
+                1,
+                100,
+                rival_request(50),
+                Managers {
+                    reset_volumes: managers.alive,
+                    ..managers
+                }
+            ),
+            Err(Error::Shape)
+        );
+        assert_eq!(
+            world.create_ai_slot(3, 100, rival_request(50), managers),
+            Err(Error::UnknownObject)
+        );
+        assert_eq!(world.objects.snapshot(), before);
+
+        let created = world
+            .create_ai_slot(1, 100, rival_request(50), managers)
+            .unwrap()
+            .unwrap();
+        assert_eq!(created.records.len(), 2);
+        assert!(matches!(
+            created.records[0].initial,
+            Some(Initial::Participant(_))
+        ));
+        let Some(Initial::Actor(init)) = &created.records[1].initial else {
+            panic!()
+        };
+        assert!(init.flag_a && init.flag_b);
+        assert_eq!((init.word_a, init.word_b), (7, 16));
+        let enter = created.bound.enter.unwrap();
+        assert_eq!(enter.participant, created.ids.participant);
+        assert!(created.bound.add.is_some() && created.bound.bind.is_some());
+        assert!(created.bound.tracked.is_none());
+        assert_eq!(created.ids.car, None);
+        // Retry is inert; a different request under the key is rejected.
+        assert!(
+            world
+                .create_ai_slot(1, 100, rival_request(50), managers)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            world.create_ai_slot(
+                1,
+                100,
+                Request {
+                    words: [2, 16],
+                    ..rival_request(50)
+                },
+                managers
+            ),
+            Err(Error::DuplicateObject)
+        );
+
+        let first = world
+            .attach_ai_slot_vehicle(1, 100, 50, 900, car.clone(), &content)
+            .unwrap();
+        assert_eq!(first.ids.participant, created.ids.participant);
+        assert_eq!(first.ids.actor, created.ids.actor);
+        assert!(matches!(
+            first.records[1].update,
+            Update::Participant(ParticipantUpdate { entity: Some(v), .. }) if v == first.ids.vehicle
+        ));
+        assert_eq!(first.tracked.participant, Some(created.ids.participant));
+        assert_eq!(
+            first.tracked.call,
+            crate::world_activation::Call::StreamedParticipant
+        );
+        assert_eq!(first.tracked.endpoint.scene, scene);
+        assert_eq!(world.ai_ids(1, 100, 900), Some(first.ids));
+        assert_eq!(world.ai_slot(1, 100, 50).unwrap().car, Some(900));
+        // One car per slot; spawn keys stay unique; other sessions are refused.
+        for (c, p, slot, key) in [(1, 100, 50, 901), (1, 100, 51, 902), (2, 200, 50, 903)] {
+            assert!(
+                world
+                    .attach_ai_slot_vehicle(c, p, slot, key, car.clone(), &content)
+                    .is_err()
+            );
+        }
+        world
+            .start_ai_wander_goal(1, 100, 900, [false, false, true])
+            .unwrap();
+        assert!(world.release_ai_control(1, 100, 900).unwrap().is_some());
+
+        // Removing the car keeps the slot: no Alive leave, the car leaves the
+        // reset volumes, its goal and car are deleted and control is held again.
+        let detached = world.remove_ai_vehicle(1, 100, 900).unwrap();
+        assert!(detached.leave.is_empty());
+        assert_eq!(detached.untracked.len(), 1);
+        assert_eq!(
+            detached.untracked[0].call,
+            crate::world_activation::Call::StreamedParticipantLeave
+        );
+        assert_eq!(detached.deleted.len(), 2);
+        assert!(detached.deleted.contains(&first.ids.vehicle));
+        assert!(!detached.deleted.contains(&created.ids.participant));
+        assert!(detached.records.iter().any(|r| matches!(
+            r.update,
+            Update::Participant(ParticipantUpdate {
+                entity: Some(0),
+                ..
+            })
+        )));
+        assert!(detached.records.iter().any(|r| matches!(
+            r.update,
+            Update::Actor(ActorUpdate {
+                flag_b: Some(true),
+                ..
+            })
+        )));
+        assert!(world.objects.get(created.ids.participant).is_some());
+        assert!(world.objects.get(created.ids.actor).is_some());
+        assert!(world.objects.get(first.ids.vehicle).is_none());
+        assert_eq!(world.ai_ids(1, 100, 900), None);
+        assert_eq!(world.ai_slot(1, 100, 50).unwrap().car, None);
+        assert!(world.owns_ai_participant(1, 100, created.ids.participant));
+
+        // A new car under the same slot is held again until its first report.
+        let second = world
+            .attach_ai_slot_vehicle(1, 100, 50, 901, car.clone(), &content)
+            .unwrap();
+        assert_ne!(second.ids.vehicle, first.ids.vehicle);
+        assert!(world.release_ai_control(1, 100, 901).unwrap().is_some());
+        assert_eq!(world.release_ai_control(1, 100, 901), Ok(None));
+
+        // The other session's slot is independent.
+        let other = world
+            .create_ai_slot(2, 200, rival_request(50), managers)
+            .unwrap()
+            .unwrap();
+        assert_ne!(other.ids.participant, created.ids.participant);
+
+        let removed = world.remove_ai_slot(1, 100, 50).unwrap();
+        assert_eq!(removed.leave.len(), 1);
+        assert_eq!(removed.untracked.len(), 1);
+        for id in [
+            created.ids.participant,
+            created.ids.actor,
+            second.ids.vehicle,
+        ] {
+            assert!(removed.deleted.contains(&id));
+        }
+        assert_eq!(world.ai_slot(1, 100, 50), None);
+        assert_eq!(world.ai_ids(1, 100, 901), None);
+        assert_eq!(
+            world.remove_ai_slot(1, 100, 50).unwrap(),
+            Removed::default()
+        );
+        // A slot without a car has no reset-volume leave.
+        let cleanup = world.remove_ai_for_connection(2).unwrap();
+        assert_eq!(cleanup.leave.len(), 1);
+        assert!(cleanup.untracked.is_empty());
+        assert!(cleanup.deleted.contains(&other.ids.participant));
         for record in world.objects.snapshot() {
             record.encode().unwrap();
         }

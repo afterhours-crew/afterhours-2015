@@ -3,6 +3,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 use super::*;
 use crate::rival_content::population::{Focus, Input};
+use nfs_world::application::Random;
 
 impl PlayerListener {
     pub(super) fn rival_glass_owner(
@@ -23,6 +24,26 @@ impl PlayerListener {
             local_slot,
             runtime_index: players.local_runtime_index(connection, self.persona, local_slot)?,
         })
+    }
+
+    /// Entries for the rival map: every active racer, driven by the client or
+    /// by the host. Frame records drain before queued rival entries, so the
+    /// map is left unchanged (None) until a new participant's creation has
+    /// been handed to the host.
+    pub(super) fn rival_map(
+        &self,
+        players: &Players,
+    ) -> Result<Option<Vec<crate::rival_content::population::Location>>, replication::Error> {
+        if !self.pending_entries.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(
+            self.rival_population
+                .as_ref()
+                .map(|r| r.locations(players, HOST_SELECTOR as u8, self.persona))
+                .transpose()?
+                .unwrap_or_default(),
+        ))
     }
 
     pub(in crate::net) fn advance_rivals(&mut self, now: u64) -> Result<(), replication::Error> {
@@ -53,7 +74,11 @@ impl PlayerListener {
             &mut registrations,
             HOST_SELECTOR as u8,
             self.persona,
-            Input { now, focus: &focus },
+            Input {
+                now,
+                focus: &focus,
+                random: crate::seeds::OsRandom.next_u32(),
+            },
         )?;
         let mut entries: Vec<_> = split_scenes(
             changes.records,
@@ -77,13 +102,21 @@ impl PlayerListener {
             return Ok(());
         }
         population.update_registrations(&previous, registrations)?;
+        if let Some(ids) = changes.activated {
+            tracing::info!(
+                participant = ids.participant,
+                actor = ids.actor,
+                count = rivals.count(),
+                "owned roaming rival activated"
+            );
+        }
         if let Some(ids) = changes.spawned {
             tracing::info!(
                 participant = ids.participant,
                 actor = ids.actor,
                 vehicle = ids.vehicle,
                 count = rivals.count(),
-                "owned roaming rival spawn queued"
+                "owned roaming rival car handed to the client"
             );
         }
         self.players = players;
@@ -691,5 +724,33 @@ mod tests {
         let (delete, calls) = &listener.pending_entries[2];
         assert!(calls.is_empty() && delete.records.is_empty());
         assert_eq!(delete.deleted.len(), 4);
+    }
+
+    #[test]
+    fn rival_map_waits_for_queued_rival_entries() {
+        let connection = HOST_SELECTOR as u8;
+        let (mut rivals, mut world, mut registrations, _) =
+            crate::rival_content::population::tests::fixture(connection);
+        let ids = crate::rival_content::population::tests::spawn(
+            &mut rivals,
+            &mut world,
+            &mut registrations,
+            connection,
+        )
+        .spawned
+        .unwrap();
+        let mut listener = PlayerListener::new(100);
+        assert_eq!(listener.rival_map(&world), Ok(Some(vec![])));
+        listener.rival_population = Some(rivals);
+        // A client frame may be handled before the creation entries drain;
+        // frame records would then reach the client ahead of the participant.
+        listener
+            .pending_entries
+            .push_back((returning::empty_section(), Vec::new()));
+        assert_eq!(listener.rival_map(&world), Ok(None));
+        listener.pending_entries.clear();
+        let entries = listener.rival_map(&world).unwrap().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, ids.participant);
     }
 }

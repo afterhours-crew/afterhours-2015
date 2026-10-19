@@ -8,7 +8,28 @@ use nfs_world::content::bindings::name_key;
 use nfs_world::{
     content::{Registration, Registrations, SubLevelNames},
     replication::{Initial, Update, sublevel},
+    road_graph::{Direction, LaneInput},
 };
+
+/// A 6 km by 3 km loop of two-way roads whose south side runs along z = 2,
+/// through the authored racer spawn.
+fn graph() -> Arc<Graph> {
+    let nodes = vec![
+        [-3000., 0., 2.],
+        [3000., 0., 2.],
+        [3000., 0., 3002.],
+        [-3000., 0., 3002.],
+    ];
+    let lanes = (0..4)
+        .map(|i| LaneInput {
+            start: i,
+            end: (i + 1) % 4,
+            direction: Direction::Any,
+            points: vec![nodes[i], nodes[(i + 1) % 4]],
+        })
+        .collect();
+    Arc::new(Graph::new(nodes, lanes).unwrap())
+}
 
 pub(crate) fn fixture(
     connection: u8,
@@ -114,6 +135,7 @@ fn fixture_mode(
         data,
         vehicles,
         presets: vec![Arc::new(items.clone()), Arc::new(items)],
+        graph: Some(graph()),
     });
     let population = Population::new(&bindings, content).unwrap();
     let mut world = Players::default();
@@ -181,7 +203,11 @@ fn focus() -> Focus {
     }
 }
 fn input(now: u64, focus: &[Focus]) -> Input<'_> {
-    Input { now, focus }
+    Input {
+        now,
+        focus,
+        random: 12_345,
+    }
 }
 pub(crate) fn spawn(
     p: &mut Population,
@@ -414,8 +440,8 @@ fn late_error_rolls_back_meshes_objects_cursors_and_authority() {
     assert_eq!(world.objects().snapshot(), before);
     assert_eq!(registry, meshes);
     assert_eq!(
-        (p.next, p.cohort, p.clock, p.owner),
-        (RIVAL_KEY_START, 0, None, None)
+        (p.next, p.slots, p.cohort, p.clock, p.owner),
+        (RIVAL_KEY_START, 1, 0, None, None)
     );
     assert_eq!(p.racers, vec![Racer::default()]);
     assert_eq!(p.authority, vehicle::authority::Registry::default());
@@ -484,10 +510,17 @@ fn first_rival_registers_a_missing_vehicle_bundle_and_reuses_it_after_retirement
     assert!(world.objects().scene(key).is_none());
     let changes = spawn(&mut p, &mut world, &mut registry, 1);
     let scene = world.objects().scene(key).unwrap();
-    assert_eq!(changes.records[0].id, scene);
+    // The bundle scene follows the slot's participant and actor and precedes
+    // the car.
+    let index = changes
+        .records
+        .iter()
+        .position(|r| matches!(r.initial, Some(Initial::SubLevel { .. })))
+        .unwrap();
+    assert_eq!((index, changes.records[index].id), (2, scene));
     assert!(matches!(
-        changes.records[0].initial,
-        Some(Initial::SubLevel { .. })
+        changes.records[3].initial,
+        Some(Initial::Vehicle { .. })
     ));
     assert!(changes.messages.iter().any(
         |m| matches!(m,Message::Names(n) if n.entries.iter().any(|(_,s)|s==b"car/test_bundle"))
@@ -517,7 +550,7 @@ fn all_populations_share_the_world_budget_and_resume_after_a_slot_is_freed() {
     let (mut p, mut world, mut registry, _) = fixture(1);
     // An independently owned AI lifetime occupies one world-budget slot.
     let mut other = p.clone();
-    other.next = 1;
+    (other.next, other.slots) = (1, 1_000);
     spawn(&mut other, &mut world, &mut registry, 1);
     let data = Arc::make_mut(&mut p.content);
     let template = data.data.racers[0].clone();
@@ -544,4 +577,260 @@ fn all_populations_share_the_world_budget_and_resume_after_a_slot_is_freed() {
             .is_some()
     );
     assert_eq!((p.count(), world.ai_count()), (128, 128));
+}
+
+/// A racer authored 1 km east of the focus, facing it.
+fn far_fixture() -> (Population, Players, registrations::Registry) {
+    let (mut p, world, registry, _) = fixture_mode(1, false);
+    let racer = &mut Arc::make_mut(&mut p.content).data.racers[0];
+    racer.position = [1000., 0., 2.];
+    racer.basis = [[0., 0., 1.], [0., 1., 0.], [-1., 0., 0.]];
+    (p, world, registry)
+}
+
+fn place(world: &mut Players, key: u64, position: [f32; 3], velocity: [f32; 3]) {
+    let motion = vehicle::chassis::Motion {
+        identity: 100f64.to_bits(),
+        revision: 2,
+        position,
+        quaternion: [0., 0., 0., 1.],
+        velocity,
+        angular_velocity: [0.; 3],
+    };
+    let physics = motion
+        .encode([0.; 3], &vehicle::chassis::Controls::new(4).unwrap())
+        .unwrap();
+    world.set_ai_vehicle_physics(1, 100, key, physics).unwrap();
+}
+
+#[test]
+fn host_drives_rivals_and_hands_cars_over_within_790_m_and_back_beyond_800_m() {
+    let (mut p, mut world, mut registry) = far_fixture();
+    // The racer activates at its authored spawn, 1 km away: participant and
+    // actor only, bound to the managers, without a car or reset tracking.
+    let c = p
+        .advance(&mut world, &mut registry, 1, 100, input(0, &[focus()]))
+        .unwrap();
+    let slot = c.activated.unwrap();
+    assert!(c.spawned.is_none());
+    assert_eq!(
+        (p.count(), world.ai_count(), world.ai_slot_count()),
+        (1, 0, 1)
+    );
+    assert_eq!((c.records.len(), c.calls.len()), (2, 3));
+    assert!(
+        !c.calls
+            .iter()
+            .any(|call| matches!(call, HostRpc::WorldActivation(_)))
+    );
+    assert!(c.messages.is_empty());
+    assert!(p.delegated(&world, 1, 100).is_empty());
+    assert_eq!(
+        p.locations(&world, 1, 100).unwrap(),
+        vec![(slot.participant, [1000., 0., 2.])]
+    );
+    // Another session sees nothing.
+    assert!(p.locations(&world, 2, 100).unwrap().is_empty());
+
+    // The host drives it west along the road at the wander speed.
+    p.advance(&mut world, &mut registry, 1, 100, input(5_000, &[focus()]))
+        .unwrap();
+    let [(participant, moved)] = p.locations(&world, 1, 100).unwrap()[..] else {
+        panic!()
+    };
+    assert_eq!(participant, slot.participant);
+    assert!(
+        (moved[0] - (1000. - 5. * WANDER_SPEED)).abs() < 0.01,
+        "{moved:?}"
+    );
+    assert_eq!((moved[1], moved[2]), (0., 2.));
+
+    // Within 790 m of the focus the client gets a car at the simulated pose,
+    // moving west at the wander speed, under the same participant.
+    let c = p
+        .advance(&mut world, &mut registry, 1, 100, input(10_000, &[focus()]))
+        .unwrap();
+    assert!(c.activated.is_none());
+    let first = c.spawned.unwrap();
+    assert_eq!(
+        (first.participant, first.actor),
+        (slot.participant, slot.actor)
+    );
+    assert!(c.messages.iter().any(|m| matches!(m, Message::Names(_))));
+    assert!(matches!(
+        c.calls[..],
+        [HostRpc::WorldActivation(nfs_world::world_activation::Notification {
+            participant: Some(p),
+            call: nfs_world::world_activation::Call::StreamedParticipant,
+            ..
+        })] if p == slot.participant
+    ));
+    let key = RIVAL_KEY_START;
+    assert_eq!(
+        p.delegated(&world, 1, 100),
+        BTreeMap::from([(first.vehicle, key)])
+    );
+    let motion = world
+        .ai_vehicle_physics(1, 100, key)
+        .unwrap()
+        .decode([0.; 3])
+        .unwrap();
+    let x = 1000. - 10. * WANDER_SPEED;
+    // The fixture's zero suspension lifts the car by one up vector.
+    assert!(
+        (motion.position[0] - x).abs() < 0.01,
+        "{:?}",
+        motion.position
+    );
+    assert_eq!((motion.position[1], motion.position[2]), (1., 2.));
+    assert!((motion.velocity[0] + WANDER_SPEED).abs() <= 1. / 32.);
+    assert!(motion.velocity[1].abs() <= 1. / 32. && motion.velocity[2].abs() <= 1. / 32.);
+    let goal = c
+        .records
+        .iter()
+        .find_map(|r| match &r.initial {
+            Some(Initial::WanderGoal(g)) => Some(g),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(goal.flags, [false, false, true]);
+    // While the client drives, the map follows the car and the host waits.
+    place(&mut world, key, [500., 0., 2.], [-20., 0., 0.]);
+    p.advance(&mut world, &mut registry, 1, 100, input(20_000, &[focus()]))
+        .unwrap();
+    assert_eq!(
+        p.locations(&world, 1, 100).unwrap(),
+        vec![(slot.participant, [500., 0., 2.])]
+    );
+
+    // At exactly 800 m the car stays; beyond it the client loses the car but
+    // the participant, actor and region retention stay. The binding and goal
+    // are cleared before the reset-volume leave.
+    place(&mut world, key, [-800., 0., 0.], [-20., 0., 0.]);
+    assert!(
+        p.advance(&mut world, &mut registry, 1, 100, input(20_001, &[focus()]))
+            .unwrap()
+            .deleted
+            .is_empty()
+    );
+    place(&mut world, key, [-850., 0., 2.], [-20., 0., 0.]);
+    let c = p
+        .advance(&mut world, &mut registry, 1, 100, input(20_002, &[focus()]))
+        .unwrap();
+    assert!(c.leave.is_empty());
+    assert_eq!(c.deleted.len(), 2);
+    assert!(c.deleted.contains(&first.vehicle));
+    assert!(!c.deleted.contains(&slot.participant));
+    assert!(matches!(
+        c.calls[..],
+        [HostRpc::WorldActivation(
+            nfs_world::world_activation::Notification {
+                call: nfs_world::world_activation::Call::StreamedParticipantLeave,
+                ..
+            }
+        )]
+    ));
+    assert!(c.records.iter().any(|r| r.id == slot.participant));
+    assert!(p.delegated(&world, 1, 100).is_empty());
+    assert_eq!(
+        (p.count(), world.ai_count(), world.ai_slot_count()),
+        (1, 0, 1)
+    );
+    assert_eq!(world.ai_slot(1, 100, 1).unwrap().car, None);
+    assert_eq!(p.authority, vehicle::authority::Registry::default());
+    // The host continues west from the car's last reported pose.
+    assert_eq!(
+        p.locations(&world, 1, 100).unwrap(),
+        vec![(slot.participant, [-850., 0., 2.])]
+    );
+    p.advance(&mut world, &mut registry, 1, 100, input(22_002, &[focus()]))
+        .unwrap();
+    let [(_, resumed)] = p.locations(&world, 1, 100).unwrap()[..] else {
+        panic!()
+    };
+    assert!(
+        (resumed[0] - (-850. - 2. * WANDER_SPEED)).abs() < 0.01,
+        "{resumed:?}"
+    );
+
+    // A focus inside 790 m gets the next car under the same participant.
+    let near = Focus {
+        position: [-700., 1., 0.],
+        ..focus()
+    };
+    let c = p
+        .advance(&mut world, &mut registry, 1, 100, input(22_003, &[near]))
+        .unwrap();
+    let second = c.spawned.unwrap();
+    assert_eq!(second.participant, slot.participant);
+    assert_ne!(second.vehicle, first.vehicle);
+    assert!(c.messages.is_empty());
+    assert_eq!(
+        p.delegated(&world, 1, 100),
+        BTreeMap::from([(second.vehicle, key + 1)])
+    );
+    // Leaving every view and region retires the slot with its car.
+    let c = p
+        .advance(&mut world, &mut registry, 1, 100, input(22_004, &[]))
+        .unwrap();
+    assert_eq!(c.leave.len(), 2);
+    for id in [slot.participant, slot.actor, second.vehicle] {
+        assert!(c.deleted.contains(&id));
+    }
+    assert_eq!(
+        (p.count(), world.ai_count(), world.ai_slot_count()),
+        (0, 0, 0)
+    );
+}
+
+#[test]
+fn late_hand_over_error_rolls_back_registrations_and_the_bundle_scene() {
+    let (mut p, mut world, mut registry) = far_fixture();
+    p.advance(&mut world, &mut registry, 1, 100, input(0, &[focus()]))
+        .unwrap();
+    // The car's blueprint lookup fails after its bundle and meshes registered.
+    Arc::make_mut(&mut p.content).data.managers.scene = 99;
+    let (before, meshes, population) = (world.objects().snapshot(), registry.clone(), p.clone());
+    assert!(
+        p.advance(&mut world, &mut registry, 1, 100, input(10_000, &[focus()]))
+            .is_err()
+    );
+    assert_eq!(world.objects().snapshot(), before);
+    assert_eq!(registry, meshes);
+    assert_eq!(
+        (p.next, p.slots, p.clock, &p.racers),
+        (
+            population.next,
+            population.slots,
+            population.clock,
+            &population.racers
+        )
+    );
+    assert_eq!(p.authority, vehicle::authority::Registry::default());
+}
+
+#[test]
+fn racers_without_a_nearby_road_stay_inactive() {
+    let (mut p, mut world, mut registry, _) = fixture(1);
+    Arc::make_mut(&mut p.content).data.racers[0].position = [5., 0., 500.];
+    for now in 0..20 {
+        let c = p
+            .advance(&mut world, &mut registry, 1, 100, input(now, &[focus()]))
+            .unwrap();
+        assert!(c.activated.is_none() && c.records.is_empty());
+    }
+    assert_eq!((p.count(), world.ai_slot_count()), (0, 0));
+}
+
+#[test]
+fn cars_follow_the_road_slope() {
+    let rise = 0.1f32;
+    let length = (1. + rise * rise).sqrt();
+    let [right, up, forward] = road_basis([1., rise, 0.]).unwrap();
+    let close = |a: [f32; 3], b: [f32; 3]| a.iter().zip(b).all(|(a, b)| (a - b).abs() < 1e-6);
+    assert!(close(forward, [1. / length, rise / length, 0.]));
+    assert!(close(up, [-rise / length, 1. / length, 0.]));
+    assert!(close(right, [0., 0., -1.]));
+    assert_eq!(road_basis([0., 1., 0.]), None);
+    assert_eq!(road_basis([0.; 3]), None);
 }

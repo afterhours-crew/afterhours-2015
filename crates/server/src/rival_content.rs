@@ -2,9 +2,10 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! Installed roaming-racer definitions and ephemeral vehicle presets.
+//! Installed roaming-racer definitions, ephemeral vehicle presets and the
+//! road graph the host drives them on.
 use crate::{Failure, vehicle_content};
-use nfs_world::items::Collection;
+use nfs_world::{items::Collection, road_graph::Graph};
 use std::{path::Path, sync::Arc};
 
 pub mod population;
@@ -14,6 +15,8 @@ pub struct Content {
     data: nfs_content::rivals::Content,
     vehicles: vehicle_content::Content,
     presets: Vec<Arc<Collection>>,
+    /// Required by the population: rivals are simulated on it (E987).
+    graph: Option<Arc<Graph>>,
 }
 
 impl Content {
@@ -54,7 +57,14 @@ impl Content {
             data,
             vehicles,
             presets,
+            graph: None,
         })
+    }
+
+    /// Attach the installed road graph the host moves inactive rivals on.
+    pub fn with_graph(mut self, graph: Arc<Graph>) -> Self {
+        self.graph = Some(graph);
+        self
     }
 
     pub fn racers(&self) -> usize {

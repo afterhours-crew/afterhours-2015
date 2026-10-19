@@ -2,8 +2,12 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! Session-owned roaming rivals. The client runs their authored wandering AI;
-//! the host owns activation, participant/actor identity and retirement.
+//! Session-owned roaming rivals, simulated by the host like the official
+//! server (E986/E987). An active racer keeps one participant and actor (a
+//! slot) while the host moves it along the road graph with the native wander
+//! rules. Within [`HANDOVER_IN`] of a focus the host creates a car for it and
+//! the client drives it; beyond [`HANDOVER_OUT`] the car is removed and the
+//! host continues from the car's last reported pose.
 use super::Content;
 use crate::{
     traffic_content::population::RIVAL_KEY_START,
@@ -18,15 +22,29 @@ use nfs_world::{
         players::{Players, ai},
         vehicle,
     },
+    road_graph::Graph,
+    road_wander::{Flags, NativeRandom, Wander},
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
 };
 
-/// Non-urgent wandering speed (50 mph in m/s) of the native server wander
-/// behaviour; official rivals are created moving at it along their heading.
-pub const WANDER_SPEED: f32 = 22.352;
+pub use nfs_world::road_wander::WANDER_SPEED;
+
+/// A rival participant and its world position for the rival map.
+pub type Location = (u16, [f32; 3]);
+
+/// Native roaming-manager retention: a Genesis view's outer radius (E986).
+const VIEW: f32 = 400.;
+/// Farthest observed first appearance of an official rival car (E986).
+pub const HANDOVER_IN: f32 = 790.;
+/// The native AI director removes a delegated car beyond this (E987).
+pub const HANDOVER_OUT: f32 = 800.;
+/// Official rival cars carry the WanderGoal flags (random offset only).
+const GOAL: [bool; 3] = [false, false, true];
+/// A stalled tick never moves the host simulation farther than this.
+const MAX_STEP_MS: u64 = 10_000;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Focus {
@@ -36,22 +54,39 @@ pub struct Focus {
 pub struct Input<'a> {
     pub now: u64,
     pub focus: &'a [Focus],
+    /// Fresh host randomness; seeds the wander of racers activated this tick.
+    pub random: u32,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
+struct Active {
+    /// Spawn key of the persistent participant and actor.
+    slot: u64,
+    /// One car model per participant for its whole activation.
+    persona: usize,
+    /// Host simulation; frozen while a client drives the car.
+    wander: Wander,
+    car: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
 struct Racer {
-    key: Option<u64>,
     /// Retained between the native ten membership-query cohorts.
     region_active: bool,
     persona_cursor: usize,
+    active: Option<Active>,
 }
 
 #[derive(Clone, Debug)]
 pub struct Population {
     content: Arc<Content>,
+    graph: Arc<Graph>,
     racers: Vec<Racer>,
     authority: vehicle::authority::Registry,
+    /// Next car spawn key.
     next: u64,
+    /// Next slot key; slots and cars are separate world namespaces.
+    slots: u64,
     cohort: usize,
     clock: Option<u64>,
     owner: Option<(u8, u64)>,
@@ -59,11 +94,16 @@ pub struct Population {
 
 #[derive(Clone, Debug, Default)]
 pub struct Changes {
+    /// Alive and reset-volume leaves of retired slots, before their deletion.
     pub leave: Vec<HostRpc>,
     pub messages: Vec<Message>,
     pub records: Vec<Record>,
+    /// Manager bindings and reset-volume changes, after the records.
     pub calls: Vec<HostRpc>,
     pub deleted: Vec<u16>,
+    /// The slot activated this tick.
+    pub activated: Option<ai::SlotIds>,
+    /// The car handed to the client this tick.
     pub spawned: Option<ai::Ids>,
 }
 
@@ -77,19 +117,26 @@ impl Population {
         {
             return Err(Error::Bound);
         }
+        let graph = content.graph.clone().ok_or(Error::Unsupported)?;
         Ok(Self {
             racers: vec![Racer::default(); content.data.racers.len()],
             content,
+            graph,
             authority: vehicle::authority::Registry::default(),
             next: RIVAL_KEY_START,
+            slots: 1,
             cohort: 0,
             clock: None,
             owner: None,
         })
     }
+
+    /// Active racers, with or without a car.
     pub fn count(&self) -> usize {
-        self.racers.iter().filter(|r| r.key.is_some()).count()
+        self.racers.iter().filter(|r| r.active.is_some()).count()
     }
+
+    /// Cars currently driven by the client, by vehicle ghost.
     pub fn delegated(&self, world: &Players, connection: u8, persona: u64) -> BTreeMap<u16, u64> {
         if self.owner != Some((connection, persona)) {
             return BTreeMap::new();
@@ -97,12 +144,62 @@ impl Population {
         self.racers
             .iter()
             .filter_map(|r| {
-                let key = r.key?;
+                let key = r.active.as_ref()?.car?;
                 world
                     .ai_ids(connection, persona, key)
                     .map(|ids| (ids.vehicle, key))
             })
             .collect()
+    }
+
+    /// Every active racer's participant and world position for the rival map:
+    /// its car's while the client drives it, otherwise the host simulation's.
+    pub fn locations(
+        &self,
+        world: &Players,
+        connection: u8,
+        persona: u64,
+    ) -> Result<Vec<Location>, Error> {
+        if self.owner != Some((connection, persona)) {
+            return Ok(Vec::new());
+        }
+        self.racers
+            .iter()
+            .filter_map(|r| r.active.as_ref())
+            .map(|active| {
+                let slot = world
+                    .ai_slot(connection, persona, active.slot)
+                    .ok_or(Error::UnknownObject)?;
+                Ok((
+                    slot.participant,
+                    self.position(world, connection, persona, active)?,
+                ))
+            })
+            .collect()
+    }
+
+    fn position(
+        &self,
+        world: &Players,
+        connection: u8,
+        persona: u64,
+        active: &Active,
+    ) -> Result<[f32; 3], Error> {
+        Ok(match active.car {
+            Some(car) => {
+                world
+                    .ai_vehicle_physics(connection, persona, car)?
+                    .decode([0.; 3])?
+                    .position
+            }
+            None => {
+                active
+                    .wander
+                    .pose(&self.graph)
+                    .map_err(|_| Error::Shape)?
+                    .position
+            }
+        })
     }
 
     /// Stage the world, mesh namespace and population together. The caller must
@@ -115,7 +212,7 @@ impl Population {
         persona: u64,
         input: Input<'_>,
     ) -> Result<Changes, Error> {
-        let Input { now, focus } = input;
+        let Input { now, focus, random } = input;
         if self.clock.is_some_and(|clock| now < clock) || focus.len() > 128 {
             return Err(Error::Bound);
         }
@@ -138,23 +235,31 @@ impl Population {
         if self.clock == Some(now) {
             return Ok(Changes::default());
         }
+        let seconds = self.clock.map_or(0, |clock| (now - clock).min(MAX_STEP_MS)) as f32 * 0.001;
         let mut next = self.clone();
         let mut world = players.clone();
         let mut meshes = registrations.clone();
         let mut changes = Changes::default();
+        let nearest = |position: [f32; 3]| {
+            focus
+                .iter()
+                .map(|f| horizontal_squared(f.position, position))
+                .fold(f32::INFINITY, f32::min)
+        };
         for ordinal in 0..next.racers.len() {
-            let retained = match next.racers[ordinal].key {
-                Some(key) => {
-                    let position = world
-                        .ai_vehicle_physics(connection, persona, key)?
-                        .decode([0.; 3])?
-                        .position;
-                    focus
-                        .iter()
-                        .any(|f| horizontal_squared(f.position, position) < 400. * 400.)
-                }
-                None => false,
+            if let Some(active) = &mut next.racers[ordinal].active
+                && active.car.is_none()
+            {
+                active
+                    .wander
+                    .advance(&next.graph, seconds)
+                    .map_err(|_| Error::Shape)?;
+            }
+            let position = match &next.racers[ordinal].active {
+                Some(active) => Some(next.position(&world, connection, persona, active)?),
+                None => None,
             };
+            let retained = position.is_some_and(|p| nearest(p) < VIEW * VIEW);
             let racer = &mut next.racers[ordinal];
             if focus.is_empty() {
                 racer.region_active = false;
@@ -165,8 +270,8 @@ impl Population {
                     .any(|region| focus.iter().any(|f| region.contains(f.position)));
             }
             if !retained && !racer.region_active {
-                if let Some(key) = racer.key.take() {
-                    let removed = world.remove_ai_vehicle(connection, persona, key)?;
+                if let Some(active) = racer.active.take() {
+                    let removed = world.remove_ai_slot(connection, persona, active.slot)?;
                     changes.records.extend(removed.records);
                     changes
                         .leave
@@ -175,22 +280,44 @@ impl Population {
                         .leave
                         .extend(removed.untracked.into_iter().map(HostRpc::WorldActivation));
                     changes.deleted.extend(removed.deleted);
-                    next.authority.remove_group(key);
+                    if let Some(car) = active.car {
+                        next.authority.remove_group(car);
+                    }
                 }
-            } else if racer.key.is_none()
-                && changes.spawned.is_none()
-                && world.ai_count() < ai::MAX_AI
-            {
-                // Bounded publication admits one new car per edge tick. Other
-                // active racers remain eligible while queues drain.
-                next.spawn(
-                    &mut world,
-                    &mut meshes,
-                    connection,
-                    persona,
-                    ordinal,
-                    &mut changes,
-                )?;
+                continue;
+            }
+            if racer.active.is_none() {
+                // Bounded publication activates at most one racer per tick.
+                if changes.activated.is_some() || world.ai_slot_count() >= ai::MAX_AI {
+                    continue;
+                }
+                let seed = random.wrapping_add((ordinal as u32).wrapping_mul(0x9e37_79b9));
+                if !next.activate(&mut world, connection, persona, ordinal, seed, &mut changes)? {
+                    continue;
+                }
+            }
+            let Some(active) = next.racers[ordinal].active.clone() else {
+                continue;
+            };
+            let distance = nearest(next.position(&world, connection, persona, &active)?);
+            match active.car {
+                Some(car) if distance > HANDOVER_OUT * HANDOVER_OUT => {
+                    next.hand_back(&mut world, connection, persona, ordinal, car, &mut changes)?;
+                }
+                None if distance <= HANDOVER_IN * HANDOVER_IN
+                    && changes.spawned.is_none()
+                    && world.ai_count() < ai::MAX_AI =>
+                {
+                    next.hand_over(
+                        &mut world,
+                        &mut meshes,
+                        connection,
+                        persona,
+                        ordinal,
+                        &mut changes,
+                    )?;
+                }
+                _ => {}
             }
         }
         next.clock = Some(now);
@@ -202,8 +329,124 @@ impl Population {
         Ok(changes)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn spawn(
+    fn key(&mut self) -> Result<u64, Error> {
+        let key = self.next;
+        self.next = key.checked_add(1).ok_or(Error::Bound)?;
+        Ok(key)
+    }
+
+    /// Create the racer's participant and actor at its authored spawn and start
+    /// the host simulation there (native spawn `04683c70`). False when no road
+    /// is near the spawn.
+    fn activate(
+        &mut self,
+        world: &mut Players,
+        connection: u8,
+        persona: u64,
+        ordinal: usize,
+        seed: u32,
+        changes: &mut Changes,
+    ) -> Result<bool, Error> {
+        let content = self.content.clone();
+        let racer = &content.data.racers[ordinal];
+        let Some(wander) = Wander::start(
+            &self.graph,
+            racer.position,
+            racer.basis[2],
+            Flags::from_goal(GOAL),
+            NativeRandom::new(seed),
+        )
+        .map_err(|_| Error::Shape)?
+        else {
+            return Ok(false);
+        };
+        let cursor = self.racers[ordinal].persona_cursor;
+        let selected = racer.personas[cursor % racer.personas.len()];
+        let provider = &content.data.personas[selected];
+        let personas = racer.personas.len();
+        let slot = self.slots;
+        self.slots = slot.checked_add(1).ok_or(Error::Bound)?;
+        let created = world
+            .create_ai_slot(
+                connection,
+                persona,
+                ai::Request {
+                    key: slot,
+                    name: provider.name.as_bytes().to_vec(),
+                    flags: [true, true],
+                    words: [provider.provider_index, provider.personality_index],
+                    // Roaming racers use the full vehicle driving mode.
+                    // The ambient-traffic mode selects different physics.
+                    mode: 2,
+                },
+                content.data.managers,
+            )?
+            .ok_or(Error::DuplicateObject)?;
+        changes.records.extend(created.records);
+        changes
+            .calls
+            .extend(created.bound.add.map(HostRpc::Participant));
+        changes.calls.extend(created.bound.bind.map(HostRpc::Actor));
+        changes
+            .calls
+            .extend(created.bound.enter.map(HostRpc::Participant));
+        changes.activated = Some(created.ids);
+        self.racers[ordinal].persona_cursor = (cursor + 1) % personas;
+        self.racers[ordinal].active = Some(Active {
+            slot,
+            persona: selected,
+            wander,
+            car: None,
+        });
+        Ok(true)
+    }
+
+    /// Remove the client's car and continue the host simulation from its last
+    /// reported pose. The participant and actor stay (E986).
+    fn hand_back(
+        &mut self,
+        world: &mut Players,
+        connection: u8,
+        persona: u64,
+        ordinal: usize,
+        car: u64,
+        changes: &mut Changes,
+    ) -> Result<(), Error> {
+        let motion = world
+            .ai_vehicle_physics(connection, persona, car)?
+            .decode([0.; 3])?;
+        let removed = world.remove_ai_vehicle(connection, persona, car)?;
+        changes.records.extend(removed.records);
+        changes.deleted.extend(removed.deleted);
+        // Official order: binding and goal cleared, then the reset-volume leave.
+        changes
+            .calls
+            .extend(removed.untracked.into_iter().map(HostRpc::WorldActivation));
+        self.authority.remove_group(car);
+        let heading = if horizontal_squared(motion.velocity, [0.; 3]) > 1. {
+            motion.velocity
+        } else {
+            vehicle::orientation::basis_from_quaternion(motion.quaternion)?[2]
+        };
+        let active = self.racers[ordinal]
+            .active
+            .as_mut()
+            .ok_or(Error::UnknownObject)?;
+        // A car left far from every road resumes where the host last had it.
+        if let Some(wander) = active
+            .wander
+            .relocate(&self.graph, motion.position, heading)
+            .map_err(|_| Error::Shape)?
+        {
+            active.wander = wander;
+        }
+        active.car = None;
+        Ok(())
+    }
+
+    /// Create a car for an active racer at its simulated pose, already moving
+    /// at the wander speed along the road, and hand it to the client.
+    fn hand_over(
         &mut self,
         world: &mut Players,
         registrations: &mut registrations::Registry,
@@ -212,12 +455,15 @@ impl Population {
         ordinal: usize,
         changes: &mut Changes,
     ) -> Result<(), Error> {
-        let racer = &self.content.data.racers[ordinal];
-        let cursor = self.racers[ordinal].persona_cursor;
-        let selected = racer.personas[cursor % racer.personas.len()];
-        let provider = &self.content.data.personas[selected];
-        let definition = self
-            .content
+        let active = self.racers[ordinal]
+            .active
+            .clone()
+            .ok_or(Error::UnknownObject)?;
+        let pose = active.wander.pose(&self.graph).map_err(|_| Error::Shape)?;
+        let basis = road_basis(pose.tangent).ok_or(Error::Shape)?;
+        let content = self.content.clone();
+        let provider = &content.data.personas[active.persona];
+        let definition = content
             .vehicles
             .definition(&provider.preset.vehicle)
             .ok_or(Error::Shape)?;
@@ -248,9 +494,9 @@ impl Population {
         };
         let blueprint = world
             .objects()
-            .scene(self.content.data.managers.scene)
+            .scene(content.data.managers.scene)
             .ok_or(Error::UnknownObject)?;
-        let key = self.next;
+        let key = self.key()?;
         let components = definition
             .profile
             .kinds()
@@ -263,12 +509,12 @@ impl Population {
                     .ok_or(Error::Bound)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let body = self.content.vehicles.construct_with_overrides(
+        let body = content.vehicles.construct_with_overrides(
             vehicle_content::Request {
-                items: &self.content.presets[selected],
+                items: &content.presets[active.persona],
                 vehicle: 1,
-                locator: racer.position,
-                basis: racer.basis,
+                locator: pose.position,
+                basis,
                 origin: [0.; 3],
                 speed: Some(WANDER_SPEED),
                 connection: None,
@@ -298,51 +544,59 @@ impl Population {
             vec![],
         )?
         .with_vehicles(vec![(asset, definition.profile.clone())])?;
-        let spawned = world
-            .spawn_ai_vehicle(
-                connection,
-                persona,
-                ai::Request {
-                    key,
-                    name: provider.name.as_bytes().to_vec(),
-                    flags: [true, true],
-                    words: [provider.provider_index, provider.personality_index],
-                    // Roaming racers use the full vehicle driving mode.
-                    // The ambient-traffic mode selects different physics.
-                    mode: 2,
+        let attached = world.attach_ai_slot_vehicle(
+            connection,
+            persona,
+            active.slot,
+            key,
+            vehicle::EntityCreation {
+                prefix: Prefix {
+                    parent: Some(Parent {
+                        reference: Some(parent),
+                    }),
+                    blueprint,
+                    sub_id: 2,
+                    owner: None,
+                    asset,
                 },
-                vehicle::EntityCreation {
-                    prefix: Prefix {
-                        parent: Some(Parent {
-                            reference: Some(parent),
-                        }),
-                        blueprint,
-                        sub_id: 2,
-                        owner: None,
-                        asset,
-                    },
-                    body,
-                },
-                &entity_content,
-            )?
-            .ok_or(Error::DuplicateObject)?;
-        changes.records.extend(spawned.records);
-        let bound = world.bind_ai_managers(connection, persona, key, self.content.data.managers)?;
-        changes.calls.extend(bound.add.map(HostRpc::Participant));
-        changes.calls.extend(bound.bind.map(HostRpc::Actor));
-        changes.calls.extend(bound.enter.map(HostRpc::Participant));
+                body,
+            },
+            &entity_content,
+        )?;
+        changes.records.extend(attached.records);
         changes
             .calls
-            .extend(bound.tracked.map(HostRpc::WorldActivation));
-        let (goal, assigned) =
-            world.start_ai_wander_goal(connection, persona, key, [false, false, true])?;
+            .push(HostRpc::WorldActivation(attached.tracked));
+        let (goal, assigned) = world.start_ai_wander_goal(connection, persona, key, GOAL)?;
         changes.records.extend([goal, assigned]);
-        changes.spawned = Some(spawned.ids);
-        self.racers[ordinal].key = Some(key);
-        self.racers[ordinal].persona_cursor = (cursor + 1) % racer.personas.len();
-        self.next = key.checked_add(1).ok_or(Error::Bound)?;
+        changes.spawned = Some(attached.ids);
+        if let Some(active) = &mut self.racers[ordinal].active {
+            active.car = Some(key);
+        }
         Ok(())
     }
+}
+
+/// Right, up and forward axes of a car on a road with tangent `forward`: up is
+/// world up made perpendicular to the road, so the car follows its slope.
+fn road_basis(forward: [f32; 3]) -> Option<[[f32; 3]; 3]> {
+    let forward = normalized(forward)?;
+    let up = normalized([
+        -forward[1] * forward[0],
+        1. - forward[1] * forward[1],
+        -forward[1] * forward[2],
+    ])?;
+    let right = [
+        up[1] * forward[2] - up[2] * forward[1],
+        up[2] * forward[0] - up[0] * forward[2],
+        up[0] * forward[1] - up[1] * forward[0],
+    ];
+    Some([right, up, forward])
+}
+
+fn normalized(v: [f32; 3]) -> Option<[f32; 3]> {
+    let length = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    (length.is_finite() && length > 1e-3).then(|| v.map(|c| c / length))
 }
 
 fn horizontal_squared(a: [f32; 3], b: [f32; 3]) -> f32 {

@@ -52,6 +52,8 @@ pub struct Players {
     staged_vehicles: BTreeMap<(u16, u64), u16>,
     goal_allocation_serial: u8,
     ai: BTreeMap<(u8, u64, u64), ai::Instance>,
+    /// Persistent AI participants whose cars come and go (roaming rivals).
+    ai_slots: BTreeMap<(u8, u64, u64), ai::Slot>,
 }
 
 /// Native runtime index of the player on `connection` and local `slot`.

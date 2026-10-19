@@ -527,6 +527,18 @@ fn rival(world: &mut Players, c: u8, p: u64, key: u64) -> super::super::ai::Ids 
         .ids
 }
 
+/// A spawned rival's participant and current car position.
+fn at(world: &Players, c: u8, p: u64, key: u64) -> (u16, [f32; 3]) {
+    let ids = world.ai_ids(c, p, key).unwrap();
+    let position = world
+        .ai_vehicle_physics(c, p, key)
+        .unwrap()
+        .position
+        .to_position([0.; 3], 7)
+        .unwrap();
+    (ids.participant, position)
+}
+
 #[test]
 fn rivals_have_their_own_first_slot_map_alongside_the_human_marker() {
     let mut world = Players::default();
@@ -536,7 +548,7 @@ fn rivals_have_their_own_first_slot_map_alongside_the_human_marker() {
     // No rival yet: no map and no binding.
     assert!(
         world
-            .sync_rival_locations(1, 101, &[], [0.; 3], site, 0)
+            .sync_rival_locations(1, 101, &[], site, 0)
             .unwrap()
             .is_empty()
     );
@@ -544,18 +556,26 @@ fn rivals_have_their_own_first_slot_map_alongside_the_human_marker() {
     let a = rival(&mut world, 1, 101, 7);
     let b = rival(&mut world, 1, 101, 8);
     let other = rival(&mut world, 2, 202, 7);
-    // Another session's spawn key and unknown keys fail without mutation.
+    // Another session's participant, a human participant and duplicates fail
+    // without mutation.
     let before = world.objects.snapshot();
-    for keys in [&[9][..], &[7, 7]] {
+    let (a7, a8) = (at(&world, 1, 101, 7), at(&world, 1, 101, 8));
+    let foreign = at(&world, 2, 202, 7);
+    for entries in [
+        vec![foreign],
+        vec![(participant, [0.; 3])],
+        vec![a7, a7],
+        vec![(a7.0, [f32::NAN, 0., 0.])],
+    ] {
         assert!(
             world
-                .sync_rival_locations(1, 101, keys, [0.; 3], site, 0)
+                .sync_rival_locations(1, 101, &entries, site, 0)
                 .is_err()
         );
         assert_eq!(world.objects.snapshot(), before);
     }
     let batch = world
-        .sync_rival_locations(1, 101, &[8, 7], [0.; 3], site, 0)
+        .sync_rival_locations(1, 101, &[a8, a7], site, 0)
         .unwrap();
     assert_eq!(batch.len(), 2);
     assert!(matches!(
@@ -597,7 +617,7 @@ fn rivals_have_their_own_first_slot_map_alongside_the_human_marker() {
     // Unchanged rivals produce nothing; a moved rival updates only the map.
     assert!(
         world
-            .sync_rival_locations(1, 101, &[7, 8], [0.; 3], site, 100)
+            .sync_rival_locations(1, 101, &[a7, a8], site, 100)
             .unwrap()
             .is_empty()
     );
@@ -605,14 +625,15 @@ fn rivals_have_their_own_first_slot_map_alongside_the_human_marker() {
     physics.position = vehicle::Vector::from_position([300., 2., 900.], [0.; 3], 7).unwrap();
     world.set_ai_vehicle_physics(1, 101, 7, physics).unwrap();
     // Position-only changes wait for the official republish period.
+    let (a7, a8) = (at(&world, 1, 101, 7), at(&world, 1, 101, 8));
     assert!(
         world
-            .sync_rival_locations(1, 101, &[7, 8], [0.; 3], site, 1899)
+            .sync_rival_locations(1, 101, &[a7, a8], site, 1899)
             .unwrap()
             .is_empty()
     );
     let moved = world
-        .sync_rival_locations(1, 101, &[7, 8], [0.; 3], site, 1900)
+        .sync_rival_locations(1, 101, &[a7, a8], site, 1900)
         .unwrap();
     assert_eq!(moved.len(), 1);
     assert_eq!(moved[0].id, map);
@@ -638,7 +659,7 @@ fn rivals_have_their_own_first_slot_map_alongside_the_human_marker() {
     assert!(entries(last.records.iter().find(|r| r.id == map).unwrap()).is_empty());
     assert!(
         world
-            .sync_rival_locations(1, 101, &[], [0.; 3], site, 1950)
+            .sync_rival_locations(1, 101, &[], site, 1950)
             .unwrap()
             .is_empty()
     );
@@ -646,13 +667,13 @@ fn rivals_have_their_own_first_slot_map_alongside_the_human_marker() {
     // The other session cannot claim the bound slot with its own map.
     let before = world.objects.snapshot();
     assert_eq!(
-        world.sync_rival_locations(2, 202, &[7], [0.; 3], site, 2000),
+        world.sync_rival_locations(2, 202, &[foreign], site, 2000),
         Err(Error::UnknownObject)
     );
     assert_eq!(world.objects.snapshot(), before);
     // A host clock that runs backwards is rejected rather than republished.
     assert_eq!(
-        world.sync_rival_locations(1, 101, &[], [0.; 3], site, 1000),
+        world.sync_rival_locations(1, 101, &[], site, 1000),
         Err(Error::Shape)
     );
 }

@@ -78,22 +78,24 @@ impl Players {
     /// Publish this session's roaming rivals for the client map and minimap.
     /// Official hosts list the rival participants in their own location map,
     /// bound to the location service's first slot, while the human map keeps
-    /// the last slot (E981). The map is created with the first rival and kept,
-    /// empty, after the last one retires. Membership changes publish at once;
-    /// moved rivals wait for the official period, [`RIVAL_MAP_PERIOD_MS`].
+    /// the last slot (E981). Each entry is a participant this session owns and
+    /// its world position: the car's while a client drives it, otherwise the
+    /// host's own simulation (E986). The map is created with the first rival
+    /// and kept, empty, after the last one retires. Membership changes publish
+    /// at once; moved rivals wait for the official period,
+    /// [`RIVAL_MAP_PERIOD_MS`].
     pub fn sync_rival_locations(
         &mut self,
         connection: u8,
         persona: u64,
-        rivals: &[u64],
-        origin: [f32; 3],
+        rivals: &[(u16, [f32; 3])],
         site: crate::world_activation::Site,
         now_ms: u64,
     ) -> Result<Vec<Record>, Error> {
         if rivals.len() > 128 {
             return Err(Error::Bound);
         }
-        if connection == 0 || persona == 0 || origin.iter().any(|v| !v.is_finite()) {
+        if connection == 0 || persona == 0 {
             return Err(Error::Shape);
         }
         let scene = self
@@ -121,16 +123,12 @@ impl Players {
             return Err(Error::UnknownObject);
         }
         let mut entries = Vec::with_capacity(rivals.len());
-        for &spawn in rivals {
-            let ids = self
-                .ai_ids(connection, persona, spawn)
-                .ok_or(Error::UnknownObject)?;
-            let position = self
-                .ai_vehicle_physics(connection, persona, spawn)?
-                .position
-                .to_position(origin, 7)?;
+        for &(participant, position) in rivals {
+            if !self.owns_ai_participant(connection, persona, participant) {
+                return Err(Error::UnknownObject);
+            }
             entries.push(Entry {
-                participant: ids.participant,
+                participant,
                 x: Coordinate::from_world(position[0])?,
                 z: Coordinate::from_world(position[2])?,
             });

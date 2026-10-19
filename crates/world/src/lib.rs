@@ -19,6 +19,8 @@ pub mod logic;
 pub mod nitrous_fuel;
 pub mod participants;
 pub mod replication;
+pub mod road_graph;
+pub mod road_wander;
 pub mod scoring;
 pub mod sequences;
 pub mod session;

@@ -3,7 +3,8 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! Read-only installed-content preflight of every roaming rival lifetime.
-//! Synthetic focus points exercise allocation; this does not simulate driving.
+//! Synthetic focus points exercise allocation and the host's road-graph
+//! simulation; this does not simulate client driving.
 use nfs_server::{content::WorldContent, rival_content, vehicle_content};
 use nfs_world::{
     content::bindings::Bindings,
@@ -14,7 +15,7 @@ use nfs_world::{
 };
 use std::{path::Path, sync::Arc};
 
-fn run(cache: &Path) -> Result<serde_json::Value, String> {
+fn run(cache: &Path, game: &Path) -> Result<serde_json::Value, String> {
     let error = |e| format!("world: {e:?}");
     let data = nfs_content::rivals::Content::load(&cache.join("rival-content.json"))
         .map_err(|e| e.to_string())?;
@@ -62,9 +63,13 @@ fn run(cache: &Path) -> Result<serde_json::Value, String> {
         Some(&cache.join("vehicle-parts.json")),
     )
     .map_err(|e| format!("vehicles: {e:?}"))?;
+    let graph = nfs_content::assets::AssetIndex::open(game, &nfs_content::Options::default())
+        .and_then(|mut index| index.road_graph())
+        .map_err(|e| format!("road graph: {e:?}"))?;
     let rivals = Arc::new(
         rival_content::Content::new(data, definitions, &items)
-            .map_err(|e| format!("rivals: {e:?}"))?,
+            .map_err(|e| format!("rivals: {e:?}"))?
+            .with_graph(Arc::new(graph)),
     );
     let expected = rivals.racers();
     let scenes = nfs_content::scenes::Catalog::load(&cache.join("scene-catalog.json"))
@@ -119,7 +124,11 @@ fn run(cache: &Path) -> Result<serde_json::Value, String> {
                 &mut registrations,
                 1,
                 1,
-                rival_content::population::Input { now, focus: &focus },
+                rival_content::population::Input {
+                    now: now * 50,
+                    focus: &focus,
+                    random: now as u32,
+                },
             )
             .map_err(|e| format!("population tick {now}: {e:?}"))?;
         for m in &changes.messages {
@@ -147,8 +156,14 @@ fn run(cache: &Path) -> Result<serde_json::Value, String> {
             updates.push(serde_json::json!({"participant":ids.participant,"actor":ids.actor,"vehicle":ids.vehicle,"messages":changes.messages.len(),"sections":sections.len()}));
         }
     }
-    if population.count() != expected || world.ai_count() != expected {
-        return Err(format!("spawned {} of {expected}", population.count()));
+    // Every racer activates on a road near its spawn; cars exist only for
+    // racers within the hand-over distance of a focus.
+    let cars = world.ai_count();
+    if population.count() != expected || world.ai_slot_count() != expected || cars == 0 {
+        return Err(format!(
+            "activated {} of {expected} with {cars} cars",
+            population.count()
+        ));
     }
     let retired = population
         .advance(
@@ -157,8 +172,9 @@ fn run(cache: &Path) -> Result<serde_json::Value, String> {
             1,
             1,
             rival_content::population::Input {
-                now: expected as u64 + 21,
+                now: (expected as u64 + 21) * 50,
                 focus: &[],
+                random: 0,
             },
         )
         .map_err(error)?;
@@ -168,17 +184,21 @@ fn run(cache: &Path) -> Result<serde_json::Value, String> {
         .into_iter()
         .filter(|r| !new_scenes.contains(&r.id))
         .collect();
-    if population.count() != 0 || world.ai_count() != 0 || before != after {
+    if population.count() != 0
+        || world.ai_count() != 0
+        || world.ai_slot_count() != 0
+        || before != after
+    {
         return Err("cleanup mismatch".into());
     }
     Ok(
-        serde_json::json!({"result":"spawned and retired all rivals","racers":expected,"spawned":updates,"deleted":retired.deleted.len(),"session_bundle_scenes":new_scenes.len(),"live_validation":false}),
+        serde_json::json!({"result":"activated and retired all rivals","racers":expected,"cars":cars,"spawned":updates,"deleted":retired.deleted.len(),"session_bundle_scenes":new_scenes.len(),"live_validation":false}),
     )
 }
 fn main() -> Result<(), String> {
-    let path = std::env::args()
-        .nth(1)
-        .ok_or("usage: rival_population PREPARED_CONTENT_DIRECTORY")?;
-    println!("{}", run(Path::new(&path))?);
+    let usage = "usage: rival_population PREPARED_CONTENT_DIRECTORY GAME_DIRECTORY";
+    let path = std::env::args().nth(1).ok_or(usage)?;
+    let game = std::env::args().nth(2).ok_or(usage)?;
+    println!("{}", run(Path::new(&path), Path::new(&game))?);
     Ok(())
 }

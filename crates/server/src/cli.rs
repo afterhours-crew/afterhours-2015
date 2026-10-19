@@ -651,15 +651,38 @@ async fn run(args: Args) -> Result<(), Failure> {
             .ok_or(Failure::ProfileConfig)?
             .vehicles
             .clone();
-        Some(Arc::new(
-            tokio::task::spawn_blocking(move || {
-                let items = nfs_services::item_content::ItemContent::load(&item_path)
-                    .map_err(|_| Failure::ProfileConfig)?;
-                nfs_server::rival_content::Content::load(&path, definitions, &items)
-            })
-            .await
-            .map_err(|_| Failure::Output)??,
-        ))
+        let game_dir = args.game_dir.clone();
+        let (content, graph) = tokio::task::spawn_blocking(move || {
+            let items = nfs_services::item_content::ItemContent::load(&item_path)
+                .map_err(|_| Failure::ProfileConfig)?;
+            let content = nfs_server::rival_content::Content::load(&path, definitions, &items)?;
+            // The host simulates rivals on the installed road graph (E987).
+            let graph = game_dir.ok_or(None).and_then(|dir| {
+                nfs_content::assets::AssetIndex::open(&dir, &nfs_content::Options::default())
+                    .and_then(|mut index| index.road_graph())
+                    .map_err(Some)
+            });
+            Ok::<_, Failure>((content, graph))
+        })
+        .await
+        .map_err(|_| Failure::Output)??;
+        match graph {
+            Ok(graph) => {
+                tracing::info!(
+                    nodes = graph.node_count(),
+                    lanes = graph.lane_count(),
+                    "road graph read from the installation for roaming rivals"
+                );
+                Some(Arc::new(content.with_graph(Arc::new(graph))))
+            }
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    "road graph unavailable (needs --game-dir); roaming rivals stay off"
+                );
+                None
+            }
+        }
     } else {
         None
     };
