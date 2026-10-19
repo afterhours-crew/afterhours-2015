@@ -58,6 +58,9 @@ struct Args {
     generated: Option<serde_json::Value>,
     /// Player-chosen traffic and roaming-rival amounts.
     ai: nfs_server::ai_settings::AiSettings,
+    /// The player's settings file, watched for changes while the server
+    /// runs; without it the amounts stay as started.
+    settings_file: Option<PathBuf>,
 }
 
 fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args, String> {
@@ -98,6 +101,7 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
     let (mut auth_config, mut local_identity) = (None, None);
     let (mut game_dir, mut content_cache) = (None, None);
     let (mut traffic_percent, mut rival_limit) = (100u16, None);
+    let mut settings_file = None;
     while let Some(flag) = args.next() {
         let mut value = || {
             args.next()
@@ -108,6 +112,7 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
             Some("--root") => root = value()?.into(),
             Some("--output") => output = Some(PathBuf::from(value()?)),
             Some("--stop-file") => stop_file = Some(PathBuf::from(value()?)),
+            Some("--settings-file") => settings_file = Some(PathBuf::from(value()?)),
             Some("--scene-catalog") => scene_catalog = Some(PathBuf::from(value()?)),
             Some("--world-content") => world_content = Some(PathBuf::from(value()?)),
             Some("--item-content") => item_content = Some(PathBuf::from(value()?)),
@@ -350,6 +355,7 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
         content_cache,
         generated: None,
         ai,
+        settings_file,
     })
 }
 
@@ -912,6 +918,18 @@ async fn run(args: Args) -> Result<(), Failure> {
     ready["install_content"] = args.generated.clone().unwrap_or(serde_json::Value::Null);
     println!("{ready}");
     let (stop, shutdown) = tokio::sync::watch::channel(false);
+    // Saved changes reach running sessions through this handle (live
+    // traffic and rival amounts); without a settings file it never changes.
+    let (ai_sender, ai) = nfs_server::ai_settings::Live::channel(args.ai);
+    let settings_watch = args.settings_file.as_ref().map(|path| {
+        tokio::spawn(nfs_server::settings_file::watch(
+            args.root.join(path),
+            args.ai,
+            ai_sender,
+            shutdown.clone(),
+            nfs_server::settings_file::POLL,
+        ))
+    });
     let config = net::Config {
         root: args.root,
         redirector_port: args.redirector_port,
@@ -932,7 +950,7 @@ async fn run(args: Args) -> Result<(), Failure> {
         stats,
         owned_menu_awards: args.owned_menu_awards,
         owned_local_social: args.owned_local_social,
-        ai: args.ai,
+        ai,
         challenges,
         kickback,
         speedwall,
@@ -979,6 +997,9 @@ async fn run(args: Args) -> Result<(), Failure> {
         if let Err(error) = result.unwrap_or(Err(Failure::Io)) {
             served = Err(error);
         }
+    }
+    if let Some(task) = settings_watch {
+        let _ = task.await;
     }
     thread.finish()?;
     served
@@ -1109,12 +1130,17 @@ mod tests {
             "500".into(),
             "--rival-limit".into(),
             "15".into(),
+            "--settings-file".into(),
+            "settings.json".into(),
         ]);
         let parsed = parse_from(args.into_iter()).unwrap();
         assert_eq!(
             (parsed.ai.traffic_percent(), parsed.ai.rival_limit()),
             (500, Some(15))
         );
+        assert_eq!(parsed.settings_file, Some(PathBuf::from("settings.json")));
+        let parsed = parse_from(configured().into_iter()).unwrap();
+        assert_eq!(parsed.settings_file, None, "amounts stay as started");
         for (flag, value) in [
             ("--traffic-percent", "501"),
             ("--traffic-percent", "-1"),

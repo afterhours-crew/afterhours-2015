@@ -38,6 +38,9 @@ impl Default for AiSettings {
 pub enum Error {
     TrafficPercent,
     RivalLimit,
+    /// Not the launcher's `settings.json` shape: a JSON object with only
+    /// `traffic_percent` (integer) and `rival_limit` (integer or null).
+    File,
 }
 
 impl std::fmt::Display for Error {
@@ -45,9 +48,18 @@ impl std::fmt::Display for Error {
         match self {
             Self::TrafficPercent => write!(f, "traffic must be 0 to {MAX_TRAFFIC_PERCENT} percent"),
             Self::RivalLimit => write!(f, "rivals must be 0 to {MAX_RIVALS}"),
+            Self::File => write!(
+                f,
+                "settings must be an object with traffic_percent and rival_limit"
+            ),
         }
     }
 }
+
+/// Builds before the rival count accepted a cap up to this; a saved value
+/// above [`MAX_RIVALS`] and up to this reads as [`MAX_RIVALS`], as the
+/// launcher reads it.
+const OLDER_MAX_RIVALS: u64 = 128;
 
 impl std::error::Error for Error {}
 
@@ -76,6 +88,72 @@ impl AiSettings {
 
     pub fn rival_limit(&self) -> Option<u16> {
         self.rival_limit
+    }
+
+    /// Parse the launcher's `settings.json`: missing fields are the
+    /// originals, unknown fields and out-of-range values are refused.
+    pub fn from_json(bytes: &[u8]) -> Result<Self, Error> {
+        let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| Error::File)?;
+        let object = value.as_object().ok_or(Error::File)?;
+        if object
+            .keys()
+            .any(|key| key != "traffic_percent" && key != "rival_limit")
+        {
+            return Err(Error::File);
+        }
+        let traffic_percent = match object.get("traffic_percent") {
+            None => 100,
+            Some(value) => {
+                let percent = value.as_u64().ok_or(Error::File)?;
+                u16::try_from(percent).map_err(|_| Error::TrafficPercent)?
+            }
+        };
+        let rival_limit = match object.get("rival_limit") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(value) => match value.as_u64().ok_or(Error::File)? {
+                limit if limit > u64::from(MAX_RIVALS) && limit <= OLDER_MAX_RIVALS => {
+                    Some(MAX_RIVALS)
+                }
+                limit => Some(u16::try_from(limit).map_err(|_| Error::RivalLimit)?),
+            },
+        };
+        Self::new(traffic_percent, rival_limit)
+    }
+}
+
+/// A running server's current settings. Every world session reads it each
+/// tick, so a change the player saves applies to sessions already running.
+#[derive(Clone, Debug)]
+pub struct Live(tokio::sync::watch::Receiver<AiSettings>);
+
+impl Live {
+    /// Settings that never change, for a server without a settings file.
+    pub fn fixed(settings: AiSettings) -> Self {
+        Self(tokio::sync::watch::channel(settings).1)
+    }
+
+    /// Settings the returned sender can change.
+    pub fn channel(settings: AiSettings) -> (tokio::sync::watch::Sender<AiSettings>, Self) {
+        let (sender, receiver) = tokio::sync::watch::channel(settings);
+        (sender, Self(receiver))
+    }
+
+    pub fn current(&self) -> AiSettings {
+        *self.0.borrow()
+    }
+
+    /// The settings, when they changed since this handle last looked.
+    pub fn changed(&mut self) -> Option<AiSettings> {
+        self.0
+            .has_changed()
+            .unwrap_or(false)
+            .then(|| *self.0.borrow_and_update())
+    }
+}
+
+impl Default for Live {
+    fn default() -> Self {
+        Self::fixed(AiSettings::default())
     }
 }
 
@@ -120,5 +198,49 @@ mod tests {
         // 5x: the original 2-10 nearby target becomes 10-50.
         assert_eq!((scale(2, 500), scale(10, 500)), (10, 50));
         assert_eq!(scale(u32::MAX, MAX_TRAFFIC_PERCENT), u32::MAX);
+    }
+
+    #[test]
+    fn the_settings_file_reads_like_the_launcher_reads_it() {
+        let read = |text: &str| AiSettings::from_json(text.as_bytes());
+        assert_eq!(
+            read(r#"{"traffic_percent": 500, "rival_limit": 15}"#),
+            AiSettings::new(500, Some(15))
+        );
+        assert_eq!(read(r#"{"rival_limit": null}"#), Ok(AiSettings::default()));
+        assert_eq!(read("{}"), Ok(AiSettings::default()));
+        assert_eq!(read(r#"{"rival_limit": 0}"#), AiSettings::new(100, Some(0)));
+        // A count saved by an older build (up to 128) reads as 15.
+        assert_eq!(
+            read(r#"{"rival_limit": 128}"#),
+            AiSettings::new(100, Some(15))
+        );
+        for (text, error) in [
+            (r#"{"traffic_percent": 501}"#, Error::TrafficPercent),
+            (r#"{"traffic_percent": 70000}"#, Error::TrafficPercent),
+            (r#"{"rival_limit": 129}"#, Error::RivalLimit),
+            (r#"{"traffic_percent": -5}"#, Error::File),
+            (r#"{"traffic_percent": "lots"}"#, Error::File),
+            (r#"{"traffic": 50}"#, Error::File),
+            ("[]", Error::File),
+            ("not json", Error::File),
+            ("", Error::File),
+        ] {
+            assert_eq!(read(text), Err(error), "{text}");
+        }
+    }
+
+    #[test]
+    fn live_settings_report_each_change_once_to_every_handle() {
+        let (sender, mut first) = Live::channel(AiSettings::default());
+        let mut second = first.clone();
+        assert_eq!((first.changed(), second.changed()), (None, None));
+        let busy = AiSettings::new(500, Some(15)).unwrap();
+        sender.send_replace(busy);
+        assert_eq!((first.changed(), first.changed()), (Some(busy), None));
+        assert_eq!((second.changed(), second.current()), (Some(busy), busy));
+        let mut fixed = Live::fixed(busy);
+        assert_eq!((fixed.changed(), fixed.current()), (None, busy));
+        assert_eq!(Live::default().current(), AiSettings::default());
     }
 }

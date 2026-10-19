@@ -268,11 +268,10 @@ pub enum Command {
     ///
     /// Without options, prints the values in settings.json in the data
     /// directory, or the original ones when there is no file yet, and
-    /// changes nothing. --traffic and --rivals save new values for later
-    /// sessions, as they do on `start` and `serve`; saving is refused while
-    /// a session holds the data directory, because a running session keeps
-    /// the values it started with. The record also gives the largest
-    /// values this build accepts.
+    /// changes nothing. --traffic and --rivals save new values, as they do on
+    /// `start` and `serve`; a running session applies them within about a
+    /// second and later sessions start with them. The record also gives the
+    /// largest values this build accepts.
     Settings(SettingsArgs),
 
     /// Show the version, the JSON record versions and the capabilities.

@@ -204,9 +204,15 @@ original costs client performance. Traffic always leaves room for 15 rival cars 
 server's 128-car AI budget.
 
 `nfs-afterhours settings` prints the saved values without starting anything, and
-`nfs-afterhours settings --traffic 200 --rivals original` saves new ones for the next
-session. Saving is refused while a session runs, because a running session keeps the
-values it started with.
+`nfs-afterhours settings --traffic 200 --rivals original` saves new ones. Saving also
+works while a session runs, and that session applies the new values within about a
+second: the server checks the file's modified time and size once a second and reads it
+only when they change. Hand edits apply the same way; an invalid file is ignored (the
+server log says so) and the current values stay. More traffic fills in at the normal
+spawn pace; with less, cars leave as they fall out of range behind you, and traffic off
+stops new cars at once. A lower rival number removes rivals that have no car near you
+right away, and the others once their car is out of range; a higher one adds racers
+over the next seconds.
 
 Every subcommand accepts `--json` to print one JSON object instead of text, and
 exits with a documented code (`nfs-afterhours --help` lists them): 0 success,

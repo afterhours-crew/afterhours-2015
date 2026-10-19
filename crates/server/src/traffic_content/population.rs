@@ -133,8 +133,19 @@ impl Population {
 
     /// Scale the original traffic by `percent` (0 turns traffic off).
     pub fn with_traffic_percent(mut self, percent: u16) -> Self {
-        self.traffic_percent = percent;
+        self.set_traffic_percent(percent);
         self
+    }
+
+    /// Change the amount while the session runs; the next spawn decision
+    /// uses it. Cars above a lower amount retire as they leave the retain
+    /// range, never in view.
+    pub fn set_traffic_percent(&mut self, percent: u16) {
+        self.traffic_percent = percent;
+    }
+
+    pub fn traffic_percent(&self) -> u16 {
+        self.traffic_percent
     }
 
     pub fn count(&self) -> usize {
@@ -245,7 +256,7 @@ impl Population {
                 continue;
             }
             let nearby = next.policy.nearby(point, &next.cars);
-            timer.interval = (nearby as f32 / query.target as f32) * 2.;
+            timer.interval = policy::interval(nearby, query.target, next.traffic_percent);
             if nearby >= query.target {
                 continue;
             }

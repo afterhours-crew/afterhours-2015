@@ -1233,3 +1233,58 @@ fn chosen_rivals_still_get_cars_when_traffic_holds_its_whole_share() {
         .count();
     assert_eq!((p.count(), cars, world.ai_count()), (15, 15, ai::MAX_AI));
 }
+
+#[test]
+fn a_count_changed_while_running_never_removes_a_shown_car() {
+    let (mut p, mut world, mut registry, _) = fixture(1);
+    // One racer 300 m away (it gets a car) and four farther out.
+    spread(
+        &mut p,
+        &[
+            [300., 0., 2.],
+            [1000., 0., 2.],
+            [-1500., 0., 2.],
+            [2000., 0., 2.],
+            [-2500., 0., 2.],
+        ],
+    );
+    p.set_limit(Some(5));
+    let mut now = 0;
+    drive(&mut p, &mut world, &mut registry, &mut now, at(0., 0.), 8);
+    assert_eq!(active(&p), [0, 1, 2, 3, 4]);
+    assert!(p.racers[0].active.as_ref().unwrap().car.is_some());
+    // Lower: racers without a car go at once, farthest first.
+    p.set_limit(Some(2));
+    let c = drive(&mut p, &mut world, &mut registry, &mut now, at(0., 0.), 1);
+    assert_eq!(active(&p), [0, 1]);
+    assert_eq!(c[0].deleted.len(), 6, "three participants and actors");
+    // Off: the racer with a car stays until its car is handed back.
+    p.set_limit(Some(0));
+    drive(&mut p, &mut world, &mut registry, &mut now, at(0., 0.), 3);
+    assert_eq!(active(&p), [0]);
+    assert_eq!(world.ai_count(), 1);
+    // The player drives away: hand-back beyond 800 m, then it is retired.
+    drive(
+        &mut p,
+        &mut world,
+        &mut registry,
+        &mut now,
+        at(-1200., 0.),
+        3,
+    );
+    assert_eq!(
+        (p.count(), world.ai_slot_count(), world.ai_count()),
+        (0, 0, 0)
+    );
+    // Back up: racers are added again, one per tick.
+    p.set_limit(Some(3));
+    let c = drive(&mut p, &mut world, &mut registry, &mut now, at(0., 0.), 5);
+    assert_eq!(c.iter().filter(|c| c.activated.is_some()).count(), 3);
+    assert_eq!(p.count(), 3);
+    // Back to the original: added racers without a car leave at once; the
+    // one with a car stays until it is handed back.
+    p.set_limit(None);
+    drive(&mut p, &mut world, &mut registry, &mut now, at(0., 0.), 2);
+    assert_eq!(active(&p), [0]);
+    assert!(p.racers[0].active.as_ref().unwrap().car.is_some());
+}

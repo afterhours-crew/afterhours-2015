@@ -250,7 +250,7 @@ impl PlayReport {
 }
 
 /// `settings --json`: the saved traffic and rival amounts, which every later
-/// `setup`, `serve` and `start` uses.
+/// `setup`, `serve` and `start` uses and a running session applies.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct SettingsReport {
     pub version: u32,
@@ -268,6 +268,10 @@ pub struct SettingsReport {
     /// rivals (other installed racers near the player, each at most once).
     /// When `false` it only caps the game's own.
     pub rivals_above_original: bool,
+    /// Whether saving applies to a running session within about a second
+    /// (the server watches `settings.json`); when `false`, a running
+    /// session keeps the values it started with and saving is refused.
+    pub live: bool,
     /// `settings.json` in the data directory; it may not exist yet.
     pub file: PathBuf,
     /// Whether this command saved the file.
@@ -283,6 +287,7 @@ impl SettingsReport {
             max_traffic_percent: crate::settings::MAX_TRAFFIC_PERCENT,
             max_rivals: crate::settings::MAX_RIVALS,
             rivals_above_original: crate::settings::RIVALS_ABOVE_ORIGINAL,
+            live: true,
             file,
             saved,
         }

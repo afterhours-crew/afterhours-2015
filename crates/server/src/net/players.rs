@@ -734,6 +734,19 @@ impl PlayerListener {
         self.ai = ai;
         self
     }
+    /// New player-chosen amounts while the session runs. Populations read
+    /// them on their next tick: more traffic fills in at the spawn pacing,
+    /// less lets cars retire as they leave the retain range, and a lower
+    /// rival count retires rivals only where no car is shown.
+    pub(super) fn set_ai_settings(&mut self, ai: crate::ai_settings::AiSettings) {
+        self.ai = ai;
+        if let Some(traffic) = &mut self.traffic_population {
+            traffic.set_traffic_percent(ai.traffic_percent());
+        }
+        if let Some(rivals) = &mut self.rival_population {
+            rivals.set_limit(ai.rival_limit());
+        }
+    }
     pub(super) fn with_arrivals(mut self, arrivals: Option<nfs_world::arrival::Arrivals>) -> Self {
         self.arrivals = arrivals;
         self

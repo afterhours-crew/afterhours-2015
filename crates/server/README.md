@@ -248,6 +248,7 @@ For world/garage operation also supply:
 | `--traffic-content` | Installed traffic vehicles, AI managers and road splines; generated with `--game-dir`. Bounded session population and lifecycle are implemented; gameplay acceptance remains tracked in [#54](https://github.com/afterhours-crew/afterhours-2015/issues/54) |
 | `--rival-content` | Installed roaming racer regions, spawn transforms, vehicle presets and driving personalities; generated with `--game-dir` and requires the owned vehicle configuration |
 | `--traffic-percent`, `--rival-limit` | Player-chosen amounts ([settings](src/ai_settings.rs)): traffic as 0–500 % of the original (default 100; traffic leaves 15 of the 128 AI cars for rivals), and the number of roaming rivals kept active, 0–15 (default: the original, region-driven number). A number caps the game's own rivals and adds other installed racers near the player up to it ([population](src/rival_content/population.rs)). The launcher passes them from `settings.json` |
+| `--settings-file` | The launcher's `settings.json`, checked once a second by modified time and size and read only when they change ([watcher](src/settings_file.rs)); valid new amounts apply to running sessions on their next tick, an invalid or missing file keeps the current ones. The launcher passes `<data>/settings.json` |
 
 Sequence content version 2 omits `arrive.spline.base_value`: the six-bit goal
 allocation counter belongs to the current world and wraps after 63. It advances

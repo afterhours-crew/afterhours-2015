@@ -40,6 +40,7 @@ pub mod scene_roles;
 pub mod scoring;
 pub mod seeds;
 pub mod sequence_content;
+pub mod settings_file;
 pub mod shared_wraps;
 pub mod startup;
 pub mod startup_branch;

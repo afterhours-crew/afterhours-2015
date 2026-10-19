@@ -1,10 +1,14 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "description": "`settings --json`: the saved traffic and rival amounts, which every later\n`setup`, `serve` and `start` uses.",
+  "description": "`settings --json`: the saved traffic and rival amounts, which every later\n`setup`, `serve` and `start` uses and a running session applies.",
   "properties": {
     "file": {
       "description": "`settings.json` in the data directory; it may not exist yet.",
       "type": "string"
+    },
+    "live": {
+      "description": "Whether saving applies to a running session within about a second\n(the server watches `settings.json`); when `false`, a running\nsession keeps the values it started with and saving is refused.",
+      "type": "boolean"
     },
     "max_rivals": {
       "description": "Largest `rival_limit` this build accepts.",
@@ -59,6 +63,7 @@
     "max_traffic_percent",
     "max_rivals",
     "rivals_above_original",
+    "live",
     "file",
     "saved"
   ],
