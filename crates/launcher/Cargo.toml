@@ -15,6 +15,8 @@ path = "src/main.rs"
 workspace = true
 
 [dev-dependencies]
+# The same pinned SQLite as nfs-storage, for tests that hold a second writer.
+rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled", "limits"] }
 serde_json = "=1.0.151"
 sha2 = { version = "=0.11.0", default-features = false }
 
@@ -22,6 +24,10 @@ sha2 = { version = "=0.11.0", default-features = false }
 anstream = "=1.0.0"
 anstyle = "=1.0.14"
 nfs-afterhours-sys = { path = "../launcher-sys" }
+# Read-only `profile`: the account store and its domain decoders. The
+# launcher never opens a store for writing; the server owns all writes.
+nfs-services = { path = "../services" }
+nfs-storage = { path = "../storage" }
 # Argument parsing, help and usage. Default features are off: no color, no
 # suggestions, no environment-variable or wrapping support.
 clap = { version = "=4.6.7", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }

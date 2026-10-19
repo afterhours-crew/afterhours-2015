@@ -81,7 +81,10 @@ The launcher uses clap 4.6.7 (MIT OR Apache-2.0) with default features off
 (`std`, `derive`, `help`, `usage`, `error-context`); its tree adds clap_builder,
 clap_derive, clap_lex, anstyle and heck, all MIT OR Apache-2.0. The
 operating-system crate uses windows-sys 0.61.2 and libc 0.2.190, both
-MIT OR Apache-2.0 and already locked by other crates.
+MIT OR Apache-2.0 and already locked by other crates. The read-only `profile`
+command links the first-party `nfs-storage` and `nfs-services` crates, so the
+launcher also carries the pinned `rusqlite` with bundled SQLite; no new
+registry crate is locked for it.
 
 Terminal presentation uses anstream 1.0.0 and anstyle 1.0.14 (MIT OR Apache-2.0).
 New locked transitive dependencies are anstyle-parse 1.0.0, anstyle-query 1.1.5,

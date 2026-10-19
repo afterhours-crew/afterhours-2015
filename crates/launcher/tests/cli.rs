@@ -5,7 +5,7 @@
 //! The built `nfs-afterhours` binary, driven as a user would.
 //!
 //! These tests cover the command line itself: help, usage errors, exit
-//! codes, `status`, `stop` and `recover` against a data directory, and on
+//! codes, `status`, `stop`, `profile` and `recover` against a data directory, and on
 //! Unix a complete `serve` session supervised over a stand-in server
 //! script. No game installation is needed; the one check that requires the
 //! real game digest is exercised by its refusal.
@@ -99,7 +99,7 @@ fn help_lists_every_public_subcommand_and_the_exit_table() {
     assert_eq!(out.status.code(), Some(0));
     let help = text(&out.stdout);
     for sub in [
-        "check", "setup", "serve", "start", "status", "stop", "recover",
+        "check", "setup", "serve", "start", "status", "stop", "profile", "recover",
     ] {
         assert!(
             help.contains(&format!("\n  {sub}")),
@@ -228,6 +228,112 @@ fn recover_restores_a_pointer_only_for_a_real_database() {
 /// A stand-in `nfs-server`: answers `prepare-local` and `create-account`
 /// with the JSON shapes the real server prints, and otherwise prints a
 /// readiness record and waits for its `--stop-file`.
+#[test]
+fn profile_reads_a_saved_driver_and_reports_missing_accounts() {
+    use nfs_storage::{
+        AccountId, Batch, GarageSlots, Op, Timestamp,
+        account::{Document, Kind, Repository},
+    };
+    let data = scratch("profile");
+    let dir = data.to_str().unwrap();
+    let out = run(&["profile", "--json", "--data-dir", dir]);
+    assert_eq!(out.status.code(), Some(4), "{}", text(&out.stderr));
+    let out = run(&["profile", "--list", "--json", "--data-dir", dir]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let listing: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(listing["accounts"], serde_json::json!([]));
+    // A synthetic save selected by account.json; no prepared content.
+    let id = "5a".repeat(16);
+    let account = AccountId::from_owned_config([0x5a; 16]).unwrap();
+    let identity = serde_json::json!({"version": 1, "storage_account": id,
+        "persona": 41, "account": 42, "name": "Cli Tester"});
+    let documents: Vec<_> = Kind::ALL
+        .into_iter()
+        .map(|kind| {
+            let bytes = if kind == Kind::Identity {
+                identity.to_string().into_bytes()
+            } else {
+                b"{}".to_vec()
+            };
+            (kind, Document { revision: 1, bytes })
+        })
+        .collect();
+    let batch = Batch {
+        id: 1,
+        expected_generation: 0,
+        ops: vec![Op::SetGarage(GarageSlots::default())],
+    };
+    let accounts = data.join("artifacts").join("account");
+    std::fs::create_dir_all(&accounts).unwrap();
+    Repository::open_owned_directory(&accounts)
+        .unwrap()
+        .initialize_fresh(account, &documents, &batch, Timestamp(1))
+        .unwrap();
+    std::fs::write(
+        data.join("account.json"),
+        format!(r#"{{"version":1,"local_account":"{id}","progression":"post-intro"}}"#),
+    )
+    .unwrap();
+    let save = accounts.join(format!("{id}.sqlite"));
+    let before = std::fs::read(&save).unwrap();
+    let out = run(&["profile", "--json", "--data-dir", dir]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let profile: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(profile["identity"]["display_name"], "Cli Tester");
+    assert_eq!(profile["identity"]["persona_id"], "41");
+    assert_eq!(profile["bank"]["balance"], 0);
+    assert_eq!(profile["save"]["generation"], 1);
+    assert_eq!(profile["active"], true);
+    assert!(profile["reputation"].is_null(), "no content, no REP schema");
+    assert!(!profile["warnings"].as_array().unwrap().is_empty());
+    let out = run(&["profile", "--data-dir", dir]);
+    let shown = text(&out.stdout);
+    assert!(
+        shown.contains("Cli Tester (selected)") && shown.contains("Bank $0"),
+        "{shown}"
+    );
+    let out = run(&["profile", "--list", "--json", "--data-dir", dir]);
+    let listing: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(listing["accounts"][0]["display_name"], "Cli Tester");
+    let out = run(&[
+        "profile",
+        "--data-dir",
+        dir,
+        "--account-id",
+        &"7b".repeat(16),
+    ]);
+    assert_eq!(out.status.code(), Some(4));
+    let out = run(&["profile", "--data-dir", dir, "--account-id", "nope"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        std::fs::read(&save).unwrap(),
+        before,
+        "profile never writes"
+    );
+    // Another process holding an uncommitted write, as a running server
+    // would, neither blocks the profile nor shows through.
+    let writer = rusqlite::Connection::open(&save).unwrap();
+    writer
+        .execute_batch("BEGIN IMMEDIATE; UPDATE meta SET generation=generation+5;")
+        .unwrap();
+    let generation = |out: Output| {
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap()["save"]["generation"]
+            .clone()
+    };
+    assert_eq!(
+        generation(run(&["profile", "--json", "--data-dir", dir])),
+        1
+    );
+    writer.execute_batch("COMMIT;").unwrap();
+    assert_eq!(
+        generation(run(&["profile", "--json", "--data-dir", dir])),
+        6
+    );
+    drop(writer);
+    std::fs::remove_dir_all(data).unwrap();
+}
+
 #[cfg(unix)]
 fn fake_server(dir: &Path, data: &Path) -> PathBuf {
     let policy = dir.join("account-policy.json");

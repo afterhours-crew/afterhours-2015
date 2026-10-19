@@ -14,6 +14,8 @@
 //!
 //! - [`marker`], [`compat`], [`paths`], [`records`], [`digest`], [`install`]
 //!   and [`session`] are portable and have no process or platform dependency.
+//! - [`profile`] reads account saves read-only through `nfs-storage` and
+//!   decodes them with `nfs-services`; it never locks or writes.
 //! - [`platform`] defines the operations the supervisor needs from the
 //!   operating system. Implementations live behind `cfg` and are the only
 //!   code that spawns processes or reads the registry.
@@ -33,6 +35,7 @@ pub mod marker;
 pub mod paths;
 pub mod platform;
 pub mod preflight;
+pub mod profile;
 pub mod records;
 pub mod session;
 pub mod supervisor;

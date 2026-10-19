@@ -240,7 +240,18 @@ nfs-afterhours recover --account-id <32 lowercase hex digits>
 ```
 
 Recovery refuses an existing different pointer and never edits the database.
-The server still validates schema and ownership when starting. If no complete
+The server still validates schema and ownership when starting.
+
+To look at a save without changing it, also while the server runs:
+
+```sh
+nfs-afterhours profile            # the driver account.json selects
+nfs-afterhours profile --list     # every save in artifacts/account
+```
+
+Add `--json` for the machine-readable form a desktop front end reads; the
+format is described in `crates/launcher/README.md`. Saved stats are printed as
+raw stored integers because the game's units are not confirmed. If no complete
 account database exists, keep the failed directory for diagnosis and choose a new
 data directory. Do not overwrite it with someone else's profile.
 

@@ -93,6 +93,24 @@ pub struct SessionArgs {
     pub record_protocol: bool,
 }
 
+/// Arguments for `profile`.
+#[derive(Debug, Clone, Args)]
+pub struct ProfileArgs {
+    /// List every saved driver: name, REP level, bank and last save.
+    #[arg(long, conflicts_with = "account_id")]
+    pub list: bool,
+
+    /// The 32-character account ID to show. Defaults to the account in
+    /// account.json.
+    #[arg(long, value_name = "ID")]
+    pub account_id: Option<String>,
+
+    /// Prepared content directory for REP thresholds, table schemas and car
+    /// names. Defaults to the one the current session prepared.
+    #[arg(long, value_name = "DIR")]
+    pub content_dir: Option<PathBuf>,
+}
+
 #[derive(Debug, Clone, Subcommand)]
 pub enum Command {
     /// Verify the installation, paths, registration and conflicts; change nothing.
@@ -133,6 +151,16 @@ pub enum Command {
     /// Writes a stop request the supervisor consumes. Never kills a process
     /// by identifier. Exits with code 4 when there is no live session.
     Stop,
+
+    /// Show a saved driver's profile, or list every saved driver; change nothing.
+    ///
+    /// Read-only. Opens the account's SQLite save without the data-directory
+    /// lock, so it also works while the server runs, and reads REP
+    /// thresholds, table schemas and car names from the prepared content.
+    /// Stored integers are printed as stored: the game's units for
+    /// distances, times and speeds are not confirmed. Exits with code 4
+    /// when there is no saved account to show.
+    Profile(ProfileArgs),
 
     /// Restore the account pointer for an existing saved database.
     ///
@@ -214,6 +242,28 @@ mod tests {
         assert!(
             Cli::try_parse_from(["nfs-afterhours", "recover"]).is_err(),
             "account-id is required"
+        );
+        let profile = Cli::try_parse_from([
+            "nfs-afterhours",
+            "profile",
+            "--json",
+            "--content-dir",
+            "C",
+            "--data-dir",
+            "d",
+        ])
+        .unwrap();
+        match profile.command {
+            Command::Profile(args) => {
+                assert!(!args.list && args.account_id.is_none());
+                assert_eq!(args.content_dir, Some(PathBuf::from("C")));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(
+            Cli::try_parse_from(["nfs-afterhours", "profile", "--list", "--account-id", "a"])
+                .is_err(),
+            "a listing shows every account"
         );
     }
 }

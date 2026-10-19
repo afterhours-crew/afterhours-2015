@@ -8,6 +8,7 @@
 //! one JSON object instead.
 
 mod launch;
+mod profile;
 mod recover;
 mod status;
 
@@ -91,6 +92,7 @@ fn dispatch(cli: Cli, bundled_server: Option<PathBuf>) -> Result<()> {
         Command::Start(args) => launch::launch(&context, crate::records::Action::Start, &args),
         Command::Status => status::status(&context),
         Command::Stop => status::stop(&context),
+        Command::Profile(args) => profile::profile(&context, &args),
         Command::Recover { account_id } => recover::recover(&context, &account_id),
         Command::Supervise { request } => launch::supervise(&request),
     }

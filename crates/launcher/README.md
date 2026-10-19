@@ -21,6 +21,8 @@ nfs-afterhours serve   --game-dir <DIR>     run the server without a game (every
 nfs-afterhours start   --game-dir <DIR>     run the server, start and route the game (Windows)
 nfs-afterhours status                       report the current session
 nfs-afterhours stop                         ask the live session to close the game, then the server
+nfs-afterhours profile [--account-id <ID>]  show a saved driver's profile; change nothing
+nfs-afterhours profile --list               list every saved driver in the data directory
 nfs-afterhours recover --account-id <ID>    restore account.json for an existing database
 ```
 
@@ -58,6 +60,43 @@ if it is still running, retire the routing lease once the game's lifetime has
 ended, stop the server through its stop file, drain both children's log
 pumps, disarm the job. A cleanup failure is reported together with any
 earlier failure, and the job stays armed so process exit still kills the tree.
+
+## Profiles
+
+`profile` reads one account save, `artifacts/account/<id>.sqlite`, for a
+desktop front end; `--list` reads every save there. It never takes the
+data-directory lock and never writes, so it runs while the server holds the
+save. The save is opened through `nfs-storage`'s read-only inspection: a
+read-only SQLite connection with `query_only`, no checkpoint on close, at
+most a two-second lock wait, and every domain read in one read transaction,
+so a profile is always one committed state. Like any WAL reader, SQLite may
+leave empty `-wal` and `-shm` files beside a save it found without them.
+
+Values are decoded by the server's own code in `nfs-services`: identity,
+bank balance, REP scores evaluated against the installed thresholds, the
+single-row tables (`RepValuesTable`, `PrestigeMedalTable`,
+`GameplayStatsTable`, `SpeedListStatsTable`, `ProgressionStats`), the five
+garage slots (slot 0 is the primary vehicle), item, livery and table-row
+counts, and save metadata. Content comes from `--content-dir`, else the
+cache the current session prepared, else the only cache present. Without
+content the save still reads; REP, tables and car names are then `null`.
+
+The JSON contract, version 1:
+
+- Every table cell is `{"value": <i32>, "stored": <bool>}`. `stored: false`
+  means the save has no cell and `value` is the schema default the server
+  serves. Values are the raw stored integers: the game's units for
+  distances, times and speeds are not confirmed, so none is applied.
+- Only values whose meaning our server defines are formatted: `bank.formatted`
+  and `save.updated_at_utc`, next to the raw `bank.balance` and
+  `save.updated_at_ms`.
+- Item IDs and the persona ID are decimal strings, so JavaScript keeps every
+  digit. Definition GUIDs are 32 lowercase hexadecimal characters.
+- A car's `vehicle.label` is its blueprint asset name without `Car_` and with
+  spaces for underscores, not the game's localized display name.
+- A domain that is absent or cannot be decoded is `null` and adds a
+  sentence to `warnings`. A save that cannot be opened at all is an error
+  (exit 1, 4 or 5); in `--list` it is an entry with `error` set.
 
 ## Why it is built this way
 
@@ -127,6 +166,7 @@ existing data directories keep working.
 | `supervisor` | the state machine; `supervisor/live` implements it over processes |
 | `platform/` | the `Platform` trait, the shared child with bounded log pumps, and the Windows and Unix implementations; `platform/windows/lease` is the routing lease |
 | `endpoint` | the 13-byte transaction over abstract memory, tested with injected faults |
+| `profile` | read-only profiles from account saves; `profile/content` picks and loads the prepared content |
 | `paths`, `records`, `session`, `install`, `digest`, `compat`, `marker`, `clock` | portable pieces with their own unit tests |
 
 ## Testing
