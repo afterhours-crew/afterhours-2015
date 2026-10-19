@@ -28,6 +28,8 @@ nfs-afterhours-sys = { path = "../launcher-sys" }
 # launcher never opens a store for writing; the server owns all writes.
 nfs-services = { path = "../services" }
 nfs-storage = { path = "../storage" }
+# Item classes and states, to recognize owned cars by the server's own rule.
+nfs-world-core = { path = "../world-core" }
 # Argument parsing, help and usage. Default features are off: no color, no
 # suggestions, no environment-variable or wrapping support.
 clap = { version = "=4.6.7", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }

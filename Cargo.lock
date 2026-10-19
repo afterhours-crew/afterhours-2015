@@ -350,6 +350,7 @@ dependencies = [
  "nfs-afterhours-sys",
  "nfs-services",
  "nfs-storage",
+ "nfs-world-core",
  "rusqlite",
  "schemars",
  "serde",

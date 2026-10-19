@@ -8,7 +8,7 @@ use super::Context;
 use crate::{
     cli::ProfileArgs,
     exit::{Failure, Result},
-    profile::{self, Cell, Columns, Listing, Profile, content::Need, grouped},
+    profile::{self, CarLocation, Cell, Columns, Listing, Profile, content::Need, grouped},
 };
 use std::fmt::Write;
 
@@ -118,6 +118,35 @@ fn text(p: &Profile) -> String {
             );
             let primary = if slot.primary { " (primary)" } else { "" };
             let _ = writeln!(out, "  {}. {label}{primary}", slot.index + 1);
+        }
+    }
+    if let (Some(cars), Some(summary)) = (&p.cars, &p.car_summary) {
+        let _ = writeln!(
+            out,
+            "Cars: garage {} of {}, warehouse {} of {}, total sale value ${}",
+            summary.garage_used,
+            summary.garage_slots,
+            summary.warehouse_used,
+            summary.warehouse_limit,
+            grouped(i64::try_from(summary.total_sale_value).unwrap_or(i64::MAX))
+        );
+        for car in cars {
+            let place = match (car.location, car.slot) {
+                (CarLocation::Active, _) => "active".to_owned(),
+                (CarLocation::Garage, Some(slot)) => format!("garage {}", slot + 1),
+                _ => "warehouse".to_owned(),
+            };
+            let name = car
+                .display_name
+                .clone()
+                .unwrap_or_else(|| format!("car {}", car.definition));
+            let _ = writeln!(
+                out,
+                "  {place:<10} {name}: {} installed, {} spare, sells for ${}",
+                car.installed_parts,
+                car.spare_parts,
+                grouped(i64::from(car.sale_price))
+            );
         }
     }
     if let Some(tables) = &p.tables {

@@ -18,6 +18,147 @@
       ],
       "type": "object"
     },
+    "Car": {
+      "description": "One owned car: a root item of the race-vehicle class in the owned state,\nthe same rule the server applies to purchases, sales and the warehouse.\nWhether a car carries a custom wrap or tuning is not reported: those\nedits change stored records in place, and the save keeps no stock\nreference that tells them apart without guessing.",
+      "properties": {
+        "definition": {
+          "description": "Definition GUID as 32 lowercase hexadecimal characters.",
+          "type": "string"
+        },
+        "display_name": {
+          "description": "The blueprint label from the installed vehicle content, such as\n`Ford MustangGT 2015`; not the game's localized name. `null` when the\nvehicle content does not list the definition.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "installed_parts": {
+          "description": "Records installed on the car: reachable from it through installed\nitem links, nested parts included. An installed wrap from the\naccount's library counts.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "item_records": {
+          "description": "Records in the car's ownership tree, the car included. Selling the\ncar removes exactly these.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "location": {
+          "$ref": "#/definitions/CarLocation"
+        },
+        "sale_price": {
+          "description": "The stored sale price: the cash that selling this car credits.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "slot": {
+          "description": "Garage slot 0-4; `null` in the warehouse.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "spare_parts": {
+          "description": "Records the car owns that are not installed: stock parts it replaced\nand purchased spares.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "vehicle": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Vehicle"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "definition",
+        "display_name",
+        "vehicle",
+        "location",
+        "slot",
+        "installed_parts",
+        "spare_parts",
+        "sale_price",
+        "item_records"
+      ],
+      "type": "object"
+    },
+    "CarLocation": {
+      "description": "Where an owned car is kept.",
+      "oneOf": [
+        {
+          "const": "active",
+          "description": "Garage slot 0: the car the player drives.",
+          "type": "string"
+        },
+        {
+          "const": "garage",
+          "description": "Garage slots 1-4.",
+          "type": "string"
+        },
+        {
+          "const": "warehouse",
+          "description": "Owned but outside the five garage slots.",
+          "type": "string"
+        }
+      ]
+    },
+    "CarSummary": {
+      "description": "Totals over [`Car`]s.",
+      "properties": {
+        "garage_slots": {
+          "description": "Garage slots in all, 5.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "garage_used": {
+          "description": "Garage slots holding an item.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total_sale_value": {
+          "description": "Sum of every owned car's stored sale price.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "warehouse_limit": {
+          "description": "The server's warehouse limit; moving a car there beyond it is refused.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "warehouse_used": {
+          "description": "Owned cars outside the garage slots.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "garage_used",
+        "garage_slots",
+        "warehouse_used",
+        "warehouse_limit",
+        "total_sale_value"
+      ],
+      "type": "object"
+    },
     "Categories": {
       "properties": {
         "build": {
@@ -490,6 +631,26 @@
         }
       ]
     },
+    "car_summary": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/CarSummary"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "cars": {
+      "description": "Every owned car: the active car, garage slots 1-4 in order, then the\nwarehouse by item ID. `null` without item content to classify items.",
+      "items": {
+        "$ref": "#/definitions/Car"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    },
     "content": {
       "anyOf": [
         {
@@ -568,6 +729,8 @@
     "reputation",
     "tables",
     "garage",
+    "cars",
+    "car_summary",
     "counts",
     "save",
     "content",

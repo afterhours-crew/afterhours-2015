@@ -15,7 +15,10 @@ use nfs_storage::{
 use serde_json::json;
 
 const CAR: &str = "322ee1d18db783faf3017e18d69cfcc7";
+/// A second car model without a vehicle profile.
+const CAR2: &str = "5d0c3bdcd2b1a0e3ec9e5e0a1c6f7a10";
 const PART: &str = "0090c333fea7512769c2daf1ab07d108";
+const LIVERY: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f90";
 const UNKNOWN: &str = "ffffffffffffffffffffffffffffffff";
 const SAVED_AT: u64 = 1_760_794_047_000;
 const BUILD: &str = nfs_services::SUPPORTED_BUILD_SHA256;
@@ -209,7 +212,9 @@ fn install_content(data: &Path) -> PathBuf {
         "item-content.json",
         json!({"format": "nfs-item-definitions", "version": 1, "build_sha256": BUILD,
             "definitions": [{"guid": CAR, "class": "RaceVehicleItemData"},
-                {"guid": PART, "class": "AirFilterItemData"}]}),
+                {"guid": CAR2, "class": "RaceVehicleItemData"},
+                {"guid": PART, "class": "AirFilterItemData"},
+                {"guid": LIVERY, "class": "LiveryCustomizationItemData"}]}),
     );
     std::fs::write(
         directory.join("vehicle-profiles.json"),
@@ -319,6 +324,23 @@ fn a_complete_save_reports_raw_values_decoded_domains_and_content_names() {
     assert!(garage.slots[1].item.is_none());
     let unknown = garage.slots[2].item.clone().unwrap();
     assert_eq!((unknown.class, unknown.vehicle), (None, None));
+    // Only the car is a car; the unknown item still occupies its slot.
+    let cars = p.cars.clone().unwrap();
+    assert_eq!(cars.len(), 1);
+    assert_eq!(
+        (cars[0].id.as_str(), cars[0].location, cars[0].slot),
+        ("7", CarLocation::Active, Some(0))
+    );
+    assert_eq!(
+        p.car_summary,
+        Some(CarSummary {
+            garage_used: 2,
+            garage_slots: 5,
+            warehouse_used: 0,
+            warehouse_limit: 100,
+            total_sale_value: 0,
+        })
+    );
     assert_eq!(
         p.counts,
         Counts {
@@ -356,6 +378,147 @@ fn a_complete_save_reports_raw_values_decoded_domains_and_content_names() {
     assert_eq!(value["bank"]["balance"], 12_345);
     // Reading changed nothing in the save.
     assert_eq!(std::fs::read(&path).unwrap(), before);
+    std::fs::remove_dir_all(data).unwrap();
+}
+
+/// An owned record with the given owner, installed children and stock defaults.
+fn part(item: u64, definition: &str, owner: Option<u64>, sub: &[u64], defaults: &[u64]) -> Op {
+    let ids = |list: &[u64]| list.iter().map(|&i| ItemId::new(i).unwrap()).collect();
+    Op::Insert(ItemRecord {
+        owner: owner.map(|o| ItemId::new(o).unwrap()),
+        sub_items: ids(sub),
+        default_items: ids(defaults),
+        ..record(item, definition)
+    })
+}
+
+fn car(item: u64, definition: &str, sell_price: u32, sub: &[u64], defaults: &[u64]) -> Op {
+    let Op::Insert(record) = part(item, definition, None, sub, defaults) else {
+        unreachable!()
+    };
+    Op::Insert(ItemRecord {
+        sell_price,
+        ..record
+    })
+}
+
+/// Two garage cars and two warehouse cars. Car 10 is active with a stock
+/// part tree (11 > 12), a replaced stock part (13), a purchased spare (14),
+/// an installed upgrade (15) and an installed library wrap (16). Item 40 is
+/// an unowned car offer and 70 a car-class record that car 60 owns, so a
+/// spare of 60 rather than a car.
+fn fleet_save(data: &Path, n: u8) {
+    let directory = accounts(data);
+    let a = account(n);
+    let mut ops = vec![
+        car(10, CAR, 5_000, &[11, 15, 16], &[11, 13]),
+        part(11, PART, Some(10), &[12], &[12]),
+        // An installed-link cycle back to 11 must not loop.
+        part(12, PART, Some(11), &[11], &[]),
+        part(13, PART, Some(10), &[], &[]),
+        part(14, PART, Some(10), &[], &[]),
+        part(15, PART, Some(10), &[], &[]),
+        part(16, LIVERY, None, &[], &[]),
+        car(20, CAR2, 7_000, &[], &[]),
+        car(30, CAR, 1_000, &[31], &[31]),
+        part(31, PART, Some(30), &[], &[]),
+        car(60, CAR2, 0, &[], &[]),
+        part(70, CAR, Some(60), &[], &[]),
+        Op::SetGarage(GarageSlots([
+            ItemId::new(10),
+            None,
+            None,
+            ItemId::new(20),
+            None,
+        ])),
+    ];
+    let Op::Insert(offer) = car(40, CAR, 9_000, &[], &[]) else {
+        unreachable!()
+    };
+    ops.push(Op::Insert(ItemRecord {
+        state: nfs_world_core::items::PURCHASABLE,
+        ..offer
+    }));
+    let mut documents = vec![(Kind::Identity, identity_document(a, "Collector"))];
+    for kind in &Kind::ALL[1..] {
+        documents.push((
+            *kind,
+            Document {
+                revision: 1,
+                bytes: b"{}".to_vec(),
+            },
+        ));
+    }
+    Repository::open_owned_directory(&directory)
+        .unwrap()
+        .initialize_fresh(
+            a,
+            &documents,
+            &Batch {
+                id: 1,
+                expected_generation: 0,
+                ops,
+            },
+            Timestamp(SAVED_AT),
+        )
+        .unwrap();
+}
+
+#[test]
+fn cars_cover_the_garage_and_the_warehouse_with_parts_spares_and_prices() {
+    let data = crate::testing::scratch("profile-cars");
+    fleet_save(&data, 3);
+    install_content(&data);
+    let p = read(&data, 3);
+    let cars = p.cars.clone().unwrap();
+    let summary: Vec<_> = cars
+        .iter()
+        .map(|c| {
+            (
+                c.id.as_str(),
+                c.location,
+                c.slot,
+                c.installed_parts,
+                c.spare_parts,
+                c.item_records,
+                c.sale_price,
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            ("10", CarLocation::Active, Some(0), 4, 2, 6, 5_000),
+            ("20", CarLocation::Garage, Some(3), 0, 0, 1, 7_000),
+            ("30", CarLocation::Warehouse, None, 1, 0, 2, 1_000),
+            ("60", CarLocation::Warehouse, None, 0, 1, 2, 0),
+        ]
+    );
+    assert_eq!(cars[0].display_name.as_deref(), Some("Ford MustangGT 2015"));
+    assert_eq!(cars[0].definition, CAR);
+    assert_eq!(
+        cars[1].display_name, None,
+        "no vehicle profile, no guessed name"
+    );
+    assert_eq!(
+        p.car_summary,
+        Some(CarSummary {
+            garage_used: 2,
+            garage_slots: 5,
+            warehouse_used: 2,
+            warehouse_limit: nfs_services::garage::WAREHOUSE_CAPACITY,
+            total_sale_value: 13_000,
+        })
+    );
+    let value = serde_json::to_value(&p).unwrap();
+    assert_eq!(value["cars"][1]["location"], "garage");
+    assert_eq!(value["cars"][2]["slot"], serde_json::Value::Null);
+    assert_eq!(value["car_summary"]["warehouse_limit"], 100);
+
+    // Without item content nothing can be called a car.
+    std::fs::remove_dir_all(data.join("artifacts").join("content")).unwrap();
+    let p = read(&data, 3);
+    assert!(p.cars.is_none() && p.car_summary.is_none());
     std::fs::remove_dir_all(data).unwrap();
 }
 

@@ -32,10 +32,11 @@ use nfs_services::{
     reputation::{Field, Scores, Thresholds},
 };
 use nfs_storage::{AccountId, Inspection, ItemId, Snapshot, SqliteRepository, account::Kind};
+use nfs_world_core::items::{DefinitionClass, MAX_DEPTH, OWNED};
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Serialize, Serializer};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     time::{Duration, UNIX_EPOCH},
 };
@@ -198,6 +199,65 @@ pub struct Garage {
     pub primary_vehicle: Option<Item>,
 }
 
+/// Where an owned car is kept.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum CarLocation {
+    /// Garage slot 0: the car the player drives.
+    Active,
+    /// Garage slots 1-4.
+    Garage,
+    /// Owned but outside the five garage slots.
+    Warehouse,
+}
+
+/// One owned car: a root item of the race-vehicle class in the owned state,
+/// the same rule the server applies to purchases, sales and the warehouse.
+/// Whether a car carries a custom wrap or tuning is not reported: those
+/// edits change stored records in place, and the save keeps no stock
+/// reference that tells them apart without guessing.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct Car {
+    pub id: String,
+    /// Definition GUID as 32 lowercase hexadecimal characters.
+    pub definition: String,
+    /// The blueprint label from the installed vehicle content, such as
+    /// `Ford MustangGT 2015`; not the game's localized name. `null` when the
+    /// vehicle content does not list the definition.
+    pub display_name: Option<String>,
+    pub vehicle: Option<Vehicle>,
+    pub location: CarLocation,
+    /// Garage slot 0-4; `null` in the warehouse.
+    pub slot: Option<usize>,
+    /// Records installed on the car: reachable from it through installed
+    /// item links, nested parts included. An installed wrap from the
+    /// account's library counts.
+    pub installed_parts: usize,
+    /// Records the car owns that are not installed: stock parts it replaced
+    /// and purchased spares.
+    pub spare_parts: usize,
+    /// The stored sale price: the cash that selling this car credits.
+    pub sale_price: u32,
+    /// Records in the car's ownership tree, the car included. Selling the
+    /// car removes exactly these.
+    pub item_records: usize,
+}
+
+/// Totals over [`Car`]s.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct CarSummary {
+    /// Garage slots holding an item.
+    pub garage_used: usize,
+    /// Garage slots in all, 5.
+    pub garage_slots: usize,
+    /// Owned cars outside the garage slots.
+    pub warehouse_used: usize,
+    /// The server's warehouse limit; moving a car there beyond it is refused.
+    pub warehouse_limit: usize,
+    /// Sum of every owned car's stored sale price.
+    pub total_sale_value: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Counts {
     pub items: usize,
@@ -246,6 +306,10 @@ pub struct Profile {
     /// Single-row tables by stored table and column name.
     pub tables: Option<BTreeMap<&'static str, Columns>>,
     pub garage: Option<Garage>,
+    /// Every owned car: the active car, garage slots 1-4 in order, then the
+    /// warehouse by item ID. `null` without item content to classify items.
+    pub cars: Option<Vec<Car>>,
+    pub car_summary: Option<CarSummary>,
     pub counts: Counts,
     pub save: Save,
     pub content: Option<Source>,
@@ -391,6 +455,108 @@ fn item(snapshot: &Snapshot, id: ItemId, content: &Content) -> Option<Item> {
     })
 }
 
+/// The car and every record it owns, directly or through its parts.
+fn ownership_tree(root: ItemId, owned_by: &BTreeMap<ItemId, Vec<ItemId>>) -> BTreeSet<ItemId> {
+    let mut tree = BTreeSet::from([root]);
+    let mut pending = vec![root];
+    while let Some(id) = pending.pop() {
+        for &child in owned_by.get(&id).into_iter().flatten() {
+            if tree.insert(child) {
+                pending.push(child);
+            }
+        }
+    }
+    tree
+}
+
+/// Records reachable from the car through installed links, excluding it.
+fn installed_tree(snapshot: &Snapshot, root: ItemId) -> BTreeSet<ItemId> {
+    let mut installed = BTreeSet::new();
+    let mut pending = vec![(root, 0)];
+    while let Some((id, depth)) = pending.pop() {
+        let Some(record) = snapshot.items.get(&id) else {
+            continue;
+        };
+        if depth >= MAX_DEPTH {
+            continue;
+        }
+        for &child in &record.sub_items {
+            if child != root && installed.insert(child) {
+                pending.push((child, depth + 1));
+            }
+        }
+    }
+    installed
+}
+
+/// Every owned car and the garage and warehouse totals, or `None` without
+/// item content to tell cars from other items.
+fn cars(snapshot: &Snapshot, content: &Content) -> Option<(Vec<Car>, CarSummary)> {
+    let items = content.items.as_ref()?;
+    let slots = snapshot.garage.map(|garage| garage.0).unwrap_or_default();
+    let mut owned_by: BTreeMap<ItemId, Vec<ItemId>> = BTreeMap::new();
+    for record in snapshot.items.values() {
+        if let Some(owner) = record.owner {
+            owned_by.entry(owner).or_default().push(record.id);
+        }
+    }
+    let mut cars: Vec<(usize, u64, Car)> = snapshot
+        .items
+        .values()
+        .filter(|record| {
+            record.owner.is_none()
+                && record.state == OWNED
+                && matches!(
+                    items.catalog.class(&record.definition.0),
+                    Ok(DefinitionClass::RaceVehicleItemData)
+                )
+        })
+        .map(|record| {
+            let slot = slots.iter().position(|bound| *bound == Some(record.id));
+            let tree = ownership_tree(record.id, &owned_by);
+            let installed = installed_tree(snapshot, record.id);
+            let vehicle = content
+                .vehicles
+                .as_ref()
+                .and_then(|vehicles| vehicles.get(&record.definition.0))
+                .cloned();
+            let car = Car {
+                id: record.id.get().to_string(),
+                definition: hex(&record.definition.0),
+                display_name: vehicle.as_ref().map(|v| v.label.clone()),
+                vehicle,
+                location: match slot {
+                    Some(0) => CarLocation::Active,
+                    Some(_) => CarLocation::Garage,
+                    None => CarLocation::Warehouse,
+                },
+                slot,
+                installed_parts: installed.len(),
+                spare_parts: tree
+                    .iter()
+                    .filter(|id| **id != record.id && !installed.contains(id))
+                    .count(),
+                sale_price: record.sell_price,
+                item_records: tree.len(),
+            };
+            (slot.unwrap_or(slots.len()), record.id.get(), car)
+        })
+        .collect();
+    cars.sort_by_key(|(slot, id, _)| (*slot, *id));
+    let cars: Vec<Car> = cars.into_iter().map(|(_, _, car)| car).collect();
+    let summary = CarSummary {
+        garage_used: slots.iter().flatten().count(),
+        garage_slots: slots.len(),
+        warehouse_used: cars
+            .iter()
+            .filter(|car| car.location == CarLocation::Warehouse)
+            .count(),
+        warehouse_limit: nfs_services::garage::WAREHOUSE_CAPACITY,
+        total_sale_value: cars.iter().map(|car| u64::from(car.sale_price)).sum(),
+    };
+    Some((cars, summary))
+}
+
 fn identity(
     inspection: &Inspection,
     account: AccountId,
@@ -485,6 +651,7 @@ pub fn build(
     if garage.is_none() {
         warnings.push("The save has no garage yet.".into());
     }
+    let (cars, car_summary) = cars(snapshot, content).unzip();
     let classes = content.items.as_ref().map(|items| {
         let mut by_class = BTreeMap::new();
         let mut unresolved = 0;
@@ -506,6 +673,8 @@ pub fn build(
         reputation,
         tables,
         garage,
+        cars,
+        car_summary,
         counts: Counts {
             items: snapshot.items.len(),
             unresolved_items: classes.as_ref().map(|(_, unresolved)| *unresolved),

@@ -167,10 +167,11 @@ Values are decoded by the server's own code in `nfs-services`: identity,
 bank balance, REP scores evaluated against the installed thresholds, the
 single-row tables (`RepValuesTable`, `PrestigeMedalTable`,
 `GameplayStatsTable`, `SpeedListStatsTable`, `ProgressionStats`), the five
-garage slots (slot 0 is the primary vehicle), item, livery and table-row
-counts, and save metadata. Content comes from `--content-dir`, else the
-cache the current session prepared, else the only cache present. Without
-content the save still reads; REP, tables and car names are then `null`.
+garage slots (slot 0 is the primary vehicle), every owned car in the garage
+and the warehouse, item, livery and table-row counts, and save metadata.
+Content comes from `--content-dir`, else the cache the current session
+prepared, else the only cache present. Without content the save still reads;
+REP, tables, cars and car names are then `null`.
 
 The JSON contract, version 1:
 
@@ -185,6 +186,21 @@ The JSON contract, version 1:
   digit. Definition GUIDs are 32 lowercase hexadecimal characters.
 - A car's `vehicle.label` is its blueprint asset name without `Car_` and with
   spaces for underscores, not the game's localized display name.
+- `cars` lists every owned car, as the server defines one for purchases,
+  sales and the warehouse (docs/CAR-OWNERSHIP.md): a root item of the
+  race-vehicle class in the owned state. Order: the active car (slot 0),
+  garage slots 1-4, then the warehouse (owned cars outside the five slots)
+  by item ID. Each has its `location` and `slot`, `display_name` (the
+  blueprint label, as above), `installed_parts` (records reachable through
+  installed links, nested parts and an installed library wrap included),
+  `spare_parts` (records the car owns that are not installed: replaced stock
+  parts and purchased spares), `item_records` (its ownership tree, car
+  included: what a sale removes) and the stored `sale_price` (what a sale
+  credits). `car_summary` adds garage slots used of 5, warehouse cars used,
+  the server's warehouse limit (100) and the total sale value. Both are
+  `null` without item content. Custom wrap and tuning are not reported:
+  those edits change stored records in place and the save keeps no stock
+  reference that tells them apart without guessing.
 - A domain that is absent or cannot be decoded is `null` and adds a
   sentence to `warnings`. A save that cannot be opened at all is an error
   (exit 1, 4 or 5); in `--list` it is an entry with `error` set.
