@@ -9,6 +9,7 @@
 //! optionally rewritten by a delta stream) → self-describing EBX partitions.
 //! Non-cas superbundles such as `Win32/loc/<language>` keep chunks inline in
 //! their `.sb`; [`textdb`] decodes the localized text databases among them.
+//! [`texture`] reads texture headers and decodes the first mip of their pixels.
 //! Every reader is bounded by [`Limits`]; nothing is written to the
 //! installation. The layouts were recovered from the supported installation;
 //! no third-party implementation is included.
@@ -19,6 +20,7 @@ pub mod install;
 #[cfg(any(test, feature = "synthetic"))]
 pub mod synthetic;
 pub mod textdb;
+pub mod texture;
 
 /// djb2-xor (`h = h * 33 ^ byte`, seed 5381) used for EBX type and field
 /// names, persistent-table names and (over lower-cased paths) bundle keys.

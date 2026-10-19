@@ -136,6 +136,8 @@ pub enum Field {
     Struct(&'static str, Vec<(&'static str, Field)>),
     /// A 16-byte GUID, such as a chunk reference.
     Guid([u8; 16]),
+    /// A resource ID, such as a `TextureAsset`'s `Resource`.
+    ResourceRef(u64),
 }
 
 struct FieldDesc {
@@ -299,6 +301,10 @@ impl PartitionWriter {
                 Field::Guid(v) => {
                     rows.push((name.to_string(), 0x15, 0, offset));
                     payload.extend_from_slice(v);
+                }
+                Field::ResourceRef(v) => {
+                    rows.push((name.to_string(), 0x17, 0, offset));
+                    payload.extend_from_slice(&v.to_le_bytes());
                 }
                 Field::Guids(list) => {
                     let array_class =
@@ -536,6 +542,8 @@ pub fn write_installation(root: &Path, executable: &[u8], assets: &[Asset]) -> s
             name: "Win32/synthetic",
             bundle: "win32/synthetic",
             assets,
+            resources: &[],
+            chunks: &[],
         }],
         &[],
     )
@@ -546,6 +554,19 @@ pub struct CasSuperbundle<'a> {
     pub name: &'a str,
     pub bundle: &'a str,
     pub assets: &'a [Asset],
+    /// Resource entries of the bundle, stored as cas records.
+    pub resources: &'a [Resource],
+    /// Chunks the superbundle's `.toc` lists by SHA-1, stored as cas records.
+    pub chunks: &'a [([u8; 16], Vec<u8>)],
+}
+
+/// One resource entry of a synthetic bundle.
+pub struct Resource {
+    pub name: String,
+    pub rid: u64,
+    pub res_type: u32,
+    pub meta: Vec<u8>,
+    pub data: Vec<u8>,
 }
 
 /// A non-cas superbundle whose `.sb` holds inline chunks (id, bytes).
@@ -589,28 +610,59 @@ pub fn write_superbundles(
     let mut cas = Vec::new();
     let mut catalog = b"NyanNyanNyanNyan".to_vec();
     let mut records = 0u64;
+    // Store one payload as an LZ4 cas record; returns its SHA-1 and size.
+    let mut store = |payload: &[u8]| {
+        records += 1;
+        let mut sha1 = [0u8; 20];
+        sha1[..8].copy_from_slice(&records.to_le_bytes());
+        let record = lz4_record(payload);
+        catalog.extend_from_slice(&sha1);
+        catalog.extend_from_slice(&(cas.len() as u32).to_le_bytes());
+        catalog.extend_from_slice(&(record.len() as u32).to_le_bytes());
+        catalog.extend_from_slice(&1u32.to_le_bytes());
+        cas.extend_from_slice(&record);
+        (sha1, record.len())
+    };
+    let mut layouts = Vec::new();
     for superbundle in cas_superbundles {
         let mut entries = Vec::new();
         for asset in superbundle.assets {
-            records += 1;
-            let mut sha1 = [0u8; 20];
-            sha1[..8].copy_from_slice(&records.to_le_bytes());
-            let record = lz4_record(&asset.partition);
-            catalog.extend_from_slice(&sha1);
-            catalog.extend_from_slice(&(cas.len() as u32).to_le_bytes());
-            catalog.extend_from_slice(&(record.len() as u32).to_le_bytes());
-            catalog.extend_from_slice(&1u32.to_le_bytes());
-            cas.extend_from_slice(&record);
+            let (sha1, size) = store(&asset.partition);
             entries.push(Db::Object(vec![
                 ("name", Db::str(&asset.name)),
                 ("sha1", Db::Sha1(sha1)),
-                ("size", Db::Long(record.len() as i64)),
+                ("size", Db::Long(size as i64)),
                 ("originalSize", Db::Long(asset.partition.len() as i64)),
             ]));
         }
+        let mut resources = Vec::new();
+        for resource in superbundle.resources {
+            let (sha1, size) = store(&resource.data);
+            resources.push(Db::Object(vec![
+                ("name", Db::str(&resource.name)),
+                ("sha1", Db::Sha1(sha1)),
+                ("size", Db::Long(size as i64)),
+                ("originalSize", Db::Long(resource.data.len() as i64)),
+                ("resType", Db::Int(resource.res_type as i32)),
+                ("resMeta", Db::Blob(resource.meta.clone())),
+                ("resRid", Db::Long(resource.rid as i64)),
+            ]));
+        }
+        let mut chunks = Vec::new();
+        for (id, bytes) in superbundle.chunks {
+            let (sha1, _) = store(bytes);
+            chunks.push(Db::Object(vec![
+                ("id", Db::Guid(*id)),
+                ("sha1", Db::Sha1(sha1)),
+            ]));
+        }
+        layouts.push((superbundle, entries, resources, chunks));
+    }
+    for (superbundle, entries, resources, chunks) in layouts {
         let bundle = Db::Object(vec![
             ("path", Db::str(superbundle.bundle)),
             ("ebx", Db::List(entries)),
+            ("res", Db::List(resources)),
         ])
         .record(None);
         let toc = Db::Object(vec![
@@ -622,6 +674,7 @@ pub fn write_superbundles(
                     ("size", Db::Int(bundle.len() as i32)),
                 ])]),
             ),
+            ("chunks", Db::List(chunks)),
             ("cas", Db::Bool(true)),
         ]);
         let base = data.join(superbundle.name);
@@ -703,4 +756,31 @@ pub fn histogram(entries: u32, mapping: &[(u8, u16)]) -> Vec<u8> {
     out.extend_from_slice(&(body.len() as u32).to_le_bytes());
     out.extend_from_slice(&body);
     out
+}
+
+/// A 128-byte texture header for a single-mip 2D texture of `format`
+/// (a `RenderFormat` value) whose first mip occupies `mip0` bytes of the
+/// pixel chunk `chunk`.
+pub fn texture_header(format: u32, width: u16, height: u16, chunk: [u8; 16], mip0: u32) -> Vec<u8> {
+    let mut out = vec![0u8; crate::texture::HEADER_BYTES];
+    out[12..16].copy_from_slice(&format.to_le_bytes());
+    out[16..18].copy_from_slice(&9u16.to_le_bytes());
+    out[18..20].copy_from_slice(&width.to_le_bytes());
+    out[20..22].copy_from_slice(&height.to_le_bytes());
+    out[22..24].copy_from_slice(&1u16.to_le_bytes());
+    out[24..26].copy_from_slice(&1u16.to_le_bytes());
+    out[26] = 1;
+    out[28..44].copy_from_slice(&chunk);
+    out[44..48].copy_from_slice(&mip0.to_le_bytes());
+    out[104..108].copy_from_slice(&mip0.to_le_bytes());
+    out[112..114].copy_from_slice(b"UI");
+    out
+}
+
+/// One BC1 block filling its 4x4 texels with the RGB565 colour `color`.
+pub fn bc1_solid(color: u16) -> [u8; 8] {
+    let mut block = [0u8; 8];
+    block[..2].copy_from_slice(&color.to_le_bytes());
+    block[2..4].copy_from_slice(&color.to_le_bytes());
+    block
 }

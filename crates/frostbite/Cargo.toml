@@ -15,5 +15,8 @@ workspace = true
 synthetic = []
 
 [dependencies]
+# BC1-BC7 block decoding for texture pixels: safe, dependency-free port of
+# bcdec (MIT).
+bcdec_rs = "=0.2.0"
 lz4_flex = { version = "=0.14.0", default-features = false, features = ["std", "safe-decode", "safe-encode", "checked-decode"] }
 miniz_oxide = { version = "=0.9.1", default-features = false, features = ["with-alloc"] }

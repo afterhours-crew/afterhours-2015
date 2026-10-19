@@ -99,8 +99,19 @@ fn help_lists_every_public_subcommand_and_the_exit_table() {
     assert_eq!(out.status.code(), Some(0));
     let help = text(&out.stdout);
     for sub in [
-        "check", "setup", "serve", "start", "status", "stop", "play", "profile", "sessions",
-        "version", "schema", "recover",
+        "check",
+        "setup",
+        "serve",
+        "start",
+        "status",
+        "stop",
+        "play",
+        "profile",
+        "car-images",
+        "sessions",
+        "version",
+        "schema",
+        "recover",
     ] {
         assert!(
             help.contains(&format!("\n  {sub}")),
@@ -163,7 +174,7 @@ fn version_reports_records_and_capabilities_and_schema_prints_each_one() {
     assert_eq!(report["program_version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(
         report["capabilities"],
-        serde_json::json!(["profile", "sessions", "events", "play"])
+        serde_json::json!(["profile", "sessions", "events", "play", "car-images"])
     );
     assert_eq!(report["os"], std::env::consts::OS);
     let records = report["records"].as_object().unwrap();
@@ -190,7 +201,10 @@ fn version_reports_records_and_capabilities_and_schema_prints_each_one() {
         assert_eq!(&schema["properties"]["version"]["const"], version, "{name}");
     }
     let text_version = run(&["version"]);
-    assert!(text(&text_version.stdout).contains("capabilities: profile, sessions, events, play"));
+    assert!(
+        text(&text_version.stdout)
+            .contains("capabilities: profile, sessions, events, play, car-images")
+    );
     assert_eq!(run(&["schema", "nothing"]).status.code(), Some(2));
 }
 
@@ -812,4 +826,14 @@ fn a_session_whose_supervisor_dies_is_reported_interrupted() {
     std::fs::write(run_dir.join("stop-server"), b"stop").unwrap();
     std::thread::sleep(std::time::Duration::from_millis(300));
     std::fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn car_images_needs_prepared_content_first() {
+    let data = scratch("car-images");
+    let out = run(&["car-images", "--json", "--data-dir", data.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(4), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("run setup first"));
+    assert!(!data.join("artifacts").exists(), "nothing was written");
+    std::fs::remove_dir_all(data).unwrap();
 }

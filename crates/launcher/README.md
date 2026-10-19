@@ -26,6 +26,7 @@ nfs-afterhours profile [--account-id <ID>]  show a saved driver's profile; chang
                        [--game-dir <DIR>]   (car names come from the installed game,
                        [--language <LOCALE>] read-only, in the game's locale)
 nfs-afterhours profile --list               list every saved driver in the data directory
+nfs-afterhours car-images [--game-dir <DIR>]  decode car pictures from the game into the data folder
 nfs-afterhours sessions [--limit N] [--id <ID>]  summarize session folders and logs; change nothing
 nfs-afterhours version                      program, JSON record versions and capabilities
 nfs-afterhours schema <RECORD>              print the JSON Schema of one --json record
@@ -59,6 +60,7 @@ field and a JSON Schema (draft 7) generated from the Rust type that prints it:
 | `session-status` | `setup`/`serve`/`start --json` (the final status); also `status.json`. It carries the session's `action` and `game_running`, so `serve` without a game is hosting and with one is playing |
 | `event` | each line of `setup`/`serve`/`start --events` |
 | `profile`, `profile-list` | `profile --json`, `profile --list --json` |
+| `car-images` | `car-images --json`: the image set, counts per size, formats and unresolved images |
 | `sessions` | `sessions --json` |
 | `recover` | `recover --json` |
 | `version` | `version --json` |
@@ -249,9 +251,53 @@ The JSON contract, version 1:
   `null` without item content. Custom wrap and tuning are not reported:
   those edits change stored records in place and the save keeps no stock
   reference that tells them apart without guessing.
+- Each car and garage item has `image {medium, large}`, each `{path,
+  width, height, source_format}` or `null`, and `car_images` is the image
+  directory. Both are `null` until `car-images` has run for the current
+  content (see below); a damaged image set is `null` with a warning.
 - A domain that is absent or cannot be decoded is `null` and adds a
   sentence to `warnings`. A save that cannot be opened at all is an error
   (exit 1, 4 or 5); in `--list` it is an entry with `error` set.
+
+## Car images
+
+`car-images` decodes each car's two in-game pictures from the installation
+(read-only; `--game-dir`, else the current session's, else the registered
+one) into the data directory, and `profile` reports the files. No image is
+shipped, committed or embedded. A complete set is reused without reading the
+installation; a damaged one is rebuilt.
+
+How a name becomes a picture in the supported build, established from the
+installed data (every named texture of every car matched; the client code
+that does the lookup was not traced):
+
+- A car item's `MediumTextureName` and `LargeTextureName` are not asset
+  paths. They are `Id`s of `Output` entries in two `UITextureMappingAsset`s
+  of the frontend superbundle, `ui/textures/items/vehiclemediumtexturemappingasset`
+  and `ui/textures/items/itemslargetexturemappingasset`.
+- An entry imports a `TextureAsset` (all under `ui/textures/`) with a UV
+  rectangle; only entries covering the whole texture (0,0 to 1,1) are used,
+  which is every car entry today.
+- The texture's `Resource` is a 128-byte header in the same bundle's `res`
+  list: format (`RenderFormat`), size, mip layout and the pixel chunk's
+  GUID. The chunk is listed by SHA-1 in a `Win32/chunks*` table of contents.
+- Mip 0 is decoded with `bcdec_rs` (BC1, BC1A, BC2, BC3, BC7) or copied
+  (RGBA8, BGRA8). BC1 without alpha is written opaque. Other formats,
+  cube maps, arrays and streamed-out first mips are reported as unresolved.
+
+On the supported installation 64 of 75 cars name a medium image and 62 a
+large one; all of them decode: medium BC1 256x256, large BC1 512x512 (one
+BC3). The large pictures are stored square; how the game crops or stretches
+them on screen is not established.
+
+Files go to `artifacts/content/car-images/<content fingerprint>/` as
+`<chunk SHA-1>.png` plus `index.json`, beside the prepared content entries
+and never inside one, because the content cache refuses to replace an entry
+holding files it did not write. A set is written to a temporary directory
+and published by one rename. Bounds: 1,024 files and 512 MiB per set,
+4,096 x 4,096 pixels and the reader's asset limit per texture, a 1 MiB
+index. The `car-images --json` record lists counts per size, formats and
+every named image that could not be decoded with the reason.
 
 ## Why it is built this way
 
@@ -321,7 +367,7 @@ existing data directories keep working.
 | `supervisor` | the state machine; `supervisor/live` implements it over processes |
 | `platform/` | the `Platform` trait, the shared child with bounded log pumps, and the Windows and Unix implementations; `platform/windows/lease` is the routing lease |
 | `endpoint` | the 13-byte transaction over abstract memory, tested with injected faults |
-| `profile` | read-only profiles from account saves; `profile/content` picks and loads the prepared content |
+| `profile` | read-only profiles from account saves; `profile/content` picks and loads the prepared content; `profile/names` and `profile/images` read car names and pictures from the installation |
 | `contract` | record names, versions, capabilities and schema generation; the strict test validator |
 | `sessions` | read-only session folder summaries and the server log scanner |
 | `events` | the JSON-lines event stream |

@@ -13,7 +13,14 @@ Read-only, bounded access to an installed game's Frostbite 2014.4 content.
   `.sb` and archive files are never loaded whole. One superbundle's EBX list
   can be read alone, and the chunks a non-cas superbundle (such as
   `Win32/loc/en`) keeps inline in its `.sb` are listed with the patch
-  layer first and read by range.
+  layer first and read by range. Bundle `res` entries (resource ID, type,
+  meta) and the SHA-1 of chunks a `.toc` lists can be looked up, and any
+  cas record read by SHA-1.
+- `texture`: the 128-byte texture resource header (type, `RenderFormat`,
+  size, mips, pixel chunk GUID) and mip 0 decoded to straight RGBA8 with the
+  pinned `bcdec_rs` (BC1, BC1A, BC2, BC3, BC7; MIT, safe Rust, no
+  dependencies) or copied (RGBA8, BGRA8). Other formats, non-2D textures and
+  streamed-out first mips are refused, not approximated.
 - `textdb`: `UITextDatabase` binary and histogram chunks. Strings are keyed by
   `h = h * 33 + byte` from `0xFFFF_FFFF` over the case-sensitive string ID; the
   body offsets count from byte 8; a 256-entry histogram maps each byte to its

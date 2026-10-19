@@ -6,9 +6,9 @@
 
 use super::Context;
 use crate::{
-    cli::ProfileArgs,
+    cli::{CarImagesArgs, ProfileArgs},
     exit::{Failure, Result},
-    profile::{self, CarLocation, Cell, Columns, Listing, Profile, content::Need, grouped},
+    profile::{self, CarLocation, Cell, Columns, Listing, Profile, content::Need, grouped, images},
 };
 use std::fmt::Write;
 
@@ -234,4 +234,51 @@ fn list_text(listing: &Listing) -> String {
         let _ = writeln!(out, "Note: {warning}");
     }
     out.trim_end().to_owned()
+}
+
+/// `car-images`: decode each car's images into the data folder, or report
+/// the complete set already there.
+pub fn car_images(context: &Context, args: &CarImagesArgs) -> Result<()> {
+    let data = crate::paths::checked_data_path(&context.data_dir, None)?;
+    let source = profile::content::locate(&data, None)?.ok_or_else(|| {
+        Failure::no_session("This data directory has no prepared content; run setup first.")
+    })?;
+    let fingerprint = source
+        .directory
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_owned();
+    let prepared = match images::load(&data, &fingerprint) {
+        Ok(Some(cached)) => images::Prepared {
+            cached,
+            built: false,
+        },
+        _ => {
+            let (registered, _) = crate::platform::game_registration();
+            let (game, _) = profile::installation(&data, args.game_dir.as_deref(), registered)?
+                .ok_or_else(|| Failure::refused("No game installation found; pass --game-dir."))?;
+            images::prepare(&data, &fingerprint, &game, nfs_frostbite::Limits::default())?
+        }
+    };
+    let report = images::CarImagesReport::new(&prepared, &fingerprint);
+    context.emit(&report, || {
+        let mut out = format!(
+            "{} {} car images ({} medium, {} large) for {} cars in\n  {}",
+            if report.built { "Decoded" } else { "Reused" },
+            report.resolved.medium + report.resolved.large,
+            report.resolved.medium,
+            report.resolved.large,
+            report.cars,
+            report.directory.display()
+        );
+        for missing in &report.unresolved {
+            let _ = write!(
+                out,
+                "\n  No {:?} image for {} ({}): {}",
+                missing.size, missing.definition, missing.texture_name, missing.reason
+            );
+        }
+        out
+    })
 }

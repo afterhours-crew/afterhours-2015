@@ -28,6 +28,17 @@
         "id": {
           "type": "string"
         },
+        "image": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CarImages"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The car's in-game images, decoded by `car-images`; `null` before that\nor when the car has none."
+        },
         "installed_parts": {
           "description": "Records installed on the car: reachable from it through installed\nitem links, nested parts included. An installed wrap from the\naccount's library counts.",
           "format": "uint",
@@ -97,6 +108,7 @@
         "definition",
         "name",
         "names",
+        "image",
         "vehicle",
         "location",
         "slot",
@@ -104,6 +116,66 @@
         "spare_parts",
         "sale_price",
         "item_records"
+      ],
+      "type": "object"
+    },
+    "CarImage": {
+      "description": "One cached image for `profile`.",
+      "properties": {
+        "height": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "description": "Absolute path of the PNG file.",
+          "type": "string"
+        },
+        "source_format": {
+          "description": "The source texture's `RenderFormat` name, such as `BC1_UNORM`.",
+          "type": "string"
+        },
+        "width": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "width",
+        "height",
+        "source_format"
+      ],
+      "type": "object"
+    },
+    "CarImages": {
+      "description": "A car's cached images; a size is `null` when the car names none or it\ncould not be decoded.",
+      "properties": {
+        "large": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CarImage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "medium": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CarImage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "medium",
+        "large"
       ],
       "type": "object"
     },
@@ -466,6 +538,17 @@
         "id": {
           "type": "string"
         },
+        "image": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CarImages"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The car's in-game images, decoded by `car-images`; `null` before that\nor when the car has none."
+        },
         "name": {
           "description": "The game's localized name of a car, read from the installation:\n`names.long`. `null` for other items or when it did not resolve.",
           "type": [
@@ -501,6 +584,7 @@
         "class",
         "name",
         "names",
+        "image",
         "vehicle"
       ],
       "type": "object"
@@ -725,6 +809,13 @@
         }
       ]
     },
+    "car_images": {
+      "description": "The directory of the decoded car images; `null` until `car-images`\nhas run for the current content.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "car_summary": {
       "anyOf": [
         {
@@ -840,6 +931,7 @@
     "save",
     "content",
     "localization",
+    "car_images",
     "warnings"
   ],
   "title": "Profile",

@@ -266,7 +266,9 @@ Add `--json` for the machine-readable form a desktop front end reads; the
 format is described in `crates/launcher/README.md`. Saved stats are printed as
 raw stored integers because the game's units are not confirmed. Car names are
 the game's own, read from your installation each time (`--game-dir` and
-`--language` override the session's installation and the game's locale). If no complete
+`--language` override the session's installation and the game's locale). Run
+`nfs-afterhours car-images` once after setup to decode each car's pictures from
+your installation into the data folder; `profile` then reports their files. If no complete
 account database exists, keep the failed directory for diagnosis and choose a new
 data directory. Do not overwrite it with someone else's profile.
 
