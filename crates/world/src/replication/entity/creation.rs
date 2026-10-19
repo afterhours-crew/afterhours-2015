@@ -225,8 +225,20 @@ pub struct Prefix {
     pub owner: Option<u16>,
     pub asset: Asset,
 }
-impl Prefix {
-    pub fn decode(input: BitSpan<'_>, content: &Content) -> Result<(Self, usize), Error> {
+/// The supported creation family before its catalog-dependent asset index.
+/// This identifies the required bundle without guessing a catalog or accepting
+/// an unresolved creation. Full decoding still requires [`Prefix::decode`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Header {
+    pub parent: Option<Parent>,
+    pub blueprint: u16,
+    pub sub_id: u32,
+    pub owner: Option<u16>,
+    pub bundle: u16,
+}
+impl Header {
+    /// Returns the exact bit boundary immediately before the flattened asset.
+    pub fn decode(input: BitSpan<'_>) -> Result<(Self, usize), Error> {
         let mut r = Reader {
             span: input,
             pos: 0,
@@ -249,14 +261,34 @@ impl Prefix {
         if r.bit()? || r.take(2)? != 2 {
             return Err(Error::Unsupported);
         }
-        let catalog = content.catalog(r.take(11)? as u16)?;
-        let asset = catalog.resolve(r.take(catalog.width())? as u16)?;
+        let bundle = r.take(11)? as u16;
         Ok((
             Self {
                 parent,
                 blueprint,
                 sub_id,
                 owner,
+                bundle,
+            },
+            r.pos,
+        ))
+    }
+}
+impl Prefix {
+    pub fn decode(input: BitSpan<'_>, content: &Content) -> Result<(Self, usize), Error> {
+        let (header, bits) = Header::decode(input)?;
+        let catalog = content.catalog(header.bundle)?;
+        let mut r = Reader {
+            span: input,
+            pos: bits,
+        };
+        let asset = catalog.resolve(r.take(catalog.width())? as u16)?;
+        Ok((
+            Self {
+                parent: header.parent,
+                blueprint: header.blueprint,
+                sub_id: header.sub_id,
+                owner: header.owner,
                 asset,
             },
             r.pos,
