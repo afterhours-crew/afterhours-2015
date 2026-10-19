@@ -18,6 +18,15 @@ impl Players {
         if !self.owned_vehicles(connection, persona).contains(&id) {
             return Err(Error::UnknownObject);
         }
+        self.change_vehicle_nitrous(id, mode, level)
+    }
+
+    fn change_vehicle_nitrous(
+        &mut self,
+        id: u16,
+        mode: Option<u8>,
+        level: Option<u8>,
+    ) -> Result<Option<Record>, Error> {
         if mode.is_some_and(|m| m > 3) {
             return Err(Error::Bound);
         }
@@ -64,9 +73,55 @@ impl Players {
         id: u16,
         active: bool,
     ) -> Result<Option<Record>, Error> {
+        self.set_vehicle_nitrous(connection, persona, id, Some(u8::from(active)), None)
+    }
+
+    /// Acknowledge a delegated AI driver's transition through its host-issued
+    /// lifetime key. This does not grant inventory or equipment authority.
+    pub fn set_ai_vehicle_nitrous_mode(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        key: u64,
+        active: bool,
+    ) -> Result<Option<Record>, Error> {
+        let id = self
+            .ai_ids(connection, persona, key)
+            .ok_or(Error::UnknownObject)?
+            .vehicle;
+        self.change_vehicle_nitrous(id, Some(u8::from(active)), None)
+    }
+
+    /// Change only the horn state of an owned car.
+    pub fn set_vehicle_horn(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        id: u16,
+        sounding: bool,
+    ) -> Result<Option<Record>, Error> {
         if !self.owned_vehicles(connection, persona).contains(&id) {
             return Err(Error::UnknownObject);
         }
+        self.change_vehicle_horn(id, sounding)
+    }
+
+    /// Change only the horn state of the AI car identified by this lifetime key.
+    pub fn set_ai_vehicle_horn(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        key: u64,
+        sounding: bool,
+    ) -> Result<Option<Record>, Error> {
+        let id = self
+            .ai_ids(connection, persona, key)
+            .ok_or(Error::UnknownObject)?
+            .vehicle;
+        self.change_vehicle_horn(id, sounding)
+    }
+
+    fn change_vehicle_horn(&mut self, id: u16, sounding: bool) -> Result<Option<Record>, Error> {
         let Some(state::Object {
             current: Update::Vehicle { binding, fields },
             ..
@@ -76,7 +131,7 @@ impl Players {
         };
         if fields
             .iter()
-            .filter(|f| matches!(f, Some(vehicle::Update::Index { .. })))
+            .filter(|f| matches!(f, Some(vehicle::Update::Chassis(_))))
             .count()
             != 1
         {
@@ -85,14 +140,74 @@ impl Players {
         let updates = fields
             .iter()
             .map(|field| {
-                matches!(field, Some(vehicle::Update::Index { .. })).then_some(
-                    vehicle::Update::Index {
-                        index: Some(u8::from(active)),
-                        value: None,
-                    },
-                )
+                matches!(field, Some(vehicle::Update::Chassis(_))).then(|| {
+                    vehicle::Update::Chassis(Box::new(vehicle::ChassisUpdate {
+                        physics: None,
+                        flag: Some(sounding),
+                        custom: None,
+                        pair: None,
+                    }))
+                })
             })
             .collect();
+        self.objects.change(
+            id,
+            Update::Vehicle {
+                binding: binding.clone(),
+                fields: updates,
+            },
+        )
+    }
+
+    /// Change one wheel's burst flag after checking inventory ownership.
+    pub fn set_vehicle_tire_burst(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        id: u16,
+        component: usize,
+        burst: bool,
+    ) -> Result<Option<Record>, Error> {
+        if !self.owned_vehicles(connection, persona).contains(&id) {
+            return Err(Error::UnknownObject);
+        }
+        self.change_vehicle_tire_burst(id, component, burst)
+    }
+
+    /// Driving authority covers wheel reports without granting inventory access.
+    pub fn set_ai_vehicle_tire_burst(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        key: u64,
+        component: usize,
+        burst: bool,
+    ) -> Result<Option<Record>, Error> {
+        let id = self
+            .ai_ids(connection, persona, key)
+            .ok_or(Error::UnknownObject)?
+            .vehicle;
+        self.change_vehicle_tire_burst(id, component, burst)
+    }
+
+    fn change_vehicle_tire_burst(
+        &mut self,
+        id: u16,
+        component: usize,
+        burst: bool,
+    ) -> Result<Option<Record>, Error> {
+        let Some(state::Object {
+            current: Update::Vehicle { binding, fields },
+            ..
+        }) = self.objects.get(id)
+        else {
+            return Err(Error::TypeMismatch);
+        };
+        if !matches!(fields.get(component), Some(Some(vehicle::Update::Wheel(_)))) {
+            return Err(Error::TypeMismatch);
+        }
+        let mut updates = vec![None; fields.len()];
+        updates[component] = Some(vehicle::Update::Wheel(Some(burst)));
         self.objects.change(
             id,
             Update::Vehicle {
@@ -230,6 +345,10 @@ impl Players {
         if !self.owned_vehicles(connection, persona).contains(&id) {
             return Err(Error::UnknownObject);
         }
+        self.physics_of(id)
+    }
+
+    fn physics_of(&self, id: u16) -> Result<vehicle::Physics, Error> {
         let Some(state::Object {
             current: Update::Vehicle { fields, .. },
             ..
@@ -257,6 +376,45 @@ impl Players {
         physics: vehicle::Physics,
     ) -> Result<Option<Record>, Error> {
         self.vehicle_physics(connection, persona, id)?;
+        self.change_physics(id, physics)
+    }
+
+    /// AI state is authorized by the host's spawn key and session. Delegating
+    /// simulation is a separate host policy, not inventory ownership.
+    pub fn ai_vehicle_physics(
+        &self,
+        connection: u8,
+        persona: u64,
+        key: u64,
+    ) -> Result<vehicle::Physics, Error> {
+        let id = self
+            .ai_ids(connection, persona, key)
+            .ok_or(Error::UnknownObject)?
+            .vehicle;
+        self.physics_of(id)
+    }
+
+    /// Change AI physics only through the session's host-issued spawn key.
+    pub fn set_ai_vehicle_physics(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        key: u64,
+        physics: vehicle::Physics,
+    ) -> Result<Option<Record>, Error> {
+        let id = self
+            .ai_ids(connection, persona, key)
+            .ok_or(Error::UnknownObject)?
+            .vehicle;
+        self.physics_of(id)?;
+        self.change_physics(id, physics)
+    }
+
+    fn change_physics(
+        &mut self,
+        id: u16,
+        physics: vehicle::Physics,
+    ) -> Result<Option<Record>, Error> {
         let Some(state::Object {
             current: Update::Vehicle { binding, fields },
             ..

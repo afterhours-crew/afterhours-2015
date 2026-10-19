@@ -33,6 +33,8 @@ pub struct Generated {
     pub vehicle_profiles: PathBuf,
     pub progression_content: PathBuf,
     pub sequence_content: PathBuf,
+    pub traffic_content: PathBuf,
+    pub rival_content: PathBuf,
     pub world_mac_template: PathBuf,
     pub prepared: Prepared,
 }
@@ -91,6 +93,8 @@ pub fn resolve_with_progress(
         vehicle_profiles: prepared.path(Kind::VehicleProfiles),
         progression_content: prepared.path(Kind::ProgressionContent),
         sequence_content: prepared.path(Kind::SequenceContent),
+        traffic_content: prepared.path(Kind::TrafficContent),
+        rival_content: prepared.path(Kind::RivalContent),
         world_mac_template: prepared.path(Kind::WorldMacTemplate),
         prepared,
     })

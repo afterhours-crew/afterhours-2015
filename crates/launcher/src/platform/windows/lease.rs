@@ -246,14 +246,6 @@ impl EndpointLease {
         Ok(u32::from_le_bytes(bytes.try_into().expect("4 bytes")))
     }
 
-    fn thread_info(&self, thread: &sys::Thread) -> Result<sys::ThreadInfo> {
-        let info = thread.info()?;
-        if info.exit_status != STILL_ACTIVE || info.pid != u64::from(self.game.id()) {
-            return Err(refuse("Root thread exited or changed"));
-        }
-        Ok(info)
-    }
-
     fn check_code(&mut self) -> Result<()> {
         for (offset, length, expected) in CODE {
             let bytes = self.read(self.module_base + offset, length)?;
@@ -316,8 +308,15 @@ impl EndpointLease {
         let mut selected: Option<(sys::Thread, sys::ThreadInfo)> = None;
         let mut found = 0u64;
         for tid in threads {
-            let thread = sys::Thread::open(tid)?;
-            let info = self.thread_info(&thread)?;
+            // Snapshot entries can exit before they are opened. Discard the
+            // entire scan so the next bounded startup poll refreshes it; no
+            // endpoint transaction or memory write exists at this point.
+            let Some(thread) = sys::Thread::open_snapshot(tid)? else {
+                return Ok(false);
+            };
+            let Some(info) = startup_candidate(thread.info()?, self.game.id(), tid)? else {
+                return Ok(false);
+            };
             let value = self.thread_root(info)?;
             if value == 0 {
                 continue;
@@ -463,6 +462,15 @@ impl EndpointLease {
     }
 }
 
+fn startup_candidate(info: sys::ThreadInfo, pid: u32, tid: u32) -> Result<Option<sys::ThreadInfo>> {
+    if info.pid != u64::from(pid) || info.tid != u64::from(tid) {
+        return Err(refuse("Startup thread identity changed"));
+    }
+    // Do not read a TEB belonging to an already terminated candidate. This
+    // does not relax guard_state: a selected root exiting remains fatal.
+    Ok((info.exit_status == STILL_ACTIVE).then_some(info))
+}
+
 impl Memory for EndpointLease {
     fn read(&mut self, field: usize) -> Result<Vec<u8>> {
         let address = self.root + OFFSETS[field];
@@ -492,5 +500,27 @@ impl Drop for EndpointLease {
         // Best effort: a failed restore here has already been reported by
         // the supervisor's own restore call.
         let _ = self.restore();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stale_candidate_retries_but_reused_identity_is_refused() {
+        let mut info = sys::ThreadInfo {
+            exit_status: STILL_ACTIVE,
+            teb: 0x10000,
+            pid: 10,
+            tid: 20,
+        };
+        assert_eq!(startup_candidate(info, 10, 20).unwrap(), Some(info));
+        info.exit_status = 0;
+        assert_eq!(startup_candidate(info, 10, 20).unwrap(), None);
+        assert!(startup_candidate(info, 11, 20).is_err());
+        assert!(startup_candidate(info, 10, 21).is_err());
+        info.exit_status = STILL_ACTIVE;
+        assert!(startup_candidate(info, 11, 20).is_err());
     }
 }

@@ -19,6 +19,8 @@ pub mod logic;
 pub mod nitrous_fuel;
 pub mod participants;
 pub mod replication;
+pub mod road_graph;
+pub mod road_wander;
 pub mod scoring;
 pub mod sequences;
 pub mod session;
@@ -36,6 +38,8 @@ mod test_data {
 }
 
 pub mod trigger_volumes;
+pub mod vehicle_chassis;
 pub mod vehicle_nitrous;
 pub mod vehicle_reports;
+pub mod vehicle_wheels;
 pub mod world_activation;

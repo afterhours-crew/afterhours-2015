@@ -71,7 +71,7 @@ pub(super) fn mesh_kind(v: &Value) -> Result<MeshKind, ParseError> {
         },
     })
 }
-fn profile(v: &Value) -> Result<Profile, ParseError> {
+pub(super) fn profile(v: &Value) -> Result<Profile, ParseError> {
     let mut kinds = Vec::new();
     for k in array(v, MAX_SERIALIZERS)? {
         let (kind, extra) = match k["kind"].as_str() {
@@ -108,6 +108,7 @@ fn profile(v: &Value) -> Result<Profile, ParseError> {
             Some("four_bit") => (Kind::FourBit, None),
             Some("appearance") => (Kind::Appearance, None),
             Some("guid_float") => (Kind::GuidFloat, None),
+            Some("rpc") => (Kind::Rpc, None),
             _ => return Err(ParseError::Invalid),
         };
         keys(k, &["kind"], &extra.into_iter().collect::<Vec<_>>())?;
@@ -168,44 +169,8 @@ pub(super) fn definition(v: &Value) -> Result<Definition, ParseError> {
     {
         return Err(ParseError::Invalid);
     }
-    let mut parts = BTreeMap::new();
-    for row in array(&v["parts"], MAX_SERIALIZERS)? {
-        keys(row, &["ordinal", "variants", "networkable"], &[])?;
-        let ordinal = uint(&row["ordinal"])?;
-        if profile.kinds().get(ordinal)
-            != Some(&Kind::Part {
-                variants: uint(&row["variants"])?,
-            })
-            || parts
-                .insert(ordinal, boolean(&row["networkable"])?)
-                .is_some()
-        {
-            return Err(ParseError::Invalid);
-        }
-    }
-    if parts.is_empty()
-        || parts.len()
-            != profile
-                .kinds()
-                .iter()
-                .filter(|k| matches!(k, Kind::Part { .. }))
-                .count()
-    {
-        return Err(ParseError::Invalid);
-    }
-    let buses = array(&v["buses"], nfs_world::replication::MAX_OBJECTS)?
-        .iter()
-        .map(|b| {
-            keys(b, &["path", "flags"], &[])?;
-            Ok(root::Bus {
-                path: array(&b["path"], 31)?
-                    .iter()
-                    .map(uint)
-                    .collect::<Result<_, _>>()?,
-                flags: uint(&b["flags"])?,
-            })
-        })
-        .collect::<Result<Vec<_>, ParseError>>()?;
+    let parts = parts(v, &profile)?;
+    let root = buses(v)?;
     let resting = resting(&v["resting"])?;
     model(resting.position_at([0.; 3]))?;
     let team = uint(&v["team"])?;
@@ -257,27 +222,11 @@ pub(super) fn definition(v: &Value) -> Result<Definition, ParseError> {
     if meshes.iter().map(|m| &m.kind).ne(expected) {
         return Err(ParseError::Invalid);
     }
-    keys(&v["asset"], &["type_id", "local_index"], &[])?;
-    let asset_type = uint(&v["asset"]["type_id"])?;
-    let asset_index = uint(&v["asset"]["local_index"])?;
-    let catalog = array(&v["catalog"], 4096)?
-        .iter()
-        .map(|r| {
-            let [a, b] = array(r, 2)? else {
-                return Err(ParseError::Invalid);
-            };
-            Ok((uint(a)?, uint(b)?))
-        })
-        .collect::<Result<Vec<_>, ParseError>>()?;
-    model(nfs_world::replication::entity::creation::Catalog::new(
-        1, &catalog,
-    ))?;
-    if !catalog
-        .iter()
-        .any(|(t, n)| *t == asset_type && asset_index < *n)
-    {
-        return Err(ParseError::Invalid);
-    }
+    let Asset {
+        asset_type,
+        asset_index,
+        catalog,
+    } = asset(v)?;
     Ok(Definition {
         blueprint: text(&v["blueprint"])?.to_owned(),
         bundle: text(&v["bundle"])?.to_owned(),
@@ -285,7 +234,7 @@ pub(super) fn definition(v: &Value) -> Result<Definition, ParseError> {
         asset_index,
         catalog,
         profile,
-        root: model(root::Blueprint::new(buses))?,
+        root,
         resting,
         team,
         mode,
@@ -299,7 +248,7 @@ pub(super) fn definition(v: &Value) -> Result<Definition, ParseError> {
         health: health(&v["health"])?,
     })
 }
-fn resting(v: &Value) -> Result<placement::RestingConfig, ParseError> {
+pub(super) fn resting(v: &Value) -> Result<placement::RestingConfig, ParseError> {
     keys(
         v,
         &["mass", "front_axle", "wheelbase", "curve", "front", "rear"],
@@ -333,7 +282,7 @@ fn resting(v: &Value) -> Result<placement::RestingConfig, ParseError> {
         rear: axle("rear")?,
     })
 }
-fn health(v: &Value) -> Result<health::State, ParseError> {
+pub(super) fn health(v: &Value) -> Result<health::State, ParseError> {
     keys(v, &["maximum", "profile"], &[])?;
     let p = &v["profile"];
     let profile = if p.is_null() {
@@ -387,4 +336,85 @@ pub(super) fn components(v: &Value) -> Result<Vec<mesh::Component>, ParseError> 
             Ok(mesh::Component { kind, variants })
         })
         .collect()
+}
+
+pub(super) fn parts(v: &Value, profile: &Profile) -> Result<BTreeMap<usize, bool>, ParseError> {
+    let mut parts = BTreeMap::new();
+    for row in array(&v["parts"], MAX_SERIALIZERS)? {
+        keys(row, &["ordinal", "variants", "networkable"], &[])?;
+        let ordinal = uint(&row["ordinal"])?;
+        if profile.kinds().get(ordinal)
+            != Some(&Kind::Part {
+                variants: uint(&row["variants"])?,
+            })
+            || parts
+                .insert(ordinal, boolean(&row["networkable"])?)
+                .is_some()
+        {
+            return Err(ParseError::Invalid);
+        }
+    }
+    if parts.is_empty()
+        || parts.len()
+            != profile
+                .kinds()
+                .iter()
+                .filter(|k| matches!(k, Kind::Part { .. }))
+                .count()
+    {
+        return Err(ParseError::Invalid);
+    }
+    Ok(parts)
+}
+
+pub(super) fn buses(v: &Value) -> Result<root::Blueprint, ParseError> {
+    let buses = array(&v["buses"], nfs_world::replication::MAX_OBJECTS)?
+        .iter()
+        .map(|b| {
+            keys(b, &["path", "flags"], &[])?;
+            Ok(root::Bus {
+                path: array(&b["path"], 31)?
+                    .iter()
+                    .map(uint)
+                    .collect::<Result<_, _>>()?,
+                flags: uint(&b["flags"])?,
+            })
+        })
+        .collect::<Result<Vec<_>, ParseError>>()?;
+    model(root::Blueprint::new(buses))
+}
+
+pub(super) struct Asset {
+    pub asset_type: u16,
+    pub asset_index: u16,
+    pub catalog: Vec<(u16, u16)>,
+}
+
+pub(super) fn asset(v: &Value) -> Result<Asset, ParseError> {
+    keys(&v["asset"], &["type_id", "local_index"], &[])?;
+    let asset_type = uint(&v["asset"]["type_id"])?;
+    let asset_index = uint(&v["asset"]["local_index"])?;
+    let catalog = array(&v["catalog"], 4096)?
+        .iter()
+        .map(|r| {
+            let [a, b] = array(r, 2)? else {
+                return Err(ParseError::Invalid);
+            };
+            Ok((uint(a)?, uint(b)?))
+        })
+        .collect::<Result<Vec<_>, ParseError>>()?;
+    model(nfs_world::replication::entity::creation::Catalog::new(
+        1, &catalog,
+    ))?;
+    if !catalog
+        .iter()
+        .any(|(t, n)| *t == asset_type && asset_index < *n)
+    {
+        return Err(ParseError::Invalid);
+    }
+    Ok(Asset {
+        asset_type,
+        asset_index,
+        catalog,
+    })
 }

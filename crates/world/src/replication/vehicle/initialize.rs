@@ -56,6 +56,22 @@ pub fn fresh(
     lifecycle: Lifecycle<'_>,
     authority: &mut Registry,
 ) -> Result<Creation, Error> {
+    let custom = Customization::from_vehicle(items.collection, items.customization, items.vehicle)?;
+    let nos = nos::State::from_vehicle(items.collection, items.nos, items.vehicle)?;
+    with_inputs(profile, &custom, nos, lifecycle, authority)
+}
+
+/// Construct from explicit component state without requiring owned inventory.
+/// This does not assign an owner, actor, simulation mode or AI goal. Callers
+/// supply those lifecycle decisions separately; authority registration commits
+/// only after the complete creation record validates.
+pub fn with_inputs(
+    profile: &Profile,
+    custom: &Customization,
+    nos: nos::State,
+    lifecycle: Lifecycle<'_>,
+    authority: &mut Registry,
+) -> Result<Creation, Error> {
     if profile
         .kinds()
         .iter()
@@ -84,8 +100,6 @@ pub fn fresh(
     {
         return Err(Error::Shape);
     }
-    let custom = Customization::from_vehicle(items.collection, items.customization, items.vehicle)?;
-    let nos = nos::State::from_vehicle(items.collection, items.nos, items.vehicle)?;
     let rpcs = fresh_rpcs(profile);
     let mut pending = authority.clone();
     let mut components = lifecycle.authority_components.iter();
@@ -121,7 +135,8 @@ pub fn fresh(
             | Kind::Tagged
             | Kind::NibblesGuid
             | Kind::Appearance
-            | Kind::GuidFloat => Initial::Rpc(rpc()?),
+            | Kind::GuidFloat
+            | Kind::Rpc => Initial::Rpc(rpc()?),
         });
     }
     let creation = Creation {
@@ -372,5 +387,68 @@ mod tests {
             Spawn::new([0., f32::INFINITY, 0.], [0., 0., 1.], None),
             Err(Error::Shape)
         );
+    }
+
+    #[test]
+    fn explicit_component_inputs_need_no_inventory_and_commit_authority_only_on_success() {
+        let mut f = Fixture::new();
+        f.root.set_player(None);
+        let p = Profile::new(vec![
+            Kind::Root {
+                property_owner: true,
+            },
+            Kind::Chassis,
+            Kind::Index,
+            Kind::FourBit,
+            Kind::Rpc,
+        ])
+        .unwrap();
+        let custom = Customization {
+            value: 42,
+            list_a: vec![1, 4],
+            list_b: vec![],
+            index: None,
+            values: [3, 7],
+            flag: false,
+            tuning: [8; 32],
+        };
+        let mut authority = Registry::default();
+        let mut lifecycle = f.lifecycle();
+        lifecycle.authority_components = &[90];
+        let created = with_inputs(
+            &p,
+            &custom,
+            nos::State::default(),
+            lifecycle,
+            &mut authority,
+        )
+        .unwrap();
+        assert_eq!(created.connection_id, 0);
+        let Initial::Chassis(chassis) = &created.fields[1] else {
+            panic!()
+        };
+        assert_eq!(chassis.custom, custom);
+        let Initial::Rpc(rpc) = &created.fields[4] else {
+            panic!()
+        };
+        assert_eq!(rpc.selector, 3);
+        assert_eq!(authority.index(80, 90), Ok(0));
+        let before = authority.clone();
+        let mut invalid = custom;
+        invalid.tuning[31] = 16;
+        let mut lifecycle = f.lifecycle();
+        lifecycle.authority_components = &[91];
+        assert!(
+            with_inputs(
+                &p,
+                &invalid,
+                nos::State::default(),
+                lifecycle,
+                &mut authority
+            )
+            .is_err()
+        );
+        assert_eq!(authority, before);
+        assert_eq!(authority.index(80, 91), Err(Error::UnknownObject));
     }
 }

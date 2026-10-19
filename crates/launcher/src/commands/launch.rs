@@ -17,7 +17,7 @@ use crate::{
     exit::{Exit, Failure, Result},
     paths, platform, preflight,
     records::{self, Action, Request},
-    session,
+    session, settings,
     supervisor::{self, live::LiveSession},
 };
 use std::path::Path;
@@ -96,11 +96,13 @@ pub fn launch(context: &Context, action: Action, args: &SessionArgs) -> Result<(
     std::fs::create_dir_all(&data)?;
     let id = new_session_id();
     let run = paths::session_dir(&data, &id);
-    let (request_path, run) = {
+    let (request_path, run, settings) = {
         // Hold the lock only while creating the session directory; the
         // supervisor takes it for the session itself.
         let _lock = session::Lock::acquire(&data)?;
         paths::checked_data_path(&run, report.game_directory.as_deref())?;
+        // Saved under the lock so concurrent launches never interleave writes.
+        let settings = settings::resolve(&data, args.traffic, args.rivals)?;
         std::fs::create_dir_all(&run)?;
         paths::checked_data_path(&run, report.game_directory.as_deref())?;
         let request = Request {
@@ -114,14 +116,23 @@ pub fn launch(context: &Context, action: Action, args: &SessionArgs) -> Result<(
             bundled_server: context.bundled_server.is_some() && args.game.server.is_none(),
             player_name: args.player_name.clone(),
             record_protocol: args.record_protocol,
+            settings,
         };
         let request_path = run.join("request.json");
         records::write_new_json(&request_path, &request)?;
-        (request_path, run)
+        (request_path, run, settings)
     };
     if !context.json {
         crate::terminal::detail("Saves and cache", data.display());
         crate::terminal::detail("Session logs", run.display());
+        crate::terminal::detail(
+            "Traffic and rivals",
+            format!(
+                "{} (change with --traffic and --rivals, or edit {})",
+                settings.describe(),
+                data.join(settings::FILE).display()
+            ),
+        );
     }
     let status = std::process::Command::new(std::env::current_exe()?)
         .arg("supervise")

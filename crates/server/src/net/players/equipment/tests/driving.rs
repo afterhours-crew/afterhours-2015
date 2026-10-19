@@ -20,7 +20,7 @@ fn world_chassis(listener: &PlayerListener, items: &nfs_world::items::Collection
             name: b"Local".to_vec(),
         },
         customization_attached: true,
-        world: true,
+        placement: crate::vehicle_content::Placement::PlayerWorld,
         authority_group: 10,
         authority_components: &[100],
     };

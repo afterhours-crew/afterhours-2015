@@ -35,6 +35,7 @@ pub mod platform;
 pub mod preflight;
 pub mod records;
 pub mod session;
+pub mod settings;
 pub mod supervisor;
 pub mod terminal;
 

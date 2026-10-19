@@ -68,10 +68,13 @@ pub fn linked_creations(
     Ok(creations)
 }
 
+/// The root scene's content identity (native root constructor, E447).
+pub const CONTENT_KEY: u32 = 1;
+
 pub fn content() -> Result<Content, Error> {
     let mut kinds = vec![Kind::Noop, Kind::Rpc];
     kinds.extend([Kind::LevelReference; REFERENCES]);
-    Content::new(vec![(1, Profile::new(true, &kinds)?)])
+    Content::new(vec![(CONTENT_KEY, Profile::new(true, &kinds)?)])
 }
 
 pub fn creation(rpc: Rpc, levels: [Option<u16>; REFERENCES]) -> Result<Creation, Error> {
@@ -82,7 +85,7 @@ pub fn creation(rpc: Rpc, levels: [Option<u16>; REFERENCES]) -> Result<Creation,
     let result = Creation {
         prefix: Prefix {
             level_id: 0,
-            content_key: 1,
+            content_key: CONTENT_KEY,
             blueprint: None,
             word_a: 0,
             word_b: 0,

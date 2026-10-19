@@ -37,6 +37,20 @@ pub struct Content {
     appearance: appearance::Definitions,
     meshes: mesh::Definitions,
 }
+/// Audio state tail of an official roaming-rival car: every official rival
+/// creation carries 2 in the second tail nibble, and most carry this exact
+/// state (E981, E990). Observed constant; its meaning is not traced.
+const RIVAL_AUDIO_TAIL: [u8; 6] = [0, 2, 0, 0, 0, 0];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Placement {
+    /// Garage locator, axle-weighted resting height and installed reset mode.
+    Garage,
+    /// Exact world root position and the official player start state (E748).
+    PlayerWorld,
+    /// Authored spawner transform, mean suspension offset and reset mode.
+    Rival,
+}
 pub struct Request<'a> {
     pub items: &'a Collection,
     pub vehicle: u64,
@@ -47,10 +61,7 @@ pub struct Request<'a> {
     pub connection: Option<u8>,
     pub owner: Resource,
     pub customization_attached: bool,
-    /// World car: the locator is the exact root position (no resting offset)
-    /// and the chassis is driveable (mode 3, settled mode timer), as the
-    /// official world car (E748).
-    pub world: bool,
+    pub placement: Placement,
     pub authority_group: u64,
     pub authority_components: &'a [u64],
 }
@@ -63,6 +74,17 @@ pub struct EquipmentPresentation {
 }
 
 impl Content {
+    /// Construct an ephemeral authored AI preset using the same installed part
+    /// definitions as player vehicles, without touching persistent inventory.
+    pub fn rival_preset(
+        &self,
+        preset: &nfs_content::rivals::preset::Preset,
+        catalog: &nfs_world::items::InventoryCatalog,
+        slots: &nfs_services::purchase::Offers,
+    ) -> Result<Collection, nfs_content::Error> {
+        preset.instantiate(catalog, slots, &self.wheels)
+    }
+
     pub fn validate_rim_size(
         &self,
         items: &Collection,
@@ -291,6 +313,22 @@ impl Content {
         authority: &mut authority::Registry,
         resolve_level: impl FnMut(&str) -> Option<u16>,
     ) -> Result<Body, Error> {
+        self.construct_with_overrides(
+            request,
+            customization::SpawnOverrides::default(),
+            authority,
+            resolve_level,
+        )
+    }
+    /// Build both creation and current chassis state from the same unquantized
+    /// persona modifiers. Player construction continues to use no overrides.
+    pub fn construct_with_overrides(
+        &self,
+        request: Request<'_>,
+        overrides: customization::SpawnOverrides,
+        authority: &mut authority::Registry,
+        resolve_level: impl FnMut(&str) -> Option<u16>,
+    ) -> Result<Body, Error> {
         let item = request
             .items
             .items
@@ -305,23 +343,29 @@ impl Content {
         if request.customization_attached {
             root.attach_customization();
         }
-        let position = if request.world {
-            request.locator
-        } else {
-            d.resting
+        let position = match request.placement {
+            Placement::PlayerWorld => request.locator,
+            Placement::Garage => d
+                .resting
                 .position_at(request.locator)?
-                .map(|v| v.map_or(0., f32::from_bits))
+                .map(|v| v.map_or(0., f32::from_bits)),
+            Placement::Rival => d
+                .resting
+                .spawn_position(request.locator, request.basis[1])?,
         };
         let spawn = initialize::Spawn::new(position, request.basis[2], request.speed)?;
         let mut pending = authority.clone();
-        let creation = initialize::fresh(
+        let custom = Customization::from_vehicle_with_overrides(
+            request.items,
+            &self.custom,
+            request.vehicle,
+            overrides,
+        )?;
+        let nos = nos::State::from_vehicle(request.items, &self.nos, request.vehicle)?;
+        let creation = initialize::with_inputs(
             &d.profile,
-            initialize::Items {
-                collection: request.items,
-                vehicle: request.vehicle,
-                customization: &self.custom,
-                nos: &self.nos,
-            },
+            &custom,
+            nos,
             initialize::Lifecycle {
                 root: &root,
                 pose: initialize::Pose {
@@ -336,17 +380,28 @@ impl Content {
             },
             &mut pending,
         )?;
-        let custom = Customization::from_vehicle(request.items, &self.custom, request.vehicle)?;
         let mut chassis = chassis::State::new(
             position,
             orientation::quaternion_from_basis(request.basis)?,
-            if request.world { WORLD_MODE } else { d.mode },
+            if request.placement == Placement::PlayerWorld {
+                WORLD_MODE
+            } else {
+                d.mode
+            },
             custom,
         )?;
-        if request.world {
+        if request.placement == Placement::PlayerWorld {
             let mut controls = chassis::Controls::new(WORLD_MODE)?;
             controls.mode_time = WORLD_MODE_TIME;
             chassis.set_motion(chassis.motion().clone(), controls)?;
+        }
+        if request.placement == Placement::Rival {
+            // The spawn speed is the car's initial velocity along its heading,
+            // in both the creation vector and the current chassis state (E981).
+            let mut motion = chassis.motion().clone();
+            motion.velocity = orientation::spawn_vector(request.basis[2], request.speed)?
+                .map(|v| v.map_or(0., f32::from_bits));
+            chassis.set_motion(motion, chassis.controls().clone())?;
         }
         let wheels = wheel_customization::State::from_vehicle(
             request.items,
@@ -382,8 +437,14 @@ impl Content {
                 Kind::Index => Some(nos::Runtime::new(1.)?.update(3)?),
                 Kind::Tuning => Some(wheels.update(true)),
                 Kind::Tagged => Some(lifecycle::LockOn::default().update(true)),
-                Kind::NibblesGuid => Some(lifecycle::Audio::default().update(true)),
-                Kind::FourBit => Some(Update::Noop),
+                Kind::NibblesGuid => {
+                    let mut audio = lifecycle::Audio::default();
+                    if request.placement == Placement::Rival {
+                        audio.set([0; 3], [0; 4], RIVAL_AUDIO_TAIL)?;
+                    }
+                    Some(audio.update(true))
+                }
+                Kind::FourBit | Kind::Rpc => Some(Update::Noop),
                 Kind::Appearance => Some(appearance.update(63)?),
                 Kind::Mesh(_) => Some(mesh.update(true)),
                 Kind::GuidFloat => Some(d.health.update(3)?),

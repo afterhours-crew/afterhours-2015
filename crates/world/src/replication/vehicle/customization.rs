@@ -173,12 +173,41 @@ impl Definitions {
     }
 }
 
+/// Transient spawn modifiers supplied by an authored AI persona. Performance is
+/// added to the installed parts before quantization; grip replaces the driving
+/// settings without changing the items or the transmission selection.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SpawnOverrides {
+    pub performance: f32,
+    pub grip: Option<u8>,
+}
+
 impl Customization {
     pub fn from_vehicle(
         collection: &Collection,
         definitions: &Definitions,
         vehicle: u64,
     ) -> Result<Self, Error> {
+        Self::from_vehicle_with_overrides(
+            collection,
+            definitions,
+            vehicle,
+            SpawnOverrides::default(),
+        )
+    }
+
+    pub fn from_vehicle_with_overrides(
+        collection: &Collection,
+        definitions: &Definitions,
+        vehicle: u64,
+        overrides: SpawnOverrides,
+    ) -> Result<Self, Error> {
+        if !overrides.performance.is_finite()
+            || overrides.performance < 0.
+            || overrides.grip.is_some_and(|v| v > 10)
+        {
+            return Err(Error::Bound);
+        }
         let mut performance = 0.0_f32;
         let mut group_a = BTreeSet::new();
         let mut group_b = BTreeSet::new();
@@ -233,12 +262,21 @@ impl Customization {
         if group_a.len() > 255 || group_b.len() > 255 {
             return Err(Error::Bound);
         }
+        if overrides.performance.abs() >= 1e-6_f32 {
+            performance += overrides.performance;
+        }
         let scaled = performance * 255.0;
         if !scaled.is_finite() || scaled >= 4_294_967_296.0_f32 {
             return Err(Error::Bound);
         }
-        let tuning =
+        let mut tuning =
             tuning::Settings::from_vehicle(collection, &definitions.tuning, vehicle)?.values();
+        if let Some(grip) = overrides.grip {
+            tuning[..31].fill(grip);
+            tuning[tuning::Setting::Abs as usize] = if grip > 7 { 10 } else { 0 };
+            tuning[tuning::Setting::TractionControl as usize] = if grip > 7 { 10 } else { 0 };
+            tuning[tuning::Setting::StabilityControl as usize] = if grip > 2 { 10 } else { 0 };
+        }
         Ok(Self {
             value: (scaled as u32).min(255) as u8,
             list_a: group_a.into_iter().collect(),

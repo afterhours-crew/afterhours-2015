@@ -94,6 +94,7 @@ mod tests {
             Kind::Wheel,
             Kind::FourBit,
             Kind::Index,
+            Kind::Rpc,
         ])
         .unwrap();
         let r = fresh_rpcs(&p);
@@ -101,7 +102,16 @@ mod tests {
             r.iter()
                 .map(|v| v.as_ref().map(|r| r.selector))
                 .collect::<Vec<_>>(),
-            vec![Some(0), Some(1), None, None, Some(2), None, Some(3)]
+            vec![
+                Some(0),
+                Some(1),
+                None,
+                None,
+                Some(2),
+                None,
+                Some(3),
+                Some(4)
+            ]
         );
         assert!(
             r.iter()
