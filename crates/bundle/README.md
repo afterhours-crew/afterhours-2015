@@ -30,8 +30,9 @@ CLI acceptance does not establish that additional scope.
 
 ## Release packaging
 
-`.github/workflows/release.yml` runs on a **published** GitHub release, including
-prereleases, checks out the release tag, runs the workspace gates, builds for
+`.github/workflows/release.yml` runs when a version tag is pushed, or when a
+maintainer manually selects an existing tag. It checks the tag and bundle
+version, runs the workspace gates, builds for
 `x86_64-pc-windows-msvc` with the static C runtime, and runs
 `tools/Package-TerminalBundle.ps1`. The script copies only the executable and
 explicit documentation/license files, tests server/launcher dispatch from the
@@ -39,11 +40,15 @@ isolated package directory, and writes a ZIP, SHA-256 checksum and source/build
 manifest. It collects dependency notices from locked Cargo package sources.
 No game, account, research file or locally generated content is a package input.
 
-The workflow attaches those files to the triggering release. Pull requests
-changing the packaging and manual workflow runs build Actions artifacts only;
-they neither create nor change a release. Pull requests use the workspace gates
-in `ci.yml`; release and manual runs repeat the gates before packaging.
-Existing release assets are never overwritten on rerun. Resolve any partial
-upload deliberately. Historical source-only releases remain unchanged.
+The workflow verifies the remote tag still points to the built commit, then
+creates an **unpublished draft** with those files. A maintainer reviews and
+publishes the finished draft; publication does not rebuild. See the
+[release guide](../../docs/RELEASING.md) for version tags, preparation and retries.
+Pull requests and manual runs without `release_tag` create development Actions
+artifacts only. Pull requests use the workspace gates in `ci.yml`; tag and manual
+runs repeat the gates before packaging. Draft-publication guards have portable,
+offline tests in `tools/Test-TerminalDraft.ps1`.
+Existing releases and assets are never overwritten. Resolve any partial draft
+upload deliberately. Historical releases remain unchanged.
 
 Source/activation scope and tester instructions: [quickstart](../../docs/TESTER-QUICKSTART.md).
