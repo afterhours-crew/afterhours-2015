@@ -84,14 +84,13 @@ pub struct RestingConfig {
     pub rear: Suspension,
 }
 impl RestingConfig {
-    pub fn position_at(&self, locator: [f32; 3]) -> Result<[Option<u32>; 3], Error> {
+    fn axle_heights(&self) -> Result<[f32; 2], Error> {
         if !self.mass.is_finite()
             || self.mass < 0.0
             || !self.front_axle.is_finite()
             || !self.wheelbase.is_finite()
             || self.wheelbase <= 0.0
             || !(0.0..=self.wheelbase).contains(&self.front_axle)
-            || locator.iter().any(|v| !v.is_finite())
         {
             return Err(Error::Shape);
         }
@@ -103,6 +102,11 @@ impl RestingConfig {
         let rear = self
             .rear
             .height((((1.0 - bias) * self.mass) * 0.5) * 9.81)?;
+        Ok([front, rear])
+    }
+
+    pub fn position_at(&self, locator: [f32; 3]) -> Result<[Option<u32>; 3], Error> {
+        let [front, rear] = self.axle_heights()?;
         let fraction = self.front_axle / self.wheelbase;
         let height = (1.0 - fraction) * front + fraction * rear;
         let position = [locator[0], locator[1] + height, locator[2]];
@@ -110,6 +114,19 @@ impl RestingConfig {
             return Err(Error::Shape);
         }
         Ok(position.map(|v| (v != 0.0).then(|| v.to_bits())))
+    }
+
+    /// Shared vehicle-spawner placement: one authored up vector, then the
+    /// arithmetic mean of the front/rear suspension heights along that vector.
+    /// Garage placement above instead weights the axles and offsets world Y.
+    pub fn spawn_position(&self, locator: [f32; 3], up: [f32; 3]) -> Result<[f32; 3], Error> {
+        let [front, rear] = self.axle_heights()?;
+        let height = (front + rear) * 0.5;
+        let position = std::array::from_fn(|i| (locator[i] + up[i]) + up[i] * height);
+        if position.iter().any(|v| !v.is_finite()) {
+            return Err(Error::Shape);
+        }
+        Ok(position)
     }
 }
 
@@ -152,6 +169,26 @@ mod tests {
             ]
         );
         assert_eq!(c.position_at([-0.0, -0.254, 0.0]).unwrap(), [None; 3]);
+    }
+
+    #[test]
+    fn shared_spawner_uses_mean_axle_height_and_authored_up() {
+        let mut c = config();
+        c.front_axle = 0.5;
+        c.rear.ride_height_inches = 20.;
+        // With no load the front/rear heights are 0.254/0.508 metres.
+        // The spawn callback adds one up vector, then their mean (0.381).
+        let p = c.spawn_position([10., 20., 30.], [0.6, 0.8, 0.]).unwrap();
+        for (actual, expected) in p.into_iter().zip([10.8286, 21.1048, 30.]) {
+            assert!((actual - expected).abs() < 0.00001);
+        }
+        let garage = c.position_at([0.; 3]).unwrap();
+        assert!((f32::from_bits(garage[1].unwrap()) - 0.3175).abs() < 0.00001);
+        assert!(c.spawn_position([0.; 3], [f32::NAN, 1., 0.]).is_err());
+        assert!(
+            c.spawn_position([0., f32::INFINITY, 0.], [0., 1., 0.])
+                .is_err()
+        );
     }
 
     #[test]

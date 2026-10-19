@@ -23,6 +23,8 @@ struct Args {
     vehicle_parts: Option<PathBuf>,
     garage_layout: Option<PathBuf>,
     sequence_content: Option<PathBuf>,
+    traffic_content: Option<PathBuf>,
+    rival_content: Option<PathBuf>,
     garage_logic: Option<PathBuf>,
     reputation_thresholds: Option<PathBuf>,
     scene_catalog: Option<PathBuf>,
@@ -54,6 +56,8 @@ struct Args {
     content_cache: Option<PathBuf>,
     /// Cache entry summary once `game_dir` has been resolved.
     generated: Option<serde_json::Value>,
+    /// Player-chosen traffic and roaming-rival amounts.
+    ai: nfs_server::ai_settings::AiSettings,
 }
 
 fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args, String> {
@@ -68,6 +72,8 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
     let (mut vehicle_content, mut garage_layout) = (None, None);
     let mut vehicle_parts = None;
     let mut sequence_content = None;
+    let mut traffic_content = None;
+    let mut rival_content = None;
     let mut garage_logic = None;
     let mut reputation_thresholds = None;
     let mut scene_catalog = None;
@@ -91,6 +97,7 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
     let mut bootstrap_config = None;
     let (mut auth_config, mut local_identity) = (None, None);
     let (mut game_dir, mut content_cache) = (None, None);
+    let (mut traffic_percent, mut rival_limit) = (100u16, None);
     while let Some(flag) = args.next() {
         let mut value = || {
             args.next()
@@ -110,6 +117,8 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
             Some("--vehicle-parts") => vehicle_parts = Some(PathBuf::from(value()?)),
             Some("--garage-layout") => garage_layout = Some(PathBuf::from(value()?)),
             Some("--sequence-content") => sequence_content = Some(PathBuf::from(value()?)),
+            Some("--traffic-content") => traffic_content = Some(PathBuf::from(value()?)),
+            Some("--rival-content") => rival_content = Some(PathBuf::from(value()?)),
             Some("--garage-logic") => garage_logic = Some(PathBuf::from(value()?)),
             Some("--reputation-thresholds") => {
                 reputation_thresholds = Some(PathBuf::from(value()?))
@@ -171,6 +180,20 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
                     .and_then(|v| v.parse().ok())
                     .ok_or("bad idle")?
             }
+            Some("--traffic-percent") => {
+                traffic_percent = value()?
+                    .to_str()
+                    .and_then(|v| v.parse().ok())
+                    .ok_or("bad traffic percent")?
+            }
+            Some("--rival-limit") => {
+                rival_limit = Some(
+                    value()?
+                        .to_str()
+                        .and_then(|v| v.parse().ok())
+                        .ok_or("bad rival limit")?,
+                )
+            }
             Some("--qos-seconds") => {
                 qos_seconds = value()?
                     .to_str()
@@ -183,6 +206,8 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
     if !(1..=3600).contains(&idle_seconds) || !(1..=86_400).contains(&qos_seconds) {
         return Err("idle must be 1..3600 s and qos 1..86400 s".into());
     }
+    let ai = nfs_server::ai_settings::AiSettings::new(traffic_percent, rival_limit)
+        .map_err(|e| e.to_string())?;
     let generated = game_dir.is_some();
     if generated
         && (item_content.is_some() || persistent_content.is_some() || world_mac_template.is_some())
@@ -253,6 +278,14 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
             "--sequence-content requires the owned vehicle/progression configuration".into(),
         );
     }
+    if traffic_content.is_some() && vehicle_content.is_none() && !generated {
+        return Err(
+            "--traffic-content requires the owned vehicle/progression configuration".into(),
+        );
+    }
+    if rival_content.is_some() && vehicle_content.is_none() && !generated {
+        return Err("--rival-content requires the owned vehicle/progression configuration".into());
+    }
     if garage_logic.is_some() && sequence_content.is_none() && !generated {
         return Err("--garage-logic requires --sequence-content".into());
     }
@@ -285,6 +318,8 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
         vehicle_parts,
         garage_layout,
         sequence_content,
+        traffic_content,
+        rival_content,
         garage_logic,
         reputation_thresholds,
         scene_catalog,
@@ -314,6 +349,7 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
         game_dir,
         content_cache,
         generated: None,
+        ai,
     })
 }
 
@@ -349,6 +385,9 @@ fn resolve_install_content(args: &mut Args, options: &nfs_content::Options) -> R
         .get_or_insert(generated.progression_content);
     args.sequence_content
         .get_or_insert(generated.sequence_content);
+    args.traffic_content
+        .get_or_insert(generated.traffic_content);
+    args.rival_content.get_or_insert(generated.rival_content);
     args.world_mac_template = Some(generated.world_mac_template);
     Ok(())
 }
@@ -613,6 +652,60 @@ async fn run(args: Args) -> Result<(), Failure> {
         .map(|path| nfs_server::sequence_content::SequenceContent::load(&args.root.join(path)))
         .transpose()?
         .map(Arc::new);
+    let traffic = args
+        .traffic_content
+        .as_ref()
+        .map(|path| {
+            nfs_content::traffic::Content::load(&args.root.join(path))
+                .map_err(|_| Failure::ProfileConfig)
+        })
+        .transpose()?
+        .map(Arc::new);
+    let rivals = if let Some(path) = &args.rival_content {
+        let path = args.root.join(path);
+        let item_path = args
+            .root
+            .join(args.item_content.as_ref().ok_or(Failure::ProfileConfig)?);
+        let definitions = vehicles
+            .as_ref()
+            .ok_or(Failure::ProfileConfig)?
+            .vehicles
+            .clone();
+        let game_dir = args.game_dir.clone();
+        let (content, graph) = tokio::task::spawn_blocking(move || {
+            let items = nfs_services::item_content::ItemContent::load(&item_path)
+                .map_err(|_| Failure::ProfileConfig)?;
+            let content = nfs_server::rival_content::Content::load(&path, definitions, &items)?;
+            // The host simulates rivals on the installed road graph (E987).
+            let graph = game_dir.ok_or(None).and_then(|dir| {
+                nfs_content::assets::AssetIndex::open(&dir, &nfs_content::Options::default())
+                    .and_then(|mut index| index.road_graph())
+                    .map_err(Some)
+            });
+            Ok::<_, Failure>((content, graph))
+        })
+        .await
+        .map_err(|_| Failure::Output)??;
+        match graph {
+            Ok(graph) => {
+                tracing::info!(
+                    nodes = graph.node_count(),
+                    lanes = graph.lane_count(),
+                    "road graph read from the installation for roaming rivals"
+                );
+                Some(Arc::new(content.with_graph(Arc::new(graph))))
+            }
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    "road graph unavailable (needs --game-dir); roaming rivals stay off"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
     let default_reputation = args
         .reputation_thresholds
         .as_ref()
@@ -829,6 +922,8 @@ async fn run(args: Args) -> Result<(), Failure> {
         progression,
         vehicles,
         sequences,
+        traffic,
+        rivals,
         garage_logic,
         scoring,
         catalogs,
@@ -837,6 +932,7 @@ async fn run(args: Args) -> Result<(), Failure> {
         stats,
         owned_menu_awards: args.owned_menu_awards,
         owned_local_social: args.owned_local_social,
+        ai: args.ai,
         challenges,
         kickback,
         speedwall,
@@ -1004,6 +1100,35 @@ mod tests {
     ];
 
     #[test]
+    fn traffic_and_rival_amounts_default_to_the_original_and_are_bounded() {
+        let parsed = parse_from(configured().into_iter()).unwrap();
+        assert_eq!(parsed.ai, nfs_server::ai_settings::AiSettings::default());
+        let mut args = configured();
+        args.extend([
+            "--traffic-percent".into(),
+            "150".into(),
+            "--rival-limit".into(),
+            "2".into(),
+        ]);
+        let parsed = parse_from(args.into_iter()).unwrap();
+        assert_eq!(
+            (parsed.ai.traffic_percent(), parsed.ai.rival_limit()),
+            (150, Some(2))
+        );
+        for (flag, value) in [
+            ("--traffic-percent", "301"),
+            ("--traffic-percent", "-1"),
+            ("--traffic-percent", "lots"),
+            ("--rival-limit", "129"),
+            ("--rival-limit", "none"),
+        ] {
+            let mut args = configured();
+            args.extend([flag.into(), value.into()]);
+            assert!(parse_from(args.into_iter()).is_err(), "{flag} {value}");
+        }
+    }
+
+    #[test]
     fn game_dir_replaces_generated_options_exclusively() {
         let mut args = without(configured(), &GENERATED);
         args.extend(["--game-dir".into(), "game".into()]);
@@ -1073,6 +1198,8 @@ mod tests {
         assert!(parsed.persistent_content.as_ref().unwrap().exists());
         assert!(parsed.vehicle_parts.as_ref().unwrap().exists());
         assert!(parsed.vehicle_content.as_ref().unwrap().exists());
+        nfs_content::traffic::Content::load(parsed.traffic_content.as_ref().unwrap()).unwrap();
+        nfs_content::rivals::Content::load(parsed.rival_content.as_ref().unwrap()).unwrap();
         nfs_server::progression::Content::load(parsed.progression_content.as_ref().unwrap())
             .unwrap();
         nfs_server::sequence_content::SequenceContent::load(

@@ -208,6 +208,64 @@ fn installed_fitment_restrictions_round_trip_and_reject_unknown_targets() {
 }
 
 #[test]
+fn traffic_loader_rejects_broken_closure_catalog_and_geometry() {
+    let install = install_with(&assets());
+    let prepared = install.prepare().unwrap();
+    let value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(prepared.path(Kind::TrafficContent)).unwrap())
+            .unwrap();
+    for (path, bad) in [
+        ("/managers/alive/scene", serde_json::json!(0)),
+        ("/managers/alive/serializer", serde_json::json!(65535)),
+        ("/version", serde_json::json!(2)),
+        (
+            "/managers/actors",
+            value["managers"]["participants"].clone(),
+        ),
+        ("/personas/0/index", serde_json::json!(1)),
+        ("/personas/0/vehicle", serde_json::json!("missing/bundle")),
+        ("/personas/0/tags", serde_json::json!(["invalid-guid"])),
+        ("/splines/0/catalog_count", serde_json::json!(1)),
+        ("/splines/0/index", serde_json::json!(2)),
+        ("/splines/0/segments/0/speed", serde_json::json!(-1)),
+        ("/splines/0/segments/0/points/0", serde_json::json!([0, 1])),
+        (
+            "/splines/0/segments/0/points/0",
+            serde_json::json!([100, 3, 4]),
+        ),
+        ("/splines/0/segments/0/controls", serde_json::json!([])),
+        ("/splines/0/segments/0/times", serde_json::json!([0.])),
+        ("/splines/0/segments/0/distances", serde_json::json!([-1.])),
+        ("/density", serde_json::json!(101)),
+        ("/vehicles", serde_json::json!([])),
+    ] {
+        let mut corrupt = value.clone();
+        *corrupt.pointer_mut(path).unwrap() = bad;
+        assert!(traffic::Content::from_json(&corrupt).is_err(), "{path}");
+    }
+    let mut duplicate = value.clone();
+    duplicate["splines"]
+        .as_array_mut()
+        .unwrap()
+        .push(value["splines"][0].clone());
+    assert!(traffic::Content::from_json(&duplicate).is_err());
+    duplicate["splines"][1]["index"] = serde_json::json!(0);
+    assert!(traffic::Content::from_json(&duplicate).is_ok());
+    duplicate["splines"][1]["catalog_count"] = serde_json::json!(3);
+    assert!(traffic::Content::from_json(&duplicate).is_err());
+    duplicate["splines"][1]["scene"] = serde_json::json!(123);
+    assert!(traffic::Content::from_json(&duplicate).is_ok());
+    let mut empty_road = value.clone();
+    empty_road["splines"][0]["segments"] = serde_json::json!([]);
+    let parsed = traffic::Content::from_json(&empty_road).unwrap();
+    assert_eq!(parsed.splines.len(), 1);
+    assert!(parsed.splines[0].segments.is_empty());
+    let mut extra = value;
+    extra["splines"][0]["unexpected"] = serde_json::json!(true);
+    assert!(traffic::Content::from_json(&extra).is_err());
+}
+
+#[test]
 fn builds_outputs_the_service_loaders_accept() {
     let install = install_with(&assets());
     let prepared = install.prepare().unwrap();
@@ -219,6 +277,27 @@ fn builds_outputs_the_service_loaders_accept() {
     let items = ItemContent::load(&prepared.path(Kind::ItemContent)).unwrap();
     progression::Content::load(&prepared.path(Kind::ProgressionContent)).unwrap();
     sequences::SequenceContent::load(&prepared.path(Kind::SequenceContent)).unwrap();
+    let traffic = traffic::Content::load(&prepared.path(Kind::TrafficContent)).unwrap();
+    let rivals = rivals::Content::load(&prepared.path(Kind::RivalContent)).unwrap();
+    assert_eq!(rivals.managers, traffic.managers);
+    assert_eq!(rivals.personas.len(), 1);
+    assert_eq!(rivals.racers.len(), 1);
+    assert_eq!(rivals.personas[0].name, "SyntheticRival");
+    assert_eq!(rivals.personas[0].driving.performance, 0.2);
+    assert_eq!(rivals.personas[0].driving.grip, Some(4));
+    assert_eq!(rivals.personality_count, 2);
+    assert_eq!(rivals.personas[0].personality_index, 1);
+    assert_eq!(rivals.racers[0].position, [8., 3., -9.]);
+    assert!(rivals.racers[0].regions[0].contains([0., 1., 0.]));
+    assert!(!rivals.racers[0].regions[0].contains([21., 1., 0.]));
+    assert_eq!(traffic.personas.len(), 1);
+    assert_eq!(traffic.splines.len(), 1);
+    assert_eq!(traffic.splines[0].index, 1);
+    assert_eq!(traffic.splines[0].catalog_count, 2);
+    assert_eq!(
+        traffic.splines[0].segments[0].points,
+        [[2., 3., 4.], [12., 3., 4.]]
+    );
     vehicle_parts::Catalog::load(&prepared.path(Kind::VehicleParts), &items.catalog).unwrap();
     let parts: serde_json::Value =
         serde_json::from_slice(&std::fs::read(prepared.path(Kind::VehicleParts)).unwrap()).unwrap();
@@ -369,6 +448,22 @@ fn changed_construction_rules_do_not_reuse_an_installation_cache() {
         fingerprint(&install.game(), &changed_vehicles).unwrap()
     );
     assert!(prepare(&install.game(), &install.cache(), &changed_vehicles).is_err());
+    for mutate in [
+        |id: &mut BuildIdentity| id.traffic_spline_class_id ^= 1,
+        |id: &mut BuildIdentity| id.traffic_links.roads ^= 1,
+        |id: &mut BuildIdentity| id.rival_links.personality_library ^= 1,
+        |id: &mut BuildIdentity| id.rival_links.personality ^= 1,
+        |id: &mut BuildIdentity| id.ai_links.initial ^= 1,
+        |id: &mut BuildIdentity| id.ai_links.source ^= 1,
+        |id: &mut BuildIdentity| id.ai_links.destination ^= 1,
+    ] {
+        let mut changed = install.options();
+        mutate(&mut changed.identity);
+        assert_ne!(
+            first.fingerprint,
+            fingerprint(&install.game(), &changed).unwrap()
+        );
+    }
     assert!(!install.prepare().unwrap().built);
 }
 
@@ -472,6 +567,44 @@ fn vehicle_profiles_reject_ambiguous_missing_and_cyclic_graphs() {
         let error = install_with(&fixture).prepare().unwrap_err();
         assert!(matches!(error, Error::Content(_)), "case {case}: {error:?}");
     }
+}
+
+#[test]
+fn traffic_profiles_follow_the_constructed_subset_without_player_defaults() {
+    use vehicle_profiles::traffic;
+    let install = install_with(&synthetic::vehicles::traffic_assets());
+    let mut index = assets::AssetIndex::open(&install.game(), &install.options()).unwrap();
+    let row = traffic::extract(&mut index, synthetic::vehicles::BUNDLE).unwrap();
+    let d = traffic::Definition::from_json(&row).unwrap();
+    assert_eq!(d.asset_type, 20);
+    assert_eq!(d.asset_index, 0);
+    assert_eq!(d.profile.kinds().len(), 12);
+    assert_eq!(d.parts, [(2, true)].into());
+    assert_eq!(d.resting.mass, 1000.);
+    assert_eq!((d.team, d.mode), (1, 2));
+    assert_eq!(
+        row["health"]["profile"]["points"],
+        serde_json::json!([70, 30])
+    );
+    assert!(row.get("appearance").is_none());
+    assert!(row.get("definitions").is_none());
+    assert!(vehicle_profiles::Definition::from_json(&row).is_err());
+    for field in ["mode", "parts", "asset", "buses", "health"] {
+        let mut wrong = row.clone();
+        wrong[field] = serde_json::Value::Null;
+        assert!(traffic::Definition::from_json(&wrong).is_err(), "{field}");
+    }
+    for kind in ["rpc", "wheel", "guid_float"] {
+        let mut missing = row.clone();
+        missing["profile"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|r| r["kind"] != kind);
+        assert!(traffic::Definition::from_json(&missing).is_err());
+    }
+    let player = install_with(&assets());
+    let mut player_index = assets::AssetIndex::open(&player.game(), &player.options()).unwrap();
+    assert!(traffic::extract(&mut player_index, synthetic::vehicles::BUNDLE).is_err());
 }
 
 #[test]

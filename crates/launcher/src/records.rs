@@ -166,6 +166,10 @@ pub struct Request {
     /// `serve` it lets a play request start the game later.
     #[serde(default)]
     pub game_support: bool,
+    /// Traffic and rival amounts for this session; older requests use the
+    /// original ones.
+    #[serde(default)]
+    pub settings: crate::settings::Settings,
 }
 
 impl Request {
@@ -189,7 +193,7 @@ impl Request {
         {
             return Err(Failure::refused("Invalid launch request."));
         }
-        Ok(())
+        self.settings.validate()
     }
 }
 
@@ -377,8 +381,18 @@ mod tests {
             record_protocol: false,
             events: false,
             game_support: false,
+            settings: Default::default(),
         };
         request.validate().unwrap();
+        let mut legacy = serde_json::to_value(&request).unwrap();
+        legacy.as_object_mut().unwrap().remove("settings");
+        assert_eq!(
+            serde_json::from_value::<Request>(legacy).unwrap().settings,
+            crate::settings::Settings::default()
+        );
+        request.settings.traffic_percent = 301;
+        assert!(request.validate().is_err());
+        request.settings.traffic_percent = 100;
         let plain = vec![
             "prepare-local".to_owned(),
             "--root".to_owned(),

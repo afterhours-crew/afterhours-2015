@@ -191,6 +191,10 @@ pub fn fingerprint(root: &Path, options: &Options) -> Result<Fingerprint, Error>
         "progression":identity.progression.to_json(),
         "sequences":identity.sequences.to_json(),
         "participant_logic":identity.participant_logic.to_json(),
+        "traffic_spline_class_id":identity.traffic_spline_class_id,
+        "traffic_links":identity.traffic_links.to_json(),
+        "rival_links":identity.rival_links.to_json(),
+        "ai_links":identity.ai_links.to_json(),
     });
     text.push_str(&format!(
         "profile {}\n",

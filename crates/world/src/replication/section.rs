@@ -88,6 +88,9 @@ impl Bindings {
         if kind == Kind::ScriptedSplineGoal {
             return Record::decode_spline(span, bound, self.splines.as_ref());
         }
+        if kind == Kind::TrafficGoal {
+            return Record::decode_traffic(span, bound, self.splines.as_ref());
+        }
         Record::decode_context(
             span,
             bound,

@@ -133,12 +133,12 @@ impl Configuration {
         let distance = dot(delta, direction)?;
         let other_speed = dot(other.velocity, direction)?;
         let own_speed = dot(own.velocity, direction)?;
-        let time = finite(distance / other_speed)?;
         let delta_speed = finite(own_speed - other_speed)?;
-        if other_speed <= self.min_other_speed
-            || delta_speed.abs() >= self.max_delta_speed
-            || time >= self.max_draft_time
-        {
+        if other_speed <= self.min_other_speed || delta_speed.abs() >= self.max_delta_speed {
+            return Ok(None);
+        }
+        let time = finite(distance / other_speed)?;
+        if time >= self.max_draft_time {
             return Ok(None);
         }
         let weight = if time < self.min_draft_time {
@@ -188,6 +188,27 @@ mod tests {
             velocity: [0., 0., speed],
         }
     }
+    #[test]
+    fn perpendicular_crossing_vehicle_is_not_a_draft_or_a_numeric_fault() {
+        let own = vehicle(1, 0., 0., 20.);
+        let crossing = Vehicle {
+            identity: 2,
+            position: [3., 0., 5.],
+            velocity: [10., 0., 0.],
+        };
+        // Both broad-phase dot products are positive, but forward speed is
+        // zero. Reject it before division instead of disabling scoring.
+        assert_eq!(
+            config().evaluate(own, &[crossing]),
+            Ok(Measurement::default())
+        );
+        let valid = vehicle(3, 0., 2., 20.);
+        assert_eq!(
+            config().evaluate(own, &[crossing, valid]),
+            config().evaluate(own, &[valid])
+        );
+    }
+
     #[test]
     fn straight_draft_has_time_falloff_and_independent_maxima() {
         let own = vehicle(1, 0., 0., 20.);

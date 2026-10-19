@@ -57,6 +57,7 @@ impl Rules {
             "nibbles_guid",
             "mesh",
             "guid_float",
+            "rpc",
         ];
         let mut classes = BTreeMap::new();
         for (name, value) in entries {

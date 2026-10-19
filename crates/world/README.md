@@ -9,6 +9,14 @@ The host queues typed replication sections and ordered RPC notifications. It
 checks observer bindings, object lifetimes, loading reports, resource bounds and
 backpressure before committing a queued change. There is no captured-frame queue.
 
+Traffic-goal records encode a bounded allocation counter and an explicit asset
+reference using the installed spline catalog. Creation, empty updates and
+deletion are supported by the replication codec; traffic population and simulation
+are tracked separately in [#54](https://github.com/afterhours-crew/afterhours-2015/issues/54).
+Wandering goals use the same allocation counter and retain three constructor
+flags, with no asset or incremental body. Owned AI assignment and cleanup cover
+both goal types; this codec support alone does not establish live rivals.
+
 Supply scene serializer catalogs and current registration data explicitly. Root
 traffic slots, gameplay/startup roles and garage scene selection belong to
 deployment configuration; the library contains no game content-key table or asset
@@ -43,3 +51,25 @@ player. Vehicle binding updates the manager, participant and view atomically;
 detachment clears view seats before vehicle deletion. Creation and retry handling
 share the listener transaction, so full output queues cannot leave unpublished
 view state. Numeric view fields whose meaning is unresolved remain explicit.
+
+Traffic components support RPC-only initialization and empty updates. The shared
+vehicle constructor also accepts explicit component inputs without an inventory.
+Players keeps a separate bounded AI registry in the shared ghost namespace:
+participant, actor and car creation commits together, retry keys are per session,
+and goals and connection cleanup preserve ownership and roll back failures.
+Manager bindings atomically retain Participant/Actor and Alive-state references,
+returning add/bind/Enter RPCs. The Alive serializer may belong to another scene.
+Retirement returns Leave before relation changes and deletion, preserving other
+state members; failed registration or deletion leaves all retained state intact.
+Manager death listeners release their references without an invented remove RPC.
+Actor configuration is explicit. These APIs do not yet establish live traffic,
+client delegation or rival behavior; those remain tracked in issue #54.
+
+Driver callbacks accept an explicit map of currently delegated AI lifetimes,
+separate from owned inventory. Nitrous changes its mode, the horn changes its
+chassis flag, and burst/reinflate requests change only the selected wheel.
+Drift exit returns an event for a gameplay hook without inventing a reply or
+awarding REP. The listener commits callbacks with movement, reliable ordering
+and bounded output queues; a failed frame publishes none of those changes.
+See [#120](https://github.com/afterhours-crew/afterhours-2015/issues/120) for the
+remaining live validation of these paths.

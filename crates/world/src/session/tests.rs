@@ -1093,6 +1093,214 @@ fn host() -> Host {
     .unwrap()
 }
 
+fn motion_fixture() -> (Host, impl Fn(u16, u32) -> Section) {
+    use crate::replication::{
+        Record, Update,
+        entity::creation::{Asset, Catalog, Content},
+        section::Setup,
+        vehicle,
+    };
+    use std::sync::Arc;
+    let asset = Asset {
+        bundle: 3,
+        type_id: 4,
+        local_index: 0,
+    };
+    let content = Content::new(vec![Catalog::new(3, &[(4, 1)]).unwrap()], vec![])
+        .unwrap()
+        .with_vehicles(vec![(
+            asset,
+            vehicle::Profile::new(vec![
+                vehicle::Kind::Root {
+                    property_owner: false,
+                },
+                vehicle::Kind::Chassis,
+            ])
+            .unwrap(),
+        )])
+        .unwrap();
+    let motion = vehicle::chassis::Motion {
+        identity: 1f64.to_bits(),
+        revision: 30,
+        position: [0.; 3],
+        quaternion: [0., 0., 0., 1.],
+        velocity: [1., 0., 0.],
+        angular_velocity: [0.; 3],
+    }
+    .encode([0.; 3], &vehicle::chassis::Controls::new(4).unwrap())
+    .unwrap();
+    let binding = Arc::new(content.binding(asset).unwrap());
+    let section = move |id, revision| Section {
+        float_bits: Some(0),
+        flag: true,
+        deleted: vec![],
+        setup: Some(Setup::RawEscape([0; 3])),
+        records: vec![Record {
+            id,
+            initial: None,
+            update: Update::Vehicle {
+                binding: binding.clone(),
+                fields: vec![
+                    None,
+                    Some(vehicle::Update::Chassis(Box::new(vehicle::ChassisUpdate {
+                        physics: Some(vehicle::Physics {
+                            identity_words: [
+                                motion.identity_words[0],
+                                motion.identity_words[1],
+                                revision,
+                            ],
+                            ..motion.clone()
+                        }),
+                        flag: None,
+                        custom: None,
+                        pair: None,
+                    }))),
+                ],
+            },
+        }],
+    };
+    let mut host = host();
+    host.replication_bindings = Bindings::default().with_entities(content.clone());
+    for id in 1..=3 {
+        host.replication_bindings.bind_entity(id, asset).unwrap();
+    }
+    (host, section)
+}
+
+#[test]
+fn adjacent_car_motion_shares_one_bounded_frame_and_preserves_barriers() {
+    use crate::replication::{Update, vehicle};
+    let (mut host, snapshot) = motion_fixture();
+    let section = |id| snapshot(id, 30);
+    host.queue_replication(section(1)).unwrap();
+    host.queue_replication(section(2)).unwrap();
+    assert_eq!(host.replication_progress(), (0, 1));
+    assert_eq!(
+        host.replication_queue[0]
+            .0
+            .records
+            .iter()
+            .map(|r| r.id)
+            .collect::<Vec<_>>(),
+        [1, 2]
+    );
+    assert_eq!(
+        host.replication_bits,
+        replication_frame(&host.replication_queue[0].0, &[], 0)
+            .unwrap()
+            .len()
+    );
+    // Unknown identities must still fail atomically on the co-publication path.
+    let before = host.replication_queue.clone();
+    assert!(host.queue_replication(section(4)).is_err());
+    assert_eq!(host.replication_queue, before);
+    // Equal/regressing revisions cannot replace a newer pending sample.
+    host.queue_replication(section(1)).unwrap();
+    assert_eq!(host.replication_progress(), (0, 2));
+    // Frame limits keep two valid individual publications separate.
+    host.max_replication_frame_bits = replication_frame(&section(3), &[], 0).unwrap().len();
+    host.queue_replication(section(3)).unwrap();
+    assert_eq!(host.replication_progress(), (0, 3));
+    let mut deletion = owned_section(0);
+    deletion.setup = None;
+    deletion.deleted.push(2);
+    host.queue_replication(deletion).unwrap();
+    host.queue_replication(section(1)).unwrap();
+    assert_eq!(host.replication_progress(), (0, 5));
+    assert!(host.queue_replication(section(2)).is_err());
+    // Payload changes other than chassis motion never coalesce.
+    let mut changed = section(3);
+    let Update::Vehicle { fields, .. } = &mut changed.records[0].update else {
+        panic!()
+    };
+    let Some(vehicle::Update::Chassis(c)) = &mut fields[1] else {
+        panic!()
+    };
+    c.flag = Some(true);
+    assert!(super::motion::combine(&section(1), &changed).is_none());
+}
+
+#[test]
+fn unsent_car_and_minimap_snapshots_stay_current_during_backpressure() {
+    use crate::replication::{Initial, Record, Update, location_map, section::Setup, vehicle};
+    let (mut host, section) = motion_fixture();
+    let sample = section(1, 0);
+    let Update::Vehicle { binding, .. } = &sample.records[0].update else {
+        panic!()
+    };
+    for id in 4..=9 {
+        host.replication_bindings
+            .bind_entity(id, binding.asset())
+            .unwrap();
+    }
+    let map = |x| Record {
+        id: 10,
+        initial: None,
+        update: Update::ParticipantLocationMap(location_map::Update {
+            groups: Some(vec![location_map::Group {
+                value: 1,
+                entries: vec![location_map::Entry {
+                    participant: 1,
+                    x: location_map::Coordinate::from_world(x).unwrap(),
+                    z: location_map::Coordinate::from_world(0.).unwrap(),
+                }],
+            }]),
+        }),
+    };
+    let mut creation = section(1, 0);
+    creation.records = vec![Record {
+        initial: Some(Initial::ParticipantLocationMap),
+        ..map(0.)
+    }];
+    host.replication_bindings.apply(&creation).unwrap();
+    // The transport can be blocked for seconds. Retain one current snapshot,
+    // not a sequence of obsolete corrections to replay when it recovers.
+    for revision in 1..=120 {
+        let mut player = section(1, revision);
+        player.records.push(map(revision as f32 * 5.));
+        host.queue_replication(player).unwrap();
+        for id in 2..=9 {
+            host.queue_replication(section(id, revision)).unwrap();
+        }
+        assert_eq!(host.replication_progress(), (0, 1));
+    }
+    let retained = &host.replication_queue[0].0;
+    assert_eq!(retained.records.len(), 10);
+    assert_eq!(retained.records[1], map(600.));
+    for record in retained.records.iter().filter(|r| r.id != 10) {
+        let Update::Vehicle { fields, .. } = &record.update else {
+            panic!()
+        };
+        let Some(vehicle::Update::Chassis(c)) = &fields[1] else {
+            panic!()
+        };
+        assert_eq!(c.physics.as_ref().unwrap().identity_words[2], 120);
+    }
+    assert_eq!(
+        host.replication_bits,
+        replication_frame(retained, &[], 0).unwrap().len()
+    );
+    // Leaving the world (map membership changes) is a lifecycle boundary.
+    let mut leave = Section {
+        records: vec![Record {
+            id: 10,
+            initial: None,
+            update: Update::ParticipantLocationMap(location_map::Update {
+                groups: Some(vec![]),
+            }),
+        }],
+        ..section(1, 121)
+    };
+    host.queue_replication(leave.clone()).unwrap();
+    assert_eq!(host.replication_progress(), (0, 2));
+    leave.setup = Some(Setup::Packed {
+        tag: None,
+        width: None,
+        axes: [None; 3],
+    });
+    assert!(super::motion::combine(&section(1, 121), &leave).is_none());
+}
+
 struct Client {
     codec: Codec,
     tx: u16,

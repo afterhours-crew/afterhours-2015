@@ -337,6 +337,7 @@ impl LiveSession {
         if self.request.record_protocol {
             args.push("--record-protocol".into());
         }
+        args.extend(self.request.settings.server_arguments());
         Ok(args)
     }
 

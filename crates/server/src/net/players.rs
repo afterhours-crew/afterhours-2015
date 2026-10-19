@@ -29,8 +29,10 @@ mod launchers;
 mod purchases;
 mod refusal;
 mod returning;
+mod rivals;
 mod scoring;
 mod sequences;
+mod traffic;
 
 #[cfg(test)]
 mod deployment_tests;
@@ -84,6 +86,13 @@ pub(super) struct PlayerListener {
     progression: Option<std::sync::Arc<crate::progression::Content>>,
     vehicles: Option<std::sync::Arc<GarageContent>>,
     population: Option<Population>,
+    traffic_content: Option<std::sync::Arc<nfs_content::traffic::Content>>,
+    traffic_population: Option<crate::traffic_content::population::Population>,
+    traffic_failed: bool,
+    rival_content: Option<std::sync::Arc<crate::rival_content::Content>>,
+    rival_population: Option<crate::rival_content::population::Population>,
+    rivals_failed: bool,
+    ai: crate::ai_settings::AiSettings,
     garage_presence: nfs_world::garage::presence::Presence,
     spawn_points: nfs_world::spawn_points::SpawnPoints,
     level_poll: nfs_world::level_poll::LevelPoll,
@@ -123,6 +132,7 @@ pub(super) struct PlayerListener {
     customization: crate::customization_timer::Timers,
     world_ms: u64,
     vehicle_reports: nfs_world::vehicle_reports::Reports,
+    traffic_reports: nfs_world::vehicle_reports::Reports,
     trigger_volumes: nfs_world::trigger_volumes::Volumes,
     world_activation: Option<nfs_world::world_activation::Activation>,
     sequences: Option<nfs_world::sequences::Sequences>,
@@ -614,11 +624,24 @@ impl PlayerListener {
     /// Cars this connection's client simulates and reports movement for: the
     /// garage cars, then the world car (official E101 grants).
     pub(super) fn movement_objects(&self) -> BTreeSet<u16> {
-        Self::ready_movement(
+        let mut objects = Self::ready_movement(
             self.players
                 .owned_vehicles(HOST_SELECTOR as u8, self.persona),
             &self.world_cars,
-        )
+        );
+        objects.extend(self.delegated_ai(&self.players).keys());
+        objects
+    }
+    fn delegated_ai(&self, players: &Players) -> BTreeMap<u16, u64> {
+        let mut cars = self
+            .traffic_population
+            .as_ref()
+            .map(|p| p.delegated(players, HOST_SELECTOR as u8, self.persona))
+            .unwrap_or_default();
+        if let Some(rivals) = &self.rival_population {
+            cars.extend(rivals.delegated(players, HOST_SELECTOR as u8, self.persona));
+        }
+        cars
     }
     pub(super) fn new(persona: u64) -> Self {
         Self {
@@ -633,6 +656,13 @@ impl PlayerListener {
             progression: None,
             vehicles: None,
             population: None,
+            traffic_content: None,
+            traffic_population: None,
+            traffic_failed: false,
+            rival_content: None,
+            rival_population: None,
+            rivals_failed: false,
+            ai: crate::ai_settings::AiSettings::default(),
             garage_presence: nfs_world::garage::presence::Presence::default(),
             spawn_points: nfs_world::spawn_points::SpawnPoints::default(),
             level_poll: nfs_world::level_poll::LevelPoll::default(),
@@ -654,6 +684,7 @@ impl PlayerListener {
             customization: crate::customization_timer::Timers::default(),
             world_ms: 0,
             vehicle_reports: nfs_world::vehicle_reports::Reports::default(),
+            traffic_reports: nfs_world::vehicle_reports::Reports::default(),
             trigger_volumes: nfs_world::trigger_volumes::Volumes::default(),
             world_activation: None,
             sequences: None,
@@ -692,8 +723,26 @@ impl PlayerListener {
         self.vehicles = vehicles;
         self
     }
+    pub(super) fn with_traffic(
+        mut self,
+        content: Option<std::sync::Arc<nfs_content::traffic::Content>>,
+    ) -> Self {
+        self.traffic_content = content;
+        self
+    }
+    pub(super) fn with_ai_settings(mut self, ai: crate::ai_settings::AiSettings) -> Self {
+        self.ai = ai;
+        self
+    }
     pub(super) fn with_arrivals(mut self, arrivals: Option<nfs_world::arrival::Arrivals>) -> Self {
         self.arrivals = arrivals;
+        self
+    }
+    pub(super) fn with_rivals(
+        mut self,
+        content: Option<std::sync::Arc<crate::rival_content::Content>>,
+    ) -> Self {
+        self.rival_content = content;
         self
     }
     pub(super) fn with_returns(mut self, returns: Option<nfs_world::arrival::Arrivals>) -> Self {
@@ -739,6 +788,25 @@ impl PlayerListener {
             .map(|_| Population::new(&messages))
             .transpose()?;
         let bindings = Bindings::from_messages(&messages).map_err(|_| replication::Error::Shape)?;
+        let traffic_population = self
+            .traffic_content
+            .as_ref()
+            .map(|content| {
+                crate::traffic_content::population::Population::new(bindings.clone(), content)
+                    .map(|p| p.with_traffic_percent(self.ai.traffic_percent()))
+            })
+            .transpose()?;
+        let rival_population = self
+            .rival_content
+            .as_ref()
+            .map(|content| {
+                if population.is_none() {
+                    return Err(replication::Error::Shape);
+                }
+                crate::rival_content::population::Population::new(&bindings, content.clone())
+                    .map(|p| p.with_limit(self.ai.rival_limit()))
+            })
+            .transpose()?;
         let rpc = Rpc {
             selector: 0,
             serial: Serial::new(0).ok_or(replication::Error::Shape)?,
@@ -834,6 +902,8 @@ impl PlayerListener {
         self.world_activation = world_activation;
         self.pending.extend(sections);
         self.population = population;
+        self.traffic_population = traffic_population;
+        self.rival_population = rival_population;
         self.roles = Some(roles.clone());
         Ok(())
     }
@@ -928,6 +998,7 @@ impl Listener for PlayerListener {
         let mut deferred_sections = Vec::new();
         let mut movement_section = None;
         let mut vehicle_reports = self.vehicle_reports.clone();
+        let mut traffic_reports = self.traffic_reports.clone();
         let mut scoring_reported = BTreeSet::new();
         let mut scoring_reports = Vec::new();
         // Fuel, clock anchors and transition snapshots commit with this frame.
@@ -973,6 +1044,29 @@ impl Listener for PlayerListener {
                 Ok(_) => {}
                 Err(error) => {
                     return self.refuse(error);
+                }
+            }
+            if self.traffic_population.is_some() || self.rival_population.is_some() {
+                let delegated = self.delegated_ai(&players);
+                match traffic_reports.receive_ai(
+                    &mut players,
+                    HOST_SELECTOR as u8,
+                    self.persona,
+                    movement,
+                    &delegated,
+                    self.world_ms,
+                ) {
+                    Ok(reports) if !reports.is_empty() => {
+                        deferred_sections.extend(reports.into_iter().map(|record| Section {
+                            float_bits: None,
+                            flag: false,
+                            deleted: Vec::new(),
+                            setup: Some(Setup::RawEscape([0; 3])),
+                            records: vec![record],
+                        }))
+                    }
+                    Ok(_) => {}
+                    Err(error) => return self.refuse(error),
                 }
             }
         }
@@ -1050,7 +1144,7 @@ impl Listener for PlayerListener {
                         measurements.push((owner.participant, measurement));
                     }
                 } else if crate::glass::Glass::recognizes(&message) {
-                    let nfs_world::logic::Message::Reached { target, .. } = &message else {
+                    let nfs_world::logic::Message::Reached { target, player, .. } = &message else {
                         return Err(replication::Error::Shape);
                     };
                     let owner = population
@@ -1063,6 +1157,7 @@ impl Listener for PlayerListener {
                                 target.ghost,
                             )
                         })
+                        .or_else(|| self.rival_glass_owner(&players, target.ghost, *player))
                         .ok_or(replication::Error::UnknownObject)?;
                     let fire = glass.receive(owner, &message)?;
                     match world_cars.get(&target.ghost) {
@@ -1194,6 +1289,7 @@ impl Listener for PlayerListener {
         let mut exit_entries = Vec::new();
         let mut equipment = self.equipment.clone();
         let mut garage_commands = self.garage_commands.clone();
+        let delegated = self.delegated_ai(&players);
         for body in rpcs {
             if self.world_ms < self.return_trace_until
                 && let Some(label) = refusal::route_label(body)
@@ -1205,12 +1301,13 @@ impl Listener for PlayerListener {
                     "client call during a garage return"
                 );
             }
-            match nfs_world::vehicle_nitrous::receive(
+            match nfs_world::vehicle_nitrous::receive_with_ai(
                 &mut players,
                 HOST_SELECTOR as u8,
                 self.persona,
                 body,
                 |id| world_cars.get(&id).is_some_and(|(_, ready)| *ready),
+                &delegated,
             ) {
                 Ok(Some(report)) => {
                     tracing::info!(
@@ -1218,7 +1315,7 @@ impl Listener for PlayerListener {
                         active = report.active,
                         client_seconds = report.client_seconds,
                         changed = report.record.is_some(),
-                        "owned nitrous transition"
+                        "driver nitrous transition"
                     );
                     records.extend(report.record);
                     if let Some(fuel) = nitrous.get_mut(&report.vehicle) {
@@ -1230,6 +1327,42 @@ impl Listener for PlayerListener {
                         }
                         nitrous_reported.insert(report.vehicle);
                     }
+                    continue;
+                }
+                Ok(None) => {}
+                Err(error) => return self.refuse_rpc(error, body),
+            }
+            match nfs_world::vehicle_chassis::receive(
+                &mut players,
+                HOST_SELECTOR as u8,
+                self.persona,
+                body,
+                |id| world_cars.get(&id).is_some_and(|(_, ready)| *ready),
+                &delegated,
+            ) {
+                Ok(Some(nfs_world::vehicle_chassis::Report::Horn { record, .. })) => {
+                    records.extend(record.map(|r| *r));
+                    continue;
+                }
+                Ok(Some(nfs_world::vehicle_chassis::Report::DriftExit { vehicle, value })) => {
+                    // No challenge gameplay hook is registered in free roam.
+                    // The independent REP graphs retain their own query inputs.
+                    tracing::debug!(vehicle, value, "driver drift exit without a challenge hook");
+                    continue;
+                }
+                Ok(None) => {}
+                Err(error) => return self.refuse_rpc(error, body),
+            }
+            match nfs_world::vehicle_wheels::receive(
+                &mut players,
+                HOST_SELECTOR as u8,
+                self.persona,
+                body,
+                |id| world_cars.get(&id).is_some_and(|(_, ready)| *ready),
+                &delegated,
+            ) {
+                Ok(Some(report)) => {
+                    records.extend(report.record);
                     continue;
                 }
                 Ok(None) => {}
@@ -1912,13 +2045,26 @@ impl Listener for PlayerListener {
             .as_ref()
             .and_then(|roles| roles.free_roam.as_ref())
         {
-            match players.sync_location_service(
-                HOST_SELECTOR as u8,
-                self.persona,
-                &map_cars,
-                [0.; 3],
-                catalog.location,
-            ) {
+            // Roaming rivals have their own map/minimap list (slot 0).
+            match self.rival_map(&players).and_then(|rivals| {
+                let mut batch = players.sync_location_service(
+                    HOST_SELECTOR as u8,
+                    self.persona,
+                    &map_cars,
+                    [0.; 3],
+                    catalog.location,
+                )?;
+                if let Some(rivals) = rivals {
+                    batch.extend(players.sync_rival_locations(
+                        HOST_SELECTOR as u8,
+                        self.persona,
+                        &rivals,
+                        catalog.location,
+                        self.world_ms,
+                    )?);
+                }
+                Ok(batch)
+            }) {
                 Ok(mut batch) => {
                     // One accepted movement sample can change both chassis and
                     // minimap position. Two frames per sample can outrun the
@@ -2005,6 +2151,7 @@ impl Listener for PlayerListener {
         self.world_cars = world_cars;
         self.trigger_volumes = trigger_volumes;
         self.vehicle_reports = vehicle_reports;
+        self.traffic_reports = traffic_reports;
         self.world_activation = world_activation;
         self.deferred_deletions = deferred_deletions;
         self.pending_spawns.extend(scheduled_spawns);

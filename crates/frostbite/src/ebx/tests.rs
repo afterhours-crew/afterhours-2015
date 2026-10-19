@@ -52,6 +52,66 @@ fn sample() -> Vec<u8> {
 }
 
 #[test]
+fn nested_struct_arrays_preserve_empty_and_different_length_rows() {
+    let rows = [vec![], vec![2., 3.], vec![9.]]
+        .into_iter()
+        .map(|values| {
+            vec![
+                ("Before", Field::Int(7)),
+                (
+                    "Path",
+                    Field::Struct(
+                        "Path",
+                        vec![(
+                            "Points",
+                            Field::Structs(
+                                "Point",
+                                values
+                                    .into_iter()
+                                    .map(|value| vec![("x", Field::Float(value))])
+                                    .collect(),
+                            ),
+                        )],
+                    ),
+                ),
+                ("After", Field::Int(11)),
+            ]
+        })
+        .collect();
+    let data = PartitionWriter::default().build(
+        PART,
+        "Nested",
+        INST,
+        vec![("Rows", Field::Structs("Row", rows))],
+    );
+    let limits = Limits::default();
+    let part = Partition::parse(&data, &limits).unwrap();
+    let objects = part.objects(&limits).unwrap();
+    let rows = objects[0].fields.get("Rows").unwrap().as_array().unwrap();
+    for (row, expected) in rows.iter().zip([vec![], vec![2., 3.], vec![9.]]) {
+        let fields = row.as_fields().unwrap();
+        assert_eq!(fields.get("Before"), Some(&Value::Int32(7)));
+        assert_eq!(fields.get("After"), Some(&Value::Int32(11)));
+        let points = fields
+            .get("Path")
+            .unwrap()
+            .as_fields()
+            .unwrap()
+            .get("Points")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert_eq!(points.len(), expected.len());
+        for (point, value) in points.iter().zip(expected) {
+            assert_eq!(
+                point.as_fields().unwrap().get("x"),
+                Some(&Value::Float32(value))
+            );
+        }
+    }
+}
+
+#[test]
 fn constructed_partition_decodes_every_field_kind() {
     let data = sample();
     let limits = Limits::default();

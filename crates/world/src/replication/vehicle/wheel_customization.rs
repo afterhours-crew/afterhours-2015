@@ -31,6 +31,14 @@ pub struct Definitions {
     parts: BTreeMap<Guid, Input>,
 }
 impl Definitions {
+    /// Number of authored rim variants, before the vehicle-specific fit filter.
+    /// Style presets clamp to this count when selecting their stored variant.
+    pub fn rim_variant_count(&self, guid: &Guid) -> Option<usize> {
+        match &self.parts.get(guid)?.geometry {
+            Geometry::Rim(rim) => Some(rim.sizes.len()),
+            _ => None,
+        }
+    }
     /// Validate a requested saved size against this rim and axle's authored
     /// fit range. Do not silently persist a value that rendering would replace.
     pub fn allows_size(&self, guid: &Guid, size: u8, baseline: [f32; 2]) -> bool {

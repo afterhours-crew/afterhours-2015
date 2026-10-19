@@ -11,7 +11,9 @@ pub use nfs_frostbite::synthetic::{Asset, Field, PartitionWriter};
 use nfs_services::persistent::required_tables;
 use std::path::Path;
 pub mod progression;
+pub mod rivals;
 pub mod sequences;
+pub mod traffic;
 pub mod vehicles;
 
 pub const TEMPLATE_RVA: u32 = 0x1010;
@@ -908,6 +910,10 @@ pub fn write(root: &Path, assets: &[Asset]) -> std::io::Result<(Options, [u8; 64
             progression: progression::rules(),
             sequences: sequences::rules(),
             participant_logic: crate::BuildIdentity::supported().participant_logic,
+            traffic_spline_class_id: 72,
+            traffic_links: traffic::links(),
+            rival_links: crate::BuildIdentity::supported().rival_links,
+            ai_links: crate::BuildIdentity::supported().ai_links,
             scenes: crate::scenes::Rules {
                 level: RUNTIME_LEVEL.to_owned(),
                 classes: [
@@ -916,6 +922,53 @@ pub fn write(root: &Path, assets: &[Asset]) -> std::io::Result<(Options, [u8; 64
                     ("LogicPrefabReferenceObjectData", None),
                     ("LogicPrefabBlueprint", None),
                     ("ScriptedAISplineEntityData", None),
+                    ("TrafficSplineEntityData", None),
+                    ("PersonaEntityData", None),
+                    ("PersonaSetEntityData", None),
+                    ("TrafficManagerEntityData", None),
+                    (
+                        "UpdateableParticipantStateEntityData",
+                        Some(nfs_world::replication::sublevel::Kind::RpcReferences),
+                    ),
+                    (
+                        "GetAiSpawnParametersParticipantStateEntityData",
+                        Some(nfs_world::replication::sublevel::Kind::RpcReferences),
+                    ),
+                    (
+                        "SpawningParticipantStateEntityData",
+                        Some(nfs_world::replication::sublevel::Kind::RpcReferences),
+                    ),
+                    (
+                        "ParticipantStateEntityData",
+                        Some(nfs_world::replication::sublevel::Kind::RpcReferences),
+                    ),
+                    (
+                        "ParticipantTransitionEntityData",
+                        Some(nfs_world::replication::sublevel::Kind::Rpc),
+                    ),
+                    (
+                        "AiResetTrackerEntityData",
+                        Some(nfs_world::replication::sublevel::Kind::Rpc),
+                    ),
+                    (
+                        "StreamedTriggerVolumeCollectionEntityData",
+                        Some(nfs_world::replication::sublevel::Kind::Rpc),
+                    ),
+                    ("RoamingRacerManagerEntityData", None),
+                    ("RoamingRacerEntityData", None),
+                    ("SpecificVehicleProviderEntityData", None),
+                    ("RacerSpawnPointEntityData", None),
+                    ("VolumeVectorShapeData", None),
+                    ("PersonalityLibraryEntityData", None),
+                    ("PersonalityEntityData", None),
+                    (
+                        "AiParticipantManagerEntityData",
+                        Some(nfs_world::replication::sublevel::Kind::RpcReferences),
+                    ),
+                    (
+                        "AiActorManagerEntityData",
+                        Some(nfs_world::replication::sublevel::Kind::RpcPairs),
+                    ),
                     (
                         "StateSequenceManagerEntityData",
                         Some(nfs_world::replication::sublevel::Kind::Rpc),

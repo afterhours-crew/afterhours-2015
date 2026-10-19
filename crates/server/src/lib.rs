@@ -7,6 +7,7 @@
 //! bounded Tokio socket edge. Static content is explicit configuration; account
 //! state is durable and session/world state is isolated per connection.
 extern crate self as nfs_server;
+pub mod ai_settings;
 pub mod auxiliary;
 pub mod bank_account;
 pub mod cli;
@@ -34,6 +35,7 @@ pub mod progression;
 pub mod recommendations;
 pub mod record;
 pub mod reputation_account;
+pub mod rival_content;
 pub mod scene_roles;
 pub mod scoring;
 pub mod seeds;
@@ -43,6 +45,7 @@ pub mod startup;
 pub mod startup_branch;
 pub mod startup_profile;
 pub mod telemetry;
+pub mod traffic_content;
 pub mod user_lookup;
 pub mod user_settings;
 pub mod vehicle_content;

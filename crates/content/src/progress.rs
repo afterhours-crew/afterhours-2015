@@ -36,6 +36,8 @@ impl Kind {
             Self::VehicleProfiles => "car components, handling and appearance",
             Self::ProgressionContent => "career objectives and world links",
             Self::SequenceContent => "garage entry and exit sequences",
+            Self::TrafficContent => "traffic vehicles and road splines",
+            Self::RivalContent => "roaming rivals, vehicle presets and regions",
         }
     }
 }
