@@ -138,12 +138,17 @@ impl Reports {
                     },
                 );
             }
-            output.extend(match target {
-                Target::Player => world.set_vehicle_physics(connection, persona, id, physics)?,
-                Target::Ai(key) => {
-                    world.set_ai_vehicle_physics(connection, persona, key, physics)?
+            match target {
+                Target::Player => {
+                    output.extend(world.set_vehicle_physics(connection, persona, id, physics)?)
                 }
-            });
+                Target::Ai(key) => {
+                    output.extend(world.set_ai_vehicle_physics(connection, persona, key, physics)?);
+                    // The first accepted report proves the client drives the car;
+                    // only then is its actor's control suppression cleared.
+                    output.extend(world.release_ai_control(connection, persona, key)?);
+                }
+            }
         }
         *self = next;
         *players = world;

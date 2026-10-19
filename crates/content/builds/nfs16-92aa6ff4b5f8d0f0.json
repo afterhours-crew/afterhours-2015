@@ -1275,7 +1275,8 @@
   "ai_links": {
     "initial": 3681194412,
     "source": 4029663452,
-    "destination": 2238590467
+    "destination": 2238590467,
+    "reset_volumes": 522843166
   },
   "rival_links": {
     "racers": 3466401632,

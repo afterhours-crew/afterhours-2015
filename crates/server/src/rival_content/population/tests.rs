@@ -64,6 +64,10 @@ fn fixture_mode(
                 scene: keys[0],
                 serializer: 3,
             },
+            reset_volumes: ai::State {
+                scene: keys[0],
+                serializer: 4,
+            },
             scene: keys[0],
             actors: 1,
             participants: 2,
@@ -134,6 +138,7 @@ fn fixture_mode(
                 sublevel::Kind::RpcPairs,
                 sublevel::Kind::RpcReferences,
                 sublevel::Kind::RpcReferences,
+                sublevel::Kind::Rpc,
             ],
         )
         .unwrap(),
@@ -196,7 +201,40 @@ fn authored_pose_personality_wander_and_mesh_namespace_are_published() {
     let previous = registry.prepare(&["player/other_mesh"]).unwrap().bindings[0].level;
     let c = spawn(&mut p, &mut world, &mut registry, 1);
     let ids = c.spawned.unwrap();
-    assert_eq!((p.count(), world.ai_count(), c.calls.len()), (1, 1, 3));
+    assert_eq!((p.count(), world.ai_count(), c.calls.len()), (1, 1, 4));
+    assert!(matches!(
+        c.calls[3],
+        HostRpc::WorldActivation(nfs_world::world_activation::Notification {
+            participant: Some(p),
+            call: nfs_world::world_activation::Call::StreamedParticipant,
+            ..
+        }) if p == ids.participant
+    ));
+    // Official rivals are world cars, not garage displays: the root's
+    // customization flag stays clear so the client keeps updating the car.
+    let Initial::Vehicle { creation, .. } = &world.objects().get(ids.vehicle).unwrap().initial
+    else {
+        panic!()
+    };
+    let root = creation
+        .fields
+        .iter()
+        .find_map(|f| match f {
+            vehicle::Initial::Root(r) => Some(r),
+            _ => None,
+        })
+        .unwrap();
+    assert!(!root.fine_flag && !root.flag);
+    let spawn_velocity = creation
+        .fields
+        .iter()
+        .find_map(|f| match f {
+            vehicle::Initial::Chassis(c) => {
+                Some(c.vectors[1].map(|v| v.map_or(0., f32::from_bits)))
+            }
+            _ => None,
+        })
+        .unwrap();
     assert_eq!(
         p.delegated(&world, 1, 100),
         BTreeMap::from([(ids.vehicle, RIVAL_KEY_START)])
@@ -217,7 +255,8 @@ fn authored_pose_personality_wander_and_mesh_namespace_are_published() {
             }
         })
         .unwrap();
-    assert!(actor.flag_a && !actor.flag_b);
+    // Created holding control; the car's first client report releases it.
+    assert!(actor.flag_a && actor.flag_b);
     assert_eq!((actor.word_a, actor.word_b), (11, 15));
     assert_rival_driving_mode(&c, ids.actor);
     let goal = c
@@ -238,9 +277,16 @@ fn authored_pose_personality_wander_and_mesh_namespace_are_published() {
         .decode([0.; 3])
         .unwrap();
     // The shared native spawner lifts this zero-suspension fixture by one up
-    // vector. It starts with the installed reset mode, without a player timer.
+    // vector. It starts with the installed reset mode, without a player timer,
+    // already moving at the wander speed along its heading (E981).
     assert_eq!(motion.position, [5., 1., 2.]);
-    assert_eq!(motion.velocity, [0.; 3]);
+    let speed = spawn_velocity.iter().map(|v| v * v).sum::<f32>().sqrt();
+    assert!((speed - WANDER_SPEED).abs() < 1e-3, "{speed}");
+    // The chassis state carries the same velocity at its packed precision.
+    for (state, spawn) in motion.velocity.iter().zip(spawn_velocity) {
+        assert!((state - spawn).abs() <= 1. / 32., "{state} {spawn}");
+    }
+    assert!(motion.velocity.iter().any(|v| *v != 0.));
     let controls = &world
         .ai_vehicle_physics(1, 100, RIVAL_KEY_START)
         .unwrap()

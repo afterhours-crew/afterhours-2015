@@ -17,18 +17,21 @@ pub struct Links {
     pub initial: u32,
     pub source: u32,
     pub destination: u32,
+    /// AiResetTrackerEntityData link to its streamed trigger-volume collection.
+    pub reset_volumes: u32,
 }
 fn bad(reason: &str) -> Error {
     Error::Content(format!("AI lifecycle: {reason}"))
 }
 impl Links {
     pub(crate) fn to_json(self) -> Json {
-        json!({"initial":self.initial,"source":self.source,"destination":self.destination})
+        json!({"initial":self.initial,"source":self.source,"destination":self.destination,
+            "reset_volumes":self.reset_volumes})
     }
     pub(crate) fn from_json(v: &Json) -> Result<Self, Error> {
         let o = v
             .as_object()
-            .filter(|o| o.len() == 3)
+            .filter(|o| o.len() == 4)
             .ok_or_else(|| bad("ports"))?;
         let get = |key| {
             o.get(key)
@@ -40,9 +43,10 @@ impl Links {
             initial: get("initial")?,
             source: get("source")?,
             destination: get("destination")?,
+            reset_volumes: get("reset_volumes")?,
         };
-        let ports = BTreeSet::from([out.initial, out.source, out.destination]);
-        if ports.len() != 3 || ports.contains(&0) {
+        let ports = BTreeSet::from([out.initial, out.source, out.destination, out.reset_volumes]);
+        if ports.len() != 4 || ports.contains(&0) {
             return Err(bad("distinct ports"));
         }
         Ok(out)
@@ -153,6 +157,47 @@ pub(crate) fn resolve(
     Ok(State { scene, serializer })
 }
 
+/// The single AI reset tracker's streamed trigger-volume collection. The host
+/// must own its membership (`ClientControlled` false, `NotifyServer` true).
+fn reset_collection<S: Source>(
+    graph: &mut Graph<S>,
+    roots: &[Site],
+    ports: Links,
+) -> Result<Site, Error> {
+    let mut trackers = Vec::new();
+    for root in roots {
+        for node in graph.read(root.clone())? {
+            if node.object.class == "AiResetTrackerEntityData" && !trackers.contains(&node.site) {
+                trackers.push(node.site);
+            }
+        }
+    }
+    let [tracker] = trackers.as_slice() else {
+        return Err(bad("reset tracker count"));
+    };
+    let collection = one(graph, tracker, ports.reset_volumes)?;
+    let object = graph.object(&collection)?;
+    let flag = |name| object.fields.get(name).and_then(Value::as_bool);
+    if object.class != "StreamedTriggerVolumeCollectionEntityData"
+        || flag("ClientControlled") != Some(false)
+        || flag("NotifyServer") != Some(true)
+    {
+        return Err(bad("reset volume collection"));
+    }
+    Ok(collection)
+}
+
+pub(crate) fn resolve_reset_volumes(
+    graph: &mut Graph<crate::scan::Assets>,
+    lookup: &mut SceneLookup,
+    ports: Links,
+) -> Result<State, Error> {
+    let roots: Vec<_> = lookup.roots.values().cloned().collect();
+    let collection = reset_collection(graph, &roots, ports)?;
+    let (scene, serializer) = lookup.endpoint(graph, &collection)?;
+    Ok(State { scene, serializer })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,6 +207,7 @@ mod tests {
             initial: 11,
             source: 22,
             destination: 33,
+            reset_volumes: 44,
         };
         let mut memory = Memory::default();
         let mut edges = vec![edge(local(1), ports.initial, local(2), 0)];
@@ -212,6 +258,71 @@ mod tests {
             ports,
         )
     }
+    fn reset_fixture(collections: &[(bool, bool)], trackers: usize) -> Memory {
+        let mut memory = Memory::default();
+        let mut objects = Vec::new();
+        let mut edges = Vec::new();
+        for t in 0..trackers {
+            objects.push(local(1 + t));
+            memory.put("s", 1 + t, "AiResetTrackerEntityData", &[]);
+            for (c, (client, notify)) in collections.iter().enumerate() {
+                let index = 10 + c;
+                edges.push(edge(local(1 + t), 44, local(index), 0));
+                memory.put(
+                    "s",
+                    index,
+                    "StreamedTriggerVolumeCollectionEntityData",
+                    &[
+                        ("NotifyServer", Value::Bool(*notify)),
+                        ("ClientControlled", Value::Bool(*client)),
+                    ],
+                );
+            }
+        }
+        // An unrelated collection linked from a different port must be ignored.
+        objects.push(local(20));
+        memory.put(
+            "s",
+            20,
+            "StreamedTriggerVolumeCollectionEntityData",
+            &[
+                ("NotifyServer", Value::Bool(true)),
+                ("ClientControlled", Value::Bool(false)),
+            ],
+        );
+        edges.push(edge(local(1), 55, local(20), 0));
+        objects.extend((10..10 + collections.len()).map(local));
+        memory.put(
+            "s",
+            0,
+            "SubWorldData",
+            &[
+                ("Objects", Value::Array(objects)),
+                ("LinkConnections", Value::Array(edges)),
+            ],
+        );
+        memory
+    }
+
+    #[test]
+    fn reset_volumes_follow_the_unique_tracker_to_a_server_controlled_collection() {
+        let (_, ports) = fixture();
+        let roots = [Site::root("s")];
+        let mut memory = reset_fixture(&[(false, true)], 1);
+        let site = reset_collection(&mut Graph::new(&mut memory), &roots, ports).unwrap();
+        assert_eq!(site.key, ("s".into(), 10));
+        for (collections, trackers) in [
+            (vec![(false, true)], 0),
+            (vec![(false, true)], 2),
+            (vec![(false, true), (false, true)], 1),
+            (vec![(true, true)], 1),
+            (vec![(false, false)], 1),
+        ] {
+            let mut memory = reset_fixture(&collections, trackers);
+            assert!(reset_collection(&mut Graph::new(&mut memory), &roots, ports).is_err());
+        }
+    }
+
     #[test]
     fn follows_edges_independently_of_order_and_rejects_incomplete_or_ambiguous_lifecycle() {
         let (mut memory, ports) = fixture();

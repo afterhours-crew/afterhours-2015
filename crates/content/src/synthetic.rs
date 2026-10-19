@@ -946,6 +946,14 @@ pub fn write(root: &Path, assets: &[Asset]) -> std::io::Result<(Options, [u8; 64
                         "ParticipantTransitionEntityData",
                         Some(nfs_world::replication::sublevel::Kind::Rpc),
                     ),
+                    (
+                        "AiResetTrackerEntityData",
+                        Some(nfs_world::replication::sublevel::Kind::Rpc),
+                    ),
+                    (
+                        "StreamedTriggerVolumeCollectionEntityData",
+                        Some(nfs_world::replication::sublevel::Kind::Rpc),
+                    ),
                     ("RoamingRacerManagerEntityData", None),
                     ("RoamingRacerEntityData", None),
                     ("SpecificVehicleProviderEntityData", None),

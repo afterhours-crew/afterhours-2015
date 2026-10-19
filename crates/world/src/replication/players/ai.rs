@@ -17,6 +17,10 @@ pub struct Managers {
     pub participants: usize,
     pub actors: usize,
     pub alive: State,
+    /// Server-controlled streamed trigger-volume collection consumed by the
+    /// client's AI reset tracker. Its membership is not retained in scene
+    /// state; the host enters each spawned AI vehicle and leaves it at removal.
+    pub reset_volumes: State,
 }
 
 /// Installed participant-state serializer, possibly in a different scene.
@@ -31,6 +35,8 @@ pub struct Bound {
     pub add: Option<crate::participants::Notification>,
     pub bind: Option<crate::actors::Binding>,
     pub enter: Option<crate::participants::Notification>,
+    /// Reset-volume tracking for the bound vehicle; follows `enter` on wire.
+    pub tracked: Option<crate::world_activation::Notification>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -60,6 +66,8 @@ pub struct Spawned {
 pub struct Removed {
     /// Leave the live state before publishing relation changes or deletion.
     pub leave: Vec<crate::participants::Notification>,
+    /// Reset-volume leave for each tracked vehicle, sent after `leave`.
+    pub untracked: Vec<crate::world_activation::Notification>,
     /// Detach relations before publishing the deletion list.
     pub records: Vec<Record>,
     pub deleted: Vec<u16>,
@@ -72,6 +80,9 @@ pub(super) struct Instance {
     ids: Ids,
     goal: Option<u16>,
     managers: Option<Managers>,
+    /// The requested control-suppression flag has been cleared after the
+    /// car's first accepted client report.
+    released: bool,
 }
 
 impl Players {
@@ -179,6 +190,7 @@ impl Players {
                 ids,
                 goal: None,
                 managers: None,
+                released: false,
             },
         );
         Ok(Some(Spawned {
@@ -189,6 +201,8 @@ impl Players {
 
     /// Bind the AI participant and actor to their installed scene managers.
     /// Manager/Alive snapshots and their RPCs commit together; retry is inert.
+    /// The first binding also enters the car's participant into the reset-volume
+    /// collection, as the official host does once the car exists (E981).
     pub fn bind_ai_managers(
         &mut self,
         connection: u8,
@@ -196,8 +210,12 @@ impl Players {
         key: u64,
         managers: Managers,
     ) -> Result<Bound, Error> {
-        if managers.alive.scene == managers.scene
-            && [managers.participants, managers.actors].contains(&managers.alive.serializer)
+        let manager_fields = [managers.participants, managers.actors];
+        if (managers.alive.scene == managers.scene
+            && manager_fields.contains(&managers.alive.serializer))
+            || (managers.reset_volumes.scene == managers.scene
+                && manager_fields.contains(&managers.reset_volumes.serializer))
+            || managers.reset_volumes == managers.alive
         {
             return Err(Error::Shape);
         }
@@ -208,10 +226,15 @@ impl Players {
         if instance.managers.is_some_and(|old| old != managers) {
             return Err(Error::DuplicateObject);
         }
+        let first = instance.managers.is_none();
         let mut next = self.objects.clone();
         let mut bound =
             next.bind_ai_managers(managers, instance.ids.participant, instance.ids.actor)?;
         bound.enter = next.ai_state(managers.alive, instance.ids.participant, true)?;
+        if first {
+            bound.tracked =
+                Some(next.ai_tracking(managers.reset_volumes, instance.ids.participant, true)?);
+        }
         self.objects = next;
         self.ai
             .get_mut(&(connection, persona, key))
@@ -308,7 +331,46 @@ impl Players {
             result
                 .leave
                 .extend(next.ai_state(managers.alive, instance.ids.participant, false)?);
+            result.untracked.push(next.ai_tracking(
+                managers.reset_volumes,
+                instance.ids.participant,
+                false,
+            )?);
             next.release_ai_managers(managers, instance.ids.participant, instance.ids.actor)?;
+        }
+        // A listed rival must leave the session's map before its participant
+        // can be deleted; the map update precedes the deletion on wire.
+        if let Some(&(map, _)) = self.rival_maps.get(&(connection, persona)) {
+            let Some(state::Object {
+                current: Update::ParticipantLocationMap(current),
+                ..
+            }) = next.get(map)
+            else {
+                return Err(Error::TypeMismatch);
+            };
+            let groups: Vec<_> = current
+                .groups
+                .iter()
+                .flatten()
+                .map(|g| super::super::location_map::Group {
+                    value: g.value,
+                    entries: g
+                        .entries
+                        .iter()
+                        .filter(|e| e.participant != instance.ids.participant)
+                        .cloned()
+                        .collect(),
+                })
+                .filter(|g| !g.entries.is_empty())
+                .collect();
+            if current.groups.as_ref() != Some(&groups) {
+                result.records.extend(next.change(
+                    map,
+                    Update::ParticipantLocationMap(super::super::location_map::Update {
+                        groups: Some(groups),
+                    }),
+                )?);
+            }
         }
         result.records.extend(next.change(
             instance.ids.participant,
@@ -356,11 +418,47 @@ impl Players {
         for (c, p, k) in keys {
             let removed = next.remove_ai_vehicle(c, p, k)?;
             result.leave.extend(removed.leave);
+            result.untracked.extend(removed.untracked);
             result.records.extend(removed.records);
             result.deleted.extend(removed.deleted);
         }
         *self = next;
         Ok(result)
+    }
+
+    /// Clear the actor's control-suppression flag once the car's client has
+    /// reported it. Official traffic and rival actors are created with
+    /// `flag_b` set and cleared one tick after the first report (E981); the
+    /// client sends zero control while it is set. Later reports are inert.
+    pub fn release_ai_control(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        key: u64,
+    ) -> Result<Option<Record>, Error> {
+        let instance = self
+            .ai
+            .get(&(connection, persona, key))
+            .ok_or(Error::UnknownObject)?;
+        if instance.released || !instance.request.flags[1] {
+            return Ok(None);
+        }
+        let actor = instance.ids.actor;
+        let record = self
+            .objects
+            .change(
+                actor,
+                Update::Actor(ActorUpdate {
+                    flag_b: Some(false),
+                    ..ActorUpdate::default()
+                }),
+            )?
+            .ok_or(Error::Shape)?;
+        self.ai
+            .get_mut(&(connection, persona, key))
+            .ok_or(Error::UnknownObject)?
+            .released = true;
+        Ok(Some(record))
     }
 }
 
@@ -509,6 +607,73 @@ mod tests {
         assert_eq!(
             world.remove_ai_for_connection(2).unwrap(),
             Removed::default()
+        );
+    }
+
+    #[test]
+    fn suppressed_control_is_released_once_per_spawn_and_isolated() {
+        let mut world = world();
+        let (car, content) = car();
+        let held = Request {
+            flags: [true, true],
+            ..request(1)
+        };
+        let a = world
+            .spawn_ai_vehicle(1, 100, held.clone(), car.clone(), &content)
+            .unwrap()
+            .unwrap();
+        let Some(Initial::Actor(init)) = &a.records[1].initial else {
+            panic!()
+        };
+        assert!(init.flag_a && init.flag_b);
+        world
+            .spawn_ai_vehicle(2, 200, held, car.clone(), &content)
+            .unwrap();
+        world
+            .spawn_ai_vehicle(1, 100, request(2), car, &content)
+            .unwrap();
+        // Unknown spawn keys and other sessions are rejected without changes.
+        let before = world.objects.snapshot();
+        assert_eq!(
+            world.release_ai_control(1, 200, 1),
+            Err(Error::UnknownObject)
+        );
+        assert_eq!(world.objects.snapshot(), before);
+        let record = world.release_ai_control(1, 100, 1).unwrap().unwrap();
+        assert_eq!(record.id, a.ids.actor);
+        assert!(matches!(
+            record.update,
+            Update::Actor(ActorUpdate {
+                flag_b: Some(false),
+                flag_a: None,
+                references_a: None,
+                ..
+            })
+        ));
+        record.encode().unwrap();
+        assert!(matches!(
+            world.objects.get(a.ids.actor).unwrap().current,
+            Update::Actor(ActorUpdate {
+                flag_b: Some(false),
+                ..
+            })
+        ));
+        // Repeated reports and actors created unsuppressed stay inert.
+        assert_eq!(world.release_ai_control(1, 100, 1), Ok(None));
+        assert_eq!(world.release_ai_control(1, 100, 2), Ok(None));
+        // The other session's identical spawn is still held.
+        let other = world.ai_ids(2, 200, 1).unwrap();
+        assert!(matches!(
+            world.objects.get(other.actor).unwrap().current,
+            Update::Actor(ActorUpdate {
+                flag_b: Some(true),
+                ..
+            })
+        ));
+        world.remove_ai_vehicle(1, 100, 1).unwrap();
+        assert_eq!(
+            world.release_ai_control(1, 100, 1),
+            Err(Error::UnknownObject)
         );
     }
 
@@ -683,6 +848,7 @@ mod tests {
                 sublevel::Kind::RpcPairs,
                 sublevel::Kind::RpcReferences,
                 sublevel::Kind::RpcReferences,
+                sublevel::Kind::Rpc,
             ],
         )
         .unwrap();
@@ -702,6 +868,10 @@ mod tests {
                 alive: State {
                     scene: key,
                     serializer: 3,
+                },
+                reset_volumes: State {
+                    scene: key,
+                    serializer: 4,
                 },
                 scene: key,
                 participants: 2,
@@ -763,7 +933,63 @@ mod tests {
             Err(Error::UnknownObject)
         );
         assert_eq!(world.objects.snapshot(), before);
+        // The reset-volume collection must be a plain RPC field in a live scene.
+        for reset_volumes in [
+            State {
+                scene: managers.scene,
+                serializer: 2,
+            },
+            State {
+                scene: 999,
+                serializer: 4,
+            },
+        ] {
+            assert!(
+                world
+                    .bind_ai_managers(
+                        1,
+                        100,
+                        1,
+                        Managers {
+                            reset_volumes,
+                            ..managers
+                        }
+                    )
+                    .is_err()
+            );
+            assert_eq!(world.objects.snapshot(), before);
+        }
         let bound = world.bind_ai_managers(1, 100, 1, managers).unwrap();
+        let tracked = bound.tracked.unwrap();
+        assert_eq!(tracked.participant, Some(a.participant));
+        assert_eq!(
+            tracked.call,
+            crate::world_activation::Call::StreamedParticipant
+        );
+        assert_eq!(
+            (
+                tracked.endpoint.scene,
+                tracked.endpoint.selector,
+                tracked.endpoint.serial.value()
+            ),
+            (scene, 3, 7)
+        );
+        // Method 3 with no arguments: 5 zero padding bits after the method.
+        let wire = tracked.encode().unwrap();
+        let envelope = nfs_protocol::world::rpc::Envelope::decode(
+            wire.span(),
+            nfs_protocol::world::rpc::Limits {
+                max_input_bits: 163,
+                max_references: 2,
+                max_payload_bytes: 7,
+            },
+        )
+        .unwrap();
+        assert_eq!(envelope.references(), &[scene, a.participant]);
+        let route = envelope
+            .route(nfs_protocol::world::rpc::RouteProfile::ClientReceive)
+            .unwrap();
+        assert_eq!((route.selector(), route.method_index()), (3, 3));
         let enter = bound.enter.unwrap();
         assert_eq!(enter.participant, a.participant);
         assert_eq!(enter.call, crate::participants::Call::Enter);
@@ -833,6 +1059,14 @@ mod tests {
         assert_eq!(removed.leave[0].participant, a.participant);
         assert_eq!(removed.leave[0].call, crate::participants::Call::Leave);
         removed.leave[0].encode().unwrap();
+        assert_eq!(removed.untracked.len(), 1);
+        assert_eq!(removed.untracked[0].participant, Some(a.participant));
+        assert_eq!(removed.untracked[0].endpoint, tracked.endpoint);
+        assert_eq!(
+            removed.untracked[0].call,
+            crate::world_activation::Call::StreamedParticipantLeave
+        );
+        removed.untracked[0].encode().unwrap();
         let Initial::SubLevel { fields, .. } = &world.objects.get(scene).unwrap().initial else {
             panic!()
         };

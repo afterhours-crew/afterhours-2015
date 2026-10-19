@@ -198,6 +198,9 @@ impl Population {
             changes
                 .leave
                 .extend(removed.leave.into_iter().map(HostRpc::Participant));
+            changes
+                .leave
+                .extend(removed.untracked.into_iter().map(HostRpc::WorldActivation));
             changes.deleted.extend(removed.deleted);
             let car = next.cars.remove(&key).ok_or(Error::UnknownObject)?;
             let count = next
@@ -339,7 +342,7 @@ impl Population {
                 ai::Request {
                     key,
                     name: selected.name.as_bytes().to_vec(),
-                    flags: [true, false],
+                    flags: [true, true],
                     words: [selected.index, u16::MAX],
                     mode: 0,
                 },
@@ -363,6 +366,9 @@ impl Population {
         changes.calls.extend(bound.add.map(HostRpc::Participant));
         changes.calls.extend(bound.bind.map(HostRpc::Actor));
         changes.calls.extend(bound.enter.map(HostRpc::Participant));
+        changes
+            .calls
+            .extend(bound.tracked.map(HostRpc::WorldActivation));
         let spline = content.splines.get(placement.spline).ok_or(Error::Shape)?;
         let level = self
             .catalogs

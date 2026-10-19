@@ -206,7 +206,7 @@ mod tests {
         let (section, calls) = &listener.pending_entries[0];
         assert!(section.records.is_empty() && section.deleted.is_empty());
         assert!(
-            matches!(calls.as_slice(), [nfs_world::participants::HostRpc::Participant(call)] if call.call == nfs_world::participants::Call::Leave)
+            matches!(calls.as_slice(), [nfs_world::participants::HostRpc::Participant(call), nfs_world::participants::HostRpc::WorldActivation(untrack)] if call.call == nfs_world::participants::Call::Leave && untrack.call == nfs_world::world_activation::Call::StreamedParticipantLeave)
         );
         let (detach, before) = &listener.pending_entries[1];
         assert!(before.is_empty() && detach.deleted.is_empty());

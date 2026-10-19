@@ -390,6 +390,14 @@ impl Content {
             controls.mode_time = WORLD_MODE_TIME;
             chassis.set_motion(chassis.motion().clone(), controls)?;
         }
+        if request.placement == Placement::Rival {
+            // The spawn speed is the car's initial velocity along its heading,
+            // in both the creation vector and the current chassis state (E981).
+            let mut motion = chassis.motion().clone();
+            motion.velocity = orientation::spawn_vector(request.basis[2], request.speed)?
+                .map(|v| v.map_or(0., f32::from_bits));
+            chassis.set_motion(motion, chassis.controls().clone())?;
+        }
         let wheels = wheel_customization::State::from_vehicle(
             request.items,
             &self.wheels,

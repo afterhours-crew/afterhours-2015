@@ -309,6 +309,7 @@ pub fn extract(index: &mut AssetIndex) -> Result<Content, Error> {
     )?;
     let (scene, participants) = lookup.endpoint(&mut graph, &pm)?;
     let alive = crate::ai::resolve(&mut graph, &mut lookup, &pm, ai_ports)?;
+    let reset_volumes = crate::ai::resolve_reset_volumes(&mut graph, &mut lookup, ai_ports)?;
     let (actor_scene, actors) = lookup.endpoint(&mut graph, &am)?;
     if scene != actor_scene || participants == actors {
         return Err(bad("manager scene identity"));
@@ -435,6 +436,7 @@ pub fn extract(index: &mut AssetIndex) -> Result<Content, Error> {
         personality_count: personalities.len() as u16,
         managers: nfs_world::replication::players::ai::Managers {
             alive,
+            reset_volumes,
             scene,
             participants,
             actors,

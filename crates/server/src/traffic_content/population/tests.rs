@@ -55,6 +55,10 @@ pub(crate) fn fixture_with(connection: u8) -> (Population, Players, Content) {
                 scene: keys[0],
                 serializer: 3,
             },
+            reset_volumes: ai::State {
+                scene: keys[0],
+                serializer: 4,
+            },
             scene: keys[0],
             actors: 1,
             participants: 2,
@@ -109,6 +113,7 @@ pub(crate) fn fixture_with(connection: u8) -> (Population, Players, Content) {
                 sublevel::Kind::RpcPairs,
                 sublevel::Kind::RpcReferences,
                 sublevel::Kind::RpcReferences,
+                sublevel::Kind::Rpc,
             ],
         )
         .unwrap(),
@@ -180,7 +185,19 @@ fn initial_delay_owned_creation_and_garage_retirement() {
         .advance(&mut world, 1, 100, &c, input(1001, &[focus()]))
         .unwrap();
     let ids = change.spawned.unwrap();
-    assert_eq!(change.calls.len(), 3);
+    // Manager add, actor binding, Alive entry, then reset-volume tracking.
+    assert_eq!(change.calls.len(), 4);
+    assert!(matches!(
+        change.calls[3],
+        HostRpc::WorldActivation(nfs_world::world_activation::Notification {
+            participant: Some(p),
+            call: nfs_world::world_activation::Call::StreamedParticipant,
+            ..
+        }) if p == ids.participant
+    ));
+    // The actor is created holding control until the car's first report.
+    assert!(change.records.iter().any(|r| r.id == ids.actor
+        && matches!(&r.initial, Some(nfs_world::replication::Initial::Actor(a)) if a.flag_a && a.flag_b)));
     assert_eq!(change.records.len(), 6);
     assert_eq!(p.count(), 1);
     assert_eq!(p.cars[&1].born, 1001);
@@ -408,13 +425,23 @@ fn delegated_traffic_reports_are_isolated_retry_safe_and_retired() {
                 .is_err()
         );
         assert_eq!(world.objects().snapshot(), before);
-        assert_eq!(
-            reports
-                .receive_ai(&mut world, 1, 100, &movement, &cars, now)
-                .unwrap()
-                .len(),
-            1
-        );
+        // The first report echoes the car and releases its held actor control;
+        // later reports only echo the car.
+        let first = reports
+            .receive_ai(&mut world, 1, 100, &movement, &cars, now)
+            .unwrap();
+        assert_eq!(first.len(), if index == 0 { 2 } else { 1 });
+        assert_eq!(first[0].id, ids.vehicle);
+        if index == 0 {
+            assert_eq!(first[1].id, ids.actor);
+            assert!(matches!(
+                first[1].update,
+                nfs_world::replication::Update::Actor(nfs_world::replication::ActorUpdate {
+                    flag_b: Some(false),
+                    ..
+                })
+            ));
+        }
         let accepted = world.ai_vehicle_physics(1, 100, 1).unwrap();
         assert_eq!(accepted, physics);
         assert_eq!(accepted.controls.value3, 4);

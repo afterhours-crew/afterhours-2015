@@ -77,6 +77,7 @@ impl World {
             add,
             bind,
             enter: None,
+            tracked: None,
         })
     }
 
@@ -121,6 +122,40 @@ impl World {
         }
         self.replace_ai_scene(id, creation, &content)?;
         Ok(Some(call))
+    }
+
+    /// Enter or leave the reset-volume collection (methods 3/4 on its plain RPC
+    /// serializer, no arguments). The collection retains no scene state, so the
+    /// caller owns membership; this only resolves the current endpoint.
+    pub(in crate::replication) fn ai_tracking(
+        &self,
+        binding: State,
+        participant: u16,
+        enter: bool,
+    ) -> Result<crate::world_activation::Notification, Error> {
+        let id = self.scene(binding.scene).ok_or(Error::UnknownObject)?;
+        let Initial::SubLevel { fields, .. } = &self.get(id).ok_or(Error::UnknownObject)?.initial
+        else {
+            return Err(Error::TypeMismatch);
+        };
+        let Some(sublevel::Initial::Rpc(rpc)) = fields.get(binding.serializer) else {
+            return Err(Error::TypeMismatch);
+        };
+        let call = crate::world_activation::Notification {
+            endpoint: crate::participants::Endpoint {
+                scene: id,
+                selector: rpc.selector,
+                serial: rpc.serial,
+            },
+            participant: Some(participant),
+            call: if enter {
+                crate::world_activation::Call::StreamedParticipant
+            } else {
+                crate::world_activation::Call::StreamedParticipantLeave
+            },
+        };
+        call.encode()?;
+        Ok(call)
     }
 
     /// Client manager listeners remove these entries when the actor/participant

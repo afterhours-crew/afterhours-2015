@@ -24,6 +24,10 @@ use std::{
     sync::Arc,
 };
 
+/// Non-urgent wandering speed (50 mph in m/s) of the native server wander
+/// behaviour; official rivals are created moving at it along their heading.
+pub const WANDER_SPEED: f32 = 22.352;
+
 #[derive(Clone, Copy, Debug)]
 pub struct Focus {
     pub id: u16,
@@ -167,6 +171,9 @@ impl Population {
                     changes
                         .leave
                         .extend(removed.leave.into_iter().map(HostRpc::Participant));
+                    changes
+                        .leave
+                        .extend(removed.untracked.into_iter().map(HostRpc::WorldActivation));
                     changes.deleted.extend(removed.deleted);
                     next.authority.remove_group(key);
                 }
@@ -263,13 +270,16 @@ impl Population {
                 locator: racer.position,
                 basis: racer.basis,
                 origin: [0.; 3],
-                speed: Some(0.),
+                speed: Some(WANDER_SPEED),
                 connection: None,
                 owner: vehicle::Resource {
                     words: [0; 2],
                     name: vec![],
                 },
-                customization_attached: true,
+                // The root's customization flag puts a car in garage display:
+                // the client stops updating it (no dynamic physics or wake-up).
+                // Official world cars, rivals and traffic all leave it clear.
+                customization_attached: false,
                 placement: vehicle_content::Placement::Rival,
                 authority_group: key,
                 authority_components: &components,
@@ -295,7 +305,7 @@ impl Population {
                 ai::Request {
                     key,
                     name: provider.name.as_bytes().to_vec(),
-                    flags: [true, false],
+                    flags: [true, true],
                     words: [provider.provider_index, provider.personality_index],
                     // Roaming racers use the full vehicle driving mode.
                     // The ambient-traffic mode selects different physics.
@@ -321,6 +331,9 @@ impl Population {
         changes.calls.extend(bound.add.map(HostRpc::Participant));
         changes.calls.extend(bound.bind.map(HostRpc::Actor));
         changes.calls.extend(bound.enter.map(HostRpc::Participant));
+        changes
+            .calls
+            .extend(bound.tracked.map(HostRpc::WorldActivation));
         let (goal, assigned) =
             world.start_ai_wander_goal(connection, persona, key, [false, false, true])?;
         changes.records.extend([goal, assigned]);

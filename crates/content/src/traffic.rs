@@ -88,21 +88,29 @@ impl Content {
             ],
         )?;
         if v["format"] != "nfs-traffic-content"
-            || v["version"] != 4
+            || v["version"] != 5
             || v["build_sha256"] != nfs_services::SUPPORTED_BUILD_SHA256
         {
             return Err(bad("content identity"));
         }
-        json_keys(&v["managers"], &["participants", "actors", "alive"])?;
+        json_keys(
+            &v["managers"],
+            &["participants", "actors", "alive", "reset_volumes"],
+        )?;
         let managers = nfs_world::replication::players::ai::Managers {
             alive: crate::ai::state_from_json(&v["managers"]["alive"])?,
+            reset_volumes: crate::ai::state_from_json(&v["managers"]["reset_volumes"])?,
             scene: number(&v["scene"])?,
             participants: number(&v["managers"]["participants"])?,
             actors: number(&v["managers"]["actors"])?,
         };
+        let fields = [managers.participants, managers.actors];
         if managers.participants == managers.actors
             || (managers.alive.scene == managers.scene
-                && [managers.participants, managers.actors].contains(&managers.alive.serializer))
+                && fields.contains(&managers.alive.serializer))
+            || (managers.reset_volumes.scene == managers.scene
+                && fields.contains(&managers.reset_volumes.serializer))
+            || managers.reset_volumes == managers.alive
             || managers.participants >= nfs_world::replication::sublevel::MAX_SERIALIZERS
             || managers.actors >= nfs_world::replication::sublevel::MAX_SERIALIZERS
         {
@@ -420,7 +428,7 @@ pub fn extract(index: &mut AssetIndex) -> Result<Json, Error> {
         .map(|s| s.name.to_lowercase())
         .collect();
     let ports = index.identity.traffic_links;
-    let alive = {
+    let (alive, reset_volumes) = {
         use crate::graph::{
             Graph,
             scenes::{SceneLookup, scene_roots},
@@ -446,12 +454,15 @@ pub fn extract(index: &mut AssetIndex) -> Result<Json, Error> {
             endpoints: BTreeMap::new(),
             loaded: BTreeSet::new(),
         };
-        crate::ai::resolve(
+        let alive = crate::ai::resolve(
             &mut graph,
             &mut lookup,
             &managers[0].site,
             index.identity.ai_links,
-        )?
+        )?;
+        let reset =
+            crate::ai::resolve_reset_volumes(&mut graph, &mut lookup, index.identity.ai_links)?;
+        (alive, reset)
     };
     let linked = links::resolve(
         &mut crate::graph::Graph::new(&mut index.assets),
@@ -640,9 +651,9 @@ pub fn extract(index: &mut AssetIndex) -> Result<Json, Error> {
         );
     }
     Ok(
-        json!({"format":"nfs-traffic-content","version":4,"build_sha256":nfs_services::SUPPORTED_BUILD_SHA256,
+        json!({"format":"nfs-traffic-content","version":5,"build_sha256":nfs_services::SUPPORTED_BUILD_SHA256,
         "scene":scene_key(&gameplay),"spline_class":spline_class,
-        "managers":{"participants":participant_manager.ok_or_else(||bad("missing participant manager"))?,"actors":actor_manager.ok_or_else(||bad("missing actor manager"))?,"alive":crate::ai::state_json(alive)},
+        "managers":{"participants":participant_manager.ok_or_else(||bad("missing participant manager"))?,"actors":actor_manager.ok_or_else(||bad("missing actor manager"))?,"alive":crate::ai::state_json(alive),"reset_volumes":crate::ai::state_json(reset_volumes)},
         "density":density.ok_or_else(||bad("missing traffic manager"))?,"personas":personas,"vehicles":definitions.into_values().collect::<Vec<_>>(),"splines":splines}),
     )
 }

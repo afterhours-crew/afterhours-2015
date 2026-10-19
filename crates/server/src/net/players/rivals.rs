@@ -603,8 +603,27 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(
-                echoes.iter().map(|r| r.id).collect::<BTreeSet<_>>(),
+                echoes
+                    .iter()
+                    .map(|r| r.id)
+                    .filter(|id| ids.contains(id))
+                    .collect::<BTreeSet<_>>(),
                 ids.into_iter().collect()
+            );
+            // Only each car's first report releases its actor's held control.
+            let actors = [ambient.actor, rival.actor];
+            let released: BTreeSet<_> = echoes
+                .iter()
+                .filter(|r| !ids.contains(&r.id))
+                .map(|r| r.id)
+                .collect();
+            assert_eq!(
+                released,
+                if step == 0 {
+                    actors.into_iter().collect()
+                } else {
+                    BTreeSet::new()
+                }
             );
             for (id, sample) in ids.into_iter().zip(samples) {
                 assert_eq!(
@@ -664,7 +683,7 @@ mod tests {
         let (section, calls) = &listener.pending_entries[0];
         assert!(section.records.is_empty() && section.deleted.is_empty());
         assert!(
-            matches!(calls.as_slice(), [nfs_world::participants::HostRpc::Participant(call)] if call.call == nfs_world::participants::Call::Leave)
+            matches!(calls.as_slice(), [nfs_world::participants::HostRpc::Participant(call), nfs_world::participants::HostRpc::WorldActivation(untrack)] if call.call == nfs_world::participants::Call::Leave && untrack.call == nfs_world::world_activation::Call::StreamedParticipantLeave)
         );
         let (detach, calls) = &listener.pending_entries[1];
         assert!(calls.is_empty() && detach.deleted.is_empty());

@@ -168,15 +168,19 @@ impl Content {
             ],
         )?;
         if v["format"] != "nfs-rival-content"
-            || v["version"] != 2
+            || v["version"] != 3
             || v["build_sha256"] != nfs_services::SUPPORTED_BUILD_SHA256
         {
             return Err(bad("content identity"));
         }
         let m = &v["managers"];
-        keys(m, &["scene", "participants", "actors", "alive"])?;
+        keys(
+            m,
+            &["scene", "participants", "actors", "alive", "reset_volumes"],
+        )?;
         let managers = nfs_world::replication::players::ai::Managers {
             alive: crate::ai::state_from_json(&m["alive"])?,
+            reset_volumes: crate::ai::state_from_json(&m["reset_volumes"])?,
             scene: number(&m["scene"])?,
             participants: number(&m["participants"])?,
             actors: number(&m["actors"])?,
@@ -184,6 +188,10 @@ impl Content {
         if managers.participants == managers.actors
             || (managers.alive.scene == managers.scene
                 && [managers.participants, managers.actors].contains(&managers.alive.serializer))
+            || (managers.reset_volumes.scene == managers.scene
+                && [managers.participants, managers.actors]
+                    .contains(&managers.reset_volumes.serializer))
+            || managers.reset_volumes == managers.alive
             || [managers.participants, managers.actors]
                 .into_iter()
                 .any(|n| n >= nfs_world::replication::sublevel::MAX_SERIALIZERS)
@@ -289,8 +297,8 @@ impl Content {
         let region = |r: &Region| json!({"points":r.points(),"height":r.height()});
         let guids = |v: &[[u8; 16]]| v.iter().map(|g| nfs_frostbite::hex(g)).collect::<Vec<_>>();
         let style = |s: &Style| json!({"parts":guids(&s.parts),"color":s.color,"material":s.material,"window_tint":s.window_tint,"license_plate":s.license_plate,"alignment":s.alignment,"rims":s.rims.iter().map(|r| json!({"selection":r.selection,"primary_color":r.primary_color,"primary_material":r.primary_material,"secondary_color":r.secondary_color,"secondary_material":r.secondary_material})).collect::<Vec<_>>()});
-        json!({"format":"nfs-rival-content","version":2,"build_sha256":nfs_services::SUPPORTED_BUILD_SHA256,
-            "personality_count":self.personality_count, "managers":{"scene":self.managers.scene,"participants":self.managers.participants,"actors":self.managers.actors,"alive":crate::ai::state_json(self.managers.alive)},
+        json!({"format":"nfs-rival-content","version":3,"build_sha256":nfs_services::SUPPORTED_BUILD_SHA256,
+            "personality_count":self.personality_count, "managers":{"scene":self.managers.scene,"participants":self.managers.participants,"actors":self.managers.actors,"alive":crate::ai::state_json(self.managers.alive),"reset_volumes":crate::ai::state_json(self.managers.reset_volumes)},
             "personas": self.personas.iter().map(|p| json!({"name":p.name,"provider_index":p.provider_index,"personality_index":p.personality_index,"preset":{"vehicle":nfs_frostbite::hex(&p.preset.vehicle),"color":p.preset.color,"style":p.preset.style.as_ref().map(style),"additional":guids(&p.preset.additional)},"performance":p.driving.performance,"grip":p.driving.grip})).collect::<Vec<_>>(),
             "racers": self.racers.iter().map(|r| json!({"guid":nfs_frostbite::hex(&r.guid),"event_type":r.event_type,"personas":r.personas,"regions":r.regions.iter().map(region).collect::<Vec<_>>(),"secondary_regions":r.secondary_regions.iter().map(region).collect::<Vec<_>>(),"position":r.position,"basis":r.basis})).collect::<Vec<_>>()})
     }
@@ -316,6 +324,10 @@ mod tests {
                 alive: nfs_world::replication::players::ai::State {
                     scene: 8,
                     serializer: 3,
+                },
+                reset_volumes: nfs_world::replication::players::ai::State {
+                    scene: 8,
+                    serializer: 4,
                 },
                 scene: 7,
                 participants: 2,

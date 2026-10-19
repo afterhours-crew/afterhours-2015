@@ -22,6 +22,14 @@ fn player(world: &mut Players, c: u8, p: u64) -> (u16, u16) {
     (player, participant)
 }
 fn car(world: &mut Players, c: u8, p: u64, participant: u16, item: u64) -> u16 {
+    let (creation, content) = car_creation(c);
+    world
+        .create_vehicle(c, p, participant, item, creation, &content)
+        .unwrap()
+        .id
+}
+
+fn car_creation(c: u8) -> (vehicle::EntityCreation, entity::creation::Content) {
     use entity::creation::{Asset, Catalog, Content, Prefix};
     let asset = Asset {
         bundle: 2,
@@ -94,10 +102,7 @@ fn car(world: &mut Players, c: u8, p: u64, participant: u16, item: u64) -> u16 {
             ],
         },
     };
-    world
-        .create_vehicle(c, p, participant, item, creation, &content)
-        .unwrap()
-        .id
+    (creation, content)
 }
 
 fn entries(record: &Record) -> Vec<Entry> {
@@ -498,4 +503,156 @@ fn service_rejects_foreign_binding_and_bad_sites_without_partial_map_mutation() 
         .sync_location_service(2, 202, &BTreeMap::new(), [0.; 3], other_site)
         .unwrap();
     assert_eq!(service_refs(&world, scene), first_refs);
+}
+
+fn rival(world: &mut Players, c: u8, p: u64, key: u64) -> super::super::ai::Ids {
+    let (mut creation, content) = car_creation(0);
+    creation.prefix.owner = None;
+    world
+        .spawn_ai_vehicle(
+            c,
+            p,
+            super::super::ai::Request {
+                key,
+                name: b"ID_TEST_ROAMER".to_vec(),
+                flags: [true, true],
+                words: [1, 2],
+                mode: 2,
+            },
+            creation,
+            &content,
+        )
+        .unwrap()
+        .unwrap()
+        .ids
+}
+
+#[test]
+fn rivals_have_their_own_first_slot_map_alongside_the_human_marker() {
+    let mut world = Players::default();
+    let (_, participant) = player(&mut world, 1, 101);
+    player(&mut world, 2, 202);
+    let (site, scene) = service(&mut world, 501);
+    // No rival yet: no map and no binding.
+    assert!(
+        world
+            .sync_rival_locations(1, 101, &[], [0.; 3], site, 0)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(service_refs(&world, scene), [Some(0); 4]);
+    let a = rival(&mut world, 1, 101, 7);
+    let b = rival(&mut world, 1, 101, 8);
+    let other = rival(&mut world, 2, 202, 7);
+    // Another session's spawn key and unknown keys fail without mutation.
+    let before = world.objects.snapshot();
+    for keys in [&[9][..], &[7, 7]] {
+        assert!(
+            world
+                .sync_rival_locations(1, 101, keys, [0.; 3], site, 0)
+                .is_err()
+        );
+        assert_eq!(world.objects.snapshot(), before);
+    }
+    let batch = world
+        .sync_rival_locations(1, 101, &[8, 7], [0.; 3], site, 0)
+        .unwrap();
+    assert_eq!(batch.len(), 2);
+    assert!(matches!(
+        batch[0].initial,
+        Some(Initial::ParticipantLocationMap)
+    ));
+    let map = batch[0].id;
+    assert_eq!(batch[1].id, scene);
+    assert_eq!(
+        entries(&batch[0])
+            .iter()
+            .map(|e| e.participant)
+            .collect::<Vec<_>>(),
+        vec![a.participant, b.participant]
+    );
+    assert!(
+        !entries(&batch[0])
+            .iter()
+            .any(|e| e.participant == other.participant)
+    );
+    assert_eq!(
+        service_refs(&world, scene),
+        [Some(map), Some(0), Some(0), Some(0)]
+    );
+    // The human marker keeps its own last slot and leaves the rivals bound.
+    let car_id = car(&mut world, 1, 101, participant, 10);
+    world
+        .sync_location_service(
+            1,
+            101,
+            &BTreeMap::from([(participant, car_id)]),
+            [0.; 3],
+            site,
+        )
+        .unwrap();
+    let refs = service_refs(&world, scene);
+    assert_eq!(refs[0], Some(map));
+    assert!(refs[3].is_some_and(|human| human != map && human != 0));
+    // Unchanged rivals produce nothing; a moved rival updates only the map.
+    assert!(
+        world
+            .sync_rival_locations(1, 101, &[7, 8], [0.; 3], site, 100)
+            .unwrap()
+            .is_empty()
+    );
+    let mut physics = world.ai_vehicle_physics(1, 101, 7).unwrap();
+    physics.position = vehicle::Vector::from_position([300., 2., 900.], [0.; 3], 7).unwrap();
+    world.set_ai_vehicle_physics(1, 101, 7, physics).unwrap();
+    // Position-only changes wait for the official republish period.
+    assert!(
+        world
+            .sync_rival_locations(1, 101, &[7, 8], [0.; 3], site, 1899)
+            .unwrap()
+            .is_empty()
+    );
+    let moved = world
+        .sync_rival_locations(1, 101, &[7, 8], [0.; 3], site, 1900)
+        .unwrap();
+    assert_eq!(moved.len(), 1);
+    assert_eq!(moved[0].id, map);
+    let moved_entry = entries(&moved[0])
+        .into_iter()
+        .find(|e| e.participant == a.participant)
+        .unwrap();
+    assert_eq!(moved_entry.x, Coordinate::from_world(300.).unwrap());
+    assert_eq!(moved_entry.z, Coordinate::from_world(900.).unwrap());
+    // Retirement removes each rival from the map in its own transaction,
+    // before the participant's deletion, and keeps the slot bound.
+    let first = world.remove_ai_vehicle(1, 101, 7).unwrap();
+    let update = first.records.iter().find(|r| r.id == map).unwrap();
+    assert_eq!(
+        entries(update)
+            .iter()
+            .map(|e| e.participant)
+            .collect::<Vec<_>>(),
+        vec![b.participant]
+    );
+    assert!(first.deleted.contains(&a.participant));
+    let last = world.remove_ai_vehicle(1, 101, 8).unwrap();
+    assert!(entries(last.records.iter().find(|r| r.id == map).unwrap()).is_empty());
+    assert!(
+        world
+            .sync_rival_locations(1, 101, &[], [0.; 3], site, 1950)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(service_refs(&world, scene)[0], Some(map));
+    // The other session cannot claim the bound slot with its own map.
+    let before = world.objects.snapshot();
+    assert_eq!(
+        world.sync_rival_locations(2, 202, &[7], [0.; 3], site, 2000),
+        Err(Error::UnknownObject)
+    );
+    assert_eq!(world.objects.snapshot(), before);
+    // A host clock that runs backwards is rejected rather than republished.
+    assert_eq!(
+        world.sync_rival_locations(1, 101, &[], [0.; 3], site, 1000),
+        Err(Error::Shape)
+    );
 }

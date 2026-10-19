@@ -2037,13 +2037,35 @@ impl Listener for PlayerListener {
             .as_ref()
             .and_then(|roles| roles.free_roam.as_ref())
         {
-            match players.sync_location_service(
-                HOST_SELECTOR as u8,
-                self.persona,
-                &map_cars,
-                [0.; 3],
-                catalog.location,
-            ) {
+            // Roaming rivals have their own map/minimap list (slot 0).
+            let rivals: Vec<u64> = self
+                .rival_population
+                .as_ref()
+                .map(|r| {
+                    r.delegated(&players, HOST_SELECTOR as u8, self.persona)
+                        .into_values()
+                        .collect()
+                })
+                .unwrap_or_default();
+            match players
+                .sync_location_service(
+                    HOST_SELECTOR as u8,
+                    self.persona,
+                    &map_cars,
+                    [0.; 3],
+                    catalog.location,
+                )
+                .and_then(|mut batch| {
+                    batch.extend(players.sync_rival_locations(
+                        HOST_SELECTOR as u8,
+                        self.persona,
+                        &rivals,
+                        [0.; 3],
+                        catalog.location,
+                        self.world_ms,
+                    )?);
+                    Ok(batch)
+                }) {
                 Ok(mut batch) => {
                     // One accepted movement sample can change both chassis and
                     // minimap position. Two frames per sample can outrun the

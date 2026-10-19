@@ -52,7 +52,7 @@ fn append_lifecycle(fields: &mut ObjectFields, objects: &mut SceneObjects) {
             let Field::RawPointers(values) = value else {
                 panic!()
             };
-            values.extend(first..first + 7);
+            values.extend(first..first + 9);
         }
         if *name == "LinkConnections" {
             let Field::Structs(_, values) = value else {
@@ -68,6 +68,12 @@ fn append_lifecycle(fields: &mut ObjectFields, objects: &mut SceneObjects) {
                     0,
                 ));
             }
+            values.push(super::connection(
+                first + 7,
+                ports.reset_volumes,
+                first + 8,
+                0,
+            ));
         }
     }
     for (i, class) in [
@@ -84,6 +90,14 @@ fn append_lifecycle(fields: &mut ObjectFields, objects: &mut SceneObjects) {
     for _ in 0..3 {
         objects.push(("ParticipantTransitionEntityData", vec![]));
     }
+    objects.push(("AiResetTrackerEntityData", vec![]));
+    objects.push((
+        "StreamedTriggerVolumeCollectionEntityData",
+        vec![
+            ("NotifyServer", Field::Bool(true)),
+            ("ClientControlled", Field::Bool(false)),
+        ],
+    ));
 }
 pub(super) fn registered() -> Vec<([u8; 16], [u8; 16])> {
     vec![reference(3), reference(4)]
