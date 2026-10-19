@@ -298,7 +298,7 @@ extraction. The prepared traffic document also follows manager road links throug
 subworld interfaces and keeps each road's scene, local catalog index and catalog
 count separate from population order. Persona identities follow their provider's
 member links. Unknown providers, missing scene registrations and ambiguous links
-fail preparation. Version 3 rebuilds older traffic caches. Completely collapsed
+fail preparation. Version 4 rebuilds older traffic caches. Completely collapsed
 authored curve segments remain in the road and speed tables but have no spawn
 tangent. Population and AI lifecycle belong to the server.
 
@@ -316,3 +316,10 @@ constructs and encodes complete vehicle components with synthetic mesh identitie
 Preparation writes `rival-content.json` with those inputs and the native ordered
 personality-library indices. The server consumes this bounded cache for its
 session-owned rival population; the audit examples alone do not prove live driving.
+
+Traffic version 4 and rival version 2 include the shared AI Alive-state binding.
+The builder follows the participant manager's initial-state link and the three
+spawn transitions, checks their client-notification flags, then resolves the
+destination's actual scene and serializer. Missing, ambiguous or unsupported
+sequences fail preparation. Build-profile ports and builder revision invalidate
+older caches; scene ordinals are not embedded in runtime policy.

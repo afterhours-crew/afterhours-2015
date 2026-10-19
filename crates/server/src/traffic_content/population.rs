@@ -68,6 +68,7 @@ pub struct Population {
 
 #[derive(Clone, Debug, Default)]
 pub struct Changes {
+    pub leave: Vec<HostRpc>,
     pub records: Vec<Record>,
     pub calls: Vec<HostRpc>,
     pub deleted: Vec<u16>,
@@ -194,6 +195,9 @@ impl Population {
         for key in retire {
             let removed = world.remove_ai_vehicle(connection, persona, key)?;
             changes.records.extend(removed.records);
+            changes
+                .leave
+                .extend(removed.leave.into_iter().map(HostRpc::Participant));
             changes.deleted.extend(removed.deleted);
             let car = next.cars.remove(&key).ok_or(Error::UnknownObject)?;
             let count = next
@@ -358,6 +362,7 @@ impl Population {
         let bound = world.bind_ai_managers(connection, persona, key, content.managers)?;
         changes.calls.extend(bound.add.map(HostRpc::Participant));
         changes.calls.extend(bound.bind.map(HostRpc::Actor));
+        changes.calls.extend(bound.enter.map(HostRpc::Participant));
         let spline = content.splines.get(placement.spline).ok_or(Error::Shape)?;
         let level = self
             .catalogs

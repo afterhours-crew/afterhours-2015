@@ -5,6 +5,17 @@ use super::*;
 use crate::traffic_content::population::{Focus, Input};
 use nfs_world::application::Random;
 
+pub(super) fn ai_departures(
+    calls: &[nfs_world::participants::HostRpc],
+) -> Vec<(Section, Vec<nfs_world::participants::HostRpc>)> {
+    // The reliable message group permits at most fifteen calls. Keep each
+    // Leave ahead of every detach/deletion even when the whole population retires.
+    calls
+        .chunks(15)
+        .map(|chunk| (returning::empty_section(), chunk.to_vec()))
+        .collect()
+}
+
 impl PlayerListener {
     pub(super) fn ai_busy(&self) -> bool {
         !self.pending_entries.is_empty()
@@ -87,6 +98,7 @@ impl PlayerListener {
             (section, Vec::new())
         })
         .collect();
+        entries.splice(0..0, ai_departures(&changes.leave));
         // Manager RPCs reference newly created ghosts. queue_replication_after
         // orders them after all preceding creation sections; deletions likewise
         // follow the relation-clearing updates instead of preceding them on wire.
@@ -124,6 +136,41 @@ impl PlayerListener {
 mod tests {
     use super::*;
     #[test]
+    fn full_population_departures_fit_reliable_groups_and_frame_budget() {
+        use nfs_world::participants::{Call, Endpoint, HostRpc, Notification};
+        let calls: Vec<_> = (1..=nfs_world::replication::players::ai::MAX_AI)
+            .map(|n| {
+                HostRpc::Participant(Notification {
+                    endpoint: Endpoint {
+                        scene: 1,
+                        selector: 3,
+                        serial: nfs_protocol::world::rpc::Serial::new(7).unwrap(),
+                    },
+                    participant: n as u16 + 1,
+                    call: Call::Leave,
+                })
+            })
+            .collect();
+        let entries = ai_departures(&calls);
+        assert_eq!(
+            entries
+                .iter()
+                .flat_map(|(_, c)| c.iter().copied())
+                .collect::<Vec<_>>(),
+            calls
+        );
+        for (section, calls) in entries {
+            assert!(
+                nfs_world::session::replication_frame(&section, &calls, 127)
+                    .unwrap()
+                    .len()
+                    + 104
+                    <= nfs_world::application::OUTBOUND_FRAME_BITS
+            );
+            assert!(section.records.is_empty() && section.deleted.is_empty());
+        }
+    }
+    #[test]
     fn backpressure_retains_traffic_and_disable_orders_detach_before_deletion() {
         let (mut population, mut world, content) =
             crate::traffic_content::population::tests::fixture_with(HOST_SELECTOR as u8);
@@ -155,11 +202,16 @@ mod tests {
         listener.advance_traffic(1003).unwrap();
         assert_eq!(listener.traffic_population.as_ref().unwrap().count(), 0);
         assert!(listener.movement_objects().is_empty());
-        assert_eq!(listener.pending_entries.len(), 2);
-        let (detach, before) = &listener.pending_entries[0];
+        assert_eq!(listener.pending_entries.len(), 3);
+        let (section, calls) = &listener.pending_entries[0];
+        assert!(section.records.is_empty() && section.deleted.is_empty());
+        assert!(
+            matches!(calls.as_slice(), [nfs_world::participants::HostRpc::Participant(call)] if call.call == nfs_world::participants::Call::Leave)
+        );
+        let (detach, before) = &listener.pending_entries[1];
         assert!(before.is_empty() && detach.deleted.is_empty());
         assert_eq!(detach.records.len(), 2);
-        let (delete, before) = &listener.pending_entries[1];
+        let (delete, before) = &listener.pending_entries[2];
         assert!(before.is_empty() && delete.records.is_empty());
         assert_eq!(delete.deleted.len(), 4);
     }

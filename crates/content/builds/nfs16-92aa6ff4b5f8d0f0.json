@@ -1272,6 +1272,11 @@
       "participant_property_type": 712163237
     }
   },
+  "ai_links": {
+    "initial": 3681194412,
+    "source": 4029663452,
+    "destination": 2238590467
+  },
   "rival_links": {
     "racers": 3466401632,
     "provider": 3888882343,

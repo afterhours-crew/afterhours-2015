@@ -55,6 +55,7 @@ pub struct Population {
 
 #[derive(Clone, Debug, Default)]
 pub struct Changes {
+    pub leave: Vec<HostRpc>,
     pub messages: Vec<Message>,
     pub records: Vec<Record>,
     pub calls: Vec<HostRpc>,
@@ -163,6 +164,9 @@ impl Population {
                 if let Some(key) = racer.key.take() {
                     let removed = world.remove_ai_vehicle(connection, persona, key)?;
                     changes.records.extend(removed.records);
+                    changes
+                        .leave
+                        .extend(removed.leave.into_iter().map(HostRpc::Participant));
                     changes.deleted.extend(removed.deleted);
                     next.authority.remove_group(key);
                 }
@@ -316,6 +320,7 @@ impl Population {
         let bound = world.bind_ai_managers(connection, persona, key, self.content.data.managers)?;
         changes.calls.extend(bound.add.map(HostRpc::Participant));
         changes.calls.extend(bound.bind.map(HostRpc::Actor));
+        changes.calls.extend(bound.enter.map(HostRpc::Participant));
         let (goal, assigned) =
             world.start_ai_wander_goal(connection, persona, key, [false, false, true])?;
         changes.records.extend([goal, assigned]);

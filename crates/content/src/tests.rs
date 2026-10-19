@@ -215,6 +215,8 @@ fn traffic_loader_rejects_broken_closure_catalog_and_geometry() {
         serde_json::from_slice(&std::fs::read(prepared.path(Kind::TrafficContent)).unwrap())
             .unwrap();
     for (path, bad) in [
+        ("/managers/alive/scene", serde_json::json!(0)),
+        ("/managers/alive/serializer", serde_json::json!(65535)),
         ("/version", serde_json::json!(2)),
         (
             "/managers/actors",
@@ -451,6 +453,9 @@ fn changed_construction_rules_do_not_reuse_an_installation_cache() {
         |id: &mut BuildIdentity| id.traffic_links.roads ^= 1,
         |id: &mut BuildIdentity| id.rival_links.personality_library ^= 1,
         |id: &mut BuildIdentity| id.rival_links.personality ^= 1,
+        |id: &mut BuildIdentity| id.ai_links.initial ^= 1,
+        |id: &mut BuildIdentity| id.ai_links.source ^= 1,
+        |id: &mut BuildIdentity| id.ai_links.destination ^= 1,
     ] {
         let mut changed = install.options();
         mutate(&mut changed.identity);

@@ -274,6 +274,7 @@ fn regions<S: Source>(graph: &mut Graph<S>, site: &Site, port: u32) -> Result<Ve
 pub fn extract(index: &mut AssetIndex) -> Result<Content, Error> {
     let rules = index.identity.scenes.clone();
     let ports = index.identity.rival_links;
+    let ai_ports = index.identity.ai_links;
     let startup = index.startup_entries(&rules.level)?;
     let mut graph = Graph::new(&mut index.assets);
     let roots = scene_roots(&mut graph, &rules.level, &startup)?;
@@ -307,6 +308,7 @@ pub fn extract(index: &mut AssetIndex) -> Result<Content, Error> {
         "AiActorManagerEntityData",
     )?;
     let (scene, participants) = lookup.endpoint(&mut graph, &pm)?;
+    let alive = crate::ai::resolve(&mut graph, &mut lookup, &pm, ai_ports)?;
     let (actor_scene, actors) = lookup.endpoint(&mut graph, &am)?;
     if scene != actor_scene || participants == actors {
         return Err(bad("manager scene identity"));
@@ -432,6 +434,7 @@ pub fn extract(index: &mut AssetIndex) -> Result<Content, Error> {
     Ok(Content {
         personality_count: personalities.len() as u16,
         managers: nfs_world::replication::players::ai::Managers {
+            alive,
             scene,
             participants,
             actors,

@@ -60,6 +60,10 @@ fn fixture_mode(
     let data = nfs_content::rivals::Content {
         personality_count: 17,
         managers: ai::Managers {
+            alive: ai::State {
+                scene: keys[0],
+                serializer: 3,
+            },
             scene: keys[0],
             actors: 1,
             participants: 2,
@@ -129,6 +133,7 @@ fn fixture_mode(
                 sublevel::Kind::Noop,
                 sublevel::Kind::RpcPairs,
                 sublevel::Kind::RpcReferences,
+                sublevel::Kind::RpcReferences,
             ],
         )
         .unwrap(),
@@ -191,7 +196,7 @@ fn authored_pose_personality_wander_and_mesh_namespace_are_published() {
     let previous = registry.prepare(&["player/other_mesh"]).unwrap().bindings[0].level;
     let c = spawn(&mut p, &mut world, &mut registry, 1);
     let ids = c.spawned.unwrap();
-    assert_eq!((p.count(), world.ai_count(), c.calls.len()), (1, 1, 2));
+    assert_eq!((p.count(), world.ai_count(), c.calls.len()), (1, 1, 3));
     assert_eq!(
         p.delegated(&world, 1, 100),
         BTreeMap::from([(ids.vehicle, RIVAL_KEY_START)])

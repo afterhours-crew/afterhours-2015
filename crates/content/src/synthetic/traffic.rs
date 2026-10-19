@@ -34,12 +34,55 @@ fn asset(
 ) -> Asset {
     if seed == 1 {
         super::rivals::append(&mut fields, &mut objects);
+        append_lifecycle(&mut fields, &mut objects);
     }
     let (partition, instance) = reference(seed);
     Asset {
         name: name.into(),
         partition: PartitionWriter::default()
             .build_many(partition, class, instance, fields, objects),
+    }
+}
+
+fn append_lifecycle(fields: &mut ObjectFields, objects: &mut SceneObjects) {
+    let ports = crate::BuildIdentity::supported().ai_links;
+    let first = objects.len() as u32 + 2;
+    for (name, value) in fields {
+        if *name == "Objects" {
+            let Field::RawPointers(values) = value else {
+                panic!()
+            };
+            values.extend(first..first + 7);
+        }
+        if *name == "LinkConnections" {
+            let Field::Structs(_, values) = value else {
+                panic!()
+            };
+            values.push(super::connection(4, ports.initial, first, 0));
+            for i in 0..3 {
+                values.push(super::connection(first + 4 + i, ports.source, first + i, 0));
+                values.push(super::connection(
+                    first + 4 + i,
+                    ports.destination,
+                    first + i + 1,
+                    0,
+                ));
+            }
+        }
+    }
+    for (i, class) in [
+        "UpdateableParticipantStateEntityData",
+        "GetAiSpawnParametersParticipantStateEntityData",
+        "SpawningParticipantStateEntityData",
+        "ParticipantStateEntityData",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        objects.push((class, vec![("SendRpcToClientSide", Field::Bool(i == 3))]));
+    }
+    for _ in 0..3 {
+        objects.push(("ParticipantTransitionEntityData", vec![]));
     }
 }
 pub(super) fn registered() -> Vec<([u8; 16], [u8; 16])> {

@@ -65,6 +65,7 @@ impl PlayerListener {
             (section, Vec::new())
         })
         .collect();
+        entries.splice(0..0, super::traffic::ai_departures(&changes.leave));
         if !changes.calls.is_empty() || !changes.deleted.is_empty() {
             let mut section = returning::empty_section();
             section.deleted = changes.deleted;
@@ -659,11 +660,16 @@ mod tests {
         listener.session_backlog = 0;
         listener.advance_rivals(2).unwrap();
         assert!(listener.movement_objects().is_empty());
-        assert_eq!(listener.pending_entries.len(), 2);
-        let (detach, calls) = &listener.pending_entries[0];
+        assert_eq!(listener.pending_entries.len(), 3);
+        let (section, calls) = &listener.pending_entries[0];
+        assert!(section.records.is_empty() && section.deleted.is_empty());
+        assert!(
+            matches!(calls.as_slice(), [nfs_world::participants::HostRpc::Participant(call)] if call.call == nfs_world::participants::Call::Leave)
+        );
+        let (detach, calls) = &listener.pending_entries[1];
         assert!(calls.is_empty() && detach.deleted.is_empty());
         assert_eq!(detach.records.len(), 2);
-        let (delete, calls) = &listener.pending_entries[1];
+        let (delete, calls) = &listener.pending_entries[2];
         assert!(calls.is_empty() && delete.records.is_empty());
         assert_eq!(delete.deleted.len(), 4);
     }

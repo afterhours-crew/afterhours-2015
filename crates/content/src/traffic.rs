@@ -88,18 +88,21 @@ impl Content {
             ],
         )?;
         if v["format"] != "nfs-traffic-content"
-            || v["version"] != 3
+            || v["version"] != 4
             || v["build_sha256"] != nfs_services::SUPPORTED_BUILD_SHA256
         {
             return Err(bad("content identity"));
         }
-        json_keys(&v["managers"], &["participants", "actors"])?;
+        json_keys(&v["managers"], &["participants", "actors", "alive"])?;
         let managers = nfs_world::replication::players::ai::Managers {
+            alive: crate::ai::state_from_json(&v["managers"]["alive"])?,
             scene: number(&v["scene"])?,
             participants: number(&v["managers"]["participants"])?,
             actors: number(&v["managers"]["actors"])?,
         };
         if managers.participants == managers.actors
+            || (managers.alive.scene == managers.scene
+                && [managers.participants, managers.actors].contains(&managers.alive.serializer))
             || managers.participants >= nfs_world::replication::sublevel::MAX_SERIALIZERS
             || managers.actors >= nfs_world::replication::sublevel::MAX_SERIALIZERS
         {
@@ -402,7 +405,7 @@ pub fn extract(index: &mut AssetIndex) -> Result<Json, Error> {
         .rsplit_once('/')
         .ok_or_else(|| bad("level directory"))?
         .0;
-    let gameplay = format!("{directory}/gameplay");
+    let gameplay = format!("{directory}/gameplay").to_lowercase();
     let root = index.scene(&rules.level)?;
     let traffic_bundles: BTreeSet<_> = root
         .level_references
@@ -410,13 +413,46 @@ pub fn extract(index: &mut AssetIndex) -> Result<Json, Error> {
         .map(|n| n.to_lowercase())
         .collect();
     let (_, instances) = scenes::construct(&mut index.assets, &rules, &gameplay, true)?;
-    let scene_names = index
-        .startup_entries(&rules.level)?
-        .into_iter()
+    let startup = index.startup_entries(&rules.level)?;
+    let scene_names = startup
+        .iter()
         .filter(|s| s.kind == crate::world::StartupKind::SubLevel)
         .map(|s| s.name.to_lowercase())
         .collect();
     let ports = index.identity.traffic_links;
+    let alive = {
+        use crate::graph::{
+            Graph,
+            scenes::{SceneLookup, scene_roots},
+        };
+        let mut graph = Graph::new(&mut index.assets);
+        let roots = scene_roots(&mut graph, &rules.level, &startup)?;
+        let managers: Vec<_> = graph
+            .read(
+                roots
+                    .get(&gameplay)
+                    .ok_or_else(|| bad("gameplay scene"))?
+                    .clone(),
+            )?
+            .into_iter()
+            .filter(|n| n.object.class == "AiParticipantManagerEntityData")
+            .collect();
+        if managers.len() != 1 {
+            return Err(bad("participant manager count"));
+        }
+        let mut lookup = SceneLookup {
+            roots,
+            rules: &rules,
+            endpoints: BTreeMap::new(),
+            loaded: BTreeSet::new(),
+        };
+        crate::ai::resolve(
+            &mut graph,
+            &mut lookup,
+            &managers[0].site,
+            index.identity.ai_links,
+        )?
+    };
     let linked = links::resolve(
         &mut crate::graph::Graph::new(&mut index.assets),
         crate::graph::Site::root(&gameplay),
@@ -604,9 +640,9 @@ pub fn extract(index: &mut AssetIndex) -> Result<Json, Error> {
         );
     }
     Ok(
-        json!({"format":"nfs-traffic-content","version":3,"build_sha256":nfs_services::SUPPORTED_BUILD_SHA256,
+        json!({"format":"nfs-traffic-content","version":4,"build_sha256":nfs_services::SUPPORTED_BUILD_SHA256,
         "scene":scene_key(&gameplay),"spline_class":spline_class,
-        "managers":{"participants":participant_manager.ok_or_else(||bad("missing participant manager"))?,"actors":actor_manager.ok_or_else(||bad("missing actor manager"))?},
+        "managers":{"participants":participant_manager.ok_or_else(||bad("missing participant manager"))?,"actors":actor_manager.ok_or_else(||bad("missing actor manager"))?,"alive":crate::ai::state_json(alive)},
         "density":density.ok_or_else(||bad("missing traffic manager"))?,"personas":personas,"vehicles":definitions.into_values().collect::<Vec<_>>(),"splines":splines}),
     )
 }

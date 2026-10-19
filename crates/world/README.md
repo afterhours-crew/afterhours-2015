@@ -57,9 +57,11 @@ vehicle constructor also accepts explicit component inputs without an inventory.
 Players keeps a separate bounded AI registry in the shared ghost namespace:
 participant, actor and car creation commits together, retry keys are per session,
 and goals and connection cleanup preserve ownership and roll back failures.
-Manager bindings atomically retain Participant/Actor references and return their
-add/bind RPCs. Deletion releases those references with the AI objects, matching
-client death listeners; failed deletion leaves all retained state intact.
+Manager bindings atomically retain Participant/Actor and Alive-state references,
+returning add/bind/Enter RPCs. The Alive serializer may belong to another scene.
+Retirement returns Leave before relation changes and deletion, preserving other
+state members; failed registration or deletion leaves all retained state intact.
+Manager death listeners release their references without an invented remove RPC.
 Actor configuration is explicit. These APIs do not yet establish live traffic,
 client delegation or rival behavior; those remain tracked in issue #54.
 

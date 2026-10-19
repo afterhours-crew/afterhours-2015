@@ -3,7 +3,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 use super::*;
-use players::ai::{Bound, Managers};
+use players::ai::{Bound, Managers, State};
 
 impl World {
     pub(in crate::replication) fn bind_ai_managers(
@@ -73,7 +73,54 @@ impl World {
             Some(call)
         };
         self.replace_ai_scene(id, creation, &content)?;
-        Ok(Bound { add, bind })
+        Ok(Bound {
+            add,
+            bind,
+            enter: None,
+        })
+    }
+
+    pub(in crate::replication) fn ai_state(
+        &mut self,
+        binding: State,
+        participant: u16,
+        enter: bool,
+    ) -> Result<Option<crate::participants::Notification>, Error> {
+        let id = self.scene(binding.scene).ok_or(Error::UnknownObject)?;
+        let (mut creation, content) = scene(self.get(id).ok_or(Error::UnknownObject)?)?;
+        let fields = creation.body.initial.as_mut().ok_or(Error::Shape)?;
+        let Some(sublevel::Initial::RpcReferences { rpc, value }) =
+            fields.get_mut(binding.serializer)
+        else {
+            return Err(Error::TypeMismatch);
+        };
+        if value.contains(&participant) == enter {
+            return Ok(None);
+        }
+        let call = crate::participants::Notification {
+            endpoint: crate::participants::Endpoint {
+                scene: id,
+                selector: rpc.selector,
+                serial: rpc.serial,
+            },
+            participant,
+            call: if enter {
+                crate::participants::Call::Enter
+            } else {
+                crate::participants::Call::Leave
+            },
+        };
+        call.encode()?;
+        if enter {
+            if value.len() >= players::ai::MAX_AI {
+                return Err(Error::Bound);
+            }
+            value.push(participant);
+        } else {
+            value.retain(|p| *p != participant);
+        }
+        self.replace_ai_scene(id, creation, &content)?;
+        Ok(Some(call))
     }
 
     /// Client manager listeners remove these entries when the actor/participant

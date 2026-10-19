@@ -51,6 +51,10 @@ pub(crate) fn fixture_with(connection: u8) -> (Population, Players, Content) {
     .unwrap();
     let content = Content {
         managers: ai::Managers {
+            alive: ai::State {
+                scene: keys[0],
+                serializer: 3,
+            },
             scene: keys[0],
             actors: 1,
             participants: 2,
@@ -103,6 +107,7 @@ pub(crate) fn fixture_with(connection: u8) -> (Population, Players, Content) {
             &[
                 sublevel::Kind::Noop,
                 sublevel::Kind::RpcPairs,
+                sublevel::Kind::RpcReferences,
                 sublevel::Kind::RpcReferences,
             ],
         )
@@ -175,7 +180,7 @@ fn initial_delay_owned_creation_and_garage_retirement() {
         .advance(&mut world, 1, 100, &c, input(1001, &[focus()]))
         .unwrap();
     let ids = change.spawned.unwrap();
-    assert_eq!(change.calls.len(), 2);
+    assert_eq!(change.calls.len(), 3);
     assert_eq!(change.records.len(), 6);
     assert_eq!(p.count(), 1);
     assert_eq!(p.cars[&1].born, 1001);

@@ -913,6 +913,7 @@ pub fn write(root: &Path, assets: &[Asset]) -> std::io::Result<(Options, [u8; 64
             traffic_spline_class_id: 72,
             traffic_links: traffic::links(),
             rival_links: crate::BuildIdentity::supported().rival_links,
+            ai_links: crate::BuildIdentity::supported().ai_links,
             scenes: crate::scenes::Rules {
                 level: RUNTIME_LEVEL.to_owned(),
                 classes: [
@@ -925,6 +926,26 @@ pub fn write(root: &Path, assets: &[Asset]) -> std::io::Result<(Options, [u8; 64
                     ("PersonaEntityData", None),
                     ("PersonaSetEntityData", None),
                     ("TrafficManagerEntityData", None),
+                    (
+                        "UpdateableParticipantStateEntityData",
+                        Some(nfs_world::replication::sublevel::Kind::RpcReferences),
+                    ),
+                    (
+                        "GetAiSpawnParametersParticipantStateEntityData",
+                        Some(nfs_world::replication::sublevel::Kind::RpcReferences),
+                    ),
+                    (
+                        "SpawningParticipantStateEntityData",
+                        Some(nfs_world::replication::sublevel::Kind::RpcReferences),
+                    ),
+                    (
+                        "ParticipantStateEntityData",
+                        Some(nfs_world::replication::sublevel::Kind::RpcReferences),
+                    ),
+                    (
+                        "ParticipantTransitionEntityData",
+                        Some(nfs_world::replication::sublevel::Kind::Rpc),
+                    ),
                     ("RoamingRacerManagerEntityData", None),
                     ("RoamingRacerEntityData", None),
                     ("SpecificVehicleProviderEntityData", None),

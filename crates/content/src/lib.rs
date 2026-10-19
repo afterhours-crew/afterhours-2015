@@ -15,6 +15,7 @@
 //!
 //! The library is synchronous and owns no runtime: a server or launcher calls
 //! it before starting, or from a blocking worker.
+pub mod ai;
 pub mod assets;
 pub mod builds;
 mod cache;
@@ -60,7 +61,7 @@ pub const FORMAT: &str = "nfs-install-content";
 pub const VERSION: u64 = 1;
 /// Increment whenever a builder's output for an unchanged installation changes,
 /// so existing cache entries are rebuilt.
-pub const BUILDER_REVISION: u64 = 32;
+pub const BUILDER_REVISION: u64 = 33;
 /// Executable file name relative to the installation root.
 pub const EXECUTABLE: &str = "NFS16.exe";
 
@@ -83,6 +84,7 @@ pub struct BuildIdentity {
     pub traffic_spline_class_id: u16,
     pub traffic_links: traffic::Links,
     pub rival_links: rivals::Links,
+    pub ai_links: ai::Links,
 }
 
 impl BuildIdentity {

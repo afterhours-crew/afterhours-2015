@@ -16,12 +16,21 @@ pub struct Managers {
     pub scene: u32,
     pub participants: usize,
     pub actors: usize,
+    pub alive: State,
+}
+
+/// Installed participant-state serializer, possibly in a different scene.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct State {
+    pub scene: u32,
+    pub serializer: usize,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Bound {
     pub add: Option<crate::participants::Notification>,
     pub bind: Option<crate::actors::Binding>,
+    pub enter: Option<crate::participants::Notification>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -49,6 +58,8 @@ pub struct Spawned {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Removed {
+    /// Leave the live state before publishing relation changes or deletion.
+    pub leave: Vec<crate::participants::Notification>,
     /// Detach relations before publishing the deletion list.
     pub records: Vec<Record>,
     pub deleted: Vec<u16>,
@@ -177,7 +188,7 @@ impl Players {
     }
 
     /// Bind the AI participant and actor to their installed scene managers.
-    /// Retained snapshots and both RPCs commit together; retry is inert.
+    /// Manager/Alive snapshots and their RPCs commit together; retry is inert.
     pub fn bind_ai_managers(
         &mut self,
         connection: u8,
@@ -185,6 +196,11 @@ impl Players {
         key: u64,
         managers: Managers,
     ) -> Result<Bound, Error> {
+        if managers.alive.scene == managers.scene
+            && [managers.participants, managers.actors].contains(&managers.alive.serializer)
+        {
+            return Err(Error::Shape);
+        }
         let instance = self
             .ai
             .get(&(connection, persona, key))
@@ -192,11 +208,11 @@ impl Players {
         if instance.managers.is_some_and(|old| old != managers) {
             return Err(Error::DuplicateObject);
         }
-        let bound = self.objects.bind_ai_managers(
-            managers,
-            instance.ids.participant,
-            instance.ids.actor,
-        )?;
+        let mut next = self.objects.clone();
+        let mut bound =
+            next.bind_ai_managers(managers, instance.ids.participant, instance.ids.actor)?;
+        bound.enter = next.ai_state(managers.alive, instance.ids.participant, true)?;
+        self.objects = next;
         self.ai
             .get_mut(&(connection, persona, key))
             .ok_or(Error::UnknownObject)?
@@ -289,6 +305,9 @@ impl Players {
         let mut next = self.objects.clone();
         let mut result = Removed::default();
         if let Some(managers) = instance.managers {
+            result
+                .leave
+                .extend(next.ai_state(managers.alive, instance.ids.participant, false)?);
             next.release_ai_managers(managers, instance.ids.participant, instance.ids.actor)?;
         }
         result.records.extend(next.change(
@@ -336,6 +355,7 @@ impl Players {
         let mut result = Removed::default();
         for (c, p, k) in keys {
             let removed = next.remove_ai_vehicle(c, p, k)?;
+            result.leave.extend(removed.leave);
             result.records.extend(removed.records);
             result.deleted.extend(removed.deleted);
         }
@@ -662,6 +682,7 @@ mod tests {
                 sublevel::Kind::Noop,
                 sublevel::Kind::RpcPairs,
                 sublevel::Kind::RpcReferences,
+                sublevel::Kind::RpcReferences,
             ],
         )
         .unwrap();
@@ -678,6 +699,10 @@ mod tests {
         let scene = world.create_scenes(&[1], vec![creation], &content).unwrap()[0].id;
         (
             Managers {
+                alive: State {
+                    scene: key,
+                    serializer: 3,
+                },
                 scene: key,
                 participants: 2,
                 actors: 1,
@@ -720,7 +745,30 @@ mod tests {
             Err(Error::TypeMismatch)
         );
         assert_eq!(world.objects.snapshot(), before);
+        // Alive can be in another scene; an unresolved endpoint must roll back
+        // both successfully prepared manager memberships.
+        assert_eq!(
+            world.bind_ai_managers(
+                1,
+                100,
+                1,
+                Managers {
+                    alive: State {
+                        scene: 999,
+                        serializer: 1
+                    },
+                    ..managers
+                }
+            ),
+            Err(Error::UnknownObject)
+        );
+        assert_eq!(world.objects.snapshot(), before);
         let bound = world.bind_ai_managers(1, 100, 1, managers).unwrap();
+        let enter = bound.enter.unwrap();
+        assert_eq!(enter.participant, a.participant);
+        assert_eq!(enter.call, crate::participants::Call::Enter);
+        assert_eq!((enter.endpoint.scene, enter.endpoint.selector), (scene, 2));
+        enter.encode().unwrap();
         let add = bound.add.unwrap();
         let bind = bound.bind.unwrap();
         assert_eq!(
@@ -781,6 +829,10 @@ mod tests {
         world.bind_ai_managers(2, 200, 1, managers).unwrap();
         let removed = world.remove_ai_for_connection(1).unwrap();
         assert!(removed.deleted.contains(&a.participant));
+        assert_eq!(removed.leave.len(), 1);
+        assert_eq!(removed.leave[0].participant, a.participant);
+        assert_eq!(removed.leave[0].call, crate::participants::Call::Leave);
+        removed.leave[0].encode().unwrap();
         let Initial::SubLevel { fields, .. } = &world.objects.get(scene).unwrap().initial else {
             panic!()
         };
@@ -789,6 +841,9 @@ mod tests {
         );
         assert!(
             matches!(&fields[2],sublevel::Initial::RpcReferences {value,..} if value == &vec![b.participant])
+        );
+        assert!(
+            matches!(&fields[3],sublevel::Initial::RpcReferences {value,..} if value == &vec![b.participant])
         );
         for record in world.objects.snapshot() {
             record.encode().unwrap();
@@ -842,5 +897,77 @@ mod tests {
         );
         world.objects.remove(blocker).unwrap();
         assert_eq!(world.remove_ai_for_connection(1).unwrap().deleted.len(), 3);
+    }
+
+    #[test]
+    fn alive_in_another_scene_is_retained_and_cleanup_preserves_other_members() {
+        let mut world = world();
+        let (mut managers, _) = managers(&mut world);
+        let (car, content) = car();
+        let a = world
+            .spawn_ai_vehicle(1, 100, request(1), car.clone(), &content)
+            .unwrap()
+            .unwrap()
+            .ids;
+        let b = world
+            .spawn_ai_vehicle(2, 200, request(1), car, &content)
+            .unwrap()
+            .unwrap()
+            .ids;
+        let key = 914;
+        let profile = sublevel::Profile::new(
+            false,
+            &[sublevel::Kind::Noop, sublevel::Kind::RpcReferences],
+        )
+        .unwrap();
+        let content = sublevel::Content::new(vec![(key, profile)]).unwrap();
+        let creation = sublevel::ordinary::creation(
+            2,
+            key,
+            None,
+            Serial::new(9).unwrap(),
+            &[
+                sublevel::ordinary::Value::Noop,
+                sublevel::ordinary::Value::References(vec![b.participant]),
+            ],
+            &content,
+        )
+        .unwrap();
+        let scene = world.create_scenes(&[2], vec![creation], &content).unwrap()[0].id;
+        managers.alive = State {
+            scene: key,
+            serializer: 1,
+        };
+        let bound = world.bind_ai_managers(1, 100, 1, managers).unwrap();
+        let enter = bound.enter.unwrap();
+        assert_eq!(
+            (
+                enter.endpoint.scene,
+                enter.endpoint.selector,
+                enter.endpoint.serial.value()
+            ),
+            (scene, 0, 9)
+        );
+        assert_eq!(
+            world.bind_ai_managers(1, 100, 1, managers).unwrap(),
+            Bound::default()
+        );
+        let Initial::SubLevel { fields, .. } = &world.objects.get(scene).unwrap().initial else {
+            panic!()
+        };
+        assert!(
+            matches!(&fields[1], sublevel::Initial::RpcReferences {value,..} if value == &vec![b.participant,a.participant])
+        );
+        let removed = world.remove_ai_vehicle(1, 100, 1).unwrap();
+        assert_eq!(removed.leave[0].endpoint, enter.endpoint);
+        let Initial::SubLevel { fields, .. } = &world.objects.get(scene).unwrap().initial else {
+            panic!()
+        };
+        assert!(
+            matches!(&fields[1], sublevel::Initial::RpcReferences {value,..} if value == &vec![b.participant])
+        );
+        for record in world.objects.snapshot() {
+            record.encode().unwrap();
+        }
     }
 }
