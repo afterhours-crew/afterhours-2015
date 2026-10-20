@@ -20,6 +20,18 @@
 use crate::exit::Result;
 use std::path::{Path, PathBuf};
 
+/// What a bounded log file keeps once it reaches its bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Keep {
+    /// Its beginning: later output is drained and discarded, and the child
+    /// reports its output truncated. For a result such as a JSON document,
+    /// which is useless without its start.
+    Start,
+    /// Its newest output: the oldest part is removed, so the end of a long
+    /// session, where a crash shows, is always there. For logs.
+    End,
+}
+
 /// How to start a child.
 #[derive(Debug, Clone)]
 pub struct SpawnSpec {
@@ -28,6 +40,9 @@ pub struct SpawnSpec {
     pub working_directory: PathBuf,
     /// Bounded log file for standard output.
     pub stdout_log: PathBuf,
+    /// What the standard output log keeps when full. The standard error log
+    /// always keeps its newest output.
+    pub stdout_keeps: Keep,
     /// Bounded log file for standard error.
     pub stderr_log: PathBuf,
     /// Extra environment variables, such as the launch marker.
@@ -51,7 +66,8 @@ pub trait ChildProcess {
     fn drain_diagnostics(&mut self) -> String;
     /// Whether both log pumps have finished after exit.
     fn logs_finished(&self) -> bool;
-    /// Whether standard output exceeded the log bound.
+    /// Whether standard output exceeded the log bound and, kept from its
+    /// start ([`Keep::Start`]), lost its end.
     fn output_truncated(&self) -> bool;
     /// Any fault in the log pumps.
     fn check_logs(&self) -> Result<()>;
