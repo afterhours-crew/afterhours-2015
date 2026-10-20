@@ -176,10 +176,30 @@ pub struct Request {
     /// The API's port (`serve --api-port`); `null` lets the system pick.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_port: Option<u16>,
+    /// `start --remote`: the server elsewhere the game plays against. The
+    /// session runs a relay here instead of a server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<RemoteGame>,
     /// Traffic and rival amounts for this session; older requests use the
     /// original ones.
     #[serde(default)]
     pub settings: crate::settings::Settings,
+}
+
+/// Where a server elsewhere is reached by a game routed through a relay
+/// on this computer: its `GET /v1/game` record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteGame {
+    pub redirector: std::net::SocketAddrV4,
+    pub launcher_services: std::net::SocketAddrV4,
+}
+
+impl RemoteGame {
+    fn valid(&self) -> bool {
+        [self.redirector, self.launcher_services]
+            .iter()
+            .all(|a| !a.ip().is_unspecified() && !a.ip().is_multicast() && a.port() != 0)
+    }
 }
 
 impl Request {
@@ -223,6 +243,9 @@ impl Request {
                 .is_some_and(|ip| ip.is_unspecified() || ip.is_multicast() || ip.is_broadcast())
             || (self.listen.is_some() && self.serves_game())
             || (self.api_port.is_some() && !self.api)
+            || self
+                .remote
+                .is_some_and(|remote| self.action != Action::Start || !remote.valid())
         {
             return Err(Failure::refused("Invalid launch request."));
         }
@@ -417,6 +440,7 @@ mod tests {
             game_support: false,
             listen: None,
             api_port: None,
+            remote: None,
             settings: Default::default(),
         };
         request.validate().unwrap();
@@ -464,6 +488,24 @@ mod tests {
         request.validate().unwrap();
         request.api = false;
         request.api_port = None;
+        // A server elsewhere, only for `start`, at concrete addresses.
+        let remote = RemoteGame {
+            redirector: "192.168.1.20:42230".parse().unwrap(),
+            launcher_services: "192.168.1.20:51234".parse().unwrap(),
+        };
+        request.remote = Some(remote);
+        assert!(request.validate().is_err(), "not for serve");
+        request.action = Action::Start;
+        request.game_directory = Some("G".into());
+        request.validate().unwrap();
+        request.remote = Some(RemoteGame {
+            launcher_services: "0.0.0.0:51234".parse().unwrap(),
+            ..remote
+        });
+        assert!(request.validate().is_err());
+        request.remote = None;
+        request.action = Action::Serve;
+        request.game_directory = None;
         let plain = vec![
             "prepare-local".to_owned(),
             "--root".to_owned(),

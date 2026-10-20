@@ -202,6 +202,44 @@ pub struct MapImagesArgs {
     pub game_dir: Option<PathBuf>,
 }
 
+/// Arguments for `start`.
+#[derive(Debug, Clone, Args)]
+pub struct StartArgs {
+    #[command(flatten)]
+    pub session: SessionArgs,
+
+    /// Play against your server at this address instead of starting one
+    /// here: `http://<address>:<port>`, as that server's `api --json`
+    /// prints it. Needs --token.
+    ///
+    /// The game runs on this computer and is routed to a relay here, which
+    /// forwards it to that server; start the server there with `serve
+    /// --server-only --api --listen <address>`.
+    #[arg(long, value_name = "URL", requires = "token")]
+    pub remote: Option<String>,
+
+    /// That server's API token, as its `api --json` prints it.
+    #[arg(long, value_name = "TOKEN", requires = "remote")]
+    pub token: Option<String>,
+}
+
+/// Arguments for the internal `relay` command.
+#[derive(Debug, Clone, Args)]
+pub struct RelayArgs {
+    /// The server's redirector.
+    #[arg(long, value_name = "ADDRESS")]
+    pub redirector: std::net::SocketAddrV4,
+    /// The server's launcher services.
+    #[arg(long, value_name = "ADDRESS")]
+    pub launcher_services: std::net::SocketAddrV4,
+    /// Port on 127.0.0.1 for the game's launcher services.
+    #[arg(long, value_name = "PORT", default_value_t = crate::platform::LSX_PORT)]
+    pub lsx_port: u16,
+    /// Stop when this file appears, as the server does.
+    #[arg(long, value_name = "FILE")]
+    pub stop_file: PathBuf,
+}
+
 /// Arguments for `profile`. The default is the selected save, as the
 /// session API's `GET /v1/profile` reads it.
 #[derive(Debug, Clone, Default, Args)]
@@ -274,7 +312,16 @@ pub enum Command {
     /// date marker the client expects, waits for any activation dialog you
     /// complete yourself, applies loopback routing, and supervises both until
     /// the game exits. Quitting the game stops the server.
-    Start(SessionArgs),
+    ///
+    /// With --remote and --token the game plays against your server on
+    /// another computer instead: no server starts here and that server
+    /// keeps the saves.
+    Start(StartArgs),
+
+    /// Relay a game on this computer to a server elsewhere. Internal: the
+    /// supervisor of `start --remote` runs it under the compatibility name.
+    #[command(hide = true)]
+    Relay(RelayArgs),
 
     /// Report the current session's state.
     ///
@@ -438,9 +485,10 @@ mod tests {
         .unwrap();
         match start.command {
             Command::Start(args) => {
-                assert_eq!(args.game.game_dir, PathBuf::from("G"));
-                assert_eq!(args.player_name, "Driver");
-                assert!(args.record_protocol);
+                assert_eq!(args.session.game.game_dir, PathBuf::from("G"));
+                assert_eq!(args.session.player_name, "Driver");
+                assert!(args.session.record_protocol);
+                assert_eq!(args.remote, None);
             }
             other => panic!("{other:?}"),
         }
@@ -492,6 +540,46 @@ mod tests {
         ])
         .unwrap();
         assert!(matches!(serve.command, Command::Serve(args) if args.server_only));
+        let token = "a".repeat(64);
+        let remote = Cli::try_parse_from([
+            "nfs-afterhours",
+            "start",
+            "--game-dir",
+            "G",
+            "--remote",
+            "http://192.168.1.20:61000",
+            "--token",
+            &token,
+        ])
+        .unwrap();
+        assert!(matches!(
+            remote.command,
+            Command::Start(args) if args.remote.as_deref() == Some("http://192.168.1.20:61000")
+                && args.token.as_deref() == Some(token.as_str())
+        ));
+        for half in [
+            ["--remote", "http://192.168.1.20:61000"],
+            ["--token", token.as_str()],
+        ] {
+            let mut words = vec!["nfs-afterhours", "start", "--game-dir", "G"];
+            words.extend(half);
+            assert!(Cli::try_parse_from(words).is_err(), "{half:?}");
+        }
+        let relay = Cli::try_parse_from([
+            "nfs-afterhours",
+            "relay",
+            "--redirector",
+            "192.168.1.20:42230",
+            "--launcher-services",
+            "192.168.1.20:51234",
+            "--stop-file",
+            "stop",
+        ])
+        .unwrap();
+        assert!(matches!(
+            relay.command,
+            Command::Relay(args) if args.lsx_port == crate::platform::LSX_PORT
+        ));
         let serve = |extra: &[&str]| {
             let mut words = vec!["nfs-afterhours", "serve", "--game-dir", "G"];
             words.extend_from_slice(extra);
@@ -548,7 +636,8 @@ mod tests {
                 .unwrap()
                 .command
             {
-                Command::Setup(args) | Command::Start(args) => assert!(args.api && !args.events),
+                Command::Setup(args) => assert!(args.api && !args.events),
+                Command::Start(args) => assert!(args.session.api && !args.session.events),
                 Command::Serve(args) => assert!(args.session.api && !args.session.events),
                 other => panic!("{other:?}"),
             }

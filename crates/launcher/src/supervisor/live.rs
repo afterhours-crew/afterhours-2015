@@ -79,6 +79,10 @@ pub struct LiveSession {
     job: Option<platform::windows::JobGuard>,
     #[cfg(windows)]
     lease: Option<platform::windows::lease::EndpointLease>,
+    /// Digest of the relay copy standing in for the server (`start
+    /// --remote`); the routing lease pins it instead of the server.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    relay_sha256: Option<String>,
 }
 
 fn wait_child_exit(child: &mut dyn ChildProcess, grace: Duration) -> Result<()> {
@@ -130,6 +134,7 @@ impl LiveSession {
             job,
             #[cfg(windows)]
             lease: None,
+            relay_sha256: None,
         })
     }
 
@@ -409,6 +414,90 @@ impl LiveSession {
     }
 }
 
+impl LiveSession {
+    /// `start --remote`: this program, copied under the compatibility name,
+    /// relays the game's launcher services and redirector to the server
+    /// elsewhere and stands in for a server here, so the game's start,
+    /// routing lease and readiness work as for a local server.
+    fn start_relay(&mut self, remote: records::RemoteGame) -> Result<()> {
+        terminal::heading("Connecting to your server");
+        let registration = self
+            .platform
+            .registered_client_path()?
+            .ok_or_else(|| Failure::refused("Existing game launcher registration is missing or unsupported. Afterhours does not install or modify it."))?;
+        let name = crate::compat::compatibility_name(&registration)?;
+        let own = std::env::current_exe()?;
+        let digest = crate::digest::sha256_file(&own)?;
+        let executable = crate::install::install_compatibility_server(&crate::install::Source {
+            data_directory: &self.data,
+            game_directory: self.request.game_directory.as_deref(),
+            server_path: &own,
+            server_sha256: &digest,
+            compatibility_name: name,
+        })?;
+        let arguments = vec![
+            "relay".into(),
+            "--redirector".into(),
+            remote.redirector.to_string(),
+            "--launcher-services".into(),
+            remote.launcher_services.to_string(),
+            "--stop-file".into(),
+            self.run
+                .join(session::STOP_SERVER_FILE)
+                .to_string_lossy()
+                .into_owned(),
+        ];
+        self.run_server(executable, arguments)?;
+        self.relay_sha256 = Some(digest);
+        terminal::success("Connected to your server.");
+        Ok(())
+    }
+
+    /// Start the server (or the relay standing in for it) and wait for its
+    /// readiness record.
+    fn run_server(&mut self, executable: PathBuf, arguments: Vec<String>) -> Result<()> {
+        let spec = SpawnSpec {
+            executable: executable.clone(),
+            arguments,
+            working_directory: self.data.clone(),
+            stdout_log: self.run.join("server.stdout.jsonl"),
+            stdout_keeps: Keep::End,
+            stderr_log: self.run.join("server.stderr.log"),
+            environment: Vec::new(),
+            capture_first_line: true,
+            // Map frames are only read in event mode or for the session API.
+            map_feed: self.events.observed(),
+        };
+        let mut server = self.platform.spawn(&spec)?;
+        let deadline = Instant::now() + SERVER_READY_DEADLINE;
+        let line = loop {
+            let text = server.drain_diagnostics();
+            self.forward(DiagnosticSource::Server, &text);
+            server.check_logs()?;
+            if let Some(line) = server.first_line() {
+                break line?;
+            }
+            if server.exited() || Instant::now() > deadline {
+                server.kill();
+                return Err(Failure::session("Server did not become ready."));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        let ready = self.parse_ready(&line, server.id());
+        let ready = match ready {
+            Ok(ready) => ready,
+            Err(e) => {
+                server.kill();
+                return Err(e);
+            }
+        };
+        self.server_executable = Some(executable);
+        self.ready = Some(ready);
+        self.server = Some(server);
+        Ok(())
+    }
+}
+
 impl Steps for LiveSession {
     fn status(&mut self, state: State, message: &str) {
         self.echo_diagnostics();
@@ -470,6 +559,10 @@ impl Steps for LiveSession {
     }
 
     fn prepare(&mut self) -> Result<()> {
+        // A server elsewhere keeps the saves and its own content.
+        if self.request.remote.is_some() {
+            return Ok(());
+        }
         let game = self.game_directory()?.to_path_buf();
         let report = self.run_tool(
             "prepare",
@@ -495,6 +588,9 @@ impl Steps for LiveSession {
     }
 
     fn start_server(&mut self) -> Result<()> {
+        if let Some(remote) = self.request.remote {
+            return self.start_relay(remote);
+        }
         terminal::heading("Starting your local server");
         terminal::step("Starting local services. This may take a moment...");
         let prepared = self.prepared.clone().unwrap_or_default();
@@ -519,44 +615,8 @@ impl Steps for LiveSession {
             self.request.server_path.clone()
         };
         let arguments = self.server_arguments(&prepared, &account)?;
-        let spec = SpawnSpec {
-            executable: executable.clone(),
-            arguments: self.request.server_arguments(arguments),
-            working_directory: self.data.clone(),
-            stdout_log: self.run.join("server.stdout.jsonl"),
-            stdout_keeps: Keep::End,
-            stderr_log: self.run.join("server.stderr.log"),
-            environment: Vec::new(),
-            capture_first_line: true,
-            // Map frames are only read in event mode or for the session API.
-            map_feed: self.events.observed(),
-        };
-        let mut server = self.platform.spawn(&spec)?;
-        let deadline = Instant::now() + SERVER_READY_DEADLINE;
-        let line = loop {
-            let text = server.drain_diagnostics();
-            self.forward(DiagnosticSource::Server, &text);
-            server.check_logs()?;
-            if let Some(line) = server.first_line() {
-                break line?;
-            }
-            if server.exited() || Instant::now() > deadline {
-                server.kill();
-                return Err(Failure::session("Server did not become ready."));
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        };
-        let ready = self.parse_ready(&line, server.id());
-        let ready = match ready {
-            Ok(ready) => ready,
-            Err(e) => {
-                server.kill();
-                return Err(e);
-            }
-        };
-        self.server_executable = Some(executable);
-        self.ready = Some(ready);
-        self.server = Some(server);
+        let arguments = self.request.server_arguments(arguments);
+        self.run_server(executable, arguments)?;
         terminal::success("Your local server is ready.");
         Ok(())
     }
@@ -620,7 +680,9 @@ impl Steps for LiveSession {
             server.id(),
             created(server.id())?,
             &executable,
-            &self.request.server_sha256,
+            self.relay_sha256
+                .as_deref()
+                .unwrap_or(&self.request.server_sha256),
             ready.redirector_port,
         );
         self.lease = Some(lease?);

@@ -415,6 +415,80 @@ fn recover_restores_a_pointer_only_for_a_real_database() {
     std::fs::remove_dir_all(data).unwrap();
 }
 
+#[test]
+fn the_relay_stands_in_for_a_server_until_its_stop_file_appears() {
+    use std::io::{BufRead, Read, Write};
+    // Two stand-in services that echo what they receive.
+    let echo = || {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                std::thread::spawn(move || {
+                    let mut reader = stream.try_clone().unwrap();
+                    let mut writer = stream;
+                    let _ = std::io::copy(&mut reader, &mut writer);
+                });
+            }
+        });
+        address
+    };
+    let (redirector, services) = (echo(), echo());
+    let dir = scratch("relay");
+    std::fs::create_dir_all(&dir).unwrap();
+    let stop = dir.join("stop");
+    let mut relay = bin()
+        .args([
+            "relay",
+            "--redirector",
+            &redirector,
+            "--launcher-services",
+            &services,
+            "--lsx-port",
+            "0",
+            "--stop-file",
+            stop.to_str().unwrap(),
+        ])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    std::io::BufReader::new(relay.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    // The readiness record a supervisor expects from a server.
+    let ready: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(ready["ready"], true);
+    assert_eq!(ready["pid"], relay.id());
+    assert_eq!(ready["relays_to"]["redirector"], redirector.as_str());
+    for key in ["redirector", "lsx"] {
+        let address = ready[key].as_str().unwrap();
+        assert!(address.starts_with("127.0.0.1:"), "{key}: {address}");
+        let mut stream = std::net::TcpStream::connect(address).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .unwrap();
+        stream.write_all(key.as_bytes()).unwrap();
+        let mut answer = vec![0u8; key.len()];
+        stream.read_exact(&mut answer).unwrap();
+        assert_eq!(answer, key.as_bytes());
+    }
+    std::fs::write(&stop, b"stop").unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = relay.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the relay did not stop"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    assert!(status.success());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// A synthetic save of account `byte` repeated, for a driver called `name`,
 /// selected by `account.json`; no prepared content. Its path.
 fn save_driver(data: &std::path::Path, byte: u8, name: &str) -> PathBuf {

@@ -134,6 +134,8 @@ pub struct Hosting {
     pub server_only: bool,
     pub listen: Option<std::net::Ipv4Addr>,
     pub api_port: Option<u16>,
+    /// `start --remote`: the server elsewhere the game plays against.
+    pub remote: Option<crate::records::RemoteGame>,
 }
 
 /// Preflight, create the session directory and request, then run the
@@ -192,6 +194,7 @@ fn start_session(
             game_support,
             listen: hosting.listen,
             api_port: hosting.api_port,
+            remote: hosting.remote,
             settings,
         };
         let request_path = run.join("request.json");
@@ -569,6 +572,7 @@ mod tests {
             game_support: false,
             listen: None,
             api_port: None,
+            remote: None,
             settings: Default::default(),
         };
         (request, run)

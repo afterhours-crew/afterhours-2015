@@ -104,7 +104,7 @@ pub struct ApiError {
 /// session's server. A game is routed to a relay on its own computer that
 /// forwards to these ([`crate::relay`]); the server's answers give it the
 /// rest of its addresses.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct GameEndpoints {
     pub version: u32,
     /// The server's redirector, `<IPv4 address>:<port>`.
@@ -115,6 +115,27 @@ pub struct GameEndpoints {
 }
 
 impl GameEndpoints {
+    /// Where `start --remote` relays to; refused when the server serves
+    /// no launcher services for a game elsewhere.
+    pub fn remote(&self) -> Result<crate::records::RemoteGame> {
+        let parse = |text: &str| {
+            text.parse::<SocketAddrV4>()
+                .ok()
+                .filter(|a| !a.ip().is_unspecified() && a.port() != 0)
+        };
+        let redirector = parse(&self.redirector)
+            .ok_or_else(|| Failure::session("The server's redirector address is invalid."))?;
+        let launcher_services = self.launcher_services.as_deref().and_then(parse).ok_or_else(|| {
+            Failure::refused(
+                "That server serves no launcher services for a game on another computer; start it with serve --server-only --listen <address>.",
+            )
+        })?;
+        Ok(crate::records::RemoteGame {
+            redirector,
+            launcher_services,
+        })
+    }
+
     /// From the server's readiness record (`server.stdout.jsonl`).
     pub fn from_readiness(line: &str) -> Result<Self> {
         let invalid = || Failure::session("The server's readiness record is invalid.");
@@ -648,6 +669,69 @@ impl Control for LiveControl {
         }
         GameEndpoints::from_readiness(line.trim_end())
     }
+}
+
+/// `GET /v1/game` from a session API elsewhere, for `start --remote`:
+/// `url` is `http://<IPv4 address>:<port>` and `token` its API token.
+pub fn fetch_game(url: &str, token: &str) -> Result<crate::records::RemoteGame> {
+    let address: SocketAddrV4 = url
+        .trim()
+        .trim_end_matches('/')
+        .strip_prefix("http://")
+        .and_then(|rest| rest.parse().ok())
+        .ok_or_else(|| {
+            Failure::refused(format!(
+                "--remote takes http://<IPv4 address>:<port>, not {url}."
+            ))
+        })?;
+    let token = token.trim();
+    if token.len() != 64
+        || !token
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(Failure::refused(
+            "--token takes the server's 64-character token from its api --json.",
+        ));
+    }
+    let unreachable =
+        |e: std::io::Error| Failure::session(format!("Could not reach the server at {url}: {e}"));
+    let mut stream =
+        TcpStream::connect_timeout(&address.into(), IO_TIMEOUT).map_err(unreachable)?;
+    stream
+        .set_read_timeout(Some(IO_TIMEOUT))
+        .map_err(unreachable)?;
+    stream
+        .set_write_timeout(Some(IO_TIMEOUT))
+        .map_err(unreachable)?;
+    write!(
+        stream,
+        "GET /v1/game HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {token}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    )
+    .map_err(unreachable)?;
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::Read::take(&mut stream, 64 * 1024), &mut bytes)
+        .map_err(unreachable)?;
+    let mut headers = [httparse::EMPTY_HEADER; http::MAX_HEADERS];
+    let mut response = httparse::Response::new(&mut headers);
+    let Ok(httparse::Status::Complete(end)) = response.parse(&bytes) else {
+        return Err(Failure::session("The server's answer was not HTTP."));
+    };
+    let body = &bytes[end..];
+    if response.code != Some(200) {
+        let message = serde_json::from_slice::<serde_json::Value>(body)
+            .ok()
+            .and_then(|v| v["message"].as_str().map(str::to_owned))
+            .unwrap_or_else(|| format!("The server answered {:?}.", response.code));
+        return Err(if response.code == Some(409) {
+            Failure::no_session(message)
+        } else {
+            Failure::refused(message)
+        });
+    }
+    let game: GameEndpoints = serde_json::from_slice(body)
+        .map_err(|_| Failure::session("The server's game-endpoints record is invalid."))?;
+    game.remote()
 }
 
 /// The session file holding the server's readiness record.

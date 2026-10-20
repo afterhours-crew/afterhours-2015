@@ -897,6 +897,39 @@ fn game_endpoints_come_from_the_servers_readiness_record() {
 }
 
 #[test]
+fn start_remote_asks_the_server_where_a_game_reaches_it() {
+    let both = GameEndpoints::from_readiness(
+        r#"{"ready":true,"redirector":"192.168.1.20:42230","lsx":"192.168.1.20:51234"}"#,
+    )
+    .unwrap();
+    let remote = both.remote().unwrap();
+    assert_eq!(remote.redirector.to_string(), "192.168.1.20:42230");
+    assert_eq!(remote.launcher_services.to_string(), "192.168.1.20:51234");
+    // The fake server serves no launcher services: refused, with why.
+    let hub = Hub::new();
+    let (server, _) = server(&hub);
+    let failure = fetch_game(&server.url(), TOKEN).unwrap_err();
+    assert_eq!(failure.exit, Exit::Refused);
+    assert!(failure.message.contains("--listen"), "{}", failure.message);
+    // A wrong token is the server's refusal.
+    let wrong = fetch_game(&server.url(), &"0".repeat(64)).unwrap_err();
+    assert!(wrong.message.contains("token"), "{}", wrong.message);
+    // Malformed arguments are refused before anything is sent.
+    for (url, token) in [
+        ("192.168.1.20:61000", TOKEN),
+        ("https://192.168.1.20:61000", TOKEN),
+        ("http://server:61000", TOKEN),
+        ("http://192.168.1.20:61000", "short"),
+    ] {
+        assert_eq!(
+            fetch_game(url, token).unwrap_err().exit,
+            Exit::Refused,
+            "{url}"
+        );
+    }
+}
+
+#[test]
 fn the_token_is_kept_across_sessions_until_deleted() {
     let data = crate::testing::scratch("api-token");
     let first = stored_token(&data).unwrap();

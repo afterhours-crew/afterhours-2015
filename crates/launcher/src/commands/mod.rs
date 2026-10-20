@@ -11,6 +11,7 @@ mod launch;
 mod map;
 pub(crate) mod profile;
 mod recover;
+mod relay;
 mod sessions;
 pub(crate) mod settings;
 pub(crate) mod status;
@@ -113,14 +114,26 @@ fn dispatch(cli: Cli, bundled_server: Option<PathBuf>, build: Build) -> Result<(
                 server_only: args.server_only,
                 listen: args.listen,
                 api_port: args.api_port,
+                remote: None,
             },
         ),
-        Command::Start(args) => launch::launch(
-            &context,
-            crate::records::Action::Start,
-            &args,
-            launch::Hosting::default(),
-        ),
+        Command::Start(args) => {
+            // Against a server elsewhere: where its game connections go.
+            let remote = match (&args.remote, &args.token) {
+                (Some(url), Some(token)) => Some(crate::api::fetch_game(url, token)?),
+                _ => None,
+            };
+            launch::launch(
+                &context,
+                crate::records::Action::Start,
+                &args.session,
+                launch::Hosting {
+                    remote,
+                    ..launch::Hosting::default()
+                },
+            )
+        }
+        Command::Relay(args) => relay::relay(&args),
         Command::Status => status::status(&context),
         Command::Stop => status::stop(&context),
         Command::Play => status::play(&context),

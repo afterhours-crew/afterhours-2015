@@ -411,6 +411,7 @@ mod tests {
             game_support,
             listen: None,
             api_port: None,
+            remote: None,
             settings: Default::default(),
         };
         let _ = std::fs::remove_file(run.join("request.json"));

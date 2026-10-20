@@ -279,7 +279,23 @@ server and, with `--api`, its API to that one IPv4 address of this computer
 instead of `127.0.0.1`, and gives that address to the game: redirector,
 Blaze, QoS, the per-connection world sockets and launcher services all listen
 there, with launcher services on a port the system picks, for a game on
-another PC that reaches them through a relay (`GET /v1/game` reports them). `--api-port <port>` keeps the API on a fixed port, so a launcher on
+another PC that reaches them through a relay (`GET /v1/game` reports them).
+
+**Playing against it.** `start --remote http://<address>:<port> --token
+<token>` on the player's PC asks that server's `GET /v1/game` where a game
+reaches it, starts no server and prepares nothing here (the server keeps
+the saves), and runs the game checks as `start` does. In the server's place
+it starts this program, copied under the compatibility name the game's SDK
+looks for, as an internal `relay`: it takes launcher services on
+`127.0.0.1:3216` and a redirector port on `127.0.0.1`, forwards each
+connection unchanged to the server, and prints a readiness record like the
+server's. The game is then started, routed by the lease to that loopback
+redirector and supervised exactly as for a local server; the server's own
+answers give it the rest of its addresses. The game's backend host is a
+10-byte field (`127.0.0.1` fits, a typical network address does not), which
+is why the game is never given the server's address. Not established yet:
+no game has been played this way; the lease and the game accepting a Blaze
+address that is not loopback are checked in a live run first. `--api-port <port>` keeps the API on a fixed port, so a launcher on
 another PC finds `http://<address>:<port>` with the same token after every
 restart. The API then answers `Host: <address>:<port>` only. Listening on the
 network is an explicit opt-in; without `--listen` nothing changes. It needs
