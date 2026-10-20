@@ -196,10 +196,18 @@ also edit that file directly; the start output shows the values in use:
 malformed settings are refused rather than ignored. More traffic or rivals than the
 original costs client performance.
 
+`nfs-afterhours settings` prints the saved values without starting anything, and
+`nfs-afterhours settings --traffic 200 --rivals original` saves new ones for the next
+session. Saving is refused while a session runs, because a running session keeps the
+values it started with.
+
 Every subcommand accepts `--json` to print one JSON object instead of text, and
 exits with a documented code (`nfs-afterhours --help` lists them): 0 success,
 1 refused with nothing changed, 2 bad command line, 3 session failed, 4 nothing
-to act on, 5 input/output error.
+to act on, 5 input/output error. Each JSON object has a version and a JSON
+Schema (`nfs-afterhours schema <record>`); `nfs-afterhours version --json` lists
+them. The contract for desktop front ends is described in
+`crates/launcher/README.md`.
 
 ## Check, setup, serve and stop
 
@@ -220,9 +228,19 @@ nfs-afterhours stop
 `serve` prepares like `setup`, starts `nfs-server` directly on loopback and
 supervises it until it exits, a stop is requested or you press Ctrl+C. On Linux
 and macOS point `--game-dir` at a copy of the installation directory; the
-content readers need its files, not a running game. The server leaves the LSX
-port disabled in this mode. Non-loopback listening for a remote client is not
-yet implemented and is tracked separately.
+content readers need its files, not a running game, and the server leaves the
+LSX port disabled. Non-loopback listening for a remote client is not yet
+implemented and is tracked separately.
+
+On Windows a `serve` session can also host the game. It runs the same checks as
+`start` and starts the server the same way, so close EA Desktop and the game
+first; `serve --server-only` skips that and serves without game support. While
+it runs, `nfs-afterhours play` asks it to start the game in the same session:
+activation, routing and statuses work as for `start`. When the game exits the
+session goes back to serving, and `play` can start it again; `stop` closes the
+game first, then the server. `play` exits with code 4 without a running session
+and 1 when the session cannot start a game (not `serve`, `--server-only`,
+stopping, or a game already running). Not yet tested live.
 
 Quitting normally in the game also shuts down the server. Stop first requests
 normal game closure, then terminates only its owned process tree if closure does
@@ -264,9 +282,35 @@ nfs-afterhours recover --account-id <32 lowercase hex digits>
 ```
 
 Recovery refuses an existing different pointer and never edits the database.
-The server still validates schema and ownership when starting. If no complete
+The server still validates schema and ownership when starting.
+
+To look at a save without changing it, also while the server runs:
+
+```sh
+nfs-afterhours profile            # the driver account.json selects
+nfs-afterhours profile --list     # every save in artifacts/account
+```
+
+Add `--json` for the machine-readable form a desktop front end reads; the
+format is described in `crates/launcher/README.md`. Saved stats are printed as
+raw stored integers because the game's units are not confirmed. Car names are
+the game's own, read from your installation each time (`--game-dir` and
+`--language` override the session's installation and the game's locale). If no complete
 account database exists, keep the failed directory for diagnosis and choose a new
 data directory. Do not overwrite it with someone else's profile.
+
+To review earlier sessions without opening their folders:
+
+```sh
+nfs-afterhours sessions                 # newest 20 sessions under artifacts/launcher
+nfs-afterhours sessions --id <ID>       # one session
+```
+
+Each session shows its action, start, final state and message, its files with
+sizes and line counts, server log levels, the server's `unsupported operation
+received` warnings grouped by service and route, whether its protocol recording
+folder exists and, on Windows, game crash dumps from `Documents\Need For
+Speed\Temp` written during the session. It reads only, with bounded reads.
 
 Configuration generations and executable copies are immutable and hash checked.
 A failed copy/preparation may leave a `.partial` directory/file. It is not used on

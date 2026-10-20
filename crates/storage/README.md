@@ -41,6 +41,15 @@ async workers. `MemoryRepository` and `SqliteRepository` implement the same
   SQLite from treating a local drive as a UNC share during concurrent WAL opens.
   Network/device paths and names whose meaning changes under that conversion
   are rejected. Lock waits and transaction durability settings are unchanged.
+- `SqliteRepository::inspect` is for local tools that show a save while the
+  server runs. `open_existing_directory` creates nothing; the connection opens
+  the file read-only with `query_only` and never checkpoints or deletes the
+  write-ahead log on close. Items, garage, tables, the present service domains
+  and a livery count/byte summary come from one read transaction, so a view is
+  always one committed state. Lock waits use the same two-second bound. Only
+  schema version 5 is read, and absent, foreign or damaged stores are refused
+  rather than migrated or repaired. SQLite may still create the empty `-wal`
+  and `-shm` files beside a store it found without them, as any WAL reader does.
 - The legacy `settings-<account>.sqlite` file is a read-only migration input.
   Its value and revision are preserved; new settings writes use `<account>.sqlite`.
   Stop older servers before migration. Keep the old file as a backup, but do not

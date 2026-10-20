@@ -128,6 +128,74 @@ pub fn default_data_dir() -> Option<PathBuf> {
     }
 }
 
+/// The game's own registration: its installation directory and the locale
+/// the game runs in, from the 32-bit `SOFTWARE\EA Games\Need for Speed`
+/// key. Read only; both are `None` where there is no such registry or value.
+pub fn game_registration() -> (Option<PathBuf>, Option<String>) {
+    #[cfg(windows)]
+    {
+        const KEY: &str = "SOFTWARE\\EA Games\\Need for Speed";
+        let read = |value| {
+            nfs_afterhours_sys::windows::local_machine_string_32(KEY, value)
+                .ok()
+                .flatten()
+        };
+        (read("Install Dir").map(PathBuf::from), read("Locale"))
+    }
+    #[cfg(not(windows))]
+    {
+        (None, None)
+    }
+}
+
+/// The folder where the game writes `CrashDump_*.dmp`:
+/// `Documents\Need For Speed\Temp`. The Documents folder is looked up from
+/// the environment (the profile's `Documents`, then a OneDrive one), so a
+/// Documents folder redirected elsewhere is not found. `None` where the
+/// game does not run.
+pub fn game_crash_dump_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        let candidates: Vec<PathBuf> = ["USERPROFILE", "OneDrive", "OneDriveConsumer"]
+            .into_iter()
+            .filter_map(std::env::var_os)
+            .map(|base| {
+                PathBuf::from(base)
+                    .join("Documents")
+                    .join("Need For Speed")
+                    .join("Temp")
+            })
+            .collect();
+        candidates
+            .iter()
+            .find(|dir| dir.is_dir())
+            .or(candidates.first())
+            .cloned()
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+/// The EA Desktop log folder, `%LOCALAPPDATA%\Electronic Arts\EA Desktop\Logs`.
+/// `None` where the game does not run.
+pub fn ea_desktop_logs_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("LOCALAPPDATA").map(|base| {
+            PathBuf::from(base)
+                .join("Electronic Arts")
+                .join("EA Desktop")
+                .join("Logs")
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
 /// Default server executable: `nfs-server` next to this executable, since
 /// both are built by the same `cargo build`.
 pub fn default_server_path() -> Option<PathBuf> {
@@ -151,6 +219,10 @@ pub const CONFLICTING_PROCESSES: &[&str] = &[
     "EADesktopDebug",
     "OriginDebug",
 ];
+/// Processes that keep `play` from starting the game: the game itself and the
+/// EA applications. The `Debug` names of [`CONFLICTING_PROCESSES`] are left
+/// out because a serving session's own server runs under one of them.
+pub const PLAY_CONFLICTS: &[&str] = &["NFS16", "NFS16_trial", "EADesktop", "Origin"];
 /// Loopback port the game expects the launcher services on.
 pub const LSX_PORT: u16 = 3216;
 
@@ -174,6 +246,27 @@ pub fn existing_absolute(path: &Path, what: &str) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn play_conflicts_never_include_the_compatibility_server_name() {
+        for (_, name) in [
+            (
+                "eadesktop",
+                crate::compat::compatibility_name(r"C:\EA\EADesktop.exe"),
+            ),
+            (
+                "origin",
+                crate::compat::compatibility_name(r"C:\Origin\Origin.exe"),
+            ),
+        ] {
+            let stem = name.unwrap().trim_end_matches(".exe");
+            assert!(CONFLICTING_PROCESSES.contains(&stem), "{stem}");
+            assert!(!PLAY_CONFLICTS.contains(&stem), "{stem}");
+        }
+        for name in PLAY_CONFLICTS {
+            assert!(CONFLICTING_PROCESSES.contains(name), "{name}");
+        }
+    }
 
     #[test]
     fn a_bound_port_is_reported_busy_and_a_free_one_free() {

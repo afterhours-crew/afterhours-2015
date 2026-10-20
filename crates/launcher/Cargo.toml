@@ -15,6 +15,10 @@ path = "src/main.rs"
 workspace = true
 
 [dev-dependencies]
+# Constructed installations for the car-name tests.
+nfs-frostbite = { path = "../frostbite", features = ["synthetic"] }
+# The same pinned SQLite as nfs-storage, for tests that hold a second writer.
+rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled", "limits"] }
 serde_json = "=1.0.151"
 sha2 = { version = "=0.11.0", default-features = false }
 
@@ -22,9 +26,20 @@ sha2 = { version = "=0.11.0", default-features = false }
 anstream = "=1.0.0"
 anstyle = "=1.0.14"
 nfs-afterhours-sys = { path = "../launcher-sys" }
+# Read-only `profile`: the account store and its domain decoders. The
+# launcher never opens a store for writing; the server owns all writes.
+nfs-services = { path = "../services" }
+nfs-storage = { path = "../storage" }
+# Item classes and states, to recognize owned cars by the server's own rule.
+nfs-world-core = { path = "../world-core" }
+# Read-only installation reader for the game's localized car names.
+nfs-frostbite = { path = "../frostbite" }
 # Argument parsing, help and usage. Default features are off: no color, no
 # suggestions, no environment-variable or wrapping support.
 clap = { version = "=4.6.7", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
+# JSON Schemas of the `--json` records, generated from these types and
+# committed under `schema/` for the desktop launcher.
+schemars = { version = "=1.2.2", default-features = false, features = ["derive", "std"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 sha2 = { version = "=0.11.0", default-features = false }

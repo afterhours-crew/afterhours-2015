@@ -17,10 +17,11 @@
 use super::{GamePoll, Steps};
 use crate::{
     clock,
+    events::{DiagnosticSource, Emitter},
     exit::{Failure, Result},
     paths,
     platform::{self, ChildProcess, Keep, Platform, SpawnSpec},
-    records::{self, AccountRecord, Action, Request, State, Status},
+    records::{self, AccountRecord, Request, State, Status},
     session, terminal,
 };
 use std::{
@@ -67,6 +68,11 @@ pub struct LiveSession {
     account: Option<AccountRecord>,
     server_executable: Option<PathBuf>,
     ready: Option<ServerReady>,
+    /// The JSON-lines stream when the request asked for events.
+    events: Emitter,
+    /// Games started in this session, which names their logs.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    games: u32,
     #[cfg(windows)]
     job: Option<platform::windows::JobGuard>,
     #[cfg(windows)]
@@ -98,7 +104,9 @@ fn wait_child_exit(child: &mut dyn ChildProcess, grace: Duration) -> Result<()> 
 impl LiveSession {
     /// Build a session for a validated request whose data directory is
     /// locked by the caller. On Windows this attaches the session job.
-    pub fn new(request: Request, data: PathBuf, run: PathBuf) -> Result<Self> {
+    /// Status changes and child diagnostics go to `events` when it is
+    /// enabled, and to the console otherwise.
+    pub fn new(request: Request, data: PathBuf, run: PathBuf, events: Emitter) -> Result<Self> {
         #[cfg(windows)]
         let job = Some(platform::windows::JobGuard::attach()?);
         Ok(Self {
@@ -113,6 +121,8 @@ impl LiveSession {
             account: None,
             server_executable: None,
             ready: None,
+            events,
+            games: 0,
             #[cfg(windows)]
             job,
             #[cfg(windows)]
@@ -127,14 +137,24 @@ impl LiveSession {
             .ok_or_else(|| Failure::refused("This action needs --game-dir."))
     }
 
+    /// Pass a child's diagnostic text to the event stream or the console.
+    fn forward(&mut self, source: DiagnosticSource, text: &str) {
+        if self.events.enabled() {
+            self.events.diagnostic(source, text);
+        } else {
+            terminal::raw(text);
+        }
+    }
+
     fn echo_diagnostics(&mut self) {
-        for child in [self.server.as_mut(), self.game.as_mut()]
-            .into_iter()
-            .flatten()
-        {
-            let text = child.drain_diagnostics();
-            if !text.is_empty() {
-                eprint!("{text}");
+        let server = self.server.as_mut().map(|s| s.drain_diagnostics());
+        let game = self.game.as_mut().map(|g| g.drain_diagnostics());
+        for (source, text) in [
+            (DiagnosticSource::Server, server),
+            (DiagnosticSource::Game, game),
+        ] {
+            if let Some(text) = text {
+                self.forward(source, &text);
             }
         }
     }
@@ -158,16 +178,26 @@ impl LiveSession {
             capture_first_line: false,
         };
         let mut child = self.platform.spawn(&spec)?;
+        let source = if name == "create-account" {
+            DiagnosticSource::CreateAccount
+        } else {
+            DiagnosticSource::Prepare
+        };
         let mut diagnostics = terminal::Diagnostics::default();
+        let mut pass = |events: &mut Emitter, text: &str| {
+            if events.enabled() {
+                events.diagnostic(source, text);
+            } else if !text.is_empty() {
+                diagnostics.push(text);
+            }
+        };
         let deadline = Instant::now() + PREPARATION_DEADLINE;
         while !child.exited() || !child.logs_finished() {
-            let text = child.drain_diagnostics();
-            if !text.is_empty() {
-                diagnostics.push(&text);
-            }
+            pass(&mut self.events, &child.drain_diagnostics());
             child.check_logs()?;
             if Instant::now() > deadline || self.stop_file_present() {
                 child.kill();
+                self.events.flush(source);
                 return Err(Failure::session(
                     "Preparation cancelled or exceeded ten minutes.",
                 ));
@@ -175,7 +205,8 @@ impl LiveSession {
             std::thread::sleep(Duration::from_millis(100));
         }
         child.check_logs()?;
-        diagnostics.push(&child.drain_diagnostics());
+        pass(&mut self.events, &child.drain_diagnostics());
+        self.events.flush(source);
         diagnostics.finish();
         if child.exit_code() != Some(0) || child.output_truncated() {
             return Err(Failure::session(format!(
@@ -294,7 +325,7 @@ impl LiveSession {
             "--owned-world-connection".into(),
             "--owned-only".into(),
         ];
-        if self.request.action == Action::Start {
+        if self.request.serves_game() {
             // The game expects the launcher services on this port.
             args.push("--lsx-port".into());
             args.push(platform::LSX_PORT.to_string());
@@ -318,8 +349,7 @@ impl LiveSession {
         if ready["ready"] != true || ready["pid"] != pid {
             return Err(Failure::session("Server readiness identity mismatch."));
         }
-        if self.request.action == Action::Start
-            && ready["lsx"] != format!("127.0.0.1:{}", platform::LSX_PORT)
+        if self.request.serves_game() && ready["lsx"] != format!("127.0.0.1:{}", platform::LSX_PORT)
         {
             return Err(Failure::session("Server readiness identity mismatch."));
         }
@@ -339,14 +369,15 @@ impl LiveSession {
 impl Steps for LiveSession {
     fn status(&mut self, state: State, message: &str) {
         self.echo_diagnostics();
+        let game_running = self.game.as_mut().is_some_and(|game| !game.exited());
         match state {
             State::Preparing => terminal::heading("Preparing your game data"),
             State::Starting => terminal::heading("Starting the game"),
             State::Activation => terminal::heading("EA activation needs your attention"),
-            State::Ready => terminal::heading(if self.request.action == Action::Serve {
-                "Server is running"
-            } else {
+            State::Ready => terminal::heading(if game_running {
                 "Ready to play"
+            } else {
+                "Server is running"
             }),
             State::Stopping => terminal::heading("Closing your session"),
             State::Finished => terminal::heading("All done"),
@@ -361,6 +392,8 @@ impl Steps for LiveSession {
         let record = Status {
             version: records::VERSION,
             id: self.request.id.clone(),
+            action: Some(self.request.action),
+            game_running,
             utc: clock::now_iso(),
             state,
             message: message.to_owned(),
@@ -371,6 +404,11 @@ impl Steps for LiveSession {
         if let Err(e) = records::replace_json(&self.run.join("status.json"), &record) {
             terminal::error(format_args!("Could not save the session status: {e}"));
         }
+        if matches!(state, State::Finished | State::Failed) {
+            // Lines a child left unterminated precede the final state.
+            self.events.flush_all();
+        }
+        self.events.status(&record);
     }
 
     fn stop_requested(&mut self) -> bool {
@@ -420,7 +458,7 @@ impl Steps for LiveSession {
             .account
             .clone()
             .ok_or_else(|| Failure::internal("account not prepared"))?;
-        let executable = if self.request.action == Action::Start {
+        let executable = if self.request.serves_game() {
             let registration = self
                 .platform
                 .registered_client_path()?
@@ -450,7 +488,8 @@ impl Steps for LiveSession {
         let mut server = self.platform.spawn(&spec)?;
         let deadline = Instant::now() + SERVER_READY_DEADLINE;
         let line = loop {
-            eprint!("{}", server.drain_diagnostics());
+            let text = server.drain_diagnostics();
+            self.forward(DiagnosticSource::Server, &text);
             server.check_logs()?;
             if let Some(line) = server.first_line() {
                 break line?;
@@ -490,18 +529,28 @@ impl Steps for LiveSession {
         }
         let date = crate::marker::UtcDate::today();
         let marker = crate::marker::launch_marker(date);
+        // Each game of a session gets its own logs: game, game-2, game-3...
+        self.games += 1;
+        let logs = if self.games == 1 {
+            "game".to_owned()
+        } else {
+            format!("game-{}", self.games)
+        };
         // This date-derived value is launch context, not an account credential.
         let spec = SpawnSpec {
             executable: game_path.clone(),
             arguments: Vec::new(),
             working_directory: game_dir,
-            stdout_log: self.run.join("game.stdout.log"),
+            stdout_log: self.run.join(format!("{logs}.stdout.log")),
             stdout_keeps: Keep::End,
-            stderr_log: self.run.join("game.stderr.log"),
+            stderr_log: self.run.join(format!("{logs}.stderr.log")),
             environment: vec![("EARtPLaunchCode".into(), marker.to_string())],
             capture_first_line: false,
         };
-        let game = self.platform.spawn(&spec)?;
+        // Own the game before anything else can fail, so a failed start
+        // still closes it.
+        self.game = Some(self.platform.spawn(&spec)?);
+        let game_id = self.game.as_ref().map_or(0, |game| game.id());
         let server = self
             .server
             .as_ref()
@@ -518,8 +567,8 @@ impl Steps for LiveSession {
             Ok(nfs_afterhours_sys::windows::Process::open(pid, false)?.creation_time()?)
         };
         let lease = EndpointLease::new(
-            game.id(),
-            created(game.id())?,
+            game_id,
+            created(game_id)?,
             &game_path,
             server.id(),
             created(server.id())?,
@@ -527,7 +576,6 @@ impl Steps for LiveSession {
             &self.request.server_sha256,
             ready.redirector_port,
         );
-        self.game = Some(game);
         self.lease = Some(lease?);
         Ok(())
     }
@@ -622,6 +670,53 @@ impl Steps for LiveSession {
         Ok(())
     }
 
+    fn play_requested(&mut self) -> bool {
+        let path = self.run.join(session::PLAY_FILE);
+        if !path.exists() {
+            return false;
+        }
+        // Consume the request first: an unremovable file must not start a
+        // game on every poll. Without game support it is void.
+        std::fs::remove_file(&path).is_ok() && self.request.serves_game()
+    }
+
+    fn retire_game(&mut self) -> Result<()> {
+        self.finish_lease()?;
+        if let Some(mut game) = self.game.take() {
+            let deadline = Instant::now() + DRAIN_GRACE;
+            while !game.logs_finished() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let finished = game.logs_finished();
+            let mut text = String::new();
+            loop {
+                let chunk = game.drain_diagnostics();
+                if chunk.is_empty() {
+                    break;
+                }
+                text.push_str(&chunk);
+            }
+            self.forward(DiagnosticSource::Game, &text);
+            self.events.flush(DiagnosticSource::Game);
+            if let Err(fault) = game.check_logs().and_then(|()| {
+                if finished {
+                    Ok(())
+                } else {
+                    Err(Failure::session(
+                        "Game diagnostics did not finish after it exited.",
+                    ))
+                }
+            }) {
+                // Keep it for the session cleanup and the job check.
+                self.game = Some(game);
+                return Err(fault);
+            }
+        }
+        // A request that arrived while this game ran is void.
+        let _ = std::fs::remove_file(self.run.join(session::PLAY_FILE));
+        Ok(())
+    }
+
     fn stop_server(&mut self) -> Result<()> {
         if let Some(server) = self.server.as_mut()
             && !server.exited()
@@ -634,10 +729,12 @@ impl Steps for LiveSession {
 
     fn drain_logs(&mut self) -> Result<()> {
         let deadline = Instant::now() + DRAIN_GRACE;
-        for child in [self.game.as_mut(), self.server.as_mut()]
-            .into_iter()
-            .flatten()
-        {
+        for source in [DiagnosticSource::Game, DiagnosticSource::Server] {
+            let child = match source {
+                DiagnosticSource::Game => self.game.as_mut(),
+                _ => self.server.as_mut(),
+            };
+            let Some(child) = child else { continue };
             while !child.logs_finished() && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(50));
             }
@@ -647,13 +744,16 @@ impl Steps for LiveSession {
                     "Child diagnostics did not finish after process exit.",
                 ));
             }
+            let mut text = String::new();
             loop {
-                let text = child.drain_diagnostics();
-                if text.is_empty() {
+                let chunk = child.drain_diagnostics();
+                if chunk.is_empty() {
                     break;
                 }
-                eprint!("{text}");
+                text.push_str(&chunk);
             }
+            self.forward(source, &text);
+            self.events.flush(source);
         }
         Ok(())
     }

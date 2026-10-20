@@ -278,3 +278,122 @@ fn non_cas_and_missing_superbundles_are_skipped() {
     assert_eq!(install.ebx_index().unwrap().len(), 1);
     assert!(install.bundles("../escape").is_err());
 }
+
+#[test]
+fn superbundle_ebx_lists_one_superbundle_with_first_listings() {
+    use crate::synthetic::{CasSuperbundle, write_superbundles};
+    let dir = TempDir::new();
+    let first = [asset("items/car", 1, 1), asset("items/part", 2, 2)];
+    let second = [asset("items/car", 3, 3), asset("other/thing", 4, 4)];
+    write_superbundles(
+        &dir.0,
+        b"exe",
+        &[
+            CasSuperbundle {
+                name: "Win32/levels/frontend/frontend",
+                bundle: "win32/levels/frontend/frontend",
+                assets: &first,
+            },
+            CasSuperbundle {
+                name: "Win32/globals",
+                bundle: "win32/default_settings_win32",
+                assets: &second,
+            },
+        ],
+        &[],
+    )
+    .unwrap();
+    let install = Installation::open(&dir.0, Limits::default()).unwrap();
+    let listed = install
+        .superbundle_ebx("Win32/levels/frontend/frontend")
+        .unwrap();
+    let names: Vec<_> = listed.iter().map(|l| l.entry.name.as_str()).collect();
+    assert_eq!(names, ["items/car", "items/part"]);
+    let mut store = Store::open(&install).unwrap();
+    assert_eq!(
+        value(&store.objects(&listed[0].entry).unwrap()),
+        Some(&Ebx::Int32(1))
+    );
+    assert_eq!(install.superbundle_ebx("Win32/globals").unwrap().len(), 2);
+    assert!(install.superbundle_ebx("Win32/absent").unwrap().is_empty());
+    let limits = Limits {
+        max_entries: 1,
+        ..Limits::default()
+    };
+    let small = Installation::open(&dir.0, limits).unwrap();
+    assert!(small.superbundle_ebx("Win32/globals").is_err());
+}
+
+#[test]
+fn inline_chunks_prefer_the_patch_layer_and_skip_cas_chunks() {
+    use crate::synthetic::{InlineSuperbundle, write_superbundles};
+    let dir = TempDir::new();
+    let (a, b) = ([0xA1; 16], [0xB2; 16]);
+    let base_chunks = [(a, b"base A".to_vec()), (b, vec![7u8; 70_000])];
+    write_superbundles(
+        &dir.0,
+        b"exe",
+        &[],
+        &[InlineSuperbundle {
+            name: "Win32/loc/en",
+            chunks: &base_chunks,
+        }],
+    )
+    .unwrap();
+    let install = Installation::open(&dir.0, Limits::default()).unwrap();
+    let chunks = install.inline_chunks("Win32/loc/en").unwrap();
+    assert_eq!(chunks.len(), 2);
+    assert_eq!(install.inline_chunk_bytes(&chunks[0]).unwrap(), b"base A");
+    assert_eq!(
+        install.inline_chunk_bytes(&chunks[1]).unwrap(),
+        vec![7u8; 70_000],
+        "multi-block chunk"
+    );
+    // A patch toc replaces chunk A and adds a cas-stored chunk, which is skipped.
+    let patch = dir.0.join("Update/Patch/Data/Win32/loc");
+    std::fs::create_dir_all(&patch).unwrap();
+    let record = block(b"patched A", 9);
+    std::fs::write(patch.join("en.sb"), &record).unwrap();
+    let toc = Db::Object(vec![
+        (
+            "chunks",
+            Db::List(vec![
+                Db::Object(vec![
+                    ("id", Db::Guid(a)),
+                    ("offset", Db::Long(0)),
+                    ("size", Db::Int(record.len() as i32)),
+                ]),
+                Db::Object(vec![
+                    ("id", Db::Guid([0xC3; 16])),
+                    ("sha1", Db::Sha1([1; 20])),
+                ]),
+            ]),
+        ),
+        ("cas", Db::Bool(false)),
+    ]);
+    std::fs::write(patch.join("en.toc"), clear_header(&toc.record(None))).unwrap();
+    let chunks = install.inline_chunks("Win32/loc/en").unwrap();
+    let ids: Vec<_> = chunks.iter().map(|c| c.id).collect();
+    assert_eq!(ids, [a, b]);
+    assert_eq!(
+        install.inline_chunk_bytes(&chunks[0]).unwrap(),
+        b"patched A"
+    );
+    assert!(install.inline_chunks("../escape").is_err());
+    assert!(
+        install
+            .inline_chunks("Win32/loc/absent")
+            .unwrap()
+            .is_empty()
+    );
+    let limits = Limits {
+        max_asset_bytes: 8,
+        ..Limits::default()
+    };
+    let small = Installation::open(&dir.0, limits).unwrap();
+    assert!(small.inline_chunks("Win32/loc/en").is_err(), "chunk bound");
+    // A chunk range past the end of its .sb is malformed, not truncated data.
+    let mut broken = chunks[1].clone();
+    broken.source.offset += 1_000_000;
+    assert!(install.inline_chunk_bytes(&broken).is_err());
+}
