@@ -11,8 +11,10 @@ on:
 permissions:
   contents: read
 
+# Every main commit keeps its own run: a merged release is tagged only after
+# CI passes on its merge commit (tag-release.yml), so none may be cancelled.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -96,3 +98,31 @@ jobs:
         with:
           key: launcher
       - run: cargo test -p nfs-afterhours -p nfs-afterhours-sys --locked
+
+  release-scripts:
+    name: Release scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Offline tests
+        shell: pwsh
+        run: |
+          ./tools/Test-Release.ps1
+          ./tools/Test-TerminalDraft.ps1
+      # A dry run of Prepare release on the base branch: the notes the next
+      # release would start with. Nothing is committed or pushed.
+      - name: Draft the next release's notes
+        if: github.event_name == 'pull_request'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          ./tools/Prepare-Release.ps1 -Repository $env:GH_REPO -BodyFile "$env:RUNNER_TEMP/release-pr.md" -Head HEAD^1 -Preview
+          Get-Content -LiteralPath "$env:RUNNER_TEMP/release-pr.md" -Raw | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY

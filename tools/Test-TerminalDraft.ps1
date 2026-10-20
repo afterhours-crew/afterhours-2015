@@ -60,7 +60,20 @@ try {
     foreach ($asset in @('Afterhours-windows-x64.zip', 'SHA256SUMS.txt', 'build-info.json', 'Afterhours-contract.zip')) {
         if ($call -notcontains (Join-Path $root $asset)) { throw "Missing asset: $asset" }
     }
+    if ($call -notcontains '--generate-notes') { throw 'Default notes should include generated notes.' }
     Write-Output 'Passed: complete package creates an unpublished draft with four assets'
+
+    $reviewed = Join-Path $root 'reviewed-notes.md'
+    [IO.File]::WriteAllText($reviewed, "Reviewed notes`n")
+    $global:AfterhoursDraftTestState.ghCalls = @()
+    & $publisher -PackageDirectory $root -Release v0.3.1 -Revision $revision -Repository test-owner/test-repo -NotesFile $reviewed
+    $call = $global:AfterhoursDraftTestState.ghCalls[0]
+    $at = [array]::IndexOf($call, '--notes-file')
+    if ($at -lt 0 -or $call[$at + 1] -ne (Resolve-Path -LiteralPath $reviewed).Path -or
+        $call -contains '--generate-notes' -or $call -notcontains '--draft') { throw 'Reviewed notes were not used as the draft text.' }
+    Remove-Item -LiteralPath $reviewed
+    Write-Output 'Passed: reviewed notes replace the default and generated text'
+    Assert-Refused 'missing reviewed notes file' { & $publisher -PackageDirectory $root -Release v0.3.1 -Revision $revision -Repository test-owner/test-repo -NotesFile $reviewed }
 
     $global:AfterhoursDraftTestState.tagLines = @("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`trefs/tags/v0.3.1", "$revision`trefs/tags/v0.3.1^{}")
     & $publish

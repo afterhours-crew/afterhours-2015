@@ -1,0 +1,63 @@
+name: Tag release
+
+# When CI passes on the main commit that changed the bundle version (a merged
+# release pull request), tag that commit v<version> and start Windows tester
+# bundle on the tag, which creates the unpublished draft. A tag pushed with
+# GITHUB_TOKEN starts no workflow by itself, hence the explicit dispatch.
+# Nothing here publishes. See docs/RELEASING.md.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: "Full SHA of the main commit to tag; CI must have passed on it"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tag-release
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    name: Tag a merged release
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      BASE: ${{ github.event.repository.default_branch }}
+      COMMIT: ${{ inputs.commit || github.event.workflow_run.head_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+      - name: Is this the commit that changed the version?
+        id: select
+        shell: pwsh
+        run: ./tools/Select-ReleaseTag.ps1 -Commit $env:COMMIT -Repository $env:GH_REPO -Branch $env:BASE -RequireCi:($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch')
+      - name: Tag it and build the draft
+        if: steps.select.outputs.tag != ''
+        env:
+          TAG: ${{ steps.select.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" "$COMMIT" -m "Afterhours ${TAG#v}"
+          git push origin "refs/tags/$TAG"
+          gh workflow run release.yml --ref "$BASE" -f release_tag="$TAG"
+          echo "Tagged $COMMIT as $TAG and started Windows tester bundle." >> "$GITHUB_STEP_SUMMARY"
