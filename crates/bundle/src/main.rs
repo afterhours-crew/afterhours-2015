@@ -3,8 +3,19 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 use clap::Parser;
-use nfs_afterhours::{cli::Cli, exit::Exit, terminal};
+use nfs_afterhours::{cli::Cli, contract::Build, exit::Exit, terminal};
 use std::{ffi::OsString, io::IsTerminal, path::Path};
+
+/// This bundle, as `version --json` reports it.
+const BUILD: Build = Build {
+    program: "Afterhours",
+    version: env!("CARGO_PKG_VERSION"),
+    release: match option_env!("AFTERHOURS_RELEASE") {
+        Some(release) => release,
+        None => "development",
+    },
+    revision: option_env!("AFTERHOURS_REVISION"),
+};
 
 fn arguments(executable: &Path, supplied: Vec<OsString>) -> Vec<OsString> {
     let mut args = vec![executable.as_os_str().to_owned()];
@@ -31,11 +42,7 @@ fn run(executable: &Path, supplied: Vec<OsString>, automatic: bool) -> std::proc
         terminal::note("Local single-player preview");
         terminal::detail(
             "Build",
-            format_args!(
-                "{} ({})",
-                env!("CARGO_PKG_VERSION"),
-                option_env!("AFTERHOURS_RELEASE").unwrap_or("development")
-            ),
+            format_args!("{} ({})", BUILD.version, BUILD.release),
         );
         terminal::detail(
             "Game folder",
@@ -59,7 +66,7 @@ fn run(executable: &Path, supplied: Vec<OsString>, automatic: bool) -> std::proc
             };
         }
     };
-    match nfs_afterhours::commands::run_bundled(cli, executable.to_path_buf()) {
+    match nfs_afterhours::commands::run_bundled(cli, executable.to_path_buf(), BUILD) {
         Ok(()) => Exit::Success.into(),
         Err(failure) => {
             terminal::error(&failure);
@@ -71,9 +78,9 @@ fn run(executable: &Path, supplied: Vec<OsString>, automatic: bool) -> std::proc
 fn print_version() {
     println!(
         "Afterhours {} ({} / {})",
-        env!("CARGO_PKG_VERSION"),
-        option_env!("AFTERHOURS_RELEASE").unwrap_or("development"),
-        option_env!("AFTERHOURS_REVISION").unwrap_or("local build")
+        BUILD.version,
+        BUILD.release,
+        BUILD.revision.unwrap_or("local build")
     );
 }
 

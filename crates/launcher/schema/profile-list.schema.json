@@ -1,0 +1,164 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "Bank": {
+      "properties": {
+        "balance": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "formatted": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "balance",
+        "formatted"
+      ],
+      "type": "object"
+    },
+    "ContentSource": {
+      "description": "Where the content came from, reported with the profile.",
+      "properties": {
+        "chosen_by": {
+          "description": "`argument`, `current-session` or `only-cache`.",
+          "type": "string"
+        },
+        "directory": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "directory",
+        "chosen_by"
+      ],
+      "type": "object"
+    },
+    "ProfileEntry": {
+      "description": "One line of the account list.",
+      "properties": {
+        "account_id": {
+          "type": "string"
+        },
+        "active": {
+          "type": "boolean"
+        },
+        "bank": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Bank"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "display_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error": {
+          "description": "Why this save could not be read; the other fields are then `null`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "level": {
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "score": {
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "stored_level": {
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "updated_at_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "updated_at_utc": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "account_id",
+        "active",
+        "display_name",
+        "level",
+        "stored_level",
+        "score",
+        "bank",
+        "updated_at_ms",
+        "updated_at_utc",
+        "error"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "`profile --list --json`.",
+  "properties": {
+    "accounts": {
+      "items": {
+        "$ref": "#/definitions/ProfileEntry"
+      },
+      "type": "array"
+    },
+    "content": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ContentSource"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "truncated": {
+      "type": "boolean"
+    },
+    "version": {
+      "const": 1,
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "warnings": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "version",
+    "accounts",
+    "truncated",
+    "content",
+    "warnings"
+  ],
+  "title": "ProfileList",
+  "type": "object"
+}

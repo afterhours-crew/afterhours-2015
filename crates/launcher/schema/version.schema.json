@@ -1,0 +1,105 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "Capability": {
+      "description": "Optional features a build provides. Screens whose capability is absent\nshould say the feature is not available yet rather than fail.",
+      "oneOf": [
+        {
+          "const": "profile",
+          "description": "`profile` and `profile --list`.",
+          "type": "string"
+        },
+        {
+          "const": "sessions",
+          "description": "`sessions`.",
+          "type": "string"
+        },
+        {
+          "const": "events",
+          "description": "`--events` on `setup`, `serve` and `start`.",
+          "type": "string"
+        },
+        {
+          "const": "play",
+          "description": "`play`: start the game inside a running `serve` session (Windows).",
+          "type": "string"
+        },
+        {
+          "const": "world-settings",
+          "description": "`settings`, and `--traffic` and `--rivals` on `setup`, `serve` and\n`start`: the amounts of traffic and roaming rivals.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "description": "`version --json`.",
+  "properties": {
+    "capabilities": {
+      "description": "Optional features this build provides.",
+      "items": {
+        "$ref": "#/definitions/Capability"
+      },
+      "type": "array"
+    },
+    "game_launch": {
+      "description": "Whether `start` can launch and route the game on this platform.",
+      "type": "boolean"
+    },
+    "launcher_version": {
+      "description": "Version of the launcher library (`nfs-afterhours`) inside it.",
+      "type": "string"
+    },
+    "os": {
+      "description": "Operating system: `windows`, `linux` or `macos`.",
+      "type": "string"
+    },
+    "program": {
+      "description": "`Afterhours` for the single-executable bundle, `nfs-afterhours` for\nthe standalone launcher.",
+      "type": "string"
+    },
+    "program_version": {
+      "description": "The program's package version, such as `0.3.0`. For `Afterhours`\nthis is the bundle version that release tags name.",
+      "type": "string"
+    },
+    "records": {
+      "additionalProperties": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "description": "Current version of every record, by schema name.",
+      "type": "object"
+    },
+    "release": {
+      "description": "The release tag the program was built for, or `development`.",
+      "type": "string"
+    },
+    "revision": {
+      "description": "The source commit the program was built from; `null` for builds\nthat did not record one.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "version": {
+      "const": 1,
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version",
+    "program",
+    "program_version",
+    "release",
+    "revision",
+    "launcher_version",
+    "os",
+    "game_launch",
+    "records",
+    "capabilities"
+  ],
+  "title": "VersionReport",
+  "type": "object"
+}

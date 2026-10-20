@@ -14,7 +14,7 @@
 use crate::{
     exit::{Failure, Result},
     paths,
-    records::{self, SessionPointer, State, Status},
+    records::{self, Action, Request, SessionPointer, State, Status},
 };
 use std::{
     fs::File,
@@ -29,6 +29,8 @@ pub const POINTER_FILE: &str = "current-session.json";
 pub const STOP_FILE: &str = "stop";
 /// Stop request consumed by the server (`--stop-file`).
 pub const STOP_SERVER_FILE: &str = "stop-server";
+/// Play request consumed by a serving supervisor: start the game.
+pub const PLAY_FILE: &str = "play";
 
 /// Held advisory lock on the data directory.
 #[derive(Debug)]
@@ -105,21 +107,34 @@ pub fn current_status(data: &Path) -> Result<Option<Status>> {
         return Err(Failure::refused("Session status identity mismatch."));
     }
     if status.state.is_live() {
-        match lock_is_held(&data)? {
-            None => {
-                status.state = State::Interrupted;
-                status.message =
-                    "Supervisor lock is missing. Inspect the data directory before restarting."
-                        .into();
-            }
-            Some(false) => {
-                status.state = State::Interrupted;
-                status.message = "Supervisor is no longer running. Its owned processes were closed or are orphaned; saved account data is preserved. Start again to recover.".into();
-            }
-            Some(true) => {}
-        }
+        derive_interrupted(&mut status, lock_is_held(&data)?);
     }
     Ok(Some(status))
+}
+
+/// Report a live status as `interrupted` unless a supervisor holds the
+/// data-directory lock (`lock` as [`lock_is_held`] returns it). Only the
+/// current session can have a supervisor; pass `Some(false)` for any other.
+pub fn derive_interrupted(status: &mut Status, lock: Option<bool>) {
+    if !status.state.is_live() {
+        return;
+    }
+    if lock != Some(true) {
+        // Without its supervisor the session's job has closed its game.
+        status.game_running = false;
+    }
+    match lock {
+        None => {
+            status.state = State::Interrupted;
+            status.message =
+                "Supervisor lock is missing. Inspect the data directory before restarting.".into();
+        }
+        Some(false) => {
+            status.state = State::Interrupted;
+            status.message = "Supervisor is no longer running. Its owned processes were closed or are orphaned; saved account data is preserved. Start again to recover.".into();
+        }
+        Some(true) => {}
+    }
 }
 
 /// Outcome of a stop request.
@@ -130,7 +145,7 @@ pub enum StopOutcome {
     /// The session is already over; carries its final message.
     AlreadyOver(Status),
     /// A stop file was written for the live supervisor to consume.
-    Requested(PathBuf),
+    Requested { stop_file: PathBuf, status: Status },
 }
 
 /// Ask the live supervisor to close the game, then the server.
@@ -150,7 +165,97 @@ pub fn request_stop(data: &Path) -> Result<StopOutcome> {
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(e) => return Err(e.into()),
     }
-    Ok(StopOutcome::Requested(stop))
+    Ok(StopOutcome::Requested {
+        stop_file: stop,
+        status,
+    })
+}
+
+/// A play request written for the live serving supervisor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlayRequested {
+    pub play_file: PathBuf,
+    /// The session's status when the request was written.
+    pub status: Status,
+}
+
+/// Ask the live `serve` supervisor to start the game in its session. Only a
+/// live serve session started with game support and without a game running
+/// or requested is asked; anything else is refused and nothing is written.
+/// `ready` runs last, before the request is written, for checks outside the
+/// data directory such as conflicting processes.
+pub fn request_play(data: &Path, ready: impl FnOnce() -> Result<()>) -> Result<PlayRequested> {
+    let data = paths::checked_data_path(data, None)?;
+    let Some(status) = current_status(&data)? else {
+        return Err(Failure::no_session(
+            "No Afterhours session is running. Start one with `nfs-afterhours serve` first.",
+        ));
+    };
+    if !status.state.is_live() {
+        return Err(Failure::no_session(
+            "The current session has ended. Start one with `nfs-afterhours serve` first.",
+        ));
+    }
+    let run = paths::session_dir(&data, &status.id);
+    paths::checked_data_path(&run, None)?;
+    let request: Request = records::read_json(&run.join("request.json"))?;
+    if request.id != status.id {
+        return Err(Failure::refused("Session request identity mismatch."));
+    }
+    match request.action {
+        Action::Serve => {}
+        Action::Start => {
+            return Err(Failure::refused(
+                "This session already runs the game; only a `serve` session starts it on request.",
+            ));
+        }
+        Action::Setup => {
+            return Err(Failure::refused(
+                "A setup session does not host the game; use `nfs-afterhours serve`.",
+            ));
+        }
+    }
+    if !crate::platform::supports_game_launch() {
+        return Err(Failure::refused(
+            "Starting the game is supported on Windows only.",
+        ));
+    }
+    if !request.game_support {
+        return Err(Failure::refused(
+            "This session serves without game support. Stop it and serve again without --server-only.",
+        ));
+    }
+    match status.state {
+        State::Stopping => return Err(Failure::refused("The session is stopping.")),
+        State::Starting | State::Activation => {
+            return Err(Failure::refused(
+                "The game is already starting in this session.",
+            ));
+        }
+        _ if status.game_running => {
+            return Err(Failure::refused(
+                "The game is already running in this session.",
+            ));
+        }
+        _ => {}
+    }
+    let play = run.join(PLAY_FILE);
+    if play.exists() {
+        return Err(Failure::refused(
+            "A game start was already requested for this session.",
+        ));
+    }
+    ready()?;
+    match File::options().write(true).create_new(true).open(&play) {
+        Ok(_) => Ok(PlayRequested {
+            play_file: play,
+            status,
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(Failure::refused(
+            "A game start was already requested for this session.",
+        )),
+        Err(e) => Err(e.into()),
+    }
 }
 
 #[cfg(test)]
@@ -183,6 +288,8 @@ mod tests {
                 state,
                 message: "m".into(),
                 worker_pid: 1,
+                action: Some(crate::records::Action::Serve),
+                game_running: false,
                 game_pid: None,
                 server_pid: None,
             },
@@ -242,10 +349,11 @@ mod tests {
         write_status(&data, &id, State::Ready);
         let _held = Lock::acquire(&data).unwrap();
         let first = request_stop(&data).unwrap();
-        let StopOutcome::Requested(path) = &first else {
+        let StopOutcome::Requested { stop_file, status } = &first else {
             panic!("{first:?}")
         };
-        assert!(path.exists());
+        assert!(stop_file.exists());
+        assert_eq!(status.state, State::Ready);
         assert_eq!(
             request_stop(&data).unwrap(),
             first,
@@ -264,6 +372,154 @@ mod tests {
         status.id = "b".repeat(32);
         records::replace_json(&run.join("status.json"), &status).unwrap();
         assert!(current_status(&data).is_err());
+        std::fs::remove_dir_all(data).unwrap();
+    }
+
+    /// A current session started as `action`, with its request.
+    fn play_session(data: &Path, id: &str, action: Action, game_support: bool) {
+        write_status(data, id, State::Ready);
+        let run = paths::session_dir(data, id);
+        let mut status: Status = records::read_json(&run.join("status.json")).unwrap();
+        status.action = Some(action);
+        records::replace_json(&run.join("status.json"), &status).unwrap();
+        let request = Request {
+            bundled_server: false,
+            version: 1,
+            id: id.to_owned(),
+            action,
+            game_directory: Some(PathBuf::from("game")),
+            data_directory: data.to_owned(),
+            server_path: PathBuf::from("server"),
+            server_sha256: "e".repeat(64),
+            player_name: "Driver".into(),
+            record_protocol: false,
+            events: false,
+            game_support,
+            settings: Default::default(),
+        };
+        let _ = std::fs::remove_file(run.join("request.json"));
+        records::write_new_json(&run.join("request.json"), &request).unwrap();
+        point_current_session(data, id).unwrap();
+    }
+
+    fn update_status(data: &Path, id: &str, change: impl FnOnce(&mut Status)) {
+        let path = paths::session_dir(data, id).join("status.json");
+        let mut status: Status = records::read_json(&path).unwrap();
+        change(&mut status);
+        records::replace_json(&path, &status).unwrap();
+    }
+
+    fn refusal(result: Result<PlayRequested>) -> (crate::exit::Exit, String) {
+        let failure = result.unwrap_err();
+        (failure.exit, failure.message)
+    }
+
+    #[test]
+    fn play_needs_a_live_session() {
+        use crate::exit::Exit;
+        let data = crate::testing::scratch("play");
+        let (exit, message) = refusal(request_play(&data, || Ok(())));
+        assert_eq!(exit, Exit::NoSession);
+        assert!(message.contains("No Afterhours session"));
+        let id = "1".repeat(32);
+        play_session(&data, &id, Action::Serve, true);
+        // No supervisor holds the lock: the session reads as interrupted.
+        assert_eq!(refusal(request_play(&data, || Ok(()))).0, Exit::NoSession);
+        update_status(&data, &id, |s| s.state = State::Finished);
+        let (exit, message) = refusal(request_play(&data, || Ok(())));
+        assert_eq!(exit, Exit::NoSession);
+        assert!(message.contains("has ended"));
+        assert!(!paths::session_dir(&data, &id).join(PLAY_FILE).exists());
+        std::fs::remove_dir_all(data).unwrap();
+    }
+
+    #[test]
+    fn play_is_refused_unless_a_serve_session_can_start_a_game() {
+        use crate::exit::Exit;
+        let data = crate::testing::scratch("play");
+        let _held = Lock::acquire(&data).unwrap();
+        let start = "2".repeat(32);
+        play_session(&data, &start, Action::Start, true);
+        let (exit, message) = refusal(request_play(&data, || Ok(())));
+        assert_eq!(exit, Exit::Refused);
+        assert!(message.contains("already runs the game"), "{message}");
+
+        let serve = "3".repeat(32);
+        play_session(&data, &serve, Action::Serve, false);
+        let (exit, message) = refusal(request_play(&data, || Ok(())));
+        assert_eq!(exit, Exit::Refused);
+        if crate::platform::supports_game_launch() {
+            assert!(message.contains("--server-only"), "{message}");
+        } else {
+            assert!(message.contains("Windows only"), "{message}");
+        }
+        let run = paths::session_dir(&data, &serve);
+        assert!(!run.join(PLAY_FILE).exists(), "a refusal writes nothing");
+        std::fs::remove_dir_all(data).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn play_requests_once_and_refuses_while_a_game_starts_or_runs() {
+        use crate::exit::Exit;
+        let data = crate::testing::scratch("play");
+        let _held = Lock::acquire(&data).unwrap();
+        let id = "4".repeat(32);
+        play_session(&data, &id, Action::Serve, true);
+        let run = paths::session_dir(&data, &id);
+
+        // A failing outside check writes nothing.
+        let (exit, message) = refusal(request_play(&data, || {
+            Err(Failure::refused("Close the existing NFS16 process."))
+        }));
+        assert_eq!(exit, Exit::Refused);
+        assert!(message.contains("NFS16"));
+        assert!(!run.join(PLAY_FILE).exists());
+
+        let requested = request_play(&data, || Ok(())).unwrap();
+        assert_eq!(requested.play_file, run.join(PLAY_FILE));
+        assert!(requested.play_file.exists());
+        assert_eq!(requested.status.action, Some(Action::Serve));
+        let (exit, message) = refusal(request_play(&data, || Ok(())));
+        assert_eq!(exit, Exit::Refused);
+        assert!(message.contains("already requested"), "{message}");
+
+        // The supervisor consumed it and is starting, running or stopping.
+        std::fs::remove_file(run.join(PLAY_FILE)).unwrap();
+        for (state, running, expected) in [
+            (State::Starting, false, "already starting"),
+            (State::Activation, true, "already starting"),
+            (State::Ready, true, "already running"),
+            (State::Stopping, false, "stopping"),
+        ] {
+            update_status(&data, &id, |s| {
+                s.state = state;
+                s.game_running = running;
+            });
+            let (exit, message) = refusal(request_play(&data, || Ok(())));
+            assert_eq!(exit, Exit::Refused, "{state}");
+            assert!(message.contains(expected), "{state}: {message}");
+            assert!(!run.join(PLAY_FILE).exists());
+        }
+        // Serving again after the game: a new request is accepted.
+        update_status(&data, &id, |s| {
+            s.state = State::Ready;
+            s.game_running = false;
+        });
+        assert!(request_play(&data, || Ok(())).is_ok());
+        std::fs::remove_dir_all(data).unwrap();
+    }
+
+    #[test]
+    fn a_session_without_its_supervisor_never_reports_a_running_game() {
+        let data = crate::testing::scratch("play");
+        let id = "5".repeat(32);
+        play_session(&data, &id, Action::Serve, true);
+        update_status(&data, &id, |s| s.game_running = true);
+        let status = current_status(&data).unwrap().unwrap();
+        assert_eq!(status.state, State::Interrupted);
+        assert!(!status.game_running);
+        assert_eq!(status.action, Some(Action::Serve));
         std::fs::remove_dir_all(data).unwrap();
     }
 }

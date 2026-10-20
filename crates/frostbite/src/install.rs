@@ -45,6 +45,14 @@ pub struct SourceRange {
     pub size: usize,
 }
 
+/// A chunk a non-cas superbundle stores inline in its own `.sb`, such as a
+/// localized text database under `Win32/loc/`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InlineChunk {
+    pub id: [u8; 16],
+    pub source: SourceRange,
+}
+
 /// Opened installation with its superbundle list.
 #[derive(Clone, Debug)]
 pub struct Installation {
@@ -233,6 +241,104 @@ impl Installation {
             }
         }
         Ok(index)
+    }
+
+    /// EBX entries one cas superbundle lists, in bundle order, keeping the
+    /// first listing of each name as [`Self::ebx_index`] readers do. Lets a
+    /// reader that knows where its assets live skip every other superbundle.
+    pub fn superbundle_ebx(&self, superbundle: &str) -> Result<Vec<EbxLocation>, Error> {
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        let mut entries = 0usize;
+        for (bundle, manifest) in self.bundles(superbundle)? {
+            let Some(list) = manifest.get("ebx").and_then(Value::as_list) else {
+                continue;
+            };
+            for ebx in list {
+                entries += 1;
+                if entries > self.limits.max_entries {
+                    return Err(Error::Bound("EBX entries"));
+                }
+                let entry = ebx_entry(ebx)?;
+                if seen.insert(entry.name.clone()) {
+                    out.push(EbxLocation {
+                        superbundle: superbundle.to_owned(),
+                        bundle: bundle.clone(),
+                        entry,
+                    });
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Chunks a superbundle's `.toc` lists with an offset and size in its
+    /// `.sb`: the patch layer's first, then base chunks it does not replace.
+    /// Chunks kept in cas archives (listed by SHA-1) are not inline.
+    pub fn inline_chunks(&self, superbundle: &str) -> Result<Vec<InlineChunk>, Error> {
+        if superbundle.contains("..") {
+            return Err(Error::Malformed("superbundle path"));
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for data in [self.root.join("Update/Patch/Data"), self.root.join("Data")] {
+            let toc = data.join(format!("{superbundle}.toc"));
+            if !toc.exists() {
+                continue;
+            }
+            let value = dbobject::load(
+                &read_bounded(&toc, self.limits.max_container_bytes)?,
+                &self.limits,
+            )?;
+            let Some(list) = value.get("chunks").and_then(Value::as_list) else {
+                continue;
+            };
+            if list.len() > self.limits.max_elements {
+                return Err(Error::Bound("chunks per superbundle"));
+            }
+            for entry in list {
+                let id = entry
+                    .get("id")
+                    .and_then(Value::as_guid)
+                    .ok_or(Error::Malformed("chunk id"))?;
+                if entry.get("sha1").is_some() {
+                    continue;
+                }
+                let offset = entry
+                    .get("offset")
+                    .and_then(Value::as_i64)
+                    .and_then(|v| u64::try_from(v).ok())
+                    .ok_or(Error::Malformed("chunk offset"))?;
+                let size = entry
+                    .get("size")
+                    .and_then(Value::as_i64)
+                    .and_then(|v| usize::try_from(v).ok())
+                    .ok_or(Error::Malformed("chunk size"))?;
+                if size > self.limits.max_asset_bytes {
+                    return Err(Error::Bound("inline chunk size"));
+                }
+                if seen.insert(id) {
+                    out.push(InlineChunk {
+                        id,
+                        source: SourceRange {
+                            path: toc.with_extension("sb"),
+                            offset,
+                            size,
+                        },
+                    });
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Decompressed bytes of one inline chunk.
+    pub fn inline_chunk_bytes(&self, chunk: &InlineChunk) -> Result<Vec<u8>, Error> {
+        let path = &chunk.source.path;
+        let mut file =
+            File::open(path).map_err(|_| Error::Missing(format!("archive {}", path.display())))?;
+        let raw = read_range(&mut file, chunk.source.offset, chunk.source.size)?;
+        cas::read_blocks(&raw, &self.limits)
     }
 
     /// Bundle ids of every cas superbundle.

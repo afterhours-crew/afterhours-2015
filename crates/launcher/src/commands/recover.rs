@@ -46,18 +46,20 @@ pub fn recover(context: &Context, account_id: &str) -> Result<()> {
     }
     let target = data.join("account.json");
     let record = records::AccountRecord::post_intro(account_id.to_owned());
-    if target.exists() {
+    let written = if target.exists() {
         let existing: records::AccountRecord = records::read_json(&target)?;
         if existing.version != records::VERSION || existing.local_account != account_id {
             return Err(Failure::refused(
                 "An existing account record will not be replaced.",
             ));
         }
+        false
     } else {
         records::write_new_json(&target, &record)?;
-    }
+        true
+    };
     context.emit(
-        &serde_json::json!({"recovered": true, "account": record}),
+        &crate::contract::RecoverReport::new(record, written),
         || {
             "Account pointer recovered. The server validates database ownership and schema on next start; no account data was modified.".to_owned()
         },
