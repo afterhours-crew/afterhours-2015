@@ -76,6 +76,10 @@ impl Record for profile::Listing {
     const NAME: &'static str = "profile-list";
     const VERSION: u32 = profile::FORMAT_VERSION;
 }
+impl Record for profile::images::CarImagesReport {
+    const NAME: &'static str = "car-images";
+    const VERSION: u32 = profile::images::CarImagesReport::VERSION;
+}
 impl Record for sessions::SessionList {
     const NAME: &'static str = "sessions";
     const VERSION: u32 = sessions::FORMAT_VERSION;
@@ -111,9 +115,10 @@ fn info<T: Record>() -> RecordInfo {
 }
 
 /// Every record, sorted by name.
-pub fn records() -> [RecordInfo; 12] {
+pub fn records() -> [RecordInfo; 13] {
     let mut all = [
         info::<Preflight>(),
+        info::<profile::images::CarImagesReport>(),
         info::<events::Event>(),
         info::<profile::Profile>(),
         info::<profile::Listing>(),
@@ -250,20 +255,28 @@ impl PlayReport {
 }
 
 /// `settings --json`: the saved traffic and rival amounts, which every later
-/// `setup`, `serve` and `start` uses.
+/// `setup`, `serve` and `start` uses and a running session applies.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct SettingsReport {
     pub version: u32,
     /// Ambient traffic as a percentage of the original amount; 0 turns it
     /// off and 100 is the original.
     pub traffic_percent: u16,
-    /// Most roaming rivals active at once; 0 turns them off and `null`
-    /// keeps the original number.
+    /// Roaming rivals kept active; 0 turns them off and `null` keeps the
+    /// original number.
     pub rival_limit: Option<u16>,
     /// Largest `traffic_percent` this build accepts.
     pub max_traffic_percent: u16,
     /// Largest `rival_limit` this build accepts.
     pub max_rivals: u16,
+    /// Whether a `rival_limit` above the game's own number adds roaming
+    /// rivals (other installed racers near the player, each at most once).
+    /// When `false` it only caps the game's own.
+    pub rivals_above_original: bool,
+    /// Whether saving applies to a running session within about a second
+    /// (the server watches `settings.json`); when `false`, a running
+    /// session keeps the values it started with and saving is refused.
+    pub live: bool,
     /// `settings.json` in the data directory; it may not exist yet.
     pub file: PathBuf,
     /// Whether this command saved the file.
@@ -278,6 +291,8 @@ impl SettingsReport {
             rival_limit: settings.rival_limit,
             max_traffic_percent: crate::settings::MAX_TRAFFIC_PERCENT,
             max_rivals: crate::settings::MAX_RIVALS,
+            rivals_above_original: crate::settings::RIVALS_ABOVE_ORIGINAL,
+            live: true,
             file,
             saved,
         }
@@ -318,17 +333,20 @@ pub enum Capability {
     Events,
     /// `play`: start the game inside a running `serve` session (Windows).
     Play,
+    /// `car-images`, and per-car `image` in `profile`.
+    CarImages,
     /// `settings`, and `--traffic` and `--rivals` on `setup`, `serve` and
     /// `start`: the amounts of traffic and roaming rivals.
     WorldSettings,
 }
 
 /// Capabilities of this build, in a fixed order.
-pub const CAPABILITIES: [Capability; 5] = [
+pub const CAPABILITIES: [Capability; 6] = [
     Capability::Profile,
     Capability::Sessions,
     Capability::Events,
     Capability::Play,
+    Capability::CarImages,
     Capability::WorldSettings,
 ];
 

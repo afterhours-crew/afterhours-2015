@@ -356,8 +356,36 @@ fn traffic_amount_scales_the_target_and_each_road_quota() {
         )
         .is_some()
     };
-    // Quota 3 at 100 %, 6 at 200 %, 2 at 50 %.
+    // Quota 3 at 100 %, 6 at 200 %, 9 at 300 %, 2 at 50 %.
     assert!(pick(&p, 100, 2) && !pick(&p, 100, 3));
     assert!(pick(&p, 200, 5) && !pick(&p, 200, 6));
+    assert!(pick(&p, 300, 8) && !pick(&p, 300, 9));
     assert!(pick(&p, 50, 1) && !pick(&p, 50, 2));
+}
+
+#[test]
+fn the_spawn_interval_is_native_at_100_percent_and_scales_with_the_amount() {
+    // Native: twice the nearby/target ratio.
+    assert_eq!(interval(5, 10, 100), 1.);
+    assert_eq!(interval(0, 10, 100), 0.);
+    // At 3x the target is three times larger and attempts three times as
+    // frequent, so a moving player's steady count scales by three too.
+    assert!((interval(15, 30, 300) - 1. / 3.).abs() < 1e-6);
+    assert_eq!(interval(5, 5, 50), 4.);
+    // Degenerate inputs stay finite.
+    assert!(interval(3, 0, 0).is_finite());
+    // Steady state while driving: spawns 1/interval per second balance
+    // removals count/lifetime. Find it numerically for a 30 s lifetime.
+    let steady = |target: usize, percent: u16| {
+        (1..=target)
+            .find(|&n| 1. / interval(n, target, percent) <= n as f32 / 30.)
+            .unwrap_or(target)
+    };
+    let native = steady(10, 100);
+    assert_eq!(native, 10, "the original target is reached");
+    assert_eq!(steady(30, 300), 30);
+    // The native interval with only the target scaled settles near 22 of 30
+    // (at 5x it was about 28 of 50, which the 5x live test showed).
+    assert!(steady(30, 100) < 25);
+    assert!(steady(30, 300) >= 3 * native - 1);
 }

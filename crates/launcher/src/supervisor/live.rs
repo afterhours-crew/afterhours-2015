@@ -340,6 +340,14 @@ impl LiveSession {
             args.push("--record-protocol".into());
         }
         args.extend(self.request.settings.server_arguments());
+        // The server applies amounts saved during the session (`settings`).
+        args.push("--settings-file".into());
+        args.push(
+            self.data
+                .join(crate::settings::FILE)
+                .to_string_lossy()
+                .into_owned(),
+        );
         Ok(args)
     }
 

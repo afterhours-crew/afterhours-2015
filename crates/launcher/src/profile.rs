@@ -18,6 +18,7 @@
 //! strings so JavaScript consumers keep every digit.
 
 pub mod content;
+pub mod images;
 pub mod names;
 
 use crate::{
@@ -26,6 +27,7 @@ use crate::{
     paths, records,
 };
 use content::{Content, Need, Source, Vehicle};
+use images::CarImages;
 use names::{Localization, Names};
 use nfs_services::{
     authentication::Identity,
@@ -187,6 +189,9 @@ pub struct Item {
     /// `names.long`. `null` for other items or when it did not resolve.
     pub name: Option<String>,
     pub names: Option<Names>,
+    /// The car's in-game images, decoded by `car-images`; `null` before that
+    /// or when the car has none.
+    pub image: Option<CarImages>,
     /// Blueprint from the installed vehicle content, for cars.
     pub vehicle: Option<Vehicle>,
 }
@@ -232,6 +237,9 @@ pub struct Car {
     /// name stays in `vehicle.label`.
     pub name: Option<String>,
     pub names: Option<Names>,
+    /// The car's in-game images, decoded by `car-images`; `null` before that
+    /// or when the car has none.
+    pub image: Option<CarImages>,
     pub vehicle: Option<Vehicle>,
     pub location: CarLocation,
     /// Garage slot 0-4; `null` in the warehouse.
@@ -322,6 +330,9 @@ pub struct Profile {
     pub content: Option<Source>,
     /// Where car names came from; `null` when none could be read.
     pub localization: Option<Localization>,
+    /// The directory of the decoded car images; `null` until `car-images`
+    /// has run for the current content.
+    pub car_images: Option<PathBuf>,
     pub warnings: Vec<String>,
 }
 
@@ -454,6 +465,14 @@ fn localized(content: &Content, definition: &[u8; 16]) -> Option<Names> {
         .map(|entry| entry.names.clone())
 }
 
+/// A definition's decoded images, when `car-images` has run.
+fn pictured(content: &Content, definition: &[u8; 16]) -> Option<CarImages> {
+    content
+        .car_images
+        .as_ref()
+        .and_then(|cached| cached.get(&hex(definition)))
+}
+
 fn item(snapshot: &Snapshot, id: ItemId, content: &Content) -> Option<Item> {
     let record = snapshot.items.get(&id)?;
     let definition = record.definition.0;
@@ -468,6 +487,7 @@ fn item(snapshot: &Snapshot, id: ItemId, content: &Content) -> Option<Item> {
             .map(|class| class.name()),
         name: names.as_ref().and_then(|names| names.long.clone()),
         names,
+        image: pictured(content, &definition),
         vehicle: content
             .vehicles
             .as_ref()
@@ -547,6 +567,7 @@ fn cars(snapshot: &Snapshot, content: &Content) -> Option<(Vec<Car>, CarSummary)
                 definition: hex(&record.definition.0),
                 name: names.as_ref().and_then(|names| names.long.clone()),
                 names,
+                image: pictured(content, &record.definition.0),
                 vehicle,
                 location: match slot {
                     Some(0) => CarLocation::Active,
@@ -757,6 +778,10 @@ pub fn build(
         },
         content: content.source.clone(),
         localization: content.localization.clone(),
+        car_images: content
+            .car_images
+            .as_ref()
+            .map(|cached| cached.directory.clone()),
         warnings,
     }
 }
@@ -917,7 +942,23 @@ pub fn parse_account(id: &str) -> Result<AccountId> {
 /// Load content for `need` from the explicit directory or the data
 /// directory's own records.
 pub fn content(data: &Path, explicit: Option<&Path>, need: Need) -> Result<Content> {
-    Ok(Content::load(content::locate(data, explicit)?, need))
+    let mut content = Content::load(content::locate(data, explicit)?, need);
+    if need == Need::Full {
+        let fingerprint = content
+            .source
+            .as_ref()
+            .and_then(|source| source.directory.file_name())
+            .and_then(|name| name.to_str().map(str::to_owned));
+        if let Some(fingerprint) = fingerprint {
+            match images::load(data, &fingerprint) {
+                Ok(cached) => content.car_images = cached,
+                Err(why) => content.warnings.push(format!(
+                    "The decoded car images are unusable ({why}); run car-images again."
+                )),
+            }
+        }
+    }
+    Ok(content)
 }
 
 /// The game's registration, as [`crate::platform::game_registration`]
@@ -940,6 +981,32 @@ fn session_game_directory(data: &Path) -> Option<PathBuf> {
     request
         .game_directory
         .filter(|directory| directory.is_dir())
+}
+
+/// The installation to read: `game`, else the one the current session
+/// started, else the registered one, with where it came from. An explicit
+/// directory that does not exist is refused.
+pub fn installation(
+    data: &Path,
+    game: Option<&Path>,
+    registered: Option<PathBuf>,
+) -> Result<Option<(PathBuf, &'static str)>> {
+    if let Some(directory) = game {
+        let directory = paths::normalize(directory)?;
+        if !directory.is_dir() {
+            return Err(Failure::refused(
+                "--game-dir must be an existing directory.",
+            ));
+        }
+        return Ok(Some((directory, "argument")));
+    }
+    Ok(session_game_directory(data)
+        .map(|directory| (directory, "current-session"))
+        .or_else(|| {
+            registered
+                .filter(|directory| directory.is_dir())
+                .map(|directory| (directory, "registry"))
+        }))
 }
 
 /// Read localized car names into `content` from an installation: `game`,
@@ -967,26 +1034,9 @@ pub fn localize(
             None => (names::DEFAULT_LOCALE.to_owned(), "default"),
         },
     };
-    let installation = match game {
-        Some(directory) => {
-            let directory = paths::normalize(directory)?;
-            if !directory.is_dir() {
-                return Err(Failure::refused(
-                    "--game-dir must be an existing directory.",
-                ));
-            }
-            Some((directory, "argument"))
-        }
-        None => session_game_directory(data)
-            .map(|directory| (directory, "current-session"))
-            .or_else(|| {
-                registration
-                    .install_dir
-                    .filter(|directory| directory.is_dir())
-                    .map(|directory| (directory, "registry"))
-            }),
-    };
-    let Some((game_directory, game_directory_from)) = installation else {
+    let Some((game_directory, game_directory_from)) =
+        installation(data, game, registration.install_dir)?
+    else {
         content
             .warnings
             .push("No game installation found; car names are unavailable. Pass --game-dir.".into());

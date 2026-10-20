@@ -1,10 +1,14 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "description": "`settings --json`: the saved traffic and rival amounts, which every later\n`setup`, `serve` and `start` uses.",
+  "description": "`settings --json`: the saved traffic and rival amounts, which every later\n`setup`, `serve` and `start` uses and a running session applies.",
   "properties": {
     "file": {
       "description": "`settings.json` in the data directory; it may not exist yet.",
       "type": "string"
+    },
+    "live": {
+      "description": "Whether saving applies to a running session within about a second\n(the server watches `settings.json`); when `false`, a running\nsession keeps the values it started with and saving is refused.",
+      "type": "boolean"
     },
     "max_rivals": {
       "description": "Largest `rival_limit` this build accepts.",
@@ -21,7 +25,7 @@
       "type": "integer"
     },
     "rival_limit": {
-      "description": "Most roaming rivals active at once; 0 turns them off and `null`\nkeeps the original number.",
+      "description": "Roaming rivals kept active; 0 turns them off and `null` keeps the\noriginal number.",
       "format": "uint16",
       "maximum": 65535,
       "minimum": 0,
@@ -29,6 +33,10 @@
         "integer",
         "null"
       ]
+    },
+    "rivals_above_original": {
+      "description": "Whether a `rival_limit` above the game's own number adds roaming\nrivals (other installed racers near the player, each at most once).\nWhen `false` it only caps the game's own.",
+      "type": "boolean"
     },
     "saved": {
       "description": "Whether this command saved the file.",
@@ -54,6 +62,8 @@
     "rival_limit",
     "max_traffic_percent",
     "max_rivals",
+    "rivals_above_original",
+    "live",
     "file",
     "saved"
   ],

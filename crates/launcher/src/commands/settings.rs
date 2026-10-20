@@ -8,9 +8,8 @@ use super::Context;
 use crate::{
     cli::SettingsArgs,
     contract::SettingsReport,
-    exit::{Exit, Failure, Result},
+    exit::Result,
     paths,
-    session::Lock,
     settings::{self, Rivals},
 };
 use std::path::Path;
@@ -21,7 +20,11 @@ pub fn settings(context: &Context, args: &SettingsArgs) -> Result<()> {
     context.emit(&report, || {
         let mut lines = Vec::new();
         if report.saved {
-            lines.push("Saved. Later sessions use these values.".to_owned());
+            lines.push(
+                "Saved. A running session applies them within about a second; later sessions \
+                 start with them."
+                    .to_owned(),
+            );
         }
         lines.push(format!("Traffic and rivals: {}", values.describe()));
         lines.push(format!("Settings file: {}", report.file.display()));
@@ -29,7 +32,10 @@ pub fn settings(context: &Context, args: &SettingsArgs) -> Result<()> {
     })
 }
 
-/// Load the settings, or apply and save the given changes.
+/// Load the settings, or apply and save the given changes. Saving needs no
+/// session lock: the file is replaced atomically, a session that is starting
+/// reads either version, and a running server applies the new one when it
+/// sees the file change.
 fn apply(
     data: &Path,
     traffic: Option<u16>,
@@ -39,18 +45,6 @@ fn apply(
     let change = traffic.is_some() || rivals.is_some();
     let values = if change {
         std::fs::create_dir_all(&data)?;
-        // A running session keeps the values it started with, and the lock
-        // keeps this write from interleaving with a session that is starting.
-        let _lock = Lock::acquire(&data).map_err(|failure| {
-            if failure.exit == Exit::Refused {
-                Failure::refused(
-                    "A session is running in this data directory and keeps the traffic and \
-                     rivals it started with. Change them after it ends.",
-                )
-            } else {
-                failure
-            }
-        })?;
         settings::resolve(&data, traffic, rivals)?
     } else {
         settings::load(&data)?
@@ -62,20 +56,26 @@ fn apply(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::Lock;
 
     #[test]
-    fn reading_changes_nothing_and_saving_waits_for_the_session() {
+    fn reading_changes_nothing_and_saving_works_while_a_session_runs() {
         let data = crate::testing::scratch("settings-command");
         let (values, report) = apply(&data, None, None).unwrap();
         assert_eq!(values, settings::Settings::default());
         assert!(!report.saved && !report.file.exists());
         assert_eq!(
-            (report.max_traffic_percent, report.max_rivals),
-            (settings::MAX_TRAFFIC_PERCENT, settings::MAX_RIVALS)
+            (
+                report.max_traffic_percent,
+                report.max_rivals,
+                report.rivals_above_original,
+                report.live
+            ),
+            (300, 15, true, true)
         );
         crate::contract::testing::validate("settings", &report);
 
-        let (values, report) = apply(&data, Some(200), Some(Rivals::AtMost(0))).unwrap();
+        let (values, report) = apply(&data, Some(200), Some(Rivals::Count(0))).unwrap();
         assert_eq!((values.traffic_percent, values.rival_limit), (200, Some(0)));
         assert!(report.saved && report.file.exists());
         assert_eq!((report.traffic_percent, report.rival_limit), (200, Some(0)));
@@ -84,20 +84,31 @@ mod tests {
         assert_eq!((report.traffic_percent, report.rival_limit), (200, Some(0)));
         assert!(!report.saved);
 
-        // A session holding the data directory keeps its values.
+        // A session holding the data directory picks changes up from the
+        // file, so saving goes ahead (up, off and back) and leaves no
+        // temporary file behind.
         let session = Lock::acquire(&data).unwrap();
-        let refused = apply(&data, Some(100), None).unwrap_err();
-        assert_eq!(refused.exit, Exit::Refused);
-        assert!(
-            refused.message.contains("after it ends"),
-            "{}",
-            refused.message
-        );
-        let (_, report) = apply(&data, None, None).unwrap();
-        assert_eq!(report.traffic_percent, 200, "reading still works");
+        for (traffic, rivals, expected) in [
+            (Some(300), Some(Rivals::Count(15)), (300, Some(15))),
+            (Some(0), Some(Rivals::Count(0)), (0, Some(0))),
+            (Some(100), Some(Rivals::Original), (100, None)),
+        ] {
+            let (_, report) = apply(&data, traffic, rivals).unwrap();
+            assert!(report.saved);
+            assert_eq!((report.traffic_percent, report.rival_limit), expected);
+            let saved = settings::load(&data).unwrap();
+            assert_eq!((saved.traffic_percent, saved.rival_limit), expected);
+        }
+        let leftovers = std::fs::read_dir(&data)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .count();
+        assert_eq!(leftovers, 0);
         drop(session);
-        let (_, report) = apply(&data, None, Some(Rivals::Original)).unwrap();
-        assert_eq!((report.traffic_percent, report.rival_limit), (200, None));
+        // A later session starts with the last saved values.
+        let (_, report) = apply(&data, None, None).unwrap();
+        assert_eq!((report.traffic_percent, report.rival_limit), (100, None));
 
         // A damaged file is reported, not replaced.
         std::fs::write(data.join(settings::FILE), b"{\"traffic_percent\": 900}").unwrap();

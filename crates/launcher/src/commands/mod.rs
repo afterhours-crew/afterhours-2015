@@ -114,6 +114,7 @@ fn dispatch(cli: Cli, bundled_server: Option<PathBuf>, build: Build) -> Result<(
         Command::Stop => status::stop(&context),
         Command::Play => status::play(&context),
         Command::Profile(args) => profile::profile(&context, &args),
+        Command::CarImages(args) => profile::car_images(&context, &args),
         Command::Sessions(args) => sessions::sessions(&context, &args),
         Command::Settings(args) => settings::settings(&context, &args),
         Command::Recover { account_id } => recover::recover(&context, &account_id),

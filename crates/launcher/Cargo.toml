@@ -32,8 +32,11 @@ nfs-services = { path = "../services" }
 nfs-storage = { path = "../storage" }
 # Item classes and states, to recognize owned cars by the server's own rule.
 nfs-world-core = { path = "../world-core" }
-# Read-only installation reader for the game's localized car names.
+# Read-only installation reader for the game's localized car names and
+# car images.
 nfs-frostbite = { path = "../frostbite" }
+# zlib for the PNG files `car-images` writes; already locked by nfs-frostbite.
+miniz_oxide = { version = "=0.9.1", default-features = false, features = ["with-alloc"] }
 # Argument parsing, help and usage. Default features are off: no color, no
 # suggestions, no environment-variable or wrapping support.
 clap = { version = "=4.6.7", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }

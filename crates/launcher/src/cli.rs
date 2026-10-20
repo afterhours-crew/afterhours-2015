@@ -98,13 +98,15 @@ pub struct SessionArgs {
     ///
     /// 0 turns traffic off. Saved in settings.json in the data directory and
     /// used by later sessions until changed. Default: 100.
-    #[arg(long, value_name = "PERCENT", value_parser = clap::value_parser!(u16).range(0..=300))]
+    #[arg(long, value_name = "PERCENT", value_parser = clap::value_parser!(u16).range(0..=i64::from(crate::settings::MAX_TRAFFIC_PERCENT)))]
     pub traffic: Option<u16>,
 
-    /// Most roaming rivals active at once (0-128), or `original`.
+    /// Number of roaming rivals to keep active (0-15), or `original`.
     ///
-    /// 0 turns rivals off; `original` restores the original number. Saved in
-    /// settings.json in the data directory like --traffic.
+    /// 0 turns rivals off; `original` restores the original number. The
+    /// game's own rivals are capped at the number and, where the installed
+    /// racers allow, more are added up to it. Saved in settings.json in the
+    /// data directory like --traffic.
     #[arg(long, value_name = "COUNT", value_parser = crate::settings::parse_rivals)]
     pub rivals: Option<crate::settings::Rivals>,
 
@@ -147,6 +149,15 @@ pub struct SessionsArgs {
     pub id: Option<String>,
 }
 
+/// Arguments for `car-images`.
+#[derive(Debug, Clone, Args)]
+pub struct CarImagesArgs {
+    /// Installed game to read the images from, read-only. Defaults to the
+    /// one the current session started, then the registered one.
+    #[arg(long, value_name = "DIR")]
+    pub game_dir: Option<PathBuf>,
+}
+
 /// Arguments for `profile`.
 #[derive(Debug, Clone, Args)]
 pub struct ProfileArgs {
@@ -180,10 +191,11 @@ pub struct ProfileArgs {
 pub struct SettingsArgs {
     /// Save the amount of ambient traffic, as a percentage of the original
     /// (0-300); 0 turns traffic off.
-    #[arg(long, value_name = "PERCENT", value_parser = clap::value_parser!(u16).range(0..=300))]
+    #[arg(long, value_name = "PERCENT", value_parser = clap::value_parser!(u16).range(0..=i64::from(crate::settings::MAX_TRAFFIC_PERCENT)))]
     pub traffic: Option<u16>,
 
-    /// Save the most roaming rivals active at once (0-128), or `original`.
+    /// Save the number of roaming rivals to keep active (0-15), or
+    /// `original`.
     #[arg(long, value_name = "COUNT", value_parser = crate::settings::parse_rivals)]
     pub rivals: Option<crate::settings::Rivals>,
 }
@@ -252,6 +264,15 @@ pub enum Command {
     /// when there is no saved account to show.
     Profile(ProfileArgs),
 
+    /// Decode each car's in-game images from the installation for `profile`.
+    ///
+    /// Reads the installed game read-only and writes PNG files and an index
+    /// to artifacts/content/car-images/<content fingerprint>/ in the data
+    /// directory; `profile` then reports them per car. A complete set is
+    /// reused, never rewritten. Needs the content a session prepared; exits
+    /// with code 4 before the first setup.
+    CarImages(CarImagesArgs),
+
     /// List the session folders and summarize their logs; change nothing.
     ///
     /// Read-only, newest first. For each session: action, start and end,
@@ -265,11 +286,10 @@ pub enum Command {
     ///
     /// Without options, prints the values in settings.json in the data
     /// directory, or the original ones when there is no file yet, and
-    /// changes nothing. --traffic and --rivals save new values for later
-    /// sessions, as they do on `start` and `serve`; saving is refused while
-    /// a session holds the data directory, because a running session keeps
-    /// the values it started with. The record also gives the largest
-    /// values this build accepts.
+    /// changes nothing. --traffic and --rivals save new values, as they do on
+    /// `start` and `serve`; a running session applies them within about a
+    /// second and later sessions start with them. The record also gives the
+    /// largest values this build accepts.
     Settings(SettingsArgs),
 
     /// Show the version, the JSON record versions and the capabilities.
@@ -447,7 +467,7 @@ mod tests {
             "nfs-afterhours",
             "settings",
             "--traffic",
-            "200",
+            "300",
             "--rivals",
             "original",
         ])
@@ -456,13 +476,13 @@ mod tests {
         {
             Command::Settings(args) => assert_eq!(
                 (args.traffic, args.rivals),
-                (Some(200), Some(crate::settings::Rivals::Original))
+                (Some(300), Some(crate::settings::Rivals::Original))
             ),
             other => panic!("{other:?}"),
         }
         for bad in [
             ["--traffic", "301"],
-            ["--rivals", "129"],
+            ["--rivals", "16"],
             ["--rivals", "lots"],
         ] {
             let mut line = vec!["nfs-afterhours", "settings"];

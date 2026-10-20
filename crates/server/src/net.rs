@@ -73,8 +73,9 @@ pub struct Config {
     pub stats: Option<Arc<nfs_services::stats::Catalog>>,
     pub owned_menu_awards: bool,
     pub owned_local_social: bool,
-    /// Player-chosen traffic and roaming-rival amounts.
-    pub ai: crate::ai_settings::AiSettings,
+    /// Player-chosen traffic and roaming-rival amounts, updated while the
+    /// server runs when it watches a settings file.
+    pub ai: crate::ai_settings::Live,
     pub challenges: Option<Arc<nfs_services::challenges::Catalog>>,
     pub kickback: Option<(nfs_storage::AccountId, Arc<nfs_services::kickback::State>)>,
     pub speedwall: Option<(nfs_storage::AccountId, Arc<nfs_services::speedwall::State>)>,
@@ -98,7 +99,7 @@ pub struct WorldServe {
     pub rivals: Option<Arc<crate::rival_content::Content>>,
     pub garage_logic: Option<Arc<crate::garage_logic::GarageLogic>>,
     pub scoring: Option<Arc<crate::scoring::Content>>,
-    pub ai: crate::ai_settings::AiSettings,
+    pub ai: crate::ai_settings::Live,
 }
 
 mod items;
@@ -695,7 +696,7 @@ pub async fn serve(
                 let sequences = config.sequences.clone();
                 let traffic = config.traffic.clone();
                 let rivals = config.rivals.clone();
-                let ai = config.ai;
+                let ai = config.ai.clone();
                 let garage_logic = config.garage_logic.clone();
                 let scoring = config.scoring.clone();
                 let catalogs = config.catalogs.clone();
@@ -834,7 +835,7 @@ pub async fn world_host(
         rivals,
         garage_logic,
         scoring,
-        ai,
+        mut ai,
     } = serve;
     let Some(binding) = start.recv().await else {
         return;
@@ -923,7 +924,8 @@ pub async fn world_host(
         .with_sequences(sequences)
         .with_traffic(traffic)
         .with_rivals(rivals)
-        .with_ai_settings(ai)
+        // Marks the current value seen, so only later saves are reported.
+        .with_ai_settings(ai.changed().unwrap_or_else(|| ai.current()))
         .with_arrivals(arrivals)
         .with_returns(returns)
         .with_garage_logic(garage_logic)
@@ -955,6 +957,16 @@ pub async fn world_host(
         if let Err(error) = listener.advance_settled(now_ms()) {
             warn!(connection, ?error, "world car settlement rejected");
             return;
+        }
+        // Settings the player saved while this session runs.
+        if let Some(settings) = ai.changed() {
+            listener.set_ai_settings(settings);
+            info!(
+                connection,
+                traffic_percent = settings.traffic_percent(),
+                rival_limit = ?settings.rival_limit(),
+                "traffic and rival settings applied to this session"
+            );
         }
         listener.session_backlog = host.replication_progress().1;
         if let Err(error) = listener.advance_traffic(now_ms())

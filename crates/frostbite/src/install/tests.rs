@@ -293,11 +293,15 @@ fn superbundle_ebx_lists_one_superbundle_with_first_listings() {
                 name: "Win32/levels/frontend/frontend",
                 bundle: "win32/levels/frontend/frontend",
                 assets: &first,
+                resources: &[],
+                chunks: &[],
             },
             CasSuperbundle {
                 name: "Win32/globals",
                 bundle: "win32/default_settings_win32",
                 assets: &second,
+                resources: &[],
+                chunks: &[],
             },
         ],
         &[],
@@ -396,4 +400,79 @@ fn inline_chunks_prefer_the_patch_layer_and_skip_cas_chunks() {
     let mut broken = chunks[1].clone();
     broken.source.offset += 1_000_000;
     assert!(install.inline_chunk_bytes(&broken).is_err());
+}
+
+#[test]
+fn resources_and_toc_listed_chunks_resolve_to_cas_records() {
+    use crate::synthetic::{CasSuperbundle, Resource, write_superbundles};
+    let dir = TempDir::new();
+    let resources = [
+        Resource {
+            name: "ui/textures/a".into(),
+            rid: u64::MAX - 1,
+            res_type: 0x6BDE_20BA,
+            meta: vec![0x0B, 0, 0, 0],
+            data: vec![0xAB; 128],
+        },
+        Resource {
+            name: "ui/textures/b".into(),
+            rid: 7,
+            res_type: 1,
+            meta: Vec::new(),
+            data: vec![1, 2, 3],
+        },
+    ];
+    let (a, b, absent) = ([0xA1; 16], [0xB2; 16], [0xC3; 16]);
+    let first_chunks = [(a, vec![5u8; 70_000])];
+    let second_chunks = [(b, b"second".to_vec())];
+    write_superbundles(
+        &dir.0,
+        b"exe",
+        &[
+            CasSuperbundle {
+                name: "Win32/levels/frontend/frontend",
+                bundle: "win32/levels/frontend/frontend",
+                assets: &[],
+                resources: &resources,
+                chunks: &first_chunks,
+            },
+            CasSuperbundle {
+                name: "Win32/chunks0",
+                bundle: "win32/chunks0",
+                assets: &[],
+                resources: &[],
+                chunks: &second_chunks,
+            },
+        ],
+        &[],
+    )
+    .unwrap();
+    let install = Installation::open(&dir.0, Limits::default()).unwrap();
+    let listed = install
+        .superbundle_res("Win32/levels/frontend/frontend")
+        .unwrap();
+    assert_eq!(listed.len(), 2);
+    assert_eq!(
+        (listed[0].rid, listed[0].res_type, listed[0].meta.as_slice()),
+        (u64::MAX - 1, 0x6BDE_20BA, [0x0B, 0, 0, 0].as_slice())
+    );
+    let mut store = Store::open(&install).unwrap();
+    assert_eq!(store.bytes(&listed[0].entry).unwrap(), vec![0xAB; 128]);
+    assert_eq!(store.bytes(&listed[1].entry).unwrap(), [1, 2, 3]);
+    let wanted = BTreeSet::from([a, b, absent]);
+    let found = install.chunk_records(&wanted).unwrap();
+    assert_eq!(found.len(), 2, "the absent chunk is simply not found");
+    assert_eq!(store.record_bytes(&found[&a]).unwrap(), vec![5u8; 70_000]);
+    assert_eq!(store.record_bytes(&found[&b]).unwrap(), b"second");
+    assert!(store.record_bytes(&[0xEE; 20]).is_err());
+    let limits = Limits {
+        max_entries: 1,
+        ..Limits::default()
+    };
+    let small = Installation::open(&dir.0, limits).unwrap();
+    assert!(
+        small
+            .superbundle_res("Win32/levels/frontend/frontend")
+            .is_err()
+    );
 }
