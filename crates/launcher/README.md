@@ -245,7 +245,8 @@ characters from the system's random source, new for every session) to
 `api.json` in the session directory, readable only by the user where the
 system allows, and removes it when the session ends. `nfs-afterhours api
 --json` prints it for the current session, or exits with 4 when no live
-session serves the API.
+session serves the API, also while a session that just became current is
+still starting it.
 
 The event stream (`text/event-stream`) sends each event as `id` (its place
 in the session), `event` (its kind) and `data` (the record's JSON on one
@@ -323,8 +324,14 @@ directory, writes `request.json` there, removes sessions beyond the newest 20
 with their `artifacts/runs/<id>/` recordings (`retention`; the new and the
 current session are always kept) and starts a second copy of itself
 with the hidden `supervise` subcommand. The supervisor holds the
-data-directory lock, on Windows creates its own job object with kill-on-close, and
-runs the session state machine:
+data-directory lock, records the session's first status (`preparing`,
+"Starting the session.") and only then makes it current in
+`current-session.json`, so `status`, `stop` and `play` read a starting session
+as `preparing`, never as a missing file. A pointer to a session without a
+status, which an earlier launcher left while starting, is exit 4 for each of
+them. The supervisor then starts the session API if requested, on Windows
+creates its own job object with kill-on-close, and runs the session state
+machine:
 
 ```text
 preparing  -> nfs-server prepare-local, then create-account on first use

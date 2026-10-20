@@ -632,11 +632,9 @@ pub fn current(data: &Path) -> Result<ApiRecord> {
     let none = || {
         Failure::no_session("No running Afterhours session serves the API. Start one with --api.")
     };
-    let status = match crate::session::current_status(data) {
-        Ok(status) => status.ok_or_else(none)?,
-        Err(_) if without_status(data) => return Err(none()),
-        Err(failure) => return Err(failure),
-    };
+    // A session becomes current with its first status and starts the API
+    // next: until then this is exit 4, no API yet.
+    let status = crate::session::current_status(data)?.ok_or_else(none)?;
     if !status.state.is_live() {
         return Err(none());
     }
@@ -650,17 +648,4 @@ pub fn current(data: &Path) -> Result<ApiRecord> {
         return Err(Failure::refused("Session API identity mismatch."));
     }
     Ok(record)
-}
-
-/// Whether the current session has no status yet. A supervisor points at
-/// its session, then starts the API, then writes the first status; a
-/// front end polling `api` in between sees no API yet, not an error.
-fn without_status(data: &Path) -> bool {
-    let pointer = data.join(crate::session::POINTER_FILE);
-    crate::records::read_json::<crate::records::SessionPointer>(&pointer).is_ok_and(|pointer| {
-        crate::records::is_id(&pointer.id)
-            && !crate::paths::session_dir(data, &pointer.id)
-                .join("status.json")
-                .exists()
-    })
 }

@@ -806,15 +806,17 @@ fn the_session_api_writes_how_to_reach_it_and_forgets_the_token_at_the_end() {
 
 #[test]
 fn a_session_without_its_first_status_has_no_api_yet() {
-    // The supervisor points at its session, starts the API, then writes the
-    // first status: `api` polled in between answers "not yet" (exit 4).
+    // An earlier launcher pointed at its session, started the API, then
+    // wrote the first status: `api` polled in between answers "not yet"
+    // (exit 4), as `status` does.
     let data = crate::testing::scratch("api-starting");
     let run = paths::session_dir(&data, ID);
     std::fs::create_dir_all(&run).unwrap();
     session::point_current_session(&data, ID).unwrap();
     let lock = session::Lock::acquire(&data).unwrap();
-    assert!(session::current_status(&data).is_err(), "no status yet");
-    assert_eq!(current(&data).unwrap_err().exit, Exit::NoSession);
+    let not_yet = session::current_status(&data).unwrap_err();
+    assert_eq!(not_yet.exit, Exit::NoSession);
+    assert_eq!(current(&data).unwrap_err(), not_yet);
     let record = ApiRecord {
         version: FORMAT_VERSION,
         id: ID.into(),

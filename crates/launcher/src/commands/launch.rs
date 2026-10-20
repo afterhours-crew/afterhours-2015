@@ -273,8 +273,8 @@ fn completed_status(run: &Path) -> Result<Option<records::Status>> {
 }
 
 /// `supervise`: run a session from its request file. With `--api` the
-/// session API serves the session from just after the data directory is
-/// locked until its last status.
+/// session API serves the session from just after it becomes current until
+/// its last status; its event stream starts with the first status.
 pub fn supervise(request_path: &Path, build: Build) -> Result<()> {
     let (request, data, run) = supervisor::live::load_request(request_path)?;
     // With `--api` alone the supervisor writes nothing to standard output:
@@ -300,7 +300,6 @@ pub fn supervise(request_path: &Path, build: Build) -> Result<()> {
                 "Server changed between request and preflight.",
             ));
         }
-        session::point_current_session(&data, &request.id)?;
         Ok(lock)
     })();
     let _lock = match started {
@@ -310,28 +309,30 @@ pub fn supervise(request_path: &Path, build: Build) -> Result<()> {
             return Err(failure);
         }
     };
+    let hub = request.api.then(crate::api::hub::Hub::new);
+    if let Some(hub) = &hub {
+        emitter.attach(Arc::clone(hub));
+    }
+    begin(&data, &run, &request, &mut emitter)?;
     let action = request.action;
     let id = request.id.clone();
-    let api = if request.api {
-        let hub = crate::api::hub::Hub::new();
-        let control = Arc::new(crate::api::LiveControl::new(data.clone(), build));
-        match crate::api::SessionApi::start(control, Arc::clone(&hub), &id, &run) {
-            Ok(api) => {
-                emitter.attach(hub);
-                Some(api)
-            }
-            Err(failure) => {
-                record_refusal(&run, &id, action, &failure, &mut emitter);
-                return Err(failure);
+    let api = match hub {
+        Some(hub) => {
+            let control = Arc::new(crate::api::LiveControl::new(data.clone(), build));
+            match crate::api::SessionApi::start(control, hub, &id, &run) {
+                Ok(api) => Some(api),
+                Err(failure) => {
+                    record_failure(&run, &id, action, &failure, &mut emitter);
+                    return Err(failure);
+                }
             }
         }
-    } else {
-        None
+        None => None,
     };
     let mut live = match LiveSession::new(request, data, run.clone(), emitter) {
         Ok(live) => live,
         Err(failure) => {
-            record_refusal(&run, &id, action, &failure, &mut Emitter::disabled());
+            record_failure(&run, &id, action, &failure, &mut Emitter::disabled());
             if let Some(api) = api {
                 api.finish();
             }
@@ -349,22 +350,64 @@ pub fn supervise(request_path: &Path, build: Build) -> Result<()> {
     }
 }
 
-/// Record why a supervisor stopped before its session began, so `sessions`
-/// and the event stream show the reason. Never replaces an existing status.
-fn record_refusal(run: &Path, id: &str, action: Action, failure: &Failure, emitter: &mut Emitter) {
-    let record = Status {
+/// The message of a session's first status, until its state machine runs.
+const STARTING: &str = "Starting the session.";
+
+/// Make the locked session current: record its first status, `preparing`,
+/// then point current-session.json at it. In this order `status`, `stop`,
+/// `play` and `api` never find the current session without a status; a
+/// stop requested now ends the session at its first check. A failure is
+/// recorded in the session's status.
+fn begin(data: &Path, run: &Path, request: &Request, emitter: &mut Emitter) -> Result<()> {
+    let first = supervisor_status(
+        &request.id,
+        request.action,
+        records::State::Preparing,
+        STARTING,
+    );
+    if let Err(failure) = records::replace_json(&run.join("status.json"), &first) {
+        record_refusal(run, &request.id, request.action, &failure, emitter);
+        return Err(failure);
+    }
+    emitter.status(&first);
+    if let Err(failure) = session::point_current_session(data, &request.id) {
+        record_failure(run, &request.id, request.action, &failure, emitter);
+        return Err(failure);
+    }
+    Ok(())
+}
+
+/// A status this supervisor records before its state machine runs.
+fn supervisor_status(id: &str, action: Action, state: records::State, message: &str) -> Status {
+    Status {
         version: records::VERSION,
         id: id.to_owned(),
         action: Some(action),
         game_running: false,
         utc: crate::clock::now_iso(),
-        state: records::State::Failed,
-        message: failure.message.clone(),
+        state,
+        message: message.to_owned(),
         worker_pid: std::process::id(),
         game_pid: None,
         server_pid: None,
-    };
+    }
+}
+
+/// Record why a supervisor stopped before its session began, so `sessions`
+/// and the event stream show the reason. Never replaces an existing status.
+fn record_refusal(run: &Path, id: &str, action: Action, failure: &Failure, emitter: &mut Emitter) {
+    let record = supervisor_status(id, action, records::State::Failed, &failure.message);
     if records::write_new_json(&run.join("status.json"), &record).is_ok() {
+        emitter.status(&record);
+    }
+}
+
+/// Record why a supervisor stopped after [`begin`], before its state
+/// machine ran. The failure replaces the session's first status, which
+/// would otherwise read as `preparing` until the lock is released.
+fn record_failure(run: &Path, id: &str, action: Action, failure: &Failure, emitter: &mut Emitter) {
+    let record = supervisor_status(id, action, records::State::Failed, &failure.message);
+    if records::replace_json(&run.join("status.json"), &record).is_ok() {
         emitter.status(&record);
     }
 }
@@ -483,5 +526,104 @@ mod tests {
         assert_eq!(again.message, failure.message);
         assert_eq!(capture.lines().len(), 1);
         std::fs::remove_dir_all(run).unwrap();
+    }
+
+    /// A `serve` request for session `id` in `data`, with its directory.
+    fn serve_request(data: &Path, id: &str) -> (Request, PathBuf) {
+        let run = paths::session_dir(data, id);
+        std::fs::create_dir_all(&run).unwrap();
+        let request = Request {
+            version: records::VERSION,
+            id: id.to_owned(),
+            action: Action::Serve,
+            game_directory: None,
+            data_directory: data.to_owned(),
+            server_path: PathBuf::from("server"),
+            server_sha256: "e".repeat(64),
+            bundled_server: false,
+            player_name: "Driver".into(),
+            record_protocol: false,
+            events: true,
+            api: false,
+            game_support: false,
+            settings: Default::default(),
+        };
+        (request, run)
+    }
+
+    fn states(capture: &crate::events::Capture) -> Vec<String> {
+        capture
+            .lines()
+            .iter()
+            .map(|line| line["status"]["state"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn a_session_is_current_only_once_its_first_status_is_recorded() {
+        // Polled right after the supervisor makes its session current,
+        // `status`, `stop` and `api` see a starting session, not a missing
+        // status file (exit 5).
+        let data = crate::testing::scratch("begin");
+        let _lock = session::Lock::acquire(&data).unwrap();
+        let id = "c".repeat(32);
+        let (request, run) = serve_request(&data, &id);
+        let capture = crate::events::Capture::default();
+        let mut emitter = Emitter::to(capture.clone());
+        begin(&data, &run, &request, &mut emitter).unwrap();
+
+        let status = session::current_status(&data).unwrap().unwrap();
+        assert_eq!(status.id, id);
+        assert_eq!(status.state, records::State::Preparing);
+        assert_eq!(status.message, STARTING);
+        assert_eq!(status.action, Some(Action::Serve));
+        assert_eq!(status.worker_pid, std::process::id());
+        // The stream carries the record exactly as written.
+        let lines = capture.lines();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["status"], serde_json::to_value(&status).unwrap());
+        // No API yet, and a stop is a request the state machine checks first.
+        assert_eq!(
+            crate::api::current(&data).unwrap_err().exit,
+            Exit::NoSession
+        );
+        let stop = session::request_stop(&data).unwrap();
+        assert!(
+            matches!(stop, session::StopOutcome::Requested { ref status, .. } if status.state == records::State::Preparing),
+            "{stop:?}"
+        );
+        std::fs::remove_dir_all(data).unwrap();
+    }
+
+    #[test]
+    fn a_session_that_cannot_become_current_records_why() {
+        let data = crate::testing::scratch("begin-failed");
+        let _lock = session::Lock::acquire(&data).unwrap();
+        // The pointer cannot be replaced while a directory holds its name.
+        std::fs::create_dir_all(data.join(session::POINTER_FILE)).unwrap();
+        let id = "d".repeat(32);
+        let (request, run) = serve_request(&data, &id);
+        let capture = crate::events::Capture::default();
+        let mut emitter = Emitter::to(capture.clone());
+        let failure = begin(&data, &run, &request, &mut emitter).unwrap_err();
+
+        // The failure replaces the first status, so the session never reads
+        // as `preparing` once its supervisor has given up.
+        let stored: Status = records::read_json(&run.join("status.json")).unwrap();
+        assert_eq!(stored.state, records::State::Failed);
+        assert_eq!(stored.message, failure.message);
+        assert_eq!(states(&capture), ["preparing", "failed"]);
+        // A refusal recorded before `begin` would still never replace it.
+        record_refusal(
+            &run,
+            &id,
+            Action::Serve,
+            &Failure::internal("later"),
+            &mut emitter,
+        );
+        let again: Status = records::read_json(&run.join("status.json")).unwrap();
+        assert_eq!(again, stored);
+        assert_eq!(states(&capture).len(), 2);
+        std::fs::remove_dir_all(data).unwrap();
     }
 }
