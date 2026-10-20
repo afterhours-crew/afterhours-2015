@@ -305,8 +305,13 @@ unsafe code.
 Each session gets a unique `artifacts/launcher/<session-id>/` containing
 `request.json`, `status.json` and bounded stdout/stderr logs. Default server
 recordings contain route metadata and lengths, not request payloads. Each log
-file retains at most 4 MiB; the server recording has a 64 MiB, 100,000-event
-and 256-stream budget. It stops recording at the limit and continues serving.
+file holds at most 4 MiB. When one fills up, its oldest part is removed: it
+keeps the newest 3 MiB, starting at a line, behind one line saying how many
+bytes were removed. The end of a long session, where a crash shows, is
+therefore always in the log. The JSON results of preparation steps are kept
+from their start instead; one that would exceed 4 MiB fails the step. The
+server recording has a 64 MiB, 100,000-event and 256-stream budget. It stops
+recording at the limit and continues serving.
 These bounds are per run; old sessions are retained for deliberate user cleanup.
 
 Unimplemented operations produce `WARN unsupported operation received` in the

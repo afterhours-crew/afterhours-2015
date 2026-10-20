@@ -19,7 +19,7 @@ use crate::{
     clock,
     exit::{Failure, Result},
     paths,
-    platform::{self, ChildProcess, Platform, SpawnSpec},
+    platform::{self, ChildProcess, Keep, Platform, SpawnSpec},
     records::{self, AccountRecord, Action, Request, State, Status},
     session, terminal,
 };
@@ -151,6 +151,8 @@ impl LiveSession {
             arguments: self.request.server_arguments(arguments),
             working_directory: self.data.clone(),
             stdout_log: stdout_log.clone(),
+            // A JSON result is useless without its start.
+            stdout_keeps: Keep::Start,
             stderr_log: self.run.join(format!("{name}.stderr.log")),
             environment: Vec::new(),
             capture_first_line: false,
@@ -440,6 +442,7 @@ impl Steps for LiveSession {
             arguments: self.request.server_arguments(arguments),
             working_directory: self.data.clone(),
             stdout_log: self.run.join("server.stdout.jsonl"),
+            stdout_keeps: Keep::End,
             stderr_log: self.run.join("server.stderr.log"),
             environment: Vec::new(),
             capture_first_line: true,
@@ -493,6 +496,7 @@ impl Steps for LiveSession {
             arguments: Vec::new(),
             working_directory: game_dir,
             stdout_log: self.run.join("game.stdout.log"),
+            stdout_keeps: Keep::End,
             stderr_log: self.run.join("game.stderr.log"),
             environment: vec![("EARtPLaunchCode".into(), marker.to_string())],
             capture_first_line: false,
