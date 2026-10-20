@@ -783,12 +783,23 @@ fn a_serve_session_streams_its_states_and_diagnostics_as_json_lines() {
             .iter()
             .all(|e| e["version"] == 1 && e["utc"].is_string())
     );
-    let states: Vec<&str> = events
+    let statuses: Vec<&serde_json::Value> = events
         .iter()
         .filter(|e| e["event"] == "status")
-        .map(|e| e["status"]["state"].as_str().unwrap())
+        .map(|e| &e["status"])
         .collect();
-    assert_eq!(states, ["preparing", "ready", "stopping", "finished"]);
+    let states: Vec<&str> = statuses
+        .iter()
+        .map(|s| s["state"].as_str().unwrap())
+        .collect();
+    // The first `preparing` is recorded before the session becomes current,
+    // the second when the state machine starts preparing.
+    assert_eq!(
+        states,
+        ["preparing", "preparing", "ready", "stopping", "finished"]
+    );
+    assert_eq!(statuses[0]["message"], "Starting the session.");
+    assert_ne!(statuses[1]["message"], statuses[0]["message"]);
     assert!(
         events
             .iter()
