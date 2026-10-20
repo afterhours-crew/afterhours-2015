@@ -45,6 +45,7 @@ pub mod platform;
 pub mod preflight;
 pub mod profile;
 pub mod records;
+pub mod relay;
 pub mod retention;
 pub mod session;
 pub mod sessions;
