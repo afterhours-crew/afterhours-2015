@@ -191,6 +191,20 @@ impl Request {
     pub fn listen_address(&self) -> std::net::Ipv4Addr {
         self.listen.unwrap_or(std::net::Ipv4Addr::LOCALHOST)
     }
+    /// The port the server serves launcher services on, if it does: the
+    /// game's own port for a game on this computer (`start`, a serve
+    /// session with game support), or one the system picks on the chosen
+    /// address (`serve --listen`), which a game reaches through a relay on
+    /// its computer (`GET /v1/game` reports it).
+    pub fn launcher_services_port(&self) -> Option<u16> {
+        if self.serves_game() {
+            Some(crate::platform::LSX_PORT)
+        } else if self.listen.is_some() {
+            Some(0)
+        } else {
+            None
+        }
+    }
     /// Server children select the bundled role explicitly, including setup
     /// tools and the SDK-named compatibility copy.
     pub fn server_arguments(&self, mut arguments: Vec<String>) -> Vec<String> {
@@ -426,6 +440,11 @@ mod tests {
         request.listen = Some(std::net::Ipv4Addr::new(192, 168, 1, 20));
         request.validate().unwrap();
         assert_eq!(request.listen_address().to_string(), "192.168.1.20");
+        assert_eq!(
+            request.launcher_services_port(),
+            Some(0),
+            "any port, for a relay"
+        );
         let saved = serde_json::to_value(&request).unwrap();
         assert_eq!(saved["listen"], "192.168.1.20");
         assert!(saved.get("api_port").is_none(), "absent until chosen");
@@ -438,6 +457,7 @@ mod tests {
         }
         request.listen = None;
         assert_eq!(request.listen_address(), std::net::Ipv4Addr::LOCALHOST);
+        assert_eq!(request.launcher_services_port(), None);
         request.api_port = Some(61000);
         assert!(request.validate().is_err(), "a port without the API");
         request.api = true;

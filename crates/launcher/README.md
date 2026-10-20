@@ -278,7 +278,8 @@ session; a damaged file is refused (exit 1), not replaced.
 server and, with `--api`, its API to that one IPv4 address of this computer
 instead of `127.0.0.1`, and gives that address to the game: redirector,
 Blaze, QoS, the per-connection world sockets and launcher services all listen
-there. `--api-port <port>` keeps the API on a fixed port, so a launcher on
+there, with launcher services on a port the system picks, for a game on
+another PC that reaches them through a relay (`GET /v1/game` reports them). `--api-port <port>` keeps the API on a fixed port, so a launcher on
 another PC finds `http://<address>:<port>` with the same token after every
 restart. The API then answers `Host: <address>:<port>` only. Listening on the
 network is an explicit opt-in; without `--listen` nothing changes. It needs

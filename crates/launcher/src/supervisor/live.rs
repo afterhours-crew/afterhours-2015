@@ -341,10 +341,11 @@ impl LiveSession {
             "--owned-world-connection".into(),
             "--owned-only".into(),
         ];
-        if self.request.serves_game() {
-            // The game expects the launcher services on this port.
+        if let Some(port) = self.request.launcher_services_port() {
+            // A game here expects them on its own port; one elsewhere
+            // reaches them through a relay.
             args.push("--lsx-port".into());
-            args.push(platform::LSX_PORT.to_string());
+            args.push(port.to_string());
         }
         for (name, path) in &prepared.files {
             if name != "account-policy" {
@@ -381,9 +382,17 @@ impl LiveSession {
         if ready["ready"] != true || ready["pid"] != pid {
             return Err(Failure::session("Server readiness identity mismatch."));
         }
-        if self.request.serves_game() && ready["lsx"] != format!("127.0.0.1:{}", platform::LSX_PORT)
-        {
-            return Err(Failure::session("Server readiness identity mismatch."));
+        if let Some(port) = self.request.launcher_services_port() {
+            let lsx: Option<std::net::SocketAddrV4> =
+                ready["lsx"].as_str().and_then(|text| text.parse().ok());
+            let expected = |a: &std::net::SocketAddrV4| {
+                *a.ip() == self.request.listen_address()
+                    && a.port() != 0
+                    && (port == 0 || a.port() == port)
+            };
+            if !lsx.as_ref().is_some_and(expected) {
+                return Err(Failure::session("Server readiness identity mismatch."));
+            }
         }
         let redirector: std::net::SocketAddr = ready["redirector"]
             .as_str()
