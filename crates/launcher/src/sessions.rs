@@ -242,7 +242,7 @@ pub fn list(data: &Path, options: &Options) -> Result<SessionList> {
     if let Some(id) = &options.id {
         found.retain(|candidate| &candidate.id == id);
     }
-    found.sort_by(|a, b| b.sort_key().cmp(&a.sort_key()).then(a.id.cmp(&b.id)));
+    newest_first(&mut found);
     let limit = options.limit.clamp(1, MAX_LIMIT);
     if found.len() > limit {
         found.truncate(limit);
@@ -297,7 +297,7 @@ fn regular_file(path: &Path) -> Option<std::fs::Metadata> {
         .filter(|meta| !paths::is_link(meta) && meta.is_file())
 }
 
-fn current_pointer(data: &Path, warnings: &mut Vec<String>) -> Option<String> {
+pub(crate) fn current_pointer(data: &Path, warnings: &mut Vec<String>) -> Option<String> {
     let path = data.join(session::POINTER_FILE);
     regular_file(&path)?;
     match records::read_json::<SessionPointer>(&path) {
@@ -315,8 +315,8 @@ fn current_pointer(data: &Path, warnings: &mut Vec<String>) -> Option<String> {
     }
 }
 
-struct Candidate {
-    id: String,
+pub(crate) struct Candidate {
+    pub(crate) id: String,
     requested: Option<SystemTime>,
     modified: Option<SystemTime>,
 }
@@ -329,7 +329,15 @@ impl Candidate {
     }
 }
 
-fn discover(root: &Path, warnings: &mut Vec<String>) -> (Vec<Candidate>, bool) {
+/// Newest first, as the logs view lists them.
+pub(crate) fn newest_first(found: &mut [Candidate]) {
+    found.sort_by(|a, b| b.sort_key().cmp(&a.sort_key()).then(a.id.cmp(&b.id)));
+}
+
+/// The session folders of `root`: entries named by a session id that are
+/// directories, not links. Examines at most [`MAX_SESSION_ENTRIES`];
+/// `true` when more were left unexamined.
+pub(crate) fn discover(root: &Path, warnings: &mut Vec<String>) -> (Vec<Candidate>, bool) {
     let entries = match std::fs::read_dir(root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
