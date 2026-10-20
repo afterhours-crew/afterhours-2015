@@ -84,6 +84,9 @@ pub(in crate::net) struct AwardRequest {
     /// The participant's runtime player index, the context of the inventory
     /// notifications that announce the credit's unlocks.
     pub player_index: Option<u32>,
+    /// An owned event completion paid with this credit: its cash, earned-cash
+    /// statistic and race-event record join the same transaction.
+    pub event: Option<nfs_services::event_rewards::Completion>,
 }
 
 /// A committed credit: the refreshed account view and item collection.
@@ -949,7 +952,7 @@ impl PlayerListener {
             .participants
             .in_free_roam()
             .into_iter()
-            .filter(|p| self.free_roam_presented.contains(p))
+            .filter(|p| self.free_roam_presented.contains(p) && !self.event_suspended.contains(p))
             .collect();
         let retiring: Vec<u16> = self
             .scoring_state
@@ -1214,6 +1217,7 @@ impl PlayerListener {
                 player_index: players
                     .runtime_index(HOST_SELECTOR as u8, self.persona, participant)
                     .map(u32::from),
+                event: None,
             });
         }
         if collected.replies.len()
@@ -1330,10 +1334,20 @@ impl PlayerListener {
                 );
             }
         }
+        // An event completion also paid cash: present the committed balance.
+        if request.event.is_some()
+            && let Some(bank) = self.bank_notification(credited.loaded.balance().0)?
+        {
+            if self.pending_rpcs.len() >= nfs_world::session::MAX_RPC_QUEUE {
+                return Err(replication::Error::Bound);
+            }
+            self.pending_rpcs.push_back(bank);
+        }
         self.persistent = Some(credited.loaded);
         tracing::info!(
             participant = request.participant,
             batch_id = request.batch_id,
+            event = ?request.event.as_ref().map(|e| e.event_id),
             replayed = credited.replayed,
             total = scores.total,
             level = values.get(nfs_services::reputation::Field::Level),

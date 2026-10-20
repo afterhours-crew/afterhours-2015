@@ -134,17 +134,14 @@ impl Bindings {
             .get(&id)
             .is_some_and(|binding| binding.vehicle_profile().is_ok())
     }
+    /// Whether the entity is a state sequence: its blueprint's first serializer is
+    /// the sequence root (garage and event sequences alike; E996 refused an event
+    /// intro's Stop when only the garage layouts were accepted).
     pub fn is_sequence(&self, id: u16) -> bool {
         self.entities.get(&id).is_some_and(|binding| {
-            binding.profile().is_ok_and(|profile| {
-                [
-                    crate::sequences::Layout::Waiting,
-                    crate::sequences::Layout::GarageExit,
-                    crate::sequences::Layout::GarageEntry,
-                ]
-                .into_iter()
-                .any(|layout| profile == &layout.profile())
-            })
+            binding
+                .profile()
+                .is_ok_and(|profile| profile.kinds().first() == Some(&entity::Kind::SequenceRoot))
         })
     }
     pub fn reset(&mut self) {

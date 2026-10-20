@@ -82,7 +82,9 @@ impl Rules {
             } else {
                 Some(
                     role.as_str()
-                        .filter(|r| ["root", "provider", "event", "channel"].contains(r))
+                        .filter(|r| {
+                            ["root", "provider", "event", "channel", "participants"].contains(r)
+                        })
                         .ok_or_else(|| bad("sequence serializer role"))?
                         .to_owned(),
                 )

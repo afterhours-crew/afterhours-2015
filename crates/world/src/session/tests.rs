@@ -832,6 +832,58 @@ fn actor_rpc_requires_all_three_typed_ghosts_in_the_same_observer_queue() {
 }
 
 #[test]
+fn sequence_stop_accepts_any_sequence_root_entity_and_refuses_other_entities() {
+    use crate::{
+        participants::HostRpc,
+        replication::entity::{
+            Kind, Profile,
+            creation::{Asset, Catalog, Content},
+        },
+        sequences::Stop,
+    };
+    use nfs_protocol::world::rpc::Serial;
+    let asset = |local_index| Asset {
+        bundle: 3,
+        type_id: 4,
+        local_index,
+    };
+    // An event intro's layout (E995): sequence root, optional reference, five
+    // channel references and a reference list; and a plain logic layout.
+    let intro = Profile::new(&[
+        Kind::SequenceRoot,
+        Kind::RpcOptionalReference,
+        Kind::RpcReference,
+        Kind::RpcReference,
+        Kind::RpcReference,
+        Kind::RpcReference,
+        Kind::RpcReference,
+        Kind::RpcReferences,
+    ])
+    .unwrap();
+    let logic = Profile::new(&[Kind::Root, Kind::Rpc]).unwrap();
+    let content = Content::new(
+        vec![Catalog::new(3, &[(4, 2)]).unwrap()],
+        vec![(asset(0), intro), (asset(1), logic)],
+    )
+    .unwrap();
+    let mut host = host();
+    host.replication_bindings = Bindings::default().with_entities(content);
+    host.replication_bindings.bind_entity(7, asset(0)).unwrap();
+    host.replication_bindings.bind_entity(8, asset(1)).unwrap();
+    let stop = |sequence| {
+        HostRpc::SequenceStop(Stop {
+            sequence,
+            serial: Serial::new(1).unwrap(),
+        })
+    };
+    host.queue_rpc(stop(7)).unwrap();
+    assert_eq!(host.rpc_queue.len(), 1);
+    assert!(host.queue_rpc(stop(8)).is_err());
+    assert!(host.queue_rpc(stop(9)).is_err());
+    assert_eq!(host.rpc_queue.len(), 1);
+}
+
+#[test]
 fn typed_queue_limits_and_rejections_preserve_observer_bindings() {
     let mut host = host();
     let section = owned_section(1);

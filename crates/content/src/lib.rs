@@ -20,6 +20,7 @@ pub mod assets;
 pub mod builds;
 mod cache;
 mod control;
+pub mod events;
 mod executable;
 mod fingerprint;
 pub mod garage;
@@ -72,7 +73,10 @@ pub struct BuildIdentity {
     /// Relative virtual address of the 64-byte world MAC template.
     pub mac_template_rva: u32,
     pub mac_template_sha256: String,
-    /// Runtime class IDs of Blueprint classes, by class name.
+    /// Runtime class IDs of Blueprint classes, by class name. The catalog uses them
+    /// only to order a bundle registry; they are never sent. All are observed except
+    /// SpatialPrefabBlueprint, whose ID is inferred from that order (E995: every
+    /// decoded asset index puts it between LogicPrefab and GameMode).
     pub blueprint_class_ids: BTreeMap<String, u32>,
     /// Server scene construction rules tied to this executable.
     pub scenes: scenes::Rules,

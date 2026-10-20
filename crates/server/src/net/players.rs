@@ -21,6 +21,7 @@ mod activation;
 mod customization;
 mod diagnostics;
 mod equipment;
+mod events;
 mod garage;
 pub(super) use equipment::EquipmentRequest;
 pub(super) use garage::{GarageOperation, GarageRequest};
@@ -148,6 +149,12 @@ pub(super) struct PlayerListener {
     free_roam_presented: BTreeSet<u16>,
     scoring: Option<std::sync::Arc<crate::scoring::Content>>,
     scoring_state: scoring::State,
+    events: Option<std::sync::Arc<crate::event_logic::Content>>,
+    event_state: events::State,
+    /// Participants in an owned event: free-roam scoring is retired meanwhile.
+    event_suspended: BTreeSet<u16>,
+    /// The session's replication clock origin, set by the world loop each pass.
+    pub(in crate::net) replication_origin_ms: Option<u64>,
     pub(super) pending_content: VecDeque<nfs_world::content::Message>,
     pub(super) pending_rpcs: VecDeque<nfs_world::participants::HostRpc>,
     unsupported_rpcs: usize,
@@ -700,6 +707,10 @@ impl PlayerListener {
                 trace: std::env::var_os("NFS_SCORING_TRACE").is_some(),
                 ..scoring::State::default()
             },
+            events: None,
+            event_state: events::State::default(),
+            event_suspended: BTreeSet::new(),
+            replication_origin_ms: None,
             pending_content: VecDeque::new(),
             pending_rpcs: VecDeque::new(),
             unsupported_rpcs: 0,
@@ -1084,6 +1095,7 @@ impl Listener for PlayerListener {
         let mut sequences = self.sequences.clone();
         let mut logic_ghosts = self.logic_ghosts.clone();
         let mut unsupported_logic = 0;
+        let mut event_inputs = Vec::new();
         let mut glass = self.glass.clone();
         let mut customization = self.customization.clone();
         customization.retain_ghosts(|id| players.objects().get(id).is_some());
@@ -1104,6 +1116,10 @@ impl Listener for PlayerListener {
             for body in logic_events {
                 let message = nfs_world::logic::Message::decode(82, body)
                     .map_err(|_| replication::Error::Shape)?;
+                if self.event_claims_logic(&message) {
+                    event_inputs.push(Self::event_input_logic(&message));
+                    continue;
+                }
                 if sequences
                     .as_mut()
                     .map(|s| s.streaming_event(&message))
@@ -1291,6 +1307,10 @@ impl Listener for PlayerListener {
         let mut garage_commands = self.garage_commands.clone();
         let delegated = self.delegated_ai(&players);
         for body in rpcs {
+            if self.event_claims_rpc(body) {
+                event_inputs.push(Self::event_input_rpc(body));
+                continue;
+            }
             if self.world_ms < self.return_trace_until
                 && let Some(label) = refusal::route_label(body)
             {
@@ -2128,6 +2148,13 @@ impl Listener for PlayerListener {
         self.launchers = launchers;
         self.participants = participants;
         self.pending_rpcs.extend(responses);
+        for input in event_inputs {
+            if self.event_state.inputs.len() >= events::MAX_INPUTS {
+                tracing::warn!("owned event input queue full; input dropped");
+                break;
+            }
+            self.event_state.inputs.push_back(input);
+        }
         for participant in self.participants.waiting_garage() {
             if population
                 .as_ref()

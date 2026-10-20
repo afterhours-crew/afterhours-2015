@@ -1,0 +1,1030 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+//! Owned race event (E994–E996): one installed event's start-area logics, game mode,
+//! game-mode and scene logics and sequences as replicated creations for one
+//! participant, and the host calls on them. Pure: the listener owns the lifecycle,
+//! timing and delivery. Layouts, bindings and reward values come from the
+//! installation; synchronized values come from the participant's own event state,
+//! and a value without an owned source is sent absent, never invented.
+use nfs_content::events::{Binding, Event, Field, Layout, SceneLogic, Sequence};
+use nfs_protocol::world::rpc::Serial;
+use nfs_world::{
+    game_mode::{Arguments, Call},
+    replication::{
+        Error, Initial as RecordInitial,
+        entity::{
+            Body, GameModeRoot, Initial, Kind, Rpc, Update,
+            creation::{Asset, Catalog, Content as CreationContent, Creation, Prefix},
+        },
+        goto_waypoint, speed_limit,
+        state::World,
+        sublevel,
+    },
+};
+use std::collections::BTreeMap;
+
+pub mod request;
+
+/// The waypoints state's method-3 car ID: the client name hash (djb2 with XOR) of the
+/// car's lower-case blueprint path (E996: 762201586 is
+/// `vehicles/player/car_subaru_brzpremium_2014/car_subaru_brzpremium_2014`, the car
+/// raced in E994 and the account's favourite-car ID).
+pub fn car_id(blueprint: &str) -> u32 {
+    nfs_content::events::record_id(blueprint)
+}
+
+/// Game-mode serializers the lifecycle calls, by declaring asset and class.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum State {
+    /// Root (selector 0): participant join/leave notifications and the end call.
+    Root,
+    Main,
+    Final,
+    Countdown,
+    Waypoints,
+    Dnf,
+    DnfTriggered,
+    ResultReporting,
+    Finish,
+    /// EventInfoPresentationDataCollector: a participant's race position.
+    Positions,
+    /// IntParticipantPropertyClientNotification: the local participant's position.
+    LocalPosition,
+    DnfState,
+}
+const STATES: [(State, &str, &str); 11] = [
+    (
+        State::Main,
+        "gameplay/gamemodes/racegamemode",
+        "GameModeStateEntityData",
+    ),
+    (
+        State::Final,
+        "gameplay/gamemodes/gamemodefinalstateprefab",
+        "SimpleGameModeStateEntityData",
+    ),
+    (
+        State::Countdown,
+        "gameplay/gamemodes/countdowngamemodestateprefab",
+        "CountdownGameModeStateEntityData",
+    ),
+    (
+        State::Waypoints,
+        "gameplay/gamemodes/waypointgamemodestateprefab",
+        "WaypointsGameModeStateEntityData",
+    ),
+    (
+        State::Dnf,
+        "gameplay/gamemodes/waypointgamemodestateprefab",
+        "DNFGameModeStateTransitionEntityData",
+    ),
+    (
+        State::DnfTriggered,
+        "gameplay/gamemodes/controlgamemodeleavingallowedstates",
+        "DNFTriggeredGameModeStateTransitionEntityData",
+    ),
+    (
+        State::ResultReporting,
+        "gameplay/gamemodes/states/resultreportingstate",
+        "GameModeStateEntityData",
+    ),
+    (
+        State::Finish,
+        "gameplay/gamemodes/raceeventfinishstateprefab",
+        "GameModeStateEntityData",
+    ),
+    (
+        State::Positions,
+        "gameplay/gamemodes/ongoingscoringprefab",
+        "EventInfoPresentationDataCollectorEntityData",
+    ),
+    (
+        State::LocalPosition,
+        "gameplay/gamemodes/ongoingscoringprefab",
+        "IntParticipantPropertyClientNotificationEntityData",
+    ),
+    (
+        State::DnfState,
+        "gameplay/gamemodes/states/dnfstateprefab",
+        "GameModeStateEntityData",
+    ),
+];
+
+/// What the results logic's synchronized values present (E996: each source traced
+/// in the installed result and reward prefabs; the E994 win's values in brackets).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Presented {
+    /// A driving-style category's event REP [1284, 3749, 1200, 0, 4557]. This host
+    /// does not score driving style during an event, so each is zero.
+    Category,
+    /// Event REP plus category REP plus awards [20,790].
+    TotalRep,
+    /// The event REP for the position [9,000].
+    EventRep,
+    /// The event cash for the position [2,000].
+    Cash,
+    /// The race time in milliseconds [148,129].
+    RaceTimeMs,
+    /// The finishing position, one-based [1].
+    Position,
+    /// The group-play participant count [1].
+    GroupSize,
+    /// A bonus or multiplier this host does not offer [0].
+    Zero,
+}
+const RESULTS: [(&str, usize, Presented); 27] = [
+    (
+        "gameplay/scoring/eventresultscorelogic",
+        7,
+        Presented::Category,
+    ),
+    (
+        "gameplay/scoring/eventresultscorelogic",
+        5,
+        Presented::Category,
+    ),
+    (
+        "gameplay/scoring/eventresultscorelogic",
+        11,
+        Presented::Category,
+    ),
+    (
+        "gameplay/scoring/eventresultscorelogic",
+        1,
+        Presented::Category,
+    ),
+    (
+        "gameplay/scoring/eventresultscorelogic",
+        10,
+        Presented::Category,
+    ),
+    (
+        "gameplay/scoring/eventresultscorelogic",
+        4,
+        Presented::TotalRep,
+    ),
+    (
+        "gameplay/scoring/eventresultscorelogic",
+        13,
+        Presented::EventRep,
+    ),
+    ("gameplay/scoring/eventresultscorelogic", 2, Presented::Zero),
+    ("gameplay/scoring/eventresultscorelogic", 9, Presented::Zero),
+    (
+        "gameplay/scoring/eventresultscorelogic",
+        12,
+        Presented::Zero,
+    ),
+    ("gameplay/scoring/eventresultscorelogic", 8, Presented::Zero),
+    (
+        "gameplay/scoring/eventresultscorelogic",
+        3,
+        Presented::EventRep,
+    ),
+    (
+        "gameplay/scoring/eventresultscorelogic",
+        6,
+        Presented::EventRep,
+    ),
+    (
+        "gameplay/scoring/raceeventoutrologic",
+        6,
+        Presented::Position,
+    ),
+    ("gameplay/scoring/raceeventoutrologic", 2, Presented::Cash),
+    (
+        "gameplay/scoring/raceeventoutrologic",
+        9,
+        Presented::RaceTimeMs,
+    ),
+    ("gameplay/scoring/raceeventoutrologic", 3, Presented::Zero),
+    ("gameplay/scoring/raceeventoutrologic", 4, Presented::Zero),
+    (
+        "gameplay/progression/groupplaybonuslogic",
+        2,
+        Presented::Cash,
+    ),
+    (
+        "gameplay/progression/groupplaybonuslogic",
+        1,
+        Presented::Zero,
+    ),
+    (
+        "gameplay/progression/groupplaybonuslogic",
+        3,
+        Presented::GroupSize,
+    ),
+    (
+        "gameplay/scoring/speedlistcashrewardsprefab",
+        1,
+        Presented::Zero,
+    ),
+    (
+        "gameplay/scoring/speedlistcashrewardsprefab",
+        2,
+        Presented::Cash,
+    ),
+    (
+        "gameplay/scoring/speedlistcashrewardsprefab",
+        3,
+        Presented::Zero,
+    ),
+    (
+        "gameplay/scoring/speedlistcashrewardsprefab",
+        4,
+        Presented::Cash,
+    ),
+    (
+        "gameplay/scoring/speedlistcashrewardsprefab",
+        5,
+        Presented::Zero,
+    ),
+    (
+        "gameplay/scoring/speedlistcashrewardsprefab",
+        6,
+        Presented::Zero,
+    ),
+];
+
+/// One participant's finished race, the results logic's inputs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Finish {
+    pub race_ms: i32,
+    /// One-based finishing position.
+    pub position: i32,
+}
+
+/// Typed synchronized value of a creation field.
+#[derive(Clone, Debug, PartialEq)]
+enum Value {
+    Bool(bool),
+    Int(i32),
+    Float(f32),
+}
+
+/// Where a logic is spawned: the event scene's start area, the game mode, or another
+/// startup scene.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Owner {
+    Scene,
+    GameMode,
+    Linked,
+}
+
+#[derive(Clone, Debug)]
+pub struct Content {
+    event: Event,
+    category: String,
+    record_id: u32,
+    creation: CreationContent,
+    states: BTreeMap<State, usize>,
+}
+
+fn bad<T>(_: T) -> Error {
+    Error::Shape
+}
+fn rpc(selector: u16) -> Result<Rpc, Error> {
+    Ok(Rpc {
+        selector,
+        serial: Serial::new(0).ok_or(Error::Shape)?.next_initialization(),
+    })
+}
+
+fn rpc_bearing(kind: Kind) -> bool {
+    !matches!(
+        kind,
+        Kind::BoolProperty | Kind::FloatProperty | Kind::I32Property | Kind::StringProperty
+    )
+}
+/// The RPC selector of `layout`'s serializer: its ordinal among RPC-bearing
+/// serializers, as the client numbers them.
+pub fn selector(layout: &Layout, field: usize) -> Result<u16, Error> {
+    let kind = layout.fields.get(field).ok_or(Error::Bound)?.kind;
+    if !rpc_bearing(kind) {
+        return Err(Error::TypeMismatch);
+    }
+    let n = layout.fields[..field]
+        .iter()
+        .filter(|f| rpc_bearing(f.kind))
+        .count();
+    u16::try_from(n)
+        .ok()
+        .filter(|n| *n <= 511)
+        .ok_or(Error::Bound)
+}
+
+impl Content {
+    pub fn new(event: Event, category: String) -> Result<Self, Error> {
+        if category.is_empty() || category.len() > 128 {
+            return Err(Error::Shape);
+        }
+        let record_id = nfs_content::events::record_id(&event.game_mode_id);
+        let mut layouts: Vec<&Layout> = vec![&event.game_mode.layout];
+        layouts.extend(&event.start_logics);
+        layouts.extend(&event.game_mode_logics);
+        layouts.extend(event.sequences.iter().map(|s| &s.layout));
+        layouts.extend(event.scene_logics.iter().map(|s| &s.layout));
+        layouts.extend(&event.linked_logics);
+        let mut catalogs: BTreeMap<u16, &Vec<(u32, u32)>> = BTreeMap::new();
+        let mut profiles = BTreeMap::new();
+        for layout in &layouts {
+            if let Some(old) = catalogs.insert(layout.asset.bundle, &layout.catalog)
+                && old != &layout.catalog
+            {
+                return Err(Error::Shape);
+            }
+            let profile = layout.profile().map_err(bad)?;
+            if let Some(old) = profiles.insert(layout.asset, profile.clone())
+                && old != profile
+            {
+                return Err(Error::Shape);
+            }
+        }
+        let catalogs = catalogs
+            .into_iter()
+            .map(|(bundle, entries)| {
+                let entries = entries
+                    .iter()
+                    .map(|&(kind, count)| Ok((u16::try_from(kind)?, u16::try_from(count)?)))
+                    .collect::<std::result::Result<Vec<_>, std::num::TryFromIntError>>()
+                    .map_err(|_| Error::Bound)?;
+                Catalog::new(bundle, &entries)
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        let creation = CreationContent::new(catalogs, profiles.into_iter().collect())?;
+        let fields = &event.game_mode.layout.fields;
+        let mut states = BTreeMap::from([(State::Root, 0)]);
+        for (state, asset, class) in STATES {
+            let mut found = fields
+                .iter()
+                .enumerate()
+                .filter(|(_, f)| f.asset == asset && f.class == class);
+            let (index, _) = found.next().ok_or(Error::Unsupported)?;
+            if found.next().is_some() {
+                return Err(Error::DuplicateObject);
+            }
+            selector(&event.game_mode.layout, index)?;
+            states.insert(state, index);
+        }
+        if fields.first().map(|f| f.kind) != Some(Kind::GameModeRoot)
+            || event.game_mode.checkpoints.is_empty()
+            || event.start_logics.is_empty()
+            || !(1..=15).contains(&event.game_mode.laps)
+            || !event.dnf_timeout.is_finite()
+            || event.dnf_timeout <= 0.
+        {
+            return Err(Error::Shape);
+        }
+        let content = Self {
+            event,
+            category,
+            record_id,
+            creation,
+            states,
+        };
+        for name in [
+            request::INTRO_SEQUENCE,
+            request::COUNTDOWN_SEQUENCE,
+            request::OUTRO_SEQUENCE,
+        ] {
+            content.sequence(name)?;
+        }
+        content.spawner(request::INTRO_SEQUENCE)?;
+        content.spawner(request::OUTRO_SEQUENCE)?;
+        for name in [request::IN_GAME_MODE, request::COOLDOWN] {
+            content.scene_logic(name)?;
+        }
+        Ok(content)
+    }
+    pub fn event(&self) -> &Event {
+        &self.event
+    }
+    pub fn category(&self) -> &str {
+        &self.category
+    }
+    pub fn record_id(&self) -> u32 {
+        self.record_id
+    }
+    pub fn creation_content(&self) -> &CreationContent {
+        &self.creation
+    }
+    pub fn game_mode_layout(&self) -> &Layout {
+        &self.event.game_mode.layout
+    }
+    /// The game-mode serializer index of a lifecycle state.
+    pub fn state(&self, state: State) -> usize {
+        self.states[&state]
+    }
+    pub fn logic(&self, owner: Owner, name: &str, occurrence: usize) -> Result<&Layout, Error> {
+        let list = match owner {
+            Owner::Scene => &self.event.start_logics,
+            Owner::GameMode => &self.event.game_mode_logics,
+            Owner::Linked => &self.event.linked_logics,
+        };
+        list.iter()
+            .filter(|l| l.blueprint == name)
+            .nth(occurrence)
+            .ok_or(Error::Unsupported)
+    }
+    pub fn linked(&self) -> &[Layout] {
+        &self.event.linked_logics
+    }
+    pub fn scene_logic(&self, name: &str) -> Result<&SceneLogic, Error> {
+        self.event
+            .scene_logics
+            .iter()
+            .find(|s| s.layout.blueprint == name)
+            .ok_or(Error::Unsupported)
+    }
+    pub fn sequence(&self, name: &str) -> Result<&Sequence, Error> {
+        self.event
+            .sequences
+            .iter()
+            .find(|s| s.layout.blueprint == name)
+            .ok_or(Error::Unsupported)
+    }
+    /// The game-mode state that spawns a sequence.
+    pub fn spawner(&self, name: &str) -> Result<usize, Error> {
+        let index = self.sequence(name)?.spawner.ok_or(Error::Unsupported)?;
+        selector(&self.event.game_mode.layout, index)?;
+        Ok(index)
+    }
+
+    fn bound(
+        &self,
+        world: &World,
+        binding: Binding,
+        game_mode: Option<u16>,
+    ) -> Result<(u16, u16), Error> {
+        match binding {
+            Binding::Scene {
+                content_key,
+                serializer,
+            } => world
+                .scene_endpoint(content_key, serializer)
+                .ok_or(Error::UnknownObject),
+            Binding::GameMode { serializer } => Ok((
+                game_mode.ok_or(Error::Shape)?,
+                selector(&self.event.game_mode.layout, serializer)?,
+            )),
+        }
+    }
+
+    /// A participant logic's creation. RPC references follow the layout's bindings,
+    /// a reference list starts empty and a synchronized value comes from `value`.
+    fn logic_creation(
+        &self,
+        layout: &Layout,
+        blueprint: u16,
+        world: &World,
+        participant: u16,
+        game_mode: Option<u16>,
+        value: &dyn Fn(usize, &Field) -> Option<Value>,
+    ) -> Result<Creation, Error> {
+        let mut initial = Vec::with_capacity(layout.fields.len());
+        let mut updates = Vec::with_capacity(layout.fields.len());
+        let mut next = 0u16;
+        for (index, field) in layout.fields.iter().enumerate() {
+            let mut take = || -> Result<Rpc, Error> {
+                let current = rpc(next)?;
+                next = next.checked_add(1).ok_or(Error::Bound)?;
+                Ok(current)
+            };
+            let (first, update) = match field.kind {
+                Kind::Root if index == 0 => (
+                    Initial::Root {
+                        value: layout.bus_count,
+                        rpc: take()?,
+                        reference: participant,
+                    },
+                    Update::Noop,
+                ),
+                Kind::RpcReference => {
+                    let binding = field.binding.ok_or(Error::Unsupported)?;
+                    let (reference, target_selector) = self.bound(world, binding, game_mode)?;
+                    (
+                        Initial::RpcReference {
+                            rpc: take()?,
+                            reference,
+                            target_selector,
+                        },
+                        Update::Noop,
+                    )
+                }
+                Kind::Rpc => (Initial::Rpc(take()?), Update::Noop),
+                Kind::RpcBool => {
+                    let initial = match value(index, field) {
+                        Some(Value::Bool(v)) => v,
+                        None => false,
+                        Some(_) => return Err(Error::TypeMismatch),
+                    };
+                    (
+                        Initial::RpcBool {
+                            rpc: take()?,
+                            value: initial,
+                        },
+                        Update::Noop,
+                    )
+                }
+                Kind::RpcReferences => (
+                    Initial::RpcReferences {
+                        rpc: take()?,
+                        references: Vec::new(),
+                    },
+                    Update::Noop,
+                ),
+                Kind::BoolProperty => match value(index, field) {
+                    Some(Value::Bool(v)) => {
+                        (Initial::BoolProperty(Some(v)), Update::BoolProperty(None))
+                    }
+                    None => (Initial::BoolProperty(None), Update::BoolProperty(None)),
+                    Some(_) => return Err(Error::TypeMismatch),
+                },
+                Kind::I32Property => match value(index, field) {
+                    Some(Value::Int(v)) => {
+                        (Initial::I32Property(Some(v)), Update::I32Property(None))
+                    }
+                    None => (Initial::I32Property(None), Update::I32Property(None)),
+                    Some(_) => return Err(Error::TypeMismatch),
+                },
+                Kind::FloatProperty => match value(index, field) {
+                    Some(Value::Float(v)) if v.is_finite() => (
+                        Initial::FloatProperty(Some(v.to_bits())),
+                        Update::FloatProperty(None),
+                    ),
+                    None => (Initial::FloatProperty(None), Update::FloatProperty(None)),
+                    Some(_) => return Err(Error::TypeMismatch),
+                },
+                Kind::StringProperty => {
+                    (Initial::StringProperty(None), Update::StringProperty(None))
+                }
+                _ => return Err(Error::Unsupported),
+            };
+            initial.push(first);
+            updates.push(Some(update));
+        }
+        let creation = Creation {
+            prefix: Prefix {
+                parent: None,
+                blueprint,
+                sub_id: layout.sub_id,
+                owner: None,
+                asset: layout.asset,
+            },
+            body: Body {
+                initial: Some(initial),
+                updates,
+            },
+        };
+        creation.encode(&self.creation)?;
+        Ok(creation)
+    }
+
+    /// A start-area or linked-area logic, owned by the event scene.
+    pub fn area_logic(
+        &self,
+        layout: &Layout,
+        world: &World,
+        participant: u16,
+    ) -> Result<Creation, Error> {
+        let scene = world
+            .scene(self.event.scene_content_key)
+            .ok_or(Error::UnknownObject)?;
+        let starting = layout.blueprint == request::SHOW_PARTICIPANTS;
+        self.logic_creation(layout, scene, world, participant, None, &|_, field| {
+            // The participants the start area starts with: this participant alone
+            // (E994 solo start: 1).
+            (starting && field.kind == Kind::I32Property).then_some(Value::Int(1))
+        })
+    }
+
+    /// A game-mode logic, owned by the game mode. The results logic presents
+    /// `finish` and the event's rewards; the driving-style logic's Boolean RPCs take
+    /// the E994 creation's initial values (false, false, true) pending their source.
+    pub fn game_mode_logic(
+        &self,
+        layout: &Layout,
+        world: &World,
+        participant: u16,
+        game_mode: u16,
+        finish: Option<Finish>,
+    ) -> Result<Creation, Error> {
+        let rewards = self.event.rewards;
+        let driving = layout.blueprint == request::DRIVING_STYLE;
+        let outro = layout.blueprint == request::OUTRO;
+        let bools: Vec<usize> = layout
+            .fields
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.kind == Kind::RpcBool)
+            .map(|(i, _)| i)
+            .collect();
+        let value = |index: usize, field: &Field| -> Option<Value> {
+            if driving && field.kind == Kind::RpcBool {
+                return Some(Value::Bool(
+                    bools.iter().position(|&i| i == index) == Some(2),
+                ));
+            }
+            if !outro {
+                return None;
+            }
+            let finish = finish?;
+            let role = RESULTS
+                .iter()
+                .find(|(asset, object, _)| field.asset == *asset && field.object == *object)
+                .map(|(_, _, role)| *role)?;
+            let number = match role {
+                Presented::Category | Presented::Zero => 0,
+                Presented::TotalRep | Presented::EventRep => rewards.rep,
+                Presented::Cash => rewards.cash,
+                Presented::RaceTimeMs => finish.race_ms,
+                Presented::Position => finish.position,
+                Presented::GroupSize => 1,
+            };
+            Some(match field.kind {
+                Kind::FloatProperty => Value::Float(number as f32),
+                _ => Value::Int(number),
+            })
+        };
+        self.logic_creation(
+            layout,
+            game_mode,
+            world,
+            participant,
+            Some(game_mode),
+            &value,
+        )
+    }
+
+    /// A logic spawned in another startup scene (the Events scene's participant
+    /// sets), owned by that scene.
+    pub fn scene_logic_creation(
+        &self,
+        name: &str,
+        world: &World,
+        participant: u16,
+    ) -> Result<Creation, Error> {
+        let logic = self.scene_logic(name)?;
+        let scene = world
+            .scene(logic.scene_content_key)
+            .ok_or(Error::UnknownObject)?;
+        self.logic_creation(&logic.layout, scene, world, participant, None, &|_, _| None)
+    }
+
+    /// The game mode, owned by the game-mode manager's scene. The root holds the
+    /// start time on the host replication clock, an age of zero, the three Gameplay
+    /// bindings and the participant; the intro spawner state starts with the
+    /// participant; every other state and the outro provider start empty.
+    pub fn game_mode(
+        &self,
+        world: &World,
+        participant: u16,
+        start_seconds: f64,
+    ) -> Result<Creation, Error> {
+        if !start_seconds.is_finite() || start_seconds < 0. {
+            return Err(Error::Shape);
+        }
+        let layout = &self.event.game_mode.layout;
+        let (manager_key, _) = self.event.game_mode.root_bindings[1];
+        let blueprint = world.scene(manager_key).ok_or(Error::UnknownObject)?;
+        let mut bindings = [(0, 0); 3];
+        for (slot, &(key, serializer)) in self.event.game_mode.root_bindings.iter().enumerate() {
+            bindings[slot] = world
+                .scene_endpoint(key, serializer)
+                .ok_or(Error::UnknownObject)?;
+        }
+        let intro = self.spawner(request::INTRO_SEQUENCE)?;
+        let mut waypoints = Vec::with_capacity(self.event.game_mode.checkpoints.len());
+        for &(key, serializer) in &self.event.game_mode.checkpoints {
+            waypoints.push(
+                world
+                    .scene_endpoint(key, serializer)
+                    .ok_or(Error::UnknownObject)?,
+            );
+        }
+        let mut initial = Vec::with_capacity(layout.fields.len());
+        let mut updates = Vec::with_capacity(layout.fields.len());
+        for (index, field) in layout.fields.iter().enumerate() {
+            let r = rpc(selector(layout, index)?)?;
+            let (first, update) = match field.kind {
+                Kind::GameModeRoot if index == 0 => (
+                    Initial::GameModeRoot(Box::new(GameModeRoot {
+                        value: layout.bus_count,
+                        rpc: r,
+                        start: start_seconds.to_bits(),
+                        age: 0f32.to_bits(),
+                        bindings,
+                        participants: vec![participant],
+                        others: Vec::new(),
+                        flag: false,
+                    })),
+                    Update::Noop,
+                ),
+                Kind::RpcReference => {
+                    let binding = field.binding.ok_or(Error::Unsupported)?;
+                    let (reference, target_selector) = self.bound(world, binding, None)?;
+                    (
+                        Initial::RpcReference {
+                            rpc: r,
+                            reference,
+                            target_selector,
+                        },
+                        Update::Noop,
+                    )
+                }
+                Kind::Rpc => (Initial::Rpc(r), Update::Noop),
+                Kind::RpcReferences => (
+                    Initial::RpcReferences {
+                        rpc: r,
+                        references: if index == intro {
+                            vec![participant]
+                        } else {
+                            Vec::new()
+                        },
+                    },
+                    Update::Noop,
+                ),
+                Kind::CountdownState => (
+                    Initial::CountdownState {
+                        rpc: r,
+                        references: Vec::new(),
+                        start: None,
+                    },
+                    Update::Noop,
+                ),
+                Kind::WaypointsState => (
+                    Initial::WaypointsState {
+                        rpc: r,
+                        references: Vec::new(),
+                        words: [0; 3],
+                    },
+                    Update::Noop,
+                ),
+                Kind::DnfTransition => (
+                    Initial::DnfTransition {
+                        rpc: r,
+                        values: Vec::new(),
+                    },
+                    Update::Noop,
+                ),
+                Kind::WaypointList => (
+                    Initial::WaypointList {
+                        rpc: r,
+                        laps: self.event.game_mode.laps,
+                        waypoints: waypoints.clone(),
+                    },
+                    Update::Noop,
+                ),
+                Kind::RpcGuid => (Initial::RpcGuid { rpc: r, guid: None }, Update::Noop),
+                // E994's creations carry a present, empty outro player set.
+                Kind::RpcSet64 => (
+                    Initial::RpcSet64(r),
+                    Update::Set64(Some(sublevel::Set64 { entries: None })),
+                ),
+                _ => return Err(Error::Unsupported),
+            };
+            initial.push(first);
+            updates.push(Some(update));
+        }
+        let creation = Creation {
+            prefix: Prefix {
+                parent: None,
+                blueprint,
+                sub_id: layout.sub_id,
+                owner: None,
+                asset: layout.asset,
+            },
+            body: Body {
+                initial: Some(initial),
+                updates,
+            },
+        };
+        creation.encode(&self.creation)?;
+        Ok(creation)
+    }
+
+    /// The sequence manager's endpoint in the live world.
+    pub fn manager(&self, world: &World, name: &str) -> Result<(u16, u16), Error> {
+        let sequence = self.sequence(name)?;
+        world
+            .scene_endpoint(sequence.manager.0, sequence.manager.1)
+            .ok_or(Error::UnknownObject)
+    }
+
+    /// A participant sequence, owned by its manager's scene. Its number is the
+    /// manager's live sequence count (E662: the manager vector ordinal).
+    pub fn sequence_creation(
+        &self,
+        name: &str,
+        world: &World,
+        participant: u16,
+        game_mode: u16,
+    ) -> Result<Creation, Error> {
+        let sequence = self.sequence(name)?;
+        let layout = &sequence.layout;
+        let (manager, manager_selector) = self.manager(world, name)?;
+        let number = live_sequences(world, (manager, manager_selector));
+        let mut initial = Vec::with_capacity(layout.fields.len());
+        for (index, field) in layout.fields.iter().enumerate() {
+            let r = rpc(selector(layout, index)?)?;
+            initial.push(match field.kind {
+                Kind::SequenceRoot if index == 0 => Initial::SequenceRoot {
+                    value: layout.bus_count,
+                    rpc: r,
+                    manager,
+                    manager_selector,
+                    sequence: number,
+                    participants: vec![participant],
+                    stopping: false,
+                },
+                Kind::RpcOptionalReference => Initial::RpcOptionalReference {
+                    rpc: r,
+                    reference: Some(participant),
+                },
+                Kind::RpcReference => {
+                    let binding = field.binding.ok_or(Error::Unsupported)?;
+                    let (reference, target_selector) =
+                        self.bound(world, binding, Some(game_mode))?;
+                    Initial::RpcReference {
+                        rpc: r,
+                        reference,
+                        target_selector,
+                    }
+                }
+                Kind::RpcReferences => Initial::RpcReferences {
+                    rpc: r,
+                    references: vec![participant],
+                },
+                Kind::Rpc => Initial::Rpc(r),
+                _ => return Err(Error::Unsupported),
+            });
+        }
+        let updates = vec![Some(Update::Noop); initial.len()];
+        let creation = Creation {
+            prefix: Prefix {
+                parent: None,
+                blueprint: manager,
+                sub_id: layout.sub_id,
+                owner: None,
+                asset: layout.asset,
+            },
+            body: Body {
+                initial: Some(initial),
+                updates,
+            },
+        };
+        creation.encode(&self.creation)?;
+        Ok(creation)
+    }
+
+    /// A call on the live game mode's lifecycle state.
+    pub fn state_call(
+        &self,
+        world: &World,
+        game_mode: u16,
+        state: State,
+        method: u32,
+        reference: Option<u16>,
+        arguments: Arguments,
+    ) -> Result<Call, Error> {
+        let selector = selector(&self.event.game_mode.layout, self.state(state))?;
+        call(world, game_mode, selector, method, reference, arguments)
+    }
+    /// A call on a game-mode serializer by index (sequence spawner states).
+    pub fn field_call(
+        &self,
+        world: &World,
+        game_mode: u16,
+        field: usize,
+        method: u32,
+        reference: Option<u16>,
+    ) -> Result<Call, Error> {
+        let selector = selector(&self.event.game_mode.layout, field)?;
+        call(
+            world,
+            game_mode,
+            selector,
+            method,
+            reference,
+            Arguments::None,
+        )
+    }
+    /// A call on one of the in-event flags (E997): method 0 sets it, 1 clears it.
+    pub fn flag_call(&self, world: &World, index: usize, method: u32) -> Result<Call, Error> {
+        let &(key, serializer) = self
+            .event
+            .game_mode_notifications
+            .get(index)
+            .ok_or(Error::Bound)?;
+        let (scene, selector) = world
+            .scene_endpoint(key, serializer)
+            .ok_or(Error::UnknownObject)?;
+        call(world, scene, selector, method, None, Arguments::None)
+    }
+    /// The intro's AI goals for `participant`'s Actor (E997): a go-to-waypoint goal
+    /// with the intro's waypoint and reach radius, and a speed-limit goal. The
+    /// first value 0, second value 1, unset Booleans and selector 0 are the
+    /// official intro goal's; the RPC serial is a new component's first one.
+    pub fn intro_goals(&self) -> Result<Option<Vec<RecordInitial>>, Error> {
+        let Some(goto) = self.sequence(request::INTRO_SEQUENCE)?.goto else {
+            return Ok(None);
+        };
+        let serial = Serial::new(0)
+            .ok_or(Error::Shape)?
+            .next_initialization()
+            .value();
+        Ok(Some(vec![
+            RecordInitial::GotoWaypointGoal(goto_waypoint::Initial {
+                selector: 0,
+                serial,
+                allocation_serial: 0,
+                waypoint: 0,
+                word: 1,
+                points: vec![goto.point.map(f32::to_bits)],
+                flags: [false, false],
+                radius: goto.radius.to_bits(),
+            }),
+            RecordInitial::SpeedLimitGoal(speed_limit::Initial {
+                selector: 0,
+                serial,
+                allocation_serial: 0,
+                limit: goto.speed_limit.to_bits(),
+            }),
+        ]))
+    }
+    /// A call on an event-scene serializer.
+    pub fn scene_call(
+        &self,
+        world: &World,
+        serializer: usize,
+        method: u32,
+        reference: Option<u16>,
+    ) -> Result<Call, Error> {
+        let (scene, selector) = world
+            .scene_endpoint(self.event.scene_content_key, serializer)
+            .ok_or(Error::UnknownObject)?;
+        call(world, scene, selector, method, reference, Arguments::None)
+    }
+}
+
+/// Live sequences that name the manager endpoint.
+pub fn live_sequences(world: &World, manager: (u16, u16)) -> u32 {
+    world
+        .iter()
+        .filter(|(_, object)| {
+            matches!(&object.initial, RecordInitial::Entity { fields, .. }
+                if matches!(fields.first(), Some(Initial::SequenceRoot { manager: m, manager_selector: s, .. })
+                    if (*m, *s) == manager))
+        })
+        .count() as u32
+}
+
+/// A call on a live object's serializer with the serial it was created with.
+pub fn call(
+    world: &World,
+    target: u16,
+    selector: u16,
+    method: u32,
+    reference: Option<u16>,
+    arguments: Arguments,
+) -> Result<Call, Error> {
+    let object = world.get(target).ok_or(Error::UnknownObject)?;
+    let serial = match &object.initial {
+        RecordInitial::Entity { fields, .. } => fields
+            .iter()
+            .filter_map(Initial::rpc)
+            .find(|r| r.selector == selector)
+            .map(|r| r.serial),
+        RecordInitial::SubLevel { fields, .. } => fields
+            .iter()
+            .filter_map(sublevel::Initial::rpc)
+            .find(|r| r.selector == selector)
+            .map(|r| r.serial),
+        _ => None,
+    }
+    .ok_or(Error::TypeMismatch)?;
+    if reference.is_some_and(|id| world.get(id).is_none()) {
+        return Err(Error::UnknownObject);
+    }
+    let call = Call {
+        target,
+        selector,
+        serial,
+        method,
+        reference,
+        arguments,
+    };
+    call.encode().map_err(|_| Error::Bound)?;
+    Ok(call)
+}
+
+/// Whether a record is a live entity created from `asset`.
+pub fn is_asset(world: &World, ghost: u16, asset: Asset) -> bool {
+    matches!(world.get(ghost).map(|o| &o.initial),
+        Some(RecordInitial::Entity { prefix, .. }) if prefix.asset == asset)
+}
+
+#[cfg(test)]
+pub(crate) mod tests;

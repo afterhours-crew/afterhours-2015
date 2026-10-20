@@ -49,8 +49,15 @@ pub enum Operation {
     BinaryFloat(FloatOp, u8, u8),
     LessFloat(u8, u8),
     FloatFromInteger(u8),
-    SelectFloat { condition: u8, yes: u8, no: u8 },
+    SelectFloat {
+        condition: u8,
+        yes: u8,
+        no: u8,
+    },
     RoundFloat(u8),
+    /// Native `intf` (callback `0x3765420`, E995): `cvttss2si` from a float
+    /// register into an integer register, truncating toward zero.
+    IntegerFromFloat(u8),
     Return(Register),
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -134,6 +141,10 @@ impl Program {
                 Operation::RoundFloat(a) => {
                     read(Register::Float(a))?;
                     Type::Float
+                }
+                Operation::IntegerFromFloat(a) => {
+                    read(Register::Float(a))?;
+                    Type::Integer
                 }
                 Operation::Return(register) => {
                     read(register)?;
@@ -224,6 +235,15 @@ impl Program {
                         return Err(Error::ConversionRange);
                     }
                     floats[result] = (shifted as i32) as f32;
+                }
+                Operation::IntegerFromFloat(a) => {
+                    let value = finite(floats[usize::from(a)])?;
+                    // cvttss2si; outside its range the native result is the
+                    // integer indefinite value, which this model refuses.
+                    if !(-2_147_483_648.0..2_147_483_648.0).contains(&value) {
+                        return Err(Error::ConversionRange);
+                    }
+                    integers[result] = value as i32;
                 }
                 Operation::Return(register) => {
                     return Ok(Some(match register {

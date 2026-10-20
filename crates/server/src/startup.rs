@@ -540,6 +540,23 @@ impl<'p> Startup<'p> {
                 Err(_) => Ok(None),
             };
         }
+        if nfs_services::speedwall::owns_walls(route.component, route.command)
+            && let Some((state, account)) = self.speedwall
+        {
+            if self.users.is_some() {
+                return Ok(None);
+            }
+            return match state.reply_walls(
+                request,
+                account,
+                self.identities.persona,
+                &self.identities.name,
+            ) {
+                Ok(reply) => Ok(Some(vec![reply])),
+                Err(nfs_services::speedwall::Error::Encode) => Err(Failure::Reply),
+                Err(_) => Ok(None),
+            };
+        }
         if nfs_services::item_licenses::owns(route.component, route.command)
             && let Some(content) = self.item_licenses
         {

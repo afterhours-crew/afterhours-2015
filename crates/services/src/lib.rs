@@ -15,6 +15,7 @@ pub mod client_state;
 pub mod control_catalogs;
 pub mod departure;
 pub mod equipment;
+pub mod event_rewards;
 pub mod fresh_account;
 pub mod garage;
 pub mod group;

@@ -218,11 +218,236 @@ impl Players {
             .ok_or(Error::UnknownObject)?;
         self.objects.bind_actor(gameplay_key, participant, actor)
     }
+
+    /// Put this participant's Actor under AI control with new host goals, in
+    /// order (E997: a race intro's go-to-waypoint and speed-limit goals, then the
+    /// Actor's first flag set with them as its first goal list). Each goal takes
+    /// the next shared allocation serial; creation and assignment commit together
+    /// and an Actor that already has goals is refused.
+    pub fn start_controlled_goals(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        participant: u16,
+        goals: Vec<Initial>,
+    ) -> Result<Vec<Record>, Error> {
+        let actor = self
+            .owned_actor(connection, persona, participant)
+            .ok_or(Error::UnknownObject)?;
+        let Some(state::Object {
+            current: Update::Actor(current),
+            ..
+        }) = self.objects.get(actor)
+        else {
+            return Err(Error::TypeMismatch);
+        };
+        if [current.references_a.as_ref(), current.references_b.as_ref()]
+            .into_iter()
+            .flatten()
+            .any(|goals| !goals.is_empty())
+        {
+            return Err(Error::Shape);
+        }
+        if goals.is_empty() || goals.len() > MAX_REFERENCES {
+            return Err(Error::Bound);
+        }
+        let mut next = self.objects.clone();
+        let mut serial = self.goal_allocation_serial;
+        let mut records = Vec::with_capacity(goals.len() + 1);
+        for mut goal in goals {
+            serial = (serial + 1) & 63;
+            let update = match &mut goal {
+                Initial::GotoWaypointGoal(g) => {
+                    g.allocation_serial = serial;
+                    Update::GotoWaypointGoal
+                }
+                Initial::SpeedLimitGoal(g) => {
+                    g.allocation_serial = serial;
+                    Update::SpeedLimitGoal
+                }
+                _ => return Err(Error::Unsupported),
+            };
+            records.push(next.spawn(goal, update)?);
+        }
+        let assigned = next
+            .change(
+                actor,
+                Update::Actor(ActorUpdate {
+                    flag_a: Some(true),
+                    references_a: Some(records.iter().map(|r| r.id).collect()),
+                    ..ActorUpdate::default()
+                }),
+            )?
+            .ok_or(Error::Shape)?;
+        records.push(assigned);
+        self.objects = next;
+        self.goal_allocation_serial = serial;
+        Ok(records)
+    }
+
+    /// End AI control started by [`Self::start_controlled_goals`]: the Actor's first
+    /// flag and goal list clear and the goals are deleted, in one commit (E997: at
+    /// the intro's end). Returns the Actor's update; the goal IDs are deleted.
+    pub fn release_controlled_goals(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        participant: u16,
+        goals: &[u16],
+    ) -> Result<Record, Error> {
+        let actor = self
+            .owned_actor(connection, persona, participant)
+            .ok_or(Error::UnknownObject)?;
+        let Some(state::Object {
+            current: Update::Actor(current),
+            ..
+        }) = self.objects.get(actor)
+        else {
+            return Err(Error::TypeMismatch);
+        };
+        if goals.is_empty()
+            || current.references_a.as_deref() != Some(goals)
+            || !goals.iter().all(|g| {
+                self.objects.get(*g).is_some_and(|o| {
+                    matches!(
+                        o.initial,
+                        Initial::GotoWaypointGoal(_) | Initial::SpeedLimitGoal(_)
+                    )
+                })
+            })
+        {
+            return Err(Error::UnknownObject);
+        }
+        let mut next = self.objects.clone();
+        let cleared = next
+            .change(
+                actor,
+                Update::Actor(ActorUpdate {
+                    flag_a: Some(false),
+                    references_a: Some(Vec::new()),
+                    ..ActorUpdate::default()
+                }),
+            )?
+            .ok_or(Error::Shape)?;
+        for goal in goals {
+            next.remove(*goal)?;
+        }
+        self.objects = next;
+        Ok(cleared)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn controlled_goals_are_owned_ordered_atomic_and_released_once() {
+        let goto = || {
+            Initial::GotoWaypointGoal(goto_waypoint::Initial {
+                selector: 0,
+                serial: 1,
+                allocation_serial: 0,
+                waypoint: 0,
+                word: 1,
+                points: vec![[0, 0, 0]],
+                flags: [false, false],
+                radius: 150f32.to_bits(),
+            })
+        };
+        let speed = || {
+            Initial::SpeedLimitGoal(speed_limit::Initial {
+                selector: 0,
+                serial: 1,
+                allocation_serial: 0,
+                limit: 22.35f32.to_bits(),
+            })
+        };
+        let mut world = Players::default();
+        let p = join(&mut world, 3, 101, 0);
+        let other = join(&mut world, 7, 202, 0);
+        world.create_actor(3, 101, p).unwrap();
+        world.create_actor(7, 202, other).unwrap();
+        let before = world.objects.snapshot();
+        // Another session's participant, a missing goal list and a foreign
+        // goal kind change nothing.
+        assert!(
+            world
+                .start_controlled_goals(3, 101, other, vec![goto()])
+                .is_err()
+        );
+        assert!(world.start_controlled_goals(3, 101, p, vec![]).is_err());
+        let wander = Initial::WanderGoal(wander::Initial {
+            allocation_serial: 0,
+            flags: [false; 3],
+        });
+        assert!(
+            world
+                .start_controlled_goals(3, 101, p, vec![goto(), wander])
+                .is_err()
+        );
+        assert_eq!(world.objects.snapshot(), before);
+        let records = world
+            .start_controlled_goals(3, 101, p, vec![goto(), speed()])
+            .unwrap();
+        let [g, s, actor] = <[Record; 3]>::try_from(records).unwrap();
+        let Some(Initial::GotoWaypointGoal(gi)) = &g.initial else {
+            panic!()
+        };
+        let Some(Initial::SpeedLimitGoal(si)) = &s.initial else {
+            panic!()
+        };
+        assert_eq!((gi.allocation_serial, si.allocation_serial), (1, 2));
+        assert_eq!(
+            actor.update,
+            Update::Actor(ActorUpdate {
+                flag_a: Some(true),
+                references_a: Some(vec![g.id, s.id]),
+                ..ActorUpdate::default()
+            })
+        );
+        // Goals are not replaced while held.
+        assert!(
+            world
+                .start_controlled_goals(3, 101, p, vec![speed()])
+                .is_err()
+        );
+        assert!(
+            world
+                .release_controlled_goals(3, 101, p, &[s.id, g.id])
+                .is_err()
+        );
+        assert!(
+            world
+                .release_controlled_goals(7, 202, other, &[g.id, s.id])
+                .is_err()
+        );
+        let cleared = world
+            .release_controlled_goals(3, 101, p, &[g.id, s.id])
+            .unwrap();
+        assert_eq!(
+            cleared.update,
+            Update::Actor(ActorUpdate {
+                flag_a: Some(false),
+                references_a: Some(Vec::new()),
+                ..ActorUpdate::default()
+            })
+        );
+        assert!(world.objects.get(g.id).is_none() && world.objects.get(s.id).is_none());
+        assert!(
+            world
+                .release_controlled_goals(3, 101, p, &[g.id, s.id])
+                .is_err()
+        );
+        // The shared counter continues after the released goals.
+        let again = world
+            .start_controlled_goals(3, 101, p, vec![speed()])
+            .unwrap();
+        let Some(Initial::SpeedLimitGoal(si)) = &again[0].initial else {
+            panic!()
+        };
+        assert_eq!(si.allocation_serial, 3);
+    }
 
     #[test]
     fn goal_counter_is_world_owned_wraps_and_only_advances_after_success() {

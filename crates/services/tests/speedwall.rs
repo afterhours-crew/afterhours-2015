@@ -5,7 +5,9 @@
 use nfs_fire2::{Fields, Frame};
 use nfs_protocol::autolog::*;
 use nfs_services::ContentError;
-use nfs_services::speedwall::{Error, Row, State, body_limits, frame_limits};
+use nfs_services::speedwall::{
+    Error, Row, State, body_limits, frame_limits, walls_frame_limits, walls_limits,
+};
 use nfs_storage::AccountId;
 use serde_json::json;
 
@@ -279,4 +281,151 @@ fn documents_are_validated_bounded_and_account_bound() {
         .collect();
     assert_eq!(State::new(a, many).err(), Some(ContentError::TooLarge));
     assert!(State::new(a, vec![]).unwrap().rows().is_empty());
+}
+
+fn walls_query(persona: i64, walls: &[u32], options: [i32; 2], corr: u32) -> Vec<u8> {
+    let body = InGameSpeedWallsRequest {
+        blaze_id: Some(persona),
+        speed_wall_ids: Some(SpeedWallIds(walls.to_vec())),
+        usge: Some(options[0]),
+        uspg: Some(options[1]),
+        ..Default::default()
+    }
+    // Looser than the service's limits, so oversized requests can be built.
+    .encode(nfs_heat2::Limits {
+        max_collection: 128,
+        max_values: 512,
+        max_bytes: 8192,
+        ..body_limits()
+    })
+    .unwrap();
+    nfs_fire2::encode(
+        Frame {
+            fields: Fields {
+                routing_a: 2050,
+                routing_b: 20,
+                correlation: corr,
+                ..Default::default()
+            },
+            metadata: &[],
+            body: &body,
+        },
+        frame_limits(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn in_game_walls_list_both_stat_types_with_own_rows_where_present() {
+    let a = account(1);
+    let state = State::from_json(&document(a), a).unwrap();
+    let reply = state
+        .reply_walls(
+            &walls_query(42, &[5, 6], [0, 0], 11),
+            a,
+            42,
+            b"Local Driver",
+        )
+        .unwrap();
+    let d = nfs_fire2::decode(&reply, walls_frame_limits())
+        .unwrap()
+        .unwrap();
+    assert_eq!(d.consumed, reply.len());
+    let f = d.frame;
+    assert_eq!(
+        (f.fields.routing_b, f.fields.category, f.fields.correlation),
+        (20, 1, 11)
+    );
+    let m = InGameSpeedWallResponse::decode(f.body, walls_limits()).unwrap();
+    assert_eq!(m.unknown_field_count(), 0);
+    let walls = m.speed_walls.unwrap().0;
+    assert_eq!(
+        walls.iter().map(|(k, _)| *k).collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+    for (stat, list) in &walls {
+        assert_eq!(
+            list.iter().map(|w| w.speed_wall_id).collect::<Vec<_>>(),
+            vec![Some(5), Some(6)],
+            "request order"
+        );
+        // Wall 5 has an own row on both stat types; wall 6 has none.
+        let rows = &list[0].rows.as_ref().unwrap().0;
+        let user = rows[0].blaze_user.as_ref().unwrap();
+        assert_eq!(
+            (user.blaze_id, user.persona_name, user.relation_type),
+            (Some(42), Some(b"Local Driver".as_slice()), Some(1))
+        );
+        if *stat == 0 {
+            assert_eq!(
+                rows[0].stats_int.as_ref().unwrap().0,
+                vec![(b"Events".as_slice(), 7), (b"Wins".as_slice(), -1)]
+            );
+        }
+        assert!(list[1].rows.is_none());
+    }
+}
+
+#[test]
+fn in_game_walls_for_a_fresh_account_are_empty_walls() {
+    let a = account(2);
+    let state = State::new(a, vec![]).unwrap();
+    let reply = state
+        .reply_walls(
+            &walls_query(42, &[1_761_118_161], [0, 0], 3),
+            a,
+            42,
+            b"Local",
+        )
+        .unwrap();
+    let d = nfs_fire2::decode(&reply, walls_frame_limits())
+        .unwrap()
+        .unwrap();
+    let m = InGameSpeedWallResponse::decode(d.frame.body, walls_limits()).unwrap();
+    let walls = m.speed_walls.unwrap().0;
+    assert_eq!(walls.len(), 2);
+    for (_, list) in walls {
+        let [wall] = list.as_slice() else {
+            panic!("one wall")
+        };
+        assert_eq!(wall.speed_wall_id, Some(1_761_118_161));
+        assert!(wall.rows.is_none());
+    }
+}
+
+#[test]
+fn in_game_walls_refuse_foreign_personas_options_and_bounds() {
+    let a = account(1);
+    let state = State::from_json(&document(a), a).unwrap();
+    assert_eq!(
+        state.reply_walls(&walls_query(43, &[5], [0, 0], 1), a, 42, b"Local"),
+        Err(Error::Identity)
+    );
+    assert_eq!(
+        state.reply_walls(&walls_query(42, &[5], [0, 0], 1), account(9), 42, b"Local"),
+        Err(Error::Identity)
+    );
+    assert_eq!(
+        state.reply_walls(&walls_query(42, &[5], [1, 0], 1), a, 42, b"Local"),
+        Err(Error::Unsupported)
+    );
+    assert_eq!(
+        state.reply_walls(&walls_query(42, &[], [0, 0], 1), a, 42, b"Local"),
+        Err(Error::Unsupported)
+    );
+    let many: Vec<u32> = (0..17).collect();
+    assert!(
+        state
+            .reply_walls(&walls_query(42, &many, [0, 0], 1), a, 42, b"Local")
+            .is_err()
+    );
+    // The brief query is not this route, and vice versa.
+    assert_eq!(
+        state.reply_walls(&query(42, 5, 0, 1), a, 42, b"Local"),
+        Err(Error::Ineligible)
+    );
+    assert_eq!(
+        state.reply(&walls_query(42, &[5], [0, 0], 1), a, 42, b"Local"),
+        Err(Error::Ineligible)
+    );
 }

@@ -221,6 +221,84 @@ impl<'a, S: Source> Graph<'a, S> {
             .map(|e| e.target_port)
             .collect())
     }
+    /// The immediate property sources of `site`'s field `port` in its own bus,
+    /// without following prefab boundaries.
+    pub fn property_sources(&mut self, site: &Site, port: u32) -> Result<Vec<Endpoint>, Error> {
+        Ok(self
+            .edges(&site.bus, Connections::Property)?
+            .iter()
+            .filter(|e| e.target == site.key && e.target_port == port)
+            .map(|e| Endpoint {
+                site: Site {
+                    key: e.source.clone(),
+                    ..site.clone()
+                },
+                port: e.source_port,
+            })
+            .collect())
+    }
+    /// Event connections of `site`'s bus that end at `site`'s event `event`, as
+    /// (source site, source event).
+    pub fn event_sources(&mut self, site: &Site, event: u32) -> Result<Vec<(Site, u32)>, Error> {
+        let object = self.source.object(&site.bus)?;
+        let rows = object
+            .fields
+            .get("EventConnections")
+            .and_then(Value::as_array)
+            .ok_or_else(|| bad("event connection table missing"))?;
+        if rows.len() > MAX_GRAPH_OBJECTS {
+            return Err(bad("event connection count bound"));
+        }
+        let id = |fields: &nfs_frostbite::ebx::Fields, name: &str| -> Option<u32> {
+            fields
+                .get(name)
+                .and_then(Value::as_fields)
+                .and_then(|f| f.get("Id"))
+                .and_then(Value::bits32)
+        };
+        let mut out = Vec::new();
+        for row in rows {
+            let fields = row.as_fields().ok_or_else(|| bad("event connection row"))?;
+            if id(fields, "TargetEvent") != Some(event) {
+                continue;
+            }
+            let pointer = |name: &str| {
+                fields
+                    .get(name)
+                    .and_then(Value::as_pointer)
+                    .ok_or_else(|| bad("event connection pointer"))
+            };
+            let target = self.source.target(&site.bus.0, pointer("Target")?)?;
+            if target.as_ref() != Some(&site.key) {
+                continue;
+            }
+            let source = self
+                .source
+                .target(&site.bus.0, pointer("Source")?)?
+                .ok_or_else(|| bad("null event source"))?;
+            let source_event = id(fields, "SourceEvent").ok_or_else(|| bad("event source id"))?;
+            out.push((
+                Site {
+                    key: source,
+                    ..site.clone()
+                },
+                source_event,
+            ));
+        }
+        Ok(out)
+    }
+    /// Distinct ports of the link connections leaving `site` in its own bus.
+    pub fn link_ports(&mut self, site: &Site) -> Result<Vec<u32>, Error> {
+        let mut ports: Vec<u32> = self
+            .edges(&site.bus, Connections::Link)?
+            .iter()
+            .filter(|e| e.source == site.key)
+            .map(|e| e.source_port)
+            .collect();
+        ports.sort_unstable();
+        ports.dedup();
+        Ok(ports)
+    }
     pub fn links(&mut self, site: &Site, port: u32) -> Result<Vec<Endpoint>, Error> {
         let mut out = Vec::new();
         self.resolve(

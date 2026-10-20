@@ -156,6 +156,7 @@ fn compile_math(fields: &Fields) -> Result<Calculation, Error> {
                         Operation::SelectFloat { condition, yes, no }
                     }
                     (194_586_087, &[a]) => Operation::RoundFloat(a),
+                    (2_087_826_864, &[a]) => Operation::IntegerFromFloat(a),
                     _ => return Err(bad("unsupported math function or signature")),
                 }
             }

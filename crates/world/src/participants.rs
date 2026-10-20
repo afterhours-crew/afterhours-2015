@@ -1120,6 +1120,8 @@ pub enum HostRpc {
     WorldActivation(crate::world_activation::Notification),
     /// Scoring query control on a participant-owned entity serializer.
     Query(EntityCall),
+    /// An owned event's call on a game-mode, logic or scene serializer.
+    GameMode(crate::game_mode::Call),
 }
 impl HostRpc {
     /// Every object the notification names; the client must hold each one
@@ -1143,6 +1145,7 @@ impl HostRpc {
                 ids
             }
             Self::Query(v) => vec![v.entity],
+            Self::GameMode(v) => v.objects(),
         }
     }
     pub fn scene(self) -> u16 {
@@ -1160,6 +1163,7 @@ impl HostRpc {
             Self::Event(v) => v.target.ghost,
             Self::WorldActivation(v) => v.endpoint.scene,
             Self::Query(v) => v.entity,
+            Self::GameMode(v) => v.target,
         }
     }
     pub fn encode(self) -> Result<BitWriter, Error> {
@@ -1175,6 +1179,10 @@ impl HostRpc {
             Self::Event(v) => v.encode().map_err(|_| Error::Shape),
             Self::WorldActivation(v) => v.encode(),
             Self::Query(v) => v.encode(),
+            Self::GameMode(v) => v.encode().map_err(|e| match e {
+                crate::game_mode::Error::Bound => Error::Bound,
+                crate::game_mode::Error::Shape => Error::Shape,
+            }),
         }
     }
 }

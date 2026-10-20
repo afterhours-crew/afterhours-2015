@@ -33,6 +33,7 @@ fn rpc_message(rpc: crate::participants::HostRpc) -> frame::Message<'static> {
         HostRpc::Event(v) => frame::Message::LogicEvent(v),
         HostRpc::WorldActivation(v) => frame::Message::WorldActivation(v),
         HostRpc::Query(v) => frame::Message::QueryControl(v),
+        HostRpc::GameMode(v) => frame::Message::GameModeCall(v),
     }
 }
 
@@ -462,6 +463,15 @@ impl Host {
             crate::participants::HostRpc::Query(v) => {
                 self.replication_bindings.get(v.entity) == Some(crate::replication::Kind::Entity)
             }
+            // Every reference of an event call must already be replicated.
+            crate::participants::HostRpc::GameMode(v) => {
+                matches!(
+                    self.replication_bindings.get(v.target),
+                    Some(crate::replication::Kind::Entity | crate::replication::Kind::SubLevel)
+                ) && v
+                    .reference
+                    .is_none_or(|id| self.replication_bindings.get(id).is_some())
+            }
             _ => {
                 self.replication_bindings.get(reply.scene())
                     == Some(crate::replication::Kind::SubLevel)
@@ -483,7 +493,8 @@ impl Host {
             | crate::participants::HostRpc::LevelPoll(_)
             | crate::participants::HostRpc::SequenceStop(_)
             | crate::participants::HostRpc::Event(_)
-            | crate::participants::HostRpc::Query(_) => None,
+            | crate::participants::HostRpc::Query(_)
+            | crate::participants::HostRpc::GameMode(_) => None,
         };
         if participant.is_some_and(|id| {
             self.replication_bindings.get(id) != Some(crate::replication::Kind::Participant)

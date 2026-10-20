@@ -34,6 +34,8 @@ pub enum Kind {
     ScriptedSplineGoal,
     TrafficGoal,
     WanderGoal,
+    GotoWaypointGoal,
+    SpeedLimitGoal,
 }
 impl Kind {
     pub fn index(self) -> u8 {
@@ -49,6 +51,8 @@ impl Kind {
             Self::ScriptedSplineGoal => 20,
             Self::TrafficGoal => 26,
             Self::WanderGoal => 27,
+            Self::GotoWaypointGoal => 9,
+            Self::SpeedLimitGoal => 23,
         }
     }
     fn from_index(index: u8) -> Result<Self, Error> {
@@ -64,6 +68,8 @@ impl Kind {
             20 => Ok(Self::ScriptedSplineGoal),
             26 => Ok(Self::TrafficGoal),
             27 => Ok(Self::WanderGoal),
+            9 => Ok(Self::GotoWaypointGoal),
+            23 => Ok(Self::SpeedLimitGoal),
             _ => Err(Error::Unsupported),
         }
     }
@@ -176,6 +182,8 @@ pub enum Initial {
     ScriptedSplineGoal(spline::Initial),
     TrafficGoal(traffic::Initial),
     WanderGoal(wander::Initial),
+    GotoWaypointGoal(goto_waypoint::Initial),
+    SpeedLimitGoal(speed_limit::Initial),
     Actor(ActorInit),
     Entity {
         prefix: entity::creation::Prefix,
@@ -201,6 +209,8 @@ impl Initial {
             Self::ScriptedSplineGoal(_) => Kind::ScriptedSplineGoal,
             Self::TrafficGoal(_) => Kind::TrafficGoal,
             Self::WanderGoal(_) => Kind::WanderGoal,
+            Self::GotoWaypointGoal(_) => Kind::GotoWaypointGoal,
+            Self::SpeedLimitGoal(_) => Kind::SpeedLimitGoal,
             Self::Entity { .. } | Self::Vehicle { .. } => Kind::Entity,
             Self::Participant(_) => Kind::Participant,
             Self::ParticipantLocationMap => Kind::ParticipantLocationMap,
@@ -217,6 +227,8 @@ pub enum Update {
     ScriptedSplineGoal,
     TrafficGoal,
     WanderGoal,
+    GotoWaypointGoal,
+    SpeedLimitGoal,
     Actor(ActorUpdate),
     Entity {
         binding: std::sync::Arc<entity::creation::Binding>,
@@ -241,6 +253,8 @@ impl Update {
             Self::ScriptedSplineGoal => Kind::ScriptedSplineGoal,
             Self::TrafficGoal => Kind::TrafficGoal,
             Self::WanderGoal => Kind::WanderGoal,
+            Self::GotoWaypointGoal => Kind::GotoWaypointGoal,
+            Self::SpeedLimitGoal => Kind::SpeedLimitGoal,
             Self::Actor(_) => Kind::Actor,
             Self::Entity { .. } | Self::Vehicle { .. } => Kind::Entity,
             Self::Participant(_) => Kind::Participant,
@@ -352,6 +366,10 @@ impl Reader<'_> {
             }
             Kind::PlayerManager => Initial::PlayerManager,
             Kind::WanderGoal => Initial::WanderGoal(wander::Initial::read(self)?),
+            Kind::GotoWaypointGoal => {
+                Initial::GotoWaypointGoal(goto_waypoint::Initial::read(self)?)
+            }
+            Kind::SpeedLimitGoal => Initial::SpeedLimitGoal(speed_limit::Initial::read(self)?),
             Kind::ParticipantLocationMap => Initial::ParticipantLocationMap,
             Kind::PlayerView => Initial::PlayerView(player_view::Initial::read(self)?),
             Kind::Actor => Initial::Actor(ActorInit {
@@ -388,6 +406,8 @@ impl Reader<'_> {
             Kind::ScriptedSplineGoal => Update::ScriptedSplineGoal,
             Kind::TrafficGoal => Update::TrafficGoal,
             Kind::WanderGoal => Update::WanderGoal,
+            Kind::GotoWaypointGoal => Update::GotoWaypointGoal,
+            Kind::SpeedLimitGoal => Update::SpeedLimitGoal,
             Kind::SubLevel | Kind::Entity => return Err(Error::Unsupported),
             Kind::Participant => Update::Participant(ParticipantUpdate {
                 player: self.optional(Self::reference)?,
@@ -510,6 +530,8 @@ impl Writer {
             Initial::ScriptedSplineGoal(v) => v.write(self)?,
             Initial::TrafficGoal(v) => v.write(self)?,
             Initial::WanderGoal(v) => v.write(self)?,
+            Initial::GotoWaypointGoal(v) => v.write(self)?,
+            Initial::SpeedLimitGoal(v) => v.write(self)?,
             Initial::Actor(v) => {
                 self.reference(&v.participant)?;
                 self.bit(v.flag_a)?;
@@ -546,6 +568,8 @@ impl Writer {
             Update::ScriptedSplineGoal => {}
             Update::TrafficGoal => {}
             Update::WanderGoal => {}
+            Update::GotoWaypointGoal => {}
+            Update::SpeedLimitGoal => {}
             Update::Participant(v) => {
                 self.optional(&v.player, Self::reference)?;
                 self.optional(&v.entity, Self::reference)?;
@@ -694,6 +718,8 @@ impl Record {
 
 pub mod entity;
 mod entity_record;
+pub mod goto_waypoint;
+pub mod speed_limit;
 pub mod spline;
 pub mod traffic;
 pub mod wander;

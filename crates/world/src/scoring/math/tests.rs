@@ -178,3 +178,48 @@ fn reject_invalid_register_flow_returns_and_nonfinite_results() {
     .unwrap();
     assert_eq!(overflow.evaluate(|_, _| None), Err(Error::NonFinite));
 }
+#[test]
+fn native_intf_truncates_toward_zero_and_refuses_out_of_range_values() {
+    let program = Program::new(vec![
+        i(0, Operation::InputFloat(1)),
+        i(0, Operation::IntegerFromFloat(0)),
+        ret(Register::Integer(0)),
+    ])
+    .unwrap();
+    for (x, expected) in [(0.99, 0), (1.5, 1), (-1.8, -1), (13500.0, 13500), (-0.5, 0)] {
+        assert_eq!(
+            program.evaluate(|_, _| Some(Value::Float(x))),
+            Ok(Some(Value::Integer(expected)))
+        );
+    }
+    for x in [2_147_483_648.0, -2_147_483_904.0] {
+        assert_eq!(
+            program.evaluate(|_, _| Some(Value::Float(x))),
+            Err(Error::ConversionRange)
+        );
+    }
+    // The installed reward shape: integer to float, multiply, intf (E995).
+    let reward = Program::new(vec![
+        i(0, Operation::InputInteger(177629)),
+        i(0, Operation::FloatFromInteger(0)),
+        i(1, Operation::InputFloat(177628)),
+        i(0, Operation::BinaryFloat(FloatOp::Multiply, 0, 1)),
+        i(0, Operation::IntegerFromFloat(0)),
+        ret(Register::Integer(0)),
+    ])
+    .unwrap();
+    assert_eq!(
+        reward.evaluate(|port, _| Some(match port {
+            177629 => Value::Integer(9000),
+            _ => Value::Float(1.5),
+        })),
+        Ok(Some(Value::Integer(13500)))
+    );
+    assert_eq!(
+        Program::new(vec![
+            i(0, Operation::IntegerFromFloat(0)),
+            ret(Register::Integer(0))
+        ]),
+        Err(Error::UninitializedRegister)
+    );
+}

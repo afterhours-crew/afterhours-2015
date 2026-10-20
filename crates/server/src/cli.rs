@@ -727,6 +727,7 @@ async fn run(args: Args) -> Result<(), Failure> {
         .map(Arc::new);
     // Free-roam scoring compiles the installed driving participants directly
     // from the installation; without it (or without garage logic) scoring stays off.
+    let mut events = None;
     let scoring = match (&args.game_dir, garage_logic.is_some()) {
         (Some(game_dir), true) => {
             let game_dir = game_dir.clone();
@@ -738,12 +739,40 @@ async fn run(args: Args) -> Result<(), Failure> {
                 let scoring = index.scoring_content("levels/genesis01/gameplay")?;
                 let road = index.road_network();
                 let nitrous = index.nitrous_configurations()?;
-                Ok::<_, nfs_content::Error>((scoring, road, nitrous))
+                // The owned race event resolves from the same installation; its
+                // failure leaves scoring on and the event off.
+                let request = nfs_server::event_logic::request::sprint_race_007();
+                let event = index.event(&request).and_then(|event| {
+                    Ok((event, index.speed_wall_category(&request.game_mode_id)?))
+                });
+                Ok::<_, nfs_content::Error>((scoring, road, nitrous, event))
             })
             .await
             .map_err(|_| Failure::Output)?;
             match content {
-                Ok((content, road, nitrous)) => {
+                Ok((content, road, nitrous, event)) => {
+                    match event
+                        .map_err(|e| e.to_string())
+                        .and_then(|(event, category)| {
+                            nfs_server::event_logic::Content::new(event, category)
+                                .map_err(|e| format!("{e:?}"))
+                        }) {
+                        Ok(event) => {
+                            tracing::info!(
+                                event = event.event().game_mode_id,
+                                record_id = event.record_id(),
+                                checkpoints = event.event().game_mode.checkpoints.len(),
+                                cash = event.event().rewards.cash,
+                                rep = event.event().rewards.rep,
+                                "owned race event compiled from the installation"
+                            );
+                            events = Some(Arc::new(event));
+                        }
+                        Err(error) => tracing::warn!(
+                            %error,
+                            "owned race event unavailable; events stay off"
+                        ),
+                    }
                     let mut content = nfs_server::scoring::Content::new(Arc::new(content))
                         .map_err(|_| Failure::ProfileConfig)?
                         .with_items(
@@ -926,6 +955,7 @@ async fn run(args: Args) -> Result<(), Failure> {
         rivals,
         garage_logic,
         scoring,
+        events,
         catalogs,
         entitlements,
         user_settings,
