@@ -1448,8 +1448,14 @@ impl Listener for PlayerListener {
                     &mut logic_ghosts,
                     self.persona,
                 ) {
-                    Ok(Some(Some(entry))) => {
-                        exit_entries.push(entry);
+                    Ok(Some(Some((section, events)))) => {
+                        // Recovery events name the replacement driving objects.
+                        // Entry calls run before their section, so publish those
+                        // creations first and put the events in a following entry.
+                        exit_entries.push((section, Vec::new()));
+                        if !events.is_empty() {
+                            exit_entries.push((returning::empty_section(), events));
+                        }
                         continue;
                     }
                     Ok(Some(None)) => continue,

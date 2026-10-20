@@ -156,7 +156,8 @@ fn setup() -> (PlayerListener, Owner) {
         "spawn":{"scene_updates":[],"entities":[entity(100,0)]},
         "entry":empty,
         "crashed":{"scene_updates":[],"entities":[entity(101,1)],"delete_capture_ids":[100]},
-        "recovered":{"scene_updates":[],"entities":[entity(100,0)],"delete_capture_ids":[101]}
+        "recovered":{"scene_updates":[],"entities":[entity(100,0)],"delete_capture_ids":[101],
+            "events":[{"target":{"capture_id":100},"entity":1,"event":17}]}
     })).unwrap();
     let mut ghosts = BTreeMap::new();
     logic
@@ -196,11 +197,45 @@ fn completion_frame(owner: Owner, ghost: u16, sequence: u8) -> BitWriter {
         .unwrap()
 }
 
+fn transport_with_snapshot(players: &Players) -> nfs_world::session::Host {
+    use nfs_world::{
+        application::{Fixed, Policy},
+        session::{Host, Ids},
+        transport::Codec,
+    };
+    let key = nfs_world::crypto::session_key(
+        "11111111-2222-3333-4444-555555555555",
+        "66666666-7777-8888-9999-aaaaaaaaaaaa",
+    )
+    .unwrap();
+    let mut host = Host::new(
+        Codec::new(key, [5; 64]).unwrap(),
+        Ids {
+            client: 1,
+            host: 2,
+            host_index: 0,
+        },
+        Policy::default(),
+        Box::new(Fixed::new([1, 2, 3])),
+    )
+    .unwrap();
+    for section in split_scenes(
+        players.objects().snapshot(),
+        nfs_world::application::OUTBOUND_FRAME_BITS,
+    )
+    .unwrap()
+    {
+        host.queue_replication(section).unwrap();
+    }
+    host
+}
+
 #[test]
 fn crash_start_and_completion_are_atomic_under_queue_pressure_and_repeat() {
     let (mut listener, owner) = setup();
     let initial_count = listener.players.objects().len();
     for cycle in 0..3 {
+        let mut transport = transport_with_snapshot(&listener.players);
         let before = listener.players.objects().snapshot();
         let crashes = listener.crashes.as_mut().unwrap();
         crashes
@@ -225,6 +260,9 @@ fn crash_start_and_completion_are_atomic_under_queue_pressure_and_repeat() {
             Some(Stage::Crashing)
         );
         let (section, calls) = listener.pending_entries.pop_front().unwrap();
+        transport
+            .queue_replication_after(section.clone(), calls.clone())
+            .unwrap();
         assert!(calls.is_empty());
         assert_eq!(section.deleted.len(), 1);
         assert_eq!(section.records.len(), 2);
@@ -254,7 +292,7 @@ fn crash_start_and_completion_are_atomic_under_queue_pressure_and_repeat() {
         let wire = completion_frame(owner, ghost, cycle as u8);
         listener
             .pending_entries
-            .resize(MAX_PENDING, (returning::empty_section(), vec![]));
+            .resize(MAX_PENDING - 1, (returning::empty_section(), vec![]));
         let crashed = listener.players.objects().snapshot();
         assert!(!listener.frame(Queued {
             advertised: None,
@@ -282,6 +320,17 @@ fn crash_start_and_completion_are_atomic_under_queue_pressure_and_repeat() {
         assert!(!listener.pending_rpcs.iter().any(|rpc| matches!(
             rpc, HostRpc::SequenceStop(stop) if stop.sequence == ghost
         )));
+        // Exercise the socket host's reference validation as well as encoding.
+        // Recovered statistics events name entities created by this transition.
+        let entries: Vec<_> = listener.pending_entries.drain(..).collect();
+        assert_eq!(entries.len(), 2);
+        assert!(!entries[0].0.records.is_empty());
+        assert!(entries[0].1.is_empty());
+        assert!(entries[1].0.records.is_empty());
+        assert!(!entries[1].1.is_empty());
+        for (section, calls) in entries {
+            transport.queue_replication_after(section, calls).unwrap();
+        }
         let complete = listener.players.objects().snapshot();
         listener.pending_entries.clear();
         listener.pending.clear();
