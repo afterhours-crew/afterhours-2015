@@ -415,28 +415,17 @@ fn recover_restores_a_pointer_only_for_a_real_database() {
     std::fs::remove_dir_all(data).unwrap();
 }
 
-/// A stand-in `nfs-server`: answers `prepare-local` and `create-account`
-/// with the JSON shapes the real server prints, and otherwise prints a
-/// readiness record and waits for its `--stop-file`.
-#[test]
-fn profile_reads_a_saved_driver_and_reports_missing_accounts() {
+/// A synthetic save of account `byte` repeated, for a driver called `name`,
+/// selected by `account.json`; no prepared content. Its path.
+fn save_driver(data: &std::path::Path, byte: u8, name: &str) -> PathBuf {
     use nfs_storage::{
         AccountId, Batch, GarageSlots, Op, Timestamp,
         account::{Document, Kind, Repository},
     };
-    let data = scratch("profile");
-    let dir = data.to_str().unwrap();
-    let out = run(&["profile", "--json", "--data-dir", dir]);
-    assert_eq!(out.status.code(), Some(4), "{}", text(&out.stderr));
-    let out = run(&["profile", "--list", "--json", "--data-dir", dir]);
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    let listing: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(listing["accounts"], serde_json::json!([]));
-    // A synthetic save selected by account.json; no prepared content.
-    let id = "5a".repeat(16);
-    let account = AccountId::from_owned_config([0x5a; 16]).unwrap();
+    let id = format!("{byte:02x}").repeat(16);
+    let account = AccountId::from_owned_config([byte; 16]).unwrap();
     let identity = serde_json::json!({"version": 1, "storage_account": id,
-        "persona": 41, "account": 42, "name": "Cli Tester"});
+        "persona": 41, "account": 42, "name": name});
     let documents: Vec<_> = Kind::ALL
         .into_iter()
         .map(|kind| {
@@ -464,7 +453,23 @@ fn profile_reads_a_saved_driver_and_reports_missing_accounts() {
         format!(r#"{{"version":1,"local_account":"{id}","progression":"post-intro"}}"#),
     )
     .unwrap();
-    let save = accounts.join(format!("{id}.sqlite"));
+    accounts.join(format!("{id}.sqlite"))
+}
+
+/// A stand-in `nfs-server`: answers `prepare-local` and `create-account`
+/// with the JSON shapes the real server prints, and otherwise prints a
+/// readiness record and waits for its `--stop-file`.
+#[test]
+fn profile_reads_a_saved_driver_and_reports_missing_accounts() {
+    let data = scratch("profile");
+    let dir = data.to_str().unwrap();
+    let out = run(&["profile", "--json", "--data-dir", dir]);
+    assert_eq!(out.status.code(), Some(4), "{}", text(&out.stderr));
+    let out = run(&["profile", "--list", "--json", "--data-dir", dir]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let listing: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(listing["accounts"], serde_json::json!([]));
+    let save = save_driver(&data, 0x5a, "Cli Tester");
     let before = std::fs::read(&save).unwrap();
     // An empty game directory: no test reads a registered installation.
     let no_game = scratch("profile-no-game");
@@ -858,6 +863,27 @@ fn api_request(address: &str, token: &str, method: &str, path: &str) -> (u16, St
     (code, body.to_owned())
 }
 
+/// `PUT` a JSON body to a session API; the status code and body.
+#[cfg(unix)]
+fn api_put(address: &str, token: &str, path: &str, body: &str) -> (u16, String) {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect(address).unwrap();
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    write!(
+        stream,
+        "PUT {path} HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    let mut answer = String::new();
+    stream.read_to_string(&mut answer).unwrap();
+    let (head, body) = answer.split_once("\r\n\r\n").unwrap();
+    let code = head.split(' ').nth(1).unwrap().parse().unwrap();
+    (code, body.to_owned())
+}
+
 #[cfg(unix)]
 #[test]
 fn a_serve_session_serves_its_api_until_it_stops() {
@@ -924,6 +950,52 @@ fn a_serve_session_serves_its_api_until_it_stops() {
     let (code, body) = api_request(&address, &token, "GET", "/v1/info");
     assert_eq!(code, 200);
     assert!(body.contains("\"api\""), "{body}");
+    // The settings, read and changed there as with `settings`, while the
+    // session runs.
+    let (code, body) = api_request(&address, &token, "GET", "/v1/settings");
+    assert_eq!(code, 200, "{body}");
+    let read: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        read,
+        json(&run(&["--data-dir", &data_arg, "settings", "--json"]))
+    );
+    let change = r#"{"traffic_percent":150,"rival_limit":2}"#;
+    let (code, body) = api_put(&address, &token, "/v1/settings", change);
+    assert_eq!(code, 200, "{body}");
+    let saved: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        (
+            &saved["traffic_percent"],
+            &saved["rival_limit"],
+            &saved["saved"]
+        ),
+        (&150.into(), &2.into(), &true.into())
+    );
+    let after = json(&run(&["--data-dir", &data_arg, "settings", "--json"]));
+    assert_eq!(
+        (&after["traffic_percent"], &after["rival_limit"]),
+        (&150.into(), &2.into())
+    );
+    assert_eq!(
+        api_put(
+            &address,
+            &token,
+            "/v1/settings",
+            r#"{"traffic_percent":301}"#
+        )
+        .0,
+        400
+    );
+    // The selected save's profile, as `profile --json` reads it.
+    save_driver(&data, 0x5b, "Api Tester");
+    let (code, body) = api_request(&address, &token, "GET", "/v1/profile");
+    assert_eq!(code, 200, "{body}");
+    let profile: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(profile["identity"]["display_name"], "Api Tester");
+    assert_eq!(
+        profile,
+        json(&run(&["--data-dir", &data_arg, "profile", "--json"]))
+    );
     // The event stream, read to its end on its own thread.
     let reader = {
         let (address, token) = (address.clone(), token.clone());

@@ -359,7 +359,8 @@ pub enum Capability {
     /// positions of the players' cars, traffic and roaming rivals.
     MapFeed,
     /// `--api` on `setup`, `serve` and `start`, and `api`: the session over
-    /// HTTP on this computer, with its event stream, `stop` and `play`.
+    /// HTTP on this computer, with its event stream, `stop` and `play`, the
+    /// saved `settings` to read and change, and the selected `profile`.
     Api,
 }
 

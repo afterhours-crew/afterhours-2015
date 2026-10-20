@@ -65,11 +65,11 @@ field and a JSON Schema (draft 7) generated from the Rust type that prints it:
 | `event` | each line of `setup`/`serve`/`start --events`, including the live map positions (`map-feed`); also each event of the session API's `/v1/events` |
 | `api` | `api --json` and `api.json` in a session started with `--api`: the session ID, the API's address and its token |
 | `api-error` | the body of every refused session API request |
-| `profile`, `profile-list` | `profile --json`, `profile --list --json` |
+| `profile`, `profile-list` | `profile --json` (also the session API's `/v1/profile`), `profile --list --json` |
 | `car-images` | `car-images --json`: the image set, counts per size, formats and unresolved images |
 | `map-images` | `map-images --json`: the tile set, its detail levels, file naming, the world box it covers and any missing tiles |
 | `sessions` | `sessions --json` |
-| `settings` | `settings --json`: saved `traffic_percent` and `rival_limit`, the largest accepted values, and whether this command saved them |
+| `settings` | `settings --json`: saved `traffic_percent` and `rival_limit`, the largest accepted values, and whether this command saved them; also the session API's `/v1/settings` |
 | `recover` | `recover --json` |
 | `version` | `version --json` |
 
@@ -206,16 +206,38 @@ session's last status, and answers:
 | `GET /v1/events` | the session's `event` records as server-sent events |
 | `POST /v1/stop` | the `stop` record: close the game, then the server, as `stop --json` |
 | `POST /v1/play` | the `play` record: start the game in a `serve` session, as `play --json` |
+| `GET /v1/settings` | the `settings` record: the saved traffic and rivals, as `settings --json` |
+| `PUT /v1/settings` | the `settings` record after saving new amounts, as `settings --json` with `--traffic` and `--rivals` |
+| `GET /v1/profile` | the `profile` record of the selected save, as `profile --json` |
 
 Answers are the records the matching commands print, with the same schemas
 and the same checks behind them. A refused request answers an `api-error`
-record (`{"version":1,"message":"..."}`) with status 401 (no or wrong
-token), 403 (wrong `Host`, or an `Origin` header), 404, 405 (with `Allow`),
-409 (the command refused, as its exit codes 1 and 4), 413 (a request body
-or a head over 8 KiB) or 503 (more than 16 connections or 8 event streams).
+record (`{"version":1,"message":"..."}`) with status 400 (a malformed
+`Content-Length` or settings body), 401 (no or wrong token), 403 (wrong
+`Host`, or an `Origin` header), 404, 405 (with `Allow`), 409 (the command
+refused, as its exit codes 1 and 4), 411 (a settings body without
+`Content-Length`), 413 (a body on any other request, a settings body over
+1 KiB or a head over 8 KiB), 415 (a settings body that is not
+`application/json`) or 503 (more than 16 connections or 8 event streams).
 Every request needs `Host: 127.0.0.1:<port>` (or `localhost:<port>`) and
-`Authorization: Bearer <token>`, and none may carry a body: web pages cannot
-reach it, and other programs need the token.
+`Authorization: Bearer <token>`: web pages cannot reach it, and other
+programs need the token.
+
+`PUT /v1/settings` is the only request with a body: a JSON object with
+`Content-Type: application/json` and a `Content-Length` of at most 1 KiB,
+holding the `settings` record's `traffic_percent` (0 to
+`max_traffic_percent`), `rival_limit` (0 to `max_rivals`, or `null` for the
+original number) or both, such as `{"traffic_percent":200,"rival_limit":null}`.
+A field left out keeps its saved value; an empty object, any other field, a
+`null` traffic or a value out of range is refused with 400 and saves
+nothing. Saving works as the `settings` command does while a session runs:
+the file is replaced at once and the running server applies it within about
+a second, so the answer has `saved: true` and the new values. The API saves
+one request at a time. `GET /v1/profile` reads the save that `account.json`
+selects, read-only, with the car names of the installation the session
+started; with no save selected it answers 409, as `profile` exits with 4.
+Paths in these records (`file`, a save's `path`, car images) are on the
+computer that runs the session.
 
 How to reach it: the supervisor writes the `api` record (`version`, session
 `id`, `url` such as `http://127.0.0.1:53111`, and a `token` of 64 hexadecimal
@@ -557,7 +579,8 @@ loopback sockets on ports the system picks. The integration tests in
 `tests/cli.rs` drive the built binary; on Unix they run a complete `serve`
 session against a shell script standing in for the server, observe it from a
 second process through `status`, stop it, read the same session as an event
-stream, follow and stop another through the session API (`--api`), and also
+stream, follow and stop another through the session API (`--api`), reading
+and changing its settings and reading its profile there, and also
 kill a supervisor to see `interrupted` reported. On every
 platform they check `version`, `schema`, `sessions` and a refused event
 stream. The Windows process-layer tests run in CI on a

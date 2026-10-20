@@ -124,8 +124,9 @@ pub struct SessionArgs {
     ///
     /// The supervisor listens on 127.0.0.1 at a port the system picks and
     /// answers `/v1/info`, `/v1/status`, `/v1/events` (the event records as
-    /// server-sent events, map positions included), `/v1/stop` and
-    /// `/v1/play`. The address and a token every request must carry are
+    /// server-sent events, map positions included), `/v1/stop`, `/v1/play`,
+    /// `/v1/settings` (read and change the saved traffic and rivals) and
+    /// `/v1/profile`. The address and a token every request must carry are
     /// written to api.json in the session directory and printed by
     /// `nfs-afterhours api`. The session does not depend on any client.
     /// Console text is silenced; standard output holds only the `session`
@@ -180,8 +181,9 @@ pub struct MapImagesArgs {
     pub game_dir: Option<PathBuf>,
 }
 
-/// Arguments for `profile`.
-#[derive(Debug, Clone, Args)]
+/// Arguments for `profile`. The default is the selected save, as the
+/// session API's `GET /v1/profile` reads it.
+#[derive(Debug, Clone, Default, Args)]
 pub struct ProfileArgs {
     /// List every saved driver: name, REP level, bank and last save.
     #[arg(long, conflicts_with = "account_id")]

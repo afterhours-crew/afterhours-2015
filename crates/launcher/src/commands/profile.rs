@@ -3,6 +3,8 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! `profile`: show one saved driver or list every saved driver, read-only.
+//! The session API's `GET /v1/profile` answers with the same record
+//! ([`crate::api`]).
 
 use super::Context;
 use crate::{
@@ -10,16 +12,24 @@ use crate::{
     exit::{Failure, Result},
     profile::{self, CarLocation, Cell, Columns, Listing, Profile, content::Need, grouped, images},
 };
-use std::fmt::Write;
+use std::{fmt::Write, path::Path};
 
 /// `profile`: one account's profile, or with `--list` every account.
 pub fn profile(context: &Context, args: &ProfileArgs) -> Result<()> {
-    let saves = profile::Saves::open(&context.data_dir)?;
     if args.list {
+        let saves = profile::Saves::open(&context.data_dir)?;
         let content = profile::content(saves.data(), args.content_dir.as_deref(), Need::Summary)?;
         let listing = saves.list(&content)?;
         return context.emit(&listing, || list_text(&listing));
     }
+    let profile = profile_report(&context.data_dir, args)?;
+    context.emit(&profile, || text(&profile))
+}
+
+/// The `profile` record of one save: the one `args` names, else the
+/// selected one (exit 4 when none is selected).
+pub(crate) fn profile_report(data: &Path, args: &ProfileArgs) -> Result<Profile> {
+    let saves = profile::Saves::open(data)?;
     let id = match &args.account_id {
         Some(id) => id.clone(),
         None => saves.active().map(str::to_owned).ok_or_else(|| {
@@ -41,8 +51,7 @@ pub fn profile(context: &Context, args: &ProfileArgs) -> Result<()> {
             locale,
         },
     )?;
-    let profile = saves.profile(&id, &content)?;
-    context.emit(&profile, || text(&profile))
+    saves.profile(&id, &content)
 }
 
 fn cell(cell: Option<Cell>) -> String {

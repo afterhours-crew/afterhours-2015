@@ -46,7 +46,7 @@
         },
         {
           "const": "api",
-          "description": "`--api` on `setup`, `serve` and `start`, and `api`: the session over\nHTTP on this computer, with its event stream, `stop` and `play`.",
+          "description": "`--api` on `setup`, `serve` and `start`, and `api`: the session over\nHTTP on this computer, with its event stream, `stop` and `play`, the\nsaved `settings` to read and change, and the selected `profile`.",
           "type": "string"
         }
       ]

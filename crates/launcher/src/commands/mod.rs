@@ -9,10 +9,10 @@
 
 mod launch;
 mod map;
-mod profile;
+pub(crate) mod profile;
 mod recover;
 mod sessions;
-mod settings;
+pub(crate) mod settings;
 pub(crate) mod status;
 mod version;
 

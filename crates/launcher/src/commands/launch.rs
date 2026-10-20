@@ -314,10 +314,7 @@ pub fn supervise(request_path: &Path, build: Build) -> Result<()> {
     let id = request.id.clone();
     let api = if request.api {
         let hub = crate::api::hub::Hub::new();
-        let control = Arc::new(crate::api::LiveControl {
-            data: data.clone(),
-            build,
-        });
+        let control = Arc::new(crate::api::LiveControl::new(data.clone(), build));
         match crate::api::SessionApi::start(control, Arc::clone(&hub), &id, &run) {
             Ok(api) => {
                 emitter.attach(hub);

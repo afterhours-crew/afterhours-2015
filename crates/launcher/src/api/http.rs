@@ -3,8 +3,8 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! The small, bounded part of HTTP/1.1 the API speaks: one request per
-//! connection, no request bodies, a JSON response or an event stream, and
-//! `Connection: close`.
+//! connection, a small JSON request body only with a `Content-Length`, a
+//! JSON response or an event stream, and `Connection: close`.
 
 use std::io::{self, Read, Write};
 
@@ -30,6 +30,56 @@ impl Head {
             .find(|(n, _)| n.eq_ignore_ascii_case(name))
             .map(|(_, v)| v.as_slice())
     }
+
+    /// The values of every header named `name`, ignoring case.
+    pub fn headers<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a [u8]> {
+        self.headers
+            .iter()
+            .filter(move |(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_slice())
+    }
+}
+
+/// The request's `Content-Length`: `None` without one;
+/// [`ReadError::Malformed`] unless there is one and it is a whole number.
+pub fn content_length(head: &Head) -> Result<Option<usize>, ReadError> {
+    let mut values = head.headers("content-length");
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() || value.is_empty() || !value.iter().all(u8::is_ascii_digit) {
+        return Err(ReadError::Malformed);
+    }
+    std::str::from_utf8(value)
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .map(Some)
+        .ok_or(ReadError::Malformed)
+}
+
+/// Whether the request says its body is JSON (`application/json`, with or
+/// without parameters such as `charset=utf-8`).
+pub fn is_json(head: &Head) -> bool {
+    head.header("content-type").is_some_and(|value| {
+        let media = value.split(|&b| b == b';').next().unwrap_or_default();
+        media.trim_ascii().eq_ignore_ascii_case(b"application/json")
+    })
+}
+
+/// Read the `length` bytes of body that follow a head; the caller bounds
+/// `length`. [`ReadError::Closed`] when the peer sends fewer.
+pub fn read_body(stream: &mut impl Read, length: usize) -> Result<Vec<u8>, ReadError> {
+    let mut body = vec![0u8; length];
+    let mut filled = 0;
+    while filled < length {
+        match stream.read(&mut body[filled..]) {
+            Ok(0) => return Err(ReadError::Closed),
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(ReadError::Io(e)),
+        }
+    }
+    Ok(body)
 }
 
 /// Why a request head could not be read.
@@ -98,7 +148,9 @@ pub fn reason(status: u16) -> &'static str {
         404 => "Not Found",
         405 => "Method Not Allowed",
         409 => "Conflict",
+        411 => "Length Required",
         413 => "Content Too Large",
+        415 => "Unsupported Media Type",
         500 => "Internal Server Error",
         503 => "Service Unavailable",
         _ => "Unknown",

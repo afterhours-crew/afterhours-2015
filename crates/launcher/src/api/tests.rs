@@ -37,6 +37,15 @@ fn status(state: State) -> Status {
 #[derive(Default)]
 struct Fake {
     stops: Mutex<u32>,
+    saves: Mutex<Vec<(Option<u16>, Option<Rivals>)>>,
+}
+
+fn settings_report(traffic_percent: u16, rival_limit: Option<u16>, saved: bool) -> SettingsReport {
+    let values = settings::Settings {
+        traffic_percent,
+        rival_limit,
+    };
+    SettingsReport::new(&values, "settings.json".into(), saved)
 }
 
 impl Control for Fake {
@@ -58,6 +67,24 @@ impl Control for Fake {
         Err(Failure::refused(
             "The game is already running in this session.",
         ))
+    }
+    fn settings(&self) -> Result<SettingsReport> {
+        Ok(settings_report(100, None, false))
+    }
+    fn save_settings(
+        &self,
+        traffic: Option<u16>,
+        rivals: Option<Rivals>,
+    ) -> Result<SettingsReport> {
+        self.saves.lock().unwrap().push((traffic, rivals));
+        let limit = match rivals {
+            Some(Rivals::Count(count)) => Some(count),
+            _ => None,
+        };
+        Ok(settings_report(traffic.unwrap_or(100), limit, true))
+    }
+    fn profile(&self) -> Result<Profile> {
+        Err(Failure::no_session("No saved driver is selected."))
     }
 }
 
@@ -291,6 +318,209 @@ fn routes_answer_the_commands_records() {
     assert!(head.contains("Allow: GET"));
     assert_eq!(request(&server, "GET", "/v2/info").0, 404);
     assert_eq!(request(&server, "GET", "/").0, 404);
+    let (code, _, body) = request(&server, "GET", "/v1/settings");
+    assert_eq!(code, 200);
+    let settings: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        (&settings["traffic_percent"], &settings["saved"]),
+        (&100.into(), &false.into())
+    );
+    for method in ["POST", "DELETE", "PATCH"] {
+        let (code, head, _) = request(&server, method, "/v1/settings");
+        assert_eq!(code, 405, "{method}");
+        assert!(head.contains("Allow: GET, PUT"));
+    }
+    let (code, _, body) = request(&server, "GET", "/v1/profile");
+    assert_eq!(code, 409, "no save selected, as profile exits with 4");
+    assert!(error_message(&body).contains("No saved driver"));
+    let (code, head, _) = request(&server, "PUT", "/v1/profile");
+    assert_eq!(code, 405);
+    assert!(head.contains("Allow: GET\r\n"));
+    assert!(fake.saves.lock().unwrap().is_empty());
+}
+
+/// `PUT /v1/settings` with the given extra headers and body bytes.
+fn put_settings(server: &ApiServer, headers: &str, body: &str) -> (u16, String, String) {
+    let text = format!(
+        "PUT /v1/settings HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {TOKEN}\r\n{headers}\r\n{body}",
+        host(server)
+    );
+    exchange(server, text.as_bytes())
+}
+
+/// `PUT /v1/settings` with a JSON body as a client sends it.
+fn put_json(server: &ApiServer, body: &str) -> (u16, String, String) {
+    let headers = format!(
+        "Content-Type: application/json\r\nContent-Length: {}\r\n",
+        body.len()
+    );
+    put_settings(server, &headers, body)
+}
+
+#[test]
+fn settings_are_saved_from_a_small_checked_json_body() {
+    let hub = Hub::new();
+    let (server, fake) = server(&hub);
+    for (body, expected) in [
+        (r#"{"traffic_percent":200}"#, (Some(200), None)),
+        (r#"{"rival_limit":null}"#, (None, Some(Rivals::Original))),
+        (
+            r#"{"traffic_percent":0,"rival_limit":15}"#,
+            (Some(0), Some(Rivals::Count(15))),
+        ),
+        (
+            "  {\"rival_limit\": 0, \"traffic_percent\": 300}\n",
+            (Some(300), Some(Rivals::Count(0))),
+        ),
+    ] {
+        let (code, _, answer) = put_json(&server, body);
+        assert_eq!(code, 200, "{body}: {answer}");
+        let report: serde_json::Value = serde_json::from_str(&answer).unwrap();
+        assert_eq!(report["saved"], true);
+        assert_eq!(fake.saves.lock().unwrap().pop(), Some(expected), "{body}");
+    }
+    // Media type parameters are fine; the bound is inclusive.
+    let headers = "Content-Type: Application/JSON; charset=utf-8\r\nContent-Length: 23\r\n";
+    assert_eq!(
+        put_settings(&server, headers, r#"{"traffic_percent":150}"#).0,
+        200
+    );
+    let padded = format!("{{\"traffic_percent\":1{}}}", " ".repeat(MAX_BODY - 21));
+    assert_eq!(padded.len(), MAX_BODY);
+    assert_eq!(put_json(&server, &padded).0, 200);
+    assert_eq!(fake.saves.lock().unwrap().len(), 2);
+    fake.saves.lock().unwrap().clear();
+
+    // Bodies that are not exactly a change within bounds save nothing.
+    for (body, why) in [
+        ("{}", "traffic_percent, rival_limit or both"),
+        (r#"{"traffic":50}"#, "unknown field"),
+        (r#"{"traffic_percent":null}"#, "invalid type: null"),
+        (r#"{"traffic_percent":301}"#, "0 to 300"),
+        (r#"{"traffic_percent":70000}"#, "invalid value"),
+        (r#"{"traffic_percent":-1}"#, "invalid value"),
+        (r#"{"traffic_percent":"50"}"#, "invalid type"),
+        (r#"{"traffic_percent":1.5}"#, "invalid type"),
+        (r#"{"rival_limit":16}"#, "null or 0 to 15"),
+        (r#"{"rival_limit":"original"}"#, "invalid type"),
+        (
+            r#"{"traffic_percent":5,"traffic_percent":6}"#,
+            "duplicate field",
+        ),
+        (r#"{"traffic_percent":5} {}"#, "trailing characters"),
+        (r#"{"traffic_percent":5"#, "EOF"),
+        ("[100, null]", "a JSON object"),
+        ("not json", "a JSON object"),
+        ("", "a JSON object"),
+    ] {
+        let (code, _, answer) = put_json(&server, body);
+        assert_eq!(code, 400, "{body}");
+        let message = error_message(&answer);
+        assert!(
+            message.starts_with("Invalid settings: ") && message.contains(why),
+            "{body}: {message}"
+        );
+    }
+    let text = "Content-Type: text/plain\r\nContent-Length: 23\r\n";
+    let (code, _, answer) = put_settings(&server, text, r#"{"traffic_percent":150}"#);
+    assert_eq!(code, 415);
+    assert!(error_message(&answer).contains("application/json"));
+    assert_eq!(
+        put_settings(
+            &server,
+            "Content-Length: 23\r\n",
+            r#"{"traffic_percent":150}"#
+        )
+        .0,
+        415
+    );
+    assert!(fake.saves.lock().unwrap().is_empty(), "nothing was saved");
+}
+
+#[test]
+fn request_bodies_are_bounded_and_need_their_length() {
+    let hub = Hub::new();
+    let (server, fake) = server(&hub);
+    let json = "Content-Type: application/json\r\n";
+    // Refused from the head alone: no body bytes follow, so none go unread.
+    for (headers, code, why) in [
+        (json.to_owned(), 411, "Content-Length"),
+        (
+            format!("{json}Transfer-Encoding: chunked\r\n"),
+            411,
+            "Content-Length",
+        ),
+        (
+            format!("{json}Content-Length: {}\r\n", MAX_BODY + 1),
+            413,
+            "over 1 KiB",
+        ),
+        (
+            format!("{json}Content-Length: 99999999999999999999999\r\n"),
+            400,
+            "whole number",
+        ),
+        (format!("{json}Content-Length: +5\r\n"), 400, "whole number"),
+        (format!("{json}Content-Length: \r\n"), 400, "whole number"),
+        (
+            format!("{json}Content-Length: 5\r\nContent-Length: 5\r\n"),
+            400,
+            "whole number",
+        ),
+    ] {
+        let (status, _, answer) = put_settings(&server, &headers, "");
+        assert_eq!(status, code, "{headers}");
+        assert!(error_message(&answer).contains(why), "{headers}: {answer}");
+    }
+    // Only PUT /v1/settings has a body.
+    let text = format!(
+        "GET /v1/settings HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {TOKEN}\r\nContent-Length: 2\r\n\r\n",
+        host(&server)
+    );
+    let (code, _, answer) = exchange(&server, text.as_bytes());
+    assert_eq!(code, 413);
+    assert!(error_message(&answer).contains("Only PUT /v1/settings"));
+
+    // A body that ends early is refused once the peer stops sending.
+    let mut stream = TcpStream::connect(host(&server)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    write!(
+        stream,
+        "PUT /v1/settings HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {TOKEN}\r\n{json}Content-Length: 40\r\n\r\n{{\"traffic_percent\"",
+        host(&server)
+    )
+    .unwrap();
+    stream.shutdown(std::net::Shutdown::Write).unwrap();
+    let mut answer = String::new();
+    stream.read_to_string(&mut answer).unwrap();
+    assert!(answer.starts_with("HTTP/1.1 400 "), "{answer}");
+    assert!(answer.contains("shorter than its Content-Length"));
+
+    // A head and body that arrive in pieces are read whole.
+    let body = r#"{"traffic_percent":250,"rival_limit":3}"#;
+    let mut stream = TcpStream::connect(host(&server)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let whole = format!(
+        "PUT /v1/settings HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {TOKEN}\r\n{json}Content-Length: {}\r\n\r\n{body}",
+        host(&server),
+        body.len()
+    );
+    for piece in whole.as_bytes().chunks(17) {
+        stream.write_all(piece).unwrap();
+        stream.flush().unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let mut answer = String::new();
+    stream.read_to_string(&mut answer).unwrap();
+    assert!(answer.starts_with("HTTP/1.1 200 "), "{answer}");
+    assert_eq!(
+        *fake.saves.lock().unwrap(),
+        [(Some(250), Some(Rivals::Count(3)))]
+    );
 }
 
 /// Open the event stream; the reader positioned after the response head.
@@ -496,10 +726,7 @@ fn the_session_api_writes_how_to_reach_it_and_forgets_the_token_at_the_end() {
     let (data, lock) = live_session("api-record");
     let run = paths::session_dir(&data, ID);
     assert_eq!(current(&data).unwrap_err().exit, Exit::NoSession);
-    let control = Arc::new(LiveControl {
-        data: data.clone(),
-        build: Build::LAUNCHER,
-    });
+    let control = Arc::new(LiveControl::new(data.clone(), Build::LAUNCHER));
     let api = SessionApi::start(control, Hub::new(), ID, &run).unwrap();
     let record = current(&data).unwrap();
     assert_eq!(record.id, ID);
@@ -531,6 +758,182 @@ fn the_session_api_writes_how_to_reach_it_and_forgets_the_token_at_the_end() {
     };
     records::write_new_json(&run.join(FILE), &stale).unwrap();
     assert_eq!(current(&data).unwrap_err().exit, Exit::Refused);
+    drop(lock);
+    std::fs::remove_dir_all(data).unwrap();
+}
+
+/// One request to a live session's API, with a JSON body when given; its
+/// status code and body.
+fn live_request(record: &ApiRecord, method: &str, path: &str, body: Option<&str>) -> (u16, String) {
+    let address = record.url.trim_start_matches("http://");
+    let mut stream = TcpStream::connect(address).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    let length = body.map_or_else(String::new, |body| {
+        format!(
+            "Content-Type: application/json\r\nContent-Length: {}\r\n",
+            body.len()
+        )
+    });
+    write!(
+        stream,
+        "{method} {path} HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {}\r\n{length}\r\n{}",
+        record.token,
+        body.unwrap_or_default()
+    )
+    .unwrap();
+    let mut answer = String::new();
+    stream.read_to_string(&mut answer).unwrap();
+    let (head, body) = answer.split_once("\r\n\r\n").unwrap();
+    let code = head.split(' ').nth(1).unwrap().parse().unwrap();
+    (code, body.to_owned())
+}
+
+/// A save for a driver called `Api Tester`, selected by `account.json`.
+fn select_saved_driver(data: &std::path::Path) {
+    use nfs_storage::{
+        AccountId, Batch, GarageSlots, Op, Timestamp,
+        account::{Document, Kind, Repository},
+    };
+    let id = "5a".repeat(16);
+    let account = AccountId::from_owned_config([0x5a; 16]).unwrap();
+    let identity = serde_json::json!({"version": 1, "storage_account": id,
+        "persona": 41, "account": 42, "name": "Api Tester"});
+    let documents: Vec<_> = Kind::ALL
+        .into_iter()
+        .map(|kind| {
+            let bytes = if kind == Kind::Identity {
+                identity.to_string().into_bytes()
+            } else {
+                b"{}".to_vec()
+            };
+            (kind, Document { revision: 1, bytes })
+        })
+        .collect();
+    let batch = Batch {
+        id: 1,
+        expected_generation: 0,
+        ops: vec![Op::SetGarage(GarageSlots::default())],
+    };
+    let accounts = data.join("artifacts").join("account");
+    std::fs::create_dir_all(&accounts).unwrap();
+    Repository::open_owned_directory(&accounts)
+        .unwrap()
+        .initialize_fresh(account, &documents, &batch, Timestamp(1))
+        .unwrap();
+    records::write_new_json(
+        &data.join("account.json"),
+        &records::AccountRecord::post_intro(id),
+    )
+    .unwrap();
+}
+
+#[test]
+fn the_live_api_reads_and_saves_settings_and_reads_the_profile_as_the_commands_do() {
+    let (data, lock) = live_session("api-settings-profile");
+    let run = paths::session_dir(&data, ID);
+    // The session started an empty installation, so no test reads a
+    // registered game for car names.
+    let game = data.join("game");
+    std::fs::create_dir_all(&game).unwrap();
+    let request = serde_json::json!({"version": 1, "id": ID, "action": "serve",
+        "game_directory": game, "data_directory": data, "server_path": "server",
+        "server_sha256": "0".repeat(64), "player_name": "Driver", "record_protocol": false});
+    std::fs::write(run.join("request.json"), request.to_string()).unwrap();
+    let control = Arc::new(LiveControl::new(data.clone(), Build::LAUNCHER));
+    let api = SessionApi::start(control, Hub::new(), ID, &run).unwrap();
+    let record = current(&data).unwrap();
+
+    // Settings: the command's record, the original amounts until saved.
+    let (code, body) = live_request(&record, "GET", "/v1/settings", None);
+    assert_eq!(code, 200, "{body}");
+    let report: serde_json::Value = serde_json::from_str(&body).unwrap();
+    crate::contract::testing::validate("settings", &report);
+    let command = crate::commands::settings::settings_report(&data, None, None).unwrap();
+    assert_eq!(report, serde_json::to_value(&command).unwrap());
+    assert_eq!(
+        (&report["traffic_percent"], &report["rival_limit"]),
+        (&100.into(), &serde_json::Value::Null)
+    );
+    // Each save is applied to the file at once; a field left out is kept.
+    for (body, traffic, rivals) in [
+        (r#"{"traffic_percent":250,"rival_limit":4}"#, 250, Some(4)),
+        (r#"{"rival_limit":null}"#, 250, None),
+        (r#"{"traffic_percent":0}"#, 0, None),
+    ] {
+        let (code, answer) = live_request(&record, "PUT", "/v1/settings", Some(body));
+        assert_eq!(code, 200, "{body}: {answer}");
+        let report: serde_json::Value = serde_json::from_str(&answer).unwrap();
+        crate::contract::testing::validate("settings", &report);
+        assert_eq!(report["saved"], true);
+        assert_eq!(
+            (&report["traffic_percent"], &report["rival_limit"]),
+            (&traffic.into(), &serde_json::json!(rivals))
+        );
+        let saved = settings::load(&data).unwrap();
+        assert_eq!(
+            (saved.traffic_percent, saved.rival_limit),
+            (traffic, rivals)
+        );
+    }
+    // A damaged file is refused as the command refuses it, and kept.
+    let file = data.join(settings::FILE);
+    let damaged = br#"{"traffic_percent": 900}"#;
+    std::fs::write(&file, damaged).unwrap();
+    assert_eq!(live_request(&record, "GET", "/v1/settings", None).0, 409);
+    let put = live_request(&record, "PUT", "/v1/settings", Some(r#"{"rival_limit":1}"#));
+    assert_eq!(put.0, 409, "{}", put.1);
+    assert_eq!(std::fs::read(&file).unwrap(), damaged);
+    std::fs::remove_file(&file).unwrap();
+    // Clients saving at once are served one at a time: every save lands
+    // whole and none collides over the temporary file.
+    let savers: Vec<_> = (0..8u16)
+        .map(|i| {
+            let record = record.clone();
+            std::thread::spawn(move || {
+                let body = format!(r#"{{"traffic_percent":{},"rival_limit":{i}}}"#, i * 10);
+                live_request(&record, "PUT", "/v1/settings", Some(&body))
+            })
+        })
+        .collect();
+    for saver in savers {
+        let (code, answer) = saver.join().unwrap();
+        assert_eq!(code, 200, "{answer}");
+    }
+    let last = settings::load(&data).unwrap();
+    assert_eq!(
+        last.rival_limit.map(|limit| limit * 10),
+        Some(last.traffic_percent),
+        "one request's values, not a mix"
+    );
+    let leftovers = std::fs::read_dir(&data)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+        .count();
+    assert_eq!(leftovers, 0);
+
+    // Profile: refused as the command refuses it until a save is selected.
+    let (code, body) = live_request(&record, "GET", "/v1/profile", None);
+    assert_eq!(code, 409, "{body}");
+    let refusal = crate::commands::profile::profile_report(&data, &Default::default()).unwrap_err();
+    assert_eq!(refusal.exit, Exit::NoSession);
+    assert_eq!(error_message(&body), refusal.message);
+    select_saved_driver(&data);
+    let (code, body) = live_request(&record, "GET", "/v1/profile", None);
+    assert_eq!(code, 200, "{body}");
+    let profile: serde_json::Value = serde_json::from_str(&body).unwrap();
+    crate::contract::testing::validate("profile", &profile);
+    let command = crate::commands::profile::profile_report(&data, &Default::default()).unwrap();
+    assert_eq!(profile, serde_json::to_value(&command).unwrap());
+    assert_eq!(profile["identity"]["display_name"], "Api Tester");
+    assert_eq!(profile["active"], true);
+    assert!(
+        profile["localization"].is_null(),
+        "names come from the session's installation, which is empty"
+    );
+    api.finish();
     drop(lock);
     std::fs::remove_dir_all(data).unwrap();
 }

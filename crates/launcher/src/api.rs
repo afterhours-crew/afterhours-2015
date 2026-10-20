@@ -16,6 +16,9 @@
 //! | `GET /v1/events` | the session's `event` records as server-sent events |
 //! | `POST /v1/stop` | the `stop` record: close the game, then the server |
 //! | `POST /v1/play` | the `play` record: start the game in a `serve` session |
+//! | `GET /v1/settings` | the `settings` record: the saved traffic and rivals |
+//! | `PUT /v1/settings` | the `settings` record after saving a [`SettingsChange`] |
+//! | `GET /v1/profile` | the `profile` record of the selected save |
 //!
 //! Answers are the records the matching commands print with `--json`, with
 //! the same schemas; a refused request answers an `api-error` record. The
@@ -28,7 +31,8 @@
 //! then sends every later event in order, with a keep-alive comment when
 //! idle; it ends after the session's last status. A reader that falls
 //! behind loses events (the session's log files keep everything) and never
-//! holds up the session. One request per connection; no request bodies.
+//! holds up the session. One request per connection; only `PUT
+//! /v1/settings` has a body, a JSON object of at most [`MAX_BODY`] bytes.
 
 pub mod http;
 pub mod hub;
@@ -36,18 +40,20 @@ pub mod hub;
 mod tests;
 
 use crate::{
-    contract::{PlayReport, StatusReport, StopReport, VersionReport},
+    contract::{PlayReport, SettingsReport, StatusReport, StopReport, VersionReport},
     exit::{Exit, Failure, Result},
+    profile::Profile,
+    settings::{self, Rivals},
 };
 use hub::{Hub, Next};
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::{
     io::Write,
     net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread::JoinHandle,
@@ -68,6 +74,8 @@ pub const IO_TIMEOUT: Duration = Duration::from_secs(5);
 pub const KEEP_ALIVE: Duration = Duration::from_secs(15);
 /// How long streams get to deliver the last events when the session ends.
 pub const DRAIN_GRACE: Duration = Duration::from_secs(2);
+/// Longest request body: only `PUT /v1/settings` has one.
+pub const MAX_BODY: usize = 1024;
 
 /// How to reach a session's API: `api.json` and `nfs-afterhours api --json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -90,6 +98,69 @@ pub struct ApiError {
     pub message: String,
 }
 
+/// The body of `PUT /v1/settings`: the `settings` record's fields to save,
+/// within the bounds that record reports. A field left out keeps its saved
+/// value; `"rival_limit": null` restores the original number of rivals.
+/// At least one field is required; any other field is refused.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SettingsChange {
+    /// Ambient traffic as a percentage of the original amount.
+    #[serde(default, deserialize_with = "number")]
+    pub traffic_percent: Option<u16>,
+    /// Roaming rivals kept active; `Some(None)` is `null`, the original.
+    #[serde(default, deserialize_with = "number_or_null")]
+    pub rival_limit: Option<Option<u16>>,
+}
+
+/// A field that is present must be a number; `null` is refused.
+fn number<'de, D: Deserializer<'de>>(input: D) -> std::result::Result<Option<u16>, D::Error> {
+    u16::deserialize(input).map(Some)
+}
+
+/// A field that is present is a number or `null`.
+fn number_or_null<'de, D: Deserializer<'de>>(
+    input: D,
+) -> std::result::Result<Option<Option<u16>>, D::Error> {
+    Option::<u16>::deserialize(input).map(Some)
+}
+
+impl SettingsChange {
+    /// Parse a request body into the `--traffic` and `--rivals` values it
+    /// stands for, checked as the command line checks them.
+    pub fn parse(body: &[u8]) -> std::result::Result<(Option<u16>, Option<Rivals>), String> {
+        // Serde would also read a struct from an array of its fields.
+        if body.trim_ascii_start().first() != Some(&b'{') {
+            return Err("the body must be a JSON object.".into());
+        }
+        let change: Self = serde_json::from_slice(body).map_err(|e| e.to_string())?;
+        if change == Self::default() {
+            return Err("send traffic_percent, rival_limit or both.".into());
+        }
+        if change
+            .traffic_percent
+            .is_some_and(|percent| percent > settings::MAX_TRAFFIC_PERCENT)
+        {
+            return Err(format!(
+                "traffic_percent must be 0 to {}.",
+                settings::MAX_TRAFFIC_PERCENT
+            ));
+        }
+        let rivals = match change.rival_limit {
+            None => None,
+            Some(None) => Some(Rivals::Original),
+            Some(Some(count)) if count <= settings::MAX_RIVALS => Some(Rivals::Count(count)),
+            Some(Some(_)) => {
+                return Err(format!(
+                    "rival_limit must be null or 0 to {}.",
+                    settings::MAX_RIVALS
+                ));
+            }
+        };
+        Ok((change.traffic_percent, rivals))
+    }
+}
+
 /// What the API asks of the session; the live implementation runs the
 /// same code as the matching commands.
 pub trait Control: Send + Sync + 'static {
@@ -101,6 +172,14 @@ pub trait Control: Send + Sync + 'static {
     fn stop(&self) -> Result<StopReport>;
     /// `play --json`.
     fn play(&self) -> Result<PlayReport>;
+    /// `settings --json`.
+    fn settings(&self) -> Result<SettingsReport>;
+    /// `settings --json` with `--traffic` and `--rivals`, given as checked
+    /// values: save them, then report.
+    fn save_settings(&self, traffic: Option<u16>, rivals: Option<Rivals>)
+    -> Result<SettingsReport>;
+    /// `profile --json`: the selected save.
+    fn profile(&self) -> Result<Profile>;
 }
 
 /// A new token: 32 bytes from the system's random source, as hex.
@@ -294,11 +373,64 @@ fn check(head: &http::Head, shared: &Shared) -> Option<(u16, &'static str)> {
     if !http::same_secret(token, shared.token.as_bytes()) {
         return Some((401, "Send the session's token as Authorization: Bearer."));
     }
-    let length = head.header("content-length").unwrap_or(b"0");
-    if head.header("transfer-encoding").is_some() || length != b"0" {
-        return Some((413, "API requests have no body."));
-    }
     None
+}
+
+/// The length of the request's body, or why it is refused: only `PUT
+/// /v1/settings` has one, sent with a `Content-Length` of at most
+/// [`MAX_BODY`].
+fn body_length(head: &http::Head) -> std::result::Result<usize, (u16, &'static str)> {
+    let takes_body = (head.method.as_str(), head.path.as_str()) == ("PUT", "/v1/settings");
+    let no_length = (411, "Send the request body with a Content-Length.");
+    let no_body = (413, "Only PUT /v1/settings has a request body.");
+    if head.header("transfer-encoding").is_some() {
+        return Err(if takes_body { no_length } else { no_body });
+    }
+    let Ok(length) = http::content_length(head) else {
+        return Err((400, "The Content-Length is not one whole number."));
+    };
+    match (takes_body, length) {
+        (false, Some(1..)) => Err(no_body),
+        (false, _) => Ok(0),
+        (true, None) => Err(no_length),
+        (true, Some(n)) if n > MAX_BODY => Err((413, "The request body is over 1 KiB.")),
+        (true, Some(n)) => Ok(n),
+    }
+}
+
+/// `PUT /v1/settings`: read and check the body, then save. The body is
+/// read before any refusal, so the peer gets the answer rather than a
+/// connection reset over unread bytes.
+fn save_settings(
+    stream: &mut TcpStream,
+    head: &http::Head,
+    length: usize,
+    control: &dyn Control,
+) -> std::io::Result<()> {
+    let body = match http::read_body(stream, length) {
+        Ok(body) => body,
+        Err(http::ReadError::Closed) => {
+            return refuse(
+                stream,
+                400,
+                &[],
+                "The request body is shorter than its Content-Length.",
+            );
+        }
+        Err(_) => return Ok(()),
+    };
+    if !http::is_json(head) {
+        return refuse(
+            stream,
+            415,
+            &[],
+            "Send the settings as Content-Type: application/json.",
+        );
+    }
+    match SettingsChange::parse(&body) {
+        Ok((traffic, rivals)) => answer(stream, control.save_settings(traffic, rivals)),
+        Err(why) => refuse(stream, 400, &[], &format!("Invalid settings: {why}")),
+    }
 }
 
 fn serve(mut stream: TcpStream, shared: &Shared) {
@@ -323,6 +455,13 @@ fn serve(mut stream: TcpStream, shared: &Shared) {
         let _ = refuse(&mut stream, status, extra, message);
         return;
     }
+    let length = match body_length(&head) {
+        Ok(length) => length,
+        Err((status, message)) => {
+            let _ = refuse(&mut stream, status, &[], message);
+            return;
+        }
+    };
     let control = &shared.control;
     let _ = match (head.method.as_str(), head.path.as_str()) {
         ("GET", "/v1/info") => answer(&mut stream, Ok(control.info())),
@@ -330,11 +469,20 @@ fn serve(mut stream: TcpStream, shared: &Shared) {
         ("GET", "/v1/events") => stream_events(&mut stream, shared),
         ("POST", "/v1/stop") => answer(&mut stream, control.stop()),
         ("POST", "/v1/play") => answer(&mut stream, control.play()),
-        (_, "/v1/info" | "/v1/status" | "/v1/events") => refuse(
+        ("GET", "/v1/settings") => answer(&mut stream, control.settings()),
+        ("PUT", "/v1/settings") => save_settings(&mut stream, &head, length, control.as_ref()),
+        ("GET", "/v1/profile") => answer(&mut stream, control.profile()),
+        (_, "/v1/info" | "/v1/status" | "/v1/events" | "/v1/profile") => refuse(
             &mut stream,
             405,
             &[("Allow", "GET")],
             "This address answers GET.",
+        ),
+        (_, "/v1/settings") => refuse(
+            &mut stream,
+            405,
+            &[("Allow", "GET, PUT")],
+            "This address answers GET and PUT.",
         ),
         (_, "/v1/stop" | "/v1/play") => refuse(
             &mut stream,
@@ -377,8 +525,21 @@ fn stream_events(stream: &mut TcpStream, shared: &Shared) -> std::io::Result<()>
 /// The API of the supervisor's own session: the commands' code over its
 /// data directory.
 pub struct LiveControl {
-    pub data: PathBuf,
-    pub build: crate::contract::Build,
+    data: PathBuf,
+    build: crate::contract::Build,
+    /// One settings save at a time: each reads, changes and replaces the
+    /// file, and the temporary file is named after this process.
+    saving: Mutex<()>,
+}
+
+impl LiveControl {
+    pub fn new(data: PathBuf, build: crate::contract::Build) -> Self {
+        Self {
+            data,
+            build,
+            saving: Mutex::new(()),
+        }
+    }
 }
 
 impl Control for LiveControl {
@@ -393,6 +554,20 @@ impl Control for LiveControl {
     }
     fn play(&self) -> Result<PlayReport> {
         crate::commands::status::play_report(&self.data)
+    }
+    fn settings(&self) -> Result<SettingsReport> {
+        crate::commands::settings::settings_report(&self.data, None, None)
+    }
+    fn save_settings(
+        &self,
+        traffic: Option<u16>,
+        rivals: Option<Rivals>,
+    ) -> Result<SettingsReport> {
+        let _one = self.saving.lock().unwrap_or_else(|e| e.into_inner());
+        crate::commands::settings::settings_report(&self.data, traffic, rivals)
+    }
+    fn profile(&self) -> Result<Profile> {
+        crate::commands::profile::profile_report(&self.data, &crate::cli::ProfileArgs::default())
     }
 }
 
