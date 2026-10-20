@@ -76,6 +76,10 @@ impl Record for profile::Listing {
     const NAME: &'static str = "profile-list";
     const VERSION: u32 = profile::FORMAT_VERSION;
 }
+impl Record for profile::images::CarImagesReport {
+    const NAME: &'static str = "car-images";
+    const VERSION: u32 = profile::images::CarImagesReport::VERSION;
+}
 impl Record for sessions::SessionList {
     const NAME: &'static str = "sessions";
     const VERSION: u32 = sessions::FORMAT_VERSION;
@@ -111,9 +115,10 @@ fn info<T: Record>() -> RecordInfo {
 }
 
 /// Every record, sorted by name.
-pub fn records() -> [RecordInfo; 12] {
+pub fn records() -> [RecordInfo; 13] {
     let mut all = [
         info::<Preflight>(),
+        info::<profile::images::CarImagesReport>(),
         info::<events::Event>(),
         info::<profile::Profile>(),
         info::<profile::Listing>(),
@@ -318,17 +323,20 @@ pub enum Capability {
     Events,
     /// `play`: start the game inside a running `serve` session (Windows).
     Play,
+    /// `car-images`, and per-car `image` in `profile`.
+    CarImages,
     /// `settings`, and `--traffic` and `--rivals` on `setup`, `serve` and
     /// `start`: the amounts of traffic and roaming rivals.
     WorldSettings,
 }
 
 /// Capabilities of this build, in a fixed order.
-pub const CAPABILITIES: [Capability; 5] = [
+pub const CAPABILITIES: [Capability; 6] = [
     Capability::Profile,
     Capability::Sessions,
     Capability::Events,
     Capability::Play,
+    Capability::CarImages,
     Capability::WorldSettings,
 ];
 

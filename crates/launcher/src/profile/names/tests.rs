@@ -112,11 +112,15 @@ pub(crate) fn write_installation(
                 name: ITEM_SUPERBUNDLE,
                 bundle: "win32/levels/frontend/frontend",
                 assets: &items,
+                resources: &[],
+                chunks: &[],
             },
             CasSuperbundle {
                 name: TEXT_SUPERBUNDLE,
                 bundle: "win32/default_settings_win32",
                 assets: &texts,
+                resources: &[],
+                chunks: &[],
             },
         ],
         &[

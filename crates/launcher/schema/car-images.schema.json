@@ -1,0 +1,142 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "Size": {
+      "description": "Which of a car's two images.",
+      "enum": [
+        "medium",
+        "large"
+      ],
+      "type": "string"
+    },
+    "SizeCounts": {
+      "description": "Counts per image size.",
+      "properties": {
+        "large": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "medium": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "medium",
+        "large"
+      ],
+      "type": "object"
+    },
+    "Unresolved": {
+      "description": "A named image that could not be produced, and why.",
+      "properties": {
+        "definition": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "size": {
+          "$ref": "#/definitions/Size"
+        },
+        "texture_name": {
+          "description": "The car item's texture name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "definition",
+        "size",
+        "texture_name",
+        "reason"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "`car-images --json`.",
+  "properties": {
+    "built": {
+      "description": "Whether this run decoded the set; `false` when a complete set was\nreused without reading the installation.",
+      "type": "boolean"
+    },
+    "cars": {
+      "description": "Car definitions the installation lists.",
+      "format": "uint",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "directory": {
+      "description": "The image set's directory.",
+      "type": "string"
+    },
+    "files": {
+      "description": "PNG files in the set; cars sharing a texture share a file.",
+      "format": "uint",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "fingerprint": {
+      "description": "The content entry the set belongs to.",
+      "type": "string"
+    },
+    "formats": {
+      "additionalProperties": {
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "description": "Decoded images by their source texture format, such as `BC1_UNORM`.",
+      "type": "object"
+    },
+    "game_directory": {
+      "description": "The installation the images were decoded from.",
+      "type": "string"
+    },
+    "named": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/SizeCounts"
+        }
+      ],
+      "description": "Car items that name an image, per size."
+    },
+    "resolved": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/SizeCounts"
+        }
+      ],
+      "description": "Named images decoded, per size."
+    },
+    "unresolved": {
+      "description": "Named images that could not be decoded, and why.",
+      "items": {
+        "$ref": "#/definitions/Unresolved"
+      },
+      "type": "array"
+    },
+    "version": {
+      "const": 1,
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version",
+    "directory",
+    "fingerprint",
+    "game_directory",
+    "built",
+    "cars",
+    "named",
+    "resolved",
+    "files",
+    "formats",
+    "unresolved"
+  ],
+  "title": "CarImagesReport",
+  "type": "object"
+}

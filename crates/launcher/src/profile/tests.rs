@@ -942,3 +942,52 @@ fn installation_and_locale_come_from_arguments_then_the_registry() {
     std::fs::remove_dir_all(data).unwrap();
     std::fs::remove_dir_all(game).unwrap();
 }
+
+#[test]
+fn decoded_car_images_appear_on_cars_and_garage_slots() {
+    let data = crate::testing::scratch("profile-images");
+    let game = crate::testing::scratch("profile-images-game");
+    fleet_save(&data, 3);
+    let cache = install_content(&data);
+    let fingerprint = cache.file_name().unwrap().to_str().unwrap().to_owned();
+    images::tests::write_installation(&game, &[(CAR, "A_MED", "A_LARGE"), (CAR2, "", "")]);
+    // Before `car-images` runs, nothing is reported and nothing warns.
+    let p = read(&data, 3);
+    assert_eq!(p.car_images, None);
+    assert!(p.cars.unwrap().iter().all(|car| car.image.is_none()));
+    let prepared =
+        images::prepare(&data, &fingerprint, &game, nfs_frostbite::Limits::default()).unwrap();
+    let p = read(&data, 3);
+    assert_eq!(p.car_images.as_ref(), Some(&prepared.cached.directory));
+    let cars = p.cars.clone().unwrap();
+    let image = cars[0].image.clone().unwrap();
+    let medium = image.medium.unwrap();
+    assert!(medium.path.starts_with(&prepared.cached.directory) && medium.path.is_file());
+    assert_eq!(
+        (medium.width, medium.height, medium.source_format.as_str()),
+        (8, 8, "BC1_UNORM")
+    );
+    assert_eq!(image.large.unwrap().source_format, "BC3_UNORM");
+    assert_eq!(cars[1].image, None, "CAR2 names no image");
+    let garage = p.garage.clone().unwrap();
+    assert_eq!(
+        garage.slots[0].item.as_ref().unwrap().image,
+        cars[0].image,
+        "the garage slot reports the same files"
+    );
+    let value = serde_json::to_value(&p).unwrap();
+    assert_eq!(value["cars"][0]["image"]["medium"]["width"], 8);
+    // A damaged set is reported, not hidden.
+    std::fs::remove_file(&medium.path).unwrap();
+    let p = read(&data, 3);
+    assert_eq!(p.car_images, None);
+    assert!(
+        p.warnings
+            .iter()
+            .any(|w| w.contains("run car-images again")),
+        "{:?}",
+        p.warnings
+    );
+    std::fs::remove_dir_all(data).unwrap();
+    std::fs::remove_dir_all(game).unwrap();
+}

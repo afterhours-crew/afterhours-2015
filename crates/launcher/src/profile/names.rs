@@ -103,7 +103,7 @@ pub fn is_locale(text: &str) -> bool {
         && bytes[3..].iter().all(u8::is_ascii_uppercase)
 }
 
-fn failure(what: &str, error: nfs_frostbite::Error) -> String {
+pub(crate) fn failure(what: &str, error: nfs_frostbite::Error) -> String {
     format!("{what}: {error}")
 }
 
@@ -203,10 +203,33 @@ pub fn read(game: &Path, locale: &str, limits: Limits) -> Result<CarNames, Strin
             "the {locale} text database uses a multi-byte encoding this launcher does not decode"
         ));
     }
+    let entries = car_items(&install, &mut store, &limits)?
+        .into_iter()
+        .map(|(guid, fields)| {
+            (
+                guid,
+                names(fields.get("UI").and_then(Value::as_fields), &text),
+            )
+        })
+        .collect();
+    Ok(CarNames {
+        locale: locale.to_owned(),
+        entries,
+    })
+}
+
+/// Every car item of the installation: its definition GUID and the fields
+/// of its `RaceVehicleItemData` instance, in item-asset order.
+pub(crate) fn car_items(
+    install: &Installation,
+    store: &mut Store,
+    limits: &Limits,
+) -> Result<Vec<([u8; 16], nfs_frostbite::ebx::Fields)>, String> {
     let listed = install
         .superbundle_ebx(ITEM_SUPERBUNDLE)
         .map_err(|e| failure("item list", e))?;
-    let mut entries = BTreeMap::new();
+    let mut cars = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
     let mut inspected = 0usize;
     for location in listed
         .iter()
@@ -219,33 +242,30 @@ pub fn read(game: &Path, locale: &str, limits: Limits) -> Result<CarNames, Strin
         let data = store
             .bytes(&location.entry)
             .map_err(|e| failure("item asset", e))?;
-        let partition = Partition::parse(&data, &limits).map_err(|e| failure("item asset", e))?;
+        let partition = Partition::parse(&data, limits).map_err(|e| failure("item asset", e))?;
         if partition.primary_class() != Some(VEHICLE_CLASS) {
             continue;
         }
         let objects = partition
-            .objects(&limits)
+            .objects(limits)
             .map_err(|e| failure("car item", e))?;
         for object in objects {
             let Some(guid) = object.guid.filter(|_| object.class == VEHICLE_CLASS) else {
                 continue;
             };
-            let entry = names(object.fields.get("UI").and_then(Value::as_fields), &text);
-            if entries.insert(guid, entry).is_some() {
+            if !seen.insert(guid) {
                 return Err("a car definition is listed twice".into());
             }
-            if entries.len() > MAX_VEHICLES {
+            if seen.len() > MAX_VEHICLES {
                 return Err("the installation lists more cars than the bound".into());
             }
+            cars.push((guid, object.fields));
         }
     }
-    if entries.is_empty() {
+    if cars.is_empty() {
         return Err("the installation lists no car items".into());
     }
-    Ok(CarNames {
-        locale: locale.to_owned(),
-        entries,
-    })
+    Ok(cars)
 }
 
 #[cfg(test)]
