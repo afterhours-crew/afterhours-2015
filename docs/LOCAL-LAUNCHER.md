@@ -313,7 +313,8 @@ raw stored integers because the game's units are not confirmed. Car names are
 the game's own, read from your installation each time (`--game-dir` and
 `--language` override the session's installation and the game's locale). Run
 `nfs-afterhours car-images` once after setup to decode each car's pictures from
-your installation into the data folder; `profile` then reports their files. If no complete
+your installation into the data folder; `profile` then reports their files. `nfs-afterhours map-images`
+decodes the game's world map the same way, for a map view. If no complete
 account database exists, keep the failed directory for diagnosis and choose a new
 data directory. Do not overwrite it with someone else's profile.
 

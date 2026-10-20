@@ -89,7 +89,7 @@ command links the first-party `nfs-storage`, `nfs-services`,
 names and car pictures from the installation), so the launcher also carries
 the pinned `rusqlite` with bundled SQLite and the installation reader's
 `lz4_flex` and `miniz_oxide` (which also compresses the PNG files `car-images`
-writes). Texture blocks are decoded with bcdec_rs 0.2.0 (MIT; a safe,
+and `map-images` write). Texture blocks are decoded with bcdec_rs 0.2.0 (MIT; a safe,
 dependency-free Rust port of bcdec, BC1-BC7), the only registry crate this
 adds.
 

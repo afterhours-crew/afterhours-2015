@@ -36,6 +36,7 @@ pub mod endpoint;
 pub mod events;
 pub mod exit;
 pub mod install;
+pub mod map;
 pub mod marker;
 pub mod paths;
 pub mod platform;

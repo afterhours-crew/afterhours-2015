@@ -30,6 +30,11 @@
           "type": "string"
         },
         {
+          "const": "map-images",
+          "description": "`map-images`: the game's world map and the world box it covers.",
+          "type": "string"
+        },
+        {
           "const": "world-settings",
           "description": "`settings`, and `--traffic` and `--rivals` on `setup`, `serve` and\n`start`: the amounts of traffic and roaming rivals.",
           "type": "string"

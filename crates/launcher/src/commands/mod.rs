@@ -8,6 +8,7 @@
 //! one JSON object instead, a record described in [`crate::contract`].
 
 mod launch;
+mod map;
 mod profile;
 mod recover;
 mod sessions;
@@ -115,6 +116,7 @@ fn dispatch(cli: Cli, bundled_server: Option<PathBuf>, build: Build) -> Result<(
         Command::Play => status::play(&context),
         Command::Profile(args) => profile::profile(&context, &args),
         Command::CarImages(args) => profile::car_images(&context, &args),
+        Command::MapImages(args) => map::map_images(&context, &args),
         Command::Sessions(args) => sessions::sessions(&context, &args),
         Command::Settings(args) => settings::settings(&context, &args),
         Command::Recover { account_id } => recover::recover(&context, &account_id),

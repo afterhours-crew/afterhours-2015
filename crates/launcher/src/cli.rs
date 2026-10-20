@@ -158,6 +158,15 @@ pub struct CarImagesArgs {
     pub game_dir: Option<PathBuf>,
 }
 
+/// Arguments for `map-images`.
+#[derive(Debug, Clone, Args)]
+pub struct MapImagesArgs {
+    /// Installed game to read the map from, read-only. Defaults to the one
+    /// the current session started, then the registered one.
+    #[arg(long, value_name = "DIR")]
+    pub game_dir: Option<PathBuf>,
+}
+
 /// Arguments for `profile`.
 #[derive(Debug, Clone, Args)]
 pub struct ProfileArgs {
@@ -272,6 +281,16 @@ pub enum Command {
     /// reused, never rewritten. Needs the content a session prepared; exits
     /// with code 4 before the first setup.
     CarImages(CarImagesArgs),
+
+    /// Decode the game's world map from the installation for a map view.
+    ///
+    /// Reads the installed game read-only and writes the map's tiles at every
+    /// shipped detail level as PNG files, `<level>-<column>-<row>.png`, with
+    /// an index to artifacts/content/map-images/<content fingerprint>/ in the
+    /// data directory. Reports the world box the map covers, so positions can
+    /// be placed on it. A complete set is reused, never rewritten. Needs the
+    /// content a session prepared; exits with code 4 before the first setup.
+    MapImages(MapImagesArgs),
 
     /// List the session folders and summarize their logs; change nothing.
     ///

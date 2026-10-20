@@ -20,7 +20,7 @@
 //! provides.
 
 use crate::{
-    events, profile,
+    events, map, profile,
     records::{self, AccountRecord, Preflight, Status},
     sessions,
 };
@@ -80,6 +80,10 @@ impl Record for profile::images::CarImagesReport {
     const NAME: &'static str = "car-images";
     const VERSION: u32 = profile::images::CarImagesReport::VERSION;
 }
+impl Record for map::MapImagesReport {
+    const NAME: &'static str = "map-images";
+    const VERSION: u32 = map::MapImagesReport::VERSION;
+}
 impl Record for sessions::SessionList {
     const NAME: &'static str = "sessions";
     const VERSION: u32 = sessions::FORMAT_VERSION;
@@ -115,11 +119,12 @@ fn info<T: Record>() -> RecordInfo {
 }
 
 /// Every record, sorted by name.
-pub fn records() -> [RecordInfo; 13] {
+pub fn records() -> [RecordInfo; 14] {
     let mut all = [
         info::<Preflight>(),
         info::<profile::images::CarImagesReport>(),
         info::<events::Event>(),
+        info::<map::MapImagesReport>(),
         info::<profile::Profile>(),
         info::<profile::Listing>(),
         info::<RecoverReport>(),
@@ -335,18 +340,21 @@ pub enum Capability {
     Play,
     /// `car-images`, and per-car `image` in `profile`.
     CarImages,
+    /// `map-images`: the game's world map and the world box it covers.
+    MapImages,
     /// `settings`, and `--traffic` and `--rivals` on `setup`, `serve` and
     /// `start`: the amounts of traffic and roaming rivals.
     WorldSettings,
 }
 
 /// Capabilities of this build, in a fixed order.
-pub const CAPABILITIES: [Capability; 6] = [
+pub const CAPABILITIES: [Capability; 7] = [
     Capability::Profile,
     Capability::Sessions,
     Capability::Events,
     Capability::Play,
     Capability::CarImages,
+    Capability::MapImages,
     Capability::WorldSettings,
 ];
 

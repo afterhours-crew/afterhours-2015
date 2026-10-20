@@ -108,6 +108,7 @@ fn help_lists_every_public_subcommand_and_the_exit_table() {
         "play",
         "profile",
         "car-images",
+        "map-images",
         "sessions",
         "settings",
         "version",
@@ -181,6 +182,7 @@ fn version_reports_records_and_capabilities_and_schema_prints_each_one() {
             "events",
             "play",
             "car-images",
+            "map-images",
             "world-settings"
         ])
     );
@@ -209,10 +211,9 @@ fn version_reports_records_and_capabilities_and_schema_prints_each_one() {
         assert_eq!(&schema["properties"]["version"]["const"], version, "{name}");
     }
     let text_version = run(&["version"]);
-    assert!(
-        text(&text_version.stdout)
-            .contains("capabilities: profile, sessions, events, play, car-images, world-settings")
-    );
+    assert!(text(&text_version.stdout).contains(
+        "capabilities: profile, sessions, events, play, car-images, map-images, world-settings"
+    ));
     assert_eq!(run(&["schema", "nothing"]).status.code(), Some(2));
 }
 
@@ -840,6 +841,16 @@ fn a_session_whose_supervisor_dies_is_reported_interrupted() {
 fn car_images_needs_prepared_content_first() {
     let data = scratch("car-images");
     let out = run(&["car-images", "--json", "--data-dir", data.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(4), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("run setup first"));
+    assert!(!data.join("artifacts").exists(), "nothing was written");
+    std::fs::remove_dir_all(data).unwrap();
+}
+
+#[test]
+fn map_images_needs_prepared_content_first() {
+    let data = scratch("map-images");
+    let out = run(&["map-images", "--json", "--data-dir", data.to_str().unwrap()]);
     assert_eq!(out.status.code(), Some(4), "{}", text(&out.stderr));
     assert!(text(&out.stderr).contains("run setup first"));
     assert!(!data.join("artifacts").exists(), "nothing was written");

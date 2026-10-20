@@ -27,6 +27,7 @@ nfs-afterhours profile [--account-id <ID>]  show a saved driver's profile; chang
                        [--language <LOCALE>] read-only, in the game's locale)
 nfs-afterhours profile --list               list every saved driver in the data directory
 nfs-afterhours car-images [--game-dir <DIR>]  decode car pictures from the game into the data folder
+nfs-afterhours map-images [--game-dir <DIR>]  decode the world map from the game into the data folder
 nfs-afterhours sessions [--limit N] [--id <ID>]  summarize session folders and logs; change nothing
 nfs-afterhours settings [--traffic <PERCENT>] [--rivals <COUNT|original>]
                                             show or save traffic and rivals for later sessions
@@ -63,6 +64,7 @@ field and a JSON Schema (draft 7) generated from the Rust type that prints it:
 | `event` | each line of `setup`/`serve`/`start --events` |
 | `profile`, `profile-list` | `profile --json`, `profile --list --json` |
 | `car-images` | `car-images --json`: the image set, counts per size, formats and unresolved images |
+| `map-images` | `map-images --json`: the tile set, its detail levels, file naming, the world box it covers and any missing tiles |
 | `sessions` | `sessions --json` |
 | `settings` | `settings --json`: saved `traffic_percent` and `rival_limit`, the largest accepted values, and whether this command saved them |
 | `recover` | `recover --json` |
@@ -80,7 +82,7 @@ strict checker that rejects any property a schema does not describe.
 `nfs-afterhours`), package version, release tag, source revision (`null` for
 local builds), whether this platform can launch the game, the current version
 of every record, and `capabilities`: `profile`, `sessions`, `events`, `play`,
-`car-images` and `world-settings` (the `settings` command) today. A screen whose capability is missing should say
+`car-images`, `map-images` and `world-settings` (the `settings` command) today. A screen whose capability is missing should say
 the feature is not available yet.
 
 Versioning: until the desktop launcher's first release, every record stays at
@@ -304,6 +306,42 @@ and published by one rename. Bounds: 1,024 files and 512 MiB per set,
 index. The `car-images --json` record lists counts per size, formats and
 every named image that could not be decoded with the reason.
 
+## World map
+
+`map-images` decodes the game's pause-menu world map from the installation
+(read-only; `--game-dir`, else the current session's, else the registered
+one) into the data directory for a map view, and reports the world box it
+covers. No image is shipped, committed or embedded. A complete set is reused
+without reading the installation; a damaged one is rebuilt.
+
+What the supported build holds, established from the installed data:
+
+- The map is the `UITiledTextureAsset` `ui/menu/worldmaptiledtexture` in
+  `Win32/levels/genesis01/genesis01`: 256-pixel tiles of a 16,384-pixel map
+  at detail levels 1 to 3 (8,192, 4,096 and 2,048 pixels across; level 0 is
+  not shipped). Each `Tiles` entry gives its level, column
+  (`HorizontalIndex`), row (`VerticalIndex`) and `NormalizedRect`, and imports
+  a `TextureAsset` under `ui/menu/tiledtexture/`, decoded as for car images.
+  A tile whose rectangle does not match its column and row is not used.
+- The world box is the largest unrotated `OBBData` of the UI map's world part
+  `levels/genesis01/ui/layer1_uimap`: 8,192 m either side of the origin in x
+  and z. A world position maps to u = (x - min_x) / (max_x - min_x) and
+  v = (z - min_z) / (max_z - min_z) from the top-left corner, so +z points
+  down the image; at full size one pixel is one metre. That orientation was
+  checked by drawing the game's road network over the decoded map, not yet
+  against a live position. Without a usable box the tiles are still
+  written, `world` is `null` and a warning says why.
+
+On the supported installation all 1,344 tiles decode (BC3), about 28 MiB of
+PNG in about 9 seconds. Files go to
+`artifacts/content/map-images/<content fingerprint>/` as
+`<level>-<column>-<row>.png` (columns from the left, rows from the top,
+from 0) plus `index.json`, published by one rename like the car images.
+Bounds: 4,096 tiles, 8 detail levels, 128 tiles a side, 1,024-pixel tiles,
+256 MiB per set and a 1 MiB index. The `map-images --json` record lists the
+levels with their tile counts, the file pattern, the world box and every
+listed tile that could not be decoded with the reason.
+
 ## Why it is built this way
 
 **Two processes.** The supervisor runs separately from the command you typed
@@ -373,6 +411,7 @@ existing data directories keep working.
 | `platform/` | the `Platform` trait, the shared child with bounded log pumps, and the Windows and Unix implementations; `platform/windows/lease` is the routing lease |
 | `endpoint` | the 13-byte transaction over abstract memory, tested with injected faults |
 | `profile` | read-only profiles from account saves; `profile/content` picks and loads the prepared content; `profile/names` and `profile/images` read car names and pictures from the installation |
+| `map` | the world map's tiles and world box, decoded from the installation by `map-images` |
 | `contract` | record names, versions, capabilities and schema generation; the strict test validator |
 | `sessions` | read-only session folder summaries and the server log scanner |
 | `events` | the JSON-lines event stream |

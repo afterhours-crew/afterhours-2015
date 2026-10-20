@@ -1,0 +1,209 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "Level": {
+      "description": "One detail level of the map.",
+      "properties": {
+        "level": {
+          "description": "The tiled texture's mip level: 0 is the full size, each level halves it.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "size": {
+          "description": "Width and height of the whole level in pixels.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tiles": {
+          "description": "Tiles of this level in the set.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tiles_per_side": {
+          "description": "Columns and rows of tiles.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "level",
+        "tiles_per_side",
+        "size",
+        "tiles"
+      ],
+      "type": "object"
+    },
+    "Missing": {
+      "description": "A listed tile that could not be produced, and why.",
+      "properties": {
+        "column": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "level": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "row": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "level",
+        "column",
+        "row",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "World": {
+      "description": "The world box the map covers, in metres. A position maps to\nu = (x - min_x) / (max_x - min_x) and v = (z - min_z) / (max_z - min_z)\nfrom the image's top-left corner.",
+      "properties": {
+        "max_x": {
+          "format": "float",
+          "type": "number"
+        },
+        "max_z": {
+          "format": "float",
+          "type": "number"
+        },
+        "min_x": {
+          "format": "float",
+          "type": "number"
+        },
+        "min_z": {
+          "format": "float",
+          "type": "number"
+        }
+      },
+      "required": [
+        "min_x",
+        "min_z",
+        "max_x",
+        "max_z"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "`map-images --json`.",
+  "properties": {
+    "asset": {
+      "description": "The tiled texture's name in the game.",
+      "type": "string"
+    },
+    "built": {
+      "description": "Whether this run decoded the set; `false` when a complete set was\nreused without reading the installation.",
+      "type": "boolean"
+    },
+    "directory": {
+      "description": "The tile set's directory.",
+      "type": "string"
+    },
+    "file_pattern": {
+      "description": "How a tile's file is named in `directory`: `{level}-{column}-{row}.png`,\ncolumns from the left and rows from the top, counting from 0.",
+      "type": "string"
+    },
+    "files": {
+      "description": "PNG files in the set.",
+      "format": "uint",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "fingerprint": {
+      "description": "The content entry the set belongs to.",
+      "type": "string"
+    },
+    "formats": {
+      "additionalProperties": {
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "description": "Decoded tiles by their source texture format, such as `BC3_UNORM`.",
+      "type": "object"
+    },
+    "full_size": {
+      "description": "Width and height of level 0, which the build may not ship.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "game_directory": {
+      "description": "The installation the map was decoded from.",
+      "type": "string"
+    },
+    "levels": {
+      "description": "Detail levels, the most detailed first.",
+      "items": {
+        "$ref": "#/definitions/Level"
+      },
+      "type": "array"
+    },
+    "missing": {
+      "description": "Listed tiles that could not be decoded, and why.",
+      "items": {
+        "$ref": "#/definitions/Missing"
+      },
+      "type": "array"
+    },
+    "tile_size": {
+      "description": "Width and height of every tile in pixels.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "version": {
+      "const": 1,
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "warnings": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "world": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/World"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The world box the map covers; `null` when the installation has none\nthis program can read."
+    }
+  },
+  "required": [
+    "version",
+    "directory",
+    "fingerprint",
+    "game_directory",
+    "built",
+    "asset",
+    "tile_size",
+    "full_size",
+    "file_pattern",
+    "levels",
+    "world",
+    "files",
+    "formats",
+    "missing",
+    "warnings"
+  ],
+  "title": "MapImagesReport",
+  "type": "object"
+}

@@ -178,7 +178,7 @@ fn is_image_file(name: &str) -> bool {
         .is_some_and(|stem| records::is_lower_hex(stem, 40))
 }
 
-fn ordinary(path: &Path, directory: bool) -> bool {
+pub(crate) fn ordinary(path: &Path, directory: bool) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|meta| {
         !paths::is_link(&meta)
             && if directory {
@@ -555,7 +555,7 @@ fn decode_all(game: &Path, limits: Limits) -> std::result::Result<(Index, Vec<De
     Ok((index, decoded.into_values().collect()))
 }
 
-fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
