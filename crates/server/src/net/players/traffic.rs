@@ -215,4 +215,55 @@ mod tests {
         assert!(before.is_empty() && delete.records.is_empty());
         assert_eq!(delete.deleted.len(), 4);
     }
+
+    #[test]
+    fn saved_settings_reach_every_running_session_on_its_next_tick() {
+        use crate::ai_settings::{AiSettings, Live};
+        let (sender, live) = Live::channel(AiSettings::default());
+        // Two players' world sessions on one server share the handle.
+        let mut sessions: Vec<_> = (0..2u8)
+            .map(|player| {
+                let (traffic, _, content) =
+                    crate::traffic_content::population::tests::fixture_with(player + 1);
+                let (rivals, ..) = crate::rival_content::population::tests::fixture(player + 1);
+                let mut listener =
+                    PlayerListener::new(100).with_traffic(Some(std::sync::Arc::new(content)));
+                listener.traffic_population = Some(traffic);
+                listener.rival_population = Some(rivals);
+                let mut live = live.clone();
+                let initial = live.changed().unwrap_or_else(|| live.current());
+                (listener.with_ai_settings(initial), live)
+            })
+            .collect();
+        for (_, live) in &mut sessions {
+            assert_eq!(live.changed(), None, "nothing saved yet");
+        }
+        for saved in [
+            AiSettings::new(300, Some(15)).unwrap(),
+            AiSettings::new(0, Some(0)).unwrap(),
+            AiSettings::default(),
+        ] {
+            sender.send_replace(saved);
+            for (listener, live) in &mut sessions {
+                // What the world loop does each tick.
+                if let Some(settings) = live.changed() {
+                    listener.set_ai_settings(settings);
+                }
+                assert_eq!(listener.ai, saved);
+                assert_eq!(
+                    listener
+                        .traffic_population
+                        .as_ref()
+                        .unwrap()
+                        .traffic_percent(),
+                    saved.traffic_percent()
+                );
+                assert_eq!(
+                    listener.rival_population.as_ref().unwrap().limit(),
+                    saved.rival_limit().map(usize::from)
+                );
+                assert_eq!(live.changed(), None, "applied once");
+            }
+        }
+    }
 }

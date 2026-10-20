@@ -176,15 +176,23 @@ schedules or challenge completion. No remote product entitlements are granted.
 rivals are yours to choose; the defaults are the original game:
 
 ```sh
-# Half the original traffic and at most two rivals at once.
+# Half the original traffic and two roaming rivals.
 nfs-afterhours start --game-dir "F:\EA Games\Need for Speed" --traffic 50 --rivals 2
 # Back to the original amounts.
 nfs-afterhours start --game-dir "F:\EA Games\Need for Speed" --traffic 100 --rivals original
 ```
 
-`--traffic` is a percentage of the original traffic from 0 (none) to 300.
-`--rivals` is the most roaming rivals active at once, from 0 (none) to 128, or
-`original` for the original number. Both are saved in `settings.json` in the data
+`--traffic` is a percentage of the original traffic from 0 (none) to 300 (3x). More is not
+offered: the game keeps a fixed amount of memory for the cars around you and crashed in a
+test with about 45-50 AI cars nearby (5x traffic plus rivals). A saved amount above 300
+from a test build reads as 300.
+`--rivals` is the number of roaming rivals to keep active, from 0 (none) to 15, or
+`original` for the original number. The game's own rivals depend on where you
+drive (usually two to five at once in the parts of the city that have them); a number
+caps them, and above them the server adds other installed racers whose authored start
+is within 3.5 km of you, nearest first, each at most once, and keeps a racer until it
+is 4.5 km away. So a high number gives fewer rivals near the edges of the map. Rival
+cars still appear within 790 m like the game's own. Both are saved in `settings.json` in the data
 directory and apply to every later `start`, `serve` and `setup` until changed. You can
 also edit that file directly; the start output shows the values in use:
 
@@ -193,13 +201,21 @@ also edit that file directly; the start output shows the values in use:
 ```
 
 `rival_limit` set to `null` means the original number. Out-of-range, unknown or
-malformed settings are refused rather than ignored. More traffic or rivals than the
-original costs client performance.
+malformed settings are refused rather than ignored; a rival number above 15 saved by
+an older build (which accepted up to 128) reads as 15. More traffic or rivals than the
+original costs client performance. Traffic always leaves room for 15 rival cars in the
+server's 128-car AI budget.
 
 `nfs-afterhours settings` prints the saved values without starting anything, and
-`nfs-afterhours settings --traffic 200 --rivals original` saves new ones for the next
-session. Saving is refused while a session runs, because a running session keeps the
-values it started with.
+`nfs-afterhours settings --traffic 200 --rivals original` saves new ones. Saving also
+works while a session runs, and that session applies the new values within about a
+second: the server checks the file's modified time and size once a second and reads it
+only when they change. Hand edits apply the same way; an invalid file is ignored (the
+server log says so) and the current values stay. More traffic fills in at the normal
+spawn pace; with less, cars leave as they fall out of range behind you, and traffic off
+stops new cars at once. A lower rival number removes rivals that have no car near you
+right away, and the others once their car is out of range; a higher one adds racers
+over the next seconds.
 
 Every subcommand accepts `--json` to print one JSON object instead of text, and
 exits with a documented code (`nfs-afterhours --help` lists them): 0 success,
