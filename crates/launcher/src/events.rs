@@ -24,8 +24,13 @@
 //! Human console text is silenced in this mode. A write that fails, for
 //! example because the reader closed the pipe, disables further events and
 //! never stops the session; `status` and `sessions` still observe it.
+//!
+//! With `--api` the supervisor also publishes every event it writes to the
+//! session API's event stream ([`crate::api`]), with or without
+//! `--events`.
 
 use crate::{
+    api::hub::Hub,
     clock,
     records::{Action, Status},
     terminal::Lines,
@@ -33,8 +38,8 @@ use crate::{
 use schemars::JsonSchema;
 use serde::Serialize;
 #[cfg(test)]
-use std::sync::{Arc, Mutex};
-use std::{io::Write, path::PathBuf};
+use std::sync::Mutex;
+use std::{io::Write, path::PathBuf, sync::Arc};
 
 /// Version of [`Event`].
 pub const FORMAT_VERSION: u32 = 1;
@@ -103,6 +108,19 @@ pub enum Body {
     },
 }
 
+impl Body {
+    /// The value of the `event` property.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Body::Session { .. } => "session",
+            Body::Status { .. } => "status",
+            Body::Diagnostic { .. } => "diagnostic",
+            Body::MapFeed { .. } => "map-feed",
+            Body::Final { .. } => "final",
+        }
+    }
+}
+
 /// The child that wrote a diagnostic line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
@@ -126,9 +144,11 @@ impl DiagnosticSource {
     ];
 }
 
-/// Writes events as JSON lines, or nothing when disabled.
+/// Writes events as JSON lines, publishes them to the session API, or
+/// does nothing when neither is on.
 pub struct Emitter {
     out: Option<Box<dyn Write + Send>>,
+    hub: Option<Arc<Hub>>,
     pending: [Lines; 4],
 }
 
@@ -151,34 +171,52 @@ impl Emitter {
     fn with(out: Option<Box<dyn Write + Send>>) -> Self {
         Self {
             out,
+            hub: None,
             pending: Default::default(),
         }
     }
 
-    /// Whether events are still being written.
+    /// Also publish every event to the session API's streams.
+    pub fn attach(&mut self, hub: Arc<Hub>) {
+        self.hub = Some(hub);
+    }
+
+    /// Whether events are still being written to standard output.
     pub fn enabled(&self) -> bool {
         self.out.is_some()
     }
 
-    /// Write one event. A failed write disables the emitter.
+    /// Whether anyone takes events: standard output or the session API.
+    pub fn observed(&self) -> bool {
+        self.out.is_some() || self.hub.is_some()
+    }
+
+    /// Write and publish one event. A failed write stops further writes;
+    /// publishing to the session API goes on.
     pub fn emit(&mut self, body: Body) {
-        let Some(out) = self.out.as_mut() else {
+        if !self.observed() {
             return;
-        };
+        }
+        let kind = body.kind();
         let event = Event {
             version: FORMAT_VERSION,
             utc: clock::now_iso(),
             body,
         };
-        let written = serde_json::to_vec(&event)
-            .map_err(std::io::Error::other)
-            .and_then(|mut line| {
-                line.push(b'\n');
-                out.write_all(&line)?;
-                out.flush()
-            });
-        if written.is_err() {
-            self.out = None;
+        let Ok(text) = serde_json::to_string(&event) else {
+            return;
+        };
+        if let Some(out) = self.out.as_mut() {
+            let written = out
+                .write_all(text.as_bytes())
+                .and_then(|()| out.write_all(b"\n"))
+                .and_then(|()| out.flush());
+            if written.is_err() {
+                self.out = None;
+            }
+        }
+        if let Some(hub) = &self.hub {
+            hub.publish(kind, text);
         }
     }
 
@@ -192,7 +230,7 @@ impl Emitter {
     /// Emit every complete line of a child's diagnostic text; keep an
     /// unterminated last line until more text or [`Emitter::flush`].
     pub fn diagnostic(&mut self, source: DiagnosticSource, text: &str) {
-        if !self.enabled() || text.is_empty() {
+        if !self.observed() || text.is_empty() {
             return;
         }
         let mut lines = Vec::new();

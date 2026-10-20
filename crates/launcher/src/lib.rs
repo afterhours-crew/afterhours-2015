@@ -26,6 +26,7 @@
 //! See `crates/launcher/README.md` for how the pieces fit together and
 //! `docs/LOCAL-LAUNCHER.md` for how to run the game.
 
+pub mod api;
 pub mod cli;
 pub mod clock;
 pub mod commands;

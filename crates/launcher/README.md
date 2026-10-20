@@ -22,6 +22,7 @@ nfs-afterhours start   --game-dir <DIR>     run the server, start and route the 
 nfs-afterhours status                       report the current session
 nfs-afterhours stop                         ask the live session to close the game, then the server
 nfs-afterhours play                         ask the running serve session to start the game (Windows)
+nfs-afterhours api                          show how to reach the running session's API (--api)
 nfs-afterhours profile [--account-id <ID>]  show a saved driver's profile; change nothing
                        [--game-dir <DIR>]   (car names come from the installed game,
                        [--language <LOCALE>] read-only, in the game's locale)
@@ -61,7 +62,9 @@ field and a JSON Schema (draft 7) generated from the Rust type that prints it:
 | `stop` | `stop --json`: `outcome` `requested` or `already-over`, with the status |
 | `play` | `play --json`: the status when the request was written and the request file |
 | `session-status` | `setup`/`serve`/`start --json` (the final status); also `status.json`. It carries the session's `action` and `game_running`, so `serve` without a game is hosting and with one is playing |
-| `event` | each line of `setup`/`serve`/`start --events`, including the live map positions (`map-feed`) |
+| `event` | each line of `setup`/`serve`/`start --events`, including the live map positions (`map-feed`); also each event of the session API's `/v1/events` |
+| `api` | `api --json` and `api.json` in a session started with `--api`: the session ID, the API's address and its token |
+| `api-error` | the body of every refused session API request |
 | `profile`, `profile-list` | `profile --json`, `profile --list --json` |
 | `car-images` | `car-images --json`: the image set, counts per size, formats and unresolved images |
 | `map-images` | `map-images --json`: the tile set, its detail levels, file naming, the world box it covers and any missing tiles |
@@ -82,9 +85,10 @@ strict checker that rejects any property a schema does not describe.
 `nfs-afterhours`), package version, release tag, source revision (`null` for
 local builds), whether this platform can launch the game, the current version
 of every record, and `capabilities`: `profile`, `sessions`, `events`, `play`,
-`car-images`, `map-images`, `world-settings` (the `settings` command) and
-`map-feed` (live positions in the event stream) today. A screen whose capability is missing should say
-the feature is not available yet.
+`car-images`, `map-images`, `world-settings` (the `settings` command),
+`map-feed` (live positions in the event stream) and `api` (the session API)
+today. A screen whose capability is missing should say the feature is not
+available yet.
 
 Versioning: until the desktop launcher's first release, every record stays at
 version 1 and may change in lockstep with the launcher. From that release on,
@@ -185,6 +189,60 @@ newest complete line in memory and writes none of them to
 Not established yet: the positions are what the server holds, but no live
 run has compared markers with the game's own map, and the map orientation
 was checked only by drawing the road network over it.
+
+### Session API
+
+With `--api`, `setup`, `serve` and `start` serve their session over HTTP on
+this computer, so a desktop front end can follow and control it the way it
+would a server on another computer, and can close, crash or reopen without
+affecting the session. The supervisor listens on `127.0.0.1` at a port the
+system picks, from just after it locks the data directory until the
+session's last status, and answers:
+
+| Request | Answer |
+| --- | --- |
+| `GET /v1/info` | the `version` record |
+| `GET /v1/status` | the `status` record, as `status --json` |
+| `GET /v1/events` | the session's `event` records as server-sent events |
+| `POST /v1/stop` | the `stop` record: close the game, then the server, as `stop --json` |
+| `POST /v1/play` | the `play` record: start the game in a `serve` session, as `play --json` |
+
+Answers are the records the matching commands print, with the same schemas
+and the same checks behind them. A refused request answers an `api-error`
+record (`{"version":1,"message":"..."}`) with status 401 (no or wrong
+token), 403 (wrong `Host`, or an `Origin` header), 404, 405 (with `Allow`),
+409 (the command refused, as its exit codes 1 and 4), 413 (a request body
+or a head over 8 KiB) or 503 (more than 16 connections or 8 event streams).
+Every request needs `Host: 127.0.0.1:<port>` (or `localhost:<port>`) and
+`Authorization: Bearer <token>`, and none may carry a body: web pages cannot
+reach it, and other programs need the token.
+
+How to reach it: the supervisor writes the `api` record (`version`, session
+`id`, `url` such as `http://127.0.0.1:53111`, and a `token` of 64 hexadecimal
+characters from the system's random source, new for every session) to
+`api.json` in the session directory, readable only by the user where the
+system allows, and removes it when the session ends. `nfs-afterhours api
+--json` prints it for the current session, or exits with 4 when no live
+session serves the API.
+
+The event stream (`text/event-stream`) sends each event as `id` (its place
+in the session), `event` (its kind) and `data` (the record's JSON on one
+line). It starts with the newest `status` and `map-feed` events, so a reader
+that connects or reconnects knows the state at once, then sends every later
+`status`, `diagnostic` and `map-feed` event in order, with a `: keep-alive`
+comment every 15 seconds while idle, and ends after the session's last
+status. `session` and `final` belong to the command's standard output and
+are not in it. The supervisor keeps the last 512 events (at most 4 MiB) for
+readers that fall behind; a slower reader skips ahead and never holds up
+the session. The session's log files keep every diagnostic.
+
+`--api` is for front ends: it silences console text as `--events` does, and
+standard output holds only the front end's `session` and `final` event
+lines, so a client that starts the command learns why it was refused before
+a session existed, and nothing in the session depends on that pipe. With
+`--events` as well, every event also goes to standard output. The server is
+asked for map frames whenever either is on. The API only listens on this
+computer; serving another computer is not offered yet.
 
 ### Playing in a serve session
 
@@ -483,6 +541,7 @@ existing data directories keep working.
 | `contract` | record names, versions, capabilities and schema generation; the strict test validator |
 | `sessions` | read-only session folder summaries and the server log scanner |
 | `events` | the JSON-lines event stream |
+| `api` | the session API: `api/hub` keeps the events for its streams, `api/http` the bounded HTTP subset it speaks |
 | `map_feed` | the server's map frames: the newest-line latch, their checks and which become `map-feed` events |
 | `settings` | the saved traffic and rival amounts in `settings.json` and their server options |
 | `paths`, `records`, `session`, `install`, `digest`, `compat`, `marker`, `clock` | portable pieces with their own unit tests |
@@ -493,11 +552,13 @@ existing data directories keep working.
 cargo test -p nfs-afterhours -p nfs-afterhours-sys
 ```
 
-Unit tests need no game, server or network. The integration tests in
+Unit tests need no game, server or network; the session API's tests open
+loopback sockets on ports the system picks. The integration tests in
 `tests/cli.rs` drive the built binary; on Unix they run a complete `serve`
 session against a shell script standing in for the server, observe it from a
 second process through `status`, stop it, read the same session as an event
-stream, and also kill a supervisor to see `interrupted` reported. On every
+stream, follow and stop another through the session API (`--api`), and also
+kill a supervisor to see `interrupted` reported. On every
 platform they check `version`, `schema`, `sessions` and a refused event
 stream. The Windows process-layer tests run in CI on a
 Windows runner. Live acceptance on the supported installation is recorded in

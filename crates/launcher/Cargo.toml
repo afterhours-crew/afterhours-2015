@@ -40,6 +40,9 @@ miniz_oxide = { version = "=0.9.1", default-features = false, features = ["with-
 # Argument parsing, help and usage. Default features are off: no color, no
 # suggestions, no environment-variable or wrapping support.
 clap = { version = "=4.6.7", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
+# Request heads of the session API (`--api`); already locked by the
+# server's loopback discovery service.
+httparse = "=1.10.1"
 # JSON Schemas of the `--json` records, generated from these types and
 # committed under `schema/` for the desktop launcher.
 schemars = { version = "=1.2.2", default-features = false, features = ["derive", "std"] }

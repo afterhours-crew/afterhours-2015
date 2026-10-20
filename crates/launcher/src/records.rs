@@ -161,6 +161,9 @@ pub struct Request {
     /// [`crate::events`]) instead of human console text.
     #[serde(default)]
     pub events: bool,
+    /// Serve the session API on this computer (see [`crate::api`]).
+    #[serde(default)]
+    pub api: bool,
     /// Start the server so the game can connect: under the compatibility
     /// name with the launcher-services port. Always so for `start`; for
     /// `serve` it lets a play request start the game later.
@@ -380,6 +383,7 @@ mod tests {
             player_name: "Driver".into(),
             record_protocol: false,
             events: false,
+            api: false,
             game_support: false,
             settings: Default::default(),
         };

@@ -1,0 +1,32 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "How to reach a session's API: `api.json` and `nfs-afterhours api --json`.",
+  "properties": {
+    "id": {
+      "description": "The session this API serves.",
+      "type": "string"
+    },
+    "token": {
+      "description": "Send as `Authorization: Bearer <token>` with every request. 64\nlowercase hexadecimal characters, new for every session.",
+      "type": "string"
+    },
+    "url": {
+      "description": "Base address, `http://127.0.0.1:<port>`; requests go to `<url>/v1/...`.",
+      "type": "string"
+    },
+    "version": {
+      "const": 1,
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version",
+    "id",
+    "url",
+    "token"
+  ],
+  "title": "ApiRecord",
+  "type": "object"
+}

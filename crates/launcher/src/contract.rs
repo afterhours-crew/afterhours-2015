@@ -20,7 +20,7 @@
 //! provides.
 
 use crate::{
-    events, map, profile,
+    api, events, map, profile,
     records::{self, AccountRecord, Preflight, Status},
     sessions,
 };
@@ -88,6 +88,14 @@ impl Record for sessions::SessionList {
     const NAME: &'static str = "sessions";
     const VERSION: u32 = sessions::FORMAT_VERSION;
 }
+impl Record for api::ApiRecord {
+    const NAME: &'static str = "api";
+    const VERSION: u32 = api::FORMAT_VERSION;
+}
+impl Record for api::ApiError {
+    const NAME: &'static str = "api-error";
+    const VERSION: u32 = api::FORMAT_VERSION;
+}
 impl Record for events::Event {
     const NAME: &'static str = "event";
     const VERSION: u32 = events::FORMAT_VERSION;
@@ -119,8 +127,10 @@ fn info<T: Record>() -> RecordInfo {
 }
 
 /// Every record, sorted by name.
-pub fn records() -> [RecordInfo; 14] {
+pub fn records() -> [RecordInfo; 16] {
     let mut all = [
+        info::<api::ApiRecord>(),
+        info::<api::ApiError>(),
         info::<Preflight>(),
         info::<profile::images::CarImagesReport>(),
         info::<events::Event>(),
@@ -348,10 +358,13 @@ pub enum Capability {
     /// `map-feed` events with `--events` on `serve` and `start`: live
     /// positions of the players' cars, traffic and roaming rivals.
     MapFeed,
+    /// `--api` on `setup`, `serve` and `start`, and `api`: the session over
+    /// HTTP on this computer, with its event stream, `stop` and `play`.
+    Api,
 }
 
 /// Capabilities of this build, in a fixed order.
-pub const CAPABILITIES: [Capability; 8] = [
+pub const CAPABILITIES: [Capability; 9] = [
     Capability::Profile,
     Capability::Sessions,
     Capability::Events,
@@ -360,6 +373,7 @@ pub const CAPABILITIES: [Capability; 8] = [
     Capability::MapImages,
     Capability::WorldSettings,
     Capability::MapFeed,
+    Capability::Api,
 ];
 
 /// Identity of the program the launcher library is running in.

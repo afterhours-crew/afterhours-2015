@@ -119,6 +119,19 @@ pub struct SessionArgs {
     /// is silenced; the session keeps running if the reader goes away.
     #[arg(long)]
     pub events: bool,
+
+    /// Serve the session over HTTP on this computer for a desktop front end.
+    ///
+    /// The supervisor listens on 127.0.0.1 at a port the system picks and
+    /// answers `/v1/info`, `/v1/status`, `/v1/events` (the event records as
+    /// server-sent events, map positions included), `/v1/stop` and
+    /// `/v1/play`. The address and a token every request must carry are
+    /// written to api.json in the session directory and printed by
+    /// `nfs-afterhours api`. The session does not depend on any client.
+    /// Console text is silenced; standard output holds only the `session`
+    /// and `final` event lines (every event with --events).
+    #[arg(long)]
+    pub api: bool,
 }
 
 /// Arguments for `serve`.
@@ -262,6 +275,13 @@ pub enum Command {
     /// not a serve session, served with --server-only, stopping, or a game
     /// already running or requested.
     Play,
+
+    /// Show how to reach the running session's API; change nothing.
+    ///
+    /// Prints the address and token of a session started with --api, from
+    /// api.json in its session directory. Exits with code 4 when no live
+    /// session serves the API.
+    Api,
 
     /// Show a saved driver's profile, or list every saved driver; change nothing.
     ///
@@ -466,6 +486,22 @@ mod tests {
                 .command,
             Command::Play
         ));
+        assert!(matches!(
+            Cli::try_parse_from(["nfs-afterhours", "api", "--json"])
+                .unwrap()
+                .command,
+            Command::Api
+        ));
+        for action in ["setup", "serve", "start"] {
+            match Cli::try_parse_from(["nfs-afterhours", action, "--game-dir", "G", "--api"])
+                .unwrap()
+                .command
+            {
+                Command::Setup(args) | Command::Start(args) => assert!(args.api && !args.events),
+                Command::Serve(args) => assert!(args.session.api && !args.session.events),
+                other => panic!("{other:?}"),
+            }
+        }
         match Cli::try_parse_from(["nfs-afterhours", "sessions"])
             .unwrap()
             .command

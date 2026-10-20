@@ -13,7 +13,7 @@ mod profile;
 mod recover;
 mod sessions;
 mod settings;
-mod status;
+pub(crate) mod status;
 mod version;
 
 use crate::{
@@ -114,13 +114,14 @@ fn dispatch(cli: Cli, bundled_server: Option<PathBuf>, build: Build) -> Result<(
         Command::Status => status::status(&context),
         Command::Stop => status::stop(&context),
         Command::Play => status::play(&context),
+        Command::Api => status::api(&context),
         Command::Profile(args) => profile::profile(&context, &args),
         Command::CarImages(args) => profile::car_images(&context, &args),
         Command::MapImages(args) => map::map_images(&context, &args),
         Command::Sessions(args) => sessions::sessions(&context, &args),
         Command::Settings(args) => settings::settings(&context, &args),
         Command::Recover { account_id } => recover::recover(&context, &account_id),
-        Command::Supervise { request } => launch::supervise(&request),
+        Command::Supervise { request } => launch::supervise(&request, build),
         Command::Version | Command::Schema { .. } => unreachable!("handled above"),
     }
 }

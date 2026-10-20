@@ -140,18 +140,18 @@ impl LiveSession {
             .ok_or_else(|| Failure::refused("This action needs --game-dir."))
     }
 
-    /// Pass a child's diagnostic text to the event stream or the console.
+    /// Pass a child's diagnostic text to the event stream or the console,
+    /// and to the session API when it runs.
     fn forward(&mut self, source: DiagnosticSource, text: &str) {
-        if self.events.enabled() {
-            self.events.diagnostic(source, text);
-        } else {
+        if !self.events.enabled() {
             terminal::raw(text);
         }
+        self.events.diagnostic(source, text);
     }
 
     /// Emit the server's newest map frame, if it is newer than the last.
     fn relay_map_feed(&mut self) {
-        if !self.events.enabled() {
+        if !self.events.observed() {
             return;
         }
         if let Some(line) = self.server.as_mut().and_then(|s| s.take_map_feed())
@@ -355,7 +355,7 @@ impl LiveSession {
         if self.request.record_protocol {
             args.push("--record-protocol".into());
         }
-        if self.events.enabled() {
+        if self.events.observed() {
             // Live positions for `map-feed` events, after the readiness line.
             args.push("--map-feed".into());
         }
@@ -513,8 +513,8 @@ impl Steps for LiveSession {
             stderr_log: self.run.join("server.stderr.log"),
             environment: Vec::new(),
             capture_first_line: true,
-            // Map frames are only read in event mode.
-            map_feed: self.events.enabled(),
+            // Map frames are only read in event mode or for the session API.
+            map_feed: self.events.observed(),
         };
         let mut server = self.platform.spawn(&spec)?;
         let deadline = Instant::now() + SERVER_READY_DEADLINE;

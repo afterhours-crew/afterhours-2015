@@ -14,6 +14,7 @@
 use super::{Context, server_path};
 use crate::{
     cli::{GameArgs, SessionArgs},
+    contract::Build,
     events::{self, Emitter},
     exit::{Exit, Failure, Result},
     paths, platform, preflight,
@@ -21,7 +22,10 @@ use crate::{
     retention, session, settings,
     supervisor::{self, live::LiveSession},
 };
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 /// `check`: preflight only.
 pub fn check(context: &Context, args: &GameArgs) -> Result<()> {
@@ -79,6 +83,8 @@ fn new_session_id() -> String {
 /// `setup`, `serve` and `start`: preflight, write the request, supervise.
 /// With `--json` the final status is printed as one object; with
 /// `--events` the whole session is a JSON-lines stream ending in `final`.
+/// With `--api` alone the stream holds only `session` and `final`: the
+/// session itself is followed through its API.
 /// `server_only` keeps a Windows `serve` session from hosting the game.
 pub fn launch(
     context: &Context,
@@ -86,7 +92,7 @@ pub fn launch(
     args: &SessionArgs,
     server_only: bool,
 ) -> Result<()> {
-    let mut emitter = if args.events {
+    let mut emitter = if args.events || args.api {
         crate::terminal::silence();
         Emitter::stdout()
     } else {
@@ -105,7 +111,7 @@ pub fn launch(
         },
         Err(failure) => (None, Err(failure)),
     };
-    if args.events {
+    if args.events || args.api {
         emitter.emit(events::Body::Final {
             exit_code: result.as_ref().map_or_else(|f| f.exit as u8, |()| 0),
             message: result.as_ref().err().map(|f| f.message.clone()),
@@ -170,6 +176,7 @@ fn start_session(
             player_name: args.player_name.clone(),
             record_protocol: args.record_protocol,
             events: args.events,
+            api: args.api,
             game_support,
             settings,
         };
@@ -265,13 +272,20 @@ fn completed_status(run: &Path) -> Result<Option<records::Status>> {
     Ok(Some(record))
 }
 
-/// `supervise`: run a session from its request file.
-pub fn supervise(request_path: &Path) -> Result<()> {
+/// `supervise`: run a session from its request file. With `--api` the
+/// session API serves the session from just after the data directory is
+/// locked until its last status.
+pub fn supervise(request_path: &Path, build: Build) -> Result<()> {
     let (request, data, run) = supervisor::live::load_request(request_path)?;
+    // With `--api` alone the supervisor writes nothing to standard output:
+    // its events go to the API only.
     let mut emitter = if request.events {
         crate::terminal::silence();
         Emitter::stdout()
     } else {
+        if request.api {
+            crate::terminal::silence();
+        }
         Emitter::disabled()
     };
     let started = (|| -> Result<session::Lock> {
@@ -298,14 +312,39 @@ pub fn supervise(request_path: &Path) -> Result<()> {
     };
     let action = request.action;
     let id = request.id.clone();
+    let api = if request.api {
+        let hub = crate::api::hub::Hub::new();
+        let control = Arc::new(crate::api::LiveControl {
+            data: data.clone(),
+            build,
+        });
+        match crate::api::SessionApi::start(control, Arc::clone(&hub), &id, &run) {
+            Ok(api) => {
+                emitter.attach(hub);
+                Some(api)
+            }
+            Err(failure) => {
+                record_refusal(&run, &id, action, &failure, &mut emitter);
+                return Err(failure);
+            }
+        }
+    } else {
+        None
+    };
     let mut live = match LiveSession::new(request, data, run.clone(), emitter) {
         Ok(live) => live,
         Err(failure) => {
             record_refusal(&run, &id, action, &failure, &mut Emitter::disabled());
+            if let Some(api) = api {
+                api.finish();
+            }
             return Err(failure);
         }
     };
     let outcome = supervisor::run(&mut live, action);
+    if let Some(api) = api {
+        api.finish();
+    }
     if outcome.succeeded() {
         Ok(())
     } else {

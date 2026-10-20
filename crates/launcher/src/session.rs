@@ -394,6 +394,7 @@ mod tests {
             player_name: "Driver".into(),
             record_protocol: false,
             events: false,
+            api: false,
             game_support,
             settings: Default::default(),
         };

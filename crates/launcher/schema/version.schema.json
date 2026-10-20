@@ -43,6 +43,11 @@
           "const": "map-feed",
           "description": "`map-feed` events with `--events` on `serve` and `start`: live\npositions of the players' cars, traffic and roaming rivals.",
           "type": "string"
+        },
+        {
+          "const": "api",
+          "description": "`--api` on `setup`, `serve` and `start`, and `api`: the session over\nHTTP on this computer, with its event stream, `stop` and `play`.",
+          "type": "string"
         }
       ]
     }
