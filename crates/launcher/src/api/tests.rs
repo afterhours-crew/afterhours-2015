@@ -804,6 +804,34 @@ fn the_session_api_writes_how_to_reach_it_and_forgets_the_token_at_the_end() {
     std::fs::remove_dir_all(data).unwrap();
 }
 
+#[test]
+fn a_session_without_its_first_status_has_no_api_yet() {
+    // The supervisor points at its session, starts the API, then writes the
+    // first status: `api` polled in between answers "not yet" (exit 4).
+    let data = crate::testing::scratch("api-starting");
+    let run = paths::session_dir(&data, ID);
+    std::fs::create_dir_all(&run).unwrap();
+    session::point_current_session(&data, ID).unwrap();
+    let lock = session::Lock::acquire(&data).unwrap();
+    assert!(session::current_status(&data).is_err(), "no status yet");
+    assert_eq!(current(&data).unwrap_err().exit, Exit::NoSession);
+    let record = ApiRecord {
+        version: FORMAT_VERSION,
+        id: ID.into(),
+        url: "http://127.0.0.1:1".into(),
+        token: TOKEN.into(),
+    };
+    records::write_new_json(&run.join(FILE), &record).unwrap();
+    assert_eq!(current(&data).unwrap_err().exit, Exit::NoSession);
+    records::write_new_json(&run.join("status.json"), &status(State::Ready)).unwrap();
+    assert_eq!(current(&data).unwrap(), record);
+    // Anything else wrong is still reported as it is.
+    drop(lock);
+    std::fs::write(data.join(session::POINTER_FILE), b"not json").unwrap();
+    assert_eq!(current(&data).unwrap_err().exit, Exit::Refused);
+    std::fs::remove_dir_all(data).unwrap();
+}
+
 /// One request to a live session's API, with a JSON body when given; its
 /// status code and body.
 fn live_request(record: &ApiRecord, method: &str, path: &str, body: Option<&str>) -> (u16, String) {
