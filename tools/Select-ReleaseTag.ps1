@@ -21,8 +21,10 @@ if ($Commit -notmatch '^[0-9a-f]{40}$') { throw 'Expected the full commit SHA.' 
 if ($Repository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') { throw 'Expected owner/repository.' }
 if ($Branch -notmatch '^[A-Za-z0-9_./-]+$') { throw 'Expected a branch name.' }
 
-git merge-base --is-ancestor $Commit "origin/$Branch"
-if ($LASTEXITCODE -ne 0) { throw "$Commit is not on $Branch." }
+# Main's own history: a merge commit, not a commit inside a merged branch.
+$history = @(git rev-list --first-parent "origin/$Branch")
+if ($LASTEXITCODE -ne 0) { throw "Cannot list the history of $Branch." }
+if ($history -notcontains $Commit) { throw "$Commit is not on $Branch's first-parent history." }
 
 function Get-VersionAt([string]$Revision) {
     $text = @(git show "${Revision}:crates/bundle/Cargo.toml")

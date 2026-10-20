@@ -109,6 +109,10 @@ function global:git {
             return
         }
         'merge-base' { if (!$s.Ancestor) { $global:LASTEXITCODE = 1 }; return }
+        'rev-list' {
+            if ($s.Ancestor) { return @($sha.other, $sha.release, $sha.v040) }
+            return @($sha.other, $sha.v040)
+        }
         'describe' { return $s.Describe }
         'log' { return $s.Log }
         'show' {
@@ -346,7 +350,7 @@ try {
 
     $refusals = [ordered]@{
         'abbreviated commit' = @{ Commit = 'abc123'; Pattern = 'full commit' }
-        'commit off main' = @{ Setup = { $global:ReleaseTestState.Ancestor = $false }; Pattern = 'not on main' }
+        'commit off main''s first-parent history' = @{ Setup = { $global:ReleaseTestState.Ancestor = $false }; Pattern = "not on main's first-parent history" }
         'tag on another commit' = @{ Setup = { $global:ReleaseTestState.Remote['refs/tags/v0.4.1'] = $sha.other }; Pattern = 'already names' }
         'version older than the published one' = @{ Setup = { $global:ReleaseTestState.Latest = 'v0.5.0' }; Pattern = 'not newer' }
         'manual run without passing CI' = @{ Setup = { $global:ReleaseTestState.CiRuns = '0' }; RequireCi = $true; Pattern = 'CI has not passed' }
