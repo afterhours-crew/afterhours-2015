@@ -70,6 +70,8 @@ pub struct LiveSession {
     ready: Option<ServerReady>,
     /// The JSON-lines stream when the request asked for events.
     events: Emitter,
+    /// Which of the server's map frames become `map-feed` events.
+    map_feed: crate::map_feed::Relay,
     /// Games started in this session, which names their logs.
     #[cfg_attr(not(windows), allow(dead_code))]
     games: u32,
@@ -122,6 +124,7 @@ impl LiveSession {
             server_executable: None,
             ready: None,
             events,
+            map_feed: crate::map_feed::Relay::default(),
             games: 0,
             #[cfg(windows)]
             job,
@@ -143,6 +146,18 @@ impl LiveSession {
             self.events.diagnostic(source, text);
         } else {
             terminal::raw(text);
+        }
+    }
+
+    /// Emit the server's newest map frame, if it is newer than the last.
+    fn relay_map_feed(&mut self) {
+        if !self.events.enabled() {
+            return;
+        }
+        if let Some(line) = self.server.as_mut().and_then(|s| s.take_map_feed())
+            && let Some(body) = self.map_feed.accept(&line)
+        {
+            self.events.emit(body);
         }
     }
 
@@ -176,6 +191,7 @@ impl LiveSession {
             stderr_log: self.run.join(format!("{name}.stderr.log")),
             environment: Vec::new(),
             capture_first_line: false,
+            map_feed: false,
         };
         let mut child = self.platform.spawn(&spec)?;
         let source = if name == "create-account" {
@@ -339,6 +355,10 @@ impl LiveSession {
         if self.request.record_protocol {
             args.push("--record-protocol".into());
         }
+        if self.events.enabled() {
+            // Live positions for `map-feed` events, after the readiness line.
+            args.push("--map-feed".into());
+        }
         args.extend(self.request.settings.server_arguments());
         // The server applies amounts saved during the session (`settings`).
         args.push("--settings-file".into());
@@ -430,6 +450,7 @@ impl Steps for LiveSession {
 
     fn wait(&mut self) {
         self.echo_diagnostics();
+        self.relay_map_feed();
         std::thread::sleep(Duration::from_millis(250));
     }
 
@@ -492,6 +513,8 @@ impl Steps for LiveSession {
             stderr_log: self.run.join("server.stderr.log"),
             environment: Vec::new(),
             capture_first_line: true,
+            // Map frames are only read in event mode.
+            map_feed: self.events.enabled(),
         };
         let mut server = self.platform.spawn(&spec)?;
         let deadline = Instant::now() + SERVER_READY_DEADLINE;
@@ -554,6 +577,7 @@ impl Steps for LiveSession {
             stderr_log: self.run.join(format!("{logs}.stderr.log")),
             environment: vec![("EARtPLaunchCode".into(), marker.to_string())],
             capture_first_line: false,
+            map_feed: false,
         };
         // Own the game before anything else can fail, so a failed start
         // still closes it.

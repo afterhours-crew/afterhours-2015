@@ -61,7 +61,7 @@ field and a JSON Schema (draft 7) generated from the Rust type that prints it:
 | `stop` | `stop --json`: `outcome` `requested` or `already-over`, with the status |
 | `play` | `play --json`: the status when the request was written and the request file |
 | `session-status` | `setup`/`serve`/`start --json` (the final status); also `status.json`. It carries the session's `action` and `game_running`, so `serve` without a game is hosting and with one is playing |
-| `event` | each line of `setup`/`serve`/`start --events` |
+| `event` | each line of `setup`/`serve`/`start --events`, including the live map positions (`map-feed`) |
 | `profile`, `profile-list` | `profile --json`, `profile --list --json` |
 | `car-images` | `car-images --json`: the image set, counts per size, formats and unresolved images |
 | `map-images` | `map-images --json`: the tile set, its detail levels, file naming, the world box it covers and any missing tiles |
@@ -82,7 +82,8 @@ strict checker that rejects any property a schema does not describe.
 `nfs-afterhours`), package version, release tag, source revision (`null` for
 local builds), whether this platform can launch the game, the current version
 of every record, and `capabilities`: `profile`, `sessions`, `events`, `play`,
-`car-images`, `map-images` and `world-settings` (the `settings` command) today. A screen whose capability is missing should say
+`car-images`, `map-images`, `world-settings` (the `settings` command) and
+`map-feed` (live positions in the event stream) today. A screen whose capability is missing should say
 the feature is not available yet.
 
 Versioning: until the desktop launcher's first release, every record stays at
@@ -105,18 +106,85 @@ are the exit code plus a message on stderr (in event mode, the `final` line).
 - `diagnostic`: one line a child wrote to stderr, with `source` `prepare`,
   `create-account`, `server` or `game`. Lines over 16 KiB are split; if the
   supervisor falls behind, a line saying output was skipped stands in for it.
+- `map-feed`: where the cars are, at most four times a second while the
+  server runs a world session (see [Map feed](#map-feed)).
 - `final`: always the last line, also when preflight refused the command
   before a session existed: `exit_code`, `message` (`null` on success) and the
   final `status` (`null` if none was recorded).
 
 The front-end process writes `session` and `final`; the supervisor it starts
-inherits stdout and writes `status` and `diagnostic`, so the lines never
-interleave. Human console text is silenced in this mode. A failed write, for
+inherits stdout and writes `status`, `diagnostic` and `map-feed`, so the lines
+never interleave. Human console text is silenced in this mode. A failed write, for
 example after the reader closed the pipe, disables further events without
 stopping the session: the supervisor outlives a closed launcher window, and
 `status --json` and `sessions --json` still observe it. A supervisor that is
 refused before its session begins (another session holds the data directory,
 a stop arrived, the server changed) records that reason as a `failed` status.
+
+### Map feed
+
+With `--events`, the supervisor starts the server with `--map-feed`, and
+`serve` and `start` report where the cars are for a map view (capability
+`map-feed`). It is read-only: the server observes the state its world
+sessions already own and changes nothing. Positions come from the cars'
+replicated chassis state (the game's latest report for cars it drives) or,
+for a roaming rival without a car, from the server's own simulation of it on
+the road network.
+
+```json
+{"version":1,"utc":"...","event":"map-feed","frame":42,"skipped":0,"worlds":[
+  {"connection":1,"persona_id":"1000000007","world_ms":81250,
+   "drivers":[{"participant":1,"x":-1234.57,"y":12.35,"z":6543.21,"heading":90.5,"speed":12.35}],
+   "traffic":[{"id":17,"x":-1180.0,"y":11.9,"z":6610.25,"heading":182.3}],
+   "rivals":[{"id":3,"x":-900.5,"y":10.0,"z":6800.0,"heading":null}],
+   "traffic_ring":{"inner":300.0,"outer":450.0},"omitted":0}]}
+```
+
+- `worlds`: one entry per world session (one per connected game), ordered by
+  `connection`. A frame with no worlds means none is running: remove any
+  markers. In a local session every driver is the local player; `persona_id`
+  matches `profile`'s `persona_id`.
+- `drivers` are the players' cars driving in the world (garage and menus show
+  none), ordered by `participant`; `traffic` and `rivals` are ordered by `id`,
+  which is unique within its list for that world session and never reused
+  there, so markers can be keyed by connection, kind and id.
+- Units and axes: x, y and z are world metres (y up), rounded to centimetres.
+  On the `map-images` map +x points right and +z points down, so a position
+  is at u = (x - min_x) / (max_x - min_x), v = (z - min_z) / (max_z - min_z)
+  of its world box. `heading` is the car's forward direction in degrees
+  clockwise from up the map (0 up, 90 right), `0 <= heading < 360`, to a
+  tenth, or `null` when it is unknown or vertical. `speed` is metres per
+  second.
+- `traffic_ring` gives the fixed radii of the native traffic policy, in
+  horizontal metres around each driver: cars are created beyond `inner` and
+  up to a little more than `outer` ahead of where the driver will be in about
+  three seconds (a quarter of those distances to the sides), and kept while
+  within `outer`. It is `null` without traffic or while traffic is off. A
+  circle at these radii is an approximation of that shape.
+- `omitted` counts cars the server left out of the frame (no usable
+  position, state it could not read, or beyond a bound).
+- Rate and order: each world session is observed at most every 250 ms, after
+  its tick's traffic and rival updates, and the server writes a frame when
+  anything changed, at most every 250 ms. The supervisor emits the newest
+  frame on each of its 250 ms polls if it is newer than the last one sent, so
+  `frame` only increases and `skipped` counts the frames in between that were
+  not delivered (superseded before a poll, or unreadable). A slow reader
+  drops frames; it never delays the game.
+- Bounds: 32 worlds, 16 drivers and 128 traffic cars and 128 rivals per
+  world, coordinates within 100 km of the origin, ids at most 2^53 - 1, and
+  1 MiB per server line. The supervisor checks every frame against them and
+  drops one that fails.
+
+How it travels: the server writes each frame as one JSON line on its
+standard output after the readiness line, from its own thread, so a stalled
+pipe never blocks a world session. The supervisor's pump keeps only the
+newest complete line in memory and writes none of them to
+`server.stdout.jsonl`, which keeps just the readiness line. Without
+`--events` the server is not asked for frames.
+
+Not established yet: the positions are what the server holds, but no live
+run has compared markers with the game's own map, and the map orientation
+was checked only by drawing the road network over it.
 
 ### Playing in a serve session
 
@@ -415,6 +483,7 @@ existing data directories keep working.
 | `contract` | record names, versions, capabilities and schema generation; the strict test validator |
 | `sessions` | read-only session folder summaries and the server log scanner |
 | `events` | the JSON-lines event stream |
+| `map_feed` | the server's map frames: the newest-line latch, their checks and which become `map-feed` events |
 | `settings` | the saved traffic and rival amounts in `settings.json` and their server options |
 | `paths`, `records`, `session`, `install`, `digest`, `compat`, `marker`, `clock` | portable pieces with their own unit tests |
 

@@ -76,6 +76,9 @@ pub struct Config {
     /// Player-chosen traffic and roaming-rival amounts, updated while the
     /// server runs when it watches a settings file.
     pub ai: crate::ai_settings::Live,
+    /// Where world sessions publish what the launcher's map shows
+    /// (`--map-feed`); `None` builds no snapshots.
+    pub map_feed: Option<crate::map_feed::Board>,
     pub challenges: Option<Arc<nfs_services::challenges::Catalog>>,
     pub kickback: Option<(nfs_storage::AccountId, Arc<nfs_services::kickback::State>)>,
     pub speedwall: Option<(nfs_storage::AccountId, Arc<nfs_services::speedwall::State>)>,
@@ -100,6 +103,7 @@ pub struct WorldServe {
     pub garage_logic: Option<Arc<crate::garage_logic::GarageLogic>>,
     pub scoring: Option<Arc<crate::scoring::Content>>,
     pub ai: crate::ai_settings::Live,
+    pub map_feed: Option<crate::map_feed::Board>,
 }
 
 mod items;
@@ -697,6 +701,7 @@ pub async fn serve(
                 let traffic = config.traffic.clone();
                 let rivals = config.rivals.clone();
                 let ai = config.ai.clone();
+                let map_feed = config.map_feed.clone();
                 let garage_logic = config.garage_logic.clone();
                 let scoring = config.scoring.clone();
                 let catalogs = config.catalogs.clone();
@@ -766,6 +771,7 @@ pub async fn serve(
                             garage_logic,
                             scoring,
                             ai,
+                            map_feed,
                         },
                         n,
                         recorder.clone(),
@@ -836,6 +842,7 @@ pub async fn world_host(
         garage_logic,
         scoring,
         mut ai,
+        map_feed,
     } = serve;
     let Some(binding) = start.recv().await else {
         return;
@@ -892,6 +899,8 @@ pub async fn world_host(
     let Ok(persona) = u64::try_from(persona) else {
         return;
     };
+    // Leaves the map when this world host returns.
+    let mut map_feed = map_feed.map(|board| board.publisher(connection, persona));
     let arrivals = match sequences.as_ref().and_then(|c| c.arrivals()).transpose() {
         Ok(arrivals) => arrivals,
         Err(error) => {
@@ -996,6 +1005,12 @@ pub async fn world_host(
                 "owned scoring rejected; scoring disabled for this session"
             );
             listener.disable_scoring();
+        }
+        // Read-only: what the launcher's map shows, after this tick's AI.
+        if let Some(feed) = &mut map_feed
+            && feed.due(now_ms())
+        {
+            feed.publish(listener.map_snapshot(now_ms()));
         }
         if !listener.files_alive(now_ms()) {
             warn!(

@@ -233,6 +233,41 @@ impl Population {
             .collect()
     }
 
+    /// Every active racer's slot key with its world position and forward
+    /// axis, for the launcher's map: its car's while the client drives it,
+    /// otherwise the host simulation's (the road's direction of travel).
+    /// `None` when that state does not decode.
+    pub fn poses(
+        &self,
+        world: &Players,
+        connection: u8,
+        persona: u64,
+    ) -> Vec<(u64, Option<[[f32; 3]; 2]>)> {
+        if self.owner != Some((connection, persona)) {
+            return Vec::new();
+        }
+        let pose = |active: &Active| -> Result<[[f32; 3]; 2], Error> {
+            Ok(match active.car {
+                Some(car) => {
+                    let motion = world
+                        .ai_vehicle_physics(connection, persona, car)?
+                        .decode([0.; 3])?;
+                    let basis = vehicle::orientation::basis_from_quaternion(motion.quaternion)?;
+                    [motion.position, basis[2]]
+                }
+                None => {
+                    let pose = active.wander.pose(&self.graph).map_err(|_| Error::Shape)?;
+                    [pose.position, pose.tangent]
+                }
+            })
+        };
+        self.racers
+            .iter()
+            .filter_map(|r| r.active.as_ref())
+            .map(|active| (active.slot, pose(active).ok()))
+            .collect()
+    }
+
     fn position(
         &self,
         world: &Players,

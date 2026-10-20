@@ -61,6 +61,9 @@ struct Args {
     /// The player's settings file, watched for changes while the server
     /// runs; without it the amounts stay as started.
     settings_file: Option<PathBuf>,
+    /// Print live positions for the launcher's map on standard output after
+    /// the readiness line ([`nfs_server::map_feed`]).
+    map_feed: bool,
 }
 
 fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args, String> {
@@ -102,6 +105,7 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
     let (mut game_dir, mut content_cache) = (None, None);
     let (mut traffic_percent, mut rival_limit) = (100u16, None);
     let mut settings_file = None;
+    let mut map_feed = false;
     while let Some(flag) = args.next() {
         let mut value = || {
             args.next()
@@ -109,6 +113,7 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
         };
         match flag.to_str() {
             Some("--record-protocol") if !record_protocol => record_protocol = true,
+            Some("--map-feed") if !map_feed => map_feed = true,
             Some("--root") => root = value()?.into(),
             Some("--output") => output = Some(PathBuf::from(value()?)),
             Some("--stop-file") => stop_file = Some(PathBuf::from(value()?)),
@@ -356,6 +361,7 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
         generated: None,
         ai,
         settings_file,
+        map_feed,
     })
 }
 
@@ -930,6 +936,20 @@ async fn run(args: Args) -> Result<(), Failure> {
             nfs_server::settings_file::POLL,
         ))
     });
+    // Started after the readiness line, so every later line on standard
+    // output is a map frame. Its own thread: a slow reader never blocks the
+    // runtime, and it ends once the server drops the board.
+    let map_feed = if args.map_feed {
+        let (board, reader) = nfs_server::map_feed::Board::new();
+        let interval = Duration::from_millis(nfs_server::map_feed::INTERVAL_MS);
+        std::thread::Builder::new()
+            .name("map-feed".into())
+            .spawn(move || nfs_server::map_feed::write(reader, std::io::stdout(), interval))
+            .map_err(|_| Failure::Io)?;
+        Some(board)
+    } else {
+        None
+    };
     let config = net::Config {
         root: args.root,
         redirector_port: args.redirector_port,
@@ -951,6 +971,7 @@ async fn run(args: Args) -> Result<(), Failure> {
         owned_menu_awards: args.owned_menu_awards,
         owned_local_social: args.owned_local_social,
         ai,
+        map_feed,
         challenges,
         kickback,
         speedwall,
@@ -1141,6 +1162,7 @@ mod tests {
         assert_eq!(parsed.settings_file, Some(PathBuf::from("settings.json")));
         let parsed = parse_from(configured().into_iter()).unwrap();
         assert_eq!(parsed.settings_file, None, "amounts stay as started");
+        assert!(!parsed.map_feed, "no map frames unless asked");
         for (flag, value) in [
             ("--traffic-percent", "301"),
             ("--traffic-percent", "-1"),
@@ -1152,6 +1174,15 @@ mod tests {
             args.extend([flag.into(), value.into()]);
             assert!(parse_from(args.into_iter()).is_err(), "{flag} {value}");
         }
+    }
+
+    #[test]
+    fn map_feed_is_one_flag_without_a_value() {
+        let mut args = configured();
+        args.push("--map-feed".into());
+        assert!(parse_from(args.clone().into_iter()).unwrap().map_feed);
+        args.push("--map-feed".into());
+        assert!(parse_from(args.into_iter()).is_err(), "given twice");
     }
 
     #[test]

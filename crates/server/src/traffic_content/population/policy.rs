@@ -8,8 +8,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const GRID: usize = 33;
 const MAX_CANDIDATES: usize = 131_072;
-const INNER2: f32 = 300. * 300.;
-const OUTER2: f32 = 450. * 450.;
+/// Horizontal metres: cars are created beyond this from a focus's predicted
+/// position (shaped by its heading) and kept within it of that position.
+pub const INNER: f32 = 300.;
+/// Horizontal metres: cars are kept within this of a focus, and created up
+/// to a little beyond it.
+pub const OUTER: f32 = 450.;
+const INNER2: f32 = INNER * INNER;
+const OUTER2: f32 = OUTER * OUTER;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Focus {

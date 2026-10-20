@@ -12,11 +12,14 @@
 //!    `status.json`, in order.
 //! 3. `diagnostic`: each line a child wrote to standard error, tagged with
 //!    the child that wrote it.
-//! 4. `final`: the command's outcome and exit code. Always the last line,
+//! 4. `map-feed`: live positions for the map, at most four times a second
+//!    while the server runs a world session ([`crate::map_feed`]).
+//! 5. `final`: the command's outcome and exit code. Always the last line,
 //!    also when the command was refused before a session existed.
 //!
 //! The front-end process writes `session` and `final`; the supervisor it
-//! starts inherits standard output and writes `status` and `diagnostic`.
+//! starts inherits standard output and writes `status`, `diagnostic` and
+//! `map-feed`.
 //! Their writes never interleave: the front end waits for the supervisor.
 //! Human console text is silenced in this mode. A write that fails, for
 //! example because the reader closed the pipe, disables further events and
@@ -37,7 +40,7 @@ use std::{io::Write, path::PathBuf};
 pub const FORMAT_VERSION: u32 = 1;
 
 /// One line of the event stream.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct Event {
     pub version: u32,
     /// When the event was written, UTC.
@@ -47,7 +50,7 @@ pub struct Event {
 }
 
 /// The kind of event, in the `event` property, and its fields.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 #[serde(tag = "event", rename_all = "kebab-case")]
 pub enum Body {
     /// The session directory was created and the supervisor is starting.
@@ -69,6 +72,24 @@ pub enum Body {
     Diagnostic {
         source: DiagnosticSource,
         text: String,
+    },
+    /// Where the cars are in the server's world sessions, read-only, at
+    /// most four times a second while one runs, and only when the server
+    /// wrote a newer frame. A frame lists every world session; one with no
+    /// worlds means none is running (any markers go). World positions are
+    /// in metres: on the `map-images` map +x points right and +z points
+    /// down, and headings are degrees clockwise from up the map. Requires
+    /// the `map-feed` capability.
+    MapFeed {
+        /// The server's frame number: one more for every frame it wrote,
+        /// so frames only move forward.
+        frame: u64,
+        /// Frames the server wrote since the previous `map-feed` event that
+        /// were not delivered: a newer one arrived before the supervisor's
+        /// next poll, or one could not be read.
+        skipped: u64,
+        /// Every world session, by `connection`.
+        worlds: Vec<crate::map_feed::MapWorld>,
     },
     /// The last line: how the command ended.
     Final {
@@ -287,6 +308,38 @@ mod tests {
         assert_eq!(lines[2]["source"], "server");
         assert_eq!(lines[2]["text"], "line with \"quotes\" and \u{e5}");
         assert_eq!(lines[4]["status"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn a_map_feed_event_is_one_line_that_matches_the_schema() {
+        let capture = Capture::default();
+        let mut emitter = Emitter::to(capture.clone());
+        let mut relay = crate::map_feed::Relay::default();
+        emitter.emit(
+            relay
+                .accept(&crate::map_feed::tests::sample_line(3))
+                .unwrap(),
+        );
+        let mut empty = crate::map_feed::tests::sample(4);
+        empty["worlds"] = serde_json::json!([]);
+        emitter.emit(relay.accept(&empty.to_string()).unwrap());
+        let lines = capture.lines();
+        assert_eq!(lines.len(), 2);
+        for line in &lines {
+            assert_eq!(line["event"], "map-feed");
+            crate::contract::testing::validate("event", line);
+        }
+        let world = &lines[0]["worlds"][0];
+        assert_eq!(
+            (lines[0]["frame"].as_u64(), lines[0]["skipped"].as_u64()),
+            (Some(3), Some(2))
+        );
+        assert_eq!(world["persona_id"], "1000000007");
+        assert_eq!(world["drivers"][0]["heading"], 90.5);
+        assert_eq!(world["rivals"][0]["heading"], serde_json::Value::Null);
+        assert_eq!(world["traffic_ring"]["outer"], 450.0);
+        assert_eq!(lines[1]["worlds"], serde_json::json!([]));
+        assert_eq!(lines[1]["skipped"], 0);
     }
 
     #[test]

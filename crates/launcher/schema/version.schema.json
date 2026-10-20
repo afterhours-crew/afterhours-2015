@@ -38,6 +38,11 @@
           "const": "world-settings",
           "description": "`settings`, and `--traffic` and `--rivals` on `setup`, `serve` and\n`start`: the amounts of traffic and roaming rivals.",
           "type": "string"
+        },
+        {
+          "const": "map-feed",
+          "description": "`map-feed` events with `--events` on `serve` and `start`: live\npositions of the players' cars, traffic and roaming rivals.",
+          "type": "string"
         }
       ]
     }

@@ -20,7 +20,7 @@ use std::{
 };
 
 mod policy;
-pub use policy::Focus;
+pub use policy::{Focus, INNER, OUTER};
 
 #[cfg(test)]
 pub(crate) mod tests;
@@ -162,6 +162,33 @@ impl Population {
                 world
                     .ai_ids(connection, persona, key)
                     .map(|ids| (ids.vehicle, key))
+            })
+            .collect()
+    }
+
+    /// Every car's spawn key, world position and forward axis, for the
+    /// launcher's map: the client's latest report, or the pose the host kept
+    /// at its last advance when the report does not decode.
+    pub fn poses(
+        &self,
+        world: &Players,
+        connection: u8,
+        persona: u64,
+    ) -> Vec<(u64, [[f32; 3]; 2])> {
+        if self.owner != Some((connection, persona)) {
+            return Vec::new();
+        }
+        self.cars
+            .iter()
+            .map(|(&key, car)| {
+                let reported = world
+                    .ai_vehicle_physics(connection, persona, key)
+                    .and_then(|physics| physics.decode([0.; 3]))
+                    .and_then(|motion| {
+                        let basis = vehicle::orientation::basis_from_quaternion(motion.quaternion)?;
+                        Ok([motion.position, basis[2]])
+                    });
+                (key, reported.unwrap_or([car.anchor, car.forward]))
             })
             .collect()
     }

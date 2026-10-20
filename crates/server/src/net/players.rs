@@ -26,6 +26,7 @@ pub(super) use equipment::EquipmentRequest;
 pub(super) use garage::{GarageOperation, GarageRequest};
 pub(super) use scoring::{AwardRequest, Credited};
 mod launchers;
+mod map_feed;
 mod purchases;
 mod refusal;
 mod returning;

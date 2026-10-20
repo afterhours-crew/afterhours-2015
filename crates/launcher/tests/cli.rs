@@ -183,7 +183,8 @@ fn version_reports_records_and_capabilities_and_schema_prints_each_one() {
             "play",
             "car-images",
             "map-images",
-            "world-settings"
+            "world-settings",
+            "map-feed"
         ])
     );
     assert_eq!(report["os"], std::env::consts::OS);
@@ -212,7 +213,7 @@ fn version_reports_records_and_capabilities_and_schema_prints_each_one() {
     }
     let text_version = run(&["version"]);
     assert!(text(&text_version.stdout).contains(
-        "capabilities: profile, sessions, events, play, car-images, map-images, world-settings"
+        "capabilities: profile, sessions, events, play, car-images, map-images, world-settings, map-feed"
     ));
     assert_eq!(run(&["schema", "nothing"]).status.code(), Some(2));
 }
@@ -551,13 +552,22 @@ case "$1" in
     exit 0 ;;
 esac
 stop=""
+feed=""
 while [ $# -gt 0 ]; do
   if [ "$1" = "--stop-file" ]; then stop="$2"; fi
+  if [ "$1" = "--map-feed" ]; then feed=1; fi
   shift
 done
 echo "fake server starting" >&2
 printf '{{"ready":true,"pid":%s,"redirector":"127.0.0.1:34567","lsx":null}}\n' "$$"
-while [ ! -e "$stop" ]; do sleep 0.1; done
+frame=0
+while [ ! -e "$stop" ]; do
+  if [ -n "$feed" ]; then
+    frame=$((frame + 1))
+    printf '{{"map_feed":1,"frame":%s,"worlds":[{{"connection":1,"persona_id":"1000000007","world_ms":%s,"drivers":[{{"participant":1,"x":%s.5,"y":0.0,"z":-20.25,"heading":90.0,"speed":3.5}}],"traffic":[],"rivals":[],"traffic_ring":null,"omitted":0}}]}}\n' "$frame" "$((frame * 100))" "$frame"
+  fi
+  sleep 0.1
+done
 echo "fake server stopping" >&2
 exit 0
 "#,
@@ -729,6 +739,8 @@ fn a_serve_session_streams_its_states_and_diagnostics_as_json_lines() {
         assert!(std::time::Instant::now() < deadline, "never ready");
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
+    // Long enough for several of the server's map frames and polls.
+    std::thread::sleep(std::time::Duration::from_millis(1500));
     let stop = run(&["--data-dir", &data_arg, "stop"]);
     assert_eq!(stop.status.code(), Some(0), "{}", text(&stop.stderr));
     let out = supervisor.wait_with_output().unwrap();
@@ -737,6 +749,12 @@ fn a_serve_session_streams_its_states_and_diagnostics_as_json_lines() {
         out.stderr.is_empty(),
         "console text is silenced: {}",
         text(&out.stderr)
+    );
+    let stdout_log = std::fs::read_to_string(run_dir.join("server.stdout.jsonl")).unwrap();
+    assert_eq!(
+        stdout_log.lines().count(),
+        1,
+        "only the readiness line is logged: {stdout_log}"
     );
     let events: Vec<serde_json::Value> = text(&out.stdout)
         .lines()
@@ -767,6 +785,32 @@ fn a_serve_session_streams_its_states_and_diagnostics_as_json_lines() {
         .collect();
     assert!(diagnostics.contains(&("server", "fake server starting")));
     assert!(diagnostics.contains(&("server", "fake server stopping")));
+    // The server got --map-feed; its frames arrive while it is ready, only
+    // ever forward, and say how many were skipped in between.
+    let ready = events
+        .iter()
+        .position(|e| e["event"] == "status" && e["status"]["state"] == "ready")
+        .unwrap();
+    let feed: Vec<(usize, &serde_json::Value)> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e["event"] == "map-feed")
+        .collect();
+    assert!(feed.len() >= 2, "map frames while serving: {events:?}");
+    let mut previous = 0;
+    for (at, event) in &feed {
+        assert!(*at > ready);
+        let frame = event["frame"].as_u64().unwrap();
+        assert_eq!(frame, previous + event["skipped"].as_u64().unwrap() + 1);
+        previous = frame;
+        let driver = &event["worlds"][0]["drivers"][0];
+        assert_eq!(driver["x"], frame as f64 + 0.5, "the frame's own data");
+        assert_eq!(
+            (driver["z"].as_f64(), driver["heading"].as_f64()),
+            (Some(-20.25), Some(90.0))
+        );
+        assert_eq!(event["worlds"][0]["persona_id"], "1000000007");
+    }
     let last = events.last().unwrap();
     assert_eq!(
         last["event"], "status",

@@ -345,10 +345,13 @@ pub enum Capability {
     /// `settings`, and `--traffic` and `--rivals` on `setup`, `serve` and
     /// `start`: the amounts of traffic and roaming rivals.
     WorldSettings,
+    /// `map-feed` events with `--events` on `serve` and `start`: live
+    /// positions of the players' cars, traffic and roaming rivals.
+    MapFeed,
 }
 
 /// Capabilities of this build, in a fixed order.
-pub const CAPABILITIES: [Capability; 7] = [
+pub const CAPABILITIES: [Capability; 8] = [
     Capability::Profile,
     Capability::Sessions,
     Capability::Events,
@@ -356,6 +359,7 @@ pub const CAPABILITIES: [Capability; 7] = [
     Capability::CarImages,
     Capability::MapImages,
     Capability::WorldSettings,
+    Capability::MapFeed,
 ];
 
 /// Identity of the program the launcher library is running in.

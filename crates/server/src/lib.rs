@@ -25,6 +25,7 @@ pub mod install_content;
 pub mod limits;
 pub mod local_setup;
 pub mod lsx;
+pub mod map_feed;
 pub mod matchmaking_session;
 pub mod matchmaking_status;
 pub mod menu_news;
