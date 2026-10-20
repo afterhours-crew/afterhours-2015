@@ -6,7 +6,7 @@
 //! PUT replaces one complete record atomically; an identical retry preserves
 //! timestamps. HTTP framing and game payload interpretation belong elsewhere.
 use crate::{AccountId, Error, SqliteRepository};
-use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 pub const MAX_RECORD_BYTES: usize = 512 * 1024;
 pub const MAX_RECORDS: usize = 256;
@@ -71,6 +71,26 @@ pub(crate) fn create_table(tx: &Transaction<'_>) -> Result<(), Error> {
          updated INTEGER NOT NULL CHECK(updated>=created)) STRICT;"
     ))?;
     Ok(())
+}
+/// Record count and total value bytes, without loading any value.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Summary {
+    pub records: usize,
+    pub bytes: usize,
+}
+/// A stored total above the account bounds is a damaged store, not a count.
+pub(crate) fn summary(conn: &Connection) -> Result<Summary, Error> {
+    let (count, total): (i64, i64) = conn.query_row(
+        "SELECT count(*),coalesce(sum(length(value)),0) FROM livery_record",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let records = usize::try_from(count).map_err(|_| Error::Config)?;
+    let bytes = usize::try_from(total).map_err(|_| Error::Config)?;
+    if records > MAX_RECORDS || bytes > MAX_ACCOUNT_BYTES {
+        return Err(Error::Config);
+    }
+    Ok(Summary { records, bytes })
 }
 fn read(tx: &Transaction<'_>, name: &str) -> Result<Option<Record>, Error> {
     let row = tx

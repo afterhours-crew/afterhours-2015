@@ -14,6 +14,11 @@
 //!
 //! - [`marker`], [`compat`], [`paths`], [`records`], [`digest`], [`install`]
 //!   and [`session`] are portable and have no process or platform dependency.
+//! - [`profile`] reads account saves read-only through `nfs-storage` and
+//!   decodes them with `nfs-services`; it never locks or writes.
+//! - [`contract`] names every JSON record and generates its schema;
+//!   [`sessions`] summarizes session folders and [`events`] writes the
+//!   JSON-lines session stream.
 //! - [`platform`] defines the operations the supervisor needs from the
 //!   operating system. Implementations live behind `cfg` and are the only
 //!   code that spawns processes or reads the registry.
@@ -25,16 +30,20 @@ pub mod cli;
 pub mod clock;
 pub mod commands;
 pub mod compat;
+pub mod contract;
 pub mod digest;
 pub mod endpoint;
+pub mod events;
 pub mod exit;
 pub mod install;
 pub mod marker;
 pub mod paths;
 pub mod platform;
 pub mod preflight;
+pub mod profile;
 pub mod records;
 pub mod session;
+pub mod sessions;
 pub mod settings;
 pub mod supervisor;
 pub mod terminal;

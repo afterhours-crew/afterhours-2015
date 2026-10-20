@@ -3,3 +3,5 @@
 *.toml text eol=lf
 *.lock text eol=lf
 *.md text eol=lf
+# Released byte-for-byte; the schema test also tolerates CRLF checkouts.
+crates/launcher/schema/*.json text eol=lf

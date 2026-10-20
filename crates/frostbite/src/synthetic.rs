@@ -136,6 +136,10 @@ pub enum Field {
     Structs(&'static str, Vec<Vec<(&'static str, Field)>>),
     /// Inline struct of scalar members.
     Struct(&'static str, Vec<(&'static str, Field)>),
+    /// A 16-byte GUID, such as a chunk reference.
+    Guid([u8; 16]),
+    /// A resource ID, such as a `TextureAsset`'s `Resource`.
+    ResourceRef(u64),
 }
 
 struct FieldDesc {
@@ -314,6 +318,14 @@ impl PartitionWriter {
             match field {
                 Field::Long(v) => {
                     rows.push((name.to_string(), 0x12, 0, offset));
+                    payload.extend_from_slice(&v.to_le_bytes());
+                }
+                Field::Guid(v) => {
+                    rows.push((name.to_string(), 0x15, 0, offset));
+                    payload.extend_from_slice(v);
+                }
+                Field::ResourceRef(v) => {
+                    rows.push((name.to_string(), 0x17, 0, offset));
                     payload.extend_from_slice(&v.to_le_bytes());
                 }
                 Field::Guids(list) => {
@@ -562,58 +574,252 @@ pub struct Asset {
 /// `Win32/synthetic` with one bundle holding every asset as LZ4 cas records,
 /// plus an executable file with the given bytes.
 pub fn write_installation(root: &Path, executable: &[u8], assets: &[Asset]) -> std::io::Result<()> {
+    write_superbundles(
+        root,
+        executable,
+        &[CasSuperbundle {
+            name: "Win32/synthetic",
+            bundle: "win32/synthetic",
+            assets,
+            resources: &[],
+            chunks: &[],
+        }],
+        &[],
+    )
+}
+
+/// A cas superbundle with one bundle, for [`write_superbundles`].
+pub struct CasSuperbundle<'a> {
+    pub name: &'a str,
+    pub bundle: &'a str,
+    pub assets: &'a [Asset],
+    /// Resource entries of the bundle, stored as cas records.
+    pub resources: &'a [Resource],
+    /// Chunks the superbundle's `.toc` lists by SHA-1, stored as cas records.
+    pub chunks: &'a [([u8; 16], Vec<u8>)],
+}
+
+/// One resource entry of a synthetic bundle.
+pub struct Resource {
+    pub name: String,
+    pub rid: u64,
+    pub res_type: u32,
+    pub meta: Vec<u8>,
+    pub data: Vec<u8>,
+}
+
+/// A non-cas superbundle whose `.sb` holds inline chunks (id, bytes).
+pub struct InlineSuperbundle<'a> {
+    pub name: &'a str,
+    pub chunks: &'a [([u8; 16], Vec<u8>)],
+}
+
+fn lz4_record(payload: &[u8]) -> Vec<u8> {
+    let mut record = Vec::new();
+    for chunk in payload.chunks(0x10000) {
+        record.extend_from_slice(&block(chunk, 9));
+    }
+    record
+}
+
+/// Write an unpatched installation with the given superbundles, listed in
+/// this order in `layout.toc`. All cas records share `cas_01.cas`.
+pub fn write_superbundles(
+    root: &Path,
+    executable: &[u8],
+    cas_superbundles: &[CasSuperbundle<'_>],
+    inline: &[InlineSuperbundle<'_>],
+) -> std::io::Result<()> {
     let data = root.join("Data");
-    std::fs::create_dir_all(data.join("Win32"))?;
+    std::fs::create_dir_all(&data)?;
     std::fs::write(root.join("NFS16.exe"), executable)?;
+    let names = cas_superbundles
+        .iter()
+        .map(|s| s.name)
+        .chain(inline.iter().map(|s| s.name));
     let layout = Db::Object(vec![(
         "superBundles",
-        Db::List(vec![Db::Object(vec![("name", Db::str("Win32/synthetic"))])]),
+        Db::List(
+            names
+                .map(|name| Db::Object(vec![("name", Db::str(name))]))
+                .collect(),
+        ),
     )]);
     std::fs::write(data.join("layout.toc"), clear_header(&layout.record(None)))?;
     let mut cas = Vec::new();
     let mut catalog = b"NyanNyanNyanNyan".to_vec();
-    let mut entries = Vec::new();
-    for (i, asset) in assets.iter().enumerate() {
+    let mut records = 0u64;
+    // Store one payload as an LZ4 cas record; returns its SHA-1 and size.
+    let mut store = |payload: &[u8]| {
+        records += 1;
         let mut sha1 = [0u8; 20];
-        sha1[..8].copy_from_slice(&(i as u64 + 1).to_le_bytes());
-        let mut record = Vec::new();
-        for chunk in asset.partition.chunks(0x10000) {
-            record.extend_from_slice(&block(chunk, 9));
-        }
+        sha1[..8].copy_from_slice(&records.to_le_bytes());
+        let record = lz4_record(payload);
         catalog.extend_from_slice(&sha1);
         catalog.extend_from_slice(&(cas.len() as u32).to_le_bytes());
         catalog.extend_from_slice(&(record.len() as u32).to_le_bytes());
         catalog.extend_from_slice(&1u32.to_le_bytes());
         cas.extend_from_slice(&record);
-        entries.push(Db::Object(vec![
-            ("name", Db::str(&asset.name)),
-            ("sha1", Db::Sha1(sha1)),
-            ("size", Db::Long(record.len() as i64)),
-            ("originalSize", Db::Long(asset.partition.len() as i64)),
-        ]));
+        (sha1, record.len())
+    };
+    let mut layouts = Vec::new();
+    for superbundle in cas_superbundles {
+        let mut entries = Vec::new();
+        for asset in superbundle.assets {
+            let (sha1, size) = store(&asset.partition);
+            entries.push(Db::Object(vec![
+                ("name", Db::str(&asset.name)),
+                ("sha1", Db::Sha1(sha1)),
+                ("size", Db::Long(size as i64)),
+                ("originalSize", Db::Long(asset.partition.len() as i64)),
+            ]));
+        }
+        let mut resources = Vec::new();
+        for resource in superbundle.resources {
+            let (sha1, size) = store(&resource.data);
+            resources.push(Db::Object(vec![
+                ("name", Db::str(&resource.name)),
+                ("sha1", Db::Sha1(sha1)),
+                ("size", Db::Long(size as i64)),
+                ("originalSize", Db::Long(resource.data.len() as i64)),
+                ("resType", Db::Int(resource.res_type as i32)),
+                ("resMeta", Db::Blob(resource.meta.clone())),
+                ("resRid", Db::Long(resource.rid as i64)),
+            ]));
+        }
+        let mut chunks = Vec::new();
+        for (id, bytes) in superbundle.chunks {
+            let (sha1, _) = store(bytes);
+            chunks.push(Db::Object(vec![
+                ("id", Db::Guid(*id)),
+                ("sha1", Db::Sha1(sha1)),
+            ]));
+        }
+        layouts.push((superbundle, entries, resources, chunks));
+    }
+    for (superbundle, entries, resources, chunks) in layouts {
+        let bundle = Db::Object(vec![
+            ("path", Db::str(superbundle.bundle)),
+            ("ebx", Db::List(entries)),
+            ("res", Db::List(resources)),
+        ])
+        .record(None);
+        let toc = Db::Object(vec![
+            (
+                "bundles",
+                Db::List(vec![Db::Object(vec![
+                    ("id", Db::str(superbundle.bundle)),
+                    ("offset", Db::Long(0)),
+                    ("size", Db::Int(bundle.len() as i32)),
+                ])]),
+            ),
+            ("chunks", Db::List(chunks)),
+            ("cas", Db::Bool(true)),
+        ]);
+        let base = data.join(superbundle.name);
+        std::fs::create_dir_all(base.parent().expect("superbundle directory"))?;
+        std::fs::write(base.with_extension("sb"), &bundle)?;
+        std::fs::write(base.with_extension("toc"), clear_header(&toc.record(None)))?;
     }
     std::fs::write(data.join("cas_01.cas"), &cas)?;
     std::fs::write(data.join("cas.cat"), &catalog)?;
-    let bundle = Db::Object(vec![
-        ("path", Db::str("win32/synthetic")),
-        ("ebx", Db::List(entries)),
-    ])
-    .record(None);
-    std::fs::write(data.join("Win32/synthetic.sb"), &bundle)?;
-    let toc = Db::Object(vec![
-        (
-            "bundles",
-            Db::List(vec![Db::Object(vec![
-                ("id", Db::str("win32/synthetic")),
-                ("offset", Db::Long(0)),
-                ("size", Db::Int(bundle.len() as i32)),
-            ])]),
-        ),
-        ("cas", Db::Bool(true)),
-    ]);
-    std::fs::write(
-        data.join("Win32/synthetic.toc"),
-        clear_header(&toc.record(None)),
-    )?;
+    for superbundle in inline {
+        let mut sb = Vec::new();
+        let mut chunks = Vec::new();
+        for (id, bytes) in superbundle.chunks {
+            let record = lz4_record(bytes);
+            chunks.push(Db::Object(vec![
+                ("id", Db::Guid(*id)),
+                ("offset", Db::Long(sb.len() as i64)),
+                ("size", Db::Int(record.len() as i32)),
+            ]));
+            sb.extend_from_slice(&record);
+        }
+        let toc = Db::Object(vec![
+            ("bundles", Db::List(Vec::new())),
+            ("chunks", Db::List(chunks)),
+            ("cas", Db::Bool(false)),
+        ]);
+        let base = data.join(superbundle.name);
+        std::fs::create_dir_all(base.parent().expect("superbundle directory"))?;
+        std::fs::write(base.with_extension("sb"), &sb)?;
+        std::fs::write(base.with_extension("toc"), clear_header(&toc.record(None)))?;
+    }
     Ok(())
+}
+
+/// A text database binary chunk named `name` holding `(string ID, encoded
+/// bytes)` entries; IDs are keyed with [`crate::textdb::string_id_hash`].
+pub fn text_database(name: &str, entries: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut keyed: Vec<(u32, &[u8])> = entries
+        .iter()
+        .map(|(id, bytes)| (crate::textdb::string_id_hash(id), *bytes))
+        .collect();
+    keyed.sort_by_key(|(key, _)| *key);
+    keyed.dedup_by_key(|(key, _)| *key);
+    let table_at = 12 + 128;
+    let text_at = table_at + 8 * keyed.len();
+    let mut body = Vec::new();
+    for value in [keyed.len(), table_at, text_at] {
+        body.extend_from_slice(&(value as u32).to_le_bytes());
+    }
+    let mut label = name.as_bytes().to_vec();
+    label.resize(128, 0);
+    body.extend_from_slice(&label);
+    let mut text = Vec::new();
+    for (key, bytes) in &keyed {
+        body.extend_from_slice(&key.to_le_bytes());
+        body.extend_from_slice(&(text.len() as u32).to_le_bytes());
+        text.extend_from_slice(bytes);
+        text.push(0);
+    }
+    body.extend_from_slice(&text);
+    let mut out = crate::textdb::BINARY_MAGIC.to_le_bytes().to_vec();
+    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    out.extend_from_slice(&body);
+    out
+}
+
+/// A histogram chunk with `entries` code units, of which the given
+/// `(byte, code unit)` pairs are set; 256 entries is the single-byte form.
+pub fn histogram(entries: u32, mapping: &[(u8, u16)]) -> Vec<u8> {
+    let mut units = vec![0u16; entries as usize];
+    for (byte, unit) in mapping {
+        units[usize::from(*byte)] = *unit;
+    }
+    let mut body = entries.to_le_bytes().to_vec();
+    for unit in units {
+        body.extend_from_slice(&unit.to_le_bytes());
+    }
+    let mut out = crate::textdb::HISTOGRAM_MAGIC.to_le_bytes().to_vec();
+    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    out.extend_from_slice(&body);
+    out
+}
+
+/// A 128-byte texture header for a single-mip 2D texture of `format`
+/// (a `RenderFormat` value) whose first mip occupies `mip0` bytes of the
+/// pixel chunk `chunk`.
+pub fn texture_header(format: u32, width: u16, height: u16, chunk: [u8; 16], mip0: u32) -> Vec<u8> {
+    let mut out = vec![0u8; crate::texture::HEADER_BYTES];
+    out[12..16].copy_from_slice(&format.to_le_bytes());
+    out[16..18].copy_from_slice(&9u16.to_le_bytes());
+    out[18..20].copy_from_slice(&width.to_le_bytes());
+    out[20..22].copy_from_slice(&height.to_le_bytes());
+    out[22..24].copy_from_slice(&1u16.to_le_bytes());
+    out[24..26].copy_from_slice(&1u16.to_le_bytes());
+    out[26] = 1;
+    out[28..44].copy_from_slice(&chunk);
+    out[44..48].copy_from_slice(&mip0.to_le_bytes());
+    out[104..108].copy_from_slice(&mip0.to_le_bytes());
+    out[112..114].copy_from_slice(b"UI");
+    out
+}
+
+/// One BC1 block filling its 4x4 texels with the RGB565 colour `color`.
+pub fn bc1_solid(color: u16) -> [u8; 8] {
+    let mut block = [0u8; 8];
+    block[..2].copy_from_slice(&color.to_le_bytes());
+    block[2..4].copy_from_slice(&color.to_le_bytes());
+    block
 }

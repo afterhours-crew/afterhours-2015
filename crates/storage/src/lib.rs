@@ -16,6 +16,8 @@
 //! [`memory::MemoryRepository`] for tests and [`sqlite::SqliteRepository`] for
 //! durable state (one versioned SQLite file per account, transactional batches,
 //! commit before acknowledgement, batch ids for retry safety).
+//! [`SqliteRepository::inspect`] gives local tools one read-only view of
+//! every domain without creating, migrating or writing the store.
 //!
 //! Bounds are local policy, not recovered native maxima. Nothing here claims
 //! game persistence: a controlled change surviving a server and game restart
@@ -23,6 +25,7 @@
 #![forbid(unsafe_code)]
 
 pub mod account;
+pub mod inspect;
 pub mod memory;
 pub mod model;
 pub mod port;
@@ -31,6 +34,7 @@ pub mod settings;
 pub mod sqlite;
 pub mod tables;
 
+pub use inspect::Inspection;
 pub use memory::MemoryRepository;
 pub use model::{
     AccountId, Applied, Batch, DefinitionGuid, Error, GarageSlots, ItemId, ItemRecord,

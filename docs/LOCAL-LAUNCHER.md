@@ -176,15 +176,23 @@ schedules or challenge completion. No remote product entitlements are granted.
 rivals are yours to choose; the defaults are the original game:
 
 ```sh
-# Half the original traffic and at most two rivals at once.
+# Half the original traffic and two roaming rivals.
 nfs-afterhours start --game-dir "F:\EA Games\Need for Speed" --traffic 50 --rivals 2
 # Back to the original amounts.
 nfs-afterhours start --game-dir "F:\EA Games\Need for Speed" --traffic 100 --rivals original
 ```
 
-`--traffic` is a percentage of the original traffic from 0 (none) to 300.
-`--rivals` is the most roaming rivals active at once, from 0 (none) to 128, or
-`original` for the original number. Both are saved in `settings.json` in the data
+`--traffic` is a percentage of the original traffic from 0 (none) to 300 (3x). More is not
+offered: the game keeps a fixed amount of memory for the cars around you and crashed in a
+test with about 45-50 AI cars nearby (5x traffic plus rivals). A saved amount above 300
+from a test build reads as 300.
+`--rivals` is the number of roaming rivals to keep active, from 0 (none) to 15, or
+`original` for the original number. The game's own rivals depend on where you
+drive (usually two to five at once in the parts of the city that have them); a number
+caps them, and above them the server adds other installed racers whose authored start
+is within 3.5 km of you, nearest first, each at most once, and keeps a racer until it
+is 4.5 km away. So a high number gives fewer rivals near the edges of the map. Rival
+cars still appear within 790 m like the game's own. Both are saved in `settings.json` in the data
 directory and apply to every later `start`, `serve` and `setup` until changed. You can
 also edit that file directly; the start output shows the values in use:
 
@@ -193,13 +201,29 @@ also edit that file directly; the start output shows the values in use:
 ```
 
 `rival_limit` set to `null` means the original number. Out-of-range, unknown or
-malformed settings are refused rather than ignored. More traffic or rivals than the
-original costs client performance.
+malformed settings are refused rather than ignored; a rival number above 15 saved by
+an older build (which accepted up to 128) reads as 15. More traffic or rivals than the
+original costs client performance. Traffic always leaves room for 15 rival cars in the
+server's 128-car AI budget.
+
+`nfs-afterhours settings` prints the saved values without starting anything, and
+`nfs-afterhours settings --traffic 200 --rivals original` saves new ones. Saving also
+works while a session runs, and that session applies the new values within about a
+second: the server checks the file's modified time and size once a second and reads it
+only when they change. Hand edits apply the same way; an invalid file is ignored (the
+server log says so) and the current values stay. More traffic fills in at the normal
+spawn pace; with less, cars leave as they fall out of range behind you, and traffic off
+stops new cars at once. A lower rival number removes rivals that have no car near you
+right away, and the others once their car is out of range; a higher one adds racers
+over the next seconds.
 
 Every subcommand accepts `--json` to print one JSON object instead of text, and
 exits with a documented code (`nfs-afterhours --help` lists them): 0 success,
 1 refused with nothing changed, 2 bad command line, 3 session failed, 4 nothing
-to act on, 5 input/output error.
+to act on, 5 input/output error. Each JSON object has a version and a JSON
+Schema (`nfs-afterhours schema <record>`); `nfs-afterhours version --json` lists
+them. The contract for desktop front ends is described in
+`crates/launcher/README.md`.
 
 ## Check, setup, serve and stop
 
@@ -220,9 +244,19 @@ nfs-afterhours stop
 `serve` prepares like `setup`, starts `nfs-server` directly on loopback and
 supervises it until it exits, a stop is requested or you press Ctrl+C. On Linux
 and macOS point `--game-dir` at a copy of the installation directory; the
-content readers need its files, not a running game. The server leaves the LSX
-port disabled in this mode. Non-loopback listening for a remote client is not
-yet implemented and is tracked separately.
+content readers need its files, not a running game, and the server leaves the
+LSX port disabled. Non-loopback listening for a remote client is not yet
+implemented and is tracked separately.
+
+On Windows a `serve` session can also host the game. It runs the same checks as
+`start` and starts the server the same way, so close EA Desktop and the game
+first; `serve --server-only` skips that and serves without game support. While
+it runs, `nfs-afterhours play` asks it to start the game in the same session:
+activation, routing and statuses work as for `start`. When the game exits the
+session goes back to serving, and `play` can start it again; `stop` closes the
+game first, then the server. `play` exits with code 4 without a running session
+and 1 when the session cannot start a game (not `serve`, `--server-only`,
+stopping, or a game already running). Not yet tested live.
 
 Quitting normally in the game also shuts down the server. Stop first requests
 normal game closure, then terminates only its owned process tree if closure does
@@ -264,9 +298,37 @@ nfs-afterhours recover --account-id <32 lowercase hex digits>
 ```
 
 Recovery refuses an existing different pointer and never edits the database.
-The server still validates schema and ownership when starting. If no complete
+The server still validates schema and ownership when starting.
+
+To look at a save without changing it, also while the server runs:
+
+```sh
+nfs-afterhours profile            # the driver account.json selects
+nfs-afterhours profile --list     # every save in artifacts/account
+```
+
+Add `--json` for the machine-readable form a desktop front end reads; the
+format is described in `crates/launcher/README.md`. Saved stats are printed as
+raw stored integers because the game's units are not confirmed. Car names are
+the game's own, read from your installation each time (`--game-dir` and
+`--language` override the session's installation and the game's locale). Run
+`nfs-afterhours car-images` once after setup to decode each car's pictures from
+your installation into the data folder; `profile` then reports their files. If no complete
 account database exists, keep the failed directory for diagnosis and choose a new
 data directory. Do not overwrite it with someone else's profile.
+
+To review earlier sessions without opening their folders:
+
+```sh
+nfs-afterhours sessions                 # newest 20 sessions under artifacts/launcher
+nfs-afterhours sessions --id <ID>       # one session
+```
+
+Each session shows its action, start, final state and message, its files with
+sizes and line counts, server log levels, the server's `unsupported operation
+received` warnings grouped by service and route, whether its protocol recording
+folder exists and, on Windows, game crash dumps from `Documents\Need For
+Speed\Temp` written during the session. It reads only, with bounded reads.
 
 Configuration generations and executable copies are immutable and hash checked.
 A failed copy/preparation may leave a `.partial` directory/file. It is not used on
@@ -305,8 +367,13 @@ unsafe code.
 Each session gets a unique `artifacts/launcher/<session-id>/` containing
 `request.json`, `status.json` and bounded stdout/stderr logs. Default server
 recordings contain route metadata and lengths, not request payloads. Each log
-file retains at most 4 MiB; the server recording has a 64 MiB, 100,000-event
-and 256-stream budget. It stops recording at the limit and continues serving.
+file holds at most 4 MiB. When one fills up, its oldest part is removed: it
+keeps the newest 3 MiB, starting at a line, behind one line saying how many
+bytes were removed. The end of a long session, where a crash shows, is
+therefore always in the log. The JSON results of preparation steps are kept
+from their start instead; one that would exceed 4 MiB fails the step. The
+server recording has a 64 MiB, 100,000-event and 256-stream budget. It stops
+recording at the limit and continues serving.
 These bounds are per run; old sessions are retained for deliberate user cleanup.
 
 Unimplemented operations produce `WARN unsupported operation received` in the

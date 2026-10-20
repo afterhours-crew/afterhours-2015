@@ -1,0 +1,939 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "Bank": {
+      "properties": {
+        "balance": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "formatted": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "balance",
+        "formatted"
+      ],
+      "type": "object"
+    },
+    "Car": {
+      "description": "One owned car: a root item of the race-vehicle class in the owned state,\nthe same rule the server applies to purchases, sales and the warehouse.\nWhether a car carries a custom wrap or tuning is not reported: those\nedits change stored records in place, and the save keeps no stock\nreference that tells them apart without guessing.",
+      "properties": {
+        "definition": {
+          "description": "Definition GUID as 32 lowercase hexadecimal characters.",
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "image": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CarImages"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The car's in-game images, decoded by `car-images`; `null` before that\nor when the car has none."
+        },
+        "installed_parts": {
+          "description": "Records installed on the car: reachable from it through installed\nitem links, nested parts included. An installed wrap from the\naccount's library counts.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "item_records": {
+          "description": "Records in the car's ownership tree, the car included. Selling the\ncar removes exactly these.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "location": {
+          "$ref": "#/definitions/CarLocation"
+        },
+        "name": {
+          "description": "The game's localized name, read from the installation's text\ndatabase: `names.long`. `null` when it did not resolve; the blueprint\nname stays in `vehicle.label`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "names": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CarNames"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sale_price": {
+          "description": "The stored sale price: the cash that selling this car credits.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "slot": {
+          "description": "Garage slot 0-4; `null` in the warehouse.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "spare_parts": {
+          "description": "Records the car owns that are not installed: stock parts it replaced\nand purchased spares.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "vehicle": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Vehicle"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "definition",
+        "name",
+        "names",
+        "image",
+        "vehicle",
+        "location",
+        "slot",
+        "installed_parts",
+        "spare_parts",
+        "sale_price",
+        "item_records"
+      ],
+      "type": "object"
+    },
+    "CarImage": {
+      "description": "One cached image for `profile`.",
+      "properties": {
+        "height": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "description": "Absolute path of the PNG file.",
+          "type": "string"
+        },
+        "source_format": {
+          "description": "The source texture's `RenderFormat` name, such as `BC1_UNORM`.",
+          "type": "string"
+        },
+        "width": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "width",
+        "height",
+        "source_format"
+      ],
+      "type": "object"
+    },
+    "CarImages": {
+      "description": "A car's cached images; a size is `null` when the car names none or it\ncould not be decoded.",
+      "properties": {
+        "large": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CarImage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "medium": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CarImage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "medium",
+        "large"
+      ],
+      "type": "object"
+    },
+    "CarLocation": {
+      "description": "Where an owned car is kept.",
+      "oneOf": [
+        {
+          "const": "active",
+          "description": "Garage slot 0: the car the player drives.",
+          "type": "string"
+        },
+        {
+          "const": "garage",
+          "description": "Garage slots 1-4.",
+          "type": "string"
+        },
+        {
+          "const": "warehouse",
+          "description": "Owned but outside the five garage slots.",
+          "type": "string"
+        }
+      ]
+    },
+    "CarNames": {
+      "description": "A car's three names in one language. A name is `null` when its string ID\nis absent from the text database or uses an encoding this reader does\nnot decode.",
+      "properties": {
+        "long": {
+          "description": "The longest form; a car's `name` repeats it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "medium": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "short": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "long",
+        "medium",
+        "short"
+      ],
+      "type": "object"
+    },
+    "CarSummary": {
+      "description": "Totals over [`Car`]s.",
+      "properties": {
+        "garage_slots": {
+          "description": "Garage slots in all, 5.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "garage_used": {
+          "description": "Garage slots holding an item.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total_sale_value": {
+          "description": "Sum of every owned car's stored sale price.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "warehouse_limit": {
+          "description": "The server's warehouse limit; moving a car there beyond it is refused.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "warehouse_used": {
+          "description": "Owned cars outside the garage slots.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "garage_used",
+        "garage_slots",
+        "warehouse_used",
+        "warehouse_limit",
+        "total_sale_value"
+      ],
+      "type": "object"
+    },
+    "Categories": {
+      "properties": {
+        "build": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Cell"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "crew": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Cell"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "outlaw": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Cell"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "speed": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Cell"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "style": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Cell"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "build",
+        "crew",
+        "outlaw",
+        "speed",
+        "style"
+      ],
+      "type": "object"
+    },
+    "Cell": {
+      "description": "One stored integer: the value the server serves (the schema default when\nthe save has no cell) and whether the save holds the cell itself.",
+      "properties": {
+        "stored": {
+          "type": "boolean"
+        },
+        "value": {
+          "format": "int32",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "value",
+        "stored"
+      ],
+      "type": "object"
+    },
+    "Columns": {
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "$ref": "#/definitions/Cell"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "description": "Stored cells by column name, in schema order. A column the installed schema lacks is `null`.",
+      "type": "object"
+    },
+    "ContentSource": {
+      "description": "Where the content came from, reported with the profile.",
+      "properties": {
+        "chosen_by": {
+          "description": "`argument`, `current-session` or `only-cache`.",
+          "type": "string"
+        },
+        "directory": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "directory",
+        "chosen_by"
+      ],
+      "type": "object"
+    },
+    "Counts": {
+      "properties": {
+        "activities": {
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "collectibles": {
+          "description": "Saved rows; `null` when the save has no such table yet.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "items": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "items_by_class": {
+          "additionalProperties": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "description": "Owned items per definition class; `null` without item content.",
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "livery_bytes": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "livery_records": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "points_of_interest": {
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "unresolved_items": {
+          "description": "Owned items whose definition the item content does not list.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "items",
+        "items_by_class",
+        "unresolved_items",
+        "livery_records",
+        "livery_bytes",
+        "collectibles",
+        "activities",
+        "points_of_interest"
+      ],
+      "type": "object"
+    },
+    "Domain": {
+      "properties": {
+        "bytes": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "revision",
+        "bytes"
+      ],
+      "type": "object"
+    },
+    "Driver": {
+      "properties": {
+        "account_id": {
+          "type": "string"
+        },
+        "display_name": {
+          "type": "string"
+        },
+        "persona_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "display_name",
+        "persona_id",
+        "account_id"
+      ],
+      "type": "object"
+    },
+    "Garage": {
+      "description": "The five ordered garage slots; slot 0 is the primary vehicle.",
+      "properties": {
+        "primary_vehicle": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Item"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "slots": {
+          "items": {
+            "$ref": "#/definitions/Slot"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "slots",
+        "primary_vehicle"
+      ],
+      "type": "object"
+    },
+    "Item": {
+      "properties": {
+        "class": {
+          "description": "Definition class from the installed item content.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "definition": {
+          "description": "Definition GUID as 32 lowercase hexadecimal characters.",
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "image": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CarImages"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The car's in-game images, decoded by `car-images`; `null` before that\nor when the car has none."
+        },
+        "name": {
+          "description": "The game's localized name of a car, read from the installation:\n`names.long`. `null` for other items or when it did not resolve.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "names": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CarNames"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "vehicle": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Vehicle"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Blueprint from the installed vehicle content, for cars."
+        }
+      },
+      "required": [
+        "id",
+        "definition",
+        "class",
+        "name",
+        "names",
+        "image",
+        "vehicle"
+      ],
+      "type": "object"
+    },
+    "Localization": {
+      "description": "Where a profile's car names came from.",
+      "properties": {
+        "cars": {
+          "description": "Car definitions the installation lists.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "game_directory": {
+          "type": "string"
+        },
+        "game_directory_from": {
+          "description": "`argument`, `current-session` or `registry`.",
+          "type": "string"
+        },
+        "locale": {
+          "description": "The text database's locale, such as `en_US`.",
+          "type": "string"
+        },
+        "locale_from": {
+          "description": "`argument`, `registry` (the game's own registration) or `default`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "locale",
+        "locale_from",
+        "game_directory",
+        "game_directory_from",
+        "cars"
+      ],
+      "type": "object"
+    },
+    "Reputation": {
+      "description": "REP as `nfs_services::reputation` presents it. `level` and the\nthresholds are evaluated from `score`; `stored_level` is the saved\n`RepLevel` cell, which is not an input to that evaluation.",
+      "properties": {
+        "categories": {
+          "$ref": "#/definitions/Categories"
+        },
+        "current_threshold": {
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "level": {
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "maximum_level": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "next_threshold": {
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "score": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Cell"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stored_level": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Cell"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "score",
+        "stored_level",
+        "categories",
+        "level",
+        "current_threshold",
+        "next_threshold",
+        "maximum_level"
+      ],
+      "type": "object"
+    },
+    "Save": {
+      "properties": {
+        "domains": {
+          "additionalProperties": {
+            "$ref": "#/definitions/Domain"
+          },
+          "description": "Present account domains and their revisions.",
+          "type": "object"
+        },
+        "file_bytes": {
+          "description": "Main database file only; recent commits may still be in its log.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "type": "string"
+        },
+        "schema_version": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "updated_at_ms": {
+          "description": "Milliseconds since the Unix epoch, from the server's clock.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "updated_at_utc": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "schema_version",
+        "generation",
+        "updated_at_ms",
+        "updated_at_utc",
+        "file_bytes",
+        "domains"
+      ],
+      "type": "object"
+    },
+    "Slot": {
+      "properties": {
+        "index": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "item": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Item"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "primary": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "index",
+        "primary",
+        "item"
+      ],
+      "type": "object"
+    },
+    "Vehicle": {
+      "description": "A vehicle's blueprint from the installed vehicle content. `label` is the\nblueprint's asset name with the `Car_` prefix removed and underscores as\nspaces; it is not the game's localized display name.",
+      "properties": {
+        "asset_name": {
+          "type": "string"
+        },
+        "blueprint": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "blueprint",
+        "asset_name",
+        "label"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "`profile --json`: one saved driver.",
+  "properties": {
+    "account_id": {
+      "type": "string"
+    },
+    "active": {
+      "description": "Whether `account.json` selects this account.",
+      "type": "boolean"
+    },
+    "bank": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Bank"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "car_images": {
+      "description": "The directory of the decoded car images; `null` until `car-images`\nhas run for the current content.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "car_summary": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/CarSummary"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "cars": {
+      "description": "Every owned car: the active car, garage slots 1-4 in order, then the\nwarehouse by item ID. `null` without item content to classify items.",
+      "items": {
+        "$ref": "#/definitions/Car"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "content": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ContentSource"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "counts": {
+      "$ref": "#/definitions/Counts"
+    },
+    "garage": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Garage"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "identity": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Driver"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "localization": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Localization"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Where car names came from; `null` when none could be read."
+    },
+    "reputation": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Reputation"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "save": {
+      "$ref": "#/definitions/Save"
+    },
+    "tables": {
+      "additionalProperties": {
+        "$ref": "#/definitions/Columns"
+      },
+      "description": "Single-row tables by stored table and column name.",
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "version": {
+      "const": 1,
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "warnings": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "version",
+    "account_id",
+    "active",
+    "identity",
+    "bank",
+    "reputation",
+    "tables",
+    "garage",
+    "cars",
+    "car_summary",
+    "counts",
+    "save",
+    "content",
+    "localization",
+    "car_images",
+    "warnings"
+  ],
+  "title": "Profile",
+  "type": "object"
+}

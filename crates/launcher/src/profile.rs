@@ -1,0 +1,1064 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+//! Read-only driver profiles from the account saves in a data directory.
+//!
+//! A save is read through [`nfs_storage::SqliteRepository::inspect`]: a
+//! read-only connection, one read transaction, a bounded lock wait and no
+//! write of any kind, so a profile can be shown while the server runs. The
+//! profile never takes the data-directory lock. Stored values are decoded
+//! by the server's own domain code in `nfs-services`, with schemas, REP
+//! thresholds and car names from the prepared installation content.
+//!
+//! Stored integers are reported exactly as stored. The game's units for
+//! distances, times and speeds are not confirmed, so none is applied. Only
+//! values whose meaning the server itself defines are formatted: bank cash
+//! and the save's own millisecond timestamp. 64-bit identifiers are decimal
+//! strings so JavaScript consumers keep every digit.
+
+pub mod content;
+pub mod images;
+pub mod names;
+
+use crate::{
+    clock,
+    exit::{Failure, Result},
+    paths, records,
+};
+use content::{Content, Need, Source, Vehicle};
+use images::CarImages;
+use names::{Localization, Names};
+use nfs_services::{
+    authentication::Identity,
+    bank::Balance,
+    persistent::{Loaded, key},
+    reputation::{Field, Scores, Thresholds},
+};
+use nfs_storage::{AccountId, Inspection, ItemId, Snapshot, SqliteRepository, account::Kind};
+use nfs_world_core::items::{DefinitionClass, MAX_DEPTH, OWNED};
+use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
+use serde::{Serialize, Serializer};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::{Path, PathBuf},
+    time::{Duration, UNIX_EPOCH},
+};
+
+/// Version of the JSON objects below. Additive fields keep the version.
+pub const FORMAT_VERSION: u32 = 1;
+/// Accounts listed; more saves set `truncated`.
+pub const MAX_ACCOUNTS: usize = 64;
+/// Directory entries inspected while looking for saves.
+pub const MAX_ACCOUNT_ENTRIES: usize = 4096;
+/// Latest millisecond timestamp formatted as a date: 9999-12-31T23:59:59Z.
+const MAX_FORMATTED_MS: u64 = 253_402_300_799_999;
+
+/// Single-row tables and the columns reported from each, as named by the
+/// installed persistent-table asset.
+const STORE_TABLES: [(&str, &[&str]); 5] = [
+    (
+        "RepValuesTable",
+        &[
+            "RepScore",
+            "RepLevel",
+            "BuildScore",
+            "CrewScore",
+            "OutlawScore",
+            "SpeedScore",
+            "StyleScore",
+        ],
+    ),
+    (
+        "PrestigeMedalTable",
+        &[
+            "BuildMedal",
+            "CrewMedal",
+            "OutlawMedal",
+            "SpeedMedal",
+            "StyleMedal",
+            "FinalEventMedal",
+        ],
+    ),
+    (
+        "GameplayStatsTable",
+        &[
+            "DistanceDriven",
+            "CashEarned",
+            "NumberOfEventsCompleted",
+            "LargestFineEscaped",
+            "LargestFineBusted",
+            "TotalTimePlayed",
+            "FavoriteVehicleId",
+            "TopSpeed",
+            "DistanceDrifted",
+        ],
+    ),
+    (
+        "SpeedListStatsTable",
+        &[
+            "Started", "Finished", "P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8",
+        ],
+    ),
+    ("ProgressionStats", &["IntroCompleted"]),
+];
+
+/// One stored integer: the value the server serves (the schema default when
+/// the save has no cell) and whether the save holds the cell itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct Cell {
+    pub value: i32,
+    pub stored: bool,
+}
+
+/// Ordered columns, serialized as an object. A column the installed schema
+/// lacks is `null`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Columns(pub Vec<(&'static str, Option<Cell>)>);
+impl Serialize for Columns {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.collect_map(self.0.iter().map(|(name, cell)| (name, cell)))
+    }
+}
+impl JsonSchema for Columns {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Columns".into()
+    }
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        let cell = generator.subschema_for::<Option<Cell>>();
+        json_schema!({
+            "description": "Stored cells by column name, in schema order. A column the installed schema lacks is `null`.",
+            "type": "object",
+            "additionalProperties": cell,
+        })
+    }
+}
+impl Columns {
+    pub fn get(&self, name: &str) -> Option<Cell> {
+        self.0
+            .iter()
+            .find(|(n, _)| *n == name)
+            .and_then(|(_, c)| *c)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct Driver {
+    pub display_name: String,
+    pub persona_id: String,
+    pub account_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct Bank {
+    pub balance: u32,
+    pub formatted: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct Categories {
+    pub build: Option<Cell>,
+    pub crew: Option<Cell>,
+    pub outlaw: Option<Cell>,
+    pub speed: Option<Cell>,
+    pub style: Option<Cell>,
+}
+
+/// REP as `nfs_services::reputation` presents it. `level` and the
+/// thresholds are evaluated from `score`; `stored_level` is the saved
+/// `RepLevel` cell, which is not an input to that evaluation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct Reputation {
+    pub score: Option<Cell>,
+    pub stored_level: Option<Cell>,
+    pub categories: Categories,
+    pub level: Option<i32>,
+    pub current_threshold: Option<i32>,
+    pub next_threshold: Option<i32>,
+    pub maximum_level: Option<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct Item {
+    pub id: String,
+    /// Definition GUID as 32 lowercase hexadecimal characters.
+    pub definition: String,
+    /// Definition class from the installed item content.
+    pub class: Option<&'static str>,
+    /// The game's localized name of a car, read from the installation:
+    /// `names.long`. `null` for other items or when it did not resolve.
+    pub name: Option<String>,
+    pub names: Option<Names>,
+    /// The car's in-game images, decoded by `car-images`; `null` before that
+    /// or when the car has none.
+    pub image: Option<CarImages>,
+    /// Blueprint from the installed vehicle content, for cars.
+    pub vehicle: Option<Vehicle>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct Slot {
+    pub index: usize,
+    pub primary: bool,
+    pub item: Option<Item>,
+}
+
+/// The five ordered garage slots; slot 0 is the primary vehicle.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct Garage {
+    pub slots: Vec<Slot>,
+    pub primary_vehicle: Option<Item>,
+}
+
+/// Where an owned car is kept.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum CarLocation {
+    /// Garage slot 0: the car the player drives.
+    Active,
+    /// Garage slots 1-4.
+    Garage,
+    /// Owned but outside the five garage slots.
+    Warehouse,
+}
+
+/// One owned car: a root item of the race-vehicle class in the owned state,
+/// the same rule the server applies to purchases, sales and the warehouse.
+/// Whether a car carries a custom wrap or tuning is not reported: those
+/// edits change stored records in place, and the save keeps no stock
+/// reference that tells them apart without guessing.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct Car {
+    pub id: String,
+    /// Definition GUID as 32 lowercase hexadecimal characters.
+    pub definition: String,
+    /// The game's localized name, read from the installation's text
+    /// database: `names.long`. `null` when it did not resolve; the blueprint
+    /// name stays in `vehicle.label`.
+    pub name: Option<String>,
+    pub names: Option<Names>,
+    /// The car's in-game images, decoded by `car-images`; `null` before that
+    /// or when the car has none.
+    pub image: Option<CarImages>,
+    pub vehicle: Option<Vehicle>,
+    pub location: CarLocation,
+    /// Garage slot 0-4; `null` in the warehouse.
+    pub slot: Option<usize>,
+    /// Records installed on the car: reachable from it through installed
+    /// item links, nested parts included. An installed wrap from the
+    /// account's library counts.
+    pub installed_parts: usize,
+    /// Records the car owns that are not installed: stock parts it replaced
+    /// and purchased spares.
+    pub spare_parts: usize,
+    /// The stored sale price: the cash that selling this car credits.
+    pub sale_price: u32,
+    /// Records in the car's ownership tree, the car included. Selling the
+    /// car removes exactly these.
+    pub item_records: usize,
+}
+
+/// Totals over [`Car`]s.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct CarSummary {
+    /// Garage slots holding an item.
+    pub garage_used: usize,
+    /// Garage slots in all, 5.
+    pub garage_slots: usize,
+    /// Owned cars outside the garage slots.
+    pub warehouse_used: usize,
+    /// The server's warehouse limit; moving a car there beyond it is refused.
+    pub warehouse_limit: usize,
+    /// Sum of every owned car's stored sale price.
+    pub total_sale_value: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct Counts {
+    pub items: usize,
+    /// Owned items per definition class; `null` without item content.
+    pub items_by_class: Option<BTreeMap<&'static str, usize>>,
+    /// Owned items whose definition the item content does not list.
+    pub unresolved_items: Option<usize>,
+    pub livery_records: usize,
+    pub livery_bytes: usize,
+    /// Saved rows; `null` when the save has no such table yet.
+    pub collectibles: Option<usize>,
+    pub activities: Option<usize>,
+    pub points_of_interest: Option<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct Domain {
+    pub revision: u64,
+    pub bytes: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct Save {
+    pub path: PathBuf,
+    pub schema_version: i64,
+    pub generation: u64,
+    /// Milliseconds since the Unix epoch, from the server's clock.
+    pub updated_at_ms: u64,
+    pub updated_at_utc: Option<String>,
+    /// Main database file only; recent commits may still be in its log.
+    pub file_bytes: u64,
+    /// Present account domains and their revisions.
+    pub domains: BTreeMap<&'static str, Domain>,
+}
+
+/// `profile --json`: one saved driver.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct Profile {
+    pub version: u32,
+    pub account_id: String,
+    /// Whether `account.json` selects this account.
+    pub active: bool,
+    pub identity: Option<Driver>,
+    pub bank: Option<Bank>,
+    pub reputation: Option<Reputation>,
+    /// Single-row tables by stored table and column name.
+    pub tables: Option<BTreeMap<&'static str, Columns>>,
+    pub garage: Option<Garage>,
+    /// Every owned car: the active car, garage slots 1-4 in order, then the
+    /// warehouse by item ID. `null` without item content to classify items.
+    pub cars: Option<Vec<Car>>,
+    pub car_summary: Option<CarSummary>,
+    pub counts: Counts,
+    pub save: Save,
+    pub content: Option<Source>,
+    /// Where car names came from; `null` when none could be read.
+    pub localization: Option<Localization>,
+    /// The directory of the decoded car images; `null` until `car-images`
+    /// has run for the current content.
+    pub car_images: Option<PathBuf>,
+    pub warnings: Vec<String>,
+}
+
+/// One line of the account list.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(rename = "ProfileEntry")]
+pub struct Entry {
+    pub account_id: String,
+    pub active: bool,
+    pub display_name: Option<String>,
+    pub level: Option<i32>,
+    pub stored_level: Option<i32>,
+    pub score: Option<i32>,
+    pub bank: Option<Bank>,
+    pub updated_at_ms: Option<u64>,
+    pub updated_at_utc: Option<String>,
+    /// Why this save could not be read; the other fields are then `null`.
+    pub error: Option<String>,
+}
+
+/// `profile --list --json`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(rename = "ProfileList")]
+pub struct Listing {
+    pub version: u32,
+    pub accounts: Vec<Entry>,
+    pub truncated: bool,
+    pub content: Option<Source>,
+    pub warnings: Vec<String>,
+}
+
+/// `1234567` as `1,234,567`.
+pub fn grouped(value: i64) -> String {
+    let digits = value.unsigned_abs().to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3 + 1);
+    if value < 0 {
+        out.push('-');
+    }
+    for (i, digit) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn utc(ms: u64) -> Option<String> {
+    if ms == 0 || ms > MAX_FORMATTED_MS {
+        return None;
+    }
+    UNIX_EPOCH
+        .checked_add(Duration::from_millis(ms))
+        .map(clock::iso_utc)
+}
+
+fn kind_name(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Identity => "identity",
+        Kind::Entitlements => "entitlements",
+        Kind::Kickback => "kickback",
+        Kind::Speedwall => "speedwall",
+        Kind::Settings => "settings",
+    }
+}
+
+/// Human message for a save that cannot be inspected. Nothing was changed.
+pub fn storage_failure(error: nfs_storage::Error) -> Failure {
+    use nfs_storage::Error as E;
+    match error {
+        E::Absent => {
+            Failure::no_session("This account has no saved database in the data directory.")
+        }
+        E::Version => Failure::refused(
+            "This save uses a schema version this launcher does not read; it was not changed.",
+        ),
+        E::Identity => Failure::refused(
+            "This database belongs to a different account than its file name; it was not changed.",
+        ),
+        E::Busy => Failure::internal("The save stayed locked by another process; try again."),
+        E::Storage => Failure::internal("The account database could not be read."),
+        _ => Failure::refused(
+            "The account database is damaged or exceeds its bounds; it was not changed.",
+        ),
+    }
+}
+
+fn cell(loaded: &Loaded, table: &str, column: &str) -> Option<Cell> {
+    let (table, column) = (key(table), key(column));
+    loaded.stores().get(&(table, column)).map(|value| Cell {
+        value: *value,
+        stored: loaded.has_cell(table, 0, column),
+    })
+}
+
+fn reputation(loaded: &Loaded, thresholds: Option<&Thresholds>) -> Reputation {
+    let rep = |column| cell(loaded, "RepValuesTable", column);
+    let values = thresholds.and_then(|thresholds| {
+        Scores::load(loaded)
+            .ok()
+            .map(|scores| (thresholds.evaluate(scores), thresholds.maximum_level()))
+    });
+    Reputation {
+        score: rep("RepScore"),
+        stored_level: rep("RepLevel"),
+        categories: Categories {
+            build: rep("BuildScore"),
+            crew: rep("CrewScore"),
+            outlaw: rep("OutlawScore"),
+            speed: rep("SpeedScore"),
+            style: rep("StyleScore"),
+        },
+        level: values.map(|(v, _)| v.get(Field::Level)),
+        current_threshold: values.map(|(v, _)| v.get(Field::CurrentThreshold)),
+        next_threshold: values.map(|(v, _)| v.get(Field::NextThreshold)),
+        maximum_level: values.map(|(_, maximum)| maximum),
+    }
+}
+
+/// A definition's localized names, when the installation lists it.
+fn localized(content: &Content, definition: &[u8; 16]) -> Option<Names> {
+    content
+        .car_names
+        .as_ref()
+        .and_then(|names| names.get(definition))
+        .map(|entry| entry.names.clone())
+}
+
+/// A definition's decoded images, when `car-images` has run.
+fn pictured(content: &Content, definition: &[u8; 16]) -> Option<CarImages> {
+    content
+        .car_images
+        .as_ref()
+        .and_then(|cached| cached.get(&hex(definition)))
+}
+
+fn item(snapshot: &Snapshot, id: ItemId, content: &Content) -> Option<Item> {
+    let record = snapshot.items.get(&id)?;
+    let definition = record.definition.0;
+    let names = localized(content, &definition);
+    Some(Item {
+        id: id.get().to_string(),
+        definition: hex(&definition),
+        class: content
+            .items
+            .as_ref()
+            .and_then(|items| items.catalog.class(&definition).ok())
+            .map(|class| class.name()),
+        name: names.as_ref().and_then(|names| names.long.clone()),
+        names,
+        image: pictured(content, &definition),
+        vehicle: content
+            .vehicles
+            .as_ref()
+            .and_then(|vehicles| vehicles.get(&definition))
+            .cloned(),
+    })
+}
+
+/// The car and every record it owns, directly or through its parts.
+fn ownership_tree(root: ItemId, owned_by: &BTreeMap<ItemId, Vec<ItemId>>) -> BTreeSet<ItemId> {
+    let mut tree = BTreeSet::from([root]);
+    let mut pending = vec![root];
+    while let Some(id) = pending.pop() {
+        for &child in owned_by.get(&id).into_iter().flatten() {
+            if tree.insert(child) {
+                pending.push(child);
+            }
+        }
+    }
+    tree
+}
+
+/// Records reachable from the car through installed links, excluding it.
+fn installed_tree(snapshot: &Snapshot, root: ItemId) -> BTreeSet<ItemId> {
+    let mut installed = BTreeSet::new();
+    let mut pending = vec![(root, 0)];
+    while let Some((id, depth)) = pending.pop() {
+        let Some(record) = snapshot.items.get(&id) else {
+            continue;
+        };
+        if depth >= MAX_DEPTH {
+            continue;
+        }
+        for &child in &record.sub_items {
+            if child != root && installed.insert(child) {
+                pending.push((child, depth + 1));
+            }
+        }
+    }
+    installed
+}
+
+/// Every owned car and the garage and warehouse totals, or `None` without
+/// item content to tell cars from other items.
+fn cars(snapshot: &Snapshot, content: &Content) -> Option<(Vec<Car>, CarSummary)> {
+    let items = content.items.as_ref()?;
+    let slots = snapshot.garage.map(|garage| garage.0).unwrap_or_default();
+    let mut owned_by: BTreeMap<ItemId, Vec<ItemId>> = BTreeMap::new();
+    for record in snapshot.items.values() {
+        if let Some(owner) = record.owner {
+            owned_by.entry(owner).or_default().push(record.id);
+        }
+    }
+    let mut cars: Vec<(usize, u64, Car)> = snapshot
+        .items
+        .values()
+        .filter(|record| {
+            record.owner.is_none()
+                && record.state == OWNED
+                && matches!(
+                    items.catalog.class(&record.definition.0),
+                    Ok(DefinitionClass::RaceVehicleItemData)
+                )
+        })
+        .map(|record| {
+            let slot = slots.iter().position(|bound| *bound == Some(record.id));
+            let tree = ownership_tree(record.id, &owned_by);
+            let installed = installed_tree(snapshot, record.id);
+            let vehicle = content
+                .vehicles
+                .as_ref()
+                .and_then(|vehicles| vehicles.get(&record.definition.0))
+                .cloned();
+            let names = localized(content, &record.definition.0);
+            let car = Car {
+                id: record.id.get().to_string(),
+                definition: hex(&record.definition.0),
+                name: names.as_ref().and_then(|names| names.long.clone()),
+                names,
+                image: pictured(content, &record.definition.0),
+                vehicle,
+                location: match slot {
+                    Some(0) => CarLocation::Active,
+                    Some(_) => CarLocation::Garage,
+                    None => CarLocation::Warehouse,
+                },
+                slot,
+                installed_parts: installed.len(),
+                spare_parts: tree
+                    .iter()
+                    .filter(|id| **id != record.id && !installed.contains(id))
+                    .count(),
+                sale_price: record.sell_price,
+                item_records: tree.len(),
+            };
+            (slot.unwrap_or(slots.len()), record.id.get(), car)
+        })
+        .collect();
+    cars.sort_by_key(|(slot, id, _)| (*slot, *id));
+    let cars: Vec<Car> = cars.into_iter().map(|(_, _, car)| car).collect();
+    let summary = CarSummary {
+        garage_used: slots.iter().flatten().count(),
+        garage_slots: slots.len(),
+        warehouse_used: cars
+            .iter()
+            .filter(|car| car.location == CarLocation::Warehouse)
+            .count(),
+        warehouse_limit: nfs_services::garage::WAREHOUSE_CAPACITY,
+        total_sale_value: cars.iter().map(|car| u64::from(car.sale_price)).sum(),
+    };
+    Some((cars, summary))
+}
+
+fn identity(
+    inspection: &Inspection,
+    account: AccountId,
+) -> std::result::Result<Driver, &'static str> {
+    let document = inspection
+        .documents
+        .get(&Kind::Identity)
+        .ok_or("The save has no identity record.")?;
+    let value: serde_json::Value =
+        serde_json::from_slice(&document.bytes).map_err(|_| "The saved identity is invalid.")?;
+    let identity = Identity::from_json(&value).map_err(|_| "The saved identity is invalid.")?;
+    if identity.storage_account() != account {
+        return Err("The saved identity belongs to another account.");
+    }
+    Ok(Driver {
+        display_name: identity.name().to_owned(),
+        persona_id: identity.persona_id().to_string(),
+        account_id: account.hex(),
+    })
+}
+
+/// Interpret one inspected save. Never fails: a domain that cannot be
+/// decoded is `null` with a warning.
+pub fn build(
+    account: AccountId,
+    active: bool,
+    path: PathBuf,
+    inspection: &Inspection,
+    content: &Content,
+) -> Profile {
+    let snapshot = &inspection.snapshot;
+    let mut warnings = content.warnings.clone();
+    let identity = identity(inspection, account)
+        .map_err(|warning| warnings.push(warning.into()))
+        .ok();
+    let bank = match Balance::from_snapshot(snapshot) {
+        Ok(Balance(balance)) => Some(Bank {
+            balance,
+            formatted: format!("${}", grouped(i64::from(balance))),
+        }),
+        Err(_) => {
+            warnings.push("The saved bank record is invalid.".into());
+            None
+        }
+    };
+    let loaded = content.tables.as_ref().and_then(|catalog| {
+        catalog
+            .view(snapshot)
+            .map_err(|_| {
+                warnings.push(
+                    "The saved tables are not initialized or do not match the installed schema; start the server once to initialize them."
+                        .into(),
+                )
+            })
+            .ok()
+    });
+    let reputation = loaded
+        .as_ref()
+        .map(|loaded| reputation(loaded, content.thresholds.as_ref()));
+    let tables = loaded.as_ref().map(|loaded| {
+        STORE_TABLES
+            .iter()
+            .map(|(table, columns)| {
+                (
+                    *table,
+                    Columns(
+                        columns
+                            .iter()
+                            .map(|column| (*column, cell(loaded, table, column)))
+                            .collect(),
+                    ),
+                )
+            })
+            .collect()
+    });
+    let garage = snapshot.garage.map(|slots| {
+        let slots: Vec<Slot> = slots
+            .0
+            .iter()
+            .enumerate()
+            .map(|(index, id)| Slot {
+                index,
+                primary: index == 0,
+                item: id.and_then(|id| item(snapshot, id, content)),
+            })
+            .collect();
+        Garage {
+            primary_vehicle: slots[0].item.clone(),
+            slots,
+        }
+    });
+    if garage.is_none() {
+        warnings.push("The save has no garage yet.".into());
+    }
+    let (cars, car_summary) = cars(snapshot, content).unzip();
+    if let Some(names) = &content.car_names {
+        // Owned cars, or the garage's items when cars cannot be classified.
+        let definitions: BTreeSet<&str> = match &cars {
+            Some(cars) => cars.iter().map(|car| car.definition.as_str()).collect(),
+            None => garage
+                .iter()
+                .flat_map(|garage| &garage.slots)
+                .filter_map(|slot| slot.item.as_ref())
+                .map(|item| item.definition.as_str())
+                .collect(),
+        };
+        for definition in definitions {
+            let entry = content::guid(definition).and_then(|guid| names.get(&guid));
+            match entry {
+                None => warnings.push(format!(
+                    "The installation lists no car item for definition {definition}; it has no localized name."
+                )),
+                Some(entry) if !entry.unresolved.is_empty() => warnings.push(format!(
+                    "Car {definition}: {} not in the {} text database.",
+                    entry.unresolved.join(", "),
+                    names.locale
+                )),
+                Some(_) => {}
+            }
+        }
+    }
+    let classes = content.items.as_ref().map(|items| {
+        let mut by_class = BTreeMap::new();
+        let mut unresolved = 0;
+        for record in snapshot.items.values() {
+            match items.catalog.class(&record.definition.0) {
+                Ok(class) => *by_class.entry(class.name()).or_insert(0) += 1,
+                Err(_) => unresolved += 1,
+            }
+        }
+        (by_class, unresolved)
+    });
+    let rows = |table: &str| snapshot.tables.get(&key(table)).map(|t| t.rows.len());
+    Profile {
+        version: FORMAT_VERSION,
+        account_id: account.hex(),
+        active,
+        identity,
+        bank,
+        reputation,
+        tables,
+        garage,
+        cars,
+        car_summary,
+        counts: Counts {
+            items: snapshot.items.len(),
+            unresolved_items: classes.as_ref().map(|(_, unresolved)| *unresolved),
+            items_by_class: classes.map(|(by_class, _)| by_class),
+            livery_records: inspection.livery.records,
+            livery_bytes: inspection.livery.bytes,
+            collectibles: rows("CollectiblesTable"),
+            activities: rows("ActivitiesTable"),
+            points_of_interest: rows("PoiIdTable"),
+        },
+        save: Save {
+            path,
+            schema_version: inspection.schema_version,
+            generation: snapshot.generation,
+            updated_at_ms: snapshot.updated_at.0,
+            updated_at_utc: utc(snapshot.updated_at.0),
+            file_bytes: inspection.file_bytes,
+            domains: inspection
+                .documents
+                .iter()
+                .map(|(kind, document)| {
+                    (
+                        kind_name(*kind),
+                        Domain {
+                            revision: document.revision,
+                            bytes: document.bytes.len(),
+                        },
+                    )
+                })
+                .collect(),
+        },
+        content: content.source.clone(),
+        localization: content.localization.clone(),
+        car_images: content
+            .car_images
+            .as_ref()
+            .map(|cached| cached.directory.clone()),
+        warnings,
+    }
+}
+
+/// An existing component of the data directory that is not a link.
+fn ordinary_dir(path: &Path) -> Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if paths::is_link(&meta) || !meta.is_dir() => Err(Failure::refused(
+            "The account directory must be an ordinary directory, not a link.",
+        )),
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// The saves of one data directory, opened for reading only.
+pub struct Saves {
+    data: PathBuf,
+    /// `artifacts/account` and its read-only repository, when present.
+    repository: Option<(PathBuf, SqliteRepository)>,
+    active: Option<String>,
+}
+
+impl Saves {
+    /// Validate the data path and find `artifacts/account`. A data directory
+    /// without saves is not an error here; callers decide.
+    pub fn open(data: &Path) -> Result<Self> {
+        let data = paths::checked_data_path(data, None)?;
+        let artifacts = data.join("artifacts");
+        let directory = artifacts.join("account");
+        let present =
+            ordinary_dir(&data)? && ordinary_dir(&artifacts)? && ordinary_dir(&directory)?;
+        let repository = if present {
+            let repository =
+                SqliteRepository::open_existing_directory(&directory).map_err(storage_failure)?;
+            Some((directory, repository))
+        } else {
+            None
+        };
+        let pointer = data.join("account.json");
+        let active = if pointer.exists() {
+            let record: records::AccountRecord = records::read_json(&pointer)?;
+            record.validate()?;
+            Some(record.local_account)
+        } else {
+            None
+        };
+        Ok(Self {
+            data,
+            repository,
+            active,
+        })
+    }
+
+    pub fn data(&self) -> &Path {
+        &self.data
+    }
+
+    /// The account `account.json` selects, if any.
+    pub fn active(&self) -> Option<&str> {
+        self.active.as_deref()
+    }
+
+    fn inspect(&self, id: &str) -> Result<(AccountId, PathBuf, Inspection)> {
+        let account = parse_account(id)?;
+        let (_, repository) = self.repository.as_ref().ok_or_else(|| {
+            Failure::no_session("This data directory has no saved accounts yet; run setup first.")
+        })?;
+        let inspection = repository.inspect(account).map_err(storage_failure)?;
+        Ok((account, repository.path(account), inspection))
+    }
+
+    /// One account's profile.
+    pub fn profile(&self, id: &str, content: &Content) -> Result<Profile> {
+        let (account, path, inspection) = self.inspect(id)?;
+        Ok(build(
+            account,
+            self.active() == Some(id),
+            path,
+            &inspection,
+            content,
+        ))
+    }
+
+    /// Every save in the account directory, in account-ID order. A save
+    /// that cannot be read is listed with its error.
+    pub fn list(&self, content: &Content) -> Result<Listing> {
+        let mut ids = Vec::new();
+        if let Some((directory, _)) = &self.repository {
+            for entry in std::fs::read_dir(directory)?.take(MAX_ACCOUNT_ENTRIES) {
+                let name = entry?.file_name();
+                if let Some(id) = name.to_str().and_then(|n| n.strip_suffix(".sqlite"))
+                    && records::is_id(id)
+                {
+                    ids.push(id.to_owned());
+                }
+            }
+        }
+        ids.sort();
+        let truncated = ids.len() > MAX_ACCOUNTS;
+        ids.truncate(MAX_ACCOUNTS);
+        let accounts = ids
+            .into_iter()
+            .map(|id| {
+                let active = self.active() == Some(id.as_str());
+                match self.profile(&id, content) {
+                    Ok(profile) => {
+                        let reputation = profile.reputation.as_ref();
+                        Entry {
+                            account_id: id,
+                            active,
+                            display_name: profile.identity.map(|d| d.display_name),
+                            level: reputation.and_then(|r| r.level),
+                            stored_level: reputation.and_then(|r| r.stored_level).map(|c| c.value),
+                            score: reputation.and_then(|r| r.score).map(|c| c.value),
+                            bank: profile.bank,
+                            updated_at_ms: Some(profile.save.updated_at_ms),
+                            updated_at_utc: profile.save.updated_at_utc,
+                            error: None,
+                        }
+                    }
+                    Err(failure) => Entry {
+                        account_id: id,
+                        active,
+                        display_name: None,
+                        level: None,
+                        stored_level: None,
+                        score: None,
+                        bank: None,
+                        updated_at_ms: None,
+                        updated_at_utc: None,
+                        error: Some(failure.message),
+                    },
+                }
+            })
+            .collect();
+        Ok(Listing {
+            version: FORMAT_VERSION,
+            accounts,
+            truncated,
+            content: content.source.clone(),
+            warnings: content.warnings.clone(),
+        })
+    }
+}
+
+/// A 32-character lowercase account ID as a storage key.
+pub fn parse_account(id: &str) -> Result<AccountId> {
+    let invalid = || Failure::refused("An account ID is 32 lowercase hexadecimal characters.");
+    if !records::is_id(id) {
+        return Err(invalid());
+    }
+    let bytes = content::guid(id).ok_or_else(invalid)?;
+    AccountId::from_owned_config(bytes).map_err(|_| invalid())
+}
+
+/// Load content for `need` from the explicit directory or the data
+/// directory's own records.
+pub fn content(data: &Path, explicit: Option<&Path>, need: Need) -> Result<Content> {
+    let mut content = Content::load(content::locate(data, explicit)?, need);
+    if need == Need::Full {
+        let fingerprint = content
+            .source
+            .as_ref()
+            .and_then(|source| source.directory.file_name())
+            .and_then(|name| name.to_str().map(str::to_owned));
+        if let Some(fingerprint) = fingerprint {
+            match images::load(data, &fingerprint) {
+                Ok(cached) => content.car_images = cached,
+                Err(why) => content.warnings.push(format!(
+                    "The decoded car images are unusable ({why}); run car-images again."
+                )),
+            }
+        }
+    }
+    Ok(content)
+}
+
+/// The game's registration, as [`crate::platform::game_registration`]
+/// reads it; tests supply their own.
+#[derive(Clone, Debug, Default)]
+pub struct Registration {
+    pub install_dir: Option<PathBuf>,
+    pub locale: Option<String>,
+}
+
+/// The game directory the current session was started with.
+fn session_game_directory(data: &Path) -> Option<PathBuf> {
+    let pointer: records::SessionPointer =
+        records::read_json(&data.join(crate::session::POINTER_FILE)).ok()?;
+    if pointer.version != records::VERSION || !records::is_id(&pointer.id) {
+        return None;
+    }
+    let request: records::Request =
+        records::read_json(&paths::session_dir(data, &pointer.id).join("request.json")).ok()?;
+    request
+        .game_directory
+        .filter(|directory| directory.is_dir())
+}
+
+/// The installation to read: `game`, else the one the current session
+/// started, else the registered one, with where it came from. An explicit
+/// directory that does not exist is refused.
+pub fn installation(
+    data: &Path,
+    game: Option<&Path>,
+    registered: Option<PathBuf>,
+) -> Result<Option<(PathBuf, &'static str)>> {
+    if let Some(directory) = game {
+        let directory = paths::normalize(directory)?;
+        if !directory.is_dir() {
+            return Err(Failure::refused(
+                "--game-dir must be an existing directory.",
+            ));
+        }
+        return Ok(Some((directory, "argument")));
+    }
+    Ok(session_game_directory(data)
+        .map(|directory| (directory, "current-session"))
+        .or_else(|| {
+            registered
+                .filter(|directory| directory.is_dir())
+                .map(|directory| (directory, "registry"))
+        }))
+}
+
+/// Read localized car names into `content` from an installation: `game`,
+/// else the one the current session started, else the registered one; in
+/// `language`, else the game's registered locale, else [`names::DEFAULT_LOCALE`].
+/// An explicit argument that cannot be used is refused. Anything else
+/// unavailable becomes a warning and leaves the names `null`.
+pub fn localize(
+    content: &mut Content,
+    data: &Path,
+    game: Option<&Path>,
+    language: Option<&str>,
+    registration: Registration,
+) -> Result<()> {
+    let (locale, locale_from) = match language {
+        Some(locale) if names::is_locale(locale) => (locale.to_owned(), "argument"),
+        Some(_) => {
+            return Err(Failure::refused("--language takes a locale such as en_US."));
+        }
+        None => match registration
+            .locale
+            .filter(|locale| names::is_locale(locale))
+        {
+            Some(locale) => (locale, "registry"),
+            None => (names::DEFAULT_LOCALE.to_owned(), "default"),
+        },
+    };
+    let Some((game_directory, game_directory_from)) =
+        installation(data, game, registration.install_dir)?
+    else {
+        content
+            .warnings
+            .push("No game installation found; car names are unavailable. Pass --game-dir.".into());
+        return Ok(());
+    };
+    match names::read(&game_directory, &locale, nfs_frostbite::Limits::default()) {
+        Ok(names) => {
+            content.localization = Some(Localization {
+                locale,
+                locale_from,
+                game_directory,
+                game_directory_from,
+                cars: names.len(),
+            });
+            content.car_names = Some(names);
+        }
+        Err(why) => content
+            .warnings
+            .push(format!("Car names are unavailable: {why}.")),
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests;

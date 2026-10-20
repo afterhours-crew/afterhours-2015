@@ -56,6 +56,8 @@ pub struct Global {
     pub data_dir: Option<PathBuf>,
 
     /// Print results as one JSON object instead of text.
+    ///
+    /// Each object has a `version`; `schema <record>` prints its JSON Schema.
     #[arg(long, global = true)]
     pub json: bool,
 }
@@ -96,13 +98,104 @@ pub struct SessionArgs {
     ///
     /// 0 turns traffic off. Saved in settings.json in the data directory and
     /// used by later sessions until changed. Default: 100.
-    #[arg(long, value_name = "PERCENT", value_parser = clap::value_parser!(u16).range(0..=300))]
+    #[arg(long, value_name = "PERCENT", value_parser = clap::value_parser!(u16).range(0..=i64::from(crate::settings::MAX_TRAFFIC_PERCENT)))]
     pub traffic: Option<u16>,
 
-    /// Most roaming rivals active at once (0-128), or `original`.
+    /// Number of roaming rivals to keep active (0-15), or `original`.
     ///
-    /// 0 turns rivals off; `original` restores the original number. Saved in
-    /// settings.json in the data directory like --traffic.
+    /// 0 turns rivals off; `original` restores the original number. The
+    /// game's own rivals are capped at the number and, where the installed
+    /// racers allow, more are added up to it. Saved in settings.json in the
+    /// data directory like --traffic.
+    #[arg(long, value_name = "COUNT", value_parser = crate::settings::parse_rivals)]
+    pub rivals: Option<crate::settings::Rivals>,
+
+    /// Report the session as JSON lines on stdout instead of console text.
+    ///
+    /// One object per line: `session` when the session directory exists,
+    /// `status` for every state change, `diagnostic` for each line the
+    /// server, game or preparation writes to stderr, and `final` last with
+    /// the exit code. Schema: `nfs-afterhours schema event`. Human output
+    /// is silenced; the session keeps running if the reader goes away.
+    #[arg(long)]
+    pub events: bool,
+}
+
+/// Arguments for `serve`.
+#[derive(Debug, Clone, Args)]
+pub struct ServeArgs {
+    #[command(flatten)]
+    pub session: SessionArgs,
+
+    /// Serve without game support, so `play` is unavailable (Windows).
+    ///
+    /// By default a Windows serve session is ready to host the game: it runs
+    /// the same checks as `start` (activation helper, registration, no EA
+    /// app or game running, port 3216 free) and starts the server as `start`
+    /// does. With this flag none of that applies, as on other platforms.
+    #[arg(long)]
+    pub server_only: bool,
+}
+
+/// Arguments for `sessions`.
+#[derive(Debug, Clone, Args)]
+pub struct SessionsArgs {
+    /// Most sessions to list, newest first (1-200).
+    #[arg(long, value_name = "N", default_value_t = 20, value_parser = clap::value_parser!(u16).range(1..=200))]
+    pub limit: u16,
+
+    /// Show only the session with this 32-character ID.
+    #[arg(long, value_name = "ID")]
+    pub id: Option<String>,
+}
+
+/// Arguments for `car-images`.
+#[derive(Debug, Clone, Args)]
+pub struct CarImagesArgs {
+    /// Installed game to read the images from, read-only. Defaults to the
+    /// one the current session started, then the registered one.
+    #[arg(long, value_name = "DIR")]
+    pub game_dir: Option<PathBuf>,
+}
+
+/// Arguments for `profile`.
+#[derive(Debug, Clone, Args)]
+pub struct ProfileArgs {
+    /// List every saved driver: name, REP level, bank and last save.
+    #[arg(long, conflicts_with = "account_id")]
+    pub list: bool,
+
+    /// The 32-character account ID to show. Defaults to the account in
+    /// account.json.
+    #[arg(long, value_name = "ID")]
+    pub account_id: Option<String>,
+
+    /// Prepared content directory for REP thresholds, table schemas and car
+    /// blueprints. Defaults to the one the current session prepared.
+    #[arg(long, value_name = "DIR")]
+    pub content_dir: Option<PathBuf>,
+
+    /// Installed game to read localized car names from, read-only. Defaults
+    /// to the one the current session started, then the registered one.
+    #[arg(long, value_name = "DIR", conflicts_with = "list")]
+    pub game_dir: Option<PathBuf>,
+
+    /// Locale of the car names, such as en_US or de_DE. Defaults to the
+    /// game's registered locale, then en_US.
+    #[arg(long, value_name = "LOCALE", conflicts_with = "list")]
+    pub language: Option<String>,
+}
+
+/// Arguments for `settings`.
+#[derive(Debug, Clone, Args)]
+pub struct SettingsArgs {
+    /// Save the amount of ambient traffic, as a percentage of the original
+    /// (0-300); 0 turns traffic off.
+    #[arg(long, value_name = "PERCENT", value_parser = clap::value_parser!(u16).range(0..=i64::from(crate::settings::MAX_TRAFFIC_PERCENT)))]
+    pub traffic: Option<u16>,
+
+    /// Save the number of roaming rivals to keep active (0-15), or
+    /// `original`.
     #[arg(long, value_name = "COUNT", value_parser = crate::settings::parse_rivals)]
     pub rivals: Option<crate::settings::Rivals>,
 }
@@ -122,11 +215,13 @@ pub enum Command {
     /// local account on first use. Existing accounts are reused, never reset.
     Setup(SessionArgs),
 
-    /// Run the server without launching the game. Works on every platform.
+    /// Run the server; on Windows the game can join later with `play`.
     ///
     /// Prepares like `setup`, then starts the server on loopback and
-    /// supervises it until it exits, a stop is requested or Ctrl+C.
-    Serve(SessionArgs),
+    /// supervises it until it exits, a stop is requested or Ctrl+C. Works on
+    /// every platform. On Windows `play` starts the game inside this session;
+    /// when the game exits, the server keeps running.
+    Serve(ServeArgs),
 
     /// Run the server, then start and route the installed game. Windows only.
     ///
@@ -147,6 +242,72 @@ pub enum Command {
     /// Writes a stop request the supervisor consumes. Never kills a process
     /// by identifier. Exits with code 4 when there is no live session.
     Stop,
+
+    /// Ask the running `serve` session to start the game. Windows only.
+    ///
+    /// Writes a play request the serving supervisor consumes. It then starts,
+    /// routes and supervises the game exactly as `start` does, in the same
+    /// session; follow it with `status` or the session's event stream. When
+    /// the game exits the session goes back to serving. Exits with code 4
+    /// when no session runs and 1 when the session cannot start the game:
+    /// not a serve session, served with --server-only, stopping, or a game
+    /// already running or requested.
+    Play,
+
+    /// Show a saved driver's profile, or list every saved driver; change nothing.
+    ///
+    /// Read-only. Opens the account's SQLite save without the data-directory
+    /// lock, so it also works while the server runs, and reads REP
+    /// thresholds, table schemas and car names from the prepared content.
+    /// Stored integers are printed as stored: the game's units for
+    /// distances, times and speeds are not confirmed. Exits with code 4
+    /// when there is no saved account to show.
+    Profile(ProfileArgs),
+
+    /// Decode each car's in-game images from the installation for `profile`.
+    ///
+    /// Reads the installed game read-only and writes PNG files and an index
+    /// to artifacts/content/car-images/<content fingerprint>/ in the data
+    /// directory; `profile` then reports them per car. A complete set is
+    /// reused, never rewritten. Needs the content a session prepared; exits
+    /// with code 4 before the first setup.
+    CarImages(CarImagesArgs),
+
+    /// List the session folders and summarize their logs; change nothing.
+    ///
+    /// Read-only, newest first. For each session: action, start and end,
+    /// final state and message, every file with its size and line count,
+    /// server log levels and unsupported-operation warnings grouped by
+    /// service and route, the protocol recording folder and, on Windows,
+    /// game crash dumps written during the session. Every read is bounded.
+    Sessions(SessionsArgs),
+
+    /// Show or change the saved traffic and rival amounts.
+    ///
+    /// Without options, prints the values in settings.json in the data
+    /// directory, or the original ones when there is no file yet, and
+    /// changes nothing. --traffic and --rivals save new values, as they do on
+    /// `start` and `serve`; a running session applies them within about a
+    /// second and later sessions start with them. The record also gives the
+    /// largest values this build accepts.
+    Settings(SettingsArgs),
+
+    /// Show the version, the JSON record versions and the capabilities.
+    ///
+    /// With --json, the record a desktop front end checks before using any
+    /// other command: program and release, source revision, the version of
+    /// every JSON record and the optional features this build provides.
+    Version,
+
+    /// Print the JSON Schema of one --json record or event line.
+    ///
+    /// The schemas are generated from the types that print the records and
+    /// ship with each release. Record names are listed by `version --json`.
+    Schema {
+        /// Record name, such as status, sessions or event.
+        #[arg(value_name = "RECORD", value_parser = clap::builder::PossibleValuesParser::new(crate::contract::record_names()))]
+        name: String,
+    },
 
     /// Restore the account pointer for an existing saved database.
     ///
@@ -229,5 +390,108 @@ mod tests {
             Cli::try_parse_from(["nfs-afterhours", "recover"]).is_err(),
             "account-id is required"
         );
+        let profile = Cli::try_parse_from([
+            "nfs-afterhours",
+            "profile",
+            "--json",
+            "--content-dir",
+            "C",
+            "--data-dir",
+            "d",
+        ])
+        .unwrap();
+        match profile.command {
+            Command::Profile(args) => {
+                assert!(!args.list && args.account_id.is_none());
+                assert_eq!(args.content_dir, Some(PathBuf::from("C")));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(
+            Cli::try_parse_from(["nfs-afterhours", "profile", "--list", "--account-id", "a"])
+                .is_err(),
+            "a listing shows every account"
+        );
+    }
+
+    #[test]
+    fn contract_commands_parse_and_bound_their_arguments() {
+        let serve = Cli::try_parse_from(["nfs-afterhours", "serve", "--game-dir", "G", "--events"])
+            .unwrap();
+        assert!(
+            matches!(serve.command, Command::Serve(args) if args.session.events && !args.server_only)
+        );
+        let serve = Cli::try_parse_from([
+            "nfs-afterhours",
+            "serve",
+            "--game-dir",
+            "G",
+            "--server-only",
+        ])
+        .unwrap();
+        assert!(matches!(serve.command, Command::Serve(args) if args.server_only));
+        assert!(
+            Cli::try_parse_from([
+                "nfs-afterhours",
+                "start",
+                "--game-dir",
+                "G",
+                "--server-only"
+            ])
+            .is_err(),
+            "--server-only is a serve option"
+        );
+        assert!(matches!(
+            Cli::try_parse_from(["nfs-afterhours", "play", "--json"])
+                .unwrap()
+                .command,
+            Command::Play
+        ));
+        match Cli::try_parse_from(["nfs-afterhours", "sessions"])
+            .unwrap()
+            .command
+        {
+            Command::Sessions(args) => assert_eq!((args.limit, args.id), (20, None)),
+            other => panic!("{other:?}"),
+        }
+        assert!(Cli::try_parse_from(["nfs-afterhours", "sessions", "--limit", "0"]).is_err());
+        assert!(Cli::try_parse_from(["nfs-afterhours", "sessions", "--limit", "201"]).is_err());
+        match Cli::try_parse_from(["nfs-afterhours", "settings"])
+            .unwrap()
+            .command
+        {
+            Command::Settings(args) => assert_eq!((args.traffic, args.rivals), (None, None)),
+            other => panic!("{other:?}"),
+        }
+        match Cli::try_parse_from([
+            "nfs-afterhours",
+            "settings",
+            "--traffic",
+            "300",
+            "--rivals",
+            "original",
+        ])
+        .unwrap()
+        .command
+        {
+            Command::Settings(args) => assert_eq!(
+                (args.traffic, args.rivals),
+                (Some(300), Some(crate::settings::Rivals::Original))
+            ),
+            other => panic!("{other:?}"),
+        }
+        for bad in [
+            ["--traffic", "301"],
+            ["--rivals", "16"],
+            ["--rivals", "lots"],
+        ] {
+            let mut line = vec!["nfs-afterhours", "settings"];
+            line.extend(bad);
+            assert!(Cli::try_parse_from(line).is_err(), "{bad:?}");
+        }
+        assert!(Cli::try_parse_from(["nfs-afterhours", "--json", "version"]).is_ok());
+        assert!(Cli::try_parse_from(["nfs-afterhours", "schema", "event"]).is_ok());
+        assert!(Cli::try_parse_from(["nfs-afterhours", "schema", "nothing"]).is_err());
+        assert!(Cli::try_parse_from(["nfs-afterhours", "schema"]).is_err());
     }
 }

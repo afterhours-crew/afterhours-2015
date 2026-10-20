@@ -113,27 +113,39 @@ impl SqliteRepository {
         let root = windows_local_root(root)?;
         Ok(Self { root })
     }
+    /// Like [`Self::open_owned_directory`] for readers that must not create
+    /// anything: an absent directory is [`Error::Absent`].
+    pub fn open_existing_directory(root: &Path) -> Result<Self, Error> {
+        match std::fs::symlink_metadata(root) {
+            Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {}
+            Ok(_) => return Err(Error::Config),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(Error::Absent),
+            Err(_) => return Err(Error::Storage),
+        }
+        let root = root.canonicalize().map_err(|_| Error::Storage)?;
+        #[cfg(windows)]
+        let root = windows_local_root(root)?;
+        Ok(Self { root })
+    }
     /// The account's database file. Exposed for tests and backups.
     pub fn path(&self, account: AccountId) -> PathBuf {
         self.root.join(format!("{}.sqlite", account.hex()))
     }
-    pub(crate) fn connect(&self, account: AccountId, create: bool) -> Result<Connection, Error> {
-        let path = self.path(account);
-        match std::fs::symlink_metadata(&path) {
+    /// Size of an existing, bounded, ordinary database file.
+    fn checked_file(&self, account: AccountId, create: bool) -> Result<Option<u64>, Error> {
+        match std::fs::symlink_metadata(self.path(account)) {
             Ok(m) => {
                 if !m.is_file() || m.file_type().is_symlink() || m.len() > MAX_FILE_BYTES {
                     return Err(Error::Config);
                 }
+                Ok(Some(m.len()))
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound && create => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(Error::Absent),
-            Err(_) => return Err(Error::Storage),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && create => Ok(None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(Error::Absent),
+            Err(_) => Err(Error::Storage),
         }
-        let mut flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-        if create {
-            flags |= OpenFlags::SQLITE_OPEN_CREATE;
-        }
-        let conn = Connection::open_with_flags(path, flags)?;
+    }
+    fn limit(conn: &Connection) -> Result<(), Error> {
         conn.busy_timeout(BUSY_TIMEOUT)?;
         conn.set_limit(
             rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH,
@@ -144,6 +156,36 @@ impl SqliteRepository {
             MAX_SQL_BYTES,
         )?;
         conn.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_VARIABLE_NUMBER, 16)?;
+        Ok(())
+    }
+    /// A connection that cannot change the database: opened read-only with
+    /// `query_only`, and never checkpointing or deleting a writer's log when
+    /// it closes. Returns the main file's size at open.
+    pub(crate) fn connect_read_only(&self, account: AccountId) -> Result<(Connection, u64), Error> {
+        let bytes = self.checked_file(account, false)?.ok_or(Error::Absent)?;
+        let conn = Connection::open_with_flags(
+            self.path(account),
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        if !conn.set_db_config(
+            rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+            true,
+        )? {
+            return Err(Error::Storage);
+        }
+        Self::limit(&conn)?;
+        conn.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA query_only=ON;")?;
+        Ok((conn, bytes))
+    }
+    pub(crate) fn connect(&self, account: AccountId, create: bool) -> Result<Connection, Error> {
+        let path = self.path(account);
+        self.checked_file(account, create)?;
+        let mut flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        if create {
+            flags |= OpenFlags::SQLITE_OPEN_CREATE;
+        }
+        let conn = Connection::open_with_flags(path, flags)?;
+        Self::limit(&conn)?;
         // EXTRA protects the initial rollback-journal import; it equals FULL
         // once the file is in WAL mode.
         conn.execute_batch(

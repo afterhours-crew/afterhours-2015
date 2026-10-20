@@ -507,7 +507,7 @@ fn delegated_traffic_reports_are_isolated_retry_safe_and_retired() {
 fn traffic_turned_off_spawns_nothing_and_more_traffic_still_spawns() {
     let (p, mut world, c) = fixture();
     let mut off = p.clone().with_traffic_percent(0);
-    let mut more = p.with_traffic_percent(200);
+    let mut more = p.with_traffic_percent(crate::ai_settings::MAX_TRAFFIC_PERCENT);
     let mut other = world.clone();
     for now in [0, 1001, 2002, 3003, 4004] {
         assert!(
@@ -526,4 +526,39 @@ fn traffic_turned_off_spawns_nothing_and_more_traffic_still_spawns() {
             .spawned
             .is_some()
     );
+}
+
+#[test]
+fn traffic_leaves_room_for_every_chosen_rival_car() {
+    assert_eq!(MAX_CARS + crate::ai_settings::RIVAL_CAR_RESERVE, ai::MAX_AI);
+    // One player's largest nearby target at 3x (30 cars) still fits.
+    assert!(
+        MAX_CARS >= crate::ai_settings::scale(10, crate::ai_settings::MAX_TRAFFIC_PERCENT) as usize
+    );
+}
+
+#[test]
+fn an_amount_changed_while_running_applies_to_the_next_spawn_decision() {
+    let (mut p, mut world, c) = fixture();
+    let step = |p: &mut Population, world: &mut Players, now| {
+        p.advance(world, 1, 100, &c, input(now, &[focus()]))
+            .unwrap()
+            .spawned
+            .is_some()
+    };
+    assert!(!step(&mut p, &mut world, 0));
+    // Off before the first spawn: nothing spawns however long it runs.
+    p.set_traffic_percent(0);
+    for now in [1001, 2002, 3003, 4004] {
+        assert!(!step(&mut p, &mut world, now));
+    }
+    // Back on: the next due attempt spawns.
+    p.set_traffic_percent(crate::ai_settings::MAX_TRAFFIC_PERCENT);
+    assert!(step(&mut p, &mut world, 5005));
+    assert_eq!(p.count(), 1);
+    // Lowered again: the car already there is not removed by the change.
+    p.set_traffic_percent(0);
+    assert!(!step(&mut p, &mut world, 6000));
+    assert_eq!(p.traffic_percent(), 0);
+    assert_eq!(p.count(), 1);
 }

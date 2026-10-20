@@ -290,6 +290,18 @@ impl Policy {
     }
 }
 
+/// Seconds until a player's next spawn attempt. The native interval is
+/// twice the nearby/target ratio; a moving player leaves cars behind within
+/// a roughly fixed time, so the native rule settles near
+/// `sqrt(target x lifetime / 2)` cars and scaling only the target gives
+/// about the square root of the chosen amount (E993 at 200 %; 5x gave about
+/// 2.2x while driving). Dividing the interval by the amount keeps the
+/// count proportional to it; 100 % is the native interval.
+pub(super) fn interval(nearby: usize, target: usize, percent: u16) -> f32 {
+    let native = nearby as f32 / target.max(1) as f32 * 2.;
+    native * 100. / f32::from(percent.max(1))
+}
+
 fn cell(value: f32) -> usize {
     ((value as i32).wrapping_add(8192) as u32 >> 9) as usize
 }
