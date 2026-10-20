@@ -1127,7 +1127,7 @@ mod tests {
         let mut args = configured();
         args.extend([
             "--traffic-percent".into(),
-            "500".into(),
+            "300".into(),
             "--rival-limit".into(),
             "15".into(),
             "--settings-file".into(),
@@ -1136,13 +1136,13 @@ mod tests {
         let parsed = parse_from(args.into_iter()).unwrap();
         assert_eq!(
             (parsed.ai.traffic_percent(), parsed.ai.rival_limit()),
-            (500, Some(15))
+            (300, Some(15))
         );
         assert_eq!(parsed.settings_file, Some(PathBuf::from("settings.json")));
         let parsed = parse_from(configured().into_iter()).unwrap();
         assert_eq!(parsed.settings_file, None, "amounts stay as started");
         for (flag, value) in [
-            ("--traffic-percent", "501"),
+            ("--traffic-percent", "301"),
             ("--traffic-percent", "-1"),
             ("--traffic-percent", "lots"),
             ("--rival-limit", "16"),

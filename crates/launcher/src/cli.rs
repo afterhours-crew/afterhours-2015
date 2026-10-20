@@ -94,7 +94,7 @@ pub struct SessionArgs {
     #[arg(long)]
     pub record_protocol: bool,
 
-    /// Amount of ambient traffic, as a percentage of the original (0-500).
+    /// Amount of ambient traffic, as a percentage of the original (0-300).
     ///
     /// 0 turns traffic off. Saved in settings.json in the data directory and
     /// used by later sessions until changed. Default: 100.
@@ -181,7 +181,7 @@ pub struct ProfileArgs {
 #[derive(Debug, Clone, Args)]
 pub struct SettingsArgs {
     /// Save the amount of ambient traffic, as a percentage of the original
-    /// (0-500); 0 turns traffic off.
+    /// (0-300); 0 turns traffic off.
     #[arg(long, value_name = "PERCENT", value_parser = clap::value_parser!(u16).range(0..=i64::from(crate::settings::MAX_TRAFFIC_PERCENT)))]
     pub traffic: Option<u16>,
 
@@ -449,7 +449,7 @@ mod tests {
             "nfs-afterhours",
             "settings",
             "--traffic",
-            "500",
+            "300",
             "--rivals",
             "original",
         ])
@@ -458,12 +458,12 @@ mod tests {
         {
             Command::Settings(args) => assert_eq!(
                 (args.traffic, args.rivals),
-                (Some(500), Some(crate::settings::Rivals::Original))
+                (Some(300), Some(crate::settings::Rivals::Original))
             ),
             other => panic!("{other:?}"),
         }
         for bad in [
-            ["--traffic", "501"],
+            ["--traffic", "301"],
             ["--rivals", "16"],
             ["--rivals", "lots"],
         ] {

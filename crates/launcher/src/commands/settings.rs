@@ -71,7 +71,7 @@ mod tests {
                 report.rivals_above_original,
                 report.live
             ),
-            (500, 15, true, true)
+            (300, 15, true, true)
         );
         crate::contract::testing::validate("settings", &report);
 
@@ -89,7 +89,7 @@ mod tests {
         // temporary file behind.
         let session = Lock::acquire(&data).unwrap();
         for (traffic, rivals, expected) in [
-            (Some(500), Some(Rivals::Count(15)), (500, Some(15))),
+            (Some(300), Some(Rivals::Count(15)), (300, Some(15))),
             (Some(0), Some(Rivals::Count(0)), (0, Some(0))),
             (Some(100), Some(Rivals::Original), (100, None)),
         ] {

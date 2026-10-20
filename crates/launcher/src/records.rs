@@ -390,10 +390,10 @@ mod tests {
             serde_json::from_value::<Request>(legacy).unwrap().settings,
             crate::settings::Settings::default()
         );
-        request.settings.traffic_percent = 500;
+        request.settings.traffic_percent = 300;
         request.settings.rival_limit = Some(15);
         request.validate().unwrap();
-        request.settings.traffic_percent = 501;
+        request.settings.traffic_percent = 301;
         assert!(request.validate().is_err());
         request.settings.traffic_percent = 100;
         request.settings.rival_limit = Some(16);

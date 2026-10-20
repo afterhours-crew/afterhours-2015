@@ -7,10 +7,17 @@
 
 use nfs_world::replication::players::ai::MAX_AI;
 
-/// Most traffic accepted, as a percentage of the original amount (5x). The
-/// nearby target grows from the original 2-10 cars per player to at most 50;
-/// traffic never takes the AI cars reserved for rivals.
-pub const MAX_TRAFFIC_PERCENT: u16 = 500;
+/// Most traffic accepted, as a percentage of the original amount (3x). The
+/// nearby target grows from the original 2-10 cars per player to at most 30;
+/// traffic never takes the AI cars reserved for rivals. Not more: the client
+/// gives every car four entries in one global manager whose linear allocator
+/// is fixed at 64 pages of 4 KiB (constructor `03801246`, allocator
+/// `0341f7e0`, which breaks into the debugger when full), and a 5x test
+/// crashed there with about 45-50 AI cars around the player.
+pub const MAX_TRAFFIC_PERCENT: u16 = 300;
+/// Test builds accepted up to this; a saved amount above
+/// [`MAX_TRAFFIC_PERCENT`] and up to this reads as [`MAX_TRAFFIC_PERCENT`].
+const OLDER_MAX_TRAFFIC_PERCENT: u64 = 500;
 /// Largest roaming-rival count accepted. Above the game's own, region-driven
 /// number the host activates more of the installed racers, each at most once.
 pub const MAX_RIVALS: u16 = 15;
@@ -103,10 +110,15 @@ impl AiSettings {
         }
         let traffic_percent = match object.get("traffic_percent") {
             None => 100,
-            Some(value) => {
-                let percent = value.as_u64().ok_or(Error::File)?;
-                u16::try_from(percent).map_err(|_| Error::TrafficPercent)?
-            }
+            Some(value) => match value.as_u64().ok_or(Error::File)? {
+                percent
+                    if percent > u64::from(MAX_TRAFFIC_PERCENT)
+                        && percent <= OLDER_MAX_TRAFFIC_PERCENT =>
+                {
+                    MAX_TRAFFIC_PERCENT
+                }
+                percent => u16::try_from(percent).map_err(|_| Error::TrafficPercent)?,
+            },
         };
         let rival_limit = match object.get("rival_limit") {
             None | Some(serde_json::Value::Null) => None,
@@ -195,8 +207,8 @@ mod tests {
         }
         assert_eq!((scale(10, 50), scale(3, 50), scale(1, 50)), (5, 2, 1));
         assert_eq!((scale(10, 300), scale(7, 150)), (30, 11));
-        // 5x: the original 2-10 nearby target becomes 10-50.
-        assert_eq!((scale(2, 500), scale(10, 500)), (10, 50));
+        // 3x: the original 2-10 nearby target becomes 6-30.
+        assert_eq!((scale(2, 300), scale(10, 300)), (6, 30));
         assert_eq!(scale(u32::MAX, MAX_TRAFFIC_PERCENT), u32::MAX);
     }
 
@@ -204,8 +216,13 @@ mod tests {
     fn the_settings_file_reads_like_the_launcher_reads_it() {
         let read = |text: &str| AiSettings::from_json(text.as_bytes());
         assert_eq!(
+            read(r#"{"traffic_percent": 300, "rival_limit": 15}"#),
+            AiSettings::new(300, Some(15))
+        );
+        // Test builds allowed up to 500 %; such a file reads as 300 %.
+        assert_eq!(
             read(r#"{"traffic_percent": 500, "rival_limit": 15}"#),
-            AiSettings::new(500, Some(15))
+            AiSettings::new(300, Some(15))
         );
         assert_eq!(read(r#"{"rival_limit": null}"#), Ok(AiSettings::default()));
         assert_eq!(read("{}"), Ok(AiSettings::default()));
@@ -217,6 +234,7 @@ mod tests {
         );
         for (text, error) in [
             (r#"{"traffic_percent": 501}"#, Error::TrafficPercent),
+            (r#"{"traffic_percent": 301.5}"#, Error::File),
             (r#"{"traffic_percent": 70000}"#, Error::TrafficPercent),
             (r#"{"rival_limit": 129}"#, Error::RivalLimit),
             (r#"{"traffic_percent": -5}"#, Error::File),
@@ -235,7 +253,7 @@ mod tests {
         let (sender, mut first) = Live::channel(AiSettings::default());
         let mut second = first.clone();
         assert_eq!((first.changed(), second.changed()), (None, None));
-        let busy = AiSettings::new(500, Some(15)).unwrap();
+        let busy = AiSettings::new(300, Some(15)).unwrap();
         sender.send_replace(busy);
         assert_eq!((first.changed(), first.changed()), (Some(busy), None));
         assert_eq!((second.changed(), second.current()), (Some(busy), busy));

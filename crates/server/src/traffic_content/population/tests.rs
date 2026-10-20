@@ -531,7 +531,7 @@ fn traffic_turned_off_spawns_nothing_and_more_traffic_still_spawns() {
 #[test]
 fn traffic_leaves_room_for_every_chosen_rival_car() {
     assert_eq!(MAX_CARS + crate::ai_settings::RIVAL_CAR_RESERVE, ai::MAX_AI);
-    // One player's largest nearby target at 5x (50 cars) still fits.
+    // One player's largest nearby target at 3x (30 cars) still fits.
     assert!(
         MAX_CARS >= crate::ai_settings::scale(10, crate::ai_settings::MAX_TRAFFIC_PERCENT) as usize
     );

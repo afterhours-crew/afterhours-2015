@@ -16,8 +16,12 @@ use std::path::Path;
 
 pub const FILE: &str = "settings.json";
 /// Same bounds as the server's `--traffic-percent` and `--rival-limit`:
-/// traffic up to 5x the original and up to 15 roaming rivals.
-pub const MAX_TRAFFIC_PERCENT: u16 = 500;
+/// traffic up to 3x the original (the game crashes with about 45-50 AI cars
+/// around a player) and up to 15 roaming rivals.
+pub const MAX_TRAFFIC_PERCENT: u16 = 300;
+/// Test builds accepted traffic up to this; such a saved value reads as
+/// [`MAX_TRAFFIC_PERCENT`].
+const OLDER_MAX_TRAFFIC_PERCENT: u16 = 500;
 pub const MAX_RIVALS: u16 = 15;
 /// A `rival_limit` above the game's own number adds rivals (the server
 /// activates other installed racers), rather than only capping them.
@@ -128,6 +132,9 @@ pub fn load(data: &Path) -> Result<Settings> {
     {
         settings.rival_limit = Some(MAX_RIVALS);
     }
+    if (MAX_TRAFFIC_PERCENT + 1..=OLDER_MAX_TRAFFIC_PERCENT).contains(&settings.traffic_percent) {
+        settings.traffic_percent = MAX_TRAFFIC_PERCENT;
+    }
     settings.validate()?;
     Ok(settings)
 }
@@ -175,10 +182,10 @@ mod tests {
             traffic_percent: MAX_TRAFFIC_PERCENT,
             rival_limit: Some(MAX_RIVALS),
         };
-        assert_eq!(most.describe(), "500% traffic, 15 rivals");
+        assert_eq!(most.describe(), "300% traffic, 15 rivals");
         assert_eq!(
             most.server_arguments(),
-            ["--traffic-percent", "500", "--rival-limit", "15"]
+            ["--traffic-percent", "300", "--rival-limit", "15"]
         );
         let off = Settings {
             traffic_percent: 0,
@@ -228,8 +235,8 @@ mod tests {
                 rival_limit: Some(1)
             }
         );
-        // 5x traffic is accepted; a count saved by an older build (which
-        // took up to 128) reads as the largest count and is saved as such.
+        // Amounts saved by older or test builds (rivals up to 128, traffic
+        // up to 500 %) read as the largest accepted and are saved as such.
         std::fs::write(
             dir.join(FILE),
             br#"{"traffic_percent": 500, "rival_limit": 40}"#,
@@ -238,12 +245,22 @@ mod tests {
         assert_eq!(
             load(&dir).unwrap(),
             Settings {
-                traffic_percent: 500,
+                traffic_percent: MAX_TRAFFIC_PERCENT,
                 rival_limit: Some(MAX_RIVALS)
             }
         );
-        resolve(&dir, Some(400), None).unwrap();
-        assert_eq!(load(&dir).unwrap().rival_limit, Some(MAX_RIVALS));
+        resolve(&dir, None, Some(Rivals::Count(4))).unwrap();
+        assert_eq!(
+            load(&dir).unwrap(),
+            Settings {
+                traffic_percent: 300,
+                rival_limit: Some(4)
+            }
+        );
+        assert!(
+            resolve(&dir, Some(400), None).is_err(),
+            "not on the command line"
+        );
         // Out-of-range, unknown or malformed settings are refused, not ignored.
         for bad in [
             &br#"{"traffic_percent": 501}"#[..],
@@ -256,7 +273,7 @@ mod tests {
             assert!(load(&dir).is_err(), "{}", String::from_utf8_lossy(bad));
             assert!(resolve(&dir, Some(50), None).is_err());
         }
-        assert!(resolve(&dir.join("missing"), Some(501), None).is_err());
+        assert!(resolve(&dir.join("missing"), Some(301), None).is_err());
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

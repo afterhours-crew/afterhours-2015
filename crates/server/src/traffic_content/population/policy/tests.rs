@@ -340,15 +340,8 @@ fn traffic_amount_scales_the_target_and_each_road_quota() {
     // The original target here is 5 (see the shaped-region test).
     let target = |percent| p.query(&focus(), percent).target;
     assert_eq!(
-        (
-            target(100),
-            target(0),
-            target(50),
-            target(200),
-            target(300),
-            target(500)
-        ),
-        (5, 0, 3, 10, 15, 25)
+        (target(100), target(0), target(50), target(200), target(300)),
+        (5, 0, 3, 10, 15)
     );
     p.roads[0].quota = 3;
     let pick = |p: &Policy, percent, count| {
@@ -363,10 +356,10 @@ fn traffic_amount_scales_the_target_and_each_road_quota() {
         )
         .is_some()
     };
-    // Quota 3 at 100 %, 6 at 200 %, 15 at 500 %, 2 at 50 %.
+    // Quota 3 at 100 %, 6 at 200 %, 9 at 300 %, 2 at 50 %.
     assert!(pick(&p, 100, 2) && !pick(&p, 100, 3));
     assert!(pick(&p, 200, 5) && !pick(&p, 200, 6));
-    assert!(pick(&p, 500, 14) && !pick(&p, 500, 15));
+    assert!(pick(&p, 300, 8) && !pick(&p, 300, 9));
     assert!(pick(&p, 50, 1) && !pick(&p, 50, 2));
 }
 
@@ -375,9 +368,9 @@ fn the_spawn_interval_is_native_at_100_percent_and_scales_with_the_amount() {
     // Native: twice the nearby/target ratio.
     assert_eq!(interval(5, 10, 100), 1.);
     assert_eq!(interval(0, 10, 100), 0.);
-    // At 5x the target is five times larger and attempts five times as
-    // frequent, so a moving player's steady count scales by five too.
-    assert_eq!(interval(25, 50, 500), 0.2);
+    // At 3x the target is three times larger and attempts three times as
+    // frequent, so a moving player's steady count scales by three too.
+    assert!((interval(15, 30, 300) - 1. / 3.).abs() < 1e-6);
     assert_eq!(interval(5, 5, 50), 4.);
     // Degenerate inputs stay finite.
     assert!(interval(3, 0, 0).is_finite());
@@ -390,8 +383,9 @@ fn the_spawn_interval_is_native_at_100_percent_and_scales_with_the_amount() {
     };
     let native = steady(10, 100);
     assert_eq!(native, 10, "the original target is reached");
-    assert_eq!(steady(50, 500), 50);
-    // The native interval with only the target scaled settles near 28 of 50.
-    assert!(steady(50, 100) < 30);
+    assert_eq!(steady(30, 300), 30);
+    // The native interval with only the target scaled settles near 22 of 30
+    // (at 5x it was about 28 of 50, which the 5x live test showed).
+    assert!(steady(30, 100) < 25);
     assert!(steady(30, 300) >= 3 * native - 1);
 }

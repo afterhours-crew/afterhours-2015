@@ -258,8 +258,8 @@ mod tests {
         for (second, text, expected) in [
             (
                 2,
-                r#"{"traffic_percent": 500, "rival_limit": 15}"#,
-                settings(500, Some(15)),
+                r#"{"traffic_percent": 300, "rival_limit": 15}"#,
+                settings(300, Some(15)),
             ),
             (
                 3,
@@ -377,7 +377,7 @@ mod tests {
         let temporary = dir.join("settings.json.1.tmp");
         std::fs::write(
             &temporary,
-            br#"{"traffic_percent": 500, "rival_limit": 15}"#,
+            br#"{"traffic_percent": 300, "rival_limit": 15}"#,
         )
         .unwrap();
         std::fs::rename(&temporary, &path).unwrap();
@@ -391,7 +391,7 @@ mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(changed, settings(500, Some(15)));
+        assert_eq!(changed, settings(300, Some(15)));
         stop.send_replace(true);
         tokio::time::timeout(Duration::from_secs(5), task)
             .await

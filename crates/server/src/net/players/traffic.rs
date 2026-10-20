@@ -239,7 +239,7 @@ mod tests {
             assert_eq!(live.changed(), None, "nothing saved yet");
         }
         for saved in [
-            AiSettings::new(500, Some(15)).unwrap(),
+            AiSettings::new(300, Some(15)).unwrap(),
             AiSettings::new(0, Some(0)).unwrap(),
             AiSettings::default(),
         ] {

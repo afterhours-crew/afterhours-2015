@@ -182,7 +182,10 @@ nfs-afterhours start --game-dir "F:\EA Games\Need for Speed" --traffic 50 --riva
 nfs-afterhours start --game-dir "F:\EA Games\Need for Speed" --traffic 100 --rivals original
 ```
 
-`--traffic` is a percentage of the original traffic from 0 (none) to 500 (5x).
+`--traffic` is a percentage of the original traffic from 0 (none) to 300 (3x). More is not
+offered: the game keeps a fixed amount of memory for the cars around you and crashed in a
+test with about 45-50 AI cars nearby (5x traffic plus rivals). A saved amount above 300
+from a test build reads as 300.
 `--rivals` is the number of roaming rivals to keep active, from 0 (none) to 15, or
 `original` for the original number. The game's own rivals depend on where you
 drive (usually two to five at once in the parts of the city that have them); a number
