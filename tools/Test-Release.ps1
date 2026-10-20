@@ -33,7 +33,7 @@ function Assert-Refused([string]$Name, [scriptblock]$Action, [string]$Pattern) {
 # --- Constructed repository state behind the git and gh replacements. ---
 $sha = @{
     v040 = 'a' * 40; m132 = 'b' * 40; m135 = 'c' * 40; rebase = 'd' * 40; direct = 'e' * 40
-    release = 'f' * 40; other = '1' * 40
+    release = 'f' * 40; other = '1' * 40; issue = '2' * 40; landed = '3' * 40; unmerged = '4' * 40
 }
 function Pull([int]$Number, [string]$Title, [string]$Head, [string[]]$Labels = @(), [string]$Body = '') {
     @{
@@ -282,6 +282,30 @@ try {
     Assert-Equal (Read-Text (Join-Path $root 'Cargo.lock')) $lock 'a preview leaves the lock'
     Assert-True ((Get-MarkedReleaseNotes (Read-Text $bodyFile)).Contains('Afterhours 0.4.1 for Windows testers.')) 'preview notes'
     Write-Output 'Passed: a preview writes only the description, even with a release branch open'
+
+    # CI's preview of a stacked pull request walks its base branch, whose own
+    # commits name their issues: none of those numbers is a merged pull request.
+    Reset-State
+    $global:ReleaseTestState.Log += @(
+        "$($sha.issue)`tfeat(launcher): decode the world map (#157)"
+        "$($sha.landed)`tfix(launcher): keep the logs (#140)"
+        "$($sha.unmerged)`tfix(launcher): live positions (#160)"
+    )
+    $global:ReleaseTestState.Pulls[141] = Pull 141 'Keep the logs' 'bugfix/keep-logs'
+    $open = Pull 160 'Live positions' 'feature/map-feed'
+    $open.merged_at = $null
+    $global:ReleaseTestState.Pulls[160] = $open
+    $global:ReleaseTestState.CommitPulls[$sha.issue] = '[{"number":158,"merged_at":null}]'
+    $global:ReleaseTestState.CommitPulls[$sha.landed] = '[{"number":141,"merged_at":"2026-10-20T00:00:00Z"}]'
+    $global:ReleaseTestState.CommitPulls[$sha.unmerged] = '[{"number":160,"merged_at":null}]'
+    $found = @(Get-MergedPullRequest -Repository $repository -Since 'v0.4.0')
+    Assert-Equal (($found | ForEach-Object { $_.Number }) -join ',') '132,135,136,137,141' 'issue numbers resolve through the commit'
+    Write-Repository
+    & $prepare -Repository $repository -BodyFile $bodyFile -Root $root -Head 'HEAD^1' -Preview | Out-Null
+    $notes = Get-MarkedReleaseNotes (Read-Text $bodyFile)
+    Assert-True ($notes.Contains('**Keep the logs.** ([#141]')) 'a rebase-merged commit naming its issue'
+    Assert-True (!$notes.Contains('#157') -and !$notes.Contains('#158') -and !$notes.Contains('#160')) 'unmerged commits left out'
+    Write-Output 'Passed: a subject naming an issue or an unmerged pull request is looked up by its commit'
 
     Reset-State
     $global:ReleaseTestState.LocalTags = @()
