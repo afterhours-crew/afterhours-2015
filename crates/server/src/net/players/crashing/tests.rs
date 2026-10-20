@@ -272,7 +272,8 @@ fn crash_start_and_completion_are_atomic_under_queue_pressure_and_repeat() {
         transport
             .queue_replication_after(section.clone(), calls.clone())
             .unwrap();
-        assert!(calls.is_empty());
+        assert!(matches!(calls.as_slice(), [HostRpc::Participant(n)] if
+            n.participant == owner.participant && n.call == Call::Enter));
         assert_eq!(section.deleted.len(), 1);
         assert_eq!(section.records.len(), 2);
         let ghost = section
@@ -571,5 +572,257 @@ fn movement_pulse_between_echoes_survives_and_only_owned_ready_cars_trigger() {
             &movement
         )
         .is_err()
+    );
+}
+
+#[test]
+fn rollover_relocation_waits_for_publication_and_acknowledgement_then_repeats() {
+    use nfs_world::replication::vehicle::{
+        chassis::{Controls, Motion},
+        movement::Sample,
+    };
+    let (mut listener, owner) = setup();
+    let car_id = car(&mut listener, owner);
+    listener
+        .world_cars
+        .insert(car_id, (owner.participant, true));
+    let mut revision = 0;
+    for cycle in 0..2 {
+        let offset = f64::from(cycle) * 20.0;
+        for i in 0..41 {
+            revision += 1;
+            let crashed = i == 40;
+            let motion = Motion {
+                identity: (offset + f64::from(i) / 4.0).to_bits(),
+                revision,
+                position: [i as f32, 2.0, -80.0],
+                quaternion: if crashed {
+                    [1., 0., 0., 0.]
+                } else {
+                    [0., 0., 0., 1.]
+                },
+                velocity: [0.; 3],
+                angular_velocity: [0.; 3],
+            };
+            let mut controls = Controls::new(4).unwrap();
+            controls.flags[0] = crashed;
+            let sample = Sample {
+                physics: motion.encode([0.; 3], &controls).unwrap(),
+                flag: true,
+            };
+            listener
+                .crashes
+                .as_mut()
+                .unwrap()
+                .observe_vehicle(&listener.players, owner, car_id, &sample, true)
+                .unwrap();
+        }
+        listener.world_ms = (offset * 1000.0) as u64 + 10_000;
+        let mut transport = transport_with_snapshot(&listener.players);
+        listener.advance_crashes(listener.world_ms).unwrap();
+        let (creation, calls) = listener.pending_entries.pop_front().unwrap();
+        let sequence = creation.records.last().unwrap().id;
+        transport.queue_replication_after(creation, calls).unwrap();
+        let done = completion_frame(owner, sequence, cycle * 4);
+        assert!(listener.frame(Queued {
+            advertised: None,
+            frame: u16::from(cycle * 4),
+            data: done.span()
+        }));
+        assert!(
+            listener
+                .crashes
+                .as_ref()
+                .unwrap()
+                .relocating(owner.participant)
+        );
+        assert_eq!(
+            listener.participants.stage(owner.participant),
+            Some(Stage::Crashing)
+        );
+        assert!(listener.logic_ghosts[&owner.participant].contains_key(&101));
+        assert!(listener.due_teleport(listener.world_ms).is_none());
+        let bindings = ResetBindings::from_scene(
+            &listener.players,
+            listener.participants.exit_bindings().unwrap().state_2.scene,
+        )
+        .unwrap();
+        // An old/early acknowledgement cannot finish a command not yet sent.
+        let ack_body = request(bindings.teleport, owner.participant, 3);
+        let ack = |sequence| {
+            frame::Builder::new()
+                .messages(
+                    None,
+                    vec![frame::Group {
+                        channel: 0,
+                        sequence: Some(sequence),
+                        messages: vec![frame::Message::Opaque {
+                            index: 47,
+                            body: ack_body.span(),
+                        }],
+                    }],
+                )
+                .build()
+                .unwrap()
+        };
+        let early = ack(cycle * 4 + 1);
+        assert!(listener.frame(Queued {
+            advertised: None,
+            frame: u16::from(cycle * 4 + 1),
+            data: early.span()
+        }));
+        assert!(
+            listener
+                .crashes
+                .as_ref()
+                .unwrap()
+                .relocating(owner.participant)
+        );
+        for (section, calls) in listener.pending_entries.drain(..) {
+            transport.queue_replication_after(section, calls).unwrap();
+        }
+        listener.session_backlog = 1;
+        assert!(listener.due_teleport(listener.world_ms).is_none());
+        listener.session_backlog = 0;
+        let command = listener.due_teleport(listener.world_ms).unwrap();
+        assert_eq!(command.vehicle, car_id);
+        assert_eq!(command.endpoint, bindings.teleport);
+        assert_eq!(command.position, [29., 2., -80.]);
+        assert_eq!(command.basis, [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]]);
+        transport
+            .queue_content(
+                nfs_world::teleport::CONTENT_TARGET,
+                &command.encode().unwrap(),
+            )
+            .unwrap();
+        listener.teleport_sent();
+        assert!(listener.pending_teleports.is_empty());
+        // Another participant cannot acknowledge this owner's relocation.
+        let mut foreign_crashes = listener.crashes.clone().unwrap();
+        let mut foreign_players = listener.players.clone();
+        let mut foreign_participants = listener.participants.clone();
+        let mut foreign_ghosts = listener.logic_ghosts.clone();
+        let bad_body = request(bindings.teleport, owner.participant + 1, 3);
+        let objects = foreign_players.objects().len();
+        assert!(
+            PlayerListener::finish_crash_call(
+                bad_body.span(),
+                &mut foreign_crashes,
+                &mut foreign_players,
+                &mut foreign_participants,
+                listener.logic.as_deref(),
+                &mut foreign_ghosts,
+                owner.persona,
+                None,
+            )
+            .is_err()
+        );
+        assert_eq!(foreign_players.objects().len(), objects);
+        assert!(foreign_crashes.relocating(owner.participant));
+        let completed = ack(cycle * 4 + 2);
+        assert!(listener.frame(Queued {
+            advertised: None,
+            frame: u16::from(cycle * 4 + 2),
+            data: completed.span()
+        }));
+        assert_eq!(
+            listener.participants.stage(owner.participant),
+            Some(Stage::FreeRoam)
+        );
+        assert!(
+            !listener
+                .crashes
+                .as_ref()
+                .unwrap()
+                .relocating(owner.participant)
+        );
+        assert!(listener.logic_ghosts[&owner.participant].contains_key(&100));
+        let entries: Vec<_> = listener.pending_entries.drain(..).collect();
+        assert_eq!(entries.len(), 2);
+        assert!(entries[0].1.is_empty());
+        let states: Vec<_> = entries[1]
+            .1
+            .iter()
+            .filter_map(|rpc| {
+                if let HostRpc::Participant(n) = rpc {
+                    Some(*n)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(states, bindings.finish(owner.participant));
+        for (section, calls) in entries {
+            transport.queue_replication_after(section, calls).unwrap();
+        }
+        let count = listener.players.objects().len();
+        let duplicate = ack(cycle * 4 + 3);
+        assert!(listener.frame(Queued {
+            advertised: None,
+            frame: u16::from(cycle * 4 + 3),
+            data: duplicate.span()
+        }));
+        assert_eq!(listener.players.objects().len(), count);
+        assert!(listener.pending_entries.is_empty());
+        listener.pending.clear();
+    }
+    assert_eq!(listener.unsupported_rpcs, 0);
+}
+
+#[test]
+fn crash_without_history_uses_installed_road_spawn_and_rejects_invalid_clock() {
+    let (mut listener, owner) = setup();
+    let id = car(&mut listener, owner);
+    let mut sample = Sample {
+        physics: listener
+            .players
+            .vehicle_physics(owner.connection, owner.persona, id)
+            .unwrap(),
+        flag: true,
+    };
+    sample.physics.controls.flags[0] = true;
+    sample.physics.identity_words = [0x7ff8_0000, 0, 1];
+    let crashes = listener.crashes.as_mut().unwrap();
+    assert!(
+        crashes
+            .observe_vehicle(&listener.players, owner, id, &sample, true)
+            .is_err()
+    );
+    assert!(crashes.pending().is_empty());
+    sample.physics.identity_words = [0, 0, 1];
+    crashes
+        .observe_vehicle(&listener.players, owner, id, &sample, true)
+        .unwrap();
+    listener.advance_crashes(1).unwrap();
+    let (creation, _) = listener.pending_entries.pop_front().unwrap();
+    let sequence = creation.records.last().unwrap().id;
+    let body = Completed {
+        sequence,
+        participant: owner.participant,
+    }
+    .encode()
+    .unwrap();
+    let mut fixture = crate::vehicle_content::layout::tests::fixture();
+    fixture["exit_teleport"] = json!({"transform_bits":fixture["main"][1]["transform_bits"]});
+    let layout = crate::vehicle_content::layout::Layout::from_json(&fixture).unwrap();
+    let result = PlayerListener::finish_crash_call(
+        body.span(),
+        listener.crashes.as_mut().unwrap(),
+        &mut listener.players,
+        &mut listener.participants,
+        listener.logic.as_deref(),
+        &mut listener.logic_ghosts,
+        owner.persona,
+        Some(&layout),
+    )
+    .unwrap()
+    .unwrap()
+    .unwrap();
+    let command = result.2.unwrap();
+    assert_eq!(command.position, [7., 0., 0.]);
+    assert_eq!(command.vehicle, id);
+    assert_eq!(
+        listener.participants.stage(owner.participant),
+        Some(Stage::Crashing)
     );
 }

@@ -14,6 +14,10 @@ use crate::{
 };
 use nfs_protocol::world::rpc::Serial;
 use std::collections::BTreeMap;
+mod reset;
+mod trail;
+pub use reset::ResetBindings;
+pub use trail::Destination;
 
 pub const MAX_PARTICIPANTS: usize = 128;
 pub const MAX_DURATION_MS: u64 = 30_000;
@@ -84,6 +88,7 @@ enum Phase {
     Running { stop_at: u64 },
     Stopping,
     Complete,
+    Resetting,
 }
 #[derive(Clone, Debug)]
 struct Entry {
@@ -93,6 +98,10 @@ struct Entry {
     phase: Phase,
     ghost: Option<u16>,
     number: u32,
+    trail: trail::Trail,
+    vehicle: Option<u16>,
+    destination: Option<Destination>,
+    relocation_sent: bool,
 }
 #[derive(Clone, Debug)]
 pub struct Crashes {
@@ -166,10 +175,128 @@ impl Crashes {
                     },
                     ghost: None,
                     number: 0,
+                    trail: trail::Trail::default(),
+                    vehicle: None,
+                    destination: None,
+                    relocation_sent: false,
                 },
             );
         }
         Ok(())
+    }
+    /// Observe the current owned car before movement echoes are rate limited.
+    /// The trail uses the accepted client clock; revisions still reject repeats.
+    pub fn observe_vehicle(
+        &mut self,
+        players: &Players,
+        owner: Owner,
+        vehicle: u16,
+        sample: &crate::replication::vehicle::movement::Sample,
+        eligible: bool,
+    ) -> Result<(), Error> {
+        let item = players
+            .vehicle_item_of(owner.connection, owner.persona, vehicle)
+            .ok_or(Error::UnknownObject)?;
+        if players.owned_vehicle(owner.connection, owner.persona, owner.participant, item)
+            != Some(vehicle)
+        {
+            return Err(Error::UnknownObject);
+        }
+        let revision = sample.physics.identity_words[2];
+        if self
+            .entries
+            .get(&owner.participant)
+            .is_some_and(|entry| entry.owner == owner && revision <= entry.stamp)
+        {
+            return Ok(());
+        }
+        if self
+            .entries
+            .get(&owner.participant)
+            .is_some_and(|entry| entry.vehicle.is_some_and(|id| id != vehicle))
+        {
+            return Err(Error::UnknownObject);
+        }
+        let motion = sample.physics.decode([0.; 3])?;
+        let seconds = f64::from_bits(motion.identity);
+        if !seconds.is_finite() || seconds < 0.0 {
+            return Err(Error::Shape);
+        }
+        let signal = sample.physics.controls.flags[0];
+        let arming = eligible
+            && signal
+            && self
+                .entries
+                .get(&owner.participant)
+                .is_none_or(|e| !e.signal && matches!(e.phase, Phase::Idle | Phase::Complete));
+        self.observe(players, owner, revision, signal, eligible)?;
+        let entry = self
+            .entries
+            .get_mut(&owner.participant)
+            .expect("observed owner");
+        entry.vehicle = Some(vehicle);
+        if arming {
+            entry.destination = entry.trail.destination(seconds);
+        }
+        if eligible && !signal {
+            entry
+                .trail
+                .observe(&motion, sample.physics.controls.values[0] == 0, false)?;
+        }
+        Ok(())
+    }
+
+    /// A still-wrecked car takes the relocation branch after the cinematic.
+    /// An absent trail destination lets the caller use its installed safe spawn.
+    pub fn relocation(&self, participant: u16) -> Option<(u16, Option<Destination>)> {
+        let entry = self.entries.get(&participant)?;
+        (entry.phase == Phase::Complete && entry.signal)
+            .then_some((entry.vehicle?, entry.destination))
+    }
+
+    pub fn begin_relocation(&mut self, owner: Owner) -> Result<(), Error> {
+        let entry = self
+            .entries
+            .get_mut(&owner.participant)
+            .ok_or(Error::UnknownObject)?;
+        if entry.owner != owner || entry.phase != Phase::Complete {
+            return Err(Error::Shape);
+        }
+        entry.phase = Phase::Resetting;
+        entry.relocation_sent = false;
+        Ok(())
+    }
+
+    pub fn relocating(&self, participant: u16) -> bool {
+        self.entries
+            .get(&participant)
+            .is_some_and(|e| e.phase == Phase::Resetting)
+    }
+
+    pub fn relocation_sent(&mut self, participant: u16, vehicle: u16) {
+        if let Some(entry) = self.entries.get_mut(&participant)
+            && entry.phase == Phase::Resetting
+            && entry.vehicle == Some(vehicle)
+        {
+            entry.relocation_sent = true;
+        }
+    }
+
+    pub fn finish_relocation(&mut self, owner: Owner) -> Result<bool, Error> {
+        let entry = self
+            .entries
+            .get_mut(&owner.participant)
+            .ok_or(Error::UnknownObject)?;
+        if entry.owner != owner {
+            return Err(Error::UnknownObject);
+        }
+        if entry.phase != Phase::Resetting || !entry.relocation_sent {
+            return Ok(false);
+        }
+        entry.phase = Phase::Complete;
+        entry.destination = None;
+        entry.trail = trail::Trail::default();
+        Ok(true)
     }
     pub fn pending(&self) -> Vec<Owner> {
         self.entries
@@ -182,7 +309,7 @@ impl Crashes {
         self.entries.get(&participant).is_some_and(|e| {
             matches!(
                 e.phase,
-                Phase::Pending | Phase::Running { .. } | Phase::Stopping
+                Phase::Pending | Phase::Running { .. } | Phase::Stopping | Phase::Resetting
             )
         })
     }
@@ -251,9 +378,9 @@ impl Crashes {
     }
     /// A queued fallback is obsolete once this sequence has completed.
     pub fn completed(&self, ghost: u16) -> bool {
-        self.entries
-            .values()
-            .any(|e| e.ghost == Some(ghost) && e.phase == Phase::Complete)
+        self.entries.values().any(|e| {
+            e.ghost == Some(ghost) && matches!(e.phase, Phase::Complete | Phase::Resetting)
+        })
     }
     /// Remove only this owner's sequence, once. Retain its last ID so reliable
     /// duplicate completion calls are harmless until the next lifetime.
@@ -277,7 +404,7 @@ impl Crashes {
             return Err(Error::UnknownObject);
         }
         match entry.phase {
-            Phase::Complete => Ok(None),
+            Phase::Complete | Phase::Resetting => Ok(None),
             Phase::Running { .. } | Phase::Stopping => {
                 players.remove_entities(&[call.sequence])?;
                 entry.phase = Phase::Complete;

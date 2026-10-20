@@ -607,6 +607,11 @@ impl PlayerListener {
     pub(super) fn due_teleport(&self, world_ms: u64) -> Option<nfs_world::teleport::Command> {
         let (at, command) = self.pending_teleports.front()?;
         if *at > world_ms
+            || (self
+                .crashes
+                .as_ref()
+                .is_some_and(|c| c.relocating(command.participant))
+                && (!self.pending_entries.is_empty() || self.session_backlog != 0))
             || self
                 .pending_spawns
                 .iter()
@@ -621,7 +626,11 @@ impl PlayerListener {
         Some(*command)
     }
     pub(super) fn teleport_sent(&mut self) {
-        self.pending_teleports.pop_front();
+        if let Some((_, command)) = self.pending_teleports.pop_front()
+            && let Some(crashes) = &mut self.crashes
+        {
+            crashes.relocation_sent(command.participant, command.vehicle);
+        }
     }
     /// Cars this connection's client simulates and reports movement for: the
     /// garage cars, then the world car (official E101 grants).
@@ -1447,14 +1456,18 @@ impl Listener for PlayerListener {
                     self.logic.as_deref(),
                     &mut logic_ghosts,
                     self.persona,
+                    self.vehicles.as_deref().map(|c| &c.layout),
                 ) {
-                    Ok(Some(Some((section, events)))) => {
+                    Ok(Some(Some((section, events, teleport)))) => {
                         // Recovery events name the replacement driving objects.
                         // Entry calls run before their section, so publish those
                         // creations first and put the events in a following entry.
                         exit_entries.push((section, Vec::new()));
                         if !events.is_empty() {
                             exit_entries.push((returning::empty_section(), events));
+                        }
+                        if let Some(command) = teleport {
+                            scheduled_teleports.push((self.world_ms, command));
                         }
                         continue;
                     }
@@ -2165,6 +2178,7 @@ impl Listener for PlayerListener {
         }
         if spawned.messages.len() > MAX_PENDING.saturating_sub(self.pending_content.len())
             || scheduled_returns.len() > MAX_PENDING.saturating_sub(self.pending_returns.len())
+            || scheduled_teleports.len() > MAX_PENDING.saturating_sub(self.pending_teleports.len())
             || responses.len() > nfs_world::session::MAX_RPC_QUEUE - self.pending_rpcs.len()
             || sections.len() + deferred_sections.len() + usize::from(!records.is_empty())
                 > MAX_PENDING - self.pending.len()
