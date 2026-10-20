@@ -292,8 +292,18 @@ function Get-PreviousKnownLimit {
     return Get-LeadingList (Get-MarkdownSection ($text -join "`n") 'Known limits')
 }
 
+# The nearest version tag reachable from $Head, or $null. All of git's output
+# is collected: `Select-Object -First` would stop the pipeline before git's
+# exit code is recorded and leave the previous command's in $LASTEXITCODE.
+function Get-NearestVersionTag {
+    param([Parameter(Mandatory)][string]$Head)
+    $found = @(git describe --tags --abbrev=0 --match 'v[0-9]*' $Head 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $found.Count -eq 0 -or !$found[0]) { return $null }
+    return ([string]$found[0]).Trim()
+}
+
 Export-ModuleMember -Function Test-ReleaseVersion, Compare-ReleaseVersion, Get-NextPatchVersion,
     Get-BundleVersion, Set-BundleVersion, Get-PullRequestNumber, ConvertTo-ReleasePullRequest,
     Get-ReleaseSection, Get-MarkdownSection, Get-LeadingList, Get-ReleaseNoteText,
     Format-ReleaseEntry, New-ServerReleaseNotes, New-ReleasePullRequestBody,
-    Get-MarkedReleaseNotes, Get-MergedPullRequest, Get-PreviousKnownLimit
+    Get-MarkedReleaseNotes, Get-MergedPullRequest, Get-PreviousKnownLimit, Get-NearestVersionTag
