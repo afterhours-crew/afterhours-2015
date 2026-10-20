@@ -199,6 +199,11 @@ pub(super) fn build(index: &mut AssetIndex, thresholds: &Json) -> Result<Json> {
         (23, GAMEPLAY, "gameplay/scoring/eventresultrep"),
         (24, GAMEPLAY, DRIVER),
         (25, GAMEPLAY, "gameplay/lockvehicleinputparticipantlogic"),
+        (
+            26,
+            GAMEPLAY,
+            "presentation/resetloadingscreenstatepresentationblueprint",
+        ),
     ];
     let mut doc = json!({"format":"nfs-garage-logic","version":1,"build_sha256":nfs_services::SUPPORTED_BUILD_SHA256,
         "reputation_thresholds":thresholds});
@@ -218,6 +223,8 @@ pub(super) fn build(index: &mut AssetIndex, thresholds: &Json) -> Result<Json> {
         "returned",
         "crashed",
         "recovered",
+        "resetting",
+        "reset_arrived",
     ] {
         doc[phase] = batch();
     }
@@ -247,6 +254,7 @@ pub(super) fn build(index: &mut AssetIndex, thresholds: &Json) -> Result<Json> {
         ("arrived", vec![22, 23, 24]),
         ("crashed", vec![25]),
         ("recovered", vec![21, 22, 23, 24]),
+        ("resetting", vec![26]),
         ("returning", vec![20]),
         ("returned", vec![13, 14, 15, 16]),
     ] {
@@ -262,6 +270,7 @@ pub(super) fn build(index: &mut AssetIndex, thresholds: &Json) -> Result<Json> {
         ("returning", vec![23, 22, 21, 24]),
         ("crashed", vec![23, 22, 21, 24]),
         ("recovered", vec![25]),
+        ("reset_arrived", vec![26]),
         ("returned", vec![20]),
     ] {
         doc[phase]["delete_capture_ids"] = json!(ids);

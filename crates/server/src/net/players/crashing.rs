@@ -207,8 +207,24 @@ impl PlayerListener {
             if !crashes.finish_relocation(owner)? {
                 return Ok(Some(None));
             }
-            let (section, mut events) =
+            let arrived = Self::arrive_logic(
+                logic,
+                crate::garage_logic::Which::ResetArrived,
+                players,
+                owner.participant,
+                ghosts,
+            )?;
+            let (mut section, events) =
                 Self::restore_crash_driving(players, participants, logic, ghosts, owner, None)?;
+            section.deleted.extend(arrived.deleted);
+            section.records.extend(arrived.records);
+            section.setup = (!section.records.is_empty()).then_some(Setup::RawEscape([0; 3]));
+            let mut events: Vec<_> = arrived
+                .events
+                .into_iter()
+                .map(HostRpc::Event)
+                .chain(events)
+                .collect();
             events.extend(
                 bindings
                     .finish(*participant)
@@ -250,17 +266,32 @@ impl PlayerListener {
             };
             command.encode()?;
             crashes.begin_relocation(owner)?;
+            let presentation = Self::arrive_logic(
+                logic,
+                crate::garage_logic::Which::Resetting,
+                players,
+                owner.participant,
+                ghosts,
+            )?;
+            let mut deleted = presentation.deleted;
+            deleted.push(sequence);
             let section = Section {
                 float_bits: None,
                 flag: false,
-                deleted: vec![sequence],
-                setup: None,
-                records: Vec::new(),
+                deleted,
+                setup: (!presentation.records.is_empty()).then_some(Setup::RawEscape([0; 3])),
+                records: presentation.records,
             };
-            let events = bindings
-                .begin(owner.participant)
+            let events = presentation
+                .events
                 .into_iter()
-                .map(HostRpc::Participant)
+                .map(HostRpc::Event)
+                .chain(
+                    bindings
+                        .begin(owner.participant)
+                        .into_iter()
+                        .map(HostRpc::Participant),
+                )
                 .collect();
             return Ok(Some(Some((section, events, Some(command)))));
         }

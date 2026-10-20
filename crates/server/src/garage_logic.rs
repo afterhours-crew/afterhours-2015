@@ -156,6 +156,9 @@ pub enum Which {
     Returned,
     Crashed,
     Recovered,
+    /// Hide relocation until the client acknowledges the destination.
+    Resetting,
+    ResetArrived,
 }
 
 #[derive(Clone, Debug)]
@@ -177,6 +180,8 @@ pub struct GarageLogic {
     returned: Batch,
     crashed: Batch,
     recovered: Batch,
+    resetting: Batch,
+    reset_arrived: Batch,
 }
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Output {
@@ -627,6 +632,22 @@ impl GarageLogic {
         {
             return Err(Failure::ProfileConfig);
         }
+        let crashing = after(&driving, &crashed);
+        let resetting = v
+            .get("resetting")
+            .map(|b| batch(b, &content, &crashing))
+            .transpose()?
+            .unwrap_or_default();
+        let reset_arrived = v
+            .get("reset_arrived")
+            .map(|b| batch(b, &content, &after(&crashing, &resetting)))
+            .transpose()?
+            .unwrap_or_default();
+        if v.get("resetting").is_some() != v.get("reset_arrived").is_some()
+            || after(&after(&crashing, &resetting), &reset_arrived) != crashing
+        {
+            return Err(Failure::ProfileConfig);
+        }
         let return_requested = event_phase("return_requested", &driving)?;
         let returning = v
             .get("returning")
@@ -675,6 +696,8 @@ impl GarageLogic {
             .chain(&returned.entities)
             .chain(&crashed.entities)
             .chain(&recovered.entities)
+            .chain(&resetting.entities)
+            .chain(&reset_arrived.entities)
             .flat_map(|d| &d.roles)
             .any(|r| matches!(r, Role::Reputation(_) | Role::ReputationLevelStat))
         {
@@ -734,6 +757,8 @@ impl GarageLogic {
             returned,
             crashed,
             recovered,
+            resetting,
+            reset_arrived,
         })
     }
     pub fn content(&self) -> &Content {
@@ -763,6 +788,8 @@ impl GarageLogic {
             Which::Returned => &self.returned,
             Which::Crashed => &self.crashed,
             Which::Recovered => &self.recovered,
+            Which::Resetting => &self.resetting,
+            Which::ResetArrived => &self.reset_arrived,
         }
     }
     /// Every integer serializer that presents a reputation value, as
@@ -785,6 +812,8 @@ impl GarageLogic {
             Which::Returned,
             Which::Crashed,
             Which::Recovered,
+            Which::Resetting,
+            Which::ResetArrived,
         ] {
             for definition in &self.batch(which).entities {
                 for (index, role) in definition.roles.iter().enumerate() {

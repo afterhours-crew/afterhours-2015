@@ -143,22 +143,7 @@ fn setup() -> (PlayerListener, Owner) {
         )
         .unwrap(),
     );
-    let entity = |id, index| {
-        json!({"capture_id":id,
-        "asset":{"bundle":10,"type_id":80,"local_index":index},
-        "blueprint":{"scene_content_key":701},"roles":[{"kind":"root","bus_count":1}]})
-    };
-    let empty = json!({"scene_updates":[],"entities":[]});
-    let logic = crate::garage_logic::GarageLogic::from_json(&json!({
-        "format":"nfs-garage-logic","version":1,"build_sha256":crate::content::BUILD,
-        "content":{"catalogs":[{"bundle":10,"entries":[[80,2]]}],
-            "profiles":([0,1].map(|i|json!({"asset":{"bundle":10,"type_id":80,"local_index":i},"serializers":["root"]})))},
-        "spawn":{"scene_updates":[],"entities":[entity(100,0)]},
-        "entry":empty,
-        "crashed":{"scene_updates":[],"entities":[entity(101,1)],"delete_capture_ids":[100]},
-        "recovered":{"scene_updates":[],"entities":[entity(100,0)],"delete_capture_ids":[101],
-            "events":[{"target":{"capture_id":100},"entity":1,"event":17}]}
-    })).unwrap();
+    let logic = crate::garage_logic::GarageLogic::from_json(&logic_document()).unwrap();
     let mut ghosts = BTreeMap::new();
     logic
         .produce(
@@ -173,6 +158,44 @@ fn setup() -> (PlayerListener, Owner) {
     listener.players.sync_player_views().unwrap();
     listener.players.sync_player_manager().unwrap();
     (listener, owner)
+}
+
+fn logic_document() -> serde_json::Value {
+    let entity = |id, index| {
+        json!({"capture_id":id,
+        "asset":{"bundle":10,"type_id":80,"local_index":index},
+        "blueprint":{"scene_content_key":701},"roles":[{"kind":"root","bus_count":1}]})
+    };
+    let empty = json!({"scene_updates":[],"entities":[]});
+    json!({
+        "format":"nfs-garage-logic","version":1,"build_sha256":crate::content::BUILD,
+        "content":{"catalogs":[{"bundle":10,"entries":[[80,2]]}],
+            "profiles":([0,1].map(|i|json!({"asset":{"bundle":10,"type_id":80,"local_index":i},"serializers":["root"]})))},
+        "spawn":{"scene_updates":[],"entities":[entity(100,0)]},
+        "entry":empty,
+        "crashed":{"scene_updates":[],"entities":[entity(101,1)],"delete_capture_ids":[100]},
+        "resetting":{"scene_updates":[],"entities":[entity(102,1)]},
+        "reset_arrived":{"scene_updates":[],"entities":[],"delete_capture_ids":[102]},
+        "recovered":{"scene_updates":[],"entities":[entity(100,0)],"delete_capture_ids":[101],
+            "events":[{"target":{"capture_id":100},"entity":1,"event":17}]}
+    })
+}
+
+#[test]
+fn reset_presentation_requires_paired_phases_and_cleanup() {
+    use crate::garage_logic::GarageLogic;
+    for missing in ["resetting", "reset_arrived"] {
+        let mut doc = logic_document();
+        doc.as_object_mut().unwrap().remove(missing);
+        assert!(GarageLogic::from_json(&doc).is_err());
+    }
+    let mut doc = logic_document();
+    doc["reset_arrived"]["delete_capture_ids"] = json!([]);
+    assert!(GarageLogic::from_json(&doc).is_err());
+    // Older deployment documents remain compatible.
+    doc.as_object_mut().unwrap().remove("resetting");
+    doc.as_object_mut().unwrap().remove("reset_arrived");
+    assert!(GarageLogic::from_json(&doc).is_ok());
 }
 fn completion_frame(owner: Owner, ghost: u16, sequence: u8) -> BitWriter {
     let call = Completed {
@@ -291,6 +314,7 @@ fn crash_start_and_completion_are_atomic_under_queue_pressure_and_repeat() {
             })
             .unwrap();
         assert!(!listener.logic_ghosts[&owner.participant].contains_key(&100));
+        assert!(!listener.logic_ghosts[&owner.participant].contains_key(&102));
         if cycle > 0 {
             listener
                 .advance_crashes(u64::from(cycle) * 5000 + 4501)
@@ -335,6 +359,7 @@ fn crash_start_and_completion_are_atomic_under_queue_pressure_and_repeat() {
         assert_eq!(listener.players.objects().len(), initial_count);
         assert!(listener.logic_ghosts[&owner.participant].contains_key(&100));
         assert!(!listener.logic_ghosts[&owner.participant].contains_key(&101));
+        assert!(!listener.logic_ghosts[&owner.participant].contains_key(&102));
         assert!(!listener.pending_rpcs.iter().any(|rpc| matches!(
             rpc, HostRpc::SequenceStop(stop) if stop.sequence == ghost
         )));
@@ -587,6 +612,7 @@ fn rollover_relocation_waits_for_publication_and_acknowledgement_then_repeats() 
         .world_cars
         .insert(car_id, (owner.participant, true));
     let mut revision = 0;
+    let mut previous_loading = None;
     for cycle in 0..2 {
         let offset = f64::from(cycle) * 20.0;
         for i in 0..41 {
@@ -624,6 +650,20 @@ fn rollover_relocation_waits_for_publication_and_acknowledgement_then_repeats() 
         let sequence = creation.records.last().unwrap().id;
         transport.queue_replication_after(creation, calls).unwrap();
         let done = completion_frame(owner, sequence, cycle * 4);
+        // Failure to enqueue the complete transition must not expose the
+        // loading entity or consume the sequence completion.
+        listener
+            .pending_entries
+            .resize(MAX_PENDING - 1, (returning::empty_section(), vec![]));
+        let before = listener.players.objects().snapshot();
+        assert!(!listener.frame(Queued {
+            advertised: None,
+            frame: u16::from(cycle * 4),
+            data: done.span()
+        }));
+        assert_eq!(listener.players.objects().snapshot(), before);
+        assert!(!listener.logic_ghosts[&owner.participant].contains_key(&102));
+        listener.pending_entries.clear();
         assert!(listener.frame(Queued {
             advertised: None,
             frame: u16::from(cycle * 4),
@@ -641,6 +681,17 @@ fn rollover_relocation_waits_for_publication_and_acknowledgement_then_repeats() 
             Some(Stage::Crashing)
         );
         assert!(listener.logic_ghosts[&owner.participant].contains_key(&101));
+        let loading = listener.logic_ghosts[&owner.participant][&102];
+        assert_ne!(previous_loading, Some(loading));
+        previous_loading = Some(loading);
+        assert!(
+            listener.pending_entries[0]
+                .0
+                .records
+                .iter()
+                .any(|r| r.id == loading)
+        );
+        assert!(listener.pending_entries[0].0.deleted.contains(&sequence));
         assert!(listener.due_teleport(listener.world_ms).is_none());
         let bindings = ResetBindings::from_scene(
             &listener.players,
@@ -678,6 +729,7 @@ fn rollover_relocation_waits_for_publication_and_acknowledgement_then_repeats() 
                 .unwrap()
                 .relocating(owner.participant)
         );
+        assert!(listener.players.objects().get(loading).is_some());
         for (section, calls) in listener.pending_entries.drain(..) {
             transport.queue_replication_after(section, calls).unwrap();
         }
@@ -720,6 +772,18 @@ fn rollover_relocation_waits_for_publication_and_acknowledgement_then_repeats() 
         assert_eq!(foreign_players.objects().len(), objects);
         assert!(foreign_crashes.relocating(owner.participant));
         let completed = ack(cycle * 4 + 2);
+        listener
+            .pending_entries
+            .resize(MAX_PENDING - 1, (returning::empty_section(), vec![]));
+        let before = listener.players.objects().snapshot();
+        assert!(!listener.frame(Queued {
+            advertised: None,
+            frame: u16::from(cycle * 4 + 2),
+            data: completed.span()
+        }));
+        assert_eq!(listener.players.objects().snapshot(), before);
+        assert!(listener.players.objects().get(loading).is_some());
+        listener.pending_entries.clear();
         assert!(listener.frame(Queued {
             advertised: None,
             frame: u16::from(cycle * 4 + 2),
@@ -737,8 +801,11 @@ fn rollover_relocation_waits_for_publication_and_acknowledgement_then_repeats() 
                 .relocating(owner.participant)
         );
         assert!(listener.logic_ghosts[&owner.participant].contains_key(&100));
+        assert!(!listener.logic_ghosts[&owner.participant].contains_key(&102));
+        assert!(listener.players.objects().get(loading).is_none());
         let entries: Vec<_> = listener.pending_entries.drain(..).collect();
         assert_eq!(entries.len(), 2);
+        assert!(entries[0].0.deleted.contains(&loading));
         assert!(entries[0].1.is_empty());
         let states: Vec<_> = entries[1]
             .1

@@ -298,9 +298,14 @@ a fallback Stop; completion can arrive before that timer. Duplicate completion,
 stale movement and a held crash flag cannot start another recovery.
 The optional `crash` sequence definition has two serializers and no linked
 cinematic channel. Garage logic supplies paired `crashed`/`recovered` batches,
-which must restore the same live roles. `prepare-local` builds these from the
-installation. The sequence preserves the current vehicle transform; it does not
-choose a road relocation point. Live acceptance is tracked in issue #156.
+which must restore the same live roles. If the car remains crashed at completion,
+the server relocates it to a recent upright, grounded driving sample, with the
+installed road spawn as a fallback. History is bounded and scoped to the owned
+vehicle. Paired `resetting`/`reset_arrived` batches keep the installed reset
+loading screen active from before relocation until the client acknowledges
+arrival; only then are input and driving presentation restored. `prepare-local`
+builds these batches from the installation. Live acceptance is tracked in issue
+#156.
 
 Garage return requires the installed entry sequence and all three garage logic
 phases: `return_requested`, `returning`, and `returned`. The entry definition
