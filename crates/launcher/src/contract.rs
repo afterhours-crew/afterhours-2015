@@ -92,6 +92,10 @@ impl Record for api::ApiRecord {
     const NAME: &'static str = "api";
     const VERSION: u32 = api::FORMAT_VERSION;
 }
+impl Record for api::GameEndpoints {
+    const NAME: &'static str = "game-endpoints";
+    const VERSION: u32 = api::FORMAT_VERSION;
+}
 impl Record for api::ApiError {
     const NAME: &'static str = "api-error";
     const VERSION: u32 = api::FORMAT_VERSION;
@@ -127,10 +131,11 @@ fn info<T: Record>() -> RecordInfo {
 }
 
 /// Every record, sorted by name.
-pub fn records() -> [RecordInfo; 16] {
+pub fn records() -> [RecordInfo; 17] {
     let mut all = [
         info::<api::ApiRecord>(),
         info::<api::ApiError>(),
+        info::<api::GameEndpoints>(),
         info::<Preflight>(),
         info::<profile::images::CarImagesReport>(),
         info::<events::Event>(),

@@ -87,6 +87,11 @@ impl Control for Fake {
     fn profile(&self) -> Result<Profile> {
         Err(Failure::no_session("No saved driver is selected."))
     }
+    fn game(&self) -> Result<GameEndpoints> {
+        GameEndpoints::from_readiness(
+            r#"{"ready":true,"redirector":"192.168.1.20:42230","lsx":null}"#,
+        )
+    }
 }
 
 fn server(hub: &Arc<Hub>) -> (ApiServer, Arc<Fake>) {
@@ -341,6 +346,13 @@ fn routes_answer_the_commands_records() {
     let (code, _, body) = request(&server, "GET", "/v1/profile");
     assert_eq!(code, 409, "no save selected, as profile exits with 4");
     assert!(error_message(&body).contains("No saved driver"));
+    let (code, _, body) = request(&server, "GET", "/v1/game");
+    assert_eq!(code, 200, "{body}");
+    let game: serde_json::Value = serde_json::from_str(&body).unwrap();
+    crate::contract::testing::validate("game-endpoints", &game);
+    assert_eq!(game["redirector"], "192.168.1.20:42230");
+    assert!(game["launcher_services"].is_null());
+    assert_eq!(request(&server, "POST", "/v1/game").0, 405);
     let (code, head, _) = request(&server, "PUT", "/v1/profile");
     assert_eq!(code, 405);
     assert!(head.contains("Allow: GET\r\n"));
@@ -846,6 +858,41 @@ fn a_session_without_its_first_status_has_no_api_yet() {
     drop(lock);
     std::fs::write(data.join(session::POINTER_FILE), b"not json").unwrap();
     assert_eq!(current(&data).unwrap_err().exit, Exit::Refused);
+    std::fs::remove_dir_all(data).unwrap();
+}
+
+#[test]
+fn game_endpoints_come_from_the_servers_readiness_record() {
+    let full = GameEndpoints::from_readiness(
+        r#"{"ready":true,"pid":7,"redirector":"192.168.1.20:42230","lsx":"192.168.1.20:3216"}"#,
+    )
+    .unwrap();
+    assert_eq!(full.redirector, "192.168.1.20:42230");
+    assert_eq!(full.launcher_services.as_deref(), Some("192.168.1.20:3216"));
+    for bad in [
+        "",
+        "not json",
+        r#"{"ready":false,"redirector":"127.0.0.1:1"}"#,
+        r#"{"ready":true}"#,
+        r#"{"ready":true,"redirector":"localhost:1"}"#,
+        r#"{"ready":true,"redirector":"[::1]:1"}"#,
+    ] {
+        assert!(GameEndpoints::from_readiness(bad).is_err(), "{bad}");
+    }
+    // The live control reads it from the current session, once written.
+    let (data, lock) = live_session("api-game");
+    let control = LiveControl::new(data.clone(), Build::LAUNCHER);
+    assert_eq!(control.game().unwrap_err().exit, Exit::NoSession);
+    let run = paths::session_dir(&data, ID);
+    std::fs::write(
+        run.join("server.stdout.jsonl"),
+        "{\"ready\":true,\"redirector\":\"127.0.0.1:34567\",\"lsx\":null}\n",
+    )
+    .unwrap();
+    let game = control.game().unwrap();
+    assert_eq!(game.redirector, "127.0.0.1:34567");
+    crate::contract::testing::validate("game-endpoints", &game);
+    drop(lock);
     std::fs::remove_dir_all(data).unwrap();
 }
 

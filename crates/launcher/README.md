@@ -65,6 +65,7 @@ field and a JSON Schema (draft 7) generated from the Rust type that prints it:
 | `event` | each line of `setup`/`serve`/`start --events`, including the live map positions (`map-feed`); also each event of the session API's `/v1/events` |
 | `api` | `api --json` and `api.json` in a session started with `--api`: the session ID, the API's address and its token |
 | `api-error` | the body of every refused session API request |
+| `game-endpoints` | the session API's `/v1/game`: where a game reaches the server |
 | `profile`, `profile-list` | `profile --json` (also the session API's `/v1/profile`), `profile --list --json` |
 | `car-images` | `car-images --json`: the image set, counts per size, formats and unresolved images |
 | `map-images` | `map-images --json`: the tile set, its detail levels, file naming, the world box it covers and any missing tiles |
@@ -209,6 +210,7 @@ session's last status, and answers:
 | `GET /v1/settings` | the `settings` record: the saved traffic and rivals, as `settings --json` |
 | `PUT /v1/settings` | the `settings` record after saving new amounts, as `settings --json` with `--traffic` and `--rivals` |
 | `GET /v1/profile` | the `profile` record of the selected save, as `profile --json` |
+| `GET /v1/game` | the `game-endpoints` record: the server's redirector and launcher-services addresses from its readiness record, for a game routed through a relay (409 until the server is ready) |
 
 Answers are the records the matching commands print, with the same schemas
 and the same checks behind them. A refused request answers an `api-error`

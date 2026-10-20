@@ -19,6 +19,7 @@
 //! | `GET /v1/settings` | the `settings` record: the saved traffic and rivals |
 //! | `PUT /v1/settings` | the `settings` record after saving a [`SettingsChange`] |
 //! | `GET /v1/profile` | the `profile` record of the selected save |
+//! | `GET /v1/game` | the `game-endpoints` record: where a game reaches the server |
 //!
 //! Answers are the records the matching commands print with `--json`, with
 //! the same schemas; a refused request answers an `api-error` record. The
@@ -97,6 +98,42 @@ pub struct ApiError {
     pub version: u32,
     /// What was refused and why, for a person to read.
     pub message: String,
+}
+
+/// `GET /v1/game`: where a game, on this computer or another, reaches this
+/// session's server. A game is routed to a relay on its own computer that
+/// forwards to these ([`crate::relay`]); the server's answers give it the
+/// rest of its addresses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct GameEndpoints {
+    pub version: u32,
+    /// The server's redirector, `<IPv4 address>:<port>`.
+    pub redirector: String,
+    /// The server's launcher services, `<IPv4 address>:<port>`, when it
+    /// serves them (a session with game support); `null` otherwise.
+    pub launcher_services: Option<String>,
+}
+
+impl GameEndpoints {
+    /// From the server's readiness record (`server.stdout.jsonl`).
+    pub fn from_readiness(line: &str) -> Result<Self> {
+        let invalid = || Failure::session("The server's readiness record is invalid.");
+        let ready: serde_json::Value = serde_json::from_str(line).map_err(|_| invalid())?;
+        let address = |key: &str| {
+            ready[key]
+                .as_str()
+                .filter(|text| text.parse::<std::net::SocketAddrV4>().is_ok())
+                .map(str::to_owned)
+        };
+        if ready["ready"] != true {
+            return Err(invalid());
+        }
+        Ok(Self {
+            version: FORMAT_VERSION,
+            redirector: address("redirector").ok_or_else(invalid)?,
+            launcher_services: address("lsx"),
+        })
+    }
 }
 
 /// The body of `PUT /v1/settings`: the `settings` record's fields to save,
@@ -181,6 +218,8 @@ pub trait Control: Send + Sync + 'static {
     -> Result<SettingsReport>;
     /// `profile --json`: the selected save.
     fn profile(&self) -> Result<Profile>;
+    /// Where a game reaches the server, once it is ready.
+    fn game(&self) -> Result<GameEndpoints>;
 }
 
 /// A new token: 32 bytes from the system's random source, as hex.
@@ -495,7 +534,8 @@ fn serve(mut stream: TcpStream, shared: &Shared) {
         ("GET", "/v1/settings") => answer(&mut stream, control.settings()),
         ("PUT", "/v1/settings") => save_settings(&mut stream, &head, length, control.as_ref()),
         ("GET", "/v1/profile") => answer(&mut stream, control.profile()),
-        (_, "/v1/info" | "/v1/status" | "/v1/events" | "/v1/profile") => refuse(
+        ("GET", "/v1/game") => answer(&mut stream, control.game()),
+        (_, "/v1/info" | "/v1/status" | "/v1/events" | "/v1/profile" | "/v1/game") => refuse(
             &mut stream,
             405,
             &[("Allow", "GET")],
@@ -592,7 +632,26 @@ impl Control for LiveControl {
     fn profile(&self) -> Result<Profile> {
         crate::commands::profile::profile_report(&self.data, &crate::cli::ProfileArgs::default())
     }
+    fn game(&self) -> Result<GameEndpoints> {
+        let not_ready = || Failure::no_session("The server is not ready yet.");
+        let status = crate::session::current_status(&self.data)?.ok_or_else(not_ready)?;
+        let path = crate::paths::session_dir(&self.data, &status.id).join(READINESS_FILE);
+        // The supervisor keeps only the readiness line in this file.
+        let mut line = String::new();
+        let file = std::fs::File::open(&path).map_err(|_| not_ready())?;
+        std::io::BufRead::read_line(
+            &mut std::io::BufReader::new(std::io::Read::take(file, 64 * 1024)),
+            &mut line,
+        )?;
+        if line.trim().is_empty() {
+            return Err(not_ready());
+        }
+        GameEndpoints::from_readiness(line.trim_end())
+    }
 }
+
+/// The session file holding the server's readiness record.
+const READINESS_FILE: &str = "server.stdout.jsonl";
 
 /// A session's API while it runs: the listener and its `api.json`.
 pub struct SessionApi {
