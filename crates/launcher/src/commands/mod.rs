@@ -99,18 +99,28 @@ fn dispatch(cli: Cli, bundled_server: Option<PathBuf>, build: Build) -> Result<(
     context.bundled_server = bundled_server;
     match cli.command {
         Command::Check(args) => launch::check(&context, &args),
-        Command::Setup(args) => {
-            launch::launch(&context, crate::records::Action::Setup, &args, false)
-        }
+        Command::Setup(args) => launch::launch(
+            &context,
+            crate::records::Action::Setup,
+            &args,
+            launch::Hosting::default(),
+        ),
         Command::Serve(args) => launch::launch(
             &context,
             crate::records::Action::Serve,
             &args.session,
-            args.server_only,
+            launch::Hosting {
+                server_only: args.server_only,
+                listen: args.listen,
+                api_port: args.api_port,
+            },
         ),
-        Command::Start(args) => {
-            launch::launch(&context, crate::records::Action::Start, &args, false)
-        }
+        Command::Start(args) => launch::launch(
+            &context,
+            crate::records::Action::Start,
+            &args,
+            launch::Hosting::default(),
+        ),
         Command::Status => status::status(&context),
         Command::Stop => status::stop(&context),
         Command::Play => status::play(&context),

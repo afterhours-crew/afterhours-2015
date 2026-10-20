@@ -29,8 +29,10 @@ pub fn profile(identity: &nfs_services::authentication::Identity) -> Profile {
     }
 }
 
-pub async fn bind(port: u16) -> Result<TcpListener, Failure> {
-    TcpListener::bind((Ipv4Addr::LOCALHOST, port))
+/// Listen for the game's launcher services on `listen` (`127.0.0.1` unless
+/// the operator chose another address).
+pub async fn bind(listen: Ipv4Addr, port: u16) -> Result<TcpListener, Failure> {
+    TcpListener::bind((listen, port))
         .await
         .map_err(|_| Failure::Io)
 }
@@ -44,6 +46,7 @@ pub async fn serve(
     let config = Config::for_profile(profile);
     let mut tasks = JoinSet::new();
     let mut next_connection = 1u32;
+    let local = listener.local_addr().map_err(|_| Failure::Io)?.ip();
     let result = loop {
         if *shutdown.borrow() {
             break Ok(());
@@ -58,7 +61,7 @@ pub async fn serve(
                     Ok(value) => value,
                     Err(_) => break Err(Failure::Io),
                 };
-                if !peer.ip().is_loopback() || tasks.len() >= 4 { continue; }
+                if !crate::net::serves(local, peer.ip()) || tasks.len() >= 4 { continue; }
                 let entropy = match fresh::<48>(&mut OsSeeds) {
                     Ok(value) => value,
                     Err(error) => break Err(error),
@@ -282,7 +285,7 @@ mod tests {
         let identity =
             nfs_services::authentication::Identity::new(account, 101, 202, "Local driver".into())
                 .unwrap();
-        let listener = bind(0).await.unwrap();
+        let listener = bind(Ipv4Addr::LOCALHOST, 0).await.unwrap();
         let address = listener.local_addr().unwrap();
         assert!(address.ip().is_loopback());
         let (stop, shutdown) = watch::channel(false);
@@ -334,7 +337,7 @@ mod tests {
     }
     #[tokio::test]
     async fn connection_limit_rejects_excess_clients_and_recovers_closed_slots() {
-        let listener = bind(0).await.unwrap();
+        let listener = bind(Ipv4Addr::LOCALHOST, 0).await.unwrap();
         let address = listener.local_addr().unwrap();
         let (stop, shutdown) = watch::channel(false);
         let server = tokio::spawn(serve(
@@ -395,7 +398,7 @@ mod tests {
 
     #[tokio::test]
     async fn established_idle_survives_but_partial_frame_has_a_deadline() {
-        let listener = bind(0).await.unwrap();
+        let listener = bind(Ipv4Addr::LOCALHOST, 0).await.unwrap();
         let address = listener.local_addr().unwrap();
         let (stop, shutdown) = watch::channel(false);
         let server = tokio::spawn(serve(
@@ -438,7 +441,7 @@ mod tests {
 
     #[tokio::test]
     async fn idle_incomplete_handshake_is_closed() {
-        let listener = bind(0).await.unwrap();
+        let listener = bind(Ipv4Addr::LOCALHOST, 0).await.unwrap();
         let address = listener.local_addr().unwrap();
         let (stop, shutdown) = watch::channel(false);
         let server = tokio::spawn(serve(

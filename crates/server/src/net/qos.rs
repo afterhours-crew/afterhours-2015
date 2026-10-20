@@ -8,7 +8,7 @@ use crate::Failure;
 use nfs_protocol::qos::LatencyProbe;
 use nfs_server_support::{qos_service::MAX_DATAGRAM_BYTES, qos_tls};
 use std::{
-    net::{Ipv4Addr, SocketAddr},
+    net::{IpAddr, SocketAddr},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -43,8 +43,11 @@ pub(super) async fn serve(
     let SocketAddr::V4(advertised) = udp.local_addr().map_err(io)? else {
         return Err(Failure::Io);
     };
-    if *advertised.ip() != Ipv4Addr::LOCALHOST
-        || !tcp.local_addr().map_err(io)?.ip().is_loopback()
+    // The UDP address is advertised in replies: one concrete address,
+    // shared with the TCP listener.
+    let local = IpAddr::V4(*advertised.ip());
+    if advertised.ip().is_unspecified()
+        || tcp.local_addr().map_err(io)?.ip() != local
         || request_timeout.is_zero()
         || request_timeout > Duration::from_secs(86_400)
     {
@@ -73,7 +76,7 @@ pub(super) async fn serve(
             }
             accepted = tcp.accept(), if workers.len() < MAX_TLS => {
                 let (socket, peer) = match accepted { Ok(v) => v, Err(_) => break Err(Failure::Io) };
-                if !peer.ip().is_loopback() { continue; }
+                if !super::serves(local, peer.ip()) { continue; }
                 let socket = match socket.into_std() { Ok(v) => v, Err(_) => break Err(Failure::Io) };
                 let identity = identity.clone();
                 let cancelled = cancellation.0.clone();
@@ -89,7 +92,7 @@ pub(super) async fn serve(
                     Err(_) => break Err(Failure::Io),
                 };
                 let SocketAddr::V4(peer) = peer else { continue };
-                if !peer.ip().is_loopback() || size > MAX_DATAGRAM_BYTES { continue; }
+                if !super::serves(local, IpAddr::V4(*peer.ip())) || size > MAX_DATAGRAM_BYTES { continue; }
                 let Ok(reply) = LatencyProbe::parse(&bytes[..size]).and_then(|p| p.encode_reply(peer)) else { continue };
                 // Local UDP has no reason to hold shutdown hostage if its send
                 // buffer is full; the client can retry a dropped probe.

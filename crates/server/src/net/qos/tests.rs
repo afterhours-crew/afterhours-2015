@@ -10,7 +10,7 @@ use openssl::{
 };
 use std::{
     io::{self, Read, Write},
-    net::{IpAddr, TcpStream},
+    net::{IpAddr, Ipv4Addr, TcpStream},
 };
 use tokio::time::{sleep, timeout};
 const CLIENT_LIMIT: Duration = Duration::from_secs(4);

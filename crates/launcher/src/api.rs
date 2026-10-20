@@ -50,7 +50,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::{
     io::Write,
-    net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream},
+    net::{SocketAddr, SocketAddrV4, TcpListener, TcpStream},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -86,7 +86,8 @@ pub struct ApiRecord {
     /// Base address, `http://127.0.0.1:<port>`; requests go to `<url>/v1/...`.
     pub url: String,
     /// Send as `Authorization: Bearer <token>` with every request. 64
-    /// lowercase hexadecimal characters, new for every session.
+    /// lowercase hexadecimal characters, kept in the data directory's
+    /// `api-token` across sessions until that file is deleted.
     pub token: String,
 }
 
@@ -194,7 +195,9 @@ struct Shared {
     control: Arc<dyn Control>,
     hub: Arc<Hub>,
     token: String,
-    port: u16,
+    /// `Host` values this API answers: its own address, and `localhost`
+    /// with its port when that address is loopback.
+    hosts: Vec<String>,
     shutdown: AtomicBool,
     connections: AtomicUsize,
     streams: AtomicUsize,
@@ -209,14 +212,25 @@ pub struct ApiServer {
 
 impl ApiServer {
     /// Listen on `127.0.0.1` at a port the system picks.
-    pub fn start(control: Arc<dyn Control>, hub: Arc<Hub>, token: String) -> Result<Self> {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+    /// Listen on `bind`: `127.0.0.1`, or the one network address a `serve
+    /// --listen` session uses; port 0 lets the system pick.
+    pub fn start(
+        control: Arc<dyn Control>,
+        hub: Arc<Hub>,
+        token: String,
+        bind: SocketAddrV4,
+    ) -> Result<Self> {
+        let listener = TcpListener::bind(bind)?;
         let address = listener.local_addr()?;
+        let mut hosts = vec![address.to_string()];
+        if address.ip().is_loopback() {
+            hosts.push(format!("localhost:{}", address.port()));
+        }
         let shared = Arc::new(Shared {
             control,
             hub,
             token,
-            port: address.port(),
+            hosts,
             shutdown: AtomicBool::new(false),
             connections: AtomicUsize::new(0),
             streams: AtomicUsize::new(0),
@@ -358,10 +372,8 @@ fn answer<T: Serialize>(stream: &mut impl Write, result: Result<T>) -> std::io::
 /// Why a request is refused before routing, if it is.
 fn check(head: &http::Head, shared: &Shared) -> Option<(u16, &'static str)> {
     let host = head.header("host").unwrap_or_default();
-    let port = shared.port;
-    let allowed = [format!("127.0.0.1:{port}"), format!("localhost:{port}")];
-    if !allowed.iter().any(|a| a.as_bytes() == host) {
-        return Some((403, "This API answers only on its own loopback address."));
+    if !shared.hosts.iter().any(|a| a.as_bytes() == host) {
+        return Some((403, "This API answers only on its own address."));
     }
     if head.header("origin").is_some() {
         return Some((403, "Requests from web pages are refused."));
@@ -589,10 +601,17 @@ pub struct SessionApi {
 }
 
 impl SessionApi {
-    /// Listen, and write how to reach the API to the session directory.
-    pub fn start(control: Arc<dyn Control>, hub: Arc<Hub>, id: &str, run: &Path) -> Result<Self> {
-        let token = new_token()?;
-        let server = ApiServer::start(control, hub, token.clone())?;
+    /// Listen on `bind` with `token` (see [`stored_token`]), and write how
+    /// to reach the API to the session directory.
+    pub fn start(
+        control: Arc<dyn Control>,
+        hub: Arc<Hub>,
+        id: &str,
+        run: &Path,
+        bind: SocketAddrV4,
+        token: String,
+    ) -> Result<Self> {
+        let server = ApiServer::start(control, hub, token.clone(), bind)?;
         let record = ApiRecord {
             version: FORMAT_VERSION,
             id: id.to_owned(),
@@ -600,20 +619,58 @@ impl SessionApi {
             token,
         };
         let file = run.join(FILE);
-        write_private(&file, &record)?;
+        let mut text = serde_json::to_vec_pretty(&record)?;
+        text.push(b'\n');
+        write_private(&file, &text)?;
         Ok(Self { server, file })
     }
 
-    /// The session is over: deliver the last events, close, forget the token.
+    /// The session is over: deliver the last events, close, remove `api.json`.
     pub fn finish(self) {
         self.server.finish(DRAIN_GRACE);
         let _ = std::fs::remove_file(&self.file);
     }
 }
 
-/// Write a new record readable only by this user where the system allows
-/// it; the session directory already lies under the user's data directory.
-fn write_private(path: &Path, record: &ApiRecord) -> Result<()> {
+/// The data directory's API token: the one in `api-token`, or a new one
+/// written there. It stays the same across sessions, so a launcher that
+/// paired with this server (on another PC, say) reconnects after a restart;
+/// deleting the file makes the next session choose a new one.
+pub fn stored_token(data: &Path) -> Result<String> {
+    let path = data.join(TOKEN_FILE);
+    let read = |path: &Path| -> Result<String> {
+        let text = std::fs::read_to_string(path)?;
+        let token = text.trim_end();
+        let valid = token.len() == 64
+            && token
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+        if !valid {
+            return Err(Failure::refused(format!(
+                "{} is damaged; delete it to choose a new API token.",
+                path.display()
+            )));
+        }
+        Ok(token.to_owned())
+    };
+    if std::fs::symlink_metadata(&path).is_ok() {
+        return read(&path);
+    }
+    let token = new_token()?;
+    match write_private(&path, format!("{token}\n").as_bytes()) {
+        Ok(()) => Ok(token),
+        // Another session wrote it first: use that one.
+        Err(_) if std::fs::symlink_metadata(&path).is_ok() => read(&path),
+        Err(failure) => Err(failure),
+    }
+}
+
+/// The file in the data directory that keeps the API token.
+pub const TOKEN_FILE: &str = "api-token";
+
+/// Write a new file readable only by this user where the system allows it;
+/// it lies under the user's data directory.
+fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -622,8 +679,7 @@ fn write_private(path: &Path, record: &ApiRecord) -> Result<()> {
         options.mode(0o600);
     }
     let mut file = options.open(path)?;
-    serde_json::to_writer_pretty(&mut file, record)?;
-    file.write_all(b"\n")?;
+    file.write_all(bytes)?;
     Ok(())
 }
 

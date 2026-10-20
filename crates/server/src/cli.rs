@@ -11,6 +11,8 @@ struct Args {
     output: PathBuf,
     record_protocol: bool,
     redirector_port: u16,
+    /// The one address every listener binds and the server advertises.
+    listen: std::net::Ipv4Addr,
     lsx_port: Option<u16>,
     idle_seconds: u64,
     qos_seconds: u64,
@@ -73,6 +75,7 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
     let (mut redirector_port, mut idle_seconds, mut qos_seconds) = (0, 120, 10);
     let (mut item_content, mut state_directory, mut local_account) = (None, None, None);
     let mut lsx_port = None;
+    let mut listen = std::net::Ipv4Addr::LOCALHOST;
     let mut persistent_content = None;
     let mut progression_content = None;
     let (mut vehicle_content, mut garage_layout) = (None, None);
@@ -177,6 +180,13 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
                         .and_then(|v| v.parse().ok())
                         .ok_or("bad LSX port")?,
                 );
+            }
+            Some("--listen") => {
+                listen = value()?
+                    .to_str()
+                    .and_then(|v| v.parse::<std::net::Ipv4Addr>().ok())
+                    .filter(|ip| !ip.is_unspecified() && !ip.is_multicast() && !ip.is_broadcast())
+                    .ok_or("--listen takes one IPv4 address of this computer")?;
             }
             Some("--redirector-port") => {
                 redirector_port = value()?
@@ -316,6 +326,7 @@ fn parse_from(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args
         output: output.ok_or("--output is required")?,
         record_protocol,
         redirector_port,
+        listen,
         lsx_port,
         idle_seconds,
         qos_seconds,
@@ -514,7 +525,7 @@ pub fn main_from(args: impl Iterator<Item = std::ffi::OsString>) -> std::process
     }
     if args.peek().is_some_and(|a| a == "--help" || a == "-h") {
         println!(
-            "nfs-server: owned local NFS 2015 services\n\nUsage: nfs-server --root <data-directory> --output <new-recording-directory> [configuration options]\n\nPrepare complete local policy: nfs-server prepare-local --game-dir <installation> --root <data-directory>\n\nPrepare game content: nfs-server prepare-content --game-dir <installation>\n[--root <data-directory>] [--content-cache <directory>]\n\nCreate account: nfs-server create-account --name <name> --state-directory <new-directory>\n--account-policy <policy.json> --item-content <items.json> --persistent-content <tables.json>\n\nRequired control configuration: --bootstrap-config, --auth-config,\n--group-policy, --matchmaking-admission, --matchmaking-policy, --world-policy,\n--control-catalogs, --stat-definitions, --challenge-content, --item-licenses,\n--owned-local-social and --owned-menu-awards.\n\nGarage configuration: --world-content (version 4 or 5), --world-mac-template,\n--item-content, --state-directory, --local-account, --persistent-content,\n--progression-content, --vehicle-content, --garage-layout, --sequence-content,\n--garage-logic.\n\nGame content: --game-dir <installation> builds --item-content,\n--persistent-content and --world-mac-template on first start, supplies\n--stat-definitions, --item-licenses, --control-catalogs and\n--reputation-thresholds, --scene-catalog, --world-content, --garage-layout,\n--vehicle-content, --vehicle-parts, --progression-content and --sequence-content unless explicitly overridden, and caches the outputs\n(--content-cache, default artifacts/content under --root).\n\nAccount state is read from SQLite. Optional one-time imports: --local-identity,\n--entitlement-state, --kickback-state, --speedwall-state, --user-settings.\n\nOptional: --lsx-port (3216 for the game), --redirector-port, --idle-seconds, --qos-seconds, --stop-file, --record-protocol.\nRaw protocol recording is disabled by default and bounded when enabled.\nAll listeners are loopback. No manifest, captured reply store or external\nauthentication is used. See crates/server/README.md for schemas and limitations."
+            "nfs-server: owned local NFS 2015 services\n\nUsage: nfs-server --root <data-directory> --output <new-recording-directory> [configuration options]\n\nPrepare complete local policy: nfs-server prepare-local --game-dir <installation> --root <data-directory>\n\nPrepare game content: nfs-server prepare-content --game-dir <installation>\n[--root <data-directory>] [--content-cache <directory>]\n\nCreate account: nfs-server create-account --name <name> --state-directory <new-directory>\n--account-policy <policy.json> --item-content <items.json> --persistent-content <tables.json>\n\nRequired control configuration: --bootstrap-config, --auth-config,\n--group-policy, --matchmaking-admission, --matchmaking-policy, --world-policy,\n--control-catalogs, --stat-definitions, --challenge-content, --item-licenses,\n--owned-local-social and --owned-menu-awards.\n\nGarage configuration: --world-content (version 4 or 5), --world-mac-template,\n--item-content, --state-directory, --local-account, --persistent-content,\n--progression-content, --vehicle-content, --garage-layout, --sequence-content,\n--garage-logic.\n\nGame content: --game-dir <installation> builds --item-content,\n--persistent-content and --world-mac-template on first start, supplies\n--stat-definitions, --item-licenses, --control-catalogs and\n--reputation-thresholds, --scene-catalog, --world-content, --garage-layout,\n--vehicle-content, --vehicle-parts, --progression-content and --sequence-content unless explicitly overridden, and caches the outputs\n(--content-cache, default artifacts/content under --root).\n\nAccount state is read from SQLite. Optional one-time imports: --local-identity,\n--entitlement-state, --kickback-state, --speedwall-state, --user-settings.\n\nOptional: --lsx-port (3216 for the game), --redirector-port, --listen, --idle-seconds, --qos-seconds, --stop-file, --record-protocol.\nRaw protocol recording is disabled by default and bounded when enabled.\nEvery listener binds 127.0.0.1 unless --listen names another IPv4 address\nof this computer, which is then advertised to the game and serves the network. No manifest, captured reply store or external\nauthentication is used. See crates/server/README.md for schemas and limitations."
         );
         return std::process::ExitCode::SUCCESS;
     }
@@ -860,10 +871,10 @@ async fn run(args: Args) -> Result<(), Failure> {
     if let Some(content) = &world_content {
         content.validate_runtime()?;
     }
-    let listeners = net::Listeners::bind(args.redirector_port).await?;
+    let listeners = net::Listeners::bind(args.listen, args.redirector_port).await?;
     let a = listeners.addresses()?;
     let lsx_listener = match args.lsx_port {
-        Some(port) => Some(nfs_server::lsx::bind(port).await?),
+        Some(port) => Some(nfs_server::lsx::bind(args.listen, port).await?),
         None => None,
     };
     let lsx_address = lsx_listener
@@ -1118,11 +1129,27 @@ mod tests {
             ("--qos-seconds", "86401"),
             ("--redirector-port", "65536"),
             ("--local-account", "00000000000000000000000000000000"),
+            ("--listen", "0.0.0.0"),
+            ("--listen", "255.255.255.255"),
+            ("--listen", "224.0.0.1"),
+            ("--listen", "::1"),
+            ("--listen", "localhost"),
+            ("--listen", "192.168.1.5:80"),
         ] {
             let mut args = configured();
             args.extend([flag.into(), value.into()]);
-            assert!(parse_from(args.into_iter()).is_err());
+            assert!(parse_from(args.into_iter()).is_err(), "{flag} {value}");
         }
+    }
+
+    #[test]
+    fn listeners_use_loopback_unless_one_address_is_chosen() {
+        let parsed = parse_from(configured().into_iter()).unwrap();
+        assert_eq!(parsed.listen, std::net::Ipv4Addr::LOCALHOST);
+        let mut args = configured();
+        args.extend(["--listen".into(), "192.168.1.5".into()]);
+        let parsed = parse_from(args.into_iter()).unwrap();
+        assert_eq!(parsed.listen, std::net::Ipv4Addr::new(192, 168, 1, 5));
     }
 
     fn without(mut args: Vec<std::ffi::OsString>, flags: &[&str]) -> Vec<std::ffi::OsString> {

@@ -34,8 +34,12 @@ cargo run -p nfs-server --locked -- --help
 
 The executable is `target/debug/nfs-server` (`.exe` on Windows). It can be copied
 to a deployment directory. Its working directory need not contain this source
-tree. It listens on IPv4 loopback only. No EA authentication, telemetry, DNS
-lookup or hosted database is used by the server. Client activation and launching
+tree. It listens on IPv4 loopback unless `--listen <address>` names one IPv4
+address of this computer, which every listener then binds and the server
+advertises to the game (redirector reply, QoS); a loopback listener serves
+only this computer, one on a network address serves that network. No EA
+authentication, telemetry, DNS lookup or hosted database is used by the
+server. Client activation and launching
 remain separate concerns.
 
 Create a deployment directory with `artifacts/`, `artifacts/runs/` and a private

@@ -241,7 +241,7 @@ computer that runs the session.
 
 How to reach it: the supervisor writes the `api` record (`version`, session
 `id`, `url` such as `http://127.0.0.1:53111`, and a `token` of 64 hexadecimal
-characters from the system's random source, new for every session) to
+characters from the system's random source) to
 `api.json` in the session directory, readable only by the user where the
 system allows, and removes it when the session ends. `nfs-afterhours api
 --json` prints it for the current session, or exits with 4 when no live
@@ -264,8 +264,27 @@ standard output holds only the front end's `session` and `final` event
 lines, so a client that starts the command learns why it was refused before
 a session existed, and nothing in the session depends on that pipe. With
 `--events` as well, every event also goes to standard output. The server is
-asked for map frames whenever either is on. The API only listens on this
-computer; serving another computer is not offered yet.
+asked for map frames whenever either is on.
+
+**The token** is kept in `api-token` in the data directory, readable only by
+the user where the system allows: the first session with `--api` creates it
+and later sessions use it, so a launcher that paired with this server finds
+it again after a restart. Delete the file to choose a new token at the next
+session; a damaged file is refused (exit 1), not replaced.
+
+**On your network.** `serve --server-only --listen <address>` binds the
+server and, with `--api`, its API to that one IPv4 address of this computer
+instead of `127.0.0.1`, and gives that address to the game: redirector,
+Blaze, QoS, the per-connection world sockets and launcher services all listen
+there. `--api-port <port>` keeps the API on a fixed port, so a launcher on
+another PC finds `http://<address>:<port>` with the same token after every
+restart. The API then answers `Host: <address>:<port>` only. Listening on the
+network is an explicit opt-in; without `--listen` nothing changes. It needs
+`--server-only`: a game a `serve` session starts on this computer is routed
+to loopback. Plain HTTP with the token is meant for a home network; anyone
+there who learns the token can control the session. Starting the game on
+another PC against this server is the next step (#172), and no game has been
+routed to a non-loopback address yet.
 
 ### Playing in a serve session
 

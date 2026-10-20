@@ -7,7 +7,7 @@
       "type": "string"
     },
     "token": {
-      "description": "Send as `Authorization: Bearer <token>` with every request. 64\nlowercase hexadecimal characters, new for every session.",
+      "description": "Send as `Authorization: Bearer <token>` with every request. 64\nlowercase hexadecimal characters, kept in the data directory's\n`api-token` across sessions until that file is deleted.",
       "type": "string"
     },
     "url": {

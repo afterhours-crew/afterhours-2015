@@ -10,6 +10,7 @@ use crate::{
     records::{self, Action, State, Status},
     session,
 };
+use std::net::Ipv4Addr;
 use std::{
     io::{BufRead, BufReader, Read, Write},
     sync::Mutex,
@@ -91,7 +92,13 @@ impl Control for Fake {
 fn server(hub: &Arc<Hub>) -> (ApiServer, Arc<Fake>) {
     let fake = Arc::new(Fake::default());
     let control: Arc<dyn Control> = fake.clone();
-    let server = ApiServer::start(control, Arc::clone(hub), TOKEN.into()).unwrap();
+    let server = ApiServer::start(
+        control,
+        Arc::clone(hub),
+        TOKEN.into(),
+        SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0),
+    )
+    .unwrap();
     (server, fake)
 }
 
@@ -769,7 +776,15 @@ fn the_session_api_writes_how_to_reach_it_and_forgets_the_token_at_the_end() {
     let run = paths::session_dir(&data, ID);
     assert_eq!(current(&data).unwrap_err().exit, Exit::NoSession);
     let control = Arc::new(LiveControl::new(data.clone(), Build::LAUNCHER));
-    let api = SessionApi::start(control, Hub::new(), ID, &run).unwrap();
+    let api = SessionApi::start(
+        control,
+        Hub::new(),
+        ID,
+        &run,
+        SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0),
+        stored_token(&data).unwrap(),
+    )
+    .unwrap();
     let record = current(&data).unwrap();
     assert_eq!(record.id, ID);
     assert!(record.url.starts_with("http://127.0.0.1:"));
@@ -832,6 +847,83 @@ fn a_session_without_its_first_status_has_no_api_yet() {
     std::fs::write(data.join(session::POINTER_FILE), b"not json").unwrap();
     assert_eq!(current(&data).unwrap_err().exit, Exit::Refused);
     std::fs::remove_dir_all(data).unwrap();
+}
+
+#[test]
+fn the_token_is_kept_across_sessions_until_deleted() {
+    let data = crate::testing::scratch("api-token");
+    let first = stored_token(&data).unwrap();
+    assert_eq!(first.len(), 64);
+    assert_eq!(stored_token(&data).unwrap(), first, "the same next session");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(data.join(TOKEN_FILE))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o077, 0, "readable only by the user");
+    }
+    std::fs::remove_file(data.join(TOKEN_FILE)).unwrap();
+    let second = stored_token(&data).unwrap();
+    assert_ne!(second, first, "deleting the file chooses a new token");
+    for damaged in ["", "short", &second.to_uppercase(), &format!("{second}x")] {
+        std::fs::write(data.join(TOKEN_FILE), damaged).unwrap();
+        assert_eq!(stored_token(&data).unwrap_err().exit, Exit::Refused);
+    }
+    std::fs::remove_dir_all(data).unwrap();
+}
+
+/// An IPv4 address of this computer other than loopback, if it has one:
+/// the source a UDP socket would use toward a documentation address
+/// (connecting a UDP socket sends nothing). None on Windows, where listening
+/// there asks the person at the computer about the firewall; Linux CI
+/// covers it.
+fn network_address() -> Option<Ipv4Addr> {
+    if cfg!(windows) {
+        return None;
+    }
+    let socket = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    socket.connect((Ipv4Addr::new(192, 0, 2, 1), 9)).ok()?;
+    match socket.local_addr().ok()?.ip() {
+        std::net::IpAddr::V4(ip) if !ip.is_loopback() && !ip.is_unspecified() => Some(ip),
+        _ => None,
+    }
+}
+
+#[test]
+fn an_api_answers_on_its_own_address_only() {
+    let hub = Hub::new();
+    let (server, _) = server(&hub);
+    let port = server.address.port();
+    // A loopback API refuses a network Host, even with the right token.
+    let lan = format!(
+        "GET /v1/info HTTP/1.1\r\nHost: 192.168.1.20:{port}\r\nAuthorization: Bearer {TOKEN}\r\n\r\n"
+    );
+    assert_eq!(exchange(&server, lan.as_bytes()).0, 403);
+    let Some(ip) = network_address() else {
+        eprintln!("no network address on this computer; loopback only");
+        return;
+    };
+    let control: Arc<dyn Control> = Arc::new(Fake::default());
+    let network =
+        ApiServer::start(control, Hub::new(), TOKEN.into(), SocketAddrV4::new(ip, 0)).unwrap();
+    assert!(network.url().starts_with(&format!("http://{ip}:")));
+    let address = network.url().trim_start_matches("http://").to_owned();
+    let (code, _, body) = request(&network, "GET", "/v1/settings");
+    assert_eq!(code, 200, "{body}");
+    // Its own address only: no loopback names.
+    let port = network.address.port();
+    for host in [format!("127.0.0.1:{port}"), format!("localhost:{port}")] {
+        let text = format!(
+            "GET /v1/info HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {TOKEN}\r\n\r\n"
+        );
+        let mut stream = TcpStream::connect(&address).unwrap();
+        stream.write_all(text.as_bytes()).unwrap();
+        let mut answer = String::new();
+        stream.read_to_string(&mut answer).unwrap();
+        assert!(answer.starts_with("HTTP/1.1 403 "), "{host}: {answer}");
+    }
 }
 
 /// One request to a live session's API, with a JSON body when given; its
@@ -914,7 +1006,15 @@ fn the_live_api_reads_and_saves_settings_and_reads_the_profile_as_the_commands_d
         "server_sha256": "0".repeat(64), "player_name": "Driver", "record_protocol": false});
     std::fs::write(run.join("request.json"), request.to_string()).unwrap();
     let control = Arc::new(LiveControl::new(data.clone(), Build::LAUNCHER));
-    let api = SessionApi::start(control, Hub::new(), ID, &run).unwrap();
+    let api = SessionApi::start(
+        control,
+        Hub::new(),
+        ID,
+        &run,
+        SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0),
+        stored_token(&data).unwrap(),
+    )
+    .unwrap();
     let record = current(&data).unwrap();
 
     // Settings: the command's record, the original amounts until saved.

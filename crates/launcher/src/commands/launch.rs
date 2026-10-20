@@ -85,12 +85,13 @@ fn new_session_id() -> String {
 /// `--events` the whole session is a JSON-lines stream ending in `final`.
 /// With `--api` alone the stream holds only `session` and `final`: the
 /// session itself is followed through its API.
-/// `server_only` keeps a Windows `serve` session from hosting the game.
+/// `hosting` is how a `serve` session is reached; `server_only` keeps a
+/// Windows `serve` session from hosting the game.
 pub fn launch(
     context: &Context,
     action: Action,
     args: &SessionArgs,
-    server_only: bool,
+    hosting: Hosting,
 ) -> Result<()> {
     let mut emitter = if args.events || args.api {
         crate::terminal::silence();
@@ -99,8 +100,8 @@ pub fn launch(
         Emitter::disabled()
     };
     let game_support = action == Action::Start
-        || (action == Action::Serve && platform::supports_game_launch() && !server_only);
-    let started = start_session(context, action, args, game_support, &mut emitter);
+        || (action == Action::Serve && platform::supports_game_launch() && !hosting.server_only);
+    let started = start_session(context, action, args, game_support, hosting, &mut emitter);
     let (record, result) = match started {
         Ok((run, exit)) => match completed_status(&run) {
             Ok(record) => {
@@ -125,6 +126,16 @@ pub fn launch(
     result
 }
 
+/// How a `serve` session is reached (`--server-only`, `--listen` and
+/// `--api-port`); `setup` and `start` use the default: on this computer,
+/// with game support where the platform has it.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Hosting {
+    pub server_only: bool,
+    pub listen: Option<std::net::Ipv4Addr>,
+    pub api_port: Option<u16>,
+}
+
 /// Preflight, create the session directory and request, then run the
 /// supervisor to completion. Returns the session directory and the
 /// supervisor's exit code (`None` when it was terminated). With
@@ -134,6 +145,7 @@ fn start_session(
     action: Action,
     args: &SessionArgs,
     game_support: bool,
+    hosting: Hosting,
     emitter: &mut Emitter,
 ) -> Result<(PathBuf, Option<i32>)> {
     if action == Action::Start && !platform::supports_game_launch() {
@@ -178,6 +190,8 @@ fn start_session(
             events: args.events,
             api: args.api,
             game_support,
+            listen: hosting.listen,
+            api_port: hosting.api_port,
             settings,
         };
         let request_path = run.join("request.json");
@@ -319,7 +333,14 @@ pub fn supervise(request_path: &Path, build: Build) -> Result<()> {
     let api = match hub {
         Some(hub) => {
             let control = Arc::new(crate::api::LiveControl::new(data.clone(), build));
-            match crate::api::SessionApi::start(control, hub, &id, &run) {
+            let bind = std::net::SocketAddrV4::new(
+                request.listen_address(),
+                request.api_port.unwrap_or(0),
+            );
+            let started = crate::api::stored_token(&data).and_then(|token| {
+                crate::api::SessionApi::start(control, hub, &id, &run, bind, token)
+            });
+            match started {
                 Ok(api) => Some(api),
                 Err(failure) => {
                     record_failure(&run, &id, action, &failure, &mut emitter);
@@ -546,6 +567,8 @@ mod tests {
             events: true,
             api: false,
             game_support: false,
+            listen: None,
+            api_port: None,
             settings: Default::default(),
         };
         (request, run)

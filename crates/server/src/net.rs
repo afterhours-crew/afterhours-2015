@@ -21,7 +21,7 @@ use nfs_world::{
 };
 use std::{
     io::Write,
-    net::{Ipv4Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{
         Arc,
         atomic::{AtomicU32, Ordering},
@@ -617,9 +617,18 @@ pub struct Addresses {
     pub qos_udp: SocketAddr,
 }
 
+/// Whether a listener on `local` serves `peer`. A loopback listener serves
+/// only this computer; one on a network address (`--listen`, an explicit
+/// opt-in) serves the network it was opened to.
+pub fn serves(local: IpAddr, peer: IpAddr) -> bool {
+    !local.is_loopback() || peer.is_loopback()
+}
+
 impl Listeners {
-    pub async fn bind(redirector_port: u16) -> Result<Self, Failure> {
-        let local = |port| SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    /// Bind every listener to `listen`, the one address the server
+    /// advertises; `127.0.0.1` unless the operator chose another.
+    pub async fn bind(listen: Ipv4Addr, redirector_port: u16) -> Result<Self, Failure> {
+        let local = |port| SocketAddr::from((listen, port));
         let tcp = |port| async move {
             TcpListener::bind(local(port))
                 .await
@@ -715,12 +724,14 @@ pub async fn serve(
                 let speedwall = config.speedwall.clone();
                 let item_licenses = config.item_licenses.clone();
                 let connections = connections.clone();
-                let Ok(world_socket) = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await else {
+                // The world and auxiliary endpoints share the advertised address.
+                let listen = addresses.blaze.ip();
+                let Ok(world_socket) = UdpSocket::bind((listen, 0)).await else {
                     warn!(connection = n, "cannot bind a world endpoint");
                     continue;
                 };
                 let Ok(world_address) = world_socket.local_addr() else { continue };
-                let Ok(auxiliary) = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await else { continue };
+                let Ok(auxiliary) = TcpListener::bind((listen, 0)).await else { continue };
                 let Ok(auxiliary_address) = auxiliary.local_addr() else { continue };
                 let token_seed: [u8; crate::auxiliary::SEED_BYTES] = fresh(&mut OsSeeds)?;
                 let endpoints = Endpoints {
@@ -1276,4 +1287,95 @@ async fn redirector(
         .chunk("redirector", n, Direction::Out, &response, None)
         .await;
     info!(connection = n, %peer, accepted, written, "redirector request");
+}
+
+#[cfg(test)]
+mod listen_tests {
+    use super::*;
+
+    /// An IPv4 address of this computer other than loopback, if it has one:
+    /// the source a UDP socket would use toward a documentation address
+    /// (connecting a UDP socket sends nothing). None on Windows, where listening
+    /// there asks the person at the computer about the firewall; Linux CI
+    /// covers it.
+    pub(crate) fn network_address() -> Option<Ipv4Addr> {
+        if cfg!(windows) {
+            return None;
+        }
+        let socket = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+        socket.connect((Ipv4Addr::new(192, 0, 2, 1), 9)).ok()?;
+        match socket.local_addr().ok()?.ip() {
+            IpAddr::V4(ip) if !ip.is_loopback() && !ip.is_unspecified() => Some(ip),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_loopback_listener_serves_only_this_computer() {
+        let me = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let lan = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 5));
+        assert!(serves(me, me));
+        assert!(!serves(me, lan));
+        assert!(serves(lan, lan));
+        assert!(serves(lan, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 9))));
+        assert!(serves(lan, me));
+    }
+
+    #[tokio::test]
+    async fn every_listener_binds_and_advertises_the_chosen_address() {
+        let chosen: Vec<Ipv4Addr> = [Some(Ipv4Addr::LOCALHOST), network_address()]
+            .into_iter()
+            .flatten()
+            .collect();
+        for listen in chosen {
+            let listeners = Listeners::bind(listen, 0).await.unwrap();
+            let a = listeners.addresses().unwrap();
+            for address in [a.redirector, a.blaze, a.qos, a.qos_udp] {
+                assert_eq!(address.ip(), IpAddr::V4(listen), "{address}");
+            }
+            let lsx = crate::lsx::bind(listen, 0).await.unwrap();
+            assert_eq!(lsx.local_addr().unwrap().ip(), IpAddr::V4(listen));
+        }
+    }
+
+    #[tokio::test]
+    async fn qos_serves_one_concrete_shared_address() {
+        let (_stop, shutdown) = tokio::sync::watch::channel(false);
+        let identity = Arc::new(nfs_server_support::qos_tls::Identity::new().unwrap());
+        let start = |tcp: Ipv4Addr, udp: Ipv4Addr| {
+            let tcp = std::net::TcpListener::bind((tcp, 0)).unwrap();
+            let udp = std::net::UdpSocket::bind((udp, 0)).unwrap();
+            qos::serve(
+                tcp,
+                udp,
+                identity.clone(),
+                Duration::from_secs(1),
+                shutdown.clone(),
+            )
+        };
+        // An unspecified address cannot be advertised.
+        assert!(
+            start(Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED)
+                .await
+                .is_err()
+        );
+        if let Some(lan) = network_address() {
+            // Both on the chosen address: serves until shut down.
+            let (stop, shutdown) = tokio::sync::watch::channel(false);
+            let tcp = std::net::TcpListener::bind((lan, 0)).unwrap();
+            let udp = std::net::UdpSocket::bind((lan, 0)).unwrap();
+            let task = tokio::spawn(qos::serve(
+                tcp,
+                udp,
+                identity.clone(),
+                Duration::from_secs(1),
+                shutdown,
+            ));
+            stop.send(true).unwrap();
+            let served = tokio::time::timeout(Duration::from_secs(3), task).await;
+            assert!(matches!(served, Ok(Ok(Ok(())))), "{served:?}");
+            // Different addresses for TCP and UDP are refused.
+            assert!(start(Ipv4Addr::LOCALHOST, lan).await.is_err());
+        }
+    }
 }

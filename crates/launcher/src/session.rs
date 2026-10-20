@@ -409,6 +409,8 @@ mod tests {
             events: false,
             api: false,
             game_support,
+            listen: None,
+            api_port: None,
             settings: Default::default(),
         };
         let _ = std::fs::remove_file(run.join("request.json"));

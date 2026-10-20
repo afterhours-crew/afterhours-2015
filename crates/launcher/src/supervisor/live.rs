@@ -355,6 +355,10 @@ impl LiveSession {
         if self.request.record_protocol {
             args.push("--record-protocol".into());
         }
+        if let Some(listen) = self.request.listen {
+            args.push("--listen".into());
+            args.push(listen.to_string());
+        }
         if self.events.observed() {
             // Live positions for `map-feed` events, after the readiness line.
             args.push("--map-feed".into());
@@ -384,9 +388,11 @@ impl LiveSession {
         let redirector: std::net::SocketAddr = ready["redirector"]
             .as_str()
             .and_then(|s| s.parse().ok())
-            .ok_or_else(|| Failure::session("Server redirector is not loopback."))?;
-        if redirector.ip() != std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST) {
-            return Err(Failure::session("Server redirector is not loopback."));
+            .ok_or_else(|| Failure::session("Server redirector is invalid."))?;
+        if redirector.ip() != std::net::IpAddr::V4(self.request.listen_address()) {
+            return Err(Failure::session(
+                "Server redirector is not on the session's address.",
+            ));
         }
         Ok(ServerReady {
             redirector_port: redirector.port(),

@@ -149,6 +149,27 @@ pub struct ServeArgs {
     /// does. With this flag none of that applies, as on other platforms.
     #[arg(long)]
     pub server_only: bool,
+
+    /// Listen on this IPv4 address of this computer instead of 127.0.0.1,
+    /// so a launcher on another PC on your network reaches this server.
+    ///
+    /// The server and, with --api, its API bind this one address and give
+    /// it to the game. Needs --server-only.
+    #[arg(long, value_name = "ADDRESS", requires = "server_only", value_parser = parse_listen)]
+    pub listen: Option<std::net::Ipv4Addr>,
+
+    /// Serve the session API on this port instead of one the system picks,
+    /// so a launcher finds it again after the server restarts. Needs --api.
+    #[arg(long, value_name = "PORT", requires = "api", value_parser = clap::value_parser!(u16).range(1..))]
+    pub api_port: Option<u16>,
+}
+
+/// A `--listen` address: one IPv4 address that can be given to the game.
+fn parse_listen(value: &str) -> std::result::Result<std::net::Ipv4Addr, String> {
+    match value.parse::<std::net::Ipv4Addr>() {
+        Ok(ip) if !ip.is_unspecified() && !ip.is_multicast() && !ip.is_broadcast() => Ok(ip),
+        _ => Err("expected one IPv4 address of this computer, such as 192.168.1.20".into()),
+    }
 }
 
 /// Arguments for `sessions`.
@@ -471,6 +492,34 @@ mod tests {
         ])
         .unwrap();
         assert!(matches!(serve.command, Command::Serve(args) if args.server_only));
+        let serve = |extra: &[&str]| {
+            let mut words = vec!["nfs-afterhours", "serve", "--game-dir", "G"];
+            words.extend_from_slice(extra);
+            Cli::try_parse_from(words)
+        };
+        let network = serve(&[
+            "--server-only",
+            "--api",
+            "--listen",
+            "192.168.1.20",
+            "--api-port",
+            "61000",
+        ])
+        .unwrap();
+        assert!(matches!(
+            network.command,
+            Command::Serve(args) if args.listen == Some([192, 168, 1, 20].into()) && args.api_port == Some(61000)
+        ));
+        for bad in [
+            &["--listen", "192.168.1.20"][..],
+            &["--server-only", "--listen", "0.0.0.0"],
+            &["--server-only", "--listen", "localhost"],
+            &["--server-only", "--listen", "::1"],
+            &["--api-port", "61000"],
+            &["--api", "--api-port", "0"],
+        ] {
+            assert!(serve(bad).is_err(), "{bad:?}");
+        }
         assert!(
             Cli::try_parse_from([
                 "nfs-afterhours",

@@ -169,6 +169,13 @@ pub struct Request {
     /// `serve` it lets a play request start the game later.
     #[serde(default)]
     pub game_support: bool,
+    /// The one IPv4 address the server and its API listen on and advertise
+    /// (`serve --listen`); `null` is `127.0.0.1`. Only without game support.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen: Option<std::net::Ipv4Addr>,
+    /// The API's port (`serve --api-port`); `null` lets the system pick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_port: Option<u16>,
     /// Traffic and rival amounts for this session; older requests use the
     /// original ones.
     #[serde(default)]
@@ -179,6 +186,10 @@ impl Request {
     /// Whether the server is started for the game, as `start` does.
     pub fn serves_game(&self) -> bool {
         self.action == Action::Start || self.game_support
+    }
+    /// The address the server and its API listen on.
+    pub fn listen_address(&self) -> std::net::Ipv4Addr {
+        self.listen.unwrap_or(std::net::Ipv4Addr::LOCALHOST)
     }
     /// Server children select the bundled role explicitly, including setup
     /// tools and the SDK-named compatibility copy.
@@ -193,6 +204,11 @@ impl Request {
             || !is_id(&self.id)
             || !crate::digest::is_sha256_hex(&self.server_sha256)
             || (self.action == Action::Start && self.game_directory.is_none())
+            || self
+                .listen
+                .is_some_and(|ip| ip.is_unspecified() || ip.is_multicast() || ip.is_broadcast())
+            || (self.listen.is_some() && self.serves_game())
+            || (self.api_port.is_some() && !self.api)
         {
             return Err(Failure::refused("Invalid launch request."));
         }
@@ -385,6 +401,8 @@ mod tests {
             events: false,
             api: false,
             game_support: false,
+            listen: None,
+            api_port: None,
             settings: Default::default(),
         };
         request.validate().unwrap();
@@ -403,6 +421,29 @@ mod tests {
         request.settings.rival_limit = Some(16);
         assert!(request.validate().is_err());
         request.settings.rival_limit = None;
+        // A chosen address only without game support; a fixed API port only
+        // with the API. Older requests listen on loopback.
+        request.listen = Some(std::net::Ipv4Addr::new(192, 168, 1, 20));
+        request.validate().unwrap();
+        assert_eq!(request.listen_address().to_string(), "192.168.1.20");
+        let saved = serde_json::to_value(&request).unwrap();
+        assert_eq!(saved["listen"], "192.168.1.20");
+        assert!(saved.get("api_port").is_none(), "absent until chosen");
+        request.game_support = true;
+        assert!(request.validate().is_err());
+        request.game_support = false;
+        for bad in [[0, 0, 0, 0], [255, 255, 255, 255], [224, 0, 0, 1]] {
+            request.listen = Some(bad.into());
+            assert!(request.validate().is_err(), "{bad:?}");
+        }
+        request.listen = None;
+        assert_eq!(request.listen_address(), std::net::Ipv4Addr::LOCALHOST);
+        request.api_port = Some(61000);
+        assert!(request.validate().is_err(), "a port without the API");
+        request.api = true;
+        request.validate().unwrap();
+        request.api = false;
+        request.api_port = None;
         let plain = vec![
             "prepare-local".to_owned(),
             "--root".to_owned(),
