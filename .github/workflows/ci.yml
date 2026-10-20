@@ -5,7 +5,11 @@ on:
     branches:
       - main
       - "codex/**"
+  # On a release pull request (opened with GITHUB_TOKEN) this run waits for a
+  # person's approval; see docs/RELEASING.md.
   pull_request:
+  # By hand, on any branch. A dispatched run's checks do not count for a pull
+  # request, so it cannot stand in for the pull_request run.
   workflow_dispatch:
 
 permissions:
