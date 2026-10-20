@@ -169,7 +169,9 @@ record becomes a warning on its session; the listing continues.
 
 A session is one run of `setup`, `serve` or `start`. The front-end command
 runs preflight, creates `artifacts/launcher/<session-id>/` in the data
-directory, writes `request.json` there and starts a second copy of itself
+directory, writes `request.json` there, removes sessions beyond the newest 20
+with their `artifacts/runs/<id>/` recordings (`retention`; the new and the
+current session are always kept) and starts a second copy of itself
 with the hidden `supervise` subcommand. The supervisor holds the
 data-directory lock, on Windows creates its own job object with kill-on-close, and
 runs the session state machine:

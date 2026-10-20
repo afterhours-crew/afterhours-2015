@@ -18,7 +18,7 @@ use crate::{
     exit::{Exit, Failure, Result},
     paths, platform, preflight,
     records::{self, Action, Request, Status},
-    session, settings,
+    retention, session, settings,
     supervisor::{self, live::LiveSession},
 };
 use std::path::{Path, PathBuf};
@@ -149,7 +149,7 @@ fn start_session(
     std::fs::create_dir_all(&data)?;
     let id = new_session_id();
     let run = paths::session_dir(&data, &id);
-    let (request_path, run, settings) = {
+    let (request_path, run, settings, pruned) = {
         // Hold the lock only while creating the session directory; the
         // supervisor takes it for the session itself.
         let _lock = session::Lock::acquire(&data)?;
@@ -175,11 +175,26 @@ fn start_session(
         };
         let request_path = run.join("request.json");
         records::write_new_json(&request_path, &request)?;
-        (request_path, run, settings)
+        // Under the same lock, so no other launch reads or adds a session.
+        let pruned = retention::prune(&data, retention::KEPT_SESSIONS, &id);
+        (request_path, run, settings, pruned)
     };
     if !context.json {
         crate::terminal::detail("Saves and cache", data.display());
         crate::terminal::detail("Session logs", run.display());
+        if !pruned.removed.is_empty() {
+            crate::terminal::detail(
+                "Older sessions removed",
+                format!(
+                    "{} (the newest {} are kept)",
+                    pruned.removed.len(),
+                    retention::KEPT_SESSIONS
+                ),
+            );
+        }
+        for warning in &pruned.warnings {
+            crate::terminal::note(warning);
+        }
         crate::terminal::detail(
             "Traffic and rivals",
             format!(

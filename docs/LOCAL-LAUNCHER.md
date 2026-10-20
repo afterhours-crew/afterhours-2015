@@ -374,7 +374,13 @@ therefore always in the log. The JSON results of preparation steps are kept
 from their start instead; one that would exceed 4 MiB fails the step. The
 server recording has a 64 MiB, 100,000-event and 256-stream budget. It stops
 recording at the limit and continues serving.
-These bounds are per run; old sessions are retained for deliberate user cleanup.
+These bounds are per run. When a session starts, only the newest 20 sessions
+are kept (as many as `sessions` lists by default): older ones lose their
+`artifacts/launcher/<session-id>/` folder and their `artifacts/runs/<session-id>/`
+recording. The new session and the one `current-session.json` names are always
+kept, links are never followed, and saves, the account and settings are never
+touched. A folder that cannot be removed is reported and tried again at the next
+launch. Copy a session folder elsewhere to keep it longer.
 
 Unimplemented operations produce `WARN unsupported operation received` in the
 terminal and `server.stderr.log`, including safe route identifiers and repeat
