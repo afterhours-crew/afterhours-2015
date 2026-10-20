@@ -250,8 +250,11 @@ function Get-MarkedReleaseNotes {
 }
 
 # Pull requests merged into the first-parent history after $Since up to
-# $Head, oldest first. Merge and squash subjects name their pull request;
-# anything else (a rebase merge) is looked up, and direct commits are skipped.
+# $Head, oldest first. A merge subject names its pull request. A squash
+# subject's "(#N)" counts when N is a merged pull request; otherwise N is the
+# issue a commit refers to (a stacked pull request's base branch, a rebase
+# merge) and the commit is looked up like any other. Commits of no merged
+# pull request (direct, or still unmerged) are skipped.
 function Get-MergedPullRequest {
     param(
         [Parameter(Mandatory)][string]$Repository,
@@ -260,24 +263,39 @@ function Get-MergedPullRequest {
     )
     $log = @(git log --first-parent --reverse '--format=%H%x09%s' "$Since..$Head")
     if ($LASTEXITCODE -ne 0) { throw "Cannot list the commits after $Since." }
-    $numbers = [Collections.Generic.List[int]]::new()
+    $seen = [Collections.Generic.HashSet[int]]::new()
     foreach ($entry in $log) {
         if (!$entry) { continue }
         $sha, $subject = $entry -split "`t", 2
         $number = Get-PullRequestNumber $subject
-        if ($null -eq $number) {
+        $pull = $null
+        if ($subject -match '^Merge pull request #') {
+            if ($seen.Contains($number)) { continue }
+            $text = gh api "repos/$Repository/pulls/$number"
+            if ($LASTEXITCODE -ne 0) { throw "Cannot read pull request #$number." }
+            $pull = ($text -join "`n") | ConvertFrom-Json
+        } elseif ($null -ne $number) {
+            if ($seen.Contains($number)) { continue }
+            # Not found is an answer here: the number may name an issue.
+            $text = gh api "repos/$Repository/pulls/$number" 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                $pull = ($text -join "`n") | ConvertFrom-Json
+                if (!$pull.merged_at) { $pull = $null }
+            }
+        }
+        if ($null -eq $pull) {
             $text = gh api "repos/$Repository/commits/$sha/pulls"
             if ($LASTEXITCODE -ne 0) { throw "Cannot look up the pull request of $sha." }
             $merged = @(($text -join "`n") | ConvertFrom-Json) | Where-Object { $_.merged_at } | Select-Object -First 1
             if ($null -eq $merged) { continue }
             $number = [int]$merged.number
+            if ($seen.Contains($number)) { continue }
+            $text = gh api "repos/$Repository/pulls/$number"
+            if ($LASTEXITCODE -ne 0) { throw "Cannot read pull request #$number." }
+            $pull = ($text -join "`n") | ConvertFrom-Json
         }
-        if (!$numbers.Contains($number)) { $numbers.Add($number) }
-    }
-    foreach ($number in $numbers) {
-        $text = gh api "repos/$Repository/pulls/$number"
-        if ($LASTEXITCODE -ne 0) { throw "Cannot read pull request #$number." }
-        ConvertTo-ReleasePullRequest (($text -join "`n") | ConvertFrom-Json)
+        [void]$seen.Add($number)
+        ConvertTo-ReleasePullRequest $pull
     }
 }
 
