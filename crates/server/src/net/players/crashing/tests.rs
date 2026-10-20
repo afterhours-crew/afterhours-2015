@@ -236,6 +236,15 @@ fn crash_start_and_completion_are_atomic_under_queue_pressure_and_repeat() {
     let initial_count = listener.players.objects().len();
     for cycle in 0..3 {
         let mut transport = transport_with_snapshot(&listener.players);
+        assert_eq!(
+            transport.queue_rpc(HostRpc::SequenceStop(nfs_world::sequences::Stop {
+                sequence: listener.logic_ghosts[&owner.participant][&100],
+                serial: Serial::new(1).unwrap(),
+            })),
+            Err(nfs_world::session::Error::Replication(
+                replication::Error::UnknownObject
+            ))
+        );
         let before = listener.players.objects().snapshot();
         let crashes = listener.crashes.as_mut().unwrap();
         crashes
@@ -281,13 +290,21 @@ fn crash_start_and_completion_are_atomic_under_queue_pressure_and_repeat() {
             })
             .unwrap();
         assert!(!listener.logic_ghosts[&owner.participant].contains_key(&100));
-        if cycle == 1 {
+        if cycle > 0 {
             listener
                 .advance_crashes(u64::from(cycle) * 5000 + 4501)
                 .unwrap();
             assert!(listener.pending_rpcs.iter().any(|rpc| matches!(
                 rpc, HostRpc::SequenceStop(stop) if stop.sequence == ghost
             )));
+            if cycle == 2 {
+                // A slow cinematic must be allowed to receive its timer Stop
+                // through the production host's sequence type validation.
+                let stop = listener.pending_rpcs.pop_front().unwrap();
+                transport
+                    .queue_replication_after(returning::empty_section(), vec![stop])
+                    .unwrap();
+            }
         }
         let wire = completion_frame(owner, ghost, cycle as u8);
         listener
@@ -331,6 +348,15 @@ fn crash_start_and_completion_are_atomic_under_queue_pressure_and_repeat() {
         for (section, calls) in entries {
             transport.queue_replication_after(section, calls).unwrap();
         }
+        assert_eq!(
+            transport.queue_rpc(HostRpc::SequenceStop(nfs_world::sequences::Stop {
+                sequence: ghost,
+                serial: Serial::new(1).unwrap(),
+            })),
+            Err(nfs_world::session::Error::Replication(
+                replication::Error::UnknownObject
+            ))
+        );
         let complete = listener.players.objects().snapshot();
         listener.pending_entries.clear();
         listener.pending.clear();

@@ -144,6 +144,7 @@ impl Bindings {
                 ]
                 .into_iter()
                 .any(|layout| profile == &layout.profile())
+                    || profile == &crate::crash::profile()
             })
         })
     }
