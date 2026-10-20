@@ -59,7 +59,9 @@ push to a `codex/` branch and every pull request. Tests run on Linux for every
 push and additionally on Windows for pull requests and main, alongside the
 Windows Rust launcher and process-wrapper tests. Hosted runners are elevated,
 so live non-admin session cleanup still needs a local check. A red run must be
-fixed before a pull request is reviewed.
+fixed before a pull request is reviewed. Its **Release scripts** job tests the
+release automation offline and previews the next release notes
+([docs/RELEASING.md](docs/RELEASING.md)).
 
 Review third-party licenses before adding code or dependencies. Current storage
 uses pinned `rusqlite` with bundled SQLite and limits; transitive versions and
