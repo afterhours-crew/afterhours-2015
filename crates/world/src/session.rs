@@ -301,6 +301,9 @@ pub struct Host {
     replication_bindings: Bindings,
     replication_bits: usize,
     replication_sent: usize,
+    /// A notification separates samples accepted before and after it. Once a
+    /// new tail is queued, reports on that side may batch while the RPC waits.
+    motion_tail_open: bool,
     max_replication_frame_bits: usize,
     rpc_queue: std::collections::VecDeque<crate::participants::HostRpc>,
     files: [Option<files::Outgoing>; 2],
@@ -338,6 +341,7 @@ impl Host {
             replication_bindings: Bindings::default(),
             replication_bits: 0,
             replication_sent: 0,
+            motion_tail_open: false,
             rpc_queue: std::collections::VecDeque::new(),
             files: [None, None],
             movement: std::collections::BTreeSet::new(),
@@ -386,7 +390,7 @@ impl Host {
             return Err(Error::Application(application::Error::Bound));
         }
         if before.is_empty()
-            && self.rpc_queue.is_empty()
+            && self.motion_tail_open
             && let Some((tail, old_bits, calls)) = self.replication_queue.back()
             && calls.is_empty()
             && let Some(combined) = motion::combine(tail, &section)
@@ -419,6 +423,7 @@ impl Host {
             .map_err(Error::Replication)?;
         self.replication_bits += bits;
         self.replication_queue.push_back((section, bits, before));
+        self.motion_tail_open = true;
         Ok(())
     }
 
@@ -442,6 +447,7 @@ impl Host {
         }
         self.validate_rpc(reply)?;
         self.rpc_queue.push_back(reply);
+        self.motion_tail_open = false;
         Ok(())
     }
 
