@@ -254,8 +254,9 @@ fn every_request_needs_the_token_its_host_and_no_origin_or_body() {
     assert_eq!(plain(&auth).0, 403, "no Host header");
     let origin = format!("Host: {address}\r\n{auth}Origin: http://evil.example\r\n");
     assert_eq!(plain(&origin).0, 403);
-    let body = format!("Host: {address}\r\n{auth}Content-Length: 2\r\n");
-    assert_eq!(plain(&body).0, 413);
+    let body =
+        format!("POST /v1/stop HTTP/1.1\r\nHost: {address}\r\n{auth}Content-Length: 2\r\n\r\n{{}}");
+    assert_eq!(exchange(&server, body.as_bytes()).0, 413);
     let chunked = format!("Host: {address}\r\n{auth}Transfer-Encoding: chunked\r\n");
     assert_eq!(plain(&chunked).0, 413);
     assert_eq!(
@@ -474,7 +475,7 @@ fn request_bodies_are_bounded_and_need_their_length() {
     }
     // Only PUT /v1/settings has a body.
     let text = format!(
-        "GET /v1/settings HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {TOKEN}\r\nContent-Length: 2\r\n\r\n",
+        "GET /v1/settings HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {TOKEN}\r\nContent-Length: 2\r\n\r\n{{}}",
         host(&server)
     );
     let (code, _, answer) = exchange(&server, text.as_bytes());
@@ -521,6 +522,47 @@ fn request_bodies_are_bounded_and_need_their_length() {
         *fake.saves.lock().unwrap(),
         [(Some(250), Some(Rivals::Count(3)))]
     );
+}
+
+#[test]
+fn a_refused_request_with_a_small_body_still_gets_its_answer() {
+    // Refused before its body is needed, the body is still read: a
+    // connection closed over unread bytes is reset, losing the answer.
+    let hub = Hub::new();
+    let (server, fake) = server(&hub);
+    let address = host(&server);
+    let body = r#"{"traffic_percent":100}"#;
+    let put = |headers: String| {
+        format!(
+            "PUT /v1/settings HTTP/1.1\r\nHost: {address}\r\n{headers}Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    };
+    let auth = format!("Authorization: Bearer {TOKEN}\r\n");
+    let cases = [
+        (put(String::new()), 401, "token"),
+        (
+            put(format!("{auth}Origin: http://evil.example\r\n")),
+            403,
+            "web pages",
+        ),
+        (
+            format!(
+                "POST /v1/play HTTP/1.1\r\nHost: {address}\r\n{auth}Content-Length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+            413,
+            "Only PUT /v1/settings",
+        ),
+    ];
+    for _ in 0..10 {
+        for (request, code, why) in &cases {
+            let (status, _, answer) = exchange(&server, request.as_bytes());
+            assert_eq!(status, *code);
+            assert!(error_message(&answer).contains(why), "{answer}");
+        }
+    }
+    assert!(fake.saves.lock().unwrap().is_empty());
 }
 
 /// Open the event stream; the reader positioned after the response head.

@@ -398,6 +398,15 @@ fn body_length(head: &http::Head) -> std::result::Result<usize, (u16, &'static s
     }
 }
 
+/// Before refusing a request, read the body its head announced when it is
+/// no larger than [`MAX_BODY`], so the peer gets the refusal: a connection
+/// closed with bytes unread is reset, and the answer can be lost with it.
+fn discard_body(stream: &mut TcpStream, head: &http::Head) {
+    if let Ok(Some(length @ 1..=MAX_BODY)) = http::content_length(head) {
+        let _ = http::read_body(stream, length);
+    }
+}
+
 /// `PUT /v1/settings`: read and check the body, then save. The body is
 /// read before any refusal, so the peer gets the answer rather than a
 /// connection reset over unread bytes.
@@ -452,12 +461,14 @@ fn serve(mut stream: TcpStream, shared: &Shared) {
         } else {
             &[]
         };
+        discard_body(&mut stream, &head);
         let _ = refuse(&mut stream, status, extra, message);
         return;
     }
     let length = match body_length(&head) {
         Ok(length) => length,
         Err((status, message)) => {
+            discard_body(&mut stream, &head);
             let _ = refuse(&mut stream, status, &[], message);
             return;
         }
