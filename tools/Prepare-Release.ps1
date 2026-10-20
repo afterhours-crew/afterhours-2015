@@ -61,9 +61,8 @@ if ($hasPrevious) {
     $hasPrevious = $LASTEXITCODE -eq 0
 }
 if (!$hasPrevious) {
-    $previous = (git describe --tags --abbrev=0 --match 'v[0-9]*' $Head | Select-Object -First 1)
-    if ($LASTEXITCODE -ne 0 -or !$previous) { throw 'No earlier version tag to start the notes from.' }
-    $previous = $previous.Trim()
+    $previous = Get-NearestVersionTag $Head
+    if (!$previous) { throw 'No earlier version tag to start the notes from.' }
 }
 
 $pulls = @(Get-MergedPullRequest -Repository $Repository -Since $previous -Head $Head)

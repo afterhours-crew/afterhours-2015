@@ -401,4 +401,27 @@ try {
     Remove-Item -Path Function:\git, Function:\gh
     Remove-Variable -Name ReleaseTestState -Scope Global -ErrorAction SilentlyContinue
 }
+
+# The nearest-tag lookup with the real git, right after a failed git command,
+# as in Prepare-Release when the current version has no tag (a release pull
+# request's preview). The replaced git above cannot show this.
+$repo = Join-Path ([IO.Path]::GetTempPath()) "afterhours-release-git-$([Guid]::NewGuid().ToString('N'))"
+New-Item -ItemType Directory -Path $repo | Out-Null
+Push-Location -LiteralPath $repo
+try {
+    $identity = @('-c', 'user.name=Release test', '-c', 'user.email=release-test@example.invalid')
+    git init -q
+    git @identity commit -q --allow-empty -m one
+    git @identity tag -a v0.4.0 -m v0.4.0
+    git @identity commit -q --allow-empty -m two
+    git rev-parse --quiet --verify 'refs/tags/v0.4.1^{commit}' | Out-Null
+    Assert-True ($LASTEXITCODE -ne 0) 'the current version has no tag'
+    Assert-Equal (Get-NearestVersionTag 'HEAD') 'v0.4.0' 'nearest tag after a failed git command'
+    git tag -d v0.4.0 | Out-Null
+    Assert-Equal (Get-NearestVersionTag 'HEAD') '' 'no version tag'
+    Write-Output 'Passed: the nearest version tag is found with the real git after a failed git command'
+} finally {
+    Pop-Location
+    Remove-Item -LiteralPath $repo -Recurse -Force
+}
 $global:LASTEXITCODE = 0
