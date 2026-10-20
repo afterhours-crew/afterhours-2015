@@ -149,6 +149,15 @@ pub struct SessionsArgs {
     pub id: Option<String>,
 }
 
+/// Arguments for `car-images`.
+#[derive(Debug, Clone, Args)]
+pub struct CarImagesArgs {
+    /// Installed game to read the images from, read-only. Defaults to the
+    /// one the current session started, then the registered one.
+    #[arg(long, value_name = "DIR")]
+    pub game_dir: Option<PathBuf>,
+}
+
 /// Arguments for `profile`.
 #[derive(Debug, Clone, Args)]
 pub struct ProfileArgs {
@@ -254,6 +263,15 @@ pub enum Command {
     /// distances, times and speeds are not confirmed. Exits with code 4
     /// when there is no saved account to show.
     Profile(ProfileArgs),
+
+    /// Decode each car's in-game images from the installation for `profile`.
+    ///
+    /// Reads the installed game read-only and writes PNG files and an index
+    /// to artifacts/content/car-images/<content fingerprint>/ in the data
+    /// directory; `profile` then reports them per car. A complete set is
+    /// reused, never rewritten. Needs the content a session prepared; exits
+    /// with code 4 before the first setup.
+    CarImages(CarImagesArgs),
 
     /// List the session folders and summarize their logs; change nothing.
     ///

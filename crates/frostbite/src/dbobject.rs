@@ -74,6 +74,12 @@ impl Value {
             _ => None,
         }
     }
+    pub fn as_blob(&self) -> Option<&[u8]> {
+        match self {
+            Self::Blob(value) => Some(value),
+            _ => None,
+        }
+    }
     pub fn as_guid(&self) -> Option<[u8; 16]> {
         match self {
             Self::Guid(value) => Some(*value),

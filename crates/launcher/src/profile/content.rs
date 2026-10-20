@@ -162,6 +162,8 @@ pub struct Content {
     /// Localized car names read from the installation; see [`super::localize`].
     pub car_names: Option<super::names::CarNames>,
     pub localization: Option<super::names::Localization>,
+    /// The decoded car images for this content, when `car-images` has run.
+    pub car_images: Option<super::images::Cached>,
     pub warnings: Vec<String>,
 }
 

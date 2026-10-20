@@ -45,6 +45,19 @@ pub struct SourceRange {
     pub size: usize,
 }
 
+/// One resource entry of a bundle manifest. Its bytes are read like an EBX
+/// entry's through [`Store::bytes`] on `entry`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResLocation {
+    pub superbundle: String,
+    pub bundle: String,
+    pub entry: EbxEntry,
+    /// The resource ID an EBX `ResourceRef` field holds.
+    pub rid: u64,
+    pub res_type: u32,
+    pub meta: Vec<u8>,
+}
+
 /// A chunk a non-cas superbundle stores inline in its own `.sb`, such as a
 /// localized text database under `Win32/loc/`.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -270,6 +283,102 @@ impl Installation {
             }
         }
         Ok(out)
+    }
+
+    /// Resource entries one cas superbundle lists, in bundle order, keeping
+    /// the first listing of each resource ID.
+    pub fn superbundle_res(&self, superbundle: &str) -> Result<Vec<ResLocation>, Error> {
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        let mut entries = 0usize;
+        for (bundle, manifest) in self.bundles(superbundle)? {
+            let Some(list) = manifest.get("res").and_then(Value::as_list) else {
+                continue;
+            };
+            for res in list {
+                entries += 1;
+                if entries > self.limits.max_entries {
+                    return Err(Error::Bound("resource entries"));
+                }
+                let entry = ebx_entry(res)?;
+                // Stored as a signed 64-bit value; the ID is its bit pattern.
+                let rid = res
+                    .get("resRid")
+                    .and_then(Value::as_i64)
+                    .ok_or(Error::Malformed("resource id"))? as u64;
+                let res_type = res
+                    .get("resType")
+                    .and_then(Value::as_i64)
+                    .and_then(|v| {
+                        u32::try_from(v)
+                            .ok()
+                            .or_else(|| i32::try_from(v).ok().map(|v| v as u32))
+                    })
+                    .ok_or(Error::Malformed("resource type"))?;
+                let meta = res
+                    .get("resMeta")
+                    .and_then(Value::as_blob)
+                    .map(<[u8]>::to_vec)
+                    .unwrap_or_default();
+                if seen.insert(rid) {
+                    out.push(ResLocation {
+                        superbundle: superbundle.to_owned(),
+                        bundle: bundle.clone(),
+                        entry,
+                        rid,
+                        res_type,
+                        meta,
+                    });
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// The cas record SHA-1 of each wanted chunk, from the `chunks` lists of
+    /// every superbundle's `.toc`, the patch layer's listing first. Bundle
+    /// manifests are not read, and inline chunks have no cas record.
+    pub fn chunk_records(
+        &self,
+        wanted: &BTreeSet<[u8; 16]>,
+    ) -> Result<std::collections::BTreeMap<[u8; 16], [u8; 20]>, Error> {
+        let mut found = std::collections::BTreeMap::new();
+        for superbundle in &self.superbundles {
+            if found.len() == wanted.len() {
+                break;
+            }
+            if superbundle.contains("..") {
+                return Err(Error::Malformed("superbundle path"));
+            }
+            for data in [self.root.join("Update/Patch/Data"), self.root.join("Data")] {
+                let toc = data.join(format!("{superbundle}.toc"));
+                if !toc.exists() {
+                    continue;
+                }
+                let value = dbobject::load(
+                    &read_bounded(&toc, self.limits.max_container_bytes)?,
+                    &self.limits,
+                )?;
+                let Some(list) = value.get("chunks").and_then(Value::as_list) else {
+                    continue;
+                };
+                if list.len() > self.limits.max_elements {
+                    return Err(Error::Bound("chunks per superbundle"));
+                }
+                for entry in list {
+                    let id = entry
+                        .get("id")
+                        .and_then(Value::as_guid)
+                        .ok_or(Error::Malformed("chunk id"))?;
+                    if let Some(sha1) = entry.get("sha1").and_then(Value::as_sha1)
+                        && wanted.contains(&id)
+                    {
+                        found.entry(id).or_insert(sha1);
+                    }
+                }
+            }
+        }
+        Ok(found)
     }
 
     /// Chunks a superbundle's `.toc` lists with an offset and size in its
@@ -500,6 +609,13 @@ impl Store {
             return Err(Error::Malformed("asset size differs from manifest"));
         }
         Ok(data)
+    }
+
+    /// Decompressed bytes of the cas record with this SHA-1, such as a chunk
+    /// a `.toc` lists.
+    pub fn record_bytes(&mut self, sha1: &[u8; 20]) -> Result<Vec<u8>, Error> {
+        let raw = self.raw(sha1)?;
+        cas::read_blocks(&raw, &self.limits)
     }
 
     /// Decode every object of an entry.
