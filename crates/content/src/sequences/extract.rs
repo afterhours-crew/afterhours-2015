@@ -74,7 +74,9 @@ fn profile(nodes: &[Node], rules: &Rules, layout: usize) -> Result<(), Error> {
             roles.push(role.as_str());
         }
     }
-    let expected: &[&str] = if layout == 2 {
+    let expected: &[&str] = if layout == 3 {
+        &["root", "provider"]
+    } else if layout == 2 {
         &["root", "provider", "event", "event", "channel", "channel"]
     } else if layout == 1 {
         &["root", "provider", "event", "event", "channel"]
@@ -171,6 +173,7 @@ pub(crate) fn build(index: &mut AssetIndex) -> Result<Vec<u8>, Error> {
         (&rules.waiting, &rules.waiting_scene),
         (&rules.exit, &rules.exit_scene),
         (&rules.entry, &rules.exit_scene),
+        (&rules.crash, &rules.manager_scene),
     ] {
         let asset = index.reference(scene, name)?;
         definitions.push(json!({"asset":{"bundle":bundle(scene)?,"type_id":asset.class_id,"local_index":asset.local_index},"catalog":index.catalog(scene)?}));
@@ -200,17 +203,13 @@ pub(crate) fn build(index: &mut AssetIndex) -> Result<Vec<u8>, Error> {
         (&rules.waiting, &rules.waiting_scene),
         (&rules.exit, &rules.exit_scene),
         (&rules.entry, &rules.exit_scene),
+        (&rules.crash, &rules.manager_scene),
     ]
     .into_iter()
     .enumerate()
     {
         let nodes = graph.read(Site::root(name))?;
         profile(&nodes, &rules, i)?;
-        let channels = binding(&mut graph, &scenes, &rules, &nodes, scene, name)?;
-        let (reference, target) = channels
-            .first()
-            .cloned()
-            .ok_or_else(|| bad("sequence channel missing"))?;
         let doc = &mut definitions[i];
         doc["blueprint"] = json!(
             nodes[0]
@@ -222,6 +221,19 @@ pub(crate) fn build(index: &mut AssetIndex) -> Result<Vec<u8>, Error> {
         );
         doc["manager"] = manager_component.clone();
         doc["embedded_bus"] = json!(bus);
+        if i == 3 {
+            let root = unique(&nodes, "ParticipantStateSequenceEntityData")?;
+            if !graph.links(root, rules.root_channels)?.is_empty() {
+                return Err(bad("unexpected crash sequence channel"));
+            }
+            doc["duration_ms"] = json!(entry_duration(&nodes, &rules)?);
+            continue;
+        }
+        let channels = binding(&mut graph, &scenes, &rules, &nodes, scene, name)?;
+        let (reference, target) = channels
+            .first()
+            .cloned()
+            .ok_or_else(|| bad("sequence channel missing"))?;
         doc["channel"] = component(&mut graph, &mut scenes, &target)?;
         if i == 2 {
             doc["presentation"] = component(&mut graph, &mut scenes, &channels[1].1)?;
@@ -259,6 +271,7 @@ pub(crate) fn build(index: &mut AssetIndex) -> Result<Vec<u8>, Error> {
     result["build_sha256"] = json!(nfs_services::SUPPORTED_BUILD_SHA256);
     result["arrive"] = definitions.remove(0);
     result["returning"] = definitions.remove(0);
+    result["crash"] = definitions.remove(0);
     SequenceContent::from_json(&result)
         .map_err(|_| bad("generated sequence content failed validation"))?;
     let bytes = serde_json::to_vec(&result).map_err(|_| bad("sequence encoding"))?;

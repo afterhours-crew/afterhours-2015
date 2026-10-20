@@ -198,6 +198,7 @@ pub(super) fn build(index: &mut AssetIndex, thresholds: &Json) -> Result<Json> {
         (22, "levels/genesis01/participantstatemachine", ALIVE),
         (23, GAMEPLAY, "gameplay/scoring/eventresultrep"),
         (24, GAMEPLAY, DRIVER),
+        (25, GAMEPLAY, "gameplay/lockvehicleinputparticipantlogic"),
     ];
     let mut doc = json!({"format":"nfs-garage-logic","version":1,"build_sha256":nfs_services::SUPPORTED_BUILD_SHA256,
         "reputation_thresholds":thresholds});
@@ -215,6 +216,8 @@ pub(super) fn build(index: &mut AssetIndex, thresholds: &Json) -> Result<Json> {
         "return_requested",
         "returning",
         "returned",
+        "crashed",
+        "recovered",
     ] {
         doc[phase] = batch();
     }
@@ -242,6 +245,8 @@ pub(super) fn build(index: &mut AssetIndex, thresholds: &Json) -> Result<Json> {
         ("entry", vec![17]),
         ("exit", vec![18, 19, 20, 21]),
         ("arrived", vec![22, 23, 24]),
+        ("crashed", vec![25]),
+        ("recovered", vec![21, 22, 23, 24]),
         ("returning", vec![20]),
         ("returned", vec![13, 14, 15, 16]),
     ] {
@@ -255,6 +260,8 @@ pub(super) fn build(index: &mut AssetIndex, thresholds: &Json) -> Result<Json> {
         ("arrive", vec![18, 19]),
         ("arrived", vec![20]),
         ("returning", vec![23, 22, 21, 24]),
+        ("crashed", vec![23, 22, 21, 24]),
+        ("recovered", vec![25]),
         ("returned", vec![20]),
     ] {
         doc[phase]["delete_capture_ids"] = json!(ids);
@@ -315,6 +322,7 @@ pub(super) fn build(index: &mut AssetIndex, thresholds: &Json) -> Result<Json> {
     for (phase, id, name) in [
         ("spawn", 3, SESSION),
         ("world_settled", 21, FREE),
+        ("recovered", 21, FREE),
         ("free_roam", 24, DRIVER),
     ] {
         let mut events = index

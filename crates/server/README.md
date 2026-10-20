@@ -289,6 +289,19 @@ batches. Event targets resolve to current per-participant objects; queue pressur
 retains the entire phase for retry. Public `prepare-local` derives these event
 phases from installed bindings. See the launcher guide for live validation scope.
 
+Crash recovery uses the owned car's client-reported crash flag. A brief pulse
+is retained independently of movement echo throttling. Once replication capacity
+is available, the server replaces driving presentation with the installed input
+lock and crash sequence. The client's sequence-completion message restores the
+driving objects and re-arms world activation. The installed server timer supplies
+a fallback Stop; completion can arrive before that timer. Duplicate completion,
+stale movement and a held crash flag cannot start another recovery.
+The optional `crash` sequence definition has two serializers and no linked
+cinematic channel. Garage logic supplies paired `crashed`/`recovered` batches,
+which must restore the same live roles. `prepare-local` builds these from the
+installation. The sequence preserves the current vehicle transform; it does not
+choose a road relocation point. Live acceptance is tracked in issue #156.
+
 Garage return requires the installed entry sequence and all three garage logic
 phases: `return_requested`, `returning`, and `returned`. The entry definition
 includes both cinematic channels, its spline and a validated server timer.

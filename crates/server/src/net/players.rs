@@ -18,6 +18,7 @@ use nfs_world::{
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 mod activation;
+mod crashing;
 mod customization;
 mod diagnostics;
 mod equipment;
@@ -139,6 +140,7 @@ pub(super) struct PlayerListener {
     /// Arrive sequences after garage exit (optional sequence content).
     arrivals: Option<nfs_world::arrival::Arrivals>,
     returns: Option<nfs_world::arrival::Arrivals>,
+    crashes: Option<nfs_world::crash::Crashes>,
     inventory: Option<Inventory>,
     equipment: equipment::State,
     garage_commands: VecDeque<GarageRequest>,
@@ -680,6 +682,7 @@ impl PlayerListener {
             session_backlog: 0,
             arrivals: None,
             returns: None,
+            crashes: None,
             glass: crate::glass::Glass::default(),
             customization: crate::customization_timer::Timers::default(),
             world_ms: 0,
@@ -760,6 +763,10 @@ impl PlayerListener {
     }
     pub(super) fn with_returns(mut self, returns: Option<nfs_world::arrival::Arrivals>) -> Self {
         self.returns = returns;
+        self
+    }
+    pub(super) fn with_crashes(mut self, crashes: Option<nfs_world::crash::Crashes>) -> Self {
+        self.crashes = crashes;
         self
     }
     pub(super) fn with_sequences(
@@ -1019,6 +1026,7 @@ impl Listener for PlayerListener {
         let mut nitrous_reported = BTreeSet::new();
         let mut trigger_volumes = self.trigger_volumes.clone();
         let mut world_activation = self.world_activation.clone();
+        let mut crashes = self.crashes.clone();
         if let Some(movement) = &parsed.movement {
             let cars = world_cars.keys().copied().collect();
             match vehicle_reports.receive(
@@ -1058,6 +1066,18 @@ impl Listener for PlayerListener {
                 Err(error) => {
                     return self.refuse(error);
                 }
+            }
+            if let Some(crashes) = &mut crashes
+                && let Err(error) = Self::observe_crashes(
+                    crashes,
+                    &players,
+                    &participants,
+                    &world_cars,
+                    self.persona,
+                    movement,
+                )
+            {
+                return self.refuse(error);
             }
             if self.traffic_population.is_some() || self.rival_population.is_some() {
                 let delegated = self.delegated_ai(&players);
@@ -1418,6 +1438,25 @@ impl Listener for PlayerListener {
                     }
                 }
             }
+            if let Some(crashes) = &mut crashes {
+                match Self::finish_crash_call(
+                    body,
+                    crashes,
+                    &mut players,
+                    &mut participants,
+                    self.logic.as_deref(),
+                    &mut logic_ghosts,
+                    self.persona,
+                ) {
+                    Ok(Some(Some(entry))) => {
+                        exit_entries.push(entry);
+                        continue;
+                    }
+                    Ok(Some(None)) => continue,
+                    Ok(None) => {}
+                    Err(error) => return self.refuse_rpc(error, body),
+                }
+            }
             if let Some(arrivals) = &mut arrivals {
                 match Self::arrival_call(arrivals, &players, &mut participants, self.persona, body)
                 {
@@ -1524,6 +1563,12 @@ impl Listener for PlayerListener {
                         let Some((participant, _)) = world_cars.remove(&removed) else {
                             return self.refuse_rpc(replication::Error::UnknownObject, body);
                         };
+                        if let Some(crashes) = &mut crashes {
+                            crashes.discard_pending(participant);
+                            if let Err(error) = crashes.retire(participant) {
+                                return self.refuse_rpc(error, body);
+                            }
+                        }
                         completed_returns.push((participant, removed));
                         exit_entries.push(entry);
                         continue;
@@ -2124,7 +2169,14 @@ impl Listener for PlayerListener {
             return self.refuse(replication::Error::Bound);
         }
         for participant in participants.in_free_roam() {
-            if !matches!(
+            if self.participants.stage(participant)
+                == Some(nfs_world::participants::Stage::Crashing)
+            {
+                tracing::info!(
+                    participant,
+                    "crash recovery completed; driving context restored"
+                );
+            } else if !matches!(
                 self.participants.stage(participant),
                 Some(
                     nfs_world::participants::Stage::FreeRoam
@@ -2173,6 +2225,13 @@ impl Listener for PlayerListener {
         self.pending_settled.extend(scheduled_settled);
         self.arrivals = arrivals;
         self.returns = returns;
+        self.crashes = crashes;
+        if let Some(crashes) = &self.crashes {
+            self.pending_rpcs.retain(|rpc| !matches!(
+                rpc,
+                nfs_world::participants::HostRpc::SequenceStop(stop) if crashes.completed(stop.sequence)
+            ));
+        }
         for (participant, removed) in completed_returns {
             self.pending_spawns
                 .retain(|(_, n)| n.participant != participant);
