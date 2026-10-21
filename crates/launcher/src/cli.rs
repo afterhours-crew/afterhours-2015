@@ -133,6 +133,11 @@ pub struct SessionArgs {
     /// and `final` event lines (every event with --events).
     #[arg(long)]
     pub api: bool,
+    /// Serve the session API on this port instead of one the system picks,
+    /// so a launcher finds it again after the server restarts or knows it in
+    /// advance. Needs --api.
+    #[arg(long, value_name = "PORT", requires = "api", value_parser = clap::value_parser!(u16).range(1..))]
+    pub api_port: Option<u16>,
 }
 
 /// Arguments for `serve`.
@@ -157,11 +162,6 @@ pub struct ServeArgs {
     /// it to the game. Needs --server-only.
     #[arg(long, value_name = "ADDRESS", requires = "server_only", value_parser = parse_listen)]
     pub listen: Option<std::net::Ipv4Addr>,
-
-    /// Serve the session API on this port instead of one the system picks,
-    /// so a launcher finds it again after the server restarts. Needs --api.
-    #[arg(long, value_name = "PORT", requires = "api", value_parser = clap::value_parser!(u16).range(1..))]
-    pub api_port: Option<u16>,
 }
 
 /// A `--listen` address: one IPv4 address that can be given to the game.
@@ -596,7 +596,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             network.command,
-            Command::Serve(args) if args.listen == Some([192, 168, 1, 20].into()) && args.api_port == Some(61000)
+            Command::Serve(args) if args.listen == Some([192, 168, 1, 20].into()) && args.session.api_port == Some(61000)
         ));
         for bad in [
             &["--listen", "192.168.1.20"][..],

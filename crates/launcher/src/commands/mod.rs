@@ -104,7 +104,10 @@ fn dispatch(cli: Cli, bundled_server: Option<PathBuf>, build: Build) -> Result<(
             &context,
             crate::records::Action::Setup,
             &args,
-            launch::Hosting::default(),
+            launch::Hosting {
+                api_port: args.api_port,
+                ..launch::Hosting::default()
+            },
         ),
         Command::Serve(args) => launch::launch(
             &context,
@@ -113,7 +116,7 @@ fn dispatch(cli: Cli, bundled_server: Option<PathBuf>, build: Build) -> Result<(
             launch::Hosting {
                 server_only: args.server_only,
                 listen: args.listen,
-                api_port: args.api_port,
+                api_port: args.session.api_port,
                 remote: None,
             },
         ),
@@ -129,6 +132,7 @@ fn dispatch(cli: Cli, bundled_server: Option<PathBuf>, build: Build) -> Result<(
                 &args.session,
                 launch::Hosting {
                     remote,
+                    api_port: args.session.api_port,
                     ..launch::Hosting::default()
                 },
             )
