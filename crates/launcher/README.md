@@ -293,9 +293,10 @@ server's. The game is then started, routed by the lease to that loopback
 redirector and supervised exactly as for a local server; the server's own
 answers give it the rest of its addresses. The game's backend host is a
 10-byte field (`127.0.0.1` fits, a typical network address does not), which
-is why the game is never given the server's address. Not established yet:
-no game has been played this way; the lease and the game accepting a Blaze
-address that is not loopback are checked in a live run first. `--api-port <port>` keeps the API on a fixed port, so a launcher on
+is why the game is never given the server's address. Live checks on
+2026-10-21 played this way against a server on this PC's loopback and then
+on its network address; the lease routed the game to the relay, and the
+game accepted a Blaze address that is not loopback. `--api-port <port>` keeps the API on a fixed port, so a launcher on
 another PC finds `http://<address>:<port>` with the same token after every
 restart. The API then answers `Host: <address>:<port>` only. Listening on the
 network is an explicit opt-in; without `--listen` nothing changes. It needs
