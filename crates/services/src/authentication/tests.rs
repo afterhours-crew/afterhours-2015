@@ -235,16 +235,50 @@ fn bounded_policy_and_entropy() {
     assert_eq!(c.validate(), Err(Error::Config));
     assert!(Identity::new(identity(1).storage_account(), 0, 2, "a".into()).is_err());
     assert!(Identity::new(identity(1).storage_account(), 1, 2, "\n".into()).is_err());
-    assert!(
-        Profile::new(
+    for address in [
+        "0.0.0.0:80",
+        "255.255.255.255:80",
+        "224.0.0.1:80",
+        "[::1]:80",
+        "192.0.2.1:0",
+    ] {
+        assert!(
+            Profile::new(
+                config(),
+                identity(1),
+                Tokens::from_seed(&[1; SEED_BYTES]).unwrap(),
+                address.parse().unwrap()
+            )
+            .is_err(),
+            "{address}"
+        );
+    }
+    assert!(Config::from_json(&serde_json::json!({"version":1})).is_err());
+}
+
+#[test]
+fn postauth_gives_telemetry_and_ticker_the_auxiliary_listen_address() {
+    for (address, host) in [
+        ("127.0.0.1:32100", &b"127.0.0.1"[..]),
+        ("192.168.1.32:32100", b"192.168.1.32"),
+    ] {
+        let profile = Profile::new(
             config(),
             identity(1),
             Tokens::from_seed(&[1; SEED_BYTES]).unwrap(),
-            "192.0.2.1:80".parse().unwrap()
+            address.parse().unwrap(),
         )
-        .is_err()
-    );
-    assert!(Config::from_json(&serde_json::json!({"version":1})).is_err());
+        .unwrap();
+        let post = profile.postauth_reply(&postauth()).unwrap();
+        let post = PostAuthResponse::decode(decoded(&post).body, body_limits()).unwrap();
+        let telemetry = post.telemetry_server.unwrap();
+        let ticker = post.ticker_server.unwrap();
+        assert_eq!(
+            (telemetry.address, telemetry.port),
+            (Some(host), Some(32100))
+        );
+        assert_eq!((ticker.address, ticker.port), (Some(host), Some(32100)));
+    }
 }
 
 #[test]

@@ -139,6 +139,46 @@ fn owned_configuration_binds_every_endpoint_and_keeps_bandwidth_unset() {
 }
 
 #[test]
+fn every_endpoint_names_the_listen_address_of_its_own_listener() {
+    let p = Profile::new(
+        &Config::from_json(&content::constructed()).unwrap(),
+        "192.168.1.32:2345".parse().unwrap(),
+        "192.168.1.32:2346".parse().unwrap(),
+    )
+    .unwrap();
+    let mut session = Session::new(&p);
+    let reply = session.response(&preauth(b"local"), 5).unwrap().unwrap();
+    let response = PreAuthResponse::decode(body(&reply), body_limits()).unwrap();
+    for (key, value) in response.config.unwrap().config.unwrap().0 {
+        let key = std::str::from_utf8(key).unwrap();
+        let expected: &[u8] = match key {
+            "bytevaultHostname" => b"192.168.1.32",
+            "bytevaultPort" | "telemetryPinServerPort" => b"2345",
+            _ if content::URL_KEYS.contains(&key) => b"http://192.168.1.32:2345",
+            _ => continue,
+        };
+        assert_eq!(value, expected, "{key}");
+    }
+    let sites = response.qos_settings.unwrap().ping_site_info_by_alias_map;
+    let sites = sites.unwrap().0;
+    assert_eq!(sites[0].1.address, Some(&b"192.168.1.32"[..]));
+    assert_eq!(sites[0].1.port, Some(2346));
+    session.committed().unwrap();
+    session.response(&wire(2, &[], 46), 6).unwrap().unwrap();
+    session.committed().unwrap();
+    let response = session.response(&identity(), 7).unwrap().unwrap();
+    let values = FetchConfigResponse::decode(body(&response), body_limits())
+        .unwrap()
+        .config
+        .unwrap()
+        .0;
+    assert!(values.contains(&(
+        &b"redirect_uri"[..],
+        &b"http://192.168.1.32:2345/identity/callback"[..]
+    )));
+}
+
+#[test]
 fn write_commit_order_retry_time_and_failure_are_per_connection() {
     let a = profile(3000);
     let b = profile(4000);
@@ -231,20 +271,25 @@ fn configuration_bounds_duplicate_keys_remote_endpoints_and_unknown_fields_fail(
         assert!(Config::from_json(&v).is_err());
     }
     let config = Config::from_json(&valid).unwrap();
+    for (auxiliary, qos) in [
+        ("0.0.0.0:80", "127.0.0.1:80"),
+        ("127.0.0.1:80", "255.255.255.255:80"),
+        ("224.0.0.1:80", "127.0.0.1:80"),
+        ("[::1]:80", "127.0.0.1:80"),
+        ("127.0.0.1:80", "127.0.0.1:0"),
+        ("192.0.2.1:0", "192.0.2.1:80"),
+    ] {
+        assert!(
+            Profile::new(&config, auxiliary.parse().unwrap(), qos.parse().unwrap()).is_err(),
+            "{auxiliary} {qos}"
+        );
+    }
     assert!(
         Profile::new(
             &config,
             ([192, 0, 2, 1], 80).into(),
-            ([127, 0, 0, 1], 80).into()
+            ([192, 0, 2, 1], 81).into()
         )
-        .is_err()
-    );
-    assert!(
-        Profile::new(
-            &config,
-            ([127, 0, 0, 1], 80).into(),
-            ([127, 0, 0, 1], 0).into()
-        )
-        .is_err()
+        .is_ok()
     );
 }

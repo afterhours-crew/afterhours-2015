@@ -652,6 +652,20 @@ impl Listeners {
         })
     }
 }
+
+/// The QoS identity and the redirector reply for the bound listeners: the
+/// certificate names the address the game reaches QoS at, and the reply
+/// directs the game to Blaze.
+fn advertise(addresses: &Addresses) -> Result<(qos_tls::Identity, Vec<u8>), Failure> {
+    let IpAddr::V4(qos) = addresses.qos.ip() else {
+        return Err(Failure::Io);
+    };
+    let identity = qos_tls::Identity::for_address(qos).map_err(|_| Failure::Reply)?;
+    let reply = discovery::local_response_with_ca(addresses.blaze, Some(identity.ca_pem()))
+        .map_err(crate::support_failure)?;
+    Ok((identity, reply))
+}
+
 pub async fn serve(
     listeners: Listeners,
     pack: Arc<Deployment>,
@@ -663,11 +677,8 @@ pub async fn serve(
         content.validate_runtime()?;
     }
     let addresses = listeners.addresses()?;
-    let identity = Arc::new(qos_tls::Identity::new().map_err(|_| Failure::Reply)?);
-    let redirector_reply = Arc::new(
-        discovery::local_response_with_ca(addresses.blaze, Some(identity.ca_pem()))
-            .map_err(crate::support_failure)?,
-    );
+    let (identity, redirector_reply) = advertise(&addresses)?;
+    let (identity, redirector_reply) = (Arc::new(identity), Arc::new(redirector_reply));
     let connections = Arc::new(AtomicU32::new(0));
     let mut tasks = JoinSet::new();
 
@@ -1308,6 +1319,36 @@ mod listen_tests {
             IpAddr::V4(ip) if !ip.is_loopback() && !ip.is_unspecified() => Some(ip),
             _ => None,
         }
+    }
+
+    #[test]
+    fn startup_advertises_the_listen_address() {
+        // Regression: on a network address the server stopped right after
+        // its ready line, when this reply and identity required 127.0.0.1.
+        for listen in [Ipv4Addr::LOCALHOST, Ipv4Addr::new(192, 168, 1, 32)] {
+            let at = |port| SocketAddr::from((listen, port));
+            let addresses = Addresses {
+                redirector: at(42127),
+                blaze: at(50001),
+                qos: at(50002),
+                qos_udp: at(50003),
+            };
+            let (_, reply) = advertise(&addresses).unwrap();
+            let reply = String::from_utf8(reply).unwrap();
+            let blaze = format!(
+                "<hostname>{listen}</hostname><ip>{}</ip><port>50001</port>",
+                u32::from(listen)
+            );
+            assert!(reply.contains(&blaze), "{reply}");
+        }
+        let at = |port| SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
+        let unspecified = Addresses {
+            redirector: at(42127),
+            blaze: at(50001),
+            qos: at(50002),
+            qos_udp: at(50003),
+        };
+        assert!(advertise(&unspecified).is_err());
     }
 
     #[test]

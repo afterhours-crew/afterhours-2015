@@ -2,7 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! Explicit loopback-local identity and fresh connection credentials.
+//! Explicit local identity and fresh connection credentials.
 //! External auth codes are shape-checked, never verified, stored or returned.
 //! The edge must authorize the chosen local account before constructing a profile.
 mod config;
@@ -24,7 +24,7 @@ use nfs_protocol::{
         UserOptions,
     },
 };
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -137,9 +137,12 @@ pub struct Profile {
     config: Config,
     identity: Identity,
     tokens: Tokens,
+    host: String,
     port: u16,
 }
 impl Profile {
+    /// `address` is the auxiliary listener postAuth gives telemetry and the
+    /// ticker: loopback, or the address the server serves a network on.
     pub fn new(
         config: Config,
         identity: Identity,
@@ -147,13 +150,12 @@ impl Profile {
         address: SocketAddr,
     ) -> Result<Self, Error> {
         config.validate()?;
-        if address.ip() != Ipv4Addr::LOCALHOST || address.port() == 0 {
-            return Err(Error::Config);
-        }
+        let address = crate::advertised(address).ok_or(Error::Config)?;
         Ok(Self {
             config,
             identity,
             tokens,
+            host: address.ip().to_string(),
             port: address.port(),
         })
     }
@@ -333,7 +335,7 @@ impl Profile {
         }
         let body = PostAuthResponse {
             telemetry_server: Some(GetTelemetryServerResponse {
-                address: Some(b"127.0.0.1"),
+                address: Some(self.host.as_bytes()),
                 is_anonymous: Some(false),
                 disable: Some(b""),
                 enable_disconnect_telemetry: Some(false),
@@ -351,7 +353,7 @@ impl Profile {
                 ..Default::default()
             }),
             ticker_server: Some(GetTickerServerResponse {
-                address: Some(b"127.0.0.1"),
+                address: Some(self.host.as_bytes()),
                 port: Some(u32::from(self.port)),
                 key: Some(&self.tokens.ticker_key[..self.config.ticker_key_length]),
                 ..Default::default()

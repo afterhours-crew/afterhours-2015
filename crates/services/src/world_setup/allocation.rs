@@ -3,7 +3,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 use super::{Allocation, Current, Error};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 
 pub const SEED_BYTES: usize = 40;
 
@@ -30,8 +30,7 @@ impl Generated {
         if seed.len() != SEED_BYTES
             || seed.iter().all(|b| *b == 0)
             || clock <= 0
-            || endpoint.ip() != IpAddr::V4(Ipv4Addr::LOCALHOST)
-            || endpoint.port() == 0
+            || crate::advertised(endpoint).is_none()
         {
             return Err(Error::Context);
         }
@@ -120,8 +119,22 @@ mod tests {
         for time in [0, -1] {
             assert!(Generated::from_seed(&[1; SEED_BYTES], time, endpoint).is_err());
         }
-        for endpoint in ["127.0.0.1:0", "192.0.2.1:9000", "[::1]:9000"] {
+        for endpoint in [
+            "127.0.0.1:0",
+            "192.0.2.1:0",
+            "0.0.0.0:9000",
+            "255.255.255.255:9000",
+            "224.0.0.1:9000",
+            "[::1]:9000",
+        ] {
             assert!(Generated::from_seed(&[1; SEED_BYTES], 1, endpoint.parse().unwrap()).is_err());
+        }
+        // The world endpoint is on the server's listen address: loopback, or
+        // the network address it serves.
+        for endpoint in ["127.0.0.1:9000", "192.168.1.32:9000"] {
+            let endpoint = endpoint.parse().unwrap();
+            let g = Generated::from_seed(&[1; SEED_BYTES], 1, endpoint).unwrap();
+            assert_eq!(g.allocation().endpoint, endpoint);
         }
         let mut seed = [1; SEED_BYTES];
         seed[20..24].fill(0);
