@@ -91,8 +91,11 @@ pub enum Behavior {
         configuration: road::Configuration,
         limit_bound: bool,
     },
-    /// Participant-proximity count from the other cars (E916).
-    Proximity,
+    /// Participant-proximity count over one participant set, keyed by the
+    /// set's channel link (E916, E1130).
+    Proximity {
+        set: u32,
+    },
     /// Vehicle figures from the owned inputs (E916).
     Stats,
     /// Nitrous query from the owned inputs (E916).

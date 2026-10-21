@@ -368,7 +368,7 @@ pub fn compile(sources: &Sources) -> Result<Program, Error> {
     }
     let mut proximities = BTreeMap::new();
     for n in &sources.proximities {
-        proximities.insert(index.lookup(&n.identity)?, n.radius);
+        proximities.insert(index.lookup(&n.identity)?, (n.radius, n.set));
     }
     let eligible: BTreeMap<&Identity, bool> = sources
         .creation
@@ -424,11 +424,11 @@ pub fn compile(sources: &Sources) -> Result<Program, Error> {
                 }
                 "RaceVehicleNearMissQueryEntityData" => Behavior::NearMiss,
                 "VehicleProximitySetFilterEntityData" => {
-                    let radius = proximities
+                    let (radius, set) = *proximities
                         .get(&id)
                         .ok_or_else(|| bad("proximity radius missing"))?;
-                    defaults[i].push((world::proximity::RADIUS, Value::Float(*radius)));
-                    Behavior::Proximity
+                    defaults[i].push((world::proximity::RADIUS, Value::Float(radius)));
+                    Behavior::Proximity { set }
                 }
                 "RaceVehicleDonutQueryEntityData" => Behavior::Donut(
                     *donuts
