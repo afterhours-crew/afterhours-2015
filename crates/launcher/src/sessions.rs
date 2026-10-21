@@ -913,5 +913,6 @@ fn field_value(raw: &str) -> Option<String> {
     })
 }
 
+pub mod file;
 #[cfg(test)]
 mod tests;

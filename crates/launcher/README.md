@@ -65,6 +65,7 @@ field and a JSON Schema (draft 7) generated from the Rust type that prints it:
 | `event` | each line of `setup`/`serve`/`start --events`, including the live map positions (`map-feed`); also each event of the session API's `/v1/events` |
 | `api` | `api --json` and `api.json` in a session started with `--api`: the session ID, the API's address and its token |
 | `api-error` | the body of every refused session API request |
+| `session-file` | the session API's `/v1/sessions/<id>/files/<name>`: the start of one session file |
 | `game-endpoints` | the session API's `/v1/game`: where a game reaches the server |
 | `profile`, `profile-list` | `profile --json` (also the session API's `/v1/profile`), `profile --list --json` |
 | `car-images` | `car-images --json`: the image set, counts per size, formats and unresolved images |
@@ -210,6 +211,13 @@ session's last status, and answers:
 | `GET /v1/settings` | the `settings` record: the saved traffic and rivals, as `settings --json` |
 | `PUT /v1/settings` | the `settings` record after saving new amounts, as `settings --json` with `--traffic` and `--rivals` |
 | `GET /v1/profile` | the `profile` record of the selected save, as `profile --json` |
+| `GET /v1/profiles` | the `profile-list` record: every save, as `profile --list --json` |
+| `GET /v1/sessions` | the `sessions` record of the newest 20 sessions, as `sessions --json` |
+| `GET /v1/sessions/<id>` | the `sessions` record of that session, as `sessions --id <id> --json` |
+| `GET /v1/sessions/<id>/files/<name>` | the `session-file` record: the start of one record or log the session wrote (4 MiB at most) |
+| `POST /v1/car-images` | the `car-images` record: decode the car pictures, or reuse a complete set, as `car-images --json` |
+| `POST /v1/map-images` | the `map-images` record: decode the world map, or reuse it, as `map-images --json` |
+| `GET /v1/content/<file>` | one decoded picture (`car-images/<fingerprint>/<name>.png`, each car image's `file`) or map tile (`map-images/<fingerprint>/<level>-<column>-<row>.png`), as `image/png` |
 | `GET /v1/game` | the `game-endpoints` record: the server's redirector and launcher-services addresses from its readiness record, for a game routed through a relay (409 until the server is ready) |
 
 Answers are the records the matching commands print, with the same schemas
@@ -268,7 +276,11 @@ a session existed, and nothing in the session depends on that pipe. With
 `--events` as well, every event also goes to standard output. The server is
 asked for map frames whenever either is on.
 
-**The token** is kept in `api-token` in the data directory, readable only by
+A front end that starts its own server can choose the token instead:
+set `AFTERHOURS_API_TOKEN` to 64 lowercase hexadecimal characters for
+`setup`, `serve` or `start`, and it knows the token without reading this
+computer's files, exactly as for a server elsewhere. Otherwise, **the
+token** is kept in `api-token` in the data directory, readable only by
 the user where the system allows: the first session with `--api` creates it
 and later sessions use it, so a launcher that paired with this server finds
 it again after a restart. Delete the file to choose a new token at the next

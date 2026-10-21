@@ -20,6 +20,13 @@
 //! | `PUT /v1/settings` | the `settings` record after saving a [`SettingsChange`] |
 //! | `GET /v1/profile` | the `profile` record of the selected save |
 //! | `GET /v1/game` | the `game-endpoints` record: where a game reaches the server |
+//! | `GET /v1/profiles` | the `profile-list` record: every save |
+//! | `GET /v1/sessions` | the `sessions` record: the newest sessions |
+//! | `GET /v1/sessions/<id>` | the `sessions` record of that session |
+//! | `GET /v1/sessions/<id>/files/<name>` | the `session-file` record: one log or record |
+//! | `POST /v1/car-images` | the `car-images` record: decode the car pictures, or reuse them |
+//! | `POST /v1/map-images` | the `map-images` record: decode the world map, or reuse it |
+//! | `GET /v1/content/<file>` | one decoded picture or map tile, `image/png` |
 //!
 //! Answers are the records the matching commands print with `--json`, with
 //! the same schemas; a refused request answers an `api-error` record. The
@@ -241,6 +248,65 @@ pub trait Control: Send + Sync + 'static {
     fn profile(&self) -> Result<Profile>;
     /// Where a game reaches the server, once it is ready.
     fn game(&self) -> Result<GameEndpoints>;
+    /// `profile --list --json`.
+    fn profiles(&self) -> Result<crate::profile::Listing>;
+    /// `sessions --json`, or with `--id`.
+    fn sessions(&self, id: Option<&str>) -> Result<crate::sessions::SessionList>;
+    /// One file of one session folder.
+    fn session_file(&self, id: &str, name: &str) -> Result<crate::sessions::file::SessionFileText>;
+    /// `car-images --json`.
+    fn car_images(&self) -> Result<crate::profile::images::CarImagesReport>;
+    /// `map-images --json`.
+    fn map_images(&self) -> Result<crate::map::MapImagesReport>;
+    /// One decoded picture or map tile, by its file below the content
+    /// folder ([`content_file`]).
+    fn content(&self, file: &str) -> Result<Vec<u8>>;
+}
+
+/// Longest picture or tile served.
+pub const MAX_CONTENT_FILE: u64 = 16 * 1024 * 1024;
+
+/// A decoded picture or map tile below `<data>/artifacts/content`:
+/// `car-images/<fingerprint>/<40 hex>.png` or
+/// `map-images/<fingerprint>/<level>-<column>-<row>.png`. Anything else, a
+/// link or a file over [`MAX_CONTENT_FILE`] is refused; a missing one is
+/// exit 4.
+pub fn content_file(data: &Path, file: &str) -> Result<Vec<u8>> {
+    let refused = || Failure::refused(format!("{file} is not a decoded picture or map tile."));
+    let parts: Vec<&str> = file.split('/').collect();
+    let [kind, fingerprint, name] = parts.as_slice() else {
+        return Err(refused());
+    };
+    let digits = |text: &str, most: usize| {
+        !text.is_empty() && text.len() <= most && text.bytes().all(|b| b.is_ascii_digit())
+    };
+    let named = match *kind {
+        crate::profile::images::DIRECTORY => name
+            .strip_suffix(".png")
+            .is_some_and(|stem| crate::records::is_lower_hex(stem, 40)),
+        crate::map::DIRECTORY => name.strip_suffix(".png").is_some_and(|stem| {
+            let parts: Vec<&str> = stem.split('-').collect();
+            matches!(parts.as_slice(), [level, column, row]
+                if digits(level, 2) && digits(column, 4) && digits(row, 4))
+        }),
+        _ => false,
+    };
+    if !named || !crate::records::is_lower_hex(fingerprint, 64) {
+        return Err(refused());
+    }
+    let data = crate::paths::checked_data_path(data, None)?;
+    let path = data
+        .join("artifacts")
+        .join("content")
+        .join(kind)
+        .join(fingerprint)
+        .join(name);
+    let meta = std::fs::symlink_metadata(&path)
+        .map_err(|_| Failure::no_session(format!("No {file} has been decoded.")))?;
+    if !meta.is_file() || meta.len() > MAX_CONTENT_FILE {
+        return Err(refused());
+    }
+    Ok(std::fs::read(&path)?)
 }
 
 /// A new token: 32 bytes from the system's random source, as hex.
@@ -556,7 +622,29 @@ fn serve(mut stream: TcpStream, shared: &Shared) {
         ("PUT", "/v1/settings") => save_settings(&mut stream, &head, length, control.as_ref()),
         ("GET", "/v1/profile") => answer(&mut stream, control.profile()),
         ("GET", "/v1/game") => answer(&mut stream, control.game()),
-        (_, "/v1/info" | "/v1/status" | "/v1/events" | "/v1/profile" | "/v1/game") => refuse(
+        ("GET", "/v1/profiles") => answer(&mut stream, control.profiles()),
+        ("POST", "/v1/car-images") => answer(&mut stream, control.car_images()),
+        ("POST", "/v1/map-images") => answer(&mut stream, control.map_images()),
+        ("GET", path) if path.starts_with("/v1/content/") => {
+            match control.content(&path["/v1/content/".len()..]) {
+                Ok(bytes) => http::write_body(&mut stream, 200, "image/png", &[], &bytes),
+                Err(failure) => refuse(&mut stream, status_of(&failure), &[], &failure.message),
+            }
+        }
+        ("GET", "/v1/sessions") => answer(&mut stream, control.sessions(None)),
+        ("GET", path) if path.starts_with("/v1/sessions/") => {
+            let rest = &path["/v1/sessions/".len()..];
+            match rest.split('/').collect::<Vec<_>>().as_slice() {
+                [id] => answer(&mut stream, control.sessions(Some(id))),
+                [id, "files", name] => answer(&mut stream, control.session_file(id, name)),
+                _ => refuse(&mut stream, 404, &[], "No such API address."),
+            }
+        }
+        (
+            _,
+            "/v1/info" | "/v1/status" | "/v1/events" | "/v1/profile" | "/v1/game" | "/v1/profiles"
+            | "/v1/sessions",
+        ) => refuse(
             &mut stream,
             405,
             &[("Allow", "GET")],
@@ -568,7 +656,7 @@ fn serve(mut stream: TcpStream, shared: &Shared) {
             &[("Allow", "GET, PUT")],
             "This address answers GET and PUT.",
         ),
-        (_, "/v1/stop" | "/v1/play") => refuse(
+        (_, "/v1/stop" | "/v1/play" | "/v1/car-images" | "/v1/map-images") => refuse(
             &mut stream,
             405,
             &[("Allow", "POST")],
@@ -652,6 +740,28 @@ impl Control for LiveControl {
     }
     fn profile(&self) -> Result<Profile> {
         crate::commands::profile::profile_report(&self.data, &crate::cli::ProfileArgs::default())
+    }
+    fn profiles(&self) -> Result<crate::profile::Listing> {
+        crate::commands::profile::profile_list_report(&self.data, None)
+    }
+    fn sessions(&self, id: Option<&str>) -> Result<crate::sessions::SessionList> {
+        crate::commands::sessions::sessions_report(
+            &self.data,
+            crate::sessions::DEFAULT_LIMIT,
+            id.map(str::to_owned),
+        )
+    }
+    fn session_file(&self, id: &str, name: &str) -> Result<crate::sessions::file::SessionFileText> {
+        crate::sessions::file::read(&self.data, id, name)
+    }
+    fn car_images(&self) -> Result<crate::profile::images::CarImagesReport> {
+        crate::commands::profile::car_images_report(&self.data, None)
+    }
+    fn map_images(&self) -> Result<crate::map::MapImagesReport> {
+        crate::commands::map::map_images_report(&self.data, None)
+    }
+    fn content(&self, file: &str) -> Result<Vec<u8>> {
+        content_file(&self.data, file)
     }
     fn game(&self) -> Result<GameEndpoints> {
         let not_ready = || Failure::no_session("The server is not ready yet.");
@@ -775,6 +885,31 @@ impl SessionApi {
     }
 }
 
+/// The environment variable a front end that starts its own server sets to
+/// choose the API token, so it knows the token without reading this
+/// computer's files, as it would for a server elsewhere.
+pub const TOKEN_ENV: &str = "AFTERHOURS_API_TOKEN";
+
+/// Whether `text` is an API token: 64 lowercase hexadecimal characters.
+pub fn is_token(text: &str) -> bool {
+    text.len() == 64
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// This session's API token: [`TOKEN_ENV`] when set, else
+/// [`stored_token`].
+pub fn session_token(data: &Path) -> Result<String> {
+    match std::env::var(TOKEN_ENV) {
+        Ok(token) if is_token(&token) => Ok(token),
+        Ok(_) => Err(Failure::refused(format!(
+            "{TOKEN_ENV} must be 64 lowercase hexadecimal characters."
+        ))),
+        Err(_) => stored_token(data),
+    }
+}
+
 /// The data directory's API token: the one in `api-token`, or a new one
 /// written there. It stays the same across sessions, so a launcher that
 /// paired with this server (on another PC, say) reconnects after a restart;
@@ -784,11 +919,7 @@ pub fn stored_token(data: &Path) -> Result<String> {
     let read = |path: &Path| -> Result<String> {
         let text = std::fs::read_to_string(path)?;
         let token = text.trim_end();
-        let valid = token.len() == 64
-            && token
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
-        if !valid {
+        if !is_token(token) {
             return Err(Failure::refused(format!(
                 "{} is damaged; delete it to choose a new API token.",
                 path.display()

@@ -8,11 +8,11 @@
 //! one JSON object instead, a record described in [`crate::contract`].
 
 mod launch;
-mod map;
+pub(crate) mod map;
 pub(crate) mod profile;
 mod recover;
 mod relay;
-mod sessions;
+pub(crate) mod sessions;
 pub(crate) mod settings;
 pub(crate) mod status;
 mod version;

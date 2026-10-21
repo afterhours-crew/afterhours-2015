@@ -340,7 +340,7 @@ pub fn supervise(request_path: &Path, build: Build) -> Result<()> {
                 request.listen_address(),
                 request.api_port.unwrap_or(0),
             );
-            let started = crate::api::stored_token(&data).and_then(|token| {
+            let started = crate::api::session_token(&data).and_then(|token| {
                 crate::api::SessionApi::start(control, hub, &id, &run, bind, token)
             });
             match started {

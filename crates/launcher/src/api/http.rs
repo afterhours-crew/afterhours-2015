@@ -164,8 +164,19 @@ pub fn write_json(
     extra: &[(&str, &str)],
     body: &[u8],
 ) -> io::Result<()> {
+    write_body(stream, status, "application/json", extra, body)
+}
+
+/// Write a whole response with a body of `content_type`.
+pub fn write_body(
+    stream: &mut impl Write,
+    status: u16,
+    content_type: &str,
+    extra: &[(&str, &str)],
+    body: &[u8],
+) -> io::Result<()> {
     let mut head = format!(
-        "HTTP/1.1 {status} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",
+        "HTTP/1.1 {status} {}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n",
         reason(status),
         body.len()
     );

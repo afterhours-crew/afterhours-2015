@@ -87,6 +87,27 @@ impl Control for Fake {
     fn profile(&self) -> Result<Profile> {
         Err(Failure::no_session("No saved driver is selected."))
     }
+    fn profiles(&self) -> Result<crate::profile::Listing> {
+        Err(Failure::no_session("No saves yet."))
+    }
+    fn sessions(&self, id: Option<&str>) -> Result<crate::sessions::SessionList> {
+        Err(Failure::no_session(format!("sessions {id:?}")))
+    }
+    fn session_file(&self, id: &str, name: &str) -> Result<crate::sessions::file::SessionFileText> {
+        Err(Failure::refused(format!("file {id}/{name}")))
+    }
+    fn car_images(&self) -> Result<crate::profile::images::CarImagesReport> {
+        Err(Failure::no_session("No prepared content."))
+    }
+    fn map_images(&self) -> Result<crate::map::MapImagesReport> {
+        Err(Failure::refused("No game installation found."))
+    }
+    fn content(&self, file: &str) -> Result<Vec<u8>> {
+        match file {
+            "car-images/x/y.png" => Ok(b"PNG fake".to_vec()),
+            _ => Err(Failure::no_session(format!("No {file}"))),
+        }
+    }
     fn game(&self) -> Result<GameEndpoints> {
         GameEndpoints::from_readiness(
             r#"{"ready":true,"redirector":"192.168.1.20:42230","lsx":null}"#,
@@ -353,6 +374,42 @@ fn routes_answer_the_commands_records() {
     assert_eq!(game["redirector"], "192.168.1.20:42230");
     assert!(game["launcher_services"].is_null());
     assert_eq!(request(&server, "POST", "/v1/game").0, 405);
+    // Saves, sessions and session files, with the path parts passed on.
+    let (code, _, body) = request(&server, "GET", "/v1/profiles");
+    assert_eq!(code, 409);
+    assert!(error_message(&body).contains("No saves"));
+    let (code, _, body) = request(&server, "GET", "/v1/sessions");
+    assert_eq!(
+        (code, error_message(&body)),
+        (409, "sessions None".to_owned())
+    );
+    let (code, _, body) = request(&server, "GET", &format!("/v1/sessions/{ID}"));
+    assert_eq!(code, 409);
+    assert!(error_message(&body).contains(ID));
+    let file = format!("/v1/sessions/{ID}/files/server.stderr.log");
+    let (code, _, body) = request(&server, "GET", &file);
+    assert_eq!(code, 409);
+    assert_eq!(error_message(&body), format!("file {ID}/server.stderr.log"));
+    for missing in [
+        format!("/v1/sessions/{ID}/logs"),
+        format!("/v1/sessions/{ID}/files/a/b"),
+        "/v1/sessions/".to_owned() + &"/".repeat(3),
+    ] {
+        assert_eq!(request(&server, "GET", &missing).0, 404, "{missing}");
+    }
+    assert_eq!(request(&server, "POST", "/v1/sessions").0, 405);
+    // Pictures: decoding is a POST, files are served as PNG bytes.
+    assert_eq!(request(&server, "POST", "/v1/car-images").0, 409);
+    assert_eq!(request(&server, "POST", "/v1/map-images").0, 409);
+    let (code, head, body) = request(&server, "GET", "/v1/content/car-images/x/y.png");
+    assert_eq!(body, "PNG fake");
+    assert_eq!(code, 200);
+    assert!(head.contains("Content-Type: image/png"));
+    assert_eq!(
+        request(&server, "GET", "/v1/content/map-images/x/0-0-0.png").0,
+        409
+    );
+    assert_eq!(request(&server, "GET", "/v1/car-images").0, 405);
     let (code, head, _) = request(&server, "PUT", "/v1/profile");
     assert_eq!(code, 405);
     assert!(head.contains("Allow: GET\r\n"));
@@ -1181,11 +1238,67 @@ fn the_live_api_reads_and_saves_settings_and_reads_the_profile_as_the_commands_d
     assert_eq!(profile, serde_json::to_value(&command).unwrap());
     assert_eq!(profile["identity"]["display_name"], "Api Tester");
     assert_eq!(profile["active"], true);
+    // Every save, the sessions and one session file, as the commands read them.
+    let (code, body) = live_request(&record, "GET", "/v1/profiles", None);
+    assert_eq!(code, 200, "{body}");
+    let listing: serde_json::Value = serde_json::from_str(&body).unwrap();
+    crate::contract::testing::validate("profile-list", &listing);
+    assert_eq!(listing["accounts"][0]["display_name"], "Api Tester");
+    let (code, body) = live_request(&record, "GET", "/v1/sessions", None);
+    assert_eq!(code, 200, "{body}");
+    let sessions: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(sessions["sessions"][0]["id"], ID);
+    let file = format!("/v1/sessions/{ID}/files/request.json");
+    let (code, body) = live_request(&record, "GET", &file, None);
+    assert_eq!(code, 200, "{body}");
+    let read: serde_json::Value = serde_json::from_str(&body).unwrap();
+    crate::contract::testing::validate("session-file", &read);
+    assert!(
+        read["text"]
+            .as_str()
+            .unwrap()
+            .contains("\"game_directory\"")
+    );
+    let other = format!("/v1/sessions/{ID}/files/api.json");
+    assert_eq!(live_request(&record, "GET", &other, None).0, 409);
     assert!(
         profile["localization"].is_null(),
         "names come from the session's installation, which is empty"
     );
     api.finish();
     drop(lock);
+    std::fs::remove_dir_all(data).unwrap();
+}
+
+#[test]
+fn only_decoded_pictures_and_map_tiles_are_served() {
+    let data = crate::testing::scratch("api-content");
+    let fingerprint = "a".repeat(64);
+    let car = format!("car-images/{fingerprint}/{}.png", "b".repeat(40));
+    let tile = format!("map-images/{fingerprint}/3-12-7.png");
+    for file in [&car, &tile] {
+        assert_eq!(content_file(&data, file).unwrap_err().exit, Exit::NoSession);
+        let path = data.join("artifacts").join("content").join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"PNG").unwrap();
+        assert_eq!(content_file(&data, file).unwrap(), b"PNG");
+    }
+    for other in [
+        format!("car-images/{fingerprint}/short.png"),
+        format!("car-images/{fingerprint}/{}.jpg", "b".repeat(40)),
+        format!("map-images/{fingerprint}/3-12.png"),
+        format!("map-images/{fingerprint}/../3-12-7.png"),
+        format!("map-images/{}/3-12-7.png", "a".repeat(63)),
+        format!("content/{fingerprint}/3-12-7.png"),
+        "../account.json".to_owned(),
+        format!("car-images/{fingerprint}/x/{}.png", "b".repeat(40)),
+        String::new(),
+    ] {
+        assert_eq!(
+            content_file(&data, &other).unwrap_err().exit,
+            Exit::Refused,
+            "{other}"
+        );
+    }
     std::fs::remove_dir_all(data).unwrap();
 }

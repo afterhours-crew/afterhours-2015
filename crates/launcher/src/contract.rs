@@ -96,6 +96,10 @@ impl Record for api::GameEndpoints {
     const NAME: &'static str = "game-endpoints";
     const VERSION: u32 = api::FORMAT_VERSION;
 }
+impl Record for sessions::file::SessionFileText {
+    const NAME: &'static str = "session-file";
+    const VERSION: u32 = sessions::file::FORMAT_VERSION;
+}
 impl Record for api::ApiError {
     const NAME: &'static str = "api-error";
     const VERSION: u32 = api::FORMAT_VERSION;
@@ -131,7 +135,7 @@ fn info<T: Record>() -> RecordInfo {
 }
 
 /// Every record, sorted by name.
-pub fn records() -> [RecordInfo; 17] {
+pub fn records() -> [RecordInfo; 18] {
     let mut all = [
         info::<api::ApiRecord>(),
         info::<api::ApiError>(),
@@ -145,6 +149,7 @@ pub fn records() -> [RecordInfo; 17] {
         info::<RecoverReport>(),
         info::<Status>(),
         info::<sessions::SessionList>(),
+        info::<sessions::file::SessionFileText>(),
         info::<SettingsReport>(),
         info::<StatusReport>(),
         info::<StopReport>(),

@@ -15,7 +15,17 @@ use std::fmt::Write;
 /// `map-images`: decode the world map's tiles into the data folder, or
 /// report the complete set already there.
 pub fn map_images(context: &Context, args: &MapImagesArgs) -> Result<()> {
-    let data = crate::paths::checked_data_path(&context.data_dir, None)?;
+    let report = map_images_report(&context.data_dir, args.game_dir.as_deref())?;
+    map_images_emit(context, &report)
+}
+
+/// The `map-images` record: decode the tile set, or reuse a complete one;
+/// the session API's `POST /v1/map-images` answers with it.
+pub(crate) fn map_images_report(
+    data: &std::path::Path,
+    game_dir: Option<&std::path::Path>,
+) -> Result<map::MapImagesReport> {
+    let data = crate::paths::checked_data_path(data, None)?;
     let source = profile::content::locate(&data, None)?.ok_or_else(|| {
         Failure::no_session("This data directory has no prepared content; run setup first.")
     })?;
@@ -32,13 +42,16 @@ pub fn map_images(context: &Context, args: &MapImagesArgs) -> Result<()> {
         },
         _ => {
             let (registered, _) = crate::platform::game_registration();
-            let (game, _) = profile::installation(&data, args.game_dir.as_deref(), registered)?
+            let (game, _) = profile::installation(&data, game_dir, registered)?
                 .ok_or_else(|| Failure::refused("No game installation found; pass --game-dir."))?;
             map::prepare(&data, &fingerprint, &game, nfs_frostbite::Limits::default())?
         }
     };
-    let report = map::MapImagesReport::new(&prepared, &fingerprint);
-    context.emit(&report, || {
+    Ok(map::MapImagesReport::new(&prepared, &fingerprint))
+}
+
+fn map_images_emit(context: &Context, report: &map::MapImagesReport) -> Result<()> {
+    context.emit(report, || {
         let mut out = format!(
             "{} {} map tiles in\n  {}",
             if report.built { "Decoded" } else { "Reused" },

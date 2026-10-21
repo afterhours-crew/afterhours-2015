@@ -128,6 +128,10 @@ pub struct Index {
 pub struct CarImage {
     /// Absolute path of the PNG file.
     pub path: PathBuf,
+    /// The file below the server's content folder,
+    /// `car-images/<fingerprint>/<name>.png`, as the session API's
+    /// `GET /v1/content/<file>` serves it to a client on any computer.
+    pub file: String,
     pub width: u32,
     pub height: u32,
     /// The source texture's `RenderFormat` name, such as `BC1_UNORM`.
@@ -156,6 +160,14 @@ impl Cached {
         let image = |size| {
             images.get(&size).map(|image: &IndexImage| CarImage {
                 path: self.directory.join(&image.file),
+                file: format!(
+                    "{DIRECTORY}/{}/{}",
+                    self.directory
+                        .file_name()
+                        .map(|name| name.to_string_lossy())
+                        .unwrap_or_default(),
+                    image.file
+                ),
                 width: image.width,
                 height: image.height,
                 source_format: image.format.clone(),
