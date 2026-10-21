@@ -745,6 +745,19 @@ async fn run(args: Args) -> Result<(), Failure> {
                 // failure leaves scoring on and the event off.
                 let request = nfs_server::event_logic::request::sprint_race_007();
                 let event = index.event(&request).and_then(|event| {
+                    let awards = event
+                        .game_mode_logics
+                        .iter()
+                        .find(|l| l.blueprint == nfs_server::event_logic::request::AWARDS)
+                        .ok_or_else(|| nfs_content::Error::Content("event awards layout".into()))?;
+                    let awards = index.event_awards(&event, awards)?;
+                    if scoring.categories.get(&awards.keeper)
+                        != Some(&nfs_world::scoring::interpreter::Category::Total)
+                    {
+                        return Err(nfs_content::Error::Content(
+                            "event award keeper category".into(),
+                        ));
+                    }
                     // The race's driving-style participant (#138).
                     let driving = event
                         .game_mode_logics
@@ -758,6 +771,7 @@ async fn run(args: Args) -> Result<(), Failure> {
                         event,
                         index.speed_wall_category(&request.game_mode_id)?,
                     )
+                    .and_then(|c| c.with_awards(awards))
                     .map_err(|e| nfs_content::Error::Content(format!("event layout: {e:?}")))?;
                     let content = if content.event().ai.spawns.is_empty() {
                         content

@@ -493,49 +493,103 @@ fn boolean_and_integer_values_publish_without_explicit_notifications() {
 }
 
 #[test]
-fn conditional_float_reads_and_publishes_only_the_selected_branch() {
-    let mut node = Node::new(Definition::ConditionalFloat).unwrap();
-    assert_eq!(
-        node.initial_outputs(|_| None).unwrap(),
-        [Effect::Publish(OUTPUT, Value::Float(0.0))]
-    );
-    for condition in [true, false] {
-        let chosen = if condition {
-            VALUE_IF_TRUE
-        } else {
-            VALUE_IF_FALSE
-        };
-        let other = if condition {
-            VALUE_IF_FALSE
-        } else {
-            VALUE_IF_TRUE
-        };
-        let read = |port| {
-            if port == CONDITION {
-                Some(Value::Boolean(condition))
-            } else if port == chosen {
-                Some(Value::Float(8.25))
+fn conditionals_read_and_publish_only_the_selected_branch() {
+    for (definition, zero, value) in [
+        (
+            Definition::ConditionalFloat,
+            Value::Float(0.0),
+            Value::Float(8.25),
+        ),
+        (
+            Definition::ConditionalInteger,
+            Value::Integer(0),
+            Value::Integer(17),
+        ),
+    ] {
+        let mut node = Node::new(definition).unwrap();
+        assert_eq!(
+            node.initial_outputs(|_| None).unwrap(),
+            [Effect::Publish(OUTPUT, zero)]
+        );
+        for condition in [true, false] {
+            let chosen = if condition {
+                VALUE_IF_TRUE
             } else {
-                panic!("read inactive/unknown branch")
+                VALUE_IF_FALSE
+            };
+            let other = if condition {
+                VALUE_IF_FALSE
+            } else {
+                VALUE_IF_TRUE
+            };
+            let read = |port| {
+                if port == CONDITION {
+                    Some(Value::Boolean(condition))
+                } else if port == chosen {
+                    Some(value)
+                } else {
+                    panic!("read inactive/unknown branch")
+                }
+            };
+            for action in [
+                Action::Activate,
+                Action::PropertyChanged(CONDITION),
+                Action::PropertyChanged(chosen),
+            ] {
+                assert_eq!(
+                    node.apply(action, read).unwrap(),
+                    [Effect::Publish(OUTPUT, value)]
+                );
             }
-        };
-        for action in [
-            Action::Activate,
-            Action::PropertyChanged(CONDITION),
-            Action::PropertyChanged(chosen),
-        ] {
-            assert_eq!(
-                node.apply(action, read).unwrap(),
-                [Effect::Publish(OUTPUT, Value::Float(8.25))]
+            assert!(
+                node.apply(Action::PropertyChanged(other), read)
+                    .unwrap()
+                    .is_empty()
             );
+            assert!(node.apply(Action::Event(IN), |_| None).unwrap().is_empty());
         }
         assert!(
-            node.apply(Action::PropertyChanged(other), read)
-                .unwrap()
-                .is_empty()
+            node.apply(Action::Activate, |p| Some(if p == CONDITION {
+                Value::Boolean(true)
+            } else {
+                Value::Boolean(false)
+            }))
+            .is_err()
         );
-        assert!(node.apply(Action::Event(IN), |_| None).unwrap().is_empty());
     }
+}
+
+#[test]
+fn event_and_gate_waits_for_distinct_inputs_and_requires_explicit_reset() {
+    for count in [1, 2, 15, 16] {
+        let mut n = Node::new(Definition::AllEvents { count }).unwrap();
+        assert!(n.apply(Action::Activate, |_| None).unwrap().is_empty());
+        assert!(
+            n.apply(Action::Event(super::super::integers::port("In", 0)), |_| {
+                None
+            })
+            .unwrap()
+            .is_empty()
+        );
+        for round in 0..2 {
+            for input in (1..=u16::from(count)).rev() {
+                let event = Action::Event(super::super::integers::port("In", input));
+                assert_eq!(
+                    n.apply(event, |_| None).unwrap(),
+                    if input == 1 {
+                        vec![Effect::Emit(OUT)]
+                    } else {
+                        vec![]
+                    },
+                    "round {round}"
+                );
+                assert!(n.apply(event, |_| None).unwrap().is_empty());
+            }
+            assert!(n.apply(Action::Event(RESET), |_| None).unwrap().is_empty());
+        }
+    }
+    assert!(Node::new(Definition::AllEvents { count: 0 }).is_err());
+    assert!(Node::new(Definition::AllEvents { count: 17 }).is_err());
 }
 
 #[test]

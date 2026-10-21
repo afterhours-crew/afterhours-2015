@@ -45,6 +45,16 @@ pub struct Keeper {
 pub enum Behavior {
     Inert,
     Unsupported,
+    /// An owned snapshot of external property values, supplied by the enclosing
+    /// session before construction. Published at binding in native node order.
+    Snapshot(Vec<(u32, Value)>),
+    IntegerSum {
+        count: u16,
+    },
+    RankIntegers {
+        count: u16,
+        on_change: bool,
+    },
     Scalar(nodes::Definition),
     Math {
         program: math::Program,
@@ -188,6 +198,30 @@ impl Program {
                 return Err(Error::Bound);
             }
             match &n.behavior {
+                Behavior::Snapshot(values) => {
+                    let mut fields = std::collections::BTreeSet::new();
+                    if values.len() > MAX_PROPERTIES {
+                        return Err(Error::Bound);
+                    }
+                    for (field, value) in values {
+                        if !fields.insert(field) {
+                            return Err(Error::InvalidGraph);
+                        }
+                        if let Value::Float(v) = value {
+                            super::finite(*v)?;
+                        }
+                    }
+                }
+                Behavior::IntegerSum { count }
+                    if *count == 0 || usize::from(*count) > arithmetic::MAX_OPERATIONS + 1 =>
+                {
+                    return Err(Error::Bound);
+                }
+                Behavior::RankIntegers { count, .. }
+                    if *count == 0 || *count > super::integers::MAX_RANK_INPUTS =>
+                {
+                    return Err(Error::Bound);
+                }
                 Behavior::Score { context, .. } => {
                     if !matches!(node(*context)?.behavior, Behavior::ScoreContext { .. }) {
                         return Err(Error::InvalidGraph);

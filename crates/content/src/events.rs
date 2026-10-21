@@ -25,6 +25,7 @@ use nfs_world::replication::entity::{Kind, Profile, creation::Asset};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub mod ai;
+pub mod awards;
 mod invitations;
 mod pacing;
 pub mod restart;
@@ -180,6 +181,9 @@ pub struct Rewards {
 /// One event's composition. Logic and sequence names are the caller's selection.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Event {
+    /// Snapshot-independent threshold and weight values from this event's
+    /// bound award channels, resolved through its own spawner.
+    pub award_values: BTreeMap<Property, nfs_world::scoring::value::Value>,
     pub ai: ai::Roster,
     pub invitations: Invitations,
     pub restart: Option<Vec<restart::Destination>>,
@@ -1175,9 +1179,24 @@ impl AssetIndex {
             }
         }
         let mut game_mode_logics = Vec::new();
+        let mut award_values = BTreeMap::new();
         for name in &request.game_mode_logics {
             let spawners = spawner_for(&mut graph, &gm_nodes, name, &|_| true)?;
             for (occurrence, spawner) in spawners.iter().enumerate() {
+                if name.eq_ignore_ascii_case(awards::BLUEPRINT) {
+                    if occurrence != 0 {
+                        return Err(bad("ambiguous award spawner"));
+                    }
+                    let nodes = graph.read(Site::root(name))?;
+                    let (_, fields) = shape(&nodes, &rules)?;
+                    let refs = fields
+                        .iter()
+                        .filter(|(_, kind)| *kind == Kind::RpcReference)
+                        .map(|(site, _)| Ok((site.clone(), graph.object(site)?.class)))
+                        .collect::<Result<Vec<_>, Error>>()?;
+                    let targets = bind(&mut graph, &refs, &fields[0].0, spawner, &rules)?;
+                    award_values = awards::bound_values(&mut graph, &refs, targets, &gm_binding)?;
+                }
                 game_mode_logics.push(spawned(
                     &mut graph,
                     &mut scenes,
@@ -1281,6 +1300,7 @@ impl AssetIndex {
             )?);
         }
         Ok(Event {
+            award_values,
             ai,
             invitations: invitations::extract(&mut graph, &mut scenes)?,
             restart: restart::destinations(&mut graph, &instance_site)?,

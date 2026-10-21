@@ -1847,9 +1847,19 @@ impl PlayerListener {
         race.deadline = None;
         // The category totals the race's driving-style session wrote.
         let properties = self.event_scoring_properties(participant);
+        let snapshots: Vec<_> = race
+            .progress
+            .as_ref()
+            .ok_or(replication::Error::Shape)?
+            .participants()
+            .iter()
+            .map(|p| (u64::from(p.id), self.event_scoring_properties(p.id)))
+            .collect();
+        let awards = content.evaluate_awards(participant, &snapshots)?;
         tracing::info!(
             participant,
             ?properties,
+            ?awards,
             "owned event participant properties"
         );
         let mut creations = Vec::new();
@@ -1864,6 +1874,7 @@ impl PlayerListener {
                 Some(event_logic::Results {
                     finish,
                     properties: &properties,
+                    awards: awards.as_ref(),
                 }),
             )?);
         }
@@ -1905,7 +1916,13 @@ impl PlayerListener {
             .checked_add(1)
             .filter(|n| *n < 1 << 19)
             .ok_or(replication::Error::Bound)?;
-        match self.event_completion(content, participant, state.completed, finish)? {
+        match self.event_completion(
+            content,
+            participant,
+            state.completed,
+            finish,
+            awards.as_ref().map_or(0, |a| a.rep),
+        )? {
             Some(request) => completions.push(request),
             None => tracing::warn!(
                 participant,
@@ -1931,8 +1948,14 @@ impl PlayerListener {
         participant: u16,
         ordinal: u64,
         finish: Finish,
+        award_rep: i32,
     ) -> Result<Option<AwardRequest>, replication::Error> {
         let rewards = content.rewards_for_finish(finish)?;
+        let rep = rewards
+            .rep
+            .checked_add(award_rep)
+            .filter(|_| award_rep >= 0)
+            .ok_or(replication::Error::Bound)?;
         let Some(thresholds) = self
             .logic
             .as_deref()
@@ -1945,7 +1968,7 @@ impl PlayerListener {
         Ok(Some(AwardRequest {
             participant,
             credit: nfs_services::reputation::Scores {
-                total: rewards.rep,
+                total: rep,
                 build: 0,
                 crew: 0,
                 outlaw: 0,
@@ -1965,7 +1988,7 @@ impl PlayerListener {
                     .map_err(|_| replication::Error::Bound)?,
                 cash: u32::try_from(rewards.cash).map_err(|_| replication::Error::Bound)?,
                 rep: nfs_services::reputation::Scores {
-                    total: rewards.rep,
+                    total: rep,
                     build: 0,
                     crew: 0,
                     outlaw: 0,

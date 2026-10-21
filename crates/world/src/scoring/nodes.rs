@@ -86,6 +86,11 @@ pub enum Definition {
     Gate {
         open: bool,
     },
+    /// EventAndGate latches each In1..InN once, emits Out on the last, and
+    /// remains latched until Reset. Native handler RVA 0375b760.
+    AllEvents {
+        count: u8,
+    },
     Splitter {
         run_once: bool,
     },
@@ -114,6 +119,7 @@ pub enum Definition {
         always_send: bool,
     },
     ConditionalFloat,
+    ConditionalInteger,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct Node {
@@ -125,6 +131,7 @@ pub struct Node {
     pending: bool,
     relation: Option<Ordering>,
     boolean_relation: Option<bool>,
+    seen_events: u16,
 }
 
 fn float(read: &mut impl FnMut(u32) -> Option<Value>, port: u32) -> Result<f32, Error> {
@@ -151,17 +158,20 @@ fn boolean_event(value: bool) -> Effect {
 fn conditional(
     read: &mut impl FnMut(u32) -> Option<Value>,
     condition: bool,
+    integer_output: bool,
 ) -> Result<Effect, Error> {
+    let port = if condition {
+        VALUE_IF_TRUE
+    } else {
+        VALUE_IF_FALSE
+    };
     Ok(Effect::Publish(
         OUTPUT,
-        Value::Float(float(
-            read,
-            if condition {
-                VALUE_IF_TRUE
-            } else {
-                VALUE_IF_FALSE
-            },
-        )?),
+        if integer_output {
+            Value::Integer(integer(read, port)?)
+        } else {
+            Value::Float(float(read, port)?)
+        },
     ))
 }
 fn relation(
@@ -204,6 +214,9 @@ impl Node {
     /// Fresh composition state, without an engine save-state restore. Binding
     /// and activation are separate: startup comparisons run after inputs bind.
     pub fn new(definition: Definition) -> Result<Self, Error> {
+        if matches!(definition, Definition::AllEvents { count } if !(1..=16).contains(&count)) {
+            return Err(Error::Bound);
+        }
         if let Definition::Float { default, step } = definition {
             finite(default)?;
             finite(step)?;
@@ -221,6 +234,7 @@ impl Node {
             ),
             relation: None,
             boolean_relation: None,
+            seen_events: 0,
         })
     }
 
@@ -266,6 +280,7 @@ impl Node {
                 Value::Boolean(boolean(&mut read, CACHE_INPUT)?),
             )],
             Definition::ConditionalFloat => vec![Effect::Publish(OUTPUT, Value::Float(0.0))],
+            Definition::ConditionalInteger => vec![Effect::Publish(OUTPUT, Value::Integer(0))],
             _ => vec![],
         })
     }
@@ -294,6 +309,27 @@ impl Node {
         use Definition::*;
         use Effect::*;
         match (self.definition, action) {
+            (AllEvents { .. }, Event(RESET)) => {
+                self.seen_events = 0;
+                Ok(vec![])
+            }
+            (AllEvents { count }, Event(event)) => {
+                let Some(slot) =
+                    (1..=u16::from(count)).find(|i| super::integers::port("In", *i) == event)
+                else {
+                    return Ok(vec![]);
+                };
+                let bit = 1 << (slot - 1);
+                if self.seen_events & bit != 0 {
+                    return Ok(vec![]);
+                }
+                self.seen_events |= bit;
+                Ok(if self.seen_events.count_ones() == u32::from(count) {
+                    vec![Emit(OUT)]
+                } else {
+                    vec![]
+                })
+            }
             (Cache, Event(LOAD)) => Ok(vec![
                 Publish(CACHE_OUTPUT, Value::Float(float(read, CACHE_INPUT)?)),
                 Emit(CACHE_LOADED),
@@ -427,14 +463,25 @@ impl Node {
                 self.boolean_relation = Some(current);
                 Ok(vec![boolean_event(current)])
             }
-            (ConditionalFloat, Activate | PropertyChanged(CONDITION)) => {
+            (ConditionalFloat | ConditionalInteger, Activate | PropertyChanged(CONDITION)) => {
                 let condition = boolean(read, CONDITION)?;
-                Ok(vec![conditional(read, condition)?])
+                Ok(vec![conditional(
+                    read,
+                    condition,
+                    self.definition == ConditionalInteger,
+                )?])
             }
-            (ConditionalFloat, PropertyChanged(port @ (VALUE_IF_TRUE | VALUE_IF_FALSE))) => {
+            (
+                ConditionalFloat | ConditionalInteger,
+                PropertyChanged(port @ (VALUE_IF_TRUE | VALUE_IF_FALSE)),
+            ) => {
                 let condition = boolean(read, CONDITION)?;
                 Ok(if condition == (port == VALUE_IF_TRUE) {
-                    vec![conditional(read, condition)?]
+                    vec![conditional(
+                        read,
+                        condition,
+                        self.definition == ConditionalInteger,
+                    )?]
                 } else {
                     vec![]
                 })

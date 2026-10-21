@@ -34,6 +34,7 @@ pub(super) fn supported(class: &str) -> bool {
             | "FloatAccumulatorEntityData"
             | "FloatEntityData"
             | "EventGateEntityData"
+            | "EventAndGateEntityData"
             | "EventSplitterEntityData"
             | "CompareFloatEntityData"
             | "CompareIntEntityData"
@@ -43,6 +44,7 @@ pub(super) fn supported(class: &str) -> bool {
             | "BoolCacheEntityData"
             | "CompareBoolEntityData"
             | "ConditionalFloatEntityData"
+            | "ConditionalIntEntityData"
             | "BoolParticipantPropertyAccessorEntityData"
             | "IntParticipantPropertyAccessorEntityData"
     )
@@ -76,6 +78,12 @@ pub fn compile(object: &Object) -> Result<Configuration, Error> {
         },
         "EventGateEntityData" => Definition::Gate {
             open: boolean(fields, "Default")?,
+        },
+        "EventAndGateEntityData" => Definition::AllEvents {
+            count: field(fields, "EventCount")?
+                .bits32()
+                .filter(|n| (1..=16).contains(n))
+                .ok_or_else(|| bad("event-and gate count"))? as u8,
         },
         "EventSplitterEntityData" => Definition::Splitter {
             run_once: boolean(fields, "RunOnce")?,
@@ -124,7 +132,8 @@ pub fn compile(object: &Object) -> Result<Configuration, Error> {
                 always_send: boolean(fields, "AlwaysSend")?,
             }
         }
-        "ConditionalFloatEntityData" => {
+        "ConditionalFloatEntityData" | "ConditionalIntEntityData" => {
+            let is_integer = object.class == "ConditionalIntEntityData";
             defaults.extend([
                 (
                     nodes::CONDITION,
@@ -132,14 +141,26 @@ pub fn compile(object: &Object) -> Result<Configuration, Error> {
                 ),
                 (
                     nodes::VALUE_IF_TRUE,
-                    Scalar::Float(scalar(fields, "ValueIfTrue")?),
+                    if is_integer {
+                        Scalar::Integer(integer(fields, "ValueIfTrue")?)
+                    } else {
+                        Scalar::Float(scalar(fields, "ValueIfTrue")?)
+                    },
                 ),
                 (
                     nodes::VALUE_IF_FALSE,
-                    Scalar::Float(scalar(fields, "ValueIfFalse")?),
+                    if is_integer {
+                        Scalar::Integer(integer(fields, "ValueIfFalse")?)
+                    } else {
+                        Scalar::Float(scalar(fields, "ValueIfFalse")?)
+                    },
                 ),
             ]);
-            Definition::ConditionalFloat
+            if is_integer {
+                Definition::ConditionalInteger
+            } else {
+                Definition::ConditionalFloat
+            }
         }
         "CompareFloatEntityData" | "CompareIntEntityData" => {
             let kind = if object.class == "CompareFloatEntityData" {

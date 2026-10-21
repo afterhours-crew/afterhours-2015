@@ -672,6 +672,19 @@ impl Candidate<'_> {
     fn bind(&mut self, node: u16, dispatch: &mut Dispatch<'_>) -> Result<(), Error> {
         let behavior = self.program.node(node)?.behavior.clone();
         match behavior {
+            Behavior::Snapshot(values) => {
+                for (field, value) in values {
+                    dispatch.initialize(
+                        self,
+                        Port { node, field },
+                        value,
+                        super::properties::DefaultMode::Override,
+                    )?;
+                }
+                Ok(())
+            }
+            Behavior::IntegerSum { count } => self.integer_sum(node, count, dispatch),
+            Behavior::RankIntegers { count, .. } => self.integer_rank(node, count, dispatch),
             Behavior::Scalar(_) => {
                 let effects = {
                     let state = self.state.scalars.get(&node).ok_or(Error::UnknownNode)?;
@@ -784,6 +797,50 @@ impl Candidate<'_> {
             }
             _ => Ok(()),
         }
+    }
+    fn integer_sum(
+        &mut self,
+        node: u16,
+        count: u16,
+        dispatch: &mut Dispatch<'_>,
+    ) -> Result<(), Error> {
+        let (field, value) =
+            super::integers::sum(count, |field| self.resolve(Port { node, field }))?;
+        if self.bound(Port { node, field }) {
+            dispatch.publish(self, Port { node, field }, value)?;
+        }
+        Ok(())
+    }
+    fn integer_rank(
+        &mut self,
+        node: u16,
+        count: u16,
+        dispatch: &mut Dispatch<'_>,
+    ) -> Result<(), Error> {
+        let mut values = Vec::with_capacity(usize::from(count));
+        for slot in 0..count {
+            values.push(
+                match self.resolve(Port {
+                    node,
+                    field: super::integers::port("In", slot),
+                })? {
+                    Some(Value::Integer(v)) => v,
+                    None => 0,
+                    _ => return Err(Error::InvalidGraph),
+                },
+            );
+        }
+        let ranks = super::integers::rank(&values)?;
+        for (slot, rank) in ranks.into_iter().enumerate() {
+            let port = Port {
+                node,
+                field: super::integers::port("Out", slot as u16),
+            };
+            if self.bound(port) {
+                dispatch.publish(self, port, Value::Integer(rank))?;
+            }
+        }
+        Ok(())
     }
     fn vehicle(&self) -> Result<Vehicle, Error> {
         self.inputs.vehicle.ok_or(Error::MissingInput)
@@ -1076,6 +1133,9 @@ impl Candidate<'_> {
                 }
             }
             Behavior::Math { .. } => self.math(id, dispatch),
+            Behavior::RankIntegers { count, .. } if event == super::integers::SORT => {
+                self.integer_rank(id, count, dispatch)
+            }
             Behavior::Gate { .. } => {
                 dispatch.property_gate(self, id, property_gate::Action::Event(event))
             }
@@ -1117,6 +1177,11 @@ impl PropertyHandler for Candidate<'_> {
             Behavior::Arithmetic { .. } => {
                 self.arithmetic(id, nodes::Action::PropertyChanged(field), dispatch)
             }
+            Behavior::IntegerSum { count } => self.integer_sum(id, count, dispatch),
+            Behavior::RankIntegers {
+                count,
+                on_change: true,
+            } => self.integer_rank(id, count, dispatch),
             Behavior::Fold { .. } => self.fold(id, nodes::Action::PropertyChanged(field), dispatch),
             Behavior::VectorLength { .. } => {
                 dispatch.vector_length(self, id, nodes::Action::PropertyChanged(field))

@@ -106,26 +106,48 @@ pub fn compile(object: &Object) -> Result<Option<Declaration>, Error> {
                 d.outputs.push((nodes::OUTPUT, Kind::Float));
             }
         },
-        "MathOpEntityData" | "VectorMathOpEntityData" => {
-            match super::arithmetic::compile(object)? {
-                super::arithmetic::Configuration::Arithmetic(operations) => {
-                    d.inputs.push((world::arithmetic::IN0, Kind::Float));
-                    for slot in 1..=operations.len() {
-                        let port = world::boolean_fold::input_port(slot as u16)
-                            .map_err(|e| bad(&e.to_string()))?;
-                        d.inputs.push((port, Kind::Float));
-                    }
-                    d.outputs.push((nodes::OUT, Kind::Float));
+        "SortAndRankIntParticipantPropertyEntityData" => {
+            d.outputs.extend([
+                (world::integers::RANK, Kind::Integer),
+                (world::integers::COUNT, Kind::Integer),
+            ]);
+        }
+        "MathOpEntityData"
+        | "VectorMathOpEntityData"
+        | "MathIntOpEntityData"
+        | "RankIntegersEntityData" => match super::arithmetic::compile(object)? {
+            super::arithmetic::Configuration::IntegerSum(count) => {
+                for slot in 0..count {
+                    d.inputs
+                        .push((world::integers::port("In", slot), Kind::Integer));
                 }
-                super::arithmetic::Configuration::VectorLength => {
-                    d.inputs.push((world::vector_length::INPUT, Kind::Vec3));
-                    d.outputs.extend([
-                        (world::vector_length::LENGTH, Kind::Float),
-                        (world::vector_length::NORMAL, Kind::Vec3),
-                    ]);
+                d.outputs.push((nodes::OUT, Kind::Integer));
+            }
+            super::arithmetic::Configuration::RankIntegers { count, .. } => {
+                for slot in 0..count {
+                    d.inputs
+                        .push((world::integers::port("In", slot), Kind::Integer));
+                    d.outputs
+                        .push((world::integers::port("Out", slot), Kind::Integer));
                 }
             }
-        }
+            super::arithmetic::Configuration::Arithmetic(operations) => {
+                d.inputs.push((world::arithmetic::IN0, Kind::Float));
+                for slot in 1..=operations.len() {
+                    let port = world::boolean_fold::input_port(slot as u16)
+                        .map_err(|e| bad(&e.to_string()))?;
+                    d.inputs.push((port, Kind::Float));
+                }
+                d.outputs.push((nodes::OUT, Kind::Float));
+            }
+            super::arithmetic::Configuration::VectorLength => {
+                d.inputs.push((world::vector_length::INPUT, Kind::Vec3));
+                d.outputs.extend([
+                    (world::vector_length::LENGTH, Kind::Float),
+                    (world::vector_length::NORMAL, Kind::Vec3),
+                ]);
+            }
+        },
         "AndEntityData" | "OrEntityData" => {
             let config = super::boolean_fold::compile(object)?;
             for slot in 1..=config.input_count {
@@ -242,6 +264,7 @@ pub fn compile(object: &Object) -> Result<Option<Declaration>, Error> {
                 Definition::Accumulator | Definition::ConditionalFloat => {
                     Some((nodes::OUTPUT, Kind::Float))
                 }
+                Definition::ConditionalInteger => Some((nodes::OUTPUT, Kind::Integer)),
                 Definition::Float { .. } => Some((nodes::FLOAT_VALUE, Kind::Float)),
                 Definition::Boolean { .. } => Some((nodes::FLOAT_VALUE, Kind::Boolean)),
                 Definition::Integer { .. } => Some((nodes::FLOAT_VALUE, Kind::Integer)),
@@ -252,6 +275,7 @@ pub fn compile(object: &Object) -> Result<Option<Declaration>, Error> {
                     Some((nodes::OUTPUT_VALUE, Kind::Integer))
                 }
                 Definition::Gate { .. }
+                | Definition::AllEvents { .. }
                 | Definition::Splitter { .. }
                 | Definition::Compare { .. }
                 | Definition::CompareBoolean { .. } => None,

@@ -237,6 +237,67 @@ impl<'a, S: Source> Graph<'a, S> {
             })
             .collect())
     }
+    /// Follow an incoming object link through prefab interfaces. Used for a
+    /// statically wired schematic channel reference, never asset-name lookup.
+    pub fn linked_source(&mut self, site: &Site, port: u32) -> Result<Endpoint, Error> {
+        self.linked_source_inner(site, port, &mut BTreeSet::new())
+    }
+    fn linked_source_inner(
+        &mut self,
+        site: &Site,
+        port: u32,
+        active: &mut BTreeSet<Endpoint>,
+    ) -> Result<Endpoint, Error> {
+        if active.len() >= MAX_GRAPH_DEPTH
+            || !active.insert(Endpoint {
+                site: site.clone(),
+                port,
+            })
+        {
+            return Err(bad("incoming link cycle or depth"));
+        }
+        let rows: Vec<_> = self
+            .edges(&site.bus, Connections::Link)?
+            .iter()
+            .filter(|e| e.target == site.key && e.target_port == port)
+            .map(|e| Endpoint {
+                site: Site {
+                    key: e.source.clone(),
+                    ..site.clone()
+                },
+                port: e.source_port,
+            })
+            .collect();
+        let [mut source] = <[Endpoint; 1]>::try_from(rows).map_err(|_| {
+            bad(&format!(
+                "incoming link count {}:{} field {port}",
+                site.key.0, site.key.1
+            ))
+        })?;
+        let class = self.object(&source.site)?.class;
+        if class == "InterfaceDescriptorData" {
+            let frame = source
+                .site
+                .parents
+                .pop()
+                .ok_or_else(|| bad("incoming root interface link"))?;
+            source.site.key = frame.reference;
+            source.site.bus = frame.bus;
+            self.linked_source_inner(&source.site, source.port, active)
+        } else if class.ends_with("ReferenceObjectData") {
+            let child = self.target_field(&source.site, "Blueprint")?;
+            source.site.parents.push(Frame {
+                bus: source.site.bus.clone(),
+                reference: source.site.key.clone(),
+            });
+            source.site.key = child.clone();
+            source.site.bus = child;
+            source.site.key = self.target_field(&source.site, "Interface")?;
+            self.linked_source_inner(&source.site, source.port, active)
+        } else {
+            Ok(source)
+        }
+    }
     /// Event connections of `site`'s bus that end at `site`'s event `event`, as
     /// (source site, source event).
     pub fn event_sources(&mut self, site: &Site, event: u32) -> Result<Vec<(Site, u32)>, Error> {

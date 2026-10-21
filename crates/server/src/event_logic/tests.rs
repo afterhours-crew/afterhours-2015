@@ -430,6 +430,7 @@ pub(crate) fn event() -> Event {
             cash: 2000,
             rep: 9000,
         },
+        award_values: BTreeMap::new(),
         placement_rewards: Some([
             Rewards {
                 cash: 2000,
@@ -471,6 +472,122 @@ pub(crate) fn event() -> Event {
         scene_notifications: vec![5],
         game_mode_notifications: FLAGS.to_vec(),
         dnf_timeout: 80.,
+    }
+}
+
+/// Constructed one-award graph, with an owned snapshot feeding its total,
+/// synchronized presentation and Score node. No installed or captured data.
+pub(crate) fn awards() -> nfs_content::events::awards::Content {
+    use nfs_world::scoring::events::{Connection, Delivery, Endpoint};
+    use nfs_world::scoring::{
+        nodes,
+        program::{Behavior, Identity, Keeper, Node, Program, Step},
+        properties::{Definition, Kind as Type, Port},
+        score, synced,
+        value::Value,
+    };
+    let node = |i, behavior| Node {
+        identity: Identity {
+            asset: "test".into(),
+            index: i,
+            instances: vec![],
+        },
+        class: "Test".into(),
+        created: true,
+        events: true,
+        properties: true,
+        forward: None,
+        defaults: vec![],
+        behavior,
+    };
+    let port = |node, field| Port { node, field };
+    let program = Program {
+        nodes: vec![
+            node(0, Behavior::Inert),
+            node(
+                1,
+                Behavior::Snapshot(vec![(nodes::OUT, Value::Integer(1000))]),
+            ),
+            node(2, Behavior::Synced(synced::Kind::Integer)),
+            node(3, Behavior::Inert),
+            node(
+                4,
+                Behavior::ScoreContext {
+                    participant_provider: 0,
+                    keepers: vec![Keeper { node: 6, field: 7 }],
+                },
+            ),
+            node(
+                5,
+                Behavior::Score {
+                    default: 0,
+                    context: 4,
+                },
+            ),
+            node(6, Behavior::Inert),
+        ],
+        cells: vec![
+            Definition {
+                kind: Type::Integer,
+                initial: None,
+                ports: vec![
+                    port(1, nodes::OUT),
+                    port(2, synced::IN),
+                    port(3, nodes::FLOAT_VALUE),
+                    port(5, score::SCORE),
+                ],
+                listeners: vec![],
+            },
+            Definition {
+                kind: Type::Integer,
+                initial: None,
+                ports: vec![port(2, synced::OUT)],
+                listeners: vec![],
+            },
+        ],
+        connections: vec![Connection {
+            source: Endpoint {
+                node: 0,
+                event: 2_659_764_833,
+            },
+            target: Endpoint {
+                node: 5,
+                event: score::AWARD,
+            },
+            delivery: Delivery::Local,
+        }],
+        startup: vec![
+            Step::Bind(1),
+            Step::Bind(2),
+            Step::Activate(2),
+            Step::Activate(4),
+        ],
+        unmodeled: vec![],
+    };
+    nfs_content::events::awards::Content {
+        program: std::sync::Arc::new(program),
+        root: 0,
+        total: 3,
+        keeper: 7,
+        reads: vec![],
+        rankings: vec![],
+        fields: vec![
+            nfs_content::scoring::content::Field {
+                node: 0,
+                serializer: 0,
+                kind: Kind::Root,
+            },
+            nfs_content::scoring::content::Field {
+                node: 6,
+                serializer: 1,
+                kind: Kind::RpcReference,
+            },
+            nfs_content::scoring::content::Field {
+                node: 2,
+                serializer: 2,
+                kind: Kind::I32Property,
+            },
+        ],
     }
 }
 
@@ -851,6 +968,7 @@ fn logics_follow_bindings_and_present_owned_values_only() {
             Some(Results {
                 finish,
                 properties: &none,
+                awards: None,
             }),
         )
         .unwrap();
@@ -888,6 +1006,7 @@ fn logics_follow_bindings_and_present_owned_values_only() {
             Some(Results {
                 finish,
                 properties: &written,
+                awards: None,
             }),
         )
         .unwrap();
@@ -920,6 +1039,7 @@ fn logics_follow_bindings_and_present_owned_values_only() {
                         ..finish
                     },
                     properties: &written,
+                    awards: None,
                 }),
             )
             .unwrap();

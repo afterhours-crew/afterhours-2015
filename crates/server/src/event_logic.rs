@@ -269,6 +269,7 @@ pub struct Finish {
 pub struct Results<'a> {
     pub finish: Finish,
     pub properties: &'a BTreeMap<Property, i32>,
+    pub awards: Option<&'a nfs_content::events::awards::ResultValues>,
 }
 
 fn presented(field: &Field) -> Option<Presented> {
@@ -304,6 +305,7 @@ pub struct Content {
     states: BTreeMap<State, usize>,
     ai: Option<std::sync::Arc<crate::event_ai::Content>>,
     navigation: Option<std::sync::Arc<crate::event_ai::navigation::Navigation>>,
+    awards: Option<std::sync::Arc<nfs_content::events::awards::Content>>,
 }
 
 fn bad<T>(_: T) -> Error {
@@ -473,6 +475,7 @@ impl Content {
             states,
             ai: None,
             navigation: None,
+            awards: None,
         };
         for name in [
             request::INTRO_SEQUENCE,
@@ -490,6 +493,35 @@ impl Content {
     }
     pub fn event(&self) -> &Event {
         &self.event
+    }
+    pub fn with_awards(
+        mut self,
+        awards: nfs_content::events::awards::Content,
+    ) -> Result<Self, Error> {
+        let layout = self.logic(Owner::GameMode, request::AWARDS, 0)?;
+        if awards.fields.len() != layout.fields.len()
+            || awards
+                .fields
+                .iter()
+                .zip(&layout.fields)
+                .enumerate()
+                .any(|(i, (a, b))| a.serializer != i || a.kind != b.kind)
+        {
+            return Err(Error::Shape);
+        }
+        awards.program.validate().map_err(bad)?;
+        self.awards = Some(std::sync::Arc::new(awards));
+        Ok(self)
+    }
+    pub fn evaluate_awards(
+        &self,
+        participant: u16,
+        properties: &[(u64, BTreeMap<Property, i32>)],
+    ) -> Result<Option<nfs_content::events::awards::ResultValues>, Error> {
+        self.awards
+            .as_ref()
+            .map(|a| a.evaluate(u64::from(participant), properties).map_err(bad))
+            .transpose()
     }
     /// Race-outro compares the one-based position against the running maximum
     /// participant count. Last place selects "other"; remaining positions clamp
@@ -852,6 +884,18 @@ impl Content {
             .transpose()?;
         let driving = layout.blueprint == request::DRIVING_STYLE;
         let outro = layout.blueprint == request::OUTRO;
+        let awards = layout.blueprint == request::AWARDS;
+        if results.and_then(|r| r.awards).is_some_and(|a| {
+            a.rep < 0
+                || a.fields.keys().any(|i| {
+                    self.logic(Owner::GameMode, request::AWARDS, 0)
+                        .ok()
+                        .and_then(|l| l.fields.get(*i))
+                        .is_none_or(|f| f.kind != Kind::I32Property)
+                })
+        }) {
+            return Err(Error::Shape);
+        }
         let bools: Vec<usize> = layout
             .fields
             .iter()
@@ -866,9 +910,16 @@ impl Content {
                 ));
             }
             if !outro {
-                return None;
+                return awards
+                    .then_some(())
+                    .and_then(|_| results?.awards?.fields.get(&index).copied())
+                    .map(Value::Int);
             }
-            let Results { finish, properties } = results?;
+            let Results {
+                finish,
+                properties,
+                awards,
+            } = results?;
             let rewards = rewards?;
             let category = |field: &Field| {
                 field
@@ -880,14 +931,17 @@ impl Content {
             };
             let number = match presented(field)? {
                 Presented::Category => category(field),
-                // The total adds the presented categories to the event REP
-                // (E994: 9,000 + 10,790 + an award this host does not grant).
+                // Driving categories were banked during the event; the final
+                // credit contains placement REP plus the selected award bonus.
                 Presented::TotalRep => layout
                     .fields
                     .iter()
                     .filter(|f| presented(f) == Some(Presented::Category))
                     .map(category)
-                    .fold(rewards.rep, i32::saturating_add),
+                    .fold(
+                        rewards.rep.saturating_add(awards.map_or(0, |a| a.rep)),
+                        i32::saturating_add,
+                    ),
                 Presented::Zero => 0,
                 Presented::EventRep => rewards.rep,
                 Presented::Cash => rewards.cash,

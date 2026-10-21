@@ -53,6 +53,117 @@ fn inputs() -> Inputs {
 }
 
 #[test]
+fn integer_rank_trigger_sum_and_snapshot_are_owned_and_ordered() {
+    use crate::scoring::integers;
+    for on_change in [false, true] {
+        let mut producer = node(
+            1,
+            Behavior::Scalar(Scalar::Integer {
+                default: 7,
+                step: 3,
+            }),
+        );
+        producer.defaults = vec![(FLOAT_VALUE, Value::Integer(7))];
+        let nodes = vec![
+            node(0, Behavior::Inert),
+            producer,
+            node(
+                2,
+                Behavior::Snapshot(vec![(FLOAT_VALUE, Value::Integer(9))]),
+            ),
+            node(
+                3,
+                Behavior::RankIntegers {
+                    count: 2,
+                    on_change,
+                },
+            ),
+            node(4, Behavior::IntegerSum { count: 2 }),
+        ];
+        let mut startup = vec![Step::Bind(1), Step::Bind(2), Step::Bind(3), Step::Bind(4)];
+        for id in [3, 4] {
+            for i in 0..2 {
+                startup.push(Step::Register(Registration::Notify(port(
+                    id,
+                    integers::port("In", i),
+                ))));
+            }
+        }
+        let p = Program {
+            nodes,
+            cells: vec![
+                cell(
+                    Kind::Integer,
+                    &[
+                        port(1, FLOAT_VALUE),
+                        port(3, integers::port("In", 0)),
+                        port(4, integers::port("In", 0)),
+                    ],
+                ),
+                cell(
+                    Kind::Integer,
+                    &[
+                        port(2, FLOAT_VALUE),
+                        port(3, integers::port("In", 1)),
+                        port(4, integers::port("In", 1)),
+                    ],
+                ),
+                cell(Kind::Integer, &[port(3, integers::port("Out", 0))]),
+                cell(Kind::Integer, &[port(3, integers::port("Out", 1))]),
+                cell(Kind::Integer, &[port(4, OUT)]),
+            ],
+            connections: vec![
+                Connection {
+                    source: Endpoint { node: 0, event: 1 },
+                    target: Endpoint {
+                        node: 1,
+                        event: nodes::INCREMENT,
+                    },
+                    delivery: Delivery::Local,
+                },
+                Connection {
+                    source: Endpoint { node: 0, event: 2 },
+                    target: Endpoint {
+                        node: 3,
+                        event: integers::SORT,
+                    },
+                    delivery: Delivery::Local,
+                },
+            ],
+            startup,
+            unmodeled: vec![],
+        };
+        let mut s = Session::new(Arc::new(p)).unwrap();
+        s.start(&inputs()).unwrap();
+        assert_eq!(
+            s.read(port(3, integers::port("Out", 0))).unwrap(),
+            Some(Value::Integer(2))
+        );
+        assert_eq!(s.read(port(4, OUT)).unwrap(), Some(Value::Integer(16)));
+        let independent = s.clone();
+        s.event(0, 1, &inputs()).unwrap();
+        assert_eq!(s.read(port(4, OUT)).unwrap(), Some(Value::Integer(19)));
+        assert_eq!(
+            s.read(port(3, integers::port("Out", 0))).unwrap(),
+            Some(Value::Integer(if on_change { 1 } else { 2 }))
+        );
+        s.event(0, 2, &inputs()).unwrap();
+        assert_eq!(
+            s.read(port(3, integers::port("Out", 0))).unwrap(),
+            Some(Value::Integer(1))
+        );
+        assert_eq!(
+            s.read(port(3, integers::port("Out", 1))).unwrap(),
+            Some(Value::Integer(2))
+        );
+        assert_eq!(
+            independent.read(port(4, OUT)).unwrap(),
+            Some(Value::Integer(16))
+        );
+    }
+}
+
+#[test]
 fn buildup_uses_ready_inputs_merges_observers_and_consumes_event_counts_once() {
     use crate::scoring::buildup::*;
     let mut nodes = vec![node(0, Behavior::NosBuildup), node(1, Behavior::NosBuildup)];

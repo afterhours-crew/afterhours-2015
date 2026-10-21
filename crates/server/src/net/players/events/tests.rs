@@ -491,6 +491,77 @@ fn a_win_runs_the_official_order_and_pays_once() {
 }
 
 #[test]
+fn selected_award_is_presented_and_credited_once_with_the_finish() {
+    let mut h = started();
+    h.content = Arc::new((*h.content).clone().with_awards(fixture::awards()).unwrap());
+    h.listener.events = Some(h.content.clone());
+    h.run(6_000, vec![h.checkpoint(6, 30.)]);
+    h.run(7_000, vec![h.checkpoint(7, 60.)]);
+    let pending = &h.listener.scoring_state.pending_awards;
+    assert_eq!(pending.len(), 1);
+    let award = pending.front().unwrap();
+    assert_eq!(award.credit.total, 2500);
+    assert_eq!(award.event.as_ref().unwrap().rep.total, 2500);
+    let batch = award.batch_id;
+    let selected = h
+        .content
+        .evaluate_awards(
+            h.participant,
+            &[(u64::from(h.participant), BTreeMap::new())],
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(selected.fields, BTreeMap::from([(2, 1000)]));
+    let outro = h
+        .content
+        .game_mode_logic(
+            h.content.logic(Owner::GameMode, names::OUTRO, 0).unwrap(),
+            h.world(),
+            h.participant,
+            h.race().game_mode,
+            Some(event_logic::Results {
+                finish: h.race().finish.unwrap(),
+                properties: &BTreeMap::new(),
+                awards: Some(&selected),
+            }),
+        )
+        .unwrap();
+    assert!(outro.body.initial.as_ref().unwrap().contains(
+        &nfs_world::replication::entity::Initial::I32Property(Some(2500))
+    ));
+    let layout = h.content.logic(Owner::GameMode, names::AWARDS, 0).unwrap();
+    let creation = h
+        .content
+        .game_mode_logic(
+            layout,
+            h.world(),
+            h.participant,
+            h.race().game_mode,
+            Some(event_logic::Results {
+                finish: h.race().finish.unwrap(),
+                properties: &BTreeMap::new(),
+                awards: Some(&selected),
+            }),
+        )
+        .unwrap();
+    assert_eq!(
+        creation.body.initial.as_ref().unwrap()[2],
+        nfs_world::replication::entity::Initial::I32Property(Some(1000))
+    );
+    h.run(7_300, vec![h.checkpoint(7, 61.)]);
+    assert_eq!(h.listener.scoring_state.pending_awards.len(), 1);
+    assert_eq!(
+        h.listener
+            .scoring_state
+            .pending_awards
+            .front()
+            .unwrap()
+            .batch_id,
+        batch
+    );
+}
+
+#[test]
 fn restart_and_leave_choices_exit_through_the_dnf_transition() {
     for (choice, exit) in [(RESTART, Exit::Restart), (LEAVE, Exit::Abandon)] {
         let mut h = started();

@@ -35,7 +35,15 @@ pub(crate) fn property<S: Source>(graph: &mut Graph<S>, site: &Site) -> Result<P
     if graph.object(site)?.class != ACCESSOR {
         return Err(bad("participant property accessor class"));
     }
-    let mut rows = graph.links(site, IDENTIFIER)?;
+    identifier(graph, site, IDENTIFIER)
+}
+
+pub(crate) fn identifier<S: Source>(
+    graph: &mut Graph<S>,
+    site: &Site,
+    port: u32,
+) -> Result<Property, Error> {
+    let mut rows = graph.links(site, port)?;
     if rows.len() != 1 {
         return Err(bad("participant property identifier link"));
     }

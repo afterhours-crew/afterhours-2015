@@ -155,6 +155,16 @@ fn lift(e: world::Error) -> Error {
 /// or explicitly unsupported; an unknown class fails. Untyped cells are kept
 /// out of the Store only when no modeled node touches them, and are reported.
 pub fn compile(sources: &Sources) -> Result<Program, Error> {
+    compile_with_snapshots(sources, &BTreeMap::new())
+}
+
+/// Compile a graph with explicitly resolved, immutable external inputs. Only
+/// read accessors, participant rankings and bound channel references may use
+/// this path; ordinary producers retain their authored behavior.
+pub fn compile_with_snapshots(
+    sources: &Sources,
+    snapshots: &BTreeMap<Identity, Vec<(u32, Value)>>,
+) -> Result<Program, Error> {
     let realm = realms::Realm::Server;
     let composition = &sources.composition;
     let typed =
@@ -172,8 +182,28 @@ pub fn compile(sources: &Sources) -> Result<Program, Error> {
     let ports = Ports::new(count, &typed.layout);
     let mut behaviors: Vec<Option<Behavior>> = vec![None; count];
     let mut defaults: Vec<Vec<(u32, Value)>> = vec![Vec::new(); count];
+    for (identity, values) in snapshots {
+        let id = index.lookup(identity)?;
+        let n = &composition.nodes[usize::from(id)];
+        if !matches!(
+            n.class.as_str(),
+            "IntParticipantPropertyAccessorEntityData"
+                | "SortAndRankIntParticipantPropertyEntityData"
+                | "LinkedSchematicChannelReferenceEntityData"
+        ) || !ports.inputs[usize::from(id)].is_empty()
+            || values
+                .iter()
+                .any(|(field, _)| !ports.has_output(id, *field))
+        {
+            return Err(bad("invalid external scoring snapshot"));
+        }
+        assign(&mut behaviors, id, Behavior::Snapshot(values.clone()))?;
+    }
     for n in &sources.scalars {
         let id = index.lookup(&n.identity)?;
+        if snapshots.contains_key(&n.identity) {
+            continue;
+        }
         if n.configuration.definition == world::nodes::Definition::IntegerParticipantProperty
             && !ports.inputs[usize::from(id)].contains(&world::nodes::FLOAT_VALUE)
         {
@@ -223,6 +253,21 @@ pub fn compile(sources: &Sources) -> Result<Program, Error> {
     for n in &sources.arithmetic {
         let id = index.lookup(&n.identity)?;
         let behavior = match &n.configuration {
+            arithmetic::Configuration::IntegerSum(count) => Behavior::IntegerSum { count: *count },
+            arithmetic::Configuration::RankIntegers { count, on_change } => {
+                // Native RankIntegers compacts bound slots. The supported graph
+                // has every input bound, preserving the authored ordinal map.
+                let inputs = &ports.inputs[usize::from(id)];
+                if inputs.len() != usize::from(*count)
+                    || (0..*count).any(|slot| !inputs.contains(&world::integers::port("In", slot)))
+                {
+                    return Err(bad("sparse integer rank inputs are not modeled"));
+                }
+                Behavior::RankIntegers {
+                    count: *count,
+                    on_change: *on_change,
+                }
+            }
             arithmetic::Configuration::Arithmetic(operations) => Behavior::Arithmetic {
                 operations: operations.clone(),
                 connected: slots(

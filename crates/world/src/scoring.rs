@@ -13,6 +13,7 @@ pub mod delay;
 pub mod donut;
 pub mod draft;
 pub mod events;
+pub mod integers;
 pub mod interpreter;
 pub mod math;
 pub mod nodes;

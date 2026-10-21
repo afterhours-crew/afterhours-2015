@@ -16,6 +16,8 @@ use nfs_world::scoring::arithmetic::{MAX_OPERATIONS, Operation};
 pub enum Configuration {
     Arithmetic(Vec<Operation>),
     VectorLength,
+    IntegerSum(u16),
+    RankIntegers { count: u16, on_change: bool },
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Node {
@@ -25,6 +27,24 @@ pub struct Node {
 
 pub fn compile(object: &Object) -> Result<Configuration, Error> {
     match object.class.as_str() {
+        "MathIntOpEntityData" => {
+            let operators = field(&object.fields, "Operators")?
+                .as_array()
+                .ok_or_else(|| bad("integer operations"))?;
+            if operators.len() > MAX_OPERATIONS || operators.iter().any(|v| !matches!(v, Value::Enum { value: 0, name: Some(n) } if n == "IntMathOp_Add")) {
+                return Err(bad("unsupported integer operation or bound"));
+            }
+            Ok(Configuration::IntegerSum(operators.len() as u16 + 1))
+        }
+        "RankIntegersEntityData" => {
+            let count = field(&object.fields, "InputCount")?
+                .bits32()
+                .and_then(|v| u16::try_from(v).ok())
+                .filter(|v| *v > 0 && *v <= nfs_world::scoring::integers::MAX_RANK_INPUTS)
+                .ok_or_else(|| bad("integer rank input bound"))?;
+            let on_change = super::boolean(&object.fields, "SortOnPropertyChange")?;
+            Ok(Configuration::RankIntegers { count, on_change })
+        }
         "MathOpEntityData" => {
             let Value::Array(values) = field(&object.fields, "Operators")? else {
                 return Err(bad("MathOp operators"));
@@ -67,7 +87,10 @@ fn read<S: Source>(source: &mut S, blueprint: &str) -> Result<Vec<Node>, Error> 
         .filter(|n| {
             matches!(
                 n.object.class.as_str(),
-                "MathOpEntityData" | "VectorMathOpEntityData"
+                "MathOpEntityData"
+                    | "VectorMathOpEntityData"
+                    | "MathIntOpEntityData"
+                    | "RankIntegersEntityData"
             )
         })
         .map(|n| {
@@ -93,6 +116,66 @@ mod tests {
         Value::Enum {
             value,
             name: Some(name.into()),
+        }
+    }
+    #[test]
+    fn integer_operations_require_supported_operators_and_bounded_rank_inputs() {
+        let mut source = Memory::default();
+        for count in [1, 19, 28] {
+            source.put(
+                "r",
+                0,
+                "RankIntegersEntityData",
+                &[
+                    ("InputCount", Value::Int32(count)),
+                    ("SortOnPropertyChange", Value::Bool(false)),
+                ],
+            );
+            assert_eq!(
+                read(&mut source, "r").unwrap()[0].configuration,
+                Configuration::RankIntegers {
+                    count: count as u16,
+                    on_change: false
+                }
+            );
+        }
+        for count in [0, -1, 29, i32::MAX] {
+            source.put(
+                "r",
+                0,
+                "RankIntegersEntityData",
+                &[
+                    ("InputCount", Value::Int32(count)),
+                    ("SortOnPropertyChange", Value::Bool(false)),
+                ],
+            );
+            assert!(read(&mut source, "r").is_err());
+        }
+        source.put(
+            "r",
+            0,
+            "MathIntOpEntityData",
+            &[(
+                "Operators",
+                Value::Array(vec![operator(0, "IntMathOp_Add"); 18]),
+            )],
+        );
+        assert_eq!(
+            read(&mut source, "r").unwrap()[0].configuration,
+            Configuration::IntegerSum(19)
+        );
+        for op in [
+            operator(0, "MathOp_Add"),
+            operator(1, "IntMathOp_Subtract"),
+            Value::Int32(0),
+        ] {
+            source.put(
+                "r",
+                0,
+                "MathIntOpEntityData",
+                &[("Operators", Value::Array(vec![op]))],
+            );
+            assert!(read(&mut source, "r").is_err());
         }
     }
     #[test]

@@ -77,11 +77,26 @@ fn default(text: &str) -> Result<Number, Error> {
 
 pub(crate) struct Evaluator<'g, 'a, S: Source> {
     pub graph: &'g mut Graph<'a, S>,
+    channels: Option<&'g std::collections::BTreeMap<Site, Site>>,
     depth: usize,
 }
 impl<'g, 'a, S: Source> Evaluator<'g, 'a, S> {
     pub fn new(graph: &'g mut Graph<'a, S>) -> Self {
-        Self { graph, depth: 0 }
+        Self {
+            graph,
+            channels: None,
+            depth: 0,
+        }
+    }
+    pub fn with_channels(
+        graph: &'g mut Graph<'a, S>,
+        channels: &'g std::collections::BTreeMap<Site, Site>,
+    ) -> Self {
+        Self {
+            graph,
+            channels: Some(channels),
+            depth: 0,
+        }
     }
     fn enter(&mut self) -> Result<(), Error> {
         self.depth += 1;
@@ -211,6 +226,58 @@ impl<'g, 'a, S: Source> Evaluator<'g, 'a, S> {
         self.input(site, port)?
             .ok_or_else(|| bad("unconnected required property"))
     }
+    /// A channel can have an interface fallback and one start-selected hub.
+    /// Interface defaults bind before activation; the hub's explicit startup
+    /// selection then publishes the difficulty-specific value.
+    fn channel_value(&mut self, site: &Site, port: u32) -> Result<Number, Error> {
+        let rows = self.graph.property_sources(site, port)?;
+        if rows.len() <= 1 {
+            return self.required(site, port);
+        }
+        let mut hub = None;
+        let mut fallback = None;
+        for source in rows {
+            match self.graph.object(&source.site)?.class.as_str() {
+                "FloatHubEntityData" | "IntHubEntityData" if hub.is_none() => {
+                    hub = Some(source);
+                }
+                "InterfaceDescriptorData" if fallback.is_none() => {
+                    fallback = Some(source);
+                }
+                _ => return Err(bad("ambiguous startup channel value")),
+            }
+        }
+        let (Some(hub), Some(fallback)) = (hub, fallback) else {
+            return Err(bad("startup channel sources"));
+        };
+        // Refuse a hub that never receives an initial selection.
+        let count = self
+            .graph
+            .object(&hub.site)?
+            .fields
+            .get("InputCount")
+            .and_then(Value::bits32)
+            .filter(|n| (1..=16).contains(n))
+            .ok_or_else(|| bad("startup channel hub count"))?;
+        let mut selects = false;
+        for i in 0..count {
+            for (source, event) in self
+                .graph
+                .event_sources(&hub.site, name(&format!("SelectIn{i}")))?
+            {
+                selects |= self.fires_at_start(&source, event)?;
+            }
+        }
+        if !selects {
+            return Err(bad("channel hub has no startup selection"));
+        }
+        let a = self.output(&fallback.site, fallback.port)?;
+        let b = self.output(&hub.site, hub.port)?;
+        if std::mem::discriminant(&a) != std::mem::discriminant(&b) {
+            return Err(bad("channel fallback type"));
+        }
+        Ok(b)
+    }
     /// An input that falls back to the node's own field.
     pub fn field_or_input(&mut self, site: &Site, port: u32, field: &str) -> Result<Number, Error> {
         match self.input(site, port)? {
@@ -226,6 +293,29 @@ impl<'g, 'a, S: Source> Evaluator<'g, 'a, S> {
         self.enter()?;
         let object = self.graph.object(site)?;
         let value = match object.class.as_str() {
+            "LinkedSchematicChannelReferenceEntityData" => {
+                let source = match self.channels.and_then(|bindings| bindings.get(site)) {
+                    Some(site) => Endpoint {
+                        site: site.clone(),
+                        port: 0,
+                    },
+                    None => self.graph.linked_source(site, 0)?,
+                };
+                if source.port != 0
+                    || self.graph.object(&source.site)?.class != "LinkedSchematicChannelEntityData"
+                    || self.graph.target_field(&source.site, "ChannelAsset")?
+                        != self.graph.target_field(site, "ChannelAsset")?
+                {
+                    return Err(bad(&format!(
+                        "static schematic channel binding: {}:{} field {} class {}",
+                        source.site.key.0,
+                        source.site.key.1,
+                        source.port,
+                        self.graph.object(&source.site)?.class
+                    )));
+                }
+                self.channel_value(&source.site, port)?
+            }
             class
                 if class == "InterfaceDescriptorData" || class.ends_with("ReferenceObjectData") =>
             {
@@ -300,7 +390,12 @@ impl<'g, 'a, S: Source> Evaluator<'g, 'a, S> {
                     _ => return Err(bad("unsupported math result type")),
                 }
             }
-            class => return Err(bad(&format!("unsupported property source {class}"))),
+            class => {
+                return Err(bad(&format!(
+                    "unsupported property source {class} {}:{} field {port}",
+                    site.key.0, site.key.1
+                )));
+            }
         };
         self.depth -= 1;
         Ok(value)
@@ -359,5 +454,227 @@ impl<'g, 'a, S: Source> Evaluator<'g, 'a, S> {
             outcome = Some(inside);
         }
         outcome.ok_or_else(|| bad("unconnected range comparison"))
+    }
+}
+
+#[cfg(test)]
+mod channel_tests {
+    use super::*;
+    use crate::graph::tests::{Memory, edge, local, ptr};
+    use std::collections::BTreeMap;
+    fn fixture() -> Memory {
+        let mut m = Memory::default();
+        m.put(
+            "r",
+            0,
+            "Blueprint",
+            &[
+                (
+                    "LinkConnections",
+                    Value::Array(vec![edge(local(2), 0, local(1), 0)]),
+                ),
+                (
+                    "PropertyConnections",
+                    Value::Array(vec![edge(local(3), VALUE, local(2), 77)]),
+                ),
+            ],
+        );
+        m.put(
+            "r",
+            1,
+            "LinkedSchematicChannelReferenceEntityData",
+            &[("ChannelAsset", ptr("c", 0))],
+        );
+        m.put(
+            "r",
+            2,
+            "LinkedSchematicChannelEntityData",
+            &[("ChannelAsset", ptr("c", 0))],
+        );
+        m.put(
+            "r",
+            3,
+            "IntEntityData",
+            &[("DefaultValue", Value::Int32(123))],
+        );
+        m.put("c", 0, "SchematicChannelAsset", &[]);
+        m
+    }
+    fn site(i: usize) -> Site {
+        Site {
+            key: ("r".into(), i),
+            ..Site::root("r")
+        }
+    }
+    #[test]
+    fn static_channel_values_follow_only_the_supplied_or_wired_binding() {
+        let mut m = fixture();
+        assert_eq!(
+            Evaluator::new(&mut Graph::new(&mut m))
+                .output(&site(1), 77)
+                .unwrap(),
+            Number::Integer(123)
+        );
+        // Spawned references use the parent game-mode binding, not a name search.
+        m.put(
+            "r",
+            0,
+            "Blueprint",
+            &[
+                ("LinkConnections", Value::Array(vec![])),
+                (
+                    "PropertyConnections",
+                    Value::Array(vec![edge(local(3), VALUE, local(2), 77)]),
+                ),
+            ],
+        );
+        assert!(
+            Evaluator::new(&mut Graph::new(&mut m))
+                .output(&site(1), 77)
+                .is_err()
+        );
+        let bindings = BTreeMap::from([(site(1), site(2))]);
+        assert_eq!(
+            Evaluator::with_channels(&mut Graph::new(&mut m), &bindings)
+                .output(&site(1), 77)
+                .unwrap(),
+            Number::Integer(123)
+        );
+        m.put(
+            "r",
+            2,
+            "LinkedSchematicChannelEntityData",
+            &[("ChannelAsset", ptr("foreign", 0))],
+        );
+        assert!(
+            Evaluator::with_channels(&mut Graph::new(&mut m), &bindings)
+                .output(&site(1), 77)
+                .is_err()
+        );
+    }
+    #[test]
+    fn unbound_or_cyclic_static_channel_values_are_errors() {
+        let mut m = fixture();
+        assert!(
+            Evaluator::new(&mut Graph::new(&mut m))
+                .output(&site(1), 78)
+                .is_err()
+        );
+        m.put(
+            "r",
+            0,
+            "Blueprint",
+            &[
+                (
+                    "LinkConnections",
+                    Value::Array(vec![edge(local(2), 0, local(1), 0)]),
+                ),
+                (
+                    "PropertyConnections",
+                    Value::Array(vec![edge(local(1), 77, local(2), 77)]),
+                ),
+            ],
+        );
+        assert!(
+            Evaluator::new(&mut Graph::new(&mut m))
+                .output(&site(1), 77)
+                .is_err()
+        );
+    }
+    #[test]
+    fn channel_hub_startup_overrides_its_interface_fallback() {
+        use nfs_frostbite::ebx::Fields;
+        let mut m = fixture();
+        let field = |id, text: &str| {
+            Value::Struct(Fields(vec![
+                ("Id".into(), Value::UInt32(id)),
+                ("Value".into(), Value::String(text.into())),
+            ]))
+        };
+        let event = |id| Value::Struct(Fields(vec![("Id".into(), Value::UInt32(id))]));
+        m.put(
+            "r",
+            0,
+            "Blueprint",
+            &[
+                (
+                    "LinkConnections",
+                    Value::Array(vec![edge(local(2), 0, local(1), 0)]),
+                ),
+                (
+                    "PropertyConnections",
+                    Value::Array(vec![
+                        edge(local(4), 7, local(5), name("In0")),
+                        edge(local(4), 8, local(2), 77),
+                        edge(local(5), OUT, local(2), 77),
+                        edge(local(3), VALUE, local(6), VALUE),
+                    ]),
+                ),
+                (
+                    "EventConnections",
+                    Value::Array(vec![Value::Struct(Fields(vec![
+                        ("Source".into(), local(6)),
+                        ("Target".into(), local(5)),
+                        ("SourceEvent".into(), event(IN_RANGE)),
+                        ("TargetEvent".into(), event(name("SelectIn0"))),
+                    ]))]),
+                ),
+            ],
+        );
+        m.put(
+            "r",
+            3,
+            "IntEntityData",
+            &[("DefaultValue", Value::Int32(0))],
+        );
+        m.put(
+            "r",
+            4,
+            "InterfaceDescriptorData",
+            &[(
+                "Fields",
+                Value::Array(vec![field(7, "Float32 60"), field(8, "Float32 44")]),
+            )],
+        );
+        m.put(
+            "r",
+            5,
+            "FloatHubEntityData",
+            &[
+                ("InputCount", Value::UInt32(1)),
+                ("InputSelect", Value::UInt32(0)),
+            ],
+        );
+        m.put(
+            "r",
+            6,
+            "CompareIntRangeEntityData",
+            &[
+                ("Min", Value::Int32(0)),
+                ("Max", Value::Int32(15)),
+                ("TriggerOnStart", Value::Bool(true)),
+            ],
+        );
+        assert_eq!(
+            Evaluator::new(&mut Graph::new(&mut m))
+                .output(&site(1), 77)
+                .unwrap(),
+            Number::Float(60.)
+        );
+        m.put(
+            "r",
+            6,
+            "CompareIntRangeEntityData",
+            &[
+                ("Min", Value::Int32(1)),
+                ("Max", Value::Int32(15)),
+                ("TriggerOnStart", Value::Bool(true)),
+            ],
+        );
+        assert!(
+            Evaluator::new(&mut Graph::new(&mut m))
+                .output(&site(1), 77)
+                .is_err()
+        );
     }
 }
