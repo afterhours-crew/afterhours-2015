@@ -7,7 +7,7 @@
 //! These routes do not authenticate an account or validate external credentials.
 use nfs_fire2::{Fields, Frame};
 use nfs_protocol::util::*;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 mod content;
 pub use content::{Config, local_configuration};
 
@@ -48,23 +48,25 @@ impl std::fmt::Debug for Profile {
     }
 }
 impl Profile {
-    /// Endpoints must be already-bound IPv4 loopback listeners. The configured
+    /// Endpoints must be already-bound IPv4 listeners, each on one concrete
+    /// address: loopback, or the address the server serves a network on.
+    /// Every configured URL and host names `auxiliary`. The configured
     /// bandwidth site remains unset; every configured latency site uses `qos`.
     pub fn new(config: &Config, auxiliary: SocketAddr, qos: SocketAddr) -> Result<Self, Error> {
-        if [auxiliary, qos]
-            .iter()
-            .any(|a| a.ip() != Ipv4Addr::LOCALHOST || a.port() == 0)
-        {
+        let (Some(auxiliary), Some(qos)) = (crate::advertised(auxiliary), crate::advertised(qos))
+        else {
             return Err(Error::Config);
-        }
-        let base = format!("http://127.0.0.1:{}", auxiliary.port());
+        };
+        let host = auxiliary.ip().to_string();
+        let qos_host = qos.ip().to_string();
+        let base = format!("http://{auxiliary}");
         let port = auxiliary.port().to_string();
         let entries = config
             .settings
             .iter()
             .map(|(key, value)| {
                 let value = match key.as_str() {
-                    "bytevaultHostname" => "127.0.0.1",
+                    "bytevaultHostname" => &host,
                     "bytevaultPort" | "telemetryPinServerPort" => &port,
                     "bytevaultSecure" => "0",
                     "xblTokenUrn" => "",
@@ -110,7 +112,7 @@ impl Profile {
                             (
                                 alias.as_bytes(),
                                 QosPingSiteInfo {
-                                    address: Some(b"127.0.0.1"),
+                                    address: Some(qos_host.as_bytes()),
                                     port: Some(qos.port()),
                                     site_name: Some(name.as_bytes()),
                                     ..Default::default()

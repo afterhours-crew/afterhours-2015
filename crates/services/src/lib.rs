@@ -89,6 +89,24 @@ pub fn error_reply(request: nfs_fire2::Fields, code: i32) -> Option<Vec<u8>> {
     .ok()
 }
 
+/// The address a bound listener is given to the game at: one concrete IPv4
+/// address with a port, loopback on this computer or the one address the
+/// server serves a network on. Unspecified, broadcast and multicast
+/// addresses cannot be connected to.
+pub(crate) fn advertised(address: std::net::SocketAddr) -> Option<std::net::SocketAddrV4> {
+    match address {
+        std::net::SocketAddr::V4(a)
+            if a.port() != 0
+                && !a.ip().is_unspecified()
+                && !a.ip().is_broadcast()
+                && !a.ip().is_multicast() =>
+        {
+            Some(a)
+        }
+        _ => None,
+    }
+}
+
 pub mod world_readiness;
 
 pub mod matchmaking_status;

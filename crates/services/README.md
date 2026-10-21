@@ -87,7 +87,8 @@ rotation and gameplay reward policies are not inferred by this service.
   its build identity. Callers supply their own content; no catalog is bundled.
 
 Bootstrap pre-authentication, ping and IdentityParams use a versioned deployment
-document and caller-bound loopback endpoints. Configuration includes product
+document and caller-bound endpoints on the server's listen address (loopback,
+or one concrete network IPv4 address). Configuration includes product
 metadata, bounded scalar settings and latency site names; endpoint values are
 generated locally, and the bandwidth site stays unset. Each connection commits
 its ordering transition only after a complete write. Exact retries preserve time;
@@ -129,7 +130,8 @@ binding, positive wire persona/account IDs and display name), deployment policy,
 and fresh caller-supplied entropy per connection. The edge authorizes the local
 account and compares its storage binding before serving. External auth codes are
 shape-checked only and never retained, verified remotely or returned. Login emits
-four ordered frames; post-auth advertises loopback services. State advances only
+four ordered frames; post-auth advertises the auxiliary listener's address for
+telemetry and the ticker. State advances only
 after the entire batch writes; partial failure closes the exchange. Retries with
 the same correlation retain the first clock value. Persistent identities survive
 reconnect while session/telemetry/ticker tokens and connection IDs refresh.
