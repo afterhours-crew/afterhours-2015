@@ -335,7 +335,10 @@ pub fn supervise(request_path: &Path, build: Build) -> Result<()> {
     let id = request.id.clone();
     let api = match hub {
         Some(hub) => {
-            let control = Arc::new(crate::api::LiveControl::new(data.clone(), build));
+            let control = Arc::new(
+                crate::api::LiveControl::new(data.clone(), build)
+                    .playing_elsewhere(request.remote.is_some()),
+            );
             let bind = std::net::SocketAddrV4::new(
                 request.listen_address(),
                 request.api_port.unwrap_or(0),

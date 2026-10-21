@@ -995,6 +995,24 @@ fn start_remote_asks_the_server_where_a_game_reaches_it() {
 }
 
 #[test]
+fn a_game_against_a_server_elsewhere_answers_no_saves_or_settings_here() {
+    let data = crate::testing::scratch("api-elsewhere");
+    let control = LiveControl::new(data.clone(), Build::LAUNCHER).playing_elsewhere(true);
+    for failure in [
+        control.settings().unwrap_err(),
+        control.save_settings(Some(100), None).unwrap_err(),
+        control.profile().unwrap_err(),
+        control.profiles().unwrap_err(),
+        control.profile_of(&"5a".repeat(16)).unwrap_err(),
+    ] {
+        assert_eq!(failure.exit, Exit::Refused);
+        assert!(failure.message.contains("elsewhere"), "{}", failure.message);
+    }
+    assert!(!data.join(settings::FILE).exists(), "nothing saved here");
+    let _ = std::fs::remove_dir_all(data);
+}
+
+#[test]
 fn the_token_is_kept_across_sessions_until_deleted() {
     let data = crate::testing::scratch("api-token");
     let first = stored_token(&data).unwrap();

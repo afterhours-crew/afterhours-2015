@@ -709,6 +709,9 @@ pub struct LiveControl {
     /// One settings save at a time: each reads, changes and replaces the
     /// file, and the temporary file is named after this process.
     saving: Mutex<()>,
+    /// A game here against a server elsewhere (`start --remote`): that
+    /// server keeps the saves and settings, so they are not answered here.
+    remote: bool,
 }
 
 impl LiveControl {
@@ -717,7 +720,23 @@ impl LiveControl {
             data,
             build,
             saving: Mutex::new(()),
+            remote: false,
         }
+    }
+
+    /// For a `start --remote` session: refuse what the server elsewhere keeps.
+    pub fn playing_elsewhere(mut self, remote: bool) -> Self {
+        self.remote = remote;
+        self
+    }
+
+    fn here(&self) -> Result<()> {
+        if self.remote {
+            return Err(Failure::refused(
+                "This session plays against your server elsewhere; ask that server.",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -735,6 +754,7 @@ impl Control for LiveControl {
         crate::commands::status::play_report(&self.data)
     }
     fn settings(&self) -> Result<SettingsReport> {
+        self.here()?;
         crate::commands::settings::settings_report(&self.data, None, None)
     }
     fn save_settings(
@@ -742,16 +762,20 @@ impl Control for LiveControl {
         traffic: Option<u16>,
         rivals: Option<Rivals>,
     ) -> Result<SettingsReport> {
+        self.here()?;
         let _one = self.saving.lock().unwrap_or_else(|e| e.into_inner());
         crate::commands::settings::settings_report(&self.data, traffic, rivals)
     }
     fn profile(&self) -> Result<Profile> {
+        self.here()?;
         crate::commands::profile::profile_report(&self.data, &crate::cli::ProfileArgs::default())
     }
     fn profiles(&self) -> Result<crate::profile::Listing> {
+        self.here()?;
         crate::commands::profile::profile_list_report(&self.data, None)
     }
     fn profile_of(&self, account_id: &str) -> Result<Profile> {
+        self.here()?;
         let args = crate::cli::ProfileArgs {
             account_id: Some(account_id.to_owned()),
             ..Default::default()
