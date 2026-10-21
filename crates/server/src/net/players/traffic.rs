@@ -3,7 +3,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 use super::*;
 use crate::traffic_content::population::{Focus, Input};
-use nfs_world::application::Random;
+use nfs_world::{application::Random, participants::Stage};
 
 pub(super) fn ai_departures(
     calls: &[nfs_world::participants::HostRpc],
@@ -26,9 +26,19 @@ impl PlayerListener {
     }
     pub(super) fn ai_focus(&self) -> Result<Vec<Focus>, replication::Error> {
         let mut focus = Vec::new();
-        for participant in self.participants.in_free_roam() {
-            if !self.free_roam_presented.contains(&participant) {
-                continue;
+        let participants: BTreeSet<_> = self
+            .world_cars
+            .values()
+            .filter_map(|(owner, ready)| ready.then_some(*owner))
+            .collect();
+        for participant in participants {
+            match self.participants.stage(participant) {
+                // Crashing suspends driving presentation, but the car remains
+                // in the world. Keep it as a focus for traffic and rivals.
+                Some(Stage::Crashing) => {}
+                Some(Stage::FreeRoam | Stage::ReturnPrompted)
+                    if self.free_roam_presented.contains(&participant) => {}
+                _ => continue,
             }
             let Some((&car, _)) = self
                 .world_cars

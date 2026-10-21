@@ -296,6 +296,8 @@ lock and crash sequence. The client's sequence-completion message restores the
 driving objects and re-arms world activation. The installed server timer supplies
 a fallback Stop; completion can arrive before that timer. Duplicate completion,
 stale movement and a held crash flag cannot start another recovery.
+The owned car remains a focus for nearby traffic and roaming rivals while crash
+presentation hides the driving context, so a crash does not retire the AI population.
 The optional `crash` sequence definition has two serializers and no linked
 cinematic channel. Garage logic supplies paired `crashed`/`recovered` batches,
 which must restore the same live roles. If the car remains crashed at completion,

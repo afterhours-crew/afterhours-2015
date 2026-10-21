@@ -197,6 +197,88 @@ fn reset_presentation_requires_paired_phases_and_cleanup() {
     doc.as_object_mut().unwrap().remove("reset_arrived");
     assert!(GarageLogic::from_json(&doc).is_ok());
 }
+
+#[test]
+fn crash_keeps_ai_focus_and_existing_traffic_while_driving_presentation_is_hidden() {
+    use crate::traffic_content::population::{Input, tests as traffic};
+    let (mut listener, owner) = setup();
+    let vehicle = car(&mut listener, owner);
+    let mut physics = listener
+        .players
+        .vehicle_physics(owner.connection, owner.persona, vehicle)
+        .unwrap();
+    physics.position = nfs_world::replication::vehicle::Vector::from_position(
+        traffic::focus().position,
+        [0.; 3],
+        7,
+    )
+    .unwrap();
+    listener
+        .players
+        .set_vehicle_physics(owner.connection, owner.persona, vehicle, physics)
+        .unwrap();
+    listener
+        .world_cars
+        .insert(vehicle, (owner.participant, true));
+    assert!(
+        listener.ai_focus().unwrap().is_empty(),
+        "initial presentation is still required"
+    );
+    listener.free_roam_presented.insert(owner.participant);
+    let initial_focus = listener.ai_focus().unwrap();
+    assert_eq!(initial_focus.len(), 1);
+    let describe = |focus: &[crate::traffic_content::population::Focus]| {
+        focus
+            .iter()
+            .map(|f| (f.id, f.position, f.velocity, f.forward))
+            .collect::<Vec<_>>()
+    };
+    let (mut population, mut world, content) = traffic::fixture_with(owner.connection);
+    let ids = traffic::spawn(&mut population, &mut world, &content, owner.connection)
+        .spawned
+        .unwrap();
+    for cycle in 0..3 {
+        listener.participants.crashed(owner.participant).unwrap();
+        listener.advance_world_activation().unwrap();
+        assert!(listener.participants.in_free_roam().is_empty());
+        assert!(!listener.free_roam_presented.contains(&owner.participant));
+        let focus = listener.ai_focus().unwrap();
+        assert_eq!(describe(&focus), describe(&initial_focus));
+        let changes = population
+            .advance(
+                &mut world,
+                owner.connection,
+                100,
+                &content,
+                Input {
+                    now: 1002 + cycle * 5000,
+                    focus: &focus,
+                    random: [0; 2],
+                },
+            )
+            .unwrap();
+        assert!(changes.leave.is_empty() && changes.deleted.is_empty());
+        assert!(population.count() >= 1);
+        assert!(world.objects().get(ids.vehicle).is_some());
+        listener.participants.recovered(owner.participant).unwrap();
+        listener.advance_world_activation().unwrap();
+        assert_eq!(
+            describe(&listener.ai_focus().unwrap()),
+            describe(&initial_focus)
+        );
+    }
+    listener.world_cars.get_mut(&vehicle).unwrap().1 = false;
+    listener.participants.crashed(owner.participant).unwrap();
+    assert!(
+        listener.ai_focus().unwrap().is_empty(),
+        "unready cars remain excluded"
+    );
+    listener.world_cars.clear();
+    assert!(
+        listener.ai_focus().unwrap().is_empty(),
+        "removed cars cannot retain AI"
+    );
+}
 fn completion_frame(owner: Owner, ghost: u16, sequence: u8) -> BitWriter {
     let call = Completed {
         sequence: ghost,
