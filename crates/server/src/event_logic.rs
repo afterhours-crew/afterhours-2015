@@ -579,11 +579,7 @@ impl Content {
                 network,
                 &self.event.game_mode.checkpoint_points,
                 self.event.game_mode.laps,
-                self.event
-                    .game_mode
-                    .pacing
-                    .clone()
-                    .ok_or(Error::Unsupported)?,
+                self.event.game_mode.pacing.clone(),
             )?,
         ));
         Ok(self)

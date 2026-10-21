@@ -74,7 +74,7 @@ struct Segment {
 pub struct Network {
     lanes: Vec<Lane>,
     segments: Vec<Segment>,
-    adjacent: Vec<Vec<(usize, f32)>>,
+    adjacent: Vec<Vec<(usize, f32, usize)>>,
     grid: Vec<Vec<Vec<usize>>>,
 }
 
@@ -83,6 +83,9 @@ pub struct Network {
 pub struct Target {
     location: Location,
     nodes: Vec<f32>,
+    // Next lane and node on the shortest route. None is an endpoint on the
+    // target lane (or an unreachable node). Prepared with the distance table.
+    steps: Vec<Option<(usize, usize)>>,
 }
 
 fn finite(v: f32) -> Result<f32, Error> {
@@ -362,8 +365,8 @@ impl Network {
                 segments[id].after = after;
             }
             if lane.layer != 0 {
-                adjacent[lane.start].push((lane.end, total));
-                adjacent[lane.end].push((lane.start, total));
+                adjacent[lane.start].push((lane.end, total, lane_index));
+                adjacent[lane.end].push((lane.start, total, lane_index));
             }
         }
         if segments.iter().any(|s| s.lane == usize::MAX) {
@@ -435,6 +438,7 @@ impl Network {
 
     pub fn prepare_target(&self, location: Location) -> Result<Target, Error> {
         let mut nodes = vec![f32::INFINITY; self.adjacent.len()];
+        let mut steps = vec![None; self.adjacent.len()];
         let mut pending = BinaryHeap::new();
         for (node, distance) in self.endpoints(location)? {
             if distance < nodes[node] {
@@ -446,15 +450,20 @@ impl Network {
             if distance != nodes[node] {
                 continue;
             }
-            for &(next, length) in &self.adjacent[node] {
+            for &(next, length, lane) in &self.adjacent[node] {
                 let candidate = finite(distance + length)?;
                 if candidate < nodes[next] {
                     nodes[next] = candidate;
+                    steps[next] = Some((lane, node));
                     pending.push(Visit(next, candidate));
                 }
             }
         }
-        Ok(Target { location, nodes })
+        Ok(Target {
+            location,
+            nodes,
+            steps,
+        })
     }
 
     pub fn distance(&self, from: Location, target: &Target) -> Result<Option<f32>, Error> {
@@ -479,5 +488,6 @@ impl Network {
     }
 }
 
+mod recovery;
 #[cfg(test)]
 mod tests;

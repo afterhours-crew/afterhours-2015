@@ -1,0 +1,57 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "AccountRecord": {
+      "description": "`account.json`: which saved account this data directory uses.",
+      "properties": {
+        "local_account": {
+          "description": "The 32-character account ID; the save is `artifacts/account/<id>.sqlite`.",
+          "type": "string"
+        },
+        "progression": {
+          "description": "Story progression the account was created with, `post-intro`.",
+          "type": "string"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "local_account",
+        "progression"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "`recover --json`.",
+  "properties": {
+    "account": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/AccountRecord"
+        }
+      ],
+      "description": "The account record now in `account.json`."
+    },
+    "version": {
+      "const": 1,
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "written": {
+      "description": "Whether `account.json` was written now; `false` when it already\nnamed this account.",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "version",
+    "account",
+    "written"
+  ],
+  "title": "RecoverReport",
+  "type": "object"
+}

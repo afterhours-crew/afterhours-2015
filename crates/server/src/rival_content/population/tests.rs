@@ -1173,3 +1173,286 @@ fn rival_limit_caps_active_racers_and_zero_turns_them_off() {
         (0, 0, 0)
     );
 }
+
+/// Racers like the installed ones: one per spawn, each with its own small
+/// region around that spawn, so only a racer spawned at the player is one of
+/// the game's own there.
+fn spread(p: &mut Population, spawns: &[[f32; 3]]) {
+    let data = Arc::make_mut(&mut p.content);
+    let template = data.data.racers[0].clone();
+    data.data.racers = spawns
+        .iter()
+        .enumerate()
+        .map(|(i, &[x, y, z])| {
+            let mut r = template.clone();
+            r.guid = [i as u8 + 1; 16];
+            r.position = [x, y, z];
+            r.regions = vec![
+                Region::new(
+                    vec![
+                        [x - 10., y, z - 10.],
+                        [x + 10., y, z - 10.],
+                        [x + 10., y, z + 10.],
+                        [x - 10., y, z + 10.],
+                    ],
+                    20.,
+                )
+                .unwrap(),
+            ];
+            r
+        })
+        .collect();
+    p.racers = vec![Racer::default(); spawns.len()];
+}
+
+fn at(x: f32, z: f32) -> Focus {
+    Focus {
+        id: 1,
+        position: [x, 1., z],
+    }
+}
+
+fn active(p: &Population) -> Vec<usize> {
+    (0..p.racers.len())
+        .filter(|&i| p.racers[i].active.is_some())
+        .collect()
+}
+
+/// Advance `ticks` milliseconds around one player.
+fn drive(
+    p: &mut Population,
+    world: &mut Players,
+    registry: &mut registrations::Registry,
+    now: &mut u64,
+    player: Focus,
+    ticks: u64,
+) -> Vec<Changes> {
+    (0..ticks)
+        .map(|_| {
+            let c = p
+                .advance(world, registry, 1, 100, input(*now, &[player]))
+                .unwrap();
+            *now += 1;
+            c
+        })
+        .collect()
+}
+
+#[test]
+fn a_chosen_count_adds_the_nearest_installed_racers_once_each() {
+    let (mut p, world, registry, _) = fixture(1);
+    spread(
+        &mut p,
+        &[
+            [5., 0., 2.],
+            [3000., 0., 2.],
+            [1000., 0., 2.],
+            [-1500., 0., 2.],
+            [2000., 0., 2.],
+            // 4.2 km away: beyond FILL_IN.
+            [-3000., 0., 3002.],
+            // The nearest spawn, but with no road near it.
+            [100., 0., 500.],
+        ],
+    );
+    let run = |limit: Option<u16>| {
+        let mut p = p.clone().with_limit(limit);
+        let (mut world, mut registry, mut now) = (world.clone(), registry.clone(), 0);
+        drive(&mut p, &mut world, &mut registry, &mut now, focus(), 30);
+        assert_eq!(world.ai_slot_count(), p.count());
+        (active(&p), p.racers[6].stranded)
+    };
+    // The game's own number here is one: only the first racer's region holds
+    // the player, and native rules never try the stranded spawn.
+    assert_eq!(run(None), (vec![0], false));
+    assert_eq!(run(Some(1)), (vec![0], false));
+    // Added nearest first (1 km, 1.5 km, 2 km), after the game's own racer;
+    // the stranded spawn is tried once and then skipped.
+    assert_eq!(run(Some(4)), (vec![0, 2, 3, 4], true));
+    // More than the installed racers near the player allow: every racer
+    // within 3.5 km once, never a second instance of one.
+    assert_eq!(run(Some(15)), (vec![0, 1, 2, 3, 4], true));
+    assert_eq!(run(Some(0)), (vec![], false));
+}
+
+#[test]
+fn a_chosen_count_keeps_racers_to_4500_m_and_refills_near_the_player() {
+    let (mut p, mut world, mut registry, _) = fixture(1);
+    spread(
+        &mut p,
+        &[[1000., 0., 2.], [-1500., 0., 2.], [-2500., 0., 3002.]],
+    );
+    let mut p = p.with_limit(Some(2));
+    let mut now = 0;
+    drive(&mut p, &mut world, &mut registry, &mut now, at(0., 0.), 5);
+    // The third racer's spawn is 3.9 km away: not added.
+    assert_eq!(active(&p), [0, 1]);
+    // 4.27 km from the first racer: still kept, so nothing is added.
+    drive(
+        &mut p,
+        &mut world,
+        &mut registry,
+        &mut now,
+        at(-3000., 1500.),
+        5,
+    );
+    assert_eq!(active(&p), [0, 1]);
+    // 5 km from the first racer: retired, and the racer whose spawn is now
+    // 500 m away takes its place and gets a car.
+    let changes = drive(
+        &mut p,
+        &mut world,
+        &mut registry,
+        &mut now,
+        at(-3000., 3002.),
+        5,
+    );
+    assert_eq!(active(&p), [1, 2]);
+    assert_eq!(changes.iter().filter(|c| c.activated.is_some()).count(), 1);
+    assert_eq!(changes.iter().filter(|c| c.spawned.is_some()).count(), 1);
+    assert!(p.racers[2].active.as_ref().unwrap().car.is_some());
+    assert_eq!((world.ai_slot_count(), world.ai_count()), (2, 1));
+    // Without players every racer is retired, as natively.
+    p.advance(&mut world, &mut registry, 1, 100, input(now, &[]))
+        .unwrap();
+    assert_eq!(
+        (p.count(), world.ai_slot_count(), world.ai_count()),
+        (0, 0, 0)
+    );
+}
+
+#[test]
+fn the_games_own_racers_take_the_place_of_added_ones_at_the_count() {
+    let (mut p, mut world, mut registry, _) = fixture(1);
+    spread(&mut p, &[[1000., 0., 2.], [-2000., 0., 2.]]);
+    let mut p = p.with_limit(Some(1));
+    let mut now = 0;
+    drive(&mut p, &mut world, &mut registry, &mut now, at(0., 0.), 5);
+    assert_eq!(active(&p), [0]);
+    // In the second racer's region the first, 3 km away and without a car,
+    // is kept only by the count; the region racer replaces it.
+    drive(
+        &mut p,
+        &mut world,
+        &mut registry,
+        &mut now,
+        at(-2000., 0.),
+        12,
+    );
+    assert_eq!(active(&p), [1]);
+    assert_eq!(world.ai_slot_count(), 1);
+    // A racer with a car (driven by the client) is never replaced.
+    let (mut p, mut world, mut registry, _) = fixture(1);
+    spread(&mut p, &[[500., 0., 2.], [-200., 0., 2.]]);
+    let mut p = p.with_limit(Some(1));
+    let mut now = 0;
+    drive(&mut p, &mut world, &mut registry, &mut now, at(0., 0.), 3);
+    assert_eq!(active(&p), [1]);
+    assert!(p.racers[1].active.as_ref().unwrap().car.is_some());
+    // The first racer's region holds the player now, but the second has its
+    // car and is within the hand-back distance.
+    drive(
+        &mut p,
+        &mut world,
+        &mut registry,
+        &mut now,
+        at(500., 0.),
+        12,
+    );
+    assert_eq!(active(&p), [1]);
+}
+
+#[test]
+fn chosen_rivals_still_get_cars_when_traffic_holds_its_whole_share() {
+    let (mut p, mut world, mut registry, _) = fixture(1);
+    let template = p.content.data.racers[0].clone();
+    let racers = |count: usize| {
+        (0..count)
+            .map(|i| {
+                let mut r = template.clone();
+                r.guid = [i as u8 + 1; 16];
+                r
+            })
+            .collect::<Vec<_>>()
+    };
+    // Another population holds every AI car ambient traffic may use.
+    let share = crate::traffic_content::population::MAX_CARS;
+    let mut traffic = p.clone();
+    (traffic.next, traffic.slots) = (1, 1_000);
+    Arc::make_mut(&mut traffic.content).data.racers = racers(share);
+    traffic.racers = vec![Racer::default(); share];
+    Arc::make_mut(&mut p.content).data.racers = racers(20);
+    p.racers = vec![Racer::default(); 20];
+    let mut p = p.with_limit(Some(crate::ai_settings::MAX_RIVALS));
+    for now in 0..share as u64 + 10 {
+        traffic
+            .advance(&mut world, &mut registry, 1, 100, input(now, &[focus()]))
+            .unwrap();
+    }
+    assert_eq!(world.ai_count(), share);
+    for now in 0..30 {
+        p.advance(&mut world, &mut registry, 1, 100, input(now, &[focus()]))
+            .unwrap();
+    }
+    let cars = p
+        .racers
+        .iter()
+        .filter(|r| r.active.as_ref().is_some_and(|a| a.car.is_some()))
+        .count();
+    assert_eq!((p.count(), cars, world.ai_count()), (15, 15, ai::MAX_AI));
+}
+
+#[test]
+fn a_count_changed_while_running_never_removes_a_shown_car() {
+    let (mut p, mut world, mut registry, _) = fixture(1);
+    // One racer 300 m away (it gets a car) and four farther out.
+    spread(
+        &mut p,
+        &[
+            [300., 0., 2.],
+            [1000., 0., 2.],
+            [-1500., 0., 2.],
+            [2000., 0., 2.],
+            [-2500., 0., 2.],
+        ],
+    );
+    p.set_limit(Some(5));
+    let mut now = 0;
+    drive(&mut p, &mut world, &mut registry, &mut now, at(0., 0.), 8);
+    assert_eq!(active(&p), [0, 1, 2, 3, 4]);
+    assert!(p.racers[0].active.as_ref().unwrap().car.is_some());
+    // Lower: racers without a car go at once, farthest first.
+    p.set_limit(Some(2));
+    let c = drive(&mut p, &mut world, &mut registry, &mut now, at(0., 0.), 1);
+    assert_eq!(active(&p), [0, 1]);
+    assert_eq!(c[0].deleted.len(), 6, "three participants and actors");
+    // Off: the racer with a car stays until its car is handed back.
+    p.set_limit(Some(0));
+    drive(&mut p, &mut world, &mut registry, &mut now, at(0., 0.), 3);
+    assert_eq!(active(&p), [0]);
+    assert_eq!(world.ai_count(), 1);
+    // The player drives away: hand-back beyond 800 m, then it is retired.
+    drive(
+        &mut p,
+        &mut world,
+        &mut registry,
+        &mut now,
+        at(-1200., 0.),
+        3,
+    );
+    assert_eq!(
+        (p.count(), world.ai_slot_count(), world.ai_count()),
+        (0, 0, 0)
+    );
+    // Back up: racers are added again, one per tick.
+    p.set_limit(Some(3));
+    let c = drive(&mut p, &mut world, &mut registry, &mut now, at(0., 0.), 5);
+    assert_eq!(c.iter().filter(|c| c.activated.is_some()).count(), 3);
+    assert_eq!(p.count(), 3);
+    // Back to the original: added racers without a car leave at once; the
+    // one with a car stays until it is handed back.
+    p.set_limit(None);
+    drive(&mut p, &mut world, &mut registry, &mut now, at(0., 0.), 2);
+    assert_eq!(active(&p), [0]);
+    assert!(p.racers[0].active.as_ref().unwrap().car.is_some());
+}

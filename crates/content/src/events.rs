@@ -28,6 +28,7 @@ pub mod ai;
 pub mod awards;
 mod invitations;
 mod pacing;
+mod recovery;
 pub mod restart;
 mod rewards;
 mod route;
@@ -121,6 +122,7 @@ impl Layout {
 /// the start area's checkpoint route.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GameMode {
+    pub recovery: Option<nfs_world::crash::route::Config>,
     pub layout: Layout,
     pub root_bindings: [(u32, usize); 3],
     pub checkpoints: Vec<(u32, usize)>,
@@ -777,6 +779,7 @@ impl AssetIndex {
             .ok_or_else(|| bad("game mode not registered"))?;
         let (gm_class, gm_local) = (gm_reference.class_id, gm_reference.local_index);
         let game_mode = GameMode {
+            recovery: recovery::extract(&gm_nodes)?,
             layout: Layout {
                 blueprint: gm_name.clone(),
                 asset: Asset {

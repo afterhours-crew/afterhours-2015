@@ -1234,6 +1234,7 @@ fn exit_handoff_keeps_car_relations_through_teleport_rollout_and_completion() {
         participant: p,
         vehicle: car,
         position: [12., 3., 40.],
+        speed: 0.,
         basis: [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]],
     }
     .encode()

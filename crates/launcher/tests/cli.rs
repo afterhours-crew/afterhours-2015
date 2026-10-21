@@ -5,7 +5,7 @@
 //! The built `nfs-afterhours` binary, driven as a user would.
 //!
 //! These tests cover the command line itself: help, usage errors, exit
-//! codes, `status`, `stop` and `recover` against a data directory, and on
+//! codes, `status`, `stop`, `profile` and `recover` against a data directory, and on
 //! Unix a complete `serve` session supervised over a stand-in server
 //! script. No game installation is needed; the one check that requires the
 //! real game digest is exercised by its refusal.
@@ -99,7 +99,20 @@ fn help_lists_every_public_subcommand_and_the_exit_table() {
     assert_eq!(out.status.code(), Some(0));
     let help = text(&out.stdout);
     for sub in [
-        "check", "setup", "serve", "start", "status", "stop", "recover",
+        "check",
+        "setup",
+        "serve",
+        "start",
+        "status",
+        "stop",
+        "play",
+        "profile",
+        "car-images",
+        "sessions",
+        "settings",
+        "version",
+        "schema",
+        "recover",
     ] {
         assert!(
             help.contains(&format!("\n  {sub}")),
@@ -135,9 +148,171 @@ fn status_and_stop_on_an_unused_data_directory() {
     assert_eq!(out.status.code(), Some(0));
     assert!(text(&out.stdout).contains("No Afterhours session"));
     let out = run(&["--data-dir", data.to_str().unwrap(), "--json", "status"]);
-    assert_eq!(text(&out.stdout).trim(), r#"{"state":"none"}"#);
+    assert_eq!(text(&out.stdout).trim(), r#"{"version":1,"session":null}"#);
     let out = run(&["--data-dir", data.to_str().unwrap(), "stop"]);
     assert_eq!(out.status.code(), Some(4), "{}", text(&out.stderr));
+    let out = run(&["--data-dir", data.to_str().unwrap(), "play", "--json"]);
+    assert_eq!(out.status.code(), Some(4), "{}", text(&out.stderr));
+    assert!(out.stdout.is_empty(), "a refused play prints no record");
+    assert!(text(&out.stderr).contains("nfs-afterhours serve"));
+    assert!(
+        std::fs::read_dir(&data).unwrap().next().is_none(),
+        "play wrote nothing"
+    );
+    std::fs::remove_dir_all(data).unwrap();
+}
+
+fn json(out: &Output) -> serde_json::Value {
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+#[test]
+fn version_reports_records_and_capabilities_and_schema_prints_each_one() {
+    let report = json(&run(&["version", "--json"]));
+    assert_eq!(report["version"], 1);
+    assert_eq!(report["program"], "nfs-afterhours");
+    assert_eq!(report["program_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        report["capabilities"],
+        serde_json::json!([
+            "profile",
+            "sessions",
+            "events",
+            "play",
+            "car-images",
+            "world-settings"
+        ])
+    );
+    assert_eq!(report["os"], std::env::consts::OS);
+    let records = report["records"].as_object().unwrap();
+    let schemas = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("schema");
+    let mut files: Vec<String> = std::fs::read_dir(&schemas)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    files.sort();
+    let mut expected: Vec<String> = records
+        .keys()
+        .map(|name| format!("{name}.schema.json"))
+        .collect();
+    expected.sort();
+    assert_eq!(files, expected, "one committed schema per record");
+    for (name, version) in records {
+        let out = run(&["schema", name]);
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        let committed = std::fs::read_to_string(schemas.join(format!("{name}.schema.json")))
+            .unwrap()
+            .replace("\r\n", "\n");
+        assert_eq!(text(&out.stdout), committed, "{name}");
+        let schema: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(&schema["properties"]["version"]["const"], version, "{name}");
+    }
+    let text_version = run(&["version"]);
+    assert!(
+        text(&text_version.stdout)
+            .contains("capabilities: profile, sessions, events, play, car-images, world-settings")
+    );
+    assert_eq!(run(&["schema", "nothing"]).status.code(), Some(2));
+}
+
+#[test]
+fn sessions_summarize_constructed_folders_without_writing() {
+    let data = scratch("sessions");
+    let dir = data.to_str().unwrap();
+    let list = json(&run(&["sessions", "--json", "--data-dir", dir]));
+    assert_eq!(list["sessions"], serde_json::json!([]));
+    assert_eq!(list["version"], 1);
+    let id = "ab".repeat(16);
+    let session = data.join("artifacts").join("launcher").join(&id);
+    std::fs::create_dir_all(&session).unwrap();
+    let request = serde_json::json!({
+        "version": 1, "id": id, "action": "serve", "game_directory": "game",
+        "data_directory": data, "server_path": "server",
+        "server_sha256": "e".repeat(64), "player_name": "Driver",
+        "record_protocol": false
+    });
+    std::fs::write(session.join("request.json"), request.to_string()).unwrap();
+    std::fs::write(
+        session.join("status.json"),
+        format!(
+            r#"{{"version":1,"id":"{id}","utc":"2026-10-18T09:00:00Z","state":"finished","message":"Server closed.","worker_pid":1,"game_pid":null,"server_pid":2}}"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        session.join("server.stderr.log"),
+        "2026-10-18T08:19:41Z  WARN nfs_server::diagnostics: unsupported operation received service=\"lsx\" route=Some(\"QueryFriends\") seen=1\n2026-10-18T08:19:42Z  INFO nfs_server: stopping\n",
+    )
+    .unwrap();
+    let entries = |path: &std::path::Path| std::fs::read_dir(path).unwrap().count();
+    let before = (entries(&data), entries(&session));
+    let list = json(&run(&["sessions", "--json", "--data-dir", dir]));
+    assert_eq!(
+        before,
+        (entries(&data), entries(&session)),
+        "nothing written"
+    );
+    let summary = &list["sessions"][0];
+    assert_eq!(summary["id"], id.as_str());
+    assert_eq!(summary["action"], "serve");
+    assert_eq!(summary["state"], "finished");
+    assert_eq!(summary["ended_utc"], "2026-10-18T09:00:00Z");
+    assert_eq!(summary["server_log"]["levels"]["warn"], 1);
+    assert_eq!(
+        summary["server_log"]["unsupported"],
+        serde_json::json!([{"service": "lsx", "route": "QueryFriends", "warnings": 1}])
+    );
+    assert_eq!(summary["runs_directory_exists"], false);
+    let one = json(&run(&[
+        "sessions",
+        "--json",
+        "--id",
+        &id,
+        "--data-dir",
+        dir,
+    ]));
+    assert_eq!(one["sessions"].as_array().unwrap().len(), 1);
+    let shown = run(&["sessions", "--data-dir", dir]);
+    assert!(text(&shown.stdout).contains("unsupported lsx QueryFriends x1"));
+    let absent = run(&["sessions", "--id", &"cd".repeat(16), "--data-dir", dir]);
+    assert_eq!(absent.status.code(), Some(4));
+    let invalid = run(&["sessions", "--id", "ABC", "--data-dir", dir]);
+    assert_eq!(invalid.status.code(), Some(1));
+    std::fs::remove_dir_all(data).unwrap();
+}
+
+#[test]
+fn an_event_stream_refused_before_a_session_is_one_final_line() {
+    let data = scratch("events-refused");
+    let server = data.join(format!("fake-server{}", std::env::consts::EXE_SUFFIX));
+    std::fs::write(&server, b"x").unwrap();
+    let out = run(&[
+        "--data-dir",
+        data.join("store").to_str().unwrap(),
+        "serve",
+        "--events",
+        "--game-dir",
+        data.join("no-game").to_str().unwrap(),
+        "--server",
+        server.to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(
+        out.stderr.is_empty(),
+        "console text is silenced: {}",
+        text(&out.stderr)
+    );
+    let stdout = text(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 1, "{stdout}");
+    let event: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(event["version"], 1);
+    assert_eq!(event["event"], "final");
+    assert_eq!(event["exit_code"], 1);
+    assert!(event["status"].is_null());
+    assert!(!event["message"].as_str().unwrap().is_empty());
+    assert!(!data.join("store").exists(), "nothing was written");
     std::fs::remove_dir_all(data).unwrap();
 }
 
@@ -228,6 +403,136 @@ fn recover_restores_a_pointer_only_for_a_real_database() {
 /// A stand-in `nfs-server`: answers `prepare-local` and `create-account`
 /// with the JSON shapes the real server prints, and otherwise prints a
 /// readiness record and waits for its `--stop-file`.
+#[test]
+fn profile_reads_a_saved_driver_and_reports_missing_accounts() {
+    use nfs_storage::{
+        AccountId, Batch, GarageSlots, Op, Timestamp,
+        account::{Document, Kind, Repository},
+    };
+    let data = scratch("profile");
+    let dir = data.to_str().unwrap();
+    let out = run(&["profile", "--json", "--data-dir", dir]);
+    assert_eq!(out.status.code(), Some(4), "{}", text(&out.stderr));
+    let out = run(&["profile", "--list", "--json", "--data-dir", dir]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let listing: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(listing["accounts"], serde_json::json!([]));
+    // A synthetic save selected by account.json; no prepared content.
+    let id = "5a".repeat(16);
+    let account = AccountId::from_owned_config([0x5a; 16]).unwrap();
+    let identity = serde_json::json!({"version": 1, "storage_account": id,
+        "persona": 41, "account": 42, "name": "Cli Tester"});
+    let documents: Vec<_> = Kind::ALL
+        .into_iter()
+        .map(|kind| {
+            let bytes = if kind == Kind::Identity {
+                identity.to_string().into_bytes()
+            } else {
+                b"{}".to_vec()
+            };
+            (kind, Document { revision: 1, bytes })
+        })
+        .collect();
+    let batch = Batch {
+        id: 1,
+        expected_generation: 0,
+        ops: vec![Op::SetGarage(GarageSlots::default())],
+    };
+    let accounts = data.join("artifacts").join("account");
+    std::fs::create_dir_all(&accounts).unwrap();
+    Repository::open_owned_directory(&accounts)
+        .unwrap()
+        .initialize_fresh(account, &documents, &batch, Timestamp(1))
+        .unwrap();
+    std::fs::write(
+        data.join("account.json"),
+        format!(r#"{{"version":1,"local_account":"{id}","progression":"post-intro"}}"#),
+    )
+    .unwrap();
+    let save = accounts.join(format!("{id}.sqlite"));
+    let before = std::fs::read(&save).unwrap();
+    // An empty game directory: no test reads a registered installation.
+    let no_game = scratch("profile-no-game");
+    let game = no_game.to_str().unwrap();
+    let out = run(&["profile", "--json", "--data-dir", dir, "--game-dir", game]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let profile: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(profile["identity"]["display_name"], "Cli Tester");
+    assert_eq!(profile["identity"]["persona_id"], "41");
+    assert_eq!(profile["bank"]["balance"], 0);
+    assert_eq!(profile["save"]["generation"], 1);
+    assert_eq!(profile["active"], true);
+    assert!(profile["reputation"].is_null(), "no content, no REP schema");
+    assert!(!profile["warnings"].as_array().unwrap().is_empty());
+    assert!(
+        profile["localization"].is_null(),
+        "no installation, no names"
+    );
+    let out = run(&["profile", "--data-dir", dir, "--game-dir", game]);
+    let shown = text(&out.stdout);
+    assert!(
+        shown.contains("Cli Tester (selected)") && shown.contains("Bank $0"),
+        "{shown}"
+    );
+    let out = run(&["profile", "--list", "--json", "--data-dir", dir]);
+    let listing: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(listing["accounts"][0]["display_name"], "Cli Tester");
+    let out = run(&[
+        "profile",
+        "--data-dir",
+        dir,
+        "--account-id",
+        &"7b".repeat(16),
+        "--game-dir",
+        game,
+    ]);
+    assert_eq!(out.status.code(), Some(4));
+    let out = run(&["profile", "--data-dir", dir, "--account-id", "nope"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        std::fs::read(&save).unwrap(),
+        before,
+        "profile never writes"
+    );
+    // Another process holding an uncommitted write, as a running server
+    // would, neither blocks the profile nor shows through.
+    let writer = rusqlite::Connection::open(&save).unwrap();
+    writer
+        .execute_batch("BEGIN IMMEDIATE; UPDATE meta SET generation=generation+5;")
+        .unwrap();
+    let generation = |out: Output| {
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap()["save"]["generation"]
+            .clone()
+    };
+    assert_eq!(
+        generation(run(&[
+            "profile",
+            "--json",
+            "--data-dir",
+            dir,
+            "--game-dir",
+            game
+        ])),
+        1
+    );
+    writer.execute_batch("COMMIT;").unwrap();
+    assert_eq!(
+        generation(run(&[
+            "profile",
+            "--json",
+            "--data-dir",
+            dir,
+            "--game-dir",
+            game
+        ])),
+        6
+    );
+    drop(writer);
+    std::fs::remove_dir_all(data).unwrap();
+    std::fs::remove_dir_all(no_game).unwrap();
+}
+
 #[cfg(unix)]
 fn fake_server(dir: &Path, data: &Path) -> PathBuf {
     let policy = dir.join("account-policy.json");
@@ -327,6 +632,13 @@ fn a_serve_session_prepares_runs_reports_and_stops() {
         std::thread::sleep(std::time::Duration::from_millis(50));
     };
     assert!(ready.contains("\"server_pid\":"), "{ready}");
+    assert!(ready.contains("\"action\":\"serve\""), "{ready}");
+    assert!(ready.contains("\"game_running\":false"), "{ready}");
+    // Only Windows hosts the game; the serving session is left as it was.
+    let play = run(&["--data-dir", &data_arg, "play"]);
+    assert_eq!(play.status.code(), Some(1), "{}", text(&play.stderr));
+    assert!(text(&play.stderr).contains("Windows only"));
+    assert!(!run_dir.join("play").exists());
     assert!(
         data.join("account.json").exists(),
         "account pointer written"
@@ -376,6 +688,95 @@ fn a_serve_session_prepares_runs_reports_and_stops() {
     assert!(text(&again.stdout).contains("Your local save is kept for next time."));
     assert!(run_dir.join("server.stdout.jsonl").exists());
     assert!(run_dir.join("prepare.stdout.json").exists());
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_serve_session_streams_its_states_and_diagnostics_as_json_lines() {
+    let base = scratch("events");
+    let data = base.join("data");
+    let game = base.join("game");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::create_dir_all(&game).unwrap();
+    let server = fake_server(&base, &data);
+    let id = "f".repeat(32);
+    let run_dir = data.join("artifacts").join("launcher").join(&id);
+    std::fs::create_dir_all(&run_dir).unwrap();
+    let request = serde_json::json!({
+        "version": 1, "id": id, "action": "serve",
+        "game_directory": game, "data_directory": data,
+        "server_path": server, "server_sha256": sha256(&server),
+        "player_name": "Tester", "record_protocol": false, "events": true
+    });
+    std::fs::write(run_dir.join("request.json"), request.to_string()).unwrap();
+    let data_arg = data.to_str().unwrap().to_owned();
+    let supervisor = bin()
+        .args([
+            "supervise",
+            "--request",
+            run_dir.join("request.json").to_str().unwrap(),
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !text(&run(&["--data-dir", &data_arg, "--json", "status"]).stdout)
+        .contains("\"state\":\"ready\"")
+    {
+        assert!(std::time::Instant::now() < deadline, "never ready");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let stop = run(&["--data-dir", &data_arg, "stop"]);
+    assert_eq!(stop.status.code(), Some(0), "{}", text(&stop.stderr));
+    let out = supervisor.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        out.stderr.is_empty(),
+        "console text is silenced: {}",
+        text(&out.stderr)
+    );
+    let events: Vec<serde_json::Value> = text(&out.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("every line is one JSON object"))
+        .collect();
+    assert!(
+        events
+            .iter()
+            .all(|e| e["version"] == 1 && e["utc"].is_string())
+    );
+    let states: Vec<&str> = events
+        .iter()
+        .filter(|e| e["event"] == "status")
+        .map(|e| e["status"]["state"].as_str().unwrap())
+        .collect();
+    assert_eq!(states, ["preparing", "ready", "stopping", "finished"]);
+    assert!(
+        events
+            .iter()
+            .filter(|e| e["event"] == "status")
+            .all(|e| e["status"]["action"] == "serve" && e["status"]["game_running"] == false),
+        "every status names its action and that no game runs"
+    );
+    let diagnostics: Vec<(&str, &str)> = events
+        .iter()
+        .filter(|e| e["event"] == "diagnostic")
+        .map(|e| (e["source"].as_str().unwrap(), e["text"].as_str().unwrap()))
+        .collect();
+    assert!(diagnostics.contains(&("server", "fake server starting")));
+    assert!(diagnostics.contains(&("server", "fake server stopping")));
+    let last = events.last().unwrap();
+    assert_eq!(
+        last["event"], "status",
+        "the front end, not the supervisor, writes final"
+    );
+    let stored: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(run_dir.join("status.json")).unwrap()).unwrap();
+    assert_eq!(
+        last["status"], stored,
+        "events carry the status.json record"
+    );
     std::fs::remove_dir_all(base).unwrap();
 }
 
@@ -433,4 +834,14 @@ fn a_session_whose_supervisor_dies_is_reported_interrupted() {
     std::fs::write(run_dir.join("stop-server"), b"stop").unwrap();
     std::thread::sleep(std::time::Duration::from_millis(300));
     std::fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn car_images_needs_prepared_content_first() {
+    let data = scratch("car-images");
+    let out = run(&["car-images", "--json", "--data-dir", data.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(4), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("run setup first"));
+    assert!(!data.join("artifacts").exists(), "nothing was written");
+    std::fs::remove_dir_all(data).unwrap();
 }

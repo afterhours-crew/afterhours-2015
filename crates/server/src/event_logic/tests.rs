@@ -450,6 +450,15 @@ pub(crate) fn event() -> Event {
             },
         ]),
         game_mode: GameMode {
+            recovery: Some(nfs_world::crash::route::Config {
+                time_before_corner: 2.,
+                sharp_corner_degrees: 60.,
+                distance_before_checkpoint: 1.,
+                time_before_checkpoint: 0.5,
+                min_speed: 10.,
+                max_speed_percent: 0.75,
+                max_delta_time: 2.,
+            }),
             layout: gm,
             root_bindings: [(GAMEPLAY, 1), (GAMEPLAY, 2), (GAMEPLAY, 3)],
             checkpoints: vec![(RACE, 6), (RACE, 7)],

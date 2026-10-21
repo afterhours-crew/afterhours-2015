@@ -14,8 +14,10 @@ on:
       - .github/workflows/release.yml
       - tools/Package-TerminalBundle.ps1
       - tools/Publish-TerminalDraft.ps1
+      - tools/Find-ReleaseNotes.ps1
       - tools/Test-TerminalDraft.ps1
       - crates/bundle/**
+      - crates/launcher/schema/**
       - docs/TESTER-QUICKSTART.md
       - docs/RELEASING.md
 
@@ -32,6 +34,8 @@ jobs:
     timeout-minutes: 90
     permissions:
       contents: write
+      # Reads the release pull request's notes for the draft.
+      pull-requests: read
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_TERM_COLOR: always
@@ -87,8 +91,10 @@ jobs:
           $env:AFTERHOURS_REVISION = (git rev-parse HEAD).Trim()
           cargo build --release --target x86_64-pc-windows-msvc -p nfs-afterhours-bundle --locked
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Package and smoke-test
+      - name: Package, verify the JSON contract and smoke-test
         id: package
+        # The bundle and Afterhours-contract.zip carry the JSON Schemas the
+        # executable prints, checked against crates/launcher/schema.
         run: |
           # Keep release staging outside target/, which rust-cache restores.
           $staging = Join-Path $env:RUNNER_TEMP "afterhours-release-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
@@ -100,6 +106,7 @@ jobs:
           name: afterhours-windows-x64
           path: |
             ${{ steps.package.outputs.directory }}/Afterhours-windows-x64.zip
+            ${{ steps.package.outputs.directory }}/Afterhours-contract.zip
             ${{ steps.package.outputs.directory }}/SHA256SUMS.txt
             ${{ steps.package.outputs.directory }}/build-info.json
           if-no-files-found: error
@@ -112,5 +119,10 @@ jobs:
         run: |
           $revision = (git rev-parse HEAD).Trim()
           if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve built revision.' }
-          ./tools/Publish-TerminalDraft.ps1 -PackageDirectory $env:AFTERHOURS_PACKAGE_DIR -Release $env:AFTERHOURS_RELEASE -Revision $revision -Repository $env:GH_REPO
+          # The notes reviewed in the release pull request that merged this
+          # commit, when there is one (Prepare release); else the default text.
+          $notes = Join-Path $env:RUNNER_TEMP 'release-notes.md'
+          ./tools/Find-ReleaseNotes.ps1 -Revision $revision -Repository $env:GH_REPO -Output $notes
+          $reviewed = if (Test-Path -LiteralPath $notes) { @{ NotesFile = $notes } } else { @{} }
+          ./tools/Publish-TerminalDraft.ps1 -PackageDirectory $env:AFTERHOURS_PACKAGE_DIR -Release $env:AFTERHOURS_RELEASE -Revision $revision -Repository $env:GH_REPO @reviewed
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

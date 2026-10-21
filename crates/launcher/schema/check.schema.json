@@ -1,0 +1,87 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "`check` output.",
+  "properties": {
+    "activation_sha256": {
+      "description": "SHA-256 of the installed activation helper; `null` when not checked.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "compatibility_name": {
+      "description": "File name the server runs under so the game accepts it (`start` only).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "data_directory": {
+      "type": "string"
+    },
+    "directory_write_access": {
+      "description": "`checked during setup`: `check` itself writes nothing.",
+      "type": "string"
+    },
+    "game_directory": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "game_sha256": {
+      "description": "SHA-256 of the installed `NFS16.exe`; `null` when no game was checked.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "machine_changes": {
+      "description": "Always empty: the launcher changes no machine-wide setting.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "registered_client_path": {
+      "description": "The existing EA client registration the game uses, read-only.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "requires_administrator": {
+      "description": "Always `false`: the launcher never needs administrator rights.",
+      "type": "boolean"
+    },
+    "server_path": {
+      "type": "string"
+    },
+    "server_sha256": {
+      "description": "SHA-256 of the server executable, lowercase hexadecimal.",
+      "type": "string"
+    },
+    "version": {
+      "const": 1,
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version",
+    "game_directory",
+    "data_directory",
+    "server_path",
+    "server_sha256",
+    "game_sha256",
+    "activation_sha256",
+    "registered_client_path",
+    "compatibility_name",
+    "requires_administrator",
+    "machine_changes",
+    "directory_write_access"
+  ],
+  "title": "Preflight",
+  "type": "object"
+}

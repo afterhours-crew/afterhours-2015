@@ -75,7 +75,7 @@ pub(crate) fn create_tables(tx: &Transaction<'_>) -> Result<(), Error> {
     }
     Ok(())
 }
-fn read_in(conn: &Connection, kind: Kind) -> Result<Option<Document>, Error> {
+pub(crate) fn read_in(conn: &Connection, kind: Kind) -> Result<Option<Document>, Error> {
     let count: i64 =
         conn.query_row(&format!("SELECT count(*) FROM {}", kind.table()), [], |r| {
             r.get(0)

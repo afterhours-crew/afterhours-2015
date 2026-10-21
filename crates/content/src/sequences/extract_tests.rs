@@ -53,48 +53,65 @@ fn generated_sequences_follow_registry_manager_and_explicit_channel_links() {
     );
     assert_ne!(returning.definition.asset, content.arrive.unwrap().0.asset);
     assert_ne!(returning.definition.channel.index, 8);
+    let crash = content.crash.unwrap();
+    assert_eq!(crash.duration_ms, 4_500);
+    assert_eq!(crash.definition.manager, content.definition.manager);
+    assert_eq!(
+        crash.definition.embedded_bus,
+        content.definition.embedded_bus
+    );
+    assert!(value["crash"].get("channel").is_none());
+    assert_eq!(
+        crash.content.profile(crash.definition.asset).unwrap(),
+        &nfs_world::crash::profile()
+    );
 }
 
 #[test]
 fn return_timer_must_be_server_world_time_and_have_both_event_edges() {
-    for case in 0..5 {
-        let extra = synthetic::sequences::assets_with(|name, fields, objects| {
-            if name != synthetic::sequences::ENTRY {
-                return;
-            }
-            let timer = &mut objects
-                .iter_mut()
-                .find(|(k, _)| *k == "DelayEntityData")
-                .unwrap()
-                .1;
-            match case {
-                0 => {
-                    timer.iter_mut().find(|(k, _)| *k == "Delay").unwrap().1 =
-                        Field::Float(f32::NAN)
+    for sequence in [synthetic::sequences::ENTRY, synthetic::sequences::CRASH] {
+        for case in 0..5 {
+            let extra = synthetic::sequences::assets_with(|name, fields, objects| {
+                if name != sequence {
+                    return;
                 }
-                1 => timer.iter_mut().find(|(k, _)| *k == "Delay").unwrap().1 = Field::Float(31.),
-                2 => {
-                    timer.iter_mut().find(|(k, _)| *k == "Realm").unwrap().1 =
-                        Field::Enum("Realm", "Realm_Client", 2)
+                let timer = &mut objects
+                    .iter_mut()
+                    .find(|(k, _)| *k == "DelayEntityData")
+                    .unwrap()
+                    .1;
+                match case {
+                    0 => {
+                        timer.iter_mut().find(|(k, _)| *k == "Delay").unwrap().1 =
+                            Field::Float(f32::NAN)
+                    }
+                    1 => {
+                        timer.iter_mut().find(|(k, _)| *k == "Delay").unwrap().1 = Field::Float(31.)
+                    }
+                    2 => {
+                        timer.iter_mut().find(|(k, _)| *k == "Realm").unwrap().1 =
+                            Field::Enum("Realm", "Realm_Client", 2)
+                    }
+                    3 => {
+                        timer.iter_mut().find(|(k, _)| *k == "AutoStart").unwrap().1 =
+                            Field::Bool(true)
+                    }
+                    _ => {
+                        let Field::Structs(_, rows) = &mut fields
+                            .iter_mut()
+                            .find(|(k, _)| *k == "EventConnections")
+                            .unwrap()
+                            .1
+                        else {
+                            panic!()
+                        };
+                        rows.pop();
+                    }
                 }
-                3 => {
-                    timer.iter_mut().find(|(k, _)| *k == "AutoStart").unwrap().1 = Field::Bool(true)
-                }
-                _ => {
-                    let Field::Structs(_, rows) = &mut fields
-                        .iter_mut()
-                        .find(|(k, _)| *k == "EventConnections")
-                        .unwrap()
-                        .1
-                    else {
-                        panic!()
-                    };
-                    rows.pop();
-                }
-            }
-        });
-        let (_dir, mut index) = index(extra);
-        assert!(build(&mut index).is_err(), "case {case}");
+            });
+            let (_dir, mut index) = index(extra);
+            assert!(build(&mut index).is_err(), "case {case}");
+        }
     }
 }
 #[test]

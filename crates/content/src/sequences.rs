@@ -32,6 +32,13 @@ pub struct SequenceContent {
     pub arrive: Option<(Definition, Content)>,
     pub spline: Option<nfs_world::replication::spline::Definition>,
     pub returning: Option<ReturnSequence>,
+    pub crash: Option<CrashSequence>,
+}
+#[derive(Clone, Debug)]
+pub struct CrashSequence {
+    pub definition: nfs_world::crash::Definition,
+    pub content: Content,
+    pub duration_ms: u64,
 }
 #[derive(Clone, Debug)]
 pub struct ReturnSequence {
@@ -70,6 +77,9 @@ impl SequenceContent {
         }
         if v.get("returning").is_some() {
             expected.push("returning");
+        }
+        if v.get("crash").is_some() {
+            expected.push("crash");
         }
         keys(v, &expected)?;
         if v["format"] != "nfs-waiting-sequence"
@@ -167,12 +177,49 @@ impl SequenceContent {
                 })
             })
             .transpose()?;
+        let crash = v
+            .get("crash")
+            .map(|c| {
+                keys(
+                    c,
+                    &[
+                        "blueprint",
+                        "asset",
+                        "catalog",
+                        "manager",
+                        "embedded_bus",
+                        "duration_ms",
+                    ],
+                )?;
+                if c["blueprint"] != "Gameplay/Sequences/CrashedSequence" {
+                    return Err(ParseError::Invalid);
+                }
+                let (asset, catalog) = asset_catalog(c)?;
+                let content =
+                    Content::new(vec![catalog], vec![(asset, nfs_world::crash::profile())])
+                        .map_err(|_| ParseError::Invalid)?;
+                let definition = nfs_world::crash::Definition {
+                    asset,
+                    manager: component(&c["manager"])?,
+                    embedded_bus: uint(&c["embedded_bus"])?,
+                };
+                let duration_ms = uint(&c["duration_ms"])?;
+                nfs_world::crash::Crashes::new(definition, content.clone(), duration_ms)
+                    .map_err(|_| ParseError::Invalid)?;
+                Ok(CrashSequence {
+                    definition,
+                    content,
+                    duration_ms,
+                })
+            })
+            .transpose()?;
         Ok(Self {
             definition,
             content,
             arrive,
             spline,
             returning,
+            crash,
         })
     }
 }

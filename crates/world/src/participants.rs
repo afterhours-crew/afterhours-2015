@@ -247,6 +247,8 @@ pub enum Stage {
     Arriving,
     /// Startup state 2 after the exit chain: driving in the open world.
     FreeRoam,
+    /// The crash cinematic owns input until its sequence completes.
+    Crashing,
     /// The client's first startup field-100 request of a spawn-zone visit: its
     /// Enter Garage prompt shows. Still free roam; nothing is answered. The
     /// return begins when the request repeats while the car is still in the
@@ -815,6 +817,29 @@ impl Lifecycle {
                 matches!(stage, Stage::FreeRoam | Stage::ReturnPrompted).then_some(id)
             })
             .collect()
+    }
+    pub fn crashed(&mut self, participant: u16) -> Result<(), Error> {
+        let stage = self
+            .stages
+            .get_mut(&participant)
+            .ok_or(Error::UnknownObject)?;
+        if !matches!(stage, Stage::FreeRoam | Stage::ReturnPrompted) {
+            return Err(Error::Shape);
+        }
+        *stage = Stage::Crashing;
+        self.arrival_prompts.remove(&participant);
+        Ok(())
+    }
+    pub fn recovered(&mut self, participant: u16) -> Result<(), Error> {
+        let stage = self
+            .stages
+            .get_mut(&participant)
+            .ok_or(Error::UnknownObject)?;
+        if *stage != Stage::Crashing {
+            return Err(Error::Shape);
+        }
+        *stage = Stage::FreeRoam;
+        Ok(())
     }
     pub fn available(&self) -> bool {
         self.bindings.is_some()

@@ -1,0 +1,76 @@
+name: Prepare release
+
+# Opens the release pull request: the bundle version bump, with tester-facing
+# notes drafted from the pull requests merged since the previous release in
+# its description. Merging it tags the merge commit once CI passes there
+# (tag-release.yml), which builds the unpublished draft. See docs/RELEASING.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "New version, such as 0.5.0. Blank: the next patch version."
+        required: false
+        type: string
+      dry_run:
+        description: "Only show the notes and the version change in the run summary"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prepare-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      BASE: ${{ github.event.repository.default_branch }}
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+      - name: Test the release scripts
+        shell: pwsh
+        run: ./tools/Test-Release.ps1
+      - name: Bump the bundle and draft the notes
+        id: prepare
+        shell: pwsh
+        run: ./tools/Prepare-Release.ps1 -Version "$env:VERSION" -Repository $env:GH_REPO -BodyFile "$env:RUNNER_TEMP/release-pr.md"
+      - name: Show the description and the change
+        run: |
+          cat "$RUNNER_TEMP/release-pr.md" >> "$GITHUB_STEP_SUMMARY"
+          git diff
+      # GitHub holds the CI run of a pull request opened with GITHUB_TOKEN
+      # until a person approves it (docs/RELEASING.md). Dispatching CI on the
+      # branch instead would not help: dispatched checks do not count for a
+      # pull request.
+      - name: Open the release pull request
+        if: ${{ !inputs.dry_run }}
+        env:
+          NEW_VERSION: ${{ steps.prepare.outputs.version }}
+          BRANCH: ${{ steps.prepare.outputs.branch }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
+          git add crates/bundle/Cargo.toml Cargo.lock
+          git commit -m "Release $NEW_VERSION"
+          git push origin "$BRANCH"
+          url=$(gh pr create --base "$BASE" --head "$BRANCH" \
+            --title "Release $NEW_VERSION" --body-file "$RUNNER_TEMP/release-pr.md")
+          echo "::notice::Opened $url. Its CI waits for approval: choose Approve workflows to run on the pull request."
+          printf '\nOpened %s. Its CI waits for approval: choose **Approve workflows to run** on the pull request.\n' "$url" >> "$GITHUB_STEP_SUMMARY"

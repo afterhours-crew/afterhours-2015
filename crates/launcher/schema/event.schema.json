@@ -1,0 +1,304 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "Action": {
+      "description": "What a session was asked to do.",
+      "oneOf": [
+        {
+          "const": "setup",
+          "description": "Prepare content and the account; start nothing.",
+          "type": "string"
+        },
+        {
+          "const": "serve",
+          "description": "Prepare, then run the server without a game.",
+          "type": "string"
+        },
+        {
+          "const": "start",
+          "description": "Prepare, run the server, start and route the game.",
+          "type": "string"
+        }
+      ]
+    },
+    "DiagnosticSource": {
+      "description": "The child that wrote a diagnostic line.",
+      "oneOf": [
+        {
+          "const": "prepare",
+          "description": "Content and policy preparation (`prepare.stderr.log`).",
+          "type": "string"
+        },
+        {
+          "const": "create-account",
+          "description": "First-run account creation (`create-account.stderr.log`).",
+          "type": "string"
+        },
+        {
+          "const": "server",
+          "description": "The running server (`server.stderr.log`).",
+          "type": "string"
+        },
+        {
+          "const": "game",
+          "description": "The game (`game.stderr.log`).",
+          "type": "string"
+        }
+      ]
+    },
+    "State": {
+      "description": "Session states, in the order a successful session passes through them.",
+      "oneOf": [
+        {
+          "const": "preparing",
+          "description": "Reading the installation, preparing content and the account.",
+          "type": "string"
+        },
+        {
+          "const": "starting",
+          "description": "The server is ready and the game is starting (`start` only).",
+          "type": "string"
+        },
+        {
+          "const": "activation",
+          "description": "The installed EA activation helper shows a window; no timeout.",
+          "type": "string"
+        },
+        {
+          "const": "ready",
+          "description": "Routing applied (`start`) or the server is listening (`serve`).",
+          "type": "string"
+        },
+        {
+          "const": "stopping",
+          "description": "A stop was requested; closing the game, then the server.",
+          "type": "string"
+        },
+        {
+          "const": "finished",
+          "description": "The session ended normally.",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "description": "The session ended with an error; `message` says why.",
+          "type": "string"
+        },
+        {
+          "const": "interrupted",
+          "description": "Derived on read, never written: a live state whose supervisor is gone.",
+          "type": "string"
+        }
+      ]
+    },
+    "Status": {
+      "description": "`artifacts/launcher/<id>/status.json`: the supervisor's latest state.\nAlso the final record of `setup`, `serve` and `start` with `--json`.",
+      "properties": {
+        "action": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Action"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "What the session was started as. `serve` hosts the server and may\nstart the game on request; `null` only in records written before\nthis field existed."
+        },
+        "game_pid": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "game_running": {
+          "default": false,
+          "description": "Whether the session's game process is running: from its start until\nit exits. With `action` `serve` this tells hosting from playing.\nAlways `false` for an interrupted session.",
+          "type": "boolean"
+        },
+        "id": {
+          "description": "Session ID: 32 lowercase hexadecimal characters.",
+          "type": "string"
+        },
+        "message": {
+          "description": "What the session is doing or why it ended, for a person to read.",
+          "type": "string"
+        },
+        "server_pid": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/definitions/State"
+        },
+        "utc": {
+          "description": "When this state was recorded, UTC. Records written by the old\nPowerShell launcher use a longer ISO 8601 form with an offset.",
+          "type": "string"
+        },
+        "version": {
+          "const": 1,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "worker_pid": {
+          "description": "Supervisor process ID when recorded. Process IDs may be reused after\nthe process exits; verify identity before acting on one.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "id",
+        "action",
+        "game_running",
+        "utc",
+        "state",
+        "message",
+        "worker_pid",
+        "game_pid",
+        "server_pid"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "One line of the event stream.",
+  "oneOf": [
+    {
+      "description": "The session directory was created and the supervisor is starting.",
+      "properties": {
+        "action": {
+          "$ref": "#/definitions/Action"
+        },
+        "data_directory": {
+          "type": "string"
+        },
+        "event": {
+          "const": "session",
+          "type": "string"
+        },
+        "id": {
+          "description": "Session ID: 32 lowercase hexadecimal characters.",
+          "type": "string"
+        },
+        "session_directory": {
+          "description": "`artifacts/launcher/<id>/` with this session's logs and records.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "event",
+        "id",
+        "action",
+        "data_directory",
+        "session_directory"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "A state change, exactly as written to `status.json`.",
+      "properties": {
+        "event": {
+          "const": "status",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/Status"
+        }
+      },
+      "required": [
+        "event",
+        "status"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "One line a child process wrote to standard error, without its line\nending. Lines longer than 16 KiB arrive in several events. When the\nsupervisor falls behind, a line saying output was skipped replaces\nthe dropped text; the session's log files keep everything up to\ntheir 4 MiB bound.",
+      "properties": {
+        "event": {
+          "const": "diagnostic",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/definitions/DiagnosticSource"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "event",
+        "source",
+        "text"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "The last line: how the command ended.",
+      "properties": {
+        "event": {
+          "const": "final",
+          "type": "string"
+        },
+        "exit_code": {
+          "description": "The process exit code; see the exit code table in `--help`.",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "message": {
+          "description": "Why the command failed; `null` on success.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Status"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The session's final status; `null` when the command was refused\nbefore the supervisor recorded one."
+        }
+      },
+      "required": [
+        "event",
+        "exit_code",
+        "message",
+        "status"
+      ],
+      "type": "object"
+    }
+  ],
+  "properties": {
+    "utc": {
+      "description": "When the event was written, UTC.",
+      "type": "string"
+    },
+    "version": {
+      "const": 1,
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version",
+    "utc"
+  ],
+  "title": "Event",
+  "type": "object"
+}

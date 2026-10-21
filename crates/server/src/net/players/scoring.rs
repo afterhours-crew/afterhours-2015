@@ -1137,6 +1137,36 @@ impl PlayerListener {
         self.pending.push_back(packed(records, deleted));
     }
 
+    pub(super) fn desired_scoring(
+        &self,
+        has_event: bool,
+    ) -> BTreeMap<u16, Vec<(Which, Option<u16>)>> {
+        let mut desired = BTreeMap::new();
+        let crashing: BTreeSet<_> = self
+            .crashing_event_participants()
+            .filter(|p| self.event_suspended.contains(p))
+            .collect();
+        for participant in self
+            .participants
+            .in_free_roam()
+            .into_iter()
+            .chain(crashing.iter().copied())
+        {
+            if !self.free_roam_presented.contains(&participant) && !crashing.contains(&participant)
+            {
+                continue;
+            }
+            let race = has_event
+                .then(|| self.event_driving_style(participant))
+                .flatten();
+            desired.insert(
+                participant,
+                kinds(self.event_suspended.contains(&participant), race),
+            );
+        }
+        desired
+    }
+
     /// Create, tick, report into and retire scoring sessions. Runs between
     /// frames with the committed world; property changes are applied to the
     /// world immediately and replicated by the bounded flush.
@@ -1150,20 +1180,7 @@ impl PlayerListener {
         if !self.pending_entries.is_empty() {
             return Ok(());
         }
-        let mut desired: BTreeMap<u16, Vec<(Which, Option<u16>)>> = BTreeMap::new();
-        for participant in self.participants.in_free_roam() {
-            if !self.free_roam_presented.contains(&participant) {
-                continue;
-            }
-            let race = content
-                .has_event()
-                .then(|| self.event_driving_style(participant))
-                .flatten();
-            desired.insert(
-                participant,
-                kinds(self.event_suspended.contains(&participant), race),
-            );
-        }
+        let desired = self.desired_scoring(content.has_event());
         let running: BTreeMap<u16, Vec<(Which, u16)>> = self
             .scoring_state
             .live

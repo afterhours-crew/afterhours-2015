@@ -9,6 +9,7 @@ use nfs_world::{bits::BitWriter, logic::EntityRef};
 use std::sync::Arc;
 
 mod ai;
+mod recovery;
 mod restart;
 
 struct Harness {
@@ -101,7 +102,9 @@ impl Harness {
     /// Deliver inputs at `now` and take everything queued for the session.
     fn run(&mut self, now: u64, inputs: Vec<Input>) -> Delivered {
         self.listener.event_state.inputs.extend(inputs);
-        self.listener.advance_events(now).unwrap();
+        self.listener
+            .advance_events(now)
+            .unwrap_or_else(|error| panic!("advance_events at {now}: {error:?}"));
         Delivered {
             sections: self.listener.pending.drain(..).collect(),
             rpcs: self.listener.pending_rpcs.drain(..).collect(),

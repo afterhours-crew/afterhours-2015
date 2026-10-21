@@ -5,7 +5,7 @@ use super::*;
 use crate::rival_content::population::tests as rivals;
 use nfs_world::replication::{Initial, Update};
 
-fn harness() -> Harness {
+pub(super) fn harness() -> Harness {
     let (ai, mut world, mut registry) = rivals::event_fixture_with(HOST_SELECTOR as u8);
     let (rivals, _, _, messages) = rivals::fixture(HOST_SELECTOR as u8);
     let (participant, car) =
@@ -48,7 +48,7 @@ fn start(h: &mut Harness) -> Delivered {
     h.run(2000, vec![logic(START, prompt)])
 }
 
-fn race(h: &mut Harness) {
+pub(super) fn race(h: &mut Harness) {
     start(h);
     h.run(2100, vec![]);
     let intro = h.race().sequence.unwrap().1;
@@ -68,6 +68,58 @@ fn checkpoint(h: &Harness, car: u16, serializer: usize, time: f64) -> Input {
         2,
         &[(bits >> 32, 32), (bits & 0xffff_ffff, 32), (0, 7)],
     )
+}
+
+#[test]
+fn a_crash_keeps_the_race_opponents_and_scoring_until_driving_resumes() {
+    use nfs_world::participants::Stage;
+    let mut h = harness();
+    race(&mut h);
+    let race_content = h.content.clone();
+    super::restart::configure(&mut h);
+    // Reuse the lifecycle setup, retaining the racing fixture's navigation.
+    h.content = race_content;
+    h.listener.events = Some(h.content.clone());
+    let p = h.participant;
+    let game_mode = h.race().game_mode;
+    let opponents = h
+        .listener
+        .event_state
+        .delegated(&h.listener.players, h.listener.persona);
+    let scoring = h.listener.desired_scoring(true);
+    assert!(
+        scoring[&p]
+            .iter()
+            .any(|(kind, _)| *kind == crate::scoring::Which::Event)
+    );
+    h.listener.participants.crashed(p).unwrap();
+    h.listener.free_roam_presented.clear();
+    assert_eq!(h.listener.participants.stage(p), Some(Stage::Crashing));
+    let during = h.run(5000, vec![]);
+    assert!(!during.deleted().contains(&game_mode));
+    assert_eq!(h.race().game_mode, game_mode);
+    assert_eq!(h.listener.desired_scoring(true), scoring);
+    assert_eq!(h.listener.ai_focus().unwrap().len(), 1);
+    assert_eq!(
+        h.listener
+            .event_state
+            .delegated(&h.listener.players, h.listener.persona),
+        opponents
+    );
+    assert!(h.listener.event_suspended.contains(&p));
+    assert!(h.listener.scoring_state.pending_awards.is_empty());
+    h.listener.participants.recovered(p).unwrap();
+    h.listener.free_roam_presented.insert(p);
+    h.run(5100, vec![]);
+    assert_eq!(h.race().game_mode, game_mode);
+    assert_eq!(h.listener.desired_scoring(true), scoring);
+    // The next checkpoint still applies to the same race after recovery.
+    let resumed = h.run(6000, vec![h.checkpoint(6, 30.)]);
+    assert!(resumed.rpcs.iter().any(|call| matches!(call,
+        HostRpc::GameMode(call) if matches!(call.arguments,
+            Arguments::Progress { passed: 0, .. }))));
+    assert_eq!(h.race().game_mode, game_mode);
+    assert!(h.listener.scoring_state.pending_awards.is_empty());
 }
 
 #[test]

@@ -445,6 +445,7 @@ fn spawn_presentation_waits_for_capacity_with_poll_and_rejects_foreign_owner() {
         participant,
         vehicle,
         position: [1.0, 2.0, 3.0],
+        speed: 0.,
         basis: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
     };
     listener

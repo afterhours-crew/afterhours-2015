@@ -333,6 +333,7 @@ pub(super) fn advance(
                     vehicle: instance.car,
                     position: destination.position,
                     basis: destination.basis,
+                    speed: 0.,
                 };
                 command.encode()?;
                 out.teleports.push(command);

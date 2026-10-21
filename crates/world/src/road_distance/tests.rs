@@ -14,6 +14,132 @@ fn grid(count: usize) -> Vec<Vec<Vec<usize>>> {
     grid[100][100] = (0..count).collect();
     grid
 }
+
+#[test]
+fn recovery_follows_route_in_both_directions_and_measures_first_sharp_corner() {
+    let network = Network::new(
+        4,
+        vec![
+            lane(0, 1, vec![0]),
+            lane(1, 2, vec![1]),
+            lane(2, 3, vec![2]),
+        ],
+        vec![
+            straight([0.; 3], [80., 0., 0.], 80.),
+            straight([80., 0., 0.], [80., 0., 80.], 80.),
+            straight([80., 0., 80.], [90., 0., 80.], 10.),
+        ],
+        grid(3),
+    )
+    .unwrap();
+    let from = network.locate([20., 2., -2.]).unwrap().unwrap();
+    let to = network.locate([85., 0., 80.]).unwrap().unwrap();
+    let g = network
+        .recovery(from, &network.prepare_target(to).unwrap(), 60.)
+        .unwrap()
+        .unwrap();
+    assert_eq!(g.destination.position, [20., 0., 0.]);
+    assert_eq!(g.destination.basis[2], [1., 0., 0.]);
+    assert_eq!(g.distance, 145.);
+    assert_eq!(g.corner, Some(60.));
+    let reverse = network
+        .recovery(to, &network.prepare_target(from).unwrap(), 60.)
+        .unwrap()
+        .unwrap();
+    assert_eq!(reverse.destination.basis[2], [-1., 0., 0.]);
+    assert_eq!(reverse.distance, 145.);
+    assert_eq!(reverse.corner, Some(5.));
+}
+
+#[test]
+fn recovery_uses_cubic_tangent_and_authored_distance_in_same_lane() {
+    let mut curved = straight([0.; 3], [20., 0., 0.], 20.);
+    curved.coefficients[2] = [0., 8., 0.];
+    curved.coefficients[3] = [0., -8., 0.];
+    let network = Network::new(2, vec![lane(0, 1, vec![0])], vec![curved], grid(1)).unwrap();
+    let from = Location {
+        segment: 0,
+        offset: 5.,
+        point: [0.; 3],
+    };
+    let target = network
+        .prepare_target(Location {
+            offset: 15.,
+            ..from
+        })
+        .unwrap();
+    let g = network.recovery(from, &target, 60.).unwrap().unwrap();
+    assert_eq!(g.destination.position, [5., 0.375, 0.]);
+    assert!(g.destination.basis[2][1] > 0.07);
+    assert_eq!(g.distance, 10.);
+    assert_eq!(g.corner, None);
+    crate::replication::vehicle::orientation::quaternion_from_basis(g.destination.basis).unwrap();
+}
+
+#[test]
+fn a_degenerate_tangent_is_an_unusable_sample_not_a_movement_error() {
+    let mut spline = straight([0.; 3], [10., 0., 0.], 10.);
+    spline.coefficients[1] = [0.; 3];
+    spline.coefficients[2] = [10., 0., 0.];
+    let network = Network::new(2, vec![lane(0, 1, vec![0])], vec![spline], grid(1)).unwrap();
+    let from = Location {
+        segment: 0,
+        offset: 0.,
+        point: [0.; 3],
+    };
+    let target = network
+        .prepare_target(Location {
+            offset: 10.,
+            ..from
+        })
+        .unwrap();
+    assert!(network.recovery(from, &target, 60.).unwrap().is_none());
+}
+
+#[test]
+fn recovery_follows_shorter_detour_and_rejects_disconnected_target() {
+    let network = Network::new(
+        5,
+        vec![
+            lane(0, 1, vec![0]),
+            lane(0, 2, vec![1]),
+            lane(2, 1, vec![2]),
+            lane(3, 4, vec![3]),
+        ],
+        vec![
+            straight([0.; 3], [100., 0., 0.], 100.),
+            straight([0.; 3], [50., 0., 0.], 5.),
+            straight([50., 0., 0.], [100., 0., 0.], 5.),
+            straight([0., 0., 50.], [100., 0., 50.], 100.),
+        ],
+        grid(4),
+    )
+    .unwrap();
+    let from = Location {
+        segment: 0,
+        offset: 10.,
+        point: [0.; 3],
+    };
+    let target = network
+        .prepare_target(Location {
+            segment: 2,
+            offset: 4.,
+            point: [0.; 3],
+        })
+        .unwrap();
+    let g = network.recovery(from, &target, 60.).unwrap().unwrap();
+    assert_eq!(g.destination.basis[2], [-1., 0., 0.]);
+    assert_eq!(g.distance, 19.);
+    let target = network
+        .prepare_target(Location {
+            segment: 3,
+            offset: 4.,
+            point: [0.; 3],
+        })
+        .unwrap();
+    assert!(network.recovery(from, &target, 60.).unwrap().is_none());
+    assert!(network.recovery(from, &target, f32::NAN).is_err());
+}
 fn lane(start: usize, end: usize, segments: Vec<usize>) -> Lane {
     Lane {
         start,

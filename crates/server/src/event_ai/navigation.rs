@@ -17,7 +17,7 @@ pub struct Navigation {
     segments: Vec<f32>,
     closing: f32,
     laps: u8,
-    config: Config,
+    config: Option<Config>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -38,7 +38,7 @@ impl Navigation {
         network: Arc<Network>,
         checkpoints: &[[f32; 3]],
         laps: u8,
-        config: Config,
+        config: Option<Config>,
     ) -> Result<Self, Error> {
         if checkpoints.is_empty()
             || checkpoints.len() > race_pacing::MAX_WAYPOINTS
@@ -100,6 +100,21 @@ impl Navigation {
         };
         self.network
             .distance(location, target)
+            .map_err(|_| Error::Shape)
+    }
+
+    pub fn recovery(
+        &self,
+        position: [f32; 3],
+        next: usize,
+        sharp_degrees: f32,
+    ) -> Result<Option<nfs_world::crash::route::Geometry>, Error> {
+        let target = self.targets.get(next).ok_or(Error::Bound)?;
+        let Some(location) = self.network.locate(position).map_err(|_| Error::Shape)? else {
+            return Ok(None);
+        };
+        self.network
+            .recovery(location, target, sharp_degrees)
             .map_err(|_| Error::Shape)
     }
 
@@ -165,6 +180,8 @@ impl Navigation {
         }
         let skills = self
             .config
+            .as_ref()
+            .ok_or(Error::Unsupported)?
             .evaluate_members(&members, reference, route.total_distance())
             .map_err(|_| Error::Shape)?;
         Ok(Measured { skills, remaining })
@@ -222,7 +239,7 @@ mod tests {
             Arc::new(network),
             &[[50., 0., 0.], [100., 0., 0.]],
             1,
-            config,
+            Some(config),
         )
         .unwrap()
     }

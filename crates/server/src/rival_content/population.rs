@@ -8,6 +8,13 @@
 //! rules. Within [`HANDOVER_IN`] of a focus the host creates a car for it and
 //! the client drives it; beyond [`HANDOVER_OUT`] the car is removed and the
 //! host continues from the car's last reported pose.
+//!
+//! A player-chosen count replaces the native number. The game's own,
+//! region-driven racers are capped at it. Below it the host also activates
+//! other installed racers, nearest authored spawn first within [`FILL_IN`],
+//! and keeps every active racer until it is beyond [`FILL_OUT`]. Each racer
+//! (one persona and spawn) is active at most once; to the client an added
+//! racer is an ordinary roaming racer with its own slot and spawn keys.
 use super::Content;
 use crate::{
     traffic_content::population::RIVAL_KEY_START,
@@ -52,6 +59,15 @@ const GOAL: [bool; 3] = [false, false, true];
 const LANE_OFFSET: f32 = -0.25;
 /// A stalled tick never moves the host simulation farther than this.
 const MAX_STEP_MS: u64 = 10_000;
+/// With a chosen count, an installed racer whose authored spawn lies within
+/// this horizontal distance of a player can be added. Host policy, not a
+/// native rule: from most of the city it reaches the nearest fifteen of the
+/// installed spawns.
+pub const FILL_IN: f32 = 3500.;
+/// With a chosen count, an active racer is kept until it is farther than
+/// this horizontally from every player; the margin over [`FILL_IN`] keeps a
+/// racer added at the edge from being retired at once.
+pub const FILL_OUT: f32 = 4500.;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Focus {
@@ -76,6 +92,10 @@ struct Active {
     /// Host simulation; frozen while a client drives the car.
     wander: Wander,
     car: Option<u64>,
+    /// Added for a chosen count, not by the native rules. Its car stays
+    /// until it is handed back, even when the count is lowered or set back
+    /// to the original, so no car is removed close to a player.
+    added: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -84,6 +104,9 @@ struct Racer {
     region_active: bool,
     persona_cursor: usize,
     active: Option<Active>,
+    /// No road near the authored spawn (the graph is fixed for the session):
+    /// never added for a chosen count.
+    stranded: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -108,7 +131,7 @@ pub struct Population {
     cohort: usize,
     clock: Option<u64>,
     owner: Option<(u8, u64)>,
-    /// Player-chosen cap on racers active at once; `None` keeps the original
+    /// Player-chosen number of racers kept active; `None` keeps the original
     /// region-driven number.
     limit: Option<usize>,
 }
@@ -154,10 +177,24 @@ impl Population {
         })
     }
 
-    /// Cap the racers active at once (0 turns roaming rivals off).
+    /// Keep this many racers active where the installed racers allow it (0
+    /// turns roaming rivals off; `None` keeps the native number).
     pub fn with_limit(mut self, limit: Option<u16>) -> Self {
-        self.limit = limit.map(usize::from);
+        self.set_limit(limit);
         self
+    }
+
+    /// Change the count while the session runs. Above the active number,
+    /// racers are added on the next ticks; below it, racers without a car
+    /// and outside view are retired, farthest first, and racers with a car
+    /// follow once it is handed back.
+    pub fn set_limit(&mut self, limit: Option<u16>) {
+        self.limit = limit.map(usize::from);
+    }
+
+    /// The chosen count; `None` is the native number.
+    pub fn limit(&self) -> Option<usize> {
+        self.limit
     }
 
     /// Active racers, with or without a car.
@@ -375,6 +412,17 @@ impl Population {
                 .map(|f| measure(f.position, position))
                 .fold(f32::INFINITY, f32::min)
         };
+        let fill = next.limit.is_some_and(|limit| limit > 0);
+        // A count lowered while the session runs: retire racers no car
+        // shows, farthest first. Racers with a car follow after hand-back.
+        if let Some(limit) = next.limit {
+            while next.count() > limit {
+                let Some(ordinal) = next.farthest_unseen(focus, |_| true)? else {
+                    break;
+                };
+                next.retire(&mut world, connection, persona, ordinal, &mut changes)?;
+            }
+        }
         for ordinal in 0..next.racers.len() {
             if let Some(active) = &mut next.racers[ordinal].active
                 && active.car.is_none()
@@ -394,6 +442,16 @@ impl Population {
                         .ai_slot(connection, persona, active.slot)
                         .is_some_and(|slot| preserve.contains(&slot.participant))
                 });
+            // A chosen count also keeps a racer the native rules would drop,
+            // and an added racer's car stays until it is handed back (with
+            // no player at all, everything is retired as natively).
+            let kept = (fill
+                && position.is_some_and(|p| nearest(p, horizontal_squared) <= FILL_OUT * FILL_OUT))
+                || (!focus.is_empty()
+                    && next.racers[ordinal]
+                        .active
+                        .as_ref()
+                        .is_some_and(|a| a.added && a.car.is_some()));
             let racer = &mut next.racers[ordinal];
             if focus.is_empty() {
                 racer.region_active = false;
@@ -403,24 +461,11 @@ impl Population {
                     .iter()
                     .any(|region| focus.iter().any(|f| region.contains(f.position)));
             }
-            if !retained && !racer.region_active {
-                if let Some(active) = racer.active.take() {
-                    let removed = world.remove_ai_slot(connection, persona, active.slot)?;
-                    changes.records.extend(removed.records);
-                    changes
-                        .leave
-                        .extend(removed.leave.into_iter().map(HostRpc::Participant));
-                    changes
-                        .leave
-                        .extend(removed.untracked.into_iter().map(HostRpc::WorldActivation));
-                    changes.deleted.extend(removed.deleted);
-                    if let Some(car) = active.car {
-                        next.authority.remove_group(car);
-                    }
-                }
+            if !retained && !kept && !racer.region_active {
+                next.retire(&mut world, connection, persona, ordinal, &mut changes)?;
                 continue;
             }
-            if racer.active.is_none() {
+            if next.racers[ordinal].active.is_none() {
                 // Bounded publication activates at most one racer per tick.
                 if changes.activated.is_some()
                     || world.ai_slot_count() >= ai::MAX_AI
@@ -429,7 +474,15 @@ impl Population {
                     continue;
                 }
                 let seed = random.wrapping_add((ordinal as u32).wrapping_mul(0x9e37_79b9));
-                if !next.activate(&mut world, connection, persona, ordinal, seed, &mut changes)? {
+                if !next.activate(
+                    &mut world,
+                    connection,
+                    persona,
+                    ordinal,
+                    seed,
+                    false,
+                    &mut changes,
+                )? {
                     continue;
                 }
             }
@@ -484,6 +537,9 @@ impl Population {
             next.authority.remove_group(key);
             next.adopted.remove(&key);
         }
+        if fill && !focus.is_empty() && changes.activated.is_none() {
+            next.fill(&mut world, connection, persona, focus, random, &mut changes)?;
+        }
         next.clock = Some(now);
         next.cohort = (next.cohort + 1) % 10;
         next.owner = Some((connection, persona));
@@ -502,9 +558,130 @@ impl Population {
         Ok(key)
     }
 
+    /// Remove an active racer's participant, actor and car (native removal
+    /// `04684040`). Nothing to do for an inactive racer.
+    fn retire(
+        &mut self,
+        world: &mut Players,
+        connection: u8,
+        persona: u64,
+        ordinal: usize,
+        changes: &mut Changes,
+    ) -> Result<(), Error> {
+        let Some(active) = self.racers[ordinal].active.take() else {
+            return Ok(());
+        };
+        let removed = world.remove_ai_slot(connection, persona, active.slot)?;
+        changes.records.extend(removed.records);
+        changes
+            .leave
+            .extend(removed.leave.into_iter().map(HostRpc::Participant));
+        changes
+            .leave
+            .extend(removed.untracked.into_iter().map(HostRpc::WorldActivation));
+        changes.deleted.extend(removed.deleted);
+        if let Some(car) = active.car {
+            self.authority.remove_group(car);
+        }
+        Ok(())
+    }
+
+    /// Below a chosen count, activate the inactive racer whose authored spawn
+    /// is nearest a player, within [`FILL_IN`]. At the count, a racer of the
+    /// game's own that the count holds back takes the place of the farthest
+    /// racer kept only by the count (outside view and its region, without a
+    /// car). Still at most one activation per tick.
+    fn fill(
+        &mut self,
+        world: &mut Players,
+        connection: u8,
+        persona: u64,
+        focus: &[Focus],
+        random: u32,
+        changes: &mut Changes,
+    ) -> Result<(), Error> {
+        let Some(limit) = self.limit else {
+            return Ok(());
+        };
+        let nearest = |position: [f32; 3]| {
+            focus
+                .iter()
+                .map(|f| horizontal_squared(f.position, position))
+                .fold(f32::INFINITY, f32::min)
+        };
+        let (ordinal, added) = if self.count() < limit {
+            let content = self.content.clone();
+            let candidate = self
+                .racers
+                .iter()
+                .zip(&content.data.racers)
+                .enumerate()
+                .filter(|(_, (racer, _))| racer.active.is_none() && !racer.stranded)
+                .map(|(ordinal, (_, authored))| (nearest(authored.position), ordinal))
+                .filter(|&(distance, _)| distance <= FILL_IN * FILL_IN)
+                .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+            let Some((_, ordinal)) = candidate else {
+                return Ok(());
+            };
+            (ordinal, true)
+        } else {
+            let Some(waiting) = self
+                .racers
+                .iter()
+                .position(|r| r.region_active && r.active.is_none() && !r.stranded)
+            else {
+                return Ok(());
+            };
+            let Some(retired) = self.farthest_unseen(focus, |r| !r.region_active)? else {
+                return Ok(());
+            };
+            self.retire(world, connection, persona, retired, changes)?;
+            (waiting, false)
+        };
+        if world.ai_slot_count() >= ai::MAX_AI {
+            return Ok(());
+        }
+        let seed = random.wrapping_add((ordinal as u32).wrapping_mul(0x9e37_79b9));
+        self.activate(world, connection, persona, ordinal, seed, added, changes)?;
+        Ok(())
+    }
+
+    /// The active racer farthest (horizontally) from every player among
+    /// those `eligible`, without a car and outside view: one whose removal
+    /// shows nothing.
+    fn farthest_unseen(
+        &self,
+        focus: &[Focus],
+        eligible: impl Fn(&Racer) -> bool,
+    ) -> Result<Option<usize>, Error> {
+        let mut farthest: Option<(f32, usize)> = None;
+        for (ordinal, racer) in self.racers.iter().enumerate() {
+            let Some(active) = &racer.active else {
+                continue;
+            };
+            if active.car.is_some() || !eligible(racer) {
+                continue;
+            }
+            let position = active
+                .wander
+                .pose(&self.graph)
+                .map_err(|_| Error::Shape)?
+                .position;
+            let distance = focus
+                .iter()
+                .map(|f| horizontal_squared(f.position, position))
+                .fold(f32::INFINITY, f32::min);
+            if distance >= VIEW * VIEW && farthest.is_none_or(|(most, _)| distance > most) {
+                farthest = Some((distance, ordinal));
+            }
+        }
+        Ok(farthest.map(|(_, ordinal)| ordinal))
+    }
+
     /// Create the racer's participant and actor at its authored spawn and start
     /// the host simulation there (native spawn `04683c70`). False when no road
-    /// is near the spawn.
+    /// is near the spawn. `added`: activated for a chosen count.
+    #[allow(clippy::too_many_arguments)]
     fn activate(
         &mut self,
         world: &mut Players,
@@ -512,6 +689,7 @@ impl Population {
         persona: u64,
         ordinal: usize,
         seed: u32,
+        added: bool,
         changes: &mut Changes,
     ) -> Result<bool, Error> {
         let content = self.content.clone();
@@ -525,6 +703,7 @@ impl Population {
         )
         .map_err(|_| Error::Shape)?
         else {
+            self.racers[ordinal].stranded = true;
             return Ok(false);
         };
         let cursor = self.racers[ordinal].persona_cursor;
@@ -567,6 +746,7 @@ impl Population {
             persona: selected,
             wander,
             car: None,
+            added,
         });
         Ok(true)
     }

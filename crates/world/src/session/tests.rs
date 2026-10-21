@@ -1327,6 +1327,66 @@ fn waiting_rpc_preserves_its_motion_boundary_without_disabling_later_coalescing(
 }
 
 #[test]
+fn pending_notifications_fence_motion_once_without_disabling_batching() {
+    use crate::{participants::HostRpc, replication::sublevel};
+    let (mut host, snapshot) = motion_fixture();
+    let content = sublevel::Content::new(vec![(
+        7,
+        sublevel::Profile::new(false, &[sublevel::Kind::Noop]).unwrap(),
+    )])
+    .unwrap();
+    let creation = sublevel::ordinary::creation(
+        1,
+        7,
+        None,
+        nfs_protocol::world::rpc::Serial::new(0).unwrap(),
+        &sublevel::ordinary::unpopulated(content.profile(7).unwrap()).unwrap(),
+        &content,
+    )
+    .unwrap();
+    let mut scene = owned_section(0);
+    scene
+        .records
+        .push(crate::replication::Record::from_scene(20, creation, &content).unwrap());
+    host.replication_bindings.apply(&scene).unwrap();
+    let event = HostRpc::Event(crate::logic::Fire {
+        target: crate::logic::EntityRef {
+            ghost: 20,
+            entity: 1,
+        },
+        event: 3,
+        player: None,
+    });
+    host.queue_replication(snapshot(1, 1)).unwrap();
+    host.queue_rpc(event).unwrap();
+    for revision in 2..=120 {
+        for id in 1..=3 {
+            host.queue_replication(snapshot(id, revision)).unwrap();
+        }
+        // Keep the sample before the notification separate, but all reports
+        // after it share one current frame even while the notification waits.
+        assert_eq!(host.replication_progress(), (0, 2));
+    }
+    assert_eq!(host.replication_queue[0].0.records, snapshot(1, 1).records);
+    let retained = host.replication_queue[1].0.clone();
+    assert_eq!(retained.records.len(), 3);
+    assert_eq!(retained.records[0], snapshot(1, 120).records[0]);
+    host.queue_rpc(event).unwrap();
+    host.queue_replication(snapshot(1, 121)).unwrap();
+    host.queue_replication(snapshot(2, 121)).unwrap();
+    assert_eq!(host.replication_progress(), (0, 3));
+    assert_eq!(host.replication_queue[1].0, retained);
+    assert_eq!(host.rpc_queue.len(), 2);
+    assert_eq!(
+        host.replication_bits,
+        host.replication_queue
+            .iter()
+            .map(|(_, bits, _)| bits)
+            .sum::<usize>()
+    );
+}
+
+#[test]
 fn unsent_car_and_minimap_snapshots_stay_current_during_backpressure() {
     use crate::replication::{Initial, Record, Update, location_map, section::Setup, vehicle};
     let (mut host, section) = motion_fixture();

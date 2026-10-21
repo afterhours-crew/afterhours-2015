@@ -195,6 +195,40 @@ pub(in crate::net) struct State {
     restart_cursor: usize,
 }
 
+impl State {
+    pub(super) fn recovery_key(
+        &self,
+        participant: u16,
+        vehicle: u16,
+    ) -> Option<nfs_world::crash::route::Key> {
+        if self.failed {
+            return None;
+        }
+        let race = self.entries.get(&participant)?.race.as_ref()?;
+        if race.phase != Phase::Racing
+            || race.exit.is_some()
+            || race.finish.is_some()
+            || race.car != vehicle
+        {
+            return None;
+        }
+        let (next, lap) = if let Some(progress) = &race.progress {
+            let p = progress.participant(participant)?;
+            if p.finished.is_some() || p.withdrawn {
+                return None;
+            }
+            (p.next, p.lap)
+        } else {
+            (race.next, race.lap)
+        };
+        Some(nfs_world::crash::route::Key {
+            game_mode: race.game_mode,
+            next: next.try_into().ok()?,
+            lap,
+        })
+    }
+}
+
 /// One frame's event output.
 #[derive(Default)]
 struct Out {
@@ -341,6 +375,12 @@ impl PlayerListener {
             .get(&Logic::DrivingStyle)
             .copied()
     }
+    /// A crash changes driving presentation, not membership in an existing event.
+    pub(super) fn crashing_event_participants(&self) -> impl Iterator<Item = u16> + '_ {
+        self.event_state.active.iter().copied().filter(|p| {
+            self.participants.stage(*p) == Some(nfs_world::participants::Stage::Crashing)
+        })
+    }
     fn event_seconds(&self, now_ms: u64) -> Option<f64> {
         let origin = self.replication_origin_ms?;
         Some(now_ms.saturating_sub(origin) as f64 / 1000.0)
@@ -445,6 +485,7 @@ impl PlayerListener {
             .in_free_roam()
             .into_iter()
             .filter(|p| !state.failed && self.free_roam_presented.contains(p))
+            .chain(self.crashing_event_participants().filter(|_| !state.failed))
             // Official restart restores event subscriptions before the final
             // FreeRoam entry. Do not wait for that entry's presentation marker.
             .chain(state.restart_resuming().filter(|_| !state.failed))

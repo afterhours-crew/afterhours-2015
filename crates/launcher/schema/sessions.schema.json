@@ -1,0 +1,468 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "Action": {
+      "description": "What a session was asked to do.",
+      "oneOf": [
+        {
+          "const": "setup",
+          "description": "Prepare content and the account; start nothing.",
+          "type": "string"
+        },
+        {
+          "const": "serve",
+          "description": "Prepare, then run the server without a game.",
+          "type": "string"
+        },
+        {
+          "const": "start",
+          "description": "Prepare, run the server, start and route the game.",
+          "type": "string"
+        }
+      ]
+    },
+    "CrashDump": {
+      "description": "A game crash dump.",
+      "properties": {
+        "bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "modified_utc": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "path",
+        "bytes",
+        "modified_utc"
+      ],
+      "type": "object"
+    },
+    "Levels": {
+      "description": "Complete lines by level. `other` counts continuation lines, panics,\noverlong lines and anything without a timestamp and level.",
+      "properties": {
+        "debug": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "error": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "info": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "other": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "trace": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "warn": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "error",
+        "warn",
+        "info",
+        "debug",
+        "trace",
+        "other"
+      ],
+      "type": "object"
+    },
+    "Location": {
+      "description": "A folder outside the data directory and whether it exists.",
+      "properties": {
+        "exists": {
+          "type": "boolean"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "exists"
+      ],
+      "type": "object"
+    },
+    "ServerLog": {
+      "description": "What `server.stderr.log` contains.",
+      "properties": {
+        "levels": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Levels"
+            }
+          ],
+          "description": "Complete lines by tracing level."
+        },
+        "lines": {
+          "description": "All lines, including an unterminated last one.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "partial_last_line": {
+          "description": "The file ends without a newline (still being written, or cut at the\nlog bound). That line is counted but not parsed.",
+          "type": "boolean"
+        },
+        "unsupported": {
+          "description": "Those lines grouped by service and route, most frequent first.",
+          "items": {
+            "$ref": "#/definitions/UnsupportedRoute"
+          },
+          "type": "array"
+        },
+        "unsupported_total": {
+          "description": "Every `unsupported operation received` line.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unsupported_truncated": {
+          "description": "More distinct groups existed than are listed; their lines are\nstill in `unsupported_total`.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "lines",
+        "partial_last_line",
+        "levels",
+        "unsupported_total",
+        "unsupported",
+        "unsupported_truncated"
+      ],
+      "type": "object"
+    },
+    "SessionFile": {
+      "description": "One file in a session folder.",
+      "properties": {
+        "bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "lines": {
+          "description": "Newline-separated lines, counting an unterminated last line; `null`\nwhen the file was too large or the scan budget was spent.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "truncated": {
+          "description": "The file reached the 4 MiB log bound; output after it was discarded.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "bytes",
+        "lines",
+        "truncated"
+      ],
+      "type": "object"
+    },
+    "SessionSummary": {
+      "description": "One session folder.",
+      "properties": {
+        "action": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Action"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "From `request.json`; `null` when it is missing or unreadable."
+        },
+        "crash_dumps": {
+          "description": "Game crash dumps written between the session's request and its\nlast status (or now, while it runs) plus two minutes. `null` when\nthe crash dump folder is unknown or the session has no start time.",
+          "items": {
+            "$ref": "#/definitions/CrashDump"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "current": {
+          "description": "Whether `current-session.json` names this session.",
+          "type": "boolean"
+        },
+        "directory": {
+          "type": "string"
+        },
+        "ended_utc": {
+          "description": "When the session finished or failed; `null` while it runs or when\nit was interrupted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "files": {
+          "description": "Ordinary files in the session folder, by name.",
+          "items": {
+            "$ref": "#/definitions/SessionFile"
+          },
+          "type": "array"
+        },
+        "files_truncated": {
+          "description": "More files exist than are listed.",
+          "type": "boolean"
+        },
+        "id": {
+          "description": "Session ID: 32 lowercase hexadecimal characters.",
+          "type": "string"
+        },
+        "message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runs_directory": {
+          "description": "The server's recording folder, `artifacts/runs/<id>/`.",
+          "type": "string"
+        },
+        "runs_directory_exists": {
+          "type": "boolean"
+        },
+        "server_log": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ServerLog"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Summary of `server.stderr.log`; `null` when there is none or it\nwas not scanned (see `warnings`)."
+        },
+        "started_utc": {
+          "description": "When the session was requested (the modification time of\n`request.json`), UTC.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/State"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`null` when `status.json` is missing or unreadable, for example\njust before a new supervisor records its first state."
+        },
+        "updated_utc": {
+          "description": "When the latest status was recorded, as `status.json` says.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "current",
+        "directory",
+        "action",
+        "started_utc",
+        "updated_utc",
+        "ended_utc",
+        "state",
+        "message",
+        "files",
+        "files_truncated",
+        "server_log",
+        "runs_directory",
+        "runs_directory_exists",
+        "crash_dumps",
+        "warnings"
+      ],
+      "type": "object"
+    },
+    "State": {
+      "description": "Session states, in the order a successful session passes through them.",
+      "oneOf": [
+        {
+          "const": "preparing",
+          "description": "Reading the installation, preparing content and the account.",
+          "type": "string"
+        },
+        {
+          "const": "starting",
+          "description": "The server is ready and the game is starting (`start` only).",
+          "type": "string"
+        },
+        {
+          "const": "activation",
+          "description": "The installed EA activation helper shows a window; no timeout.",
+          "type": "string"
+        },
+        {
+          "const": "ready",
+          "description": "Routing applied (`start`) or the server is listening (`serve`).",
+          "type": "string"
+        },
+        {
+          "const": "stopping",
+          "description": "A stop was requested; closing the game, then the server.",
+          "type": "string"
+        },
+        {
+          "const": "finished",
+          "description": "The session ended normally.",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "description": "The session ended with an error; `message` says why.",
+          "type": "string"
+        },
+        {
+          "const": "interrupted",
+          "description": "Derived on read, never written: a live state whose supervisor is gone.",
+          "type": "string"
+        }
+      ]
+    },
+    "UnsupportedRoute": {
+      "description": "One group of `unsupported operation received` warnings.",
+      "properties": {
+        "route": {
+          "description": "The `route` field as the server printed it, without `Some(...)`,\nquotes and a Blaze route's per-request `correlation`; `null` when\nabsent or `None`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "service": {
+          "description": "The `service` field, such as `lsx` or `blaze`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "warnings": {
+          "description": "Warning lines in this group. The server rate-limits repeats, so\nthis counts warnings, not requests.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "service",
+        "route",
+        "warnings"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "`sessions --json`.",
+  "properties": {
+    "crash_dump_directory": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Location"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The folder searched for game crash dumps; `null` where the game\ndoes not run or the folder is unknown."
+    },
+    "current": {
+      "description": "The session `current-session.json` names, if any.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "data_directory": {
+      "type": "string"
+    },
+    "ea_desktop_logs": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Location"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The EA Desktop log folder; `null` where it does not apply."
+    },
+    "sessions": {
+      "description": "Newest first, by the time the session was requested.",
+      "items": {
+        "$ref": "#/definitions/SessionSummary"
+      },
+      "type": "array"
+    },
+    "truncated": {
+      "description": "More sessions exist than are listed.",
+      "type": "boolean"
+    },
+    "version": {
+      "const": 1,
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "warnings": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "version",
+    "data_directory",
+    "current",
+    "sessions",
+    "truncated",
+    "crash_dump_directory",
+    "ea_desktop_logs",
+    "warnings"
+  ],
+  "title": "SessionList",
+  "type": "object"
+}

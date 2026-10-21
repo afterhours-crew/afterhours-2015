@@ -9,6 +9,7 @@ use crate::sequences::Rules;
 pub const WAITING: &str = "synthetic/sequences/waiting";
 pub const EXIT: &str = "synthetic/sequences/exit";
 pub const ENTRY: &str = "synthetic/sequences/entry";
+pub const CRASH: &str = "synthetic/sequences/crash";
 const GAMEPLAY: &str = "levels/runtime/gameplay";
 const GARAGE: &str = "levels/runtime/garage";
 fn guid(seed: u8) -> [u8; 16] {
@@ -36,6 +37,7 @@ pub fn rules() -> Rules {
         waiting: WAITING.into(),
         exit: EXIT.into(),
         entry: ENTRY.into(),
+        crash: CRASH.into(),
         entry_timer_events: [9005, 9006, 9007, 9008],
         waiting_scene: GAMEPLAY.into(),
         exit_scene: GARAGE.into(),
@@ -70,6 +72,7 @@ pub fn assets_with(mut edit: impl FnMut(&str, &mut ObjectFields, &mut SceneObjec
         (1, WAITING, "Gameplay/WaitingForGarageSequence", false),
         (2, EXIT, "Gameplay/Tests/GarageExitSequence", true),
         (7, ENTRY, "Gameplay/Tests/GarageEntrySequence", true),
+        (10, CRASH, "Gameplay/Sequences/CrashedSequence", false),
     ] {
         let mut objects = vec![
             ("ParticipantStateSequenceEntityData", vec![]),
@@ -82,11 +85,14 @@ pub fn assets_with(mut edit: impl FnMut(&str, &mut ObjectFields, &mut SceneObjec
             ]);
         }
         let channel = objects.len() as u32 + 2;
-        objects.push((
-            "LinkedSchematicChannelReferenceEntityData",
-            vec![("ChannelAsset", import(3))],
-        ));
-        let mut links = vec![connection(2, rules.root_channels, channel, 0)];
+        let mut links = Vec::new();
+        if name != CRASH {
+            objects.push((
+                "LinkedSchematicChannelReferenceEntityData",
+                vec![("ChannelAsset", import(3))],
+            ));
+            links.push(connection(2, rules.root_channels, channel, 0));
+        }
         if exit {
             objects.push((
                 "ScriptedSplineCommandEntityData",
@@ -95,12 +101,12 @@ pub fn assets_with(mut edit: impl FnMut(&str, &mut ObjectFields, &mut SceneObjec
             links.push(connection(channel + 1, rules.spline_link, channel, 9004));
         }
         let mut timer_events = Vec::new();
-        if name == ENTRY {
+        if name == ENTRY || name == CRASH {
             let delay = objects.len() as u32 + 2;
             objects.push((
                 "DelayEntityData",
                 vec![
-                    ("Delay", Field::Float(7.5)),
+                    ("Delay", Field::Float(if name == CRASH { 4.5 } else { 7.5 })),
                     ("Realm", Field::Enum("Realm", "Realm_Server", 1)),
                     (
                         "TimeDeltaType",
@@ -332,6 +338,7 @@ pub fn install(assets: &mut Vec<Asset>) {
         let sequence = if scene == GAMEPLAY { 1 } else { 2 };
         pointers.push((guid(sequence), guid(sequence ^ 0x80)));
         if scene == GAMEPLAY {
+            pointers.push((guid(10), guid(10 ^ 0x80)));
             pointers.extend(super::traffic::registered());
         }
         if scene == GARAGE {

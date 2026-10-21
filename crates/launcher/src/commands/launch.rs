@@ -14,13 +14,14 @@
 use super::{Context, server_path};
 use crate::{
     cli::{GameArgs, SessionArgs},
+    events::{self, Emitter},
     exit::{Exit, Failure, Result},
     paths, platform, preflight,
-    records::{self, Action, Request},
-    session, settings,
+    records::{self, Action, Request, Status},
+    retention, session, settings,
     supervisor::{self, live::LiveSession},
 };
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// `check`: preflight only.
 pub fn check(context: &Context, args: &GameArgs) -> Result<()> {
@@ -76,7 +77,59 @@ fn new_session_id() -> String {
 }
 
 /// `setup`, `serve` and `start`: preflight, write the request, supervise.
-pub fn launch(context: &Context, action: Action, args: &SessionArgs) -> Result<()> {
+/// With `--json` the final status is printed as one object; with
+/// `--events` the whole session is a JSON-lines stream ending in `final`.
+/// `server_only` keeps a Windows `serve` session from hosting the game.
+pub fn launch(
+    context: &Context,
+    action: Action,
+    args: &SessionArgs,
+    server_only: bool,
+) -> Result<()> {
+    let mut emitter = if args.events {
+        crate::terminal::silence();
+        Emitter::stdout()
+    } else {
+        Emitter::disabled()
+    };
+    let game_support = action == Action::Start
+        || (action == Action::Serve && platform::supports_game_launch() && !server_only);
+    let started = start_session(context, action, args, game_support, &mut emitter);
+    let (record, result) = match started {
+        Ok((run, exit)) => match completed_status(&run) {
+            Ok(record) => {
+                let result = outcome(&run, exit, record.as_ref());
+                (record, result)
+            }
+            Err(failure) => (None, Err(failure)),
+        },
+        Err(failure) => (None, Err(failure)),
+    };
+    if args.events {
+        emitter.emit(events::Body::Final {
+            exit_code: result.as_ref().map_or_else(|f| f.exit as u8, |()| 0),
+            message: result.as_ref().err().map(|f| f.message.clone()),
+            status: record,
+        });
+    } else if context.json
+        && let Some(record) = &record
+    {
+        println!("{}", serde_json::to_string(record)?);
+    }
+    result
+}
+
+/// Preflight, create the session directory and request, then run the
+/// supervisor to completion. Returns the session directory and the
+/// supervisor's exit code (`None` when it was terminated). With
+/// `game_support` the game checks run and the server starts as for `start`.
+fn start_session(
+    context: &Context,
+    action: Action,
+    args: &SessionArgs,
+    game_support: bool,
+    emitter: &mut Emitter,
+) -> Result<(PathBuf, Option<i32>)> {
     if action == Action::Start && !platform::supports_game_launch() {
         return Err(Failure::refused(
             "Starting the game is supported on Windows only. Use `nfs-afterhours serve` here.",
@@ -89,14 +142,14 @@ pub fn launch(context: &Context, action: Action, args: &SessionArgs) -> Result<(
             game_directory: Some(&args.game.game_dir),
             data_directory: &context.data_dir,
             server_path: &server,
-            for_game: action == Action::Start,
+            for_game: game_support,
         },
     )?;
     let data = report.data_directory.clone();
     std::fs::create_dir_all(&data)?;
     let id = new_session_id();
     let run = paths::session_dir(&data, &id);
-    let (request_path, run, settings) = {
+    let (request_path, run, settings, pruned) = {
         // Hold the lock only while creating the session directory; the
         // supervisor takes it for the session itself.
         let _lock = session::Lock::acquire(&data)?;
@@ -116,15 +169,32 @@ pub fn launch(context: &Context, action: Action, args: &SessionArgs) -> Result<(
             bundled_server: context.bundled_server.is_some() && args.game.server.is_none(),
             player_name: args.player_name.clone(),
             record_protocol: args.record_protocol,
+            events: args.events,
+            game_support,
             settings,
         };
         let request_path = run.join("request.json");
         records::write_new_json(&request_path, &request)?;
-        (request_path, run, settings)
+        // Under the same lock, so no other launch reads or adds a session.
+        let pruned = retention::prune(&data, retention::KEPT_SESSIONS, &id);
+        (request_path, run, settings, pruned)
     };
     if !context.json {
         crate::terminal::detail("Saves and cache", data.display());
         crate::terminal::detail("Session logs", run.display());
+        if !pruned.removed.is_empty() {
+            crate::terminal::detail(
+                "Older sessions removed",
+                format!(
+                    "{} (the newest {} are kept)",
+                    pruned.removed.len(),
+                    retention::KEPT_SESSIONS
+                ),
+            );
+        }
+        for warning in &pruned.warnings {
+            crate::terminal::note(warning);
+        }
         crate::terminal::detail(
             "Traffic and rivals",
             format!(
@@ -134,34 +204,31 @@ pub fn launch(context: &Context, action: Action, args: &SessionArgs) -> Result<(
             ),
         );
     }
+    emitter.emit(events::Body::Session {
+        id,
+        action,
+        data_directory: data,
+        session_directory: run.clone(),
+    });
+    // The supervisor inherits standard output and continues the stream.
     let status = std::process::Command::new(std::env::current_exe()?)
         .arg("supervise")
         .arg("--request")
         .arg(&request_path)
         .status()?;
-    let record = completed_status(&run)?;
-    if context.json
-        && let Some(record) = &record
-    {
-        println!("{}", serde_json::to_string(record)?);
-    }
-    if record
-        .as_ref()
-        .is_some_and(|r| r.state == records::State::Interrupted)
-    {
+    Ok((run, status.code()))
+}
+
+/// The command's result from the supervisor's exit code and final record.
+fn outcome(run: &Path, exit: Option<i32>, record: Option<&Status>) -> Result<()> {
+    if record.is_some_and(|r| r.state == records::State::Interrupted) {
         return Err(Failure::session(format!(
             "The supervisor was terminated. Inspect {}.",
             run.display()
         )));
     }
-    match status.code() {
-        Some(0)
-            if record
-                .as_ref()
-                .is_some_and(|r| r.state == records::State::Finished) =>
-        {
-            Ok(())
-        }
+    match exit {
+        Some(0) if record.is_some_and(|r| r.state == records::State::Finished) => Ok(()),
         Some(0) => Err(Failure::session(format!(
             "Supervisor exited without successful completion. Inspect {}.",
             run.display()
@@ -192,6 +259,7 @@ fn completed_status(run: &Path) -> Result<Option<records::Status>> {
     let mut record: records::Status = records::read_json(&path)?;
     if record.state.is_live() {
         record.state = records::State::Interrupted;
+        record.game_running = false;
         record.message = "Supervisor exited before recording completion. Inspect owned processes before restarting; account data is preserved.".into();
     }
     Ok(Some(record))
@@ -200,25 +268,68 @@ fn completed_status(run: &Path) -> Result<Option<records::Status>> {
 /// `supervise`: run a session from its request file.
 pub fn supervise(request_path: &Path) -> Result<()> {
     let (request, data, run) = supervisor::live::load_request(request_path)?;
-    nfs_afterhours_sys::capture_stop_requests()?;
-    let _lock = session::Lock::acquire(&data)?;
-    if run.join(session::STOP_FILE).exists() {
-        return Err(Failure::session("Start cancelled before preparation."));
-    }
-    let digest = crate::digest::sha256_file(&request.server_path)?;
-    if digest != request.server_sha256 {
-        return Err(Failure::refused(
-            "Server changed between request and preflight.",
-        ));
-    }
-    session::point_current_session(&data, &request.id)?;
+    let mut emitter = if request.events {
+        crate::terminal::silence();
+        Emitter::stdout()
+    } else {
+        Emitter::disabled()
+    };
+    let started = (|| -> Result<session::Lock> {
+        nfs_afterhours_sys::capture_stop_requests()?;
+        let lock = session::Lock::acquire(&data)?;
+        if run.join(session::STOP_FILE).exists() {
+            return Err(Failure::session("Start cancelled before preparation."));
+        }
+        let digest = crate::digest::sha256_file(&request.server_path)?;
+        if digest != request.server_sha256 {
+            return Err(Failure::refused(
+                "Server changed between request and preflight.",
+            ));
+        }
+        session::point_current_session(&data, &request.id)?;
+        Ok(lock)
+    })();
+    let _lock = match started {
+        Ok(lock) => lock,
+        Err(failure) => {
+            record_refusal(&run, &request.id, request.action, &failure, &mut emitter);
+            return Err(failure);
+        }
+    };
     let action = request.action;
-    let mut live = LiveSession::new(request, data, run)?;
+    let id = request.id.clone();
+    let mut live = match LiveSession::new(request, data, run.clone(), emitter) {
+        Ok(live) => live,
+        Err(failure) => {
+            record_refusal(&run, &id, action, &failure, &mut Emitter::disabled());
+            return Err(failure);
+        }
+    };
     let outcome = supervisor::run(&mut live, action);
     if outcome.succeeded() {
         Ok(())
     } else {
         Err(Failure::session(outcome.message))
+    }
+}
+
+/// Record why a supervisor stopped before its session began, so `sessions`
+/// and the event stream show the reason. Never replaces an existing status.
+fn record_refusal(run: &Path, id: &str, action: Action, failure: &Failure, emitter: &mut Emitter) {
+    let record = Status {
+        version: records::VERSION,
+        id: id.to_owned(),
+        action: Some(action),
+        game_running: false,
+        utc: crate::clock::now_iso(),
+        state: records::State::Failed,
+        message: failure.message.clone(),
+        worker_pid: std::process::id(),
+        game_pid: None,
+        server_pid: None,
+    };
+    if records::write_new_json(&run.join("status.json"), &record).is_ok() {
+        emitter.status(&record);
     }
 }
 
@@ -245,6 +356,8 @@ mod tests {
             state: records::State::Ready,
             message: "ready".into(),
             worker_pid: 123,
+            action: Some(crate::records::Action::Serve),
+            game_running: false,
             game_pid: Some(456),
             server_pid: Some(789),
         };
@@ -265,6 +378,74 @@ mod tests {
             records::replace_json(&run.join("status.json"), &record).unwrap();
             assert_eq!(completed_status(&run).unwrap(), Some(record.clone()));
         }
+        std::fs::remove_dir_all(run).unwrap();
+    }
+
+    #[test]
+    fn the_outcome_follows_the_supervisor_exit_and_its_final_record() {
+        let run = Path::new("session");
+        let mut record = records::Status {
+            version: records::VERSION,
+            id: "a".repeat(32),
+            utc: "2026-10-19T06:00:00Z".into(),
+            state: records::State::Finished,
+            message: "done".into(),
+            worker_pid: 1,
+            action: Some(crate::records::Action::Serve),
+            game_running: false,
+            game_pid: None,
+            server_pid: None,
+        };
+        assert!(outcome(run, Some(0), Some(&record)).is_ok());
+        assert_eq!(
+            outcome(run, Some(0), None).unwrap_err().exit,
+            Exit::SessionFailed
+        );
+        assert_eq!(
+            outcome(run, None, Some(&record)).unwrap_err().exit,
+            Exit::SessionFailed
+        );
+        assert_eq!(outcome(run, Some(1), None).unwrap_err().exit, Exit::Refused);
+        assert_eq!(
+            outcome(run, Some(3), None).unwrap_err().exit,
+            Exit::SessionFailed
+        );
+        assert_eq!(
+            outcome(run, Some(9), None).unwrap_err().exit,
+            Exit::Internal
+        );
+        record.state = records::State::Interrupted;
+        assert_eq!(
+            outcome(run, Some(0), Some(&record)).unwrap_err().exit,
+            Exit::SessionFailed
+        );
+    }
+
+    #[test]
+    fn a_refused_supervisor_records_why_once_and_streams_it() {
+        let run = crate::testing::scratch("refusal");
+        let capture = crate::events::Capture::default();
+        let mut emitter = Emitter::to(capture.clone());
+        let failure = Failure::refused("Another Afterhours session holds this data directory.");
+        record_refusal(&run, &"b".repeat(32), Action::Serve, &failure, &mut emitter);
+        let stored: Status = records::read_json(&run.join("status.json")).unwrap();
+        assert_eq!(stored.state, records::State::Failed);
+        assert_eq!(stored.message, failure.message);
+        let lines = capture.lines();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["event"], "status");
+        assert_eq!(lines[0]["status"]["state"], "failed");
+        // A status the session already wrote is never replaced.
+        record_refusal(
+            &run,
+            &"b".repeat(32),
+            Action::Serve,
+            &Failure::internal("later"),
+            &mut emitter,
+        );
+        let again: Status = records::read_json(&run.join("status.json")).unwrap();
+        assert_eq!(again.message, failure.message);
+        assert_eq!(capture.lines().len(), 1);
         std::fs::remove_dir_all(run).unwrap();
     }
 }

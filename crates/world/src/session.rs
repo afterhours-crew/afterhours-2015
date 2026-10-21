@@ -315,13 +315,12 @@ pub struct Host {
     replication_bindings: Bindings,
     replication_bits: usize,
     replication_sent: usize,
+    /// A notification separates samples accepted before and after it. Once a
+    /// new tail is queued, reports on that side may batch while the RPC waits.
+    motion_tail_open: bool,
     max_replication_frame_bits: usize,
     rpc_queue: std::collections::VecDeque<crate::participants::HostRpc>,
     rpc_sent: usize,
-    /// A newly queued RPC separates motion snapshots on either side. Once a
-    /// section has been appended after it, later snapshots may coalesce even
-    /// while the RPC waits for its referenced objects or the send window.
-    motion_barrier: bool,
     files: [Option<files::Outgoing>; 2],
     /// Objects the client is told to report movement for (selector 0).
     movement: std::collections::BTreeSet<u16>,
@@ -357,9 +356,9 @@ impl Host {
             replication_bindings: Bindings::default(),
             replication_bits: 0,
             replication_sent: 0,
+            motion_tail_open: false,
             rpc_queue: std::collections::VecDeque::new(),
             rpc_sent: 0,
-            motion_barrier: false,
             files: [None, None],
             movement: std::collections::BTreeSet::new(),
             movement_sent_ms: None,
@@ -407,7 +406,7 @@ impl Host {
             return Err(Error::Application(application::Error::Bound));
         }
         if before.is_empty()
-            && !self.motion_barrier
+            && self.motion_tail_open
             && let Some((tail, old_bits, calls)) = self.replication_queue.back()
             && calls.is_empty()
             && let Some(combined) = motion::combine(tail, &section)
@@ -440,7 +439,7 @@ impl Host {
             .map_err(Error::Replication)?;
         self.replication_bits += bits;
         self.replication_queue.push_back((section, bits, before));
-        self.motion_barrier = false;
+        self.motion_tail_open = true;
         Ok(())
     }
 
@@ -464,7 +463,7 @@ impl Host {
         }
         self.validate_rpc(reply)?;
         self.rpc_queue.push_back(reply);
-        self.motion_barrier = true;
+        self.motion_tail_open = false;
         Ok(())
     }
 
@@ -554,7 +553,7 @@ impl Host {
             self.replication_sent + self.replication_queue.len(),
             self.rpc_sent + self.rpc_queue.len(),
         )?;
-        self.motion_barrier = true;
+        self.motion_tail_open = false;
         Ok(n)
     }
 

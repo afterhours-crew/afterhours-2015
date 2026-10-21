@@ -24,10 +24,13 @@ impl PlayerListener {
             .chain(active.iter().copied())
             .collect();
         for participant in targets {
-            // A deactivated participant with a spawn assignment also gets the
-            // assignment clear and at most one occupied-flag change.
-            let clearing =
-                !active.contains(&participant) && self.spawn_points.assigned(participant).is_some();
+            // The garage volume subscription survives a crash. Only its
+            // presentation is suspended until the driving context returns.
+            let crashing = self.participants.stage(participant)
+                == Some(nfs_world::participants::Stage::Crashing);
+            let clearing = !active.contains(&participant)
+                && !crashing
+                && self.spawn_points.assigned(participant).is_some();
             let capacity = nfs_world::session::MAX_RPC_QUEUE
                 .saturating_sub(self.pending_rpcs.len())
                 .saturating_sub(if clearing { 2 } else { 0 });
@@ -37,11 +40,12 @@ impl PlayerListener {
             // before the garage-zone notification can trigger its prompt.
             // Prepare this on a clone so queue pressure retains the gate.
             let mut spawn_points = self.spawn_points.clone();
-            let spawn_presence = if presenting && spawn_points.assigned(participant).is_some() {
-                spawn_points.set_presentation_ready(participant, true)?
-            } else {
-                None
-            };
+            let spawn_presence =
+                if (presenting || crashing) && spawn_points.assigned(participant).is_some() {
+                    spawn_points.set_presentation_ready(participant, !crashing)?
+                } else {
+                    None
+                };
             if presenting && self.free_roam_presented.len() >= MAX_WORLD_CARS {
                 return Err(replication::Error::Bound);
             }
@@ -73,12 +77,9 @@ impl PlayerListener {
                 )?,
                 None => Vec::new(),
             };
-            if presenting
-                && self
-                    .world_activation
-                    .as_ref()
-                    .is_some_and(|a| !a.participants().any(|id| id == participant))
-            {
+            if self.world_activation.as_ref().is_some_and(|a| {
+                a.participants().any(|id| id == participant) != active.contains(&participant)
+            }) {
                 // Activation could not reserve its complete output. Do not send
                 // the presentation release or consume its once-only marker.
                 continue;
@@ -103,10 +104,12 @@ impl PlayerListener {
             }
             if presenting {
                 self.pending_rpcs.extend(events);
+                self.free_roam_presented.insert(participant);
+            }
+            if presenting || crashing {
                 self.pending_rpcs
                     .extend(spawn_presence.map(nfs_world::participants::HostRpc::SpawnOccupied));
                 self.spawn_points = spawn_points;
-                self.free_roam_presented.insert(participant);
             }
         }
         self.free_roam_presented.retain(|p| active.contains(p));
@@ -188,6 +191,7 @@ mod tests {
         listener.spawn_points.bind(&records, 504).unwrap();
         listener.participants.bind(&records, 501, 502).unwrap();
         listener.participants.bind_exit(&records, 502, 503).unwrap();
+        listener.participants.bind_return(&records, 502).unwrap();
         let site = |serializer| Site {
             scene_key: 501,
             serializer,
@@ -229,24 +233,29 @@ mod tests {
             .spawn_points
             .set_presentation_ready(participant, false)
             .unwrap();
-        let mut payload = BitWriter::new();
-        payload
-            .put(assign.endpoint.selector.into(), 9)
-            .put(nfs_world::spawn_points::REQUEST.into(), 32)
-            .put(1.0f64.to_bits(), 64)
-            .put(1, 32)
-            .align();
-        let mut crossing = BitWriter::new();
-        crossing
-            .put(0, 32)
-            .put(0, 32)
-            .put(2, 8)
-            .put(assign.endpoint.scene.into(), 13)
-            .put(participant.into(), 13)
-            .put(payload.bytes().len() as u64, 9)
-            .put_span(payload.span());
+        let crossing = |method: u32| {
+            let mut payload = BitWriter::new();
+            payload
+                .put(assign.endpoint.selector.into(), 9)
+                .put(method.into(), 32)
+                .put(1.0f64.to_bits(), 64)
+                .put(1, 32)
+                .align();
+            let mut crossing = BitWriter::new();
+            crossing
+                .put(0, 32)
+                .put(0, 32)
+                .put(2, 8)
+                .put(assign.endpoint.scene.into(), 13)
+                .put(participant.into(), 13)
+                .put(payload.bytes().len() as u64, 9)
+                .put_span(payload.span());
+            crossing
+        };
         assert_eq!(
-            listener.spawn_points.receive(crossing.span(), |_| true),
+            listener
+                .spawn_points
+                .receive(crossing(nfs_world::spawn_points::REQUEST).span(), |_| true),
             Ok(Some(None))
         );
         let mut presentation = crate::garage_logic::tests::presentation_json();
@@ -376,5 +385,70 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![participant]
         );
+        // A crash temporarily removes the driving context, but is not a
+        // garage return. Keep the volume subscription and token through three
+        // recoveries, including occupancy changes while presentation is hidden.
+        for _ in 0..3 {
+            listener.participants.crashed(participant).unwrap();
+            let before = listener.spawn_points.clone();
+            listener.pending_rpcs = std::iter::repeat_n(
+                nfs_world::participants::HostRpc::Participant(assign),
+                nfs_world::session::MAX_RPC_QUEUE - 3,
+            )
+            .collect();
+            listener.advance_world_activation().unwrap();
+            assert_eq!(listener.spawn_points, before);
+            listener.pending_rpcs.clear();
+            listener.advance_world_activation().unwrap();
+            assert_eq!(listener.spawn_points.assigned(participant), Some(1));
+            assert!(!listener.pending_rpcs.iter().any(|r| matches!(
+                r, nfs_world::participants::HostRpc::Participant(n)
+                    if n.call == nfs_world::participants::Call::Leave
+            )));
+            assert!(matches!(
+                listener.pending_rpcs.back(),
+                Some(nfs_world::participants::HostRpc::SpawnOccupied(f)) if !f.enabled
+            ));
+            listener.pending_rpcs.clear();
+            // Repeated callbacks are still accepted under the same token;
+            // their notification remains hidden until driving is restored.
+            for method in [
+                nfs_world::spawn_points::RELEASE,
+                nfs_world::spawn_points::REQUEST,
+            ] {
+                assert_eq!(
+                    listener
+                        .spawn_points
+                        .receive(crossing(method).span(), |_| true),
+                    Ok(Some(None))
+                );
+            }
+            listener.participants.recovered(participant).unwrap();
+            listener.advance_world_activation().unwrap();
+            assert!(matches!(
+                listener.pending_rpcs.back(),
+                Some(nfs_world::participants::HostRpc::SpawnOccupied(f)) if f.enabled
+            ));
+            listener.pending_rpcs.clear();
+        }
+        let returning = nfs_world::participants::ReturnBindings::from_records(&records, 502)
+            .unwrap()
+            .unwrap();
+        for _ in 0..2 {
+            assert!(matches!(
+                listener
+                    .participants
+                    .receive(request(returning.request, 0).span(), |_| true),
+                Ok(Outcome::Advanced(_))
+            ));
+        }
+        listener.advance_world_activation().unwrap();
+        assert!(listener.pending_rpcs.iter().any(|r| matches!(
+            r, nfs_world::participants::HostRpc::Participant(n)
+                if n.call == nfs_world::participants::Call::Leave && n.endpoint == assign.endpoint
+        )));
+        listener.pending_rpcs.clear();
+        listener.advance_world_activation().unwrap();
+        assert!(listener.pending_rpcs.is_empty());
     }
 }
