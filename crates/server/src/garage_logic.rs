@@ -154,6 +154,11 @@ pub enum Which {
     ReturnRequested,
     /// Replace return presentation with the ordinary garage loading context.
     Returned,
+    Crashed,
+    Recovered,
+    /// Hide relocation until the client acknowledges the destination.
+    Resetting,
+    ResetArrived,
 }
 
 #[derive(Clone, Debug)]
@@ -173,6 +178,10 @@ pub struct GarageLogic {
     returning: Batch,
     return_requested: Batch,
     returned: Batch,
+    crashed: Batch,
+    recovered: Batch,
+    resetting: Batch,
+    reset_arrived: Batch,
 }
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Output {
@@ -608,6 +617,37 @@ impl GarageLogic {
         let world_settled = event_phase("world_settled", &exited)?;
         let free_roam = event_phase("free_roam", &after(&after(&exited, &arrive), &arrived))?;
         let driving = after(&after(&exited, &arrive), &arrived);
+        let crashed = v
+            .get("crashed")
+            .map(|b| batch(b, &content, &driving))
+            .transpose()?
+            .unwrap_or_default();
+        let recovered = v
+            .get("recovered")
+            .map(|b| batch(b, &content, &after(&driving, &crashed)))
+            .transpose()?
+            .unwrap_or_default();
+        if v.get("crashed").is_some() != v.get("recovered").is_some()
+            || after(&after(&driving, &crashed), &recovered) != driving
+        {
+            return Err(Failure::ProfileConfig);
+        }
+        let crashing = after(&driving, &crashed);
+        let resetting = v
+            .get("resetting")
+            .map(|b| batch(b, &content, &crashing))
+            .transpose()?
+            .unwrap_or_default();
+        let reset_arrived = v
+            .get("reset_arrived")
+            .map(|b| batch(b, &content, &after(&crashing, &resetting)))
+            .transpose()?
+            .unwrap_or_default();
+        if v.get("resetting").is_some() != v.get("reset_arrived").is_some()
+            || after(&after(&crashing, &resetting), &reset_arrived) != crashing
+        {
+            return Err(Failure::ProfileConfig);
+        }
         let return_requested = event_phase("return_requested", &driving)?;
         let returning = v
             .get("returning")
@@ -654,6 +694,10 @@ impl GarageLogic {
             .chain(&arrived.entities)
             .chain(&returning.entities)
             .chain(&returned.entities)
+            .chain(&crashed.entities)
+            .chain(&recovered.entities)
+            .chain(&resetting.entities)
+            .chain(&reset_arrived.entities)
             .flat_map(|d| &d.roles)
             .any(|r| matches!(r, Role::Reputation(_) | Role::ReputationLevelStat))
         {
@@ -711,6 +755,10 @@ impl GarageLogic {
             returning,
             return_requested,
             returned,
+            crashed,
+            recovered,
+            resetting,
+            reset_arrived,
         })
     }
     pub fn content(&self) -> &Content {
@@ -738,6 +786,10 @@ impl GarageLogic {
             Which::Returning => &self.returning,
             Which::ReturnRequested => &self.return_requested,
             Which::Returned => &self.returned,
+            Which::Crashed => &self.crashed,
+            Which::Recovered => &self.recovered,
+            Which::Resetting => &self.resetting,
+            Which::ResetArrived => &self.reset_arrived,
         }
     }
     /// Every integer serializer that presents a reputation value, as
@@ -758,6 +810,10 @@ impl GarageLogic {
             Which::Returning,
             Which::ReturnRequested,
             Which::Returned,
+            Which::Crashed,
+            Which::Recovered,
+            Which::Resetting,
+            Which::ResetArrived,
         ] {
             for definition in &self.batch(which).entities {
                 for (index, role) in definition.roles.iter().enumerate() {
@@ -772,6 +828,10 @@ impl GarageLogic {
     /// Whether deployment content describes a batch for this point.
     pub fn has(&self, which: Which) -> bool {
         *self.batch(which) != Batch::default()
+    }
+    /// Both halves of the crash presentation must be installed together.
+    pub fn has_crash_recovery(&self) -> bool {
+        !self.crashed.entities.is_empty() && !self.recovered.entities.is_empty()
     }
     /// Whether deployment content describes the garage exit batch.
     pub fn has_exit(&self) -> bool {

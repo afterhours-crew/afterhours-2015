@@ -1,0 +1,349 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+use super::*;
+use nfs_protocol::world::{
+    BitSpan,
+    rpc::{Envelope, Limits, RouteProfile},
+};
+use nfs_world::{
+    crash::{Crashes, ResetBindings},
+    participants::{Call, HostRpc, Lifecycle, Notification, Stage},
+    replication::vehicle::movement::Sample,
+    sequences::{Completed, Owner},
+};
+#[cfg(test)]
+mod tests;
+
+fn eligible(participants: &Lifecycle, participant: u16) -> bool {
+    matches!(
+        participants.stage(participant),
+        Some(Stage::FreeRoam | Stage::ReturnPrompted)
+    )
+}
+
+impl PlayerListener {
+    pub(super) fn observe_crashes(
+        crashes: &mut Crashes,
+        players: &Players,
+        participants: &Lifecycle,
+        world_cars: &BTreeMap<u16, (u16, bool)>,
+        persona: u64,
+        movement: &frame::Movement<'_>,
+    ) -> Result<(), replication::Error> {
+        let header = movement.header.ok_or(replication::Error::Shape)?;
+        for record in &movement.records {
+            let Some(&(participant, ready)) = world_cars.get(&record.id) else {
+                continue;
+            };
+            let connection = HOST_SELECTOR as u8;
+            let item = players
+                .vehicle_item_of(connection, persona, record.id)
+                .ok_or(replication::Error::UnknownObject)?;
+            if record.component != 0
+                || players.owned_vehicle(connection, persona, participant, item) != Some(record.id)
+            {
+                return Err(replication::Error::UnknownObject);
+            }
+            let sample = Sample::decode(header, record.data)?;
+            crashes.observe_vehicle(
+                players,
+                Owner {
+                    connection,
+                    persona,
+                    participant,
+                },
+                record.id,
+                &sample,
+                ready && eligible(participants, participant),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// A latched crash waits for replication capacity. All lifecycle, presentation
+    /// and sequence changes commit together once its output fits.
+    pub(in crate::net) fn advance_crashes(
+        &mut self,
+        world_ms: u64,
+    ) -> Result<(), replication::Error> {
+        let Some(mut crashes) = self.crashes.clone() else {
+            return Ok(());
+        };
+        let capacity = nfs_world::session::MAX_RPC_QUEUE.saturating_sub(self.pending_rpcs.len());
+        let stops = crashes.poll(world_ms, capacity)?;
+        let mut players = self.players.clone();
+        let mut participants = self.participants.clone();
+        let mut ghosts = self.logic_ghosts.clone();
+        let mut entries = Vec::new();
+        for owner in crashes.pending() {
+            if !eligible(&participants, owner.participant) {
+                crashes.discard_pending(owner.participant);
+                continue;
+            }
+            if self.pending_entries.len() + self.session_backlog + entries.len() >= MAX_PENDING {
+                break;
+            }
+            let presentation = Self::arrive_logic(
+                self.logic.as_deref(),
+                crate::garage_logic::Which::Crashed,
+                &mut players,
+                owner.participant,
+                &mut ghosts,
+            )?;
+            let sequence = crashes
+                .start(&mut players, owner)?
+                .ok_or(replication::Error::Shape)?;
+            participants.crashed(owner.participant)?;
+            let mut records = presentation.records;
+            records.push(sequence);
+            let mut events: Vec<_> = presentation
+                .events
+                .into_iter()
+                .map(HostRpc::Event)
+                .collect();
+            if let Some(exit) = participants.exit_bindings() {
+                let bindings = ResetBindings::from_scene(&players, exit.state_2.scene)?;
+                events.push(HostRpc::Participant(Notification {
+                    endpoint: bindings.cinematic,
+                    participant: owner.participant,
+                    call: Call::Enter,
+                }));
+            }
+            entries.push((
+                Section {
+                    float_bits: None,
+                    flag: false,
+                    deleted: presentation.deleted,
+                    setup: Some(Setup::RawEscape([0; 3])),
+                    records,
+                },
+                events,
+            ));
+        }
+        for stop in &stops {
+            tracing::info!(
+                sequence = stop.sequence,
+                "crash sequence fallback Stop queued"
+            );
+        }
+        for owner in crashes.pending() {
+            // Still pending under queue pressure; no transition is reported yet.
+            debug_assert!(!matches!(
+                participants.stage(owner.participant),
+                Some(Stage::Crashing)
+            ));
+        }
+        for participant in self.participants.in_free_roam() {
+            if participants.stage(participant) == Some(Stage::Crashing) {
+                tracing::info!(participant, "crash recovery cinematic started");
+            }
+        }
+        self.crashes = Some(crashes);
+        self.players = players;
+        self.participants = participants;
+        self.logic_ghosts = ghosts;
+        self.pending_entries.extend(entries);
+        self.pending_rpcs
+            .extend(stops.into_iter().map(HostRpc::SequenceStop));
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub(super) fn finish_crash_call(
+        body: BitSpan<'_>,
+        crashes: &mut Crashes,
+        players: &mut Players,
+        participants: &mut Lifecycle,
+        logic: Option<&crate::garage_logic::GarageLogic>,
+        ghosts: &mut BTreeMap<u16, BTreeMap<u16, u16>>,
+        persona: u64,
+        layout: Option<&crate::vehicle_content::layout::Layout>,
+    ) -> Result<
+        Option<Option<(Section, Vec<HostRpc>, Option<nfs_world::teleport::Command>)>>,
+        replication::Error,
+    > {
+        let envelope = Envelope::decode(
+            body,
+            Limits {
+                max_input_bits: 4096,
+                max_references: 32,
+                max_payload_bytes: 256,
+            },
+        )
+        .map_err(|_| replication::Error::Shape)?;
+        let route = envelope
+            .route(RouteProfile::ClientSend)
+            .map_err(|_| replication::Error::Shape)?;
+        let Some(&ghost) = envelope.references().first() else {
+            return Ok(None);
+        };
+        let bindings = participants
+            .exit_bindings()
+            .map(|exit| ResetBindings::from_scene(players, exit.state_2.scene))
+            .transpose()?;
+        if let Some(bindings) = bindings
+            && ghost == bindings.teleport.scene
+            && route.selector() == bindings.teleport.selector
+            && route.method_index() == 3
+        {
+            let [_, participant] = envelope.references() else {
+                return Err(replication::Error::Shape);
+            };
+            if route.arguments().len() > 7
+                || (0..route.arguments().len()).any(|i| route.arguments().read_u32(i, 1) != Ok(0))
+                || !players.owns_participant(HOST_SELECTOR as u8, persona, *participant)
+            {
+                return Err(replication::Error::UnknownObject);
+            }
+            let owner = Owner {
+                connection: HOST_SELECTOR as u8,
+                persona,
+                participant: *participant,
+            };
+            if !crashes.relocating(*participant) {
+                return Ok(Some(None));
+            }
+            if !crashes.finish_relocation(owner)? {
+                return Ok(Some(None));
+            }
+            let arrived = Self::arrive_logic(
+                logic,
+                crate::garage_logic::Which::ResetArrived,
+                players,
+                owner.participant,
+                ghosts,
+            )?;
+            let (mut section, events) =
+                Self::restore_crash_driving(players, participants, logic, ghosts, owner, None)?;
+            section.deleted.extend(arrived.deleted);
+            section.records.extend(arrived.records);
+            section.setup = (!section.records.is_empty()).then_some(Setup::RawEscape([0; 3]));
+            let mut events: Vec<_> = arrived
+                .events
+                .into_iter()
+                .map(HostRpc::Event)
+                .chain(events)
+                .collect();
+            events.extend(
+                bindings
+                    .finish(*participant)
+                    .into_iter()
+                    .map(HostRpc::Participant),
+            );
+            return Ok(Some(Some((section, events, None))));
+        }
+        if !crashes.has_completion(ghost, route.selector()) || route.method_index() != 1 {
+            return Ok(None);
+        }
+        let call = Completed::decode(body)?;
+        let owner = Owner {
+            connection: HOST_SELECTOR as u8,
+            persona,
+            participant: call.participant,
+        };
+        let Some(sequence) = crashes.complete(players, owner, call)? else {
+            return Ok(Some(None));
+        };
+        if let Some((vehicle, destination)) = crashes.relocation(owner.participant) {
+            let bindings = bindings.ok_or(replication::Error::UnknownObject)?;
+            let destination = destination
+                .or_else(|| {
+                    layout?
+                        .exit_teleport()
+                        .map(|d| nfs_world::crash::Destination {
+                            position: d.locator(),
+                            basis: d.basis(),
+                        })
+                })
+                .ok_or(replication::Error::Shape)?;
+            let command = nfs_world::teleport::Command {
+                endpoint: bindings.teleport,
+                participant: owner.participant,
+                vehicle,
+                position: destination.position,
+                basis: destination.basis,
+            };
+            command.encode()?;
+            crashes.begin_relocation(owner)?;
+            let presentation = Self::arrive_logic(
+                logic,
+                crate::garage_logic::Which::Resetting,
+                players,
+                owner.participant,
+                ghosts,
+            )?;
+            let mut deleted = presentation.deleted;
+            deleted.push(sequence);
+            let section = Section {
+                float_bits: None,
+                flag: false,
+                deleted,
+                setup: (!presentation.records.is_empty()).then_some(Setup::RawEscape([0; 3])),
+                records: presentation.records,
+            };
+            let events = presentation
+                .events
+                .into_iter()
+                .map(HostRpc::Event)
+                .chain(
+                    bindings
+                        .begin(owner.participant)
+                        .into_iter()
+                        .map(HostRpc::Participant),
+                )
+                .collect();
+            return Ok(Some(Some((section, events, Some(command)))));
+        }
+        let (section, mut events) = Self::restore_crash_driving(
+            players,
+            participants,
+            logic,
+            ghosts,
+            owner,
+            Some(sequence),
+        )?;
+        if let Some(bindings) = bindings {
+            events.push(HostRpc::Participant(Notification {
+                endpoint: bindings.cinematic,
+                participant: owner.participant,
+                call: Call::Leave,
+            }));
+        }
+        Ok(Some(Some((section, events, None))))
+    }
+
+    fn restore_crash_driving(
+        players: &mut Players,
+        participants: &mut Lifecycle,
+        logic: Option<&crate::garage_logic::GarageLogic>,
+        ghosts: &mut BTreeMap<u16, BTreeMap<u16, u16>>,
+        owner: Owner,
+        sequence: Option<u16>,
+    ) -> Result<(Section, Vec<HostRpc>), replication::Error> {
+        let presentation = Self::arrive_logic(
+            logic,
+            crate::garage_logic::Which::Recovered,
+            players,
+            owner.participant,
+            ghosts,
+        )?;
+        participants.recovered(owner.participant)?;
+        let mut deleted = presentation.deleted;
+        deleted.extend(sequence);
+        Ok((
+            Section {
+                float_bits: None,
+                flag: false,
+                deleted,
+                setup: (!presentation.records.is_empty()).then_some(Setup::RawEscape([0; 3])),
+                records: presentation.records,
+            },
+            presentation
+                .events
+                .into_iter()
+                .map(HostRpc::Event)
+                .collect(),
+        ))
+    }
+}

@@ -22,6 +22,7 @@ impl PlayerListener {
             return Err(replication::Error::Shape);
         }
         self.advance_binding_refreshes(world_ms)?;
+        self.advance_crashes(world_ms)?;
         self.advance_world_activation()?;
         self.advance_returns(world_ms);
         if let Some(returns) = &mut self.returns {
