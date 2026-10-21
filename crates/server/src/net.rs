@@ -930,6 +930,24 @@ pub async fn world_host(
             return;
         }
     };
+    let crashes = match sequences.as_ref().and_then(|c| c.crashes()).transpose() {
+        Ok(crashes) => crashes,
+        Err(error) => {
+            warn!(connection, ?error, "crash sequence configuration rejected");
+            return;
+        }
+    };
+    if crashes.is_some()
+        && garage_logic
+            .as_ref()
+            .is_none_or(|logic| !logic.has_crash_recovery())
+    {
+        warn!(
+            connection,
+            "crash sequence requires paired crash/recovery presentation"
+        );
+        return;
+    }
     let sequences = match sequences.as_ref().map(|c| c.instance()).transpose() {
         Ok(owner) => owner,
         Err(error) => {
@@ -948,6 +966,7 @@ pub async fn world_host(
         .with_ai_settings(ai.changed().unwrap_or_else(|| ai.current()))
         .with_arrivals(arrivals)
         .with_returns(returns)
+        .with_crashes(crashes)
         .with_garage_logic(garage_logic)
         .with_scoring(scoring, unix_micros().max(0) as u64);
     let mut items = items::Exchanges::new(inventory, connection);

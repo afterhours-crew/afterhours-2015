@@ -47,4 +47,11 @@ impl SequenceContent {
                 .with_spline(r.spline.clone())
         })
     }
+    pub fn crashes(
+        &self,
+    ) -> Option<Result<nfs_world::crash::Crashes, nfs_world::replication::Error>> {
+        self.crash
+            .as_ref()
+            .map(|c| nfs_world::crash::Crashes::new(c.definition, c.content.clone(), c.duration_ms))
+    }
 }
