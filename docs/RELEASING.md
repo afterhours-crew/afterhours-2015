@@ -1,16 +1,19 @@
 # Preparing a release
 
-A release is prepared by three workflows, and a person does two things: review
-the notes, and publish the draft.
+A release is prepared by three workflows, and a person does three things:
+approve the release pull request's CI run, review the notes, and publish the
+draft.
 
 1. **Prepare release** (run by hand) opens a pull request that bumps the
    bundle version, with tester-facing notes drafted in its description.
-2. Merging that pull request is the go-ahead. Once CI passes on the merge
+2. Its CI waits until someone chooses **Approve workflows to run** on the
+   pull request ([why](#ci-on-the-release-pull-request)).
+3. Merging that pull request is the go-ahead. Once CI passes on the merge
    commit, **Tag release** tags it `v<version>` and starts **Windows tester
    bundle**.
-3. **Windows tester bundle** builds, checks and packages the bundle and creates
+4. **Windows tester bundle** builds, checks and packages the bundle and creates
    an unpublished **draft** release carrying the notes from the pull request.
-4. The owner reviews the draft and publishes it. Nothing publishes on its own.
+5. The owner reviews the draft and publishes it. Nothing publishes on its own.
 
 The draft is built **before publishing**: publishing starts no build. This
 applies to tags containing the draft-release workflow; the initial v0.3.0
@@ -22,7 +25,9 @@ Prepare release opens its pull request with the workflow's own token. Allow
 that in Settings → Actions → General → Workflow permissions: tick **Allow
 GitHub Actions to create and approve pull requests**. The default permission
 can stay read-only, because each workflow asks for what it needs. No secret
-or personal token is involved.
+or personal token is involved. No setting lifts the approval that the pull
+request's CI waits for: see
+[CI on the release pull request](#ci-on-the-release-pull-request).
 
 ## 1. Prepare the release
 
@@ -35,10 +40,39 @@ already exists.
 
 It sets the version in `crates/bundle/Cargo.toml` and its `Cargo.lock` package
 entry (internal library versions stay as they are), pushes
-`feature/release-<version>`, opens **Release \<version\>** and starts CI on it.
-Pull requests opened with the workflow token start no CI by themselves, which
-is why it is dispatched; those checks count for the merge. If they are missing,
-run `gh workflow run ci.yml --ref feature/release-<version>`.
+`feature/release-<version>` and opens **Release \<version\>**, whose CI waits
+for approval.
+
+### CI on the release pull request
+
+Since June 2026 GitHub creates the runs of a pull request opened with the
+workflow token in an approval-required state
+([changelog](https://github.blog/changelog/2026-06-11-bot-created-pull-requests-can-run-workflows-if-approved/)).
+Until someone with write access chooses **Approve workflows to run** in the
+pull request's merge box, CI (and Windows tester bundle, when the pull request
+touches its files) waits, the pull request has no checks and it stays blocked.
+Approve the runs when the pull request appears, so CI runs while you read the
+notes. If a later push leaves the pull request waiting again, approve those
+runs the same way.
+
+From the command line:
+
+```sh
+gh run list --branch feature/release-<version> --event pull_request --status action_required
+gh api -X POST repos/afterhours-crew/afterhours-2015/actions/runs/<id>/approve
+```
+
+Running CI on the branch by hand (`gh workflow run ci.yml --ref <branch>`)
+does not help: GitHub does not count a dispatched run's checks for a pull
+request. On the 0.4.1 pull request
+([#153](https://github.com/afterhours-crew/afterhours-2015/pull/153),
+2026-10-20) a dispatched run passed first, yet the pull request's checks list
+only the runs that waited for approval.
+
+Only a pull request opened by another identity, a GitHub App installation
+token or a personal access token, gets CI without the approval. Either needs
+a stored secret; the workflow uses the workflow token alone, so a person
+approves.
 
 ### How the notes are drafted
 
@@ -71,7 +105,8 @@ notes the next release would start with in its run summary.
 
 ## 2. Merge
 
-Check the notes, CI and the version, then merge. The required checks are strict:
+Check the notes, CI (it ran after **Approve workflows to run** and passed) and
+the version, then merge. The required checks are strict:
 if main moved, use **Update branch** first.
 
 **Tag release** runs when CI finishes on main. It acts only on the commit that

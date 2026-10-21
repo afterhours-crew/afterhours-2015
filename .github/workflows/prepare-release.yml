@@ -33,7 +33,6 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-      actions: write
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
@@ -55,9 +54,11 @@ jobs:
         run: |
           cat "$RUNNER_TEMP/release-pr.md" >> "$GITHUB_STEP_SUMMARY"
           git diff
-      # Pull requests opened with GITHUB_TOKEN start no pull_request runs,
-      # so CI is dispatched on the branch; its checks count for the merge.
-      - name: Open the release pull request and run CI on it
+      # GitHub holds the CI run of a pull request opened with GITHUB_TOKEN
+      # until a person approves it (docs/RELEASING.md). Dispatching CI on the
+      # branch instead would not help: dispatched checks do not count for a
+      # pull request.
+      - name: Open the release pull request
         if: ${{ !inputs.dry_run }}
         env:
           NEW_VERSION: ${{ steps.prepare.outputs.version }}
@@ -69,6 +70,7 @@ jobs:
           git add crates/bundle/Cargo.toml Cargo.lock
           git commit -m "Release $NEW_VERSION"
           git push origin "$BRANCH"
-          gh pr create --base "$BASE" --head "$BRANCH" \
-            --title "Release $NEW_VERSION" --body-file "$RUNNER_TEMP/release-pr.md"
-          gh workflow run ci.yml --ref "$BRANCH"
+          url=$(gh pr create --base "$BASE" --head "$BRANCH" \
+            --title "Release $NEW_VERSION" --body-file "$RUNNER_TEMP/release-pr.md")
+          echo "::notice::Opened $url. Its CI waits for approval: choose Approve workflows to run on the pull request."
+          printf '\nOpened %s. Its CI waits for approval: choose **Approve workflows to run** on the pull request.\n' "$url" >> "$GITHUB_STEP_SUMMARY"
