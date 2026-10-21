@@ -29,6 +29,7 @@ pub const OUTRO: &str = "gameplay/scoring/raceeventoutrologic";
 pub const INTRO_SEQUENCE: &str = "gameplay/sequences/gotowaypointraceintrosequence";
 pub const COUNTDOWN_SEQUENCE: &str = "gameplay/sequences/countdownsequence";
 pub const OUTRO_SEQUENCE: &str = "gameplay/sequences/wanderoutro";
+pub const RESTART_ARRIVAL: &str = "gameplay/progression/intro/fadein";
 pub const EVENTS_SCENE: &str = "levels/genesis01/events";
 /// Boolean client notifications the host sets while the participant is in the
 /// game mode and clears when it leaves (E997: calls on Events selectors 1 and 9,
@@ -77,6 +78,10 @@ pub fn sprint_race_007() -> Request {
         game_mode_id: "gameplay/gamemodes/sprint_race_007".into(),
         game_mode: "gameplay/gamemodes/racegamemode".into(),
         manager_scene: "levels/genesis01/gameplay".into(),
+        external_sequences: vec![(
+            "levels/genesis01/participantstatemachine".into(),
+            RESTART_ARRIVAL.into(),
+        )],
         start_logics: names(&[
             START_AREA,
             SHOW_START,

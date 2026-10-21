@@ -2,12 +2,16 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! Live free-roam scoring for owned participants: the two installed driving
+//! Live scoring for owned participants: the two installed driving
 //! participants are created when a participant drives in free roam, ticked
 //! from its car's accepted movement, fed its decoded query reports, and
-//! retired with the root disable event when it leaves free roam. Keeper
-//! awards become one category credit per bank, committed by the storage
-//! exchange; the committed snapshot refreshes the REP presentation fields.
+//! retired with the root disable event when it leaves free roam. An owned
+//! race event keeps data acquisition, retires the free-roam driving-style
+//! participant and runs the event's on the entity the race creates (E994:
+//! ghost 1355 stays, 1354 goes at the start, 1605 lives from the race start
+//! to the results; #138). Keeper awards become one category credit per bank,
+//! committed by the storage exchange; the committed snapshot refreshes the
+//! REP presentation fields.
 //!
 //! Replication of scoring state is coalesced: property changes are merged per
 //! entity and flushed as one section at a bounded rate when the queue has
@@ -52,16 +56,27 @@ const MAX_OTHERS: usize = 64;
 
 #[derive(Clone, Debug)]
 pub(super) struct Entity {
+    pub which: Which,
     pub ghost: u16,
     pub session: Session,
     pub reports: Vec<(u16, ReportBinding)>,
 }
 
+/// Driving participants running for one participant.
+const MAX_ENTITIES: usize = 2;
+
 #[derive(Clone, Debug)]
 pub(super) struct Live {
     pub car: u16,
-    pub entities: [Entity; 2],
+    /// Data acquisition, then the free-roam or the event driving-style
+    /// participant.
+    pub entities: Vec<Entity>,
     pub last_ms: u64,
+}
+impl Live {
+    fn entity_mut(&mut self, which: Which) -> Option<&mut Entity> {
+        self.entities.iter_mut().find(|e| e.which == which)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -363,6 +378,114 @@ struct Target {
     car: u16,
 }
 
+/// What one participant in free roam runs: both driving participants, or
+/// during an owned event data acquisition plus the event driving-style
+/// participant on the race's logic once that exists.
+fn kinds(in_event: bool, race: Option<u16>) -> Vec<(Which, Option<u16>)> {
+    let mut kinds = vec![(Which::Acquisition, None)];
+    match (in_event, race) {
+        (false, _) => kinds.push((Which::Scoring, None)),
+        (true, Some(ghost)) => kinds.push((Which::Event, Some(ghost))),
+        (true, None) => {}
+    }
+    kinds
+}
+
+/// Kinds to retire (running but not wanted, or on another entity) and kinds
+/// to start (wanted but not running), in participant and kind order.
+#[allow(clippy::type_complexity)]
+fn plan(
+    desired: &BTreeMap<u16, Vec<(Which, Option<u16>)>>,
+    running: &BTreeMap<u16, Vec<(Which, u16)>>,
+) -> (Vec<(u16, Which)>, Vec<(u16, Which, Option<u16>)>) {
+    let same = |(which, ghost): (Which, Option<u16>), (kind, entity): (Which, u16)| {
+        which == kind && ghost.is_none_or(|g| g == entity)
+    };
+    let mut retiring = Vec::new();
+    for (&participant, entities) in running {
+        for &entity in entities {
+            if !desired
+                .get(&participant)
+                .is_some_and(|kinds| kinds.iter().any(|&k| same(k, entity)))
+            {
+                retiring.push((participant, entity.0));
+            }
+        }
+    }
+    let mut starting = Vec::new();
+    for (&participant, wanted) in desired {
+        for &(which, ghost) in wanted {
+            if !running
+                .get(&participant)
+                .is_some_and(|entities| entities.iter().any(|&e| same((which, ghost), e)))
+            {
+                starting.push((participant, which, ghost));
+            }
+        }
+    }
+    (retiring, starting)
+}
+
+#[cfg(test)]
+mod plan_tests {
+    use super::*;
+
+    #[test]
+    fn an_event_keeps_acquisition_and_swaps_the_driving_style_participant() {
+        let free = BTreeMap::from([(4, kinds(false, None))]);
+        // Free roam starts acquisition, then the free-roam participant.
+        assert_eq!(
+            plan(&free, &BTreeMap::new()),
+            (
+                vec![],
+                vec![(4, Which::Acquisition, None), (4, Which::Scoring, None)]
+            )
+        );
+        let roaming = BTreeMap::from([(4, vec![(Which::Acquisition, 10), (Which::Scoring, 11)])]);
+        assert_eq!(plan(&free, &roaming), (vec![], vec![]));
+        // The event start retires only the free-roam participant (E994: 1354
+        // goes, 1355 stays).
+        let waiting = BTreeMap::from([(4, kinds(true, None))]);
+        assert_eq!(
+            plan(&waiting, &roaming),
+            (vec![(4, Which::Scoring)], vec![])
+        );
+        // The race start runs the event participant on the race's logic.
+        let acquiring = BTreeMap::from([(4, vec![(Which::Acquisition, 10)])]);
+        let racing = BTreeMap::from([(4, kinds(true, Some(20)))]);
+        assert_eq!(
+            plan(&racing, &acquiring),
+            (vec![], vec![(4, Which::Event, Some(20))])
+        );
+        // A new race logic (restart) replaces the session; the results retire it.
+        let raced = BTreeMap::from([(4, vec![(Which::Acquisition, 10), (Which::Event, 20)])]);
+        assert_eq!(plan(&racing, &raced), (vec![], vec![]));
+        let again = BTreeMap::from([(4, kinds(true, Some(21)))]);
+        assert_eq!(
+            plan(&again, &raced),
+            (vec![(4, Which::Event)], vec![(4, Which::Event, Some(21))])
+        );
+        assert_eq!(plan(&waiting, &raced), (vec![(4, Which::Event)], vec![]));
+        // The free-roam return starts the free-roam participant again; leaving
+        // retires everything.
+        assert_eq!(
+            plan(&free, &acquiring),
+            (vec![], vec![(4, Which::Scoring, None)])
+        );
+        assert_eq!(
+            plan(&BTreeMap::new(), &raced),
+            (vec![(4, Which::Acquisition), (4, Which::Event)], vec![])
+        );
+        // Participants are independent.
+        let both = BTreeMap::from([(4, kinds(true, Some(20))), (5, kinds(false, None))]);
+        let mixed = BTreeMap::from([
+            (4, vec![(Which::Acquisition, 10), (Which::Event, 20)]),
+            (5, vec![(Which::Acquisition, 30), (Which::Scoring, 31)]),
+        ]);
+        assert_eq!(plan(&both, &mixed), (vec![], vec![]));
+    }
+}
+
 /// One live session's identity: its participant, program and ghost.
 #[derive(Clone, Copy)]
 struct Scope {
@@ -649,7 +772,8 @@ impl PlayerListener {
         body: nfs_protocol::world::BitSpan<'_>,
     ) -> Result<Option<QueuedReport>, replication::Error> {
         for (&participant, live) in &self.scoring_state.live {
-            for (which, entity) in Which::ALL.into_iter().zip(&live.entities) {
+            for entity in &live.entities {
+                let which = entity.which;
                 for (node, binding) in &entity.reports {
                     let report = binding.receive(
                         players,
@@ -711,8 +835,7 @@ impl PlayerListener {
             if trace || matches!(value, nfs_world::scoring::value::Value::Boolean(_)) {
                 let flag = value;
                 let identity = content
-                    .participant(which)
-                    .program
+                    .program(which)?
                     .nodes
                     .get(usize::from(*node))
                     .map(|n| (n.identity.asset.as_str(), n.identity.index));
@@ -730,8 +853,7 @@ impl PlayerListener {
             ));
         }
         for emission in &output.remote {
-            let (fires, skipped) =
-                remote_fires(&content.participant(which).bus_entities, ghost, emission);
+            let (fires, skipped) = remote_fires(content.bus_entities(which)?, ghost, emission);
             if skipped > 0 {
                 tracing::warn!(
                     participant,
@@ -771,55 +893,70 @@ impl PlayerListener {
         Ok(())
     }
 
+    /// Retire one participant kind with the root disable event, which banks
+    /// every category. Free-roam kinds delete their entity; the event deletes
+    /// its own with its other logics, so only pending changes are dropped.
+    #[allow(clippy::too_many_arguments)]
     fn retire(
         &self,
         content: &Content,
         players: &mut Players,
         state: &mut State,
         participant: u16,
+        which: Which,
         now_ms: u64,
         collected: &mut Collected,
     ) -> Result<(), replication::Error> {
         let live = state
             .live
-            .remove(&participant)
+            .get_mut(&participant)
             .ok_or(replication::Error::Shape)?;
-        state.nitrous.remove(&live.car);
-        let inputs = idle_inputs(self.persona, now_ms);
-        let mut ghosts = Vec::with_capacity(2);
-        for (which, entity) in Which::ALL.into_iter().zip(live.entities) {
-            let program = &content.participant(which).program;
-            let root = program
-                .nodes
-                .iter()
-                .position(|n| n.class == "ParticipantLogicEntityData")
-                .ok_or(replication::Error::Shape)? as u16;
-            let mut session = entity.session;
-            let output = session
-                .event(root, ROOT_DISABLED, &inputs)
-                .map_err(fail("root disable"))?;
-            collected
-                .awards
-                .extend(output.awards.into_iter().map(|award| (participant, award)));
-            ghosts.push(entity.ghost);
+        let position = live
+            .entities
+            .iter()
+            .position(|e| e.which == which)
+            .ok_or(replication::Error::Shape)?;
+        let entity = live.entities.remove(position);
+        if live.entities.is_empty() {
+            let car = live.car;
+            state.live.remove(&participant);
+            state.nitrous.remove(&car);
         }
-        players.remove_entities(&ghosts)?;
-        for ghost in ghosts {
-            state.dirty.remove(&ghost);
-            state.dirty_deleted.push(ghost);
+        let root = content
+            .program(which)?
+            .nodes
+            .iter()
+            .position(|n| n.class == "ParticipantLogicEntityData")
+            .ok_or(replication::Error::Shape)? as u16;
+        let mut session = entity.session;
+        let output = session
+            .event(root, ROOT_DISABLED, &idle_inputs(self.persona, now_ms))
+            .map_err(fail("root disable"))?;
+        collected
+            .awards
+            .extend(output.awards.into_iter().map(|award| (participant, award)));
+        state.dirty.remove(&entity.ghost);
+        if which != Which::Event {
+            players.remove_entities(&[entity.ghost])?;
+            state.dirty_deleted.push(entity.ghost);
         }
-        tracing::info!(participant, "owned scoring participants retired");
+        tracing::info!(
+            participant,
+            ?which,
+            ghost = entity.ghost,
+            "owned scoring participant retired"
+        );
         Ok(())
     }
 
-    fn create(
+    /// Open a participant's scoring on its car, seeding the car's nitrous fuel.
+    fn open(
         &self,
         content: &Content,
-        players: &mut Players,
+        players: &Players,
         state: &mut State,
         target: Target,
         now_ms: u64,
-        collected: &mut Collected,
     ) -> Result<(), replication::Error> {
         let Target { participant, car } = target;
         if state.live.len() >= MAX_LIVE {
@@ -843,57 +980,122 @@ impl PlayerListener {
                 },
             );
         }
-        let inputs = self.scoring_inputs(content, players, car, now_ms, state.nitrous.get(&car))?;
-        let mut entities = Vec::with_capacity(2);
-        for which in Which::ALL {
-            let (session, output) = content
-                .start(which, &inputs)
-                .map_err(fail("session start"))?;
-            let creation = content
-                .creation(which, &session, participant, players)
-                .map_err(fail("creation record"))?;
-            let record = players
-                .spawn_entities(vec![creation], content.creation_content())?
-                .remove(0);
-            let ghost = record.id;
-            merge_record(&mut state.dirty, record)?;
-            let reports = content.report_bindings(which, players, ghost)?;
-            // Startup publications are already in the creation; only its
-            // commands and awards remain to queue.
-            let startup = Output {
-                synced: Vec::new(),
-                ..output
-            };
-            Self::collect_output(
-                content,
-                players,
-                state,
-                Scope {
-                    participant,
-                    which,
-                    ghost,
-                },
-                startup,
-                collected,
-            )?;
-            entities.push(Entity {
-                ghost,
-                session,
-                reports,
-            });
-        }
-        let [acquisition, scoring] =
-            <[Entity; 2]>::try_from(entities).map_err(|_| replication::Error::Shape)?;
         state.live.insert(
             participant,
             Live {
                 car,
-                entities: [acquisition, scoring],
+                entities: Vec::with_capacity(MAX_ENTITIES),
                 last_ms: now_ms,
             },
         );
-        tracing::info!(participant, car, "owned scoring participants created");
         Ok(())
+    }
+
+    /// Start one participant kind. Free-roam kinds create their own entity,
+    /// whose creation carries the startup publications; the event kind runs
+    /// on the entity the race created, and its startup publications follow
+    /// as an update.
+    #[allow(clippy::too_many_arguments)]
+    fn start(
+        &self,
+        content: &Content,
+        players: &mut Players,
+        state: &mut State,
+        participant: u16,
+        which: Which,
+        event_ghost: Option<u16>,
+        now_ms: u64,
+        collected: &mut Collected,
+    ) -> Result<(), replication::Error> {
+        let car = state
+            .live
+            .get(&participant)
+            .ok_or(replication::Error::Shape)?
+            .car;
+        let inputs = self.scoring_inputs(content, players, car, now_ms, state.nitrous.get(&car))?;
+        let (session, output) = content
+            .start(which, &inputs)
+            .map_err(fail("session start"))?;
+        let (ghost, output) = match (which, event_ghost) {
+            (Which::Event, Some(ghost)) => (ghost, output),
+            (Which::Event, None) => return Err(replication::Error::Shape),
+            (_, _) => {
+                let creation = content
+                    .creation(which, &session, participant, players)
+                    .map_err(fail("creation record"))?;
+                let record = players
+                    .spawn_entities(vec![creation], content.creation_content())?
+                    .remove(0);
+                let ghost = record.id;
+                merge_record(&mut state.dirty, record)?;
+                (
+                    ghost,
+                    Output {
+                        synced: Vec::new(),
+                        ..output
+                    },
+                )
+            }
+        };
+        let reports = content.report_bindings(which, players, ghost)?;
+        Self::collect_output(
+            content,
+            players,
+            state,
+            Scope {
+                participant,
+                which,
+                ghost,
+            },
+            output,
+            collected,
+        )?;
+        let live = state
+            .live
+            .get_mut(&participant)
+            .ok_or(replication::Error::Shape)?;
+        if live.entities.len() >= MAX_ENTITIES {
+            return Err(replication::Error::Bound);
+        }
+        live.entities.push(Entity {
+            which,
+            ghost,
+            session,
+            reports,
+        });
+        tracing::info!(
+            participant,
+            car,
+            ?which,
+            ghost,
+            "owned scoring participant started"
+        );
+        Ok(())
+    }
+
+    /// The participant properties the participant's event driving-style
+    /// session has written so far (empty without one).
+    pub(super) fn event_scoring_properties(
+        &self,
+        participant: u16,
+    ) -> BTreeMap<nfs_content::scoring::participant_properties::Property, i32> {
+        let (Some(content), Some(live)) = (
+            self.scoring.as_deref(),
+            self.scoring_state.live.get(&participant),
+        ) else {
+            return BTreeMap::new();
+        };
+        live.entities
+            .iter()
+            .find(|e| e.which == Which::Event)
+            .map(|e| match content.event_properties(&e.session) {
+                Ok(values) => values,
+                Err(error) => {
+                    tracing::warn!(participant, ?error, "event scoring properties unreadable");
+                    BTreeMap::new()
+                }
+            })
+            .unwrap_or_default()
     }
 
     /// Queue one section with everything coalesced so far, when the queue
@@ -948,31 +1150,53 @@ impl PlayerListener {
         if !self.pending_entries.is_empty() {
             return Ok(());
         }
-        let active: BTreeSet<u16> = self
-            .participants
-            .in_free_roam()
-            .into_iter()
-            .filter(|p| self.free_roam_presented.contains(p) && !self.event_suspended.contains(p))
-            .collect();
-        let retiring: Vec<u16> = self
+        let mut desired: BTreeMap<u16, Vec<(Which, Option<u16>)>> = BTreeMap::new();
+        for participant in self.participants.in_free_roam() {
+            if !self.free_roam_presented.contains(&participant) {
+                continue;
+            }
+            let race = content
+                .has_event()
+                .then(|| self.event_driving_style(participant))
+                .flatten();
+            desired.insert(
+                participant,
+                kinds(self.event_suspended.contains(&participant), race),
+            );
+        }
+        let running: BTreeMap<u16, Vec<(Which, u16)>> = self
             .scoring_state
             .live
-            .keys()
-            .copied()
-            .filter(|p| !active.contains(p))
-            .collect();
-        let creating: Vec<Target> = active
             .iter()
-            .filter(|p| !self.scoring_state.live.contains_key(p))
-            .filter_map(|&participant| {
-                self.world_cars
-                    .iter()
-                    .find(|(_, (owner, ready))| *owner == participant && *ready)
-                    .map(|(&car, _)| Target { participant, car })
+            .map(|(&p, live)| {
+                (
+                    p,
+                    live.entities.iter().map(|e| (e.which, e.ghost)).collect(),
+                )
             })
             .collect();
+        let (retiring, mut starting) = plan(&desired, &running);
+        // A participant without scoring opens on its ready car; without one it
+        // waits.
+        let mut opening: Vec<Target> = Vec::new();
+        for participant in desired.keys() {
+            if running.contains_key(participant) {
+                continue;
+            }
+            match self
+                .world_cars
+                .iter()
+                .find(|(_, (owner, ready))| owner == participant && *ready)
+            {
+                Some((&car, _)) => opening.push(Target {
+                    participant: *participant,
+                    car,
+                }),
+                None => starting.retain(|(p, _, _)| p != participant),
+            }
+        }
         let idle = retiring.is_empty()
-            && creating.is_empty()
+            && starting.is_empty()
             && self.scoring_state.reports.is_empty()
             && self.scoring_state.reported.is_empty();
         if idle {
@@ -982,22 +1206,28 @@ impl PlayerListener {
         let mut state = self.scoring_state.clone();
         let mut players = self.players.clone();
         let mut collected = Collected::default();
-        for participant in retiring {
+        for (participant, which) in retiring {
             self.retire(
                 &content,
                 &mut players,
                 &mut state,
                 participant,
+                which,
                 now_ms,
                 &mut collected,
             )?;
         }
-        for target in creating {
-            self.create(
+        for target in opening {
+            self.open(&content, &players, &mut state, target, now_ms)?;
+        }
+        for (participant, which, ghost) in starting {
+            self.start(
                 &content,
                 &mut players,
                 &mut state,
-                target,
+                participant,
+                which,
+                ghost,
                 now_ms,
                 &mut collected,
             )?;
@@ -1021,7 +1251,10 @@ impl PlayerListener {
                     .live
                     .get_mut(&queued.participant)
                     .ok_or(replication::Error::Shape)?;
-                let entity = &mut live.entities[queued.which as usize];
+                // A report for a participant kind retired since is dropped.
+                let Some(entity) = live.entity_mut(queued.which) else {
+                    continue;
+                };
                 let output = entity
                     .session
                     .report(queued.node, &queued.report, &inputs)
@@ -1063,17 +1296,22 @@ impl PlayerListener {
                 .get_mut(&car)
                 .map(|n| std::mem::take(&mut n.transitions))
                 .unwrap_or_default();
+            let kinds: Vec<Which> = state.live[&participant]
+                .entities
+                .iter()
+                .map(|e| e.which)
+                .collect();
             for sample in transitions {
                 if let Some(vehicle) = inputs.vehicle.as_mut() {
                     vehicle.nos = Some(sample);
                 }
-                for which in Which::ALL {
+                for &which in &kinds {
                     let (output, ghost) = {
-                        let live = state
+                        let entity = state
                             .live
                             .get_mut(&participant)
+                            .and_then(|live| live.entity_mut(which))
                             .ok_or(replication::Error::Shape)?;
-                        let entity = &mut live.entities[which as usize];
                         (
                             entity
                                 .session
@@ -1135,13 +1373,13 @@ impl PlayerListener {
                         vehicle.nos = Some(nitrous.sample());
                     }
                 }
-                for which in Which::ALL {
+                for &which in &kinds {
                     let (output, ghost) = {
-                        let live = state
+                        let entity = state
                             .live
                             .get_mut(&participant)
+                            .and_then(|live| live.entity_mut(which))
                             .ok_or(replication::Error::Shape)?;
-                        let entity = &mut live.entities[which as usize];
                         let output = entity
                             .session
                             .tick(step, &inputs)

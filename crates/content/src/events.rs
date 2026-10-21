@@ -17,12 +17,22 @@ use crate::{
     },
     participant_logic::{Rules, shape},
     scan::Assets,
+    scoring::participant_properties::{Property, mirrored},
     world::StartupKind,
 };
 use nfs_frostbite::ebx::{Object, Value};
 use nfs_world::replication::entity::{Kind, Profile, creation::Asset};
 use std::collections::{BTreeMap, BTreeSet};
 
+pub mod ai;
+mod invitations;
+mod pacing;
+pub mod restart;
+mod rewards;
+mod route;
+mod sequence;
+mod spatial;
+mod standings;
 mod values;
 use values::{Evaluator, Number, name};
 
@@ -65,6 +75,9 @@ pub struct Field {
     pub asset: String,
     pub object: usize,
     pub binding: Option<Binding>,
+    /// The integer participant property a synchronized integer mirrors (its
+    /// input is an accessor's `OutputValue`; #138).
+    pub mirrors: Option<Property>,
 }
 
 /// A blueprint instance with its creation asset and serializer layout.
@@ -105,11 +118,21 @@ impl Layout {
 /// The game mode: its layout (owned by the Gameplay game-mode manager), the root's
 /// three Gameplay endpoints (game time, game-mode manager, participant manager), and
 /// the start area's checkpoint route.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct GameMode {
     pub layout: Layout,
     pub root_bindings: [(u32, usize); 3],
     pub checkpoints: Vec<(u32, usize)>,
+    /// AI destination locators in checkpoint order, including an explicitly
+    /// linked continuation past the finish. These differ from volume centers.
+    pub points: Vec<[f32; 3]>,
+    /// Ordinary waypoint locators used to measure progress, without continuation.
+    pub checkpoint_points: Vec<[f32; 3]>,
+    /// Authored waypoint-channel driving command; None when this mode has none.
+    pub drift: Option<bool>,
+    pub pacing: Option<nfs_world::race_pacing::Config>,
+    /// Authored repeating cache-load delay for the ongoing position property.
+    pub standings_interval: f32,
     pub laps: u8,
 }
 
@@ -122,6 +145,16 @@ pub struct Sequence {
     pub spawner: Option<usize>,
     /// The AI goal of a go-to-waypoint sequence (a race intro).
     pub goto: Option<Goto>,
+    /// Authored post-race AI commands and the sequence's server timeout.
+    pub wander: Option<Wander>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Wander {
+    pub urgent: bool,
+    pub prefer_straight: bool,
+    pub speed_limit: f32,
+    pub timeout: f32,
 }
 
 /// A go-to-waypoint sequence's AI goal (E997): the location and the speed-limit
@@ -147,12 +180,18 @@ pub struct Rewards {
 /// One event's composition. Logic and sequence names are the caller's selection.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Event {
+    pub ai: ai::Roster,
+    pub invitations: Invitations,
+    pub restart: Option<Vec<restart::Destination>>,
     pub scene: String,
     pub scene_content_key: u32,
     pub game_mode_id: String,
     pub launcher: usize,
     pub start_volume: usize,
     pub rewards: Rewards,
+    /// First, second, third and other payouts. The last finisher also selects
+    /// "other", using the race's maximum participant count.
+    pub placement_rewards: Option<[Rewards; 4]>,
     pub game_mode: GameMode,
     pub start_logics: Vec<Layout>,
     pub game_mode_logics: Vec<Layout>,
@@ -170,6 +209,16 @@ pub struct Event {
     pub game_mode_notifications: Vec<(u32, usize)>,
     /// The game mode's DNF transition time-out, in seconds.
     pub dnf_timeout: f32,
+}
+
+/// The Events scene's invitation-availability output. Its threshold is authored
+/// against the human participant set after the Prestige-mode exclusion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Invitations {
+    pub scene_content_key: u32,
+    pub serializer: usize,
+    /// Availability is true only when the eligible count exceeds this value.
+    pub count_above: usize,
 }
 
 /// A logic spawned by a spawner in another startup scene, which owns it and whose
@@ -193,6 +242,8 @@ pub struct Request {
     pub start_logics: Vec<String>,
     pub game_mode_logics: Vec<String>,
     pub sequences: Vec<String>,
+    /// Sequences from another loaded scene bundle, as (bundle, blueprint).
+    pub external_sequences: Vec<(String, String)>,
     /// Logics spawned in other startup scenes, as (scene, blueprint).
     pub scene_logics: Vec<(String, String)>,
     /// A start-area logic also resolved in the start areas linked to this one.
@@ -384,6 +435,8 @@ impl AssetIndex {
     /// Resolve one event's composition. Ambiguous or missing spawners, channels,
     /// start areas or checkpoints are errors.
     pub fn event(&mut self, request: &Request) -> Result<Event, Error> {
+        let rival_links = self.identity.rival_links;
+        let ai_links = self.identity.ai_links;
         let rules = Rules::from_json(&self.identity.participant_logic.to_json())?;
         let self_sequences_rules = self.identity.sequences.to_json();
         let scene_rules = self.identity.scenes.clone();
@@ -412,6 +465,31 @@ impl AssetIndex {
             references.insert(name, r);
         }
         let mut scene_registries = Vec::new();
+        let mut sequence_registries = BTreeMap::new();
+        for (scene, blueprint) in &request.external_sequences {
+            let scene = scene.to_lowercase();
+            let name = blueprint.to_lowercase();
+            let bundle = startup
+                .iter()
+                .position(|e| {
+                    e.kind == StartupKind::SubLevel && e.name.eq_ignore_ascii_case(&scene)
+                })
+                .and_then(|i| u16::try_from(i + 1).ok())
+                .ok_or_else(|| bad("external sequence bundle is not loaded"))?;
+            if sequence_registries
+                .insert(
+                    name.clone(),
+                    (
+                        bundle,
+                        self.catalog(&scene)?,
+                        self.reference(&scene, &name)?,
+                    ),
+                )
+                .is_some()
+            {
+                return Err(bad("duplicate external sequence"));
+            }
+        }
         for (scene_name, blueprint) in &request.scene_logics {
             let scene_name = scene_name.to_lowercase();
             let blueprint = blueprint.to_lowercase();
@@ -582,11 +660,15 @@ impl AssetIndex {
         let waypoint_site = waypoints.site.clone();
         let port = one_port(&mut graph, &waypoint_site)?;
         let mut checkpoints = Vec::new();
+        let mut points = Vec::new();
+        let mut checkpoint_points = Vec::new();
         for target in graph.links(&waypoint_site, port)? {
             if target.port != 0 || graph.object(&target.site)?.class != CHECKPOINT {
                 return Err(bad("checkpoint route endpoint"));
             }
             checkpoints.push(endpoint(&mut graph, &mut scenes, &target.site)?);
+            points.push(route::point(&mut graph, &target.site)?);
+            checkpoint_points.push(route::checkpoint(&mut graph, &target.site)?);
         }
         if checkpoints.is_empty()
             || checkpoints.len() > MAX_CHECKPOINTS
@@ -644,6 +726,9 @@ impl AssetIndex {
                 ),
             );
         }
+        let placement_rewards = (gm_name == "gameplay/gamemodes/racegamemode")
+            .then(|| rewards::extract(&mut graph, &gm_binding, rewards))
+            .transpose()?;
         let manager_root = scenes
             .roots
             .get(&request.manager_scene.to_lowercase())
@@ -667,14 +752,17 @@ impl AssetIndex {
         }
         let gm_fields_out = gm_fields
             .iter()
-            .map(|(site, class, kind)| Field {
-                kind: *kind,
-                class: class.clone(),
-                asset: site.key.0.clone(),
-                object: site.key.1,
-                binding: gm_binding.get(site).map(|(_, b)| *b),
+            .map(|(site, class, kind)| {
+                Ok(Field {
+                    kind: *kind,
+                    class: class.clone(),
+                    asset: site.key.0.clone(),
+                    object: site.key.1,
+                    binding: gm_binding.get(site).map(|(_, b)| *b),
+                    mirrors: mirrored(&mut graph, site)?,
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, Error>>()?;
         let gm_index: BTreeMap<Site, usize> = gm_fields
             .iter()
             .enumerate()
@@ -700,6 +788,11 @@ impl AssetIndex {
             },
             root_bindings,
             checkpoints,
+            points,
+            checkpoint_points,
+            drift: route::drift(&gm_nodes)?,
+            pacing: pacing::extract(&mut graph, &gm_nodes, &gm_binding)?,
+            standings_interval: standings::interval(&mut graph, &gm_nodes)?,
             laps,
         };
         game_mode.layout.profile()?;
@@ -770,6 +863,7 @@ impl AssetIndex {
                             asset: site.key.0.clone(),
                             object: site.key.1,
                             binding: bindings.get(site).copied(),
+                            mirrors: mirrored(graph, site)?,
                         })
                     })
                     .collect::<Result<_, Error>>()?,
@@ -849,7 +943,7 @@ impl AssetIndex {
         let manager = endpoint(&mut graph, &mut scenes, &manager_node)?;
         let manager_bus = embedded_bus(&manager_nodes, &manager_node)?;
         let mut sequences = Vec::new();
-        for name in &request.sequences {
+        for name in request.sequences.iter().chain(sequence_registries.keys()) {
             let name = name.to_lowercase();
             let nodes = graph.read(Site::root(&name))?;
             let mut buses = 0u16;
@@ -1019,31 +1113,41 @@ impl AssetIndex {
             } else {
                 None
             };
-            let r = references
-                .get(&name)
-                .ok_or_else(|| bad("sequence not registered"))?;
+            let (sequence_bundle, sequence_catalog, r) = match sequence_registries.get(&name) {
+                Some((b, c, r)) => (*b, c, r),
+                None => (
+                    bundle,
+                    &catalog,
+                    references
+                        .get(&name)
+                        .ok_or_else(|| bad("sequence not registered"))?,
+                ),
+            };
             let layout = Layout {
                 blueprint: name.clone(),
                 asset: Asset {
-                    bundle,
+                    bundle: sequence_bundle,
                     type_id: u16::try_from(r.class_id).map_err(|_| bad("sequence class ID"))?,
                     local_index: u16::try_from(r.local_index)
                         .map_err(|_| bad("sequence ordinal"))?,
                 },
-                catalog: catalog.clone(),
+                catalog: sequence_catalog.clone(),
                 bus_count: buses,
                 sub_id: manager_bus,
                 occurrence: 0,
                 fields: field_sites
                     .iter()
-                    .map(|(site, class, kind)| Field {
-                        kind: *kind,
-                        class: class.clone(),
-                        asset: site.key.0.clone(),
-                        object: site.key.1,
-                        binding: bindings.get(site).copied(),
+                    .map(|(site, class, kind)| {
+                        Ok(Field {
+                            kind: *kind,
+                            class: class.clone(),
+                            asset: site.key.0.clone(),
+                            object: site.key.1,
+                            binding: bindings.get(site).copied(),
+                            mirrors: mirrored(&mut graph, site)?,
+                        })
                     })
-                    .collect(),
+                    .collect::<Result<_, Error>>()?,
             };
             layout.profile()?;
             sequences.push(Sequence {
@@ -1051,6 +1155,7 @@ impl AssetIndex {
                 manager,
                 spawner,
                 goto,
+                wander: sequence::wander(&mut graph, &nodes)?,
             });
         }
         let mut start_logics = Vec::new();
@@ -1155,13 +1260,37 @@ impl AssetIndex {
                 layout,
             });
         }
+        let mut ai = ai::extract(&mut graph, &instance_site, &manager_nodes, rival_links)?;
+        if !ai.spawns.is_empty() {
+            let unique = |class: &str| -> Result<Site, Error> {
+                let nodes: Vec<_> = manager_nodes
+                    .iter()
+                    .filter(|n| n.object.class == class)
+                    .collect();
+                let [node] = nodes.as_slice() else {
+                    return Err(bad("event AI manager missing or ambiguous"));
+                };
+                Ok(node.site.clone())
+            };
+            ai.managers = Some(crate::ai::managers(
+                &mut graph,
+                &mut scenes,
+                &unique("AiParticipantManagerEntityData")?,
+                &unique("AiActorManagerEntityData")?,
+                ai_links,
+            )?);
+        }
         Ok(Event {
+            ai,
+            invitations: invitations::extract(&mut graph, &mut scenes)?,
+            restart: restart::destinations(&mut graph, &instance_site)?,
             scene,
             scene_content_key,
             game_mode_id,
             launcher: launcher_serializer,
             start_volume,
             rewards,
+            placement_rewards,
             game_mode,
             start_logics,
             game_mode_logics,

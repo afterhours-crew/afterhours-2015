@@ -8,6 +8,9 @@ use crate::event_logic::tests as fixture;
 use nfs_world::{bits::BitWriter, logic::EntityRef};
 use std::sync::Arc;
 
+mod ai;
+mod restart;
+
 struct Harness {
     listener: PlayerListener,
     participant: u16,
@@ -23,14 +26,26 @@ impl Harness {
         let mut listener = PlayerListener::new(fixture::PERSONA);
         listener.players = players;
         let content = Arc::new(fixture::content());
+        let humans = listener.players.player_participants().count();
+        content
+            .invitation_update(&mut listener.players, humans)
+            .unwrap();
         listener.events = Some(content.clone());
         listener.replication_origin_ms = Some(0);
         let car = 4000;
         listener.world_cars.insert(car, (participant, true));
         let thresholds = nfs_services::reputation::Thresholds::new(vec![0, 5000]).unwrap();
+        let mut presentation = crate::garage_logic::tests::presentation_json();
+        // The event harness has its own persistent scene, separate from the
+        // garage fixture. Route synthetic fade events to that live object.
+        for phase in ["in_world_teleport", "in_world_arrival"] {
+            for event in presentation[phase]["events"].as_array_mut().unwrap() {
+                event["target"] = serde_json::json!({"scene_content_key": fixture::RACE});
+            }
+        }
         listener.logic = Some(Arc::new(
             crate::garage_logic::GarageLogic::from_json_with_reputation(
-                &crate::garage_logic::tests::presentation_json(),
+                &presentation,
                 Some(thresholds),
             )
             .unwrap(),
@@ -133,12 +148,14 @@ impl Delivered {
     fn created(&self) -> Vec<u16> {
         self.sections
             .iter()
+            .chain(self.entries.iter().map(|e| &e.0))
             .flat_map(|s| s.records.iter().map(|r| r.id))
             .collect()
     }
     fn deleted(&self) -> Vec<u16> {
         self.sections
             .iter()
+            .chain(self.entries.iter().map(|e| &e.0))
             .flat_map(|s| s.deleted.clone())
             .collect()
     }
@@ -173,6 +190,63 @@ fn logic(event: u32, ghost: u16) -> Input {
         target: EntityRef { ghost, entity: 1 },
         player: 0,
     })
+}
+
+#[test]
+fn invitation_initialization_retries_after_queue_pressure_and_tracks_human_joins() {
+    use nfs_world::replication::{Initial, players::Request, sublevel};
+    let (players, _, _) = fixture::world();
+    let mut listener = PlayerListener::new(fixture::PERSONA);
+    listener.players = players;
+    listener.events = Some(Arc::new(fixture::content()));
+    listener.replication_origin_ms = Some(0);
+    let scene = listener.players.objects().scene(fixture::EVENTS).unwrap();
+    let value = |listener: &PlayerListener| {
+        let Initial::SubLevel { fields, .. } =
+            &listener.players.objects().get(scene).unwrap().initial
+        else {
+            panic!("scene")
+        };
+        fields[3].clone()
+    };
+    listener.pending = std::iter::repeat_n(returning::empty_section(), MAX_PENDING).collect();
+    listener.advance_events(1000).unwrap();
+    assert_eq!(value(&listener), sublevel::Initial::BoolProperty(None));
+    listener.pending.clear();
+    listener.advance_events(1100).unwrap();
+    assert_eq!(
+        value(&listener),
+        sublevel::Initial::BoolProperty(Some(false))
+    );
+    let delivered = listener.pending.pop_front().unwrap();
+    assert_eq!(delivered.records.len(), 1);
+    assert_eq!(delivered.records[0].id, scene);
+    assert!(listener.pending.is_empty());
+    listener.advance_events(1200).unwrap();
+    assert!(listener.pending.is_empty());
+
+    let player = listener
+        .players
+        .create(
+            2,
+            88,
+            Request {
+                name: b"Other".to_vec(),
+                flag: false,
+                slot: 0,
+            },
+        )
+        .unwrap()
+        .unwrap()
+        .id;
+    listener.players.join(2, 88, player).unwrap().unwrap();
+    assert_eq!(listener.players.player_participants().count(), 2);
+    listener.advance_events(1300).unwrap();
+    assert_eq!(
+        value(&listener),
+        sublevel::Initial::BoolProperty(Some(true))
+    );
+    assert_eq!(listener.pending.pop_front().unwrap().records[0].id, scene);
 }
 
 /// From the start area to the countdown's end; returns the harness at the race.
@@ -358,10 +432,10 @@ fn a_win_runs_the_official_order_and_pays_once() {
             event.cash,
             event.rep.total
         ),
-        (1_761_118_161, "SpeedWall_SprintRace", 0, 2000, 9000)
+        (1_761_118_161, "SpeedWall_SprintRace", 0, 500, 1500)
     );
     assert_eq!(event.batch_id, award.batch_id);
-    assert_eq!(award.credit.total, 9000);
+    assert_eq!(award.credit.total, 1500);
     assert!(
         h.race().finish.is_some_and(|f| f.race_ms
             == ((60. - (3.1 + COUNTDOWN_LEAD_S)) as f32 as f64 * 1000.).round() as i32)
@@ -420,6 +494,9 @@ fn a_win_runs_the_official_order_and_pays_once() {
 fn restart_and_leave_choices_exit_through_the_dnf_transition() {
     for (choice, exit) in [(RESTART, Exit::Restart), (LEAVE, Exit::Abandon)] {
         let mut h = started();
+        if choice == RESTART {
+            restart::configure(&mut h);
+        }
         let gm = h.race().game_mode;
         let target = h.race().logics[&if choice == RESTART {
             Logic::Restart
@@ -429,8 +506,15 @@ fn restart_and_leave_choices_exit_through_the_dnf_transition() {
         let chosen = h.run(5_000, vec![logic(choice, target)]);
         assert_eq!(h.race().exit, Some(exit));
         assert!(chosen.deleted().contains(&target));
-        assert_eq!(chosen.created().len(), 1, "cooldown logic");
-        assert!(!h.listener.event_suspended.contains(&h.participant));
+        assert_eq!(
+            chosen.created().len(),
+            if choice == RESTART { 5 } else { 1 },
+            "cooldown plus the restart's four loading roles"
+        );
+        assert_eq!(
+            h.listener.event_suspended.contains(&h.participant),
+            exit == Exit::Restart
+        );
         let calls = h.run(5_100, vec![]).calls();
         let triggered = h.content.state(Gm::DnfTriggered) as u16;
         assert_eq!(calls[0], (gm, triggered, 0, Some(h.participant)));
@@ -457,13 +541,24 @@ fn restart_and_leave_choices_exit_through_the_dnf_transition() {
 }
 
 #[test]
-fn a_passed_dnf_deadline_leaves_the_race() {
+fn a_reached_dnf_deadline_uses_the_deadline_notification() {
     let mut h = started();
     let deadline = h.race().deadline.unwrap();
-    h.run((deadline * 1000.) as u64 - 10, vec![]);
+    h.run((deadline * 1000.) as u64 - 1, vec![]);
     assert_eq!(h.race().exit, None);
-    h.run((deadline * 1000.) as u64 + 10, vec![]);
-    assert_eq!(h.race().exit, Some(Exit::Abandon));
+    h.run((deadline * 1000.) as u64, vec![]);
+    assert_eq!(h.race().exit, Some(Exit::TimedOut));
+    let calls = h.run((deadline * 1000.) as u64 + FOLLOW_MS, vec![]).calls();
+    assert_eq!(
+        calls[0],
+        (
+            h.race().game_mode,
+            h.content.state(Gm::Dnf) as u16,
+            1,
+            Some(h.participant)
+        )
+    );
+    assert!(h.listener.scoring_state.pending_awards.is_empty());
 }
 
 #[test]

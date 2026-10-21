@@ -691,3 +691,46 @@ fn bank_cache_observes_accumulated_value_before_reset_with_session_isolation() {
         assert_eq!(state.nodes, original.nodes);
     }
 }
+
+#[test]
+fn integer_participant_property_mirrors_each_written_value() {
+    let mut node = Node::new(Definition::IntegerParticipantProperty).unwrap();
+    // Binding writes the bound Value; the output mirrors it.
+    assert_eq!(
+        node.initial_outputs(|port| {
+            assert_eq!(port, FLOAT_VALUE);
+            Some(Value::Integer(0))
+        })
+        .unwrap(),
+        vec![Effect::Publish(OUTPUT_VALUE, Value::Integer(0))]
+    );
+    for value in [1284, 1284, -3, 0] {
+        assert_eq!(
+            node.apply(Action::PropertyChanged(FLOAT_VALUE), |port| {
+                assert_eq!(port, FLOAT_VALUE);
+                Some(Value::Integer(value))
+            })
+            .unwrap(),
+            [Effect::Publish(OUTPUT_VALUE, Value::Integer(value))]
+        );
+    }
+    // Events, activation and other ports do nothing; a wrong type or a missing
+    // value fails without a write.
+    assert_eq!(node.apply(Action::Activate, |_| None).unwrap(), []);
+    assert_eq!(node.apply(Action::Event(LOAD), |_| None).unwrap(), []);
+    assert_eq!(
+        node.apply(Action::PropertyChanged(OUTPUT_VALUE), |_| None)
+            .unwrap(),
+        []
+    );
+    assert_eq!(
+        node.apply(Action::PropertyChanged(FLOAT_VALUE), |_| Some(
+            Value::Float(1.0)
+        )),
+        Err(Error::InvalidGraph)
+    );
+    assert_eq!(
+        node.apply(Action::PropertyChanged(FLOAT_VALUE), |_| None),
+        Err(Error::MissingInput)
+    );
+}

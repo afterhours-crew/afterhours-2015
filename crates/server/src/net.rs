@@ -947,10 +947,12 @@ pub async fn world_host(
     let mut proof_sent = false;
     let mut last_input = Instant::now();
     let mut tick = tokio::time::interval(WORLD_TICK);
+    let mut delay_reported = None;
     #[cfg(feature = "network-test")]
     let mut test_loss = test_loss::Loss::new(recorder.loss_trigger(connection));
     info!(connection, "world host ready");
     loop {
+        let advance_started = Instant::now();
         if let Err(error) = listener.advance_sequences(now_ms()) {
             warn!(connection, ?error, "sequence world clock rejected");
             return;
@@ -994,14 +996,21 @@ pub async fn world_host(
         }
         listener.replication_origin_ms = host.application().and_then(|a| a.origin_ms());
         if let Err(error) = listener.advance_events(now_ms()) {
-            // The event is best effort: a fault ends it for this session and
-            // never closes the world host.
+            // A first fault stages event teardown while retaining delegation.
+            // If teardown itself fails, dropping this session owns all cleanup.
+            if !listener.disable_events() {
+                warn!(
+                    connection,
+                    ?error,
+                    "owned event teardown rejected; closing world"
+                );
+                return;
+            }
             warn!(
                 connection,
                 ?error,
-                "owned event rejected; the event is disabled for this session"
+                "owned event rejected; scheduling event teardown"
             );
-            listener.disable_events();
         }
         if !listener.files_alive(now_ms()) {
             warn!(
@@ -1010,36 +1019,12 @@ pub async fn world_host(
             );
             return;
         }
-        while let Some(command) = listener.due_teleport(now_ms()) {
-            let bytes = match command.encode() {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    warn!(connection, ?error, "owned car teleport rejected");
-                    return;
-                }
-            };
-            match host.queue_content(nfs_world::teleport::CONTENT_TARGET, &bytes) {
-                Ok(chunks) => {
-                    info!(
-                        connection,
-                        chunks,
-                        participant = command.participant,
-                        vehicle = command.vehicle,
-                        "owned car teleport queued"
-                    );
-                    listener.teleport_sent();
-                }
-                Err(nfs_world::session::Error::Application(application::Error::Window)) => break,
-                Err(error) => {
-                    warn!(connection, ?error, "owned car teleport rejected");
-                    return;
-                }
-            }
-        }
         if let Err(error) = host.set_movement(listener.movement_objects()) {
             warn!(connection, ?error, "movement grants rejected");
             return;
         }
+        let advance_ms = advance_started.elapsed().as_millis() as u64;
+        let receive_started = Instant::now();
         let output = tokio::select! {
             success = items.completed(&mut listener), if items.working() => {
                 if !success { return; }
@@ -1084,6 +1069,8 @@ pub async fn world_host(
                 host.poll(now_ms())
             }
         };
+        let receive_or_poll_ms = receive_started.elapsed().as_millis() as u64;
+        let queue_started = Instant::now();
         if !items.advance(&mut host, &output.events, now_ms()) {
             return;
         }
@@ -1173,6 +1160,35 @@ pub async fn world_host(
                 }
             }
         }
+        while let Some(command) = listener.due_teleport(now_ms()) {
+            let bytes = match command.encode() {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    warn!(connection, ?error, "owned car teleport rejected");
+                    return;
+                }
+            };
+            match host.queue_content_after_replication(nfs_world::teleport::CONTENT_TARGET, &bytes)
+            {
+                Ok(chunks) => {
+                    info!(
+                        connection,
+                        chunks,
+                        participant = command.participant,
+                        vehicle = command.vehicle,
+                        "owned car teleport queued"
+                    );
+                    listener.teleport_sent();
+                }
+                Err(nfs_world::session::Error::Application(application::Error::Window)) => break,
+                Err(error) => {
+                    warn!(connection, ?error, "owned car teleport rejected");
+                    return;
+                }
+            }
+        }
+        let queue_ms = queue_started.elapsed().as_millis() as u64;
+        let send_started = Instant::now();
         for event in &output.events {
             match event {
                 Event::Application(application::Event::UnknownControl(subtype)) => {
@@ -1198,6 +1214,15 @@ pub async fn world_host(
                     return;
                 }
             }
+        }
+        let send_and_record_ms = send_started.elapsed().as_millis() as u64;
+        if (advance_ms + queue_ms + send_and_record_ms >= 100 || receive_or_poll_ms >= 250)
+            && delay_reported.is_none_or(|last| now_ms().saturating_sub(last) >= 1000)
+        {
+            delay_reported = Some(now_ms());
+            warn!(connection, advance_ms, receive_or_poll_ms, queue_ms, send_and_record_ms,
+                replication = ?host.replication_progress(), content = ?host.content_progress(),
+                "world loop delay");
         }
         if !proof_sent && host.link().is_some_and(|l| l.running()) {
             proof_sent = true;

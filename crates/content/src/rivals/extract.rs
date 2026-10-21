@@ -83,7 +83,11 @@ fn guid<S: Source>(graph: &mut Graph<S>, key: &Key) -> Result<[u8; 16], Error> {
         .guid
         .ok_or_else(|| bad("unexported item"))
 }
-fn tags<S: Source>(graph: &mut Graph<S>, key: &Key, o: &Object) -> Result<BTreeSet<u32>, Error> {
+pub(crate) fn tags<S: Source>(
+    graph: &mut Graph<S>,
+    key: &Key,
+    o: &Object,
+) -> Result<BTreeSet<u32>, Error> {
     refs(graph, key, o, "VehicleTags", 128)?
         .into_iter()
         .map(|key| {
@@ -178,7 +182,7 @@ fn style<S: Source>(graph: &mut Graph<S>, key: &Key) -> Result<Style, Error> {
     style.validate()?;
     Ok(style)
 }
-fn persona<S: Source>(
+pub(crate) fn persona<S: Source>(
     graph: &mut Graph<S>,
     key: &Key,
     provider_index: usize,
@@ -307,13 +311,7 @@ pub fn extract(index: &mut AssetIndex) -> Result<Content, Error> {
         ports.actors,
         "AiActorManagerEntityData",
     )?;
-    let (scene, participants) = lookup.endpoint(&mut graph, &pm)?;
-    let alive = crate::ai::resolve(&mut graph, &mut lookup, &pm, ai_ports)?;
-    let reset_volumes = crate::ai::resolve_reset_volumes(&mut graph, &mut lookup, ai_ports)?;
-    let (actor_scene, actors) = lookup.endpoint(&mut graph, &am)?;
-    if scene != actor_scene || participants == actors {
-        return Err(bad("manager scene identity"));
-    }
+    let managers = crate::ai::managers(&mut graph, &mut lookup, &pm, &am, ai_ports)?;
     let library = one(
         &mut graph,
         &pm,
@@ -434,13 +432,7 @@ pub fn extract(index: &mut AssetIndex) -> Result<Content, Error> {
     }
     Ok(Content {
         personality_count: personalities.len() as u16,
-        managers: nfs_world::replication::players::ai::Managers {
-            alive,
-            reset_volumes,
-            scene,
-            participants,
-            actors,
-        },
+        managers,
         personas,
         racers,
     })

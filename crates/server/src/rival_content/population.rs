@@ -18,7 +18,6 @@ use nfs_world::{
     participants::HostRpc,
     replication::{
         Error, Record,
-        entity::creation::{Asset, Catalog, Content as EntityContent, Parent, Prefix},
         players::{Players, ai},
         vehicle,
     },
@@ -64,6 +63,8 @@ pub struct Input<'a> {
     pub focus: &'a [Focus],
     /// Fresh host randomness; seeds the wander of racers activated this tick.
     pub random: u32,
+    /// Participants still owned by an active game mode's preserve property.
+    pub preserved: &'a [u16],
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -85,11 +86,20 @@ struct Racer {
     active: Option<Active>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Adopted {
+    slot: u64,
+    car: u64,
+    ids: ai::Ids,
+}
+
 #[derive(Clone, Debug)]
 pub struct Population {
     content: Arc<Content>,
     graph: Arc<Graph>,
     racers: Vec<Racer>,
+    /// Event imports have no authored regions and never respawn.
+    adopted: BTreeMap<u64, Adopted>,
     authority: vehicle::authority::Registry,
     /// Next car spawn key.
     next: u64,
@@ -131,6 +141,7 @@ impl Population {
         let graph = content.graph.clone().ok_or(Error::Unsupported)?;
         Ok(Self {
             racers: vec![Racer::default(); content.data.racers.len()],
+            adopted: BTreeMap::new(),
             content,
             graph,
             authority: vehicle::authority::Registry::default(),
@@ -151,7 +162,7 @@ impl Population {
 
     /// Active racers, with or without a car.
     pub fn count(&self) -> usize {
-        self.racers.iter().filter(|r| r.active.is_some()).count()
+        self.racers.iter().filter(|r| r.active.is_some()).count() + self.adopted.len()
     }
 
     /// Cars currently driven by the client, by vehicle ghost.
@@ -167,6 +178,10 @@ impl Population {
                     .ai_ids(connection, persona, key)
                     .map(|ids| (ids.vehicle, key))
             })
+            .chain(self.adopted.values().filter_map(|r| {
+                (world.ai_ids(connection, persona, r.car) == Some(r.ids))
+                    .then_some((r.ids.vehicle, r.car))
+            }))
             .collect()
     }
 
@@ -193,7 +208,89 @@ impl Population {
                     self.position(world, connection, persona, active)?,
                 ))
             })
+            .chain(self.adopted.values().map(|r| {
+                Ok((
+                    r.ids.participant,
+                    world
+                        .ai_vehicle_physics(connection, persona, r.car)?
+                        .decode([0.; 3])?
+                        .position,
+                ))
+            }))
             .collect()
+    }
+
+    /// Adopt an event's existing participant, actor and car. Imported racers
+    /// have view retention, not an authored spawn region. The caller stages the
+    /// event and this population together before publishing their output.
+    pub fn adopt(
+        &mut self,
+        world: &mut Players,
+        connection: u8,
+        persona: u64,
+        member: crate::event_ai::Member,
+        source: &mut vehicle::authority::Registry,
+    ) -> Result<ai::GoalChanges, Error> {
+        let key = member.selection.car_key;
+        let slot = member.selection.slot_key;
+        if self
+            .owner
+            .is_some_and(|owner| owner != (connection, persona))
+            || world.ai_ids(connection, persona, key) != Some(member.ids)
+            || !world.ai_slot(connection, persona, slot).is_some_and(|s| {
+                s.participant == member.ids.participant
+                    && s.actor == member.ids.actor
+                    && s.car == Some(key)
+            })
+        {
+            return Err(Error::UnknownObject);
+        }
+        let adopted = Adopted {
+            slot,
+            car: key,
+            ids: member.ids,
+        };
+        if let Some(existing) = self.adopted.get(&key) {
+            return if *existing == adopted {
+                Ok(ai::GoalChanges::default())
+            } else {
+                Err(Error::DuplicateObject)
+            };
+        }
+        if self.adopted.len() >= ai::MAX_AI
+            || self
+                .racers
+                .iter()
+                .filter_map(|r| r.active.as_ref())
+                .any(|r| r.slot == slot || r.car == Some(key))
+        {
+            return Err(Error::Bound);
+        }
+        let mut next = self.clone();
+        let mut players = world.clone();
+        let mut authority = source.clone();
+        authority.transfer_group(&mut next.authority, key)?;
+        let changes = players.replace_ai_goals(
+            connection,
+            persona,
+            key,
+            vec![(
+                nfs_world::replication::Initial::WanderGoal(
+                    nfs_world::replication::wander::Initial {
+                        allocation_serial: 0,
+                        flags: GOAL,
+                    },
+                ),
+                nfs_world::replication::Update::WanderGoal,
+            )],
+            None,
+        )?;
+        next.adopted.insert(key, adopted);
+        next.owner = Some((connection, persona));
+        *self = next;
+        *world = players;
+        *source = authority;
+        Ok(changes)
     }
 
     fn position(
@@ -230,8 +327,16 @@ impl Population {
         persona: u64,
         input: Input<'_>,
     ) -> Result<Changes, Error> {
-        let Input { now, focus, random } = input;
-        if self.clock.is_some_and(|clock| now < clock) || focus.len() > 128 {
+        let Input {
+            now,
+            focus,
+            random,
+            preserved,
+        } = input;
+        if self.clock.is_some_and(|clock| now < clock)
+            || focus.len() > 128
+            || preserved.len() > ai::MAX_AI
+        {
             return Err(Error::Bound);
         }
         let mut ids = BTreeSet::new();
@@ -249,6 +354,12 @@ impl Population {
         }
         if self.owner.is_some_and(|old| old != (connection, persona)) {
             return Err(Error::UnknownObject);
+        }
+        let mut preserve = BTreeSet::new();
+        for &id in preserved {
+            if !preserve.insert(id) || !players.owns_ai_participant(connection, persona, id) {
+                return Err(Error::UnknownObject);
+            }
         }
         if self.clock == Some(now) {
             return Ok(Changes::default());
@@ -277,7 +388,12 @@ impl Population {
                 Some(active) => Some(next.position(&world, connection, persona, active)?),
                 None => None,
             };
-            let retained = position.is_some_and(|p| nearest(p, horizontal_squared) < VIEW * VIEW);
+            let retained = position.is_some_and(|p| nearest(p, horizontal_squared) < VIEW * VIEW)
+                || next.racers[ordinal].active.as_ref().is_some_and(|active| {
+                    world
+                        .ai_slot(connection, persona, active.slot)
+                        .is_some_and(|slot| preserve.contains(&slot.participant))
+                });
             let racer = &mut next.racers[ordinal];
             if focus.is_empty() {
                 racer.region_active = false;
@@ -344,6 +460,30 @@ impl Population {
                 _ => {}
             }
         }
+        // Imported map (+0x98), separate from authored racers (+0x60).
+        // No primary region, activation cohort or host-side respawn applies.
+        for (&key, adopted) in &self.adopted {
+            let position = world
+                .ai_vehicle_physics(connection, persona, adopted.car)?
+                .decode([0.; 3])?
+                .position;
+            if preserve.contains(&adopted.ids.participant)
+                || nearest(position, horizontal_squared) < VIEW * VIEW
+            {
+                continue;
+            }
+            let removed = world.remove_ai_slot(connection, persona, adopted.slot)?;
+            changes.records.extend(removed.records);
+            changes
+                .leave
+                .extend(removed.leave.into_iter().map(HostRpc::Participant));
+            changes
+                .leave
+                .extend(removed.untracked.into_iter().map(HostRpc::WorldActivation));
+            changes.deleted.extend(removed.deleted);
+            next.authority.remove_group(key);
+            next.adopted.remove(&key);
+        }
         next.clock = Some(now);
         next.cohort = (next.cohort + 1) % 10;
         next.owner = Some((connection, persona));
@@ -355,6 +495,9 @@ impl Population {
 
     fn key(&mut self) -> Result<u64, Error> {
         let key = self.next;
+        if key >= crate::event_ai::KEY_START {
+            return Err(Error::Bound);
+        }
         self.next = key.checked_add(1).ok_or(Error::Bound)?;
         Ok(key)
     }
@@ -389,6 +532,9 @@ impl Population {
         let provider = &content.data.personas[selected];
         let personas = racer.personas.len();
         let slot = self.slots;
+        if slot >= crate::event_ai::KEY_START {
+            return Err(Error::Bound);
+        }
         self.slots = slot.checked_add(1).ok_or(Error::Bound)?;
         let created = world
             .create_ai_slot(
@@ -489,112 +635,26 @@ impl Population {
             std::array::from_fn(|i| pose.position[i] + basis[0][i] * LANE_OFFSET * pose.width);
         let content = self.content.clone();
         let provider = &content.data.personas[active.persona];
-        let definition = content
-            .vehicles
-            .definition(&provider.preset.vehicle)
-            .ok_or(Error::Shape)?;
-        let prepared = registrations
-            .prepare(&[&definition.bundle])
-            .map_err(|_| Error::Shape)?;
-        let registration = *prepared.bindings.first().ok_or(Error::Shape)?;
-        changes.messages.extend(prepared.messages);
-        let parent = if let Some(scene) = world.objects().scene(registration.content_key) {
-            scene
-        } else {
-            use nfs_world::replication::sublevel;
-            let scene_content = sublevel::Content::new(vec![(
-                registration.content_key,
-                sublevel::Profile::new(false, &[sublevel::Kind::Noop])?,
-            )])?;
-            // Like the official host, the bundle scene names the root scene.
-            let root = world
-                .objects()
-                .scene(sublevel::root::CONTENT_KEY)
-                .map(|ghost| sublevel::Blueprint { ghost, sub_id: 1 });
-            let creation = sublevel::passive::creation_with_parent(
-                registration.level,
-                registration.content_key,
-                nfs_protocol::world::rpc::Serial::new(0).ok_or(Error::Shape)?,
-                root,
-                &scene_content,
-            )?;
-            let scenes =
-                world.create_scenes(&[registration.level], vec![creation], &scene_content)?;
-            let id = scenes.first().ok_or(Error::Shape)?.id;
-            changes.records.extend(scenes);
-            id
-        };
-        let blueprint = world
-            .objects()
-            .scene(content.data.managers.scene)
-            .ok_or(Error::UnknownObject)?;
         let key = self.key()?;
-        let components = definition
-            .profile
-            .kinds()
-            .iter()
-            .enumerate()
-            .filter(|(_, kind)| matches!(kind, vehicle::Kind::FourBit))
-            .map(|(i, _)| {
-                key.checked_mul(512)
-                    .and_then(|v| v.checked_add(i as u64 + 1))
-                    .ok_or(Error::Bound)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let body = content.vehicles.construct_with_overrides(
-            vehicle_content::Request {
-                items: &content.presets[active.persona],
-                vehicle: 1,
+        let attached = vehicle_content::ai::attach(
+            &content.vehicles,
+            world,
+            registrations,
+            &mut self.authority,
+            vehicle_content::ai::Spawn {
+                connection,
+                persona,
+                slot: active.slot,
+                key,
+                manager_scene: content.data.managers.scene,
+                provider,
+                preset: &content.presets[active.persona],
                 locator,
                 basis,
-                origin: [0.; 3],
-                speed: Some(WANDER_SPEED),
-                connection: None,
-                owner: vehicle::Resource {
-                    words: [0; 2],
-                    name: vec![],
-                },
-                // The root's customization flag puts a car in garage display:
-                // the client stops updating it (no dynamic physics or wake-up).
-                // Official world cars, rivals and traffic all leave it clear.
-                customization_attached: false,
-                placement: vehicle_content::Placement::Rival,
-                authority_group: key,
-                authority_components: &components,
+                speed: WANDER_SPEED,
             },
-            provider.driving,
-            &mut self.authority,
-            |name| registrations.resolve_mesh(name, &mut changes.messages).ok(),
         )?;
-        let asset = Asset {
-            bundle: registration.asset_bundle,
-            type_id: definition.asset_type,
-            local_index: definition.asset_index,
-        };
-        let entity_content = EntityContent::new(
-            vec![Catalog::new(asset.bundle, &definition.catalog)?],
-            vec![],
-        )?
-        .with_vehicles(vec![(asset, definition.profile.clone())])?;
-        let attached = world.attach_ai_slot_vehicle(
-            connection,
-            persona,
-            active.slot,
-            key,
-            vehicle::EntityCreation {
-                prefix: Prefix {
-                    parent: Some(Parent {
-                        reference: Some(parent),
-                    }),
-                    blueprint,
-                    sub_id: 2,
-                    owner: None,
-                    asset,
-                },
-                body,
-            },
-            &entity_content,
-        )?;
+        changes.messages.extend(attached.messages);
         changes.records.extend(attached.records);
         changes
             .calls

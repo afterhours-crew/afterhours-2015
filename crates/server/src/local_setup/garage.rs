@@ -212,6 +212,8 @@ pub(super) fn build(index: &mut AssetIndex, thresholds: &Json) -> Result<Json> {
         "world_spawn",
         "world_settled",
         "free_roam",
+        "in_world_teleport",
+        "in_world_arrival",
         "return_requested",
         "returning",
         "returned",
@@ -241,6 +243,7 @@ pub(super) fn build(index: &mut AssetIndex, thresholds: &Json) -> Result<Json> {
         ("spawn", (1..=16).collect::<Vec<_>>()),
         ("entry", vec![17]),
         ("exit", vec![18, 19, 20, 21]),
+        ("in_world_teleport", vec![18, 19, 20, 21]),
         ("arrived", vec![22, 23, 24]),
         ("returning", vec![20]),
         ("returned", vec![13, 14, 15, 16]),
@@ -254,6 +257,8 @@ pub(super) fn build(index: &mut AssetIndex, thresholds: &Json) -> Result<Json> {
         ("exit", vec![16, 17]),
         ("arrive", vec![18, 19]),
         ("arrived", vec![20]),
+        ("in_world_teleport", vec![21, 22, 23, 24]),
+        ("in_world_arrival", vec![18, 19]),
         ("returning", vec![23, 22, 21, 24]),
         ("returned", vec![20]),
     ] {
@@ -306,6 +311,11 @@ pub(super) fn build(index: &mut AssetIndex, thresholds: &Json) -> Result<Json> {
             ],
         ),
         ("world_spawn", vec![("BlackScreen", true)]),
+        (
+            "in_world_teleport",
+            vec![("ViewWorld", false), ("BlackScreen", true)],
+        ),
+        ("in_world_arrival", vec![("BlackScreen", false)]),
         ("returning", vec![("ViewWorld", false)]),
     ] {
         for (key, active) in events {

@@ -325,3 +325,33 @@ fn new_nodes_reject_unknown_initialization_and_wrong_scalar_types() {
         assert!(compile(&obj).is_err(), "{}", obj.class);
     }
 }
+
+#[test]
+fn integer_participant_property_accessor_reads_its_authored_value() {
+    let config = compile(&object(
+        "IntParticipantPropertyAccessorEntityData",
+        &[("Value", Value::Int32(7))],
+    ))
+    .unwrap();
+    assert_eq!(config.definition, Definition::IntegerParticipantProperty);
+    assert_eq!(config.defaults, [(nodes::FLOAT_VALUE, Scalar::Integer(7))]);
+    let d = crate::scoring::property_types::compile(&object(
+        "IntParticipantPropertyAccessorEntityData",
+        &[("Value", Value::Int32(7))],
+    ))
+    .unwrap()
+    .unwrap();
+    let integer = nfs_world::scoring::properties::Kind::Integer;
+    assert_eq!(d.inputs, [(nodes::FLOAT_VALUE, integer)]);
+    assert_eq!(d.outputs, [(nodes::OUTPUT_VALUE, integer)]);
+    for invalid in [Value::Float32(7.0), Value::Bool(true)] {
+        assert!(
+            compile(&object(
+                "IntParticipantPropertyAccessorEntityData",
+                &[("Value", invalid)],
+            ))
+            .is_err()
+        );
+    }
+    assert!(compile(&object("IntParticipantPropertyAccessorEntityData", &[])).is_err());
+}

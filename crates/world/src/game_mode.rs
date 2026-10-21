@@ -28,8 +28,15 @@ pub enum Error {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Arguments {
     None,
-    /// One 32-bit value: a car ID, a position, a racer count.
+    /// One 32-bit value: a car ID, a local position notification, a racer count.
     Word(u32),
+    /// Event-info collector method 0: position and membership in the active
+    /// standings. Clearing membership removes the participant from the client's
+    /// event-info service; it is not padding after the position.
+    EventPosition {
+        position: u32,
+        active: bool,
+    },
     /// Two 32-bit reads, high word first: the bits of an f64 time.
     Time(u64),
     /// Waypoints method 2 (client reader `0x14445e5d0`): passed and next checkpoint
@@ -75,6 +82,14 @@ impl Call {
             Arguments::None => (),
             Arguments::Word(v) => {
                 payload.put(v.into(), 32);
+            }
+            Arguments::EventPosition { position, active } => {
+                // The collector's initial-state snapshot stores positions in
+                // eight bits, even though its remote update reads a full word.
+                if position > u32::from(u8::MAX) {
+                    return Err(Error::Bound);
+                }
+                payload.put(position.into(), 32).put(u64::from(active), 1);
             }
             Arguments::Time(bits) => {
                 let seconds = f64::from_bits(bits);

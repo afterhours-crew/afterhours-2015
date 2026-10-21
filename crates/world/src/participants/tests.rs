@@ -725,6 +725,31 @@ fn garage_exit_and_world_entry_follow_the_official_order() {
 }
 
 #[test]
+fn relocation_reserves_only_free_roam_and_is_isolated_and_repeat_safe() {
+    let mut model = in_customization(8);
+    let before = model.clone();
+    assert_eq!(model.begin_relocation(8), Err(Error::Shape));
+    assert_eq!(model.begin_relocation(9), Err(Error::UnknownObject));
+    assert_eq!(model, before);
+    for (selector, method) in [(96, 0), (76, 3), (80, 0)] {
+        model
+            .receive(request(4, 8, selector, method, 7).span(), |p| p == 8)
+            .unwrap();
+    }
+    model.take_arriving();
+    model.arrived(8);
+    model.begin_relocation(8).unwrap();
+    assert!(model.in_free_roam().is_empty());
+    let reserved = model.clone();
+    assert_eq!(model.begin_relocation(8), Err(Error::Shape));
+    assert_eq!(model.finish_relocation(9), Err(Error::UnknownObject));
+    assert_eq!(model, reserved);
+    model.finish_relocation(8).unwrap();
+    assert_eq!(model.in_free_roam(), vec![8]);
+    assert_eq!(model.finish_relocation(8), Err(Error::Shape));
+}
+
+#[test]
 fn exit_requests_out_of_order_foreign_or_malformed_change_nothing() {
     let model = in_customization(8);
     for early in [request(4, 8, 76, 3, 7), request(4, 8, 80, 0, 7)] {

@@ -174,6 +174,11 @@ pub fn compile(sources: &Sources) -> Result<Program, Error> {
     let mut defaults: Vec<Vec<(u32, Value)>> = vec![Vec::new(); count];
     for n in &sources.scalars {
         let id = index.lookup(&n.identity)?;
+        if n.configuration.definition == world::nodes::Definition::IntegerParticipantProperty
+            && !ports.inputs[usize::from(id)].contains(&world::nodes::FLOAT_VALUE)
+        {
+            return Err(bad("integer participant property reads are not modeled"));
+        }
         defaults[usize::from(id)].extend(n.configuration.defaults.iter().copied());
         assign(
             &mut behaviors,

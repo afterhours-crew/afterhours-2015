@@ -248,6 +248,9 @@ pub fn compile(object: &Object) -> Result<Option<Declaration>, Error> {
                 Definition::ParticipantProperty { .. } => {
                     Some((nodes::OUTPUT_VALUE, Kind::Boolean))
                 }
+                Definition::IntegerParticipantProperty => {
+                    Some((nodes::OUTPUT_VALUE, Kind::Integer))
+                }
                 Definition::Gate { .. }
                 | Definition::Splitter { .. }
                 | Definition::Compare { .. }

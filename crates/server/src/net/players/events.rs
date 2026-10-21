@@ -40,6 +40,9 @@ use nfs_world::{
     world_activation,
 };
 
+mod ai;
+mod restart;
+
 /// Client logic events on entity 1 of the named object (E995).
 const START: u32 = 12_645_288;
 const INTRO_READY: u32 = 14_506_768;
@@ -84,6 +87,7 @@ enum Exit {
     Completed,
     Restart,
     Abandon,
+    TimedOut,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 enum Logic {
@@ -155,6 +159,7 @@ struct Race {
     start: Option<f64>,
     next: usize,
     lap: u8,
+    progress: Option<nfs_world::race_progress::Race>,
     deadline: Option<f64>,
     finish: Option<Finish>,
     exit: Option<Exit>,
@@ -163,6 +168,7 @@ struct Race {
     goals: Vec<u16>,
     /// Whether the in-event flags are set.
     flags: bool,
+    ai: Option<ai::Grid>,
 }
 #[derive(Clone, Debug, Default)]
 struct Entry {
@@ -182,6 +188,11 @@ pub(in crate::net) struct State {
     cooldowns: VecDeque<(u64, u16)>,
     /// Completions of this session, the event half of the credit batch IDs.
     completed: u64,
+    ai_cursor: crate::event_ai::Cursor,
+    failed: bool,
+    restarts: BTreeMap<u16, restart::Instance>,
+    /// Next authored location in this session's event restart grid.
+    restart_cursor: usize,
 }
 
 /// One frame's event output.
@@ -191,6 +202,13 @@ struct Out {
     deleted: Vec<u16>,
     rpcs: Vec<HostRpc>,
     entries: Vec<(Section, Vec<HostRpc>)>,
+    messages: Vec<nfs_world::content::Message>,
+    registrations: Option<crate::vehicle_content::registrations::Registry>,
+    rivals: Option<crate::rival_content::population::Population>,
+    teleports: Vec<nfs_world::teleport::Command>,
+    // Clone only when a presentation lifecycle changes; commit with the world
+    // and output queues so a rejected batch cannot lose or duplicate roles.
+    logic_ghosts: Option<BTreeMap<u16, BTreeMap<u16, u16>>>,
 }
 
 fn route(body: BitSpan<'_>) -> Option<(Vec<u16>, u16, u32, usize)> {
@@ -299,15 +317,29 @@ impl PlayerListener {
         self.events = events;
         self
     }
-    /// Stop the event for this session after a fault; created objects stay.
-    pub(in crate::net) fn disable_events(&mut self) {
-        self.events = None;
-        for (participant, entry) in std::mem::take(&mut self.event_state.entries) {
-            if entry.race.is_some() {
-                self.event_suspended.remove(&participant);
-            }
+    /// Schedule transactional teardown after a fault. Keep command ownership and
+    /// delegation until its release can be published. A second fault in teardown
+    /// requires closing the session instead of abandoning owned objects.
+    pub(in crate::net) fn disable_events(&mut self) -> bool {
+        if self.event_state.failed {
+            return false;
         }
-        self.event_state = State::default();
+        self.event_state.failed = true;
+        self.event_state.inputs.clear();
+        self.event_state.steps.clear();
+        true
+    }
+    /// The participant's race driving-style logic, from the race start until
+    /// the results replace it; scoring runs the event participant on it.
+    pub(super) fn event_driving_style(&self, participant: u16) -> Option<u16> {
+        self.event_state
+            .entries
+            .get(&participant)?
+            .race
+            .as_ref()?
+            .logics
+            .get(&Logic::DrivingStyle)
+            .copied()
     }
     fn event_seconds(&self, now_ms: u64) -> Option<f64> {
         let origin = self.replication_origin_ms?;
@@ -346,6 +378,9 @@ impl PlayerListener {
         let Some(&first) = refs.first() else {
             return false;
         };
+        if restart::claims(&self.event_state, &refs, selector, method) {
+            return true;
+        }
         let event = content.event();
         let world = self.players.objects();
         let scene = world.scene(event.scene_content_key);
@@ -395,121 +430,224 @@ impl PlayerListener {
         let mut state = self.event_state.clone();
         let mut players = self.players.clone();
         let mut suspended = self.event_suspended.clone();
+        let mut participants = self.participants.clone();
         let mut out = Out::default();
         let mut completions = Vec::new();
+        // This event path implements normal-mode humans (request::sprint_race_007); AI
+        // racers and roaming rivals are outside the authored invitation set.
+        let eligible_humans = players.player_participants().count();
+        if let Some(record) = content.invitation_update(&mut players, eligible_humans)? {
+            out.records.push(record);
+        }
         // Free-roam membership.
         let active: BTreeSet<u16> = self
             .participants
             .in_free_roam()
             .into_iter()
-            .filter(|p| self.free_roam_presented.contains(p))
+            .filter(|p| !state.failed && self.free_roam_presented.contains(p))
+            // Official restart restores event subscriptions before the final
+            // FreeRoam entry. Do not wait for that entry's presentation marker.
+            .chain(state.restart_resuming().filter(|_| !state.failed))
             .collect();
-        let joined: Vec<u16> = active.difference(&state.active).copied().collect();
-        let left: Vec<u16> = state.active.difference(&active).copied().collect();
-        for participant in joined {
-            if state.entries.len() >= MAX_ENTRIES {
-                return Err(replication::Error::Bound);
+        if state.failed {
+            let participants: Vec<_> = state.entries.keys().copied().collect();
+            for participant in participants {
+                self.event_part(
+                    &content,
+                    &mut players,
+                    &mut state,
+                    &mut suspended,
+                    participant,
+                    &mut out,
+                )?;
             }
-            self.event_join(&content, &players, &mut state, participant, &mut out)?;
-        }
-        for participant in left {
-            self.event_part(
-                &content,
-                &mut players,
-                &mut state,
-                &mut suspended,
-                participant,
-                &mut out,
-            )?;
-        }
-        // Client inputs.
-        let inputs = std::mem::take(&mut state.inputs);
-        for input in inputs {
-            self.event_input(
-                &content,
-                &mut players,
-                &mut state,
-                &mut suspended,
-                input,
-                now_ms,
-                now,
-                &mut out,
-                &mut completions,
-            )?;
-        }
-        // Due steps, in queue order; steps fall due out of queue order (a fallback
-        // waits longer than the frames that follow it).
-        let (due, later): (VecDeque<_>, VecDeque<_>) = std::mem::take(&mut state.steps)
-            .into_iter()
-            .partition(|(due, _, _)| *due <= now_ms);
-        state.steps = later;
-        for (_, participant, step) in due {
-            self.event_step(
-                &content,
-                &mut players,
-                &mut state,
-                participant,
-                step,
-                now_ms,
-                now,
-                &mut out,
-            )?;
-        }
-        while let Some(&(due, ghost)) = state.cooldowns.front() {
-            if due > now_ms {
-                break;
+            let gone: Vec<_> = state
+                .cooldowns
+                .drain(..)
+                .map(|(_, ghost)| ghost)
+                .filter(|&ghost| players.objects().get(ghost).is_some())
+                .collect();
+            players.remove_entities(&gone)?;
+            out.deleted.extend(gone);
+            state.inputs.clear();
+        } else {
+            let joined: Vec<u16> = active.difference(&state.active).copied().collect();
+            let left: Vec<u16> = state.active.difference(&active).copied().collect();
+            for participant in joined {
+                if state.entries.len() >= MAX_ENTRIES {
+                    return Err(replication::Error::Bound);
+                }
+                self.event_join(&content, &players, &mut state, participant, &mut out)?;
             }
-            state.cooldowns.pop_front();
-            if players.objects().get(ghost).is_some() {
-                players.remove_entities(&[ghost])?;
-                out.deleted.push(ghost);
+            for participant in left {
+                self.event_part(
+                    &content,
+                    &mut players,
+                    &mut state,
+                    &mut suspended,
+                    participant,
+                    &mut out,
+                )?;
             }
-        }
-        // A passed DNF deadline leaves the race as a leave choice does.
-        let late: Vec<u16> = state
-            .entries
-            .iter()
-            .filter(|(_, e)| {
-                e.race.as_ref().is_some_and(|r| {
-                    r.phase == Phase::Racing
-                        && r.exit.is_none()
-                        && r.deadline.is_some_and(|d| now > d)
+            // Client inputs.
+            let inputs = std::mem::take(&mut state.inputs);
+            for input in inputs {
+                if let Input::Rpc(bytes, bits) = &input
+                    && restart::input(
+                        self,
+                        &content,
+                        &mut players,
+                        &mut state,
+                        BitSpan::new(bytes, 0, *bits).map_err(|_| replication::Error::Shape)?,
+                        now_ms,
+                        &mut out,
+                    )?
+                {
+                    continue;
+                }
+                self.event_input(
+                    &content,
+                    &mut players,
+                    &mut state,
+                    &mut suspended,
+                    input,
+                    now_ms,
+                    now,
+                    &mut out,
+                    &mut completions,
+                )?;
+            }
+            // Due steps, in queue order; steps fall due out of queue order (a fallback
+            // waits longer than the frames that follow it).
+            let (due, later): (VecDeque<_>, VecDeque<_>) = std::mem::take(&mut state.steps)
+                .into_iter()
+                .partition(|(due, _, _)| *due <= now_ms);
+            state.steps = later;
+            for (_, participant, step) in due {
+                self.event_step(
+                    &content,
+                    &mut players,
+                    &mut state,
+                    participant,
+                    step,
+                    now_ms,
+                    now,
+                    &mut out,
+                )?;
+            }
+            while let Some(&(due, ghost)) = state.cooldowns.front() {
+                if due > now_ms {
+                    break;
+                }
+                state.cooldowns.pop_front();
+                if players.objects().get(ghost).is_some() {
+                    players.remove_entities(&[ghost])?;
+                    out.deleted.push(ghost);
+                }
+            }
+            // A passed DNF deadline leaves the race as a leave choice does.
+            let late: Vec<u16> = state
+                .entries
+                .iter()
+                .filter(|(_, e)| {
+                    e.race.as_ref().is_some_and(|r| {
+                        r.phase == Phase::Racing
+                            && r.exit.is_none()
+                            && r.deadline.is_some_and(|d| now >= d)
+                    })
                 })
+                .map(|(p, _)| *p)
+                .collect();
+            for participant in late {
+                tracing::info!(
+                    participant,
+                    "owned event DNF deadline passed; leaving the race"
+                );
+                self.event_exit(
+                    &content,
+                    &mut players,
+                    &mut state,
+                    &mut suspended,
+                    participant,
+                    Exit::TimedOut,
+                    now_ms,
+                    &mut out,
+                )?;
+            }
+            self.event_ai_tick(&content, &mut players, &mut state, now_ms, &mut out)?;
+        }
+        for participant in restart::advance(
+            &mut players,
+            &mut participants,
+            &mut state,
+            self.persona,
+            now_ms,
+            &mut out,
+        )? {
+            suspended.remove(&participant);
+        }
+        let mut sections = if out.registrations.is_some() {
+            split_scenes(
+                out.records,
+                nfs_world::application::OUTBOUND_FRAME_BITS - 104,
+            )?
+            .into_iter()
+            .map(|mut section| {
+                section.setup = Some(Setup::RawEscape([0; 3]));
+                section
             })
-            .map(|(p, _)| *p)
-            .collect();
-        for participant in late {
-            tracing::info!(
-                participant,
-                "owned event DNF deadline passed; leaving the race"
-            );
-            self.event_exit(
-                &content,
-                &mut players,
-                &mut state,
-                &mut suspended,
-                participant,
-                Exit::Abandon,
-                now_ms,
-                &mut out,
-            )?;
+            .collect::<Vec<_>>()
+        } else if out.records.is_empty() {
+            Vec::new()
+        } else {
+            split_scenes(
+                out.records,
+                nfs_world::application::OUTBOUND_FRAME_BITS - 104,
+            )?
+        };
+        if !out.deleted.is_empty() {
+            sections.push(packed(Vec::new(), out.deleted));
+        }
+        if state.steps.len() > MAX_STEPS {
+            return Err(replication::Error::Bound);
         }
         if out.rpcs.len()
             > nfs_world::session::MAX_RPC_QUEUE.saturating_sub(self.pending_rpcs.len())
             || out.entries.len() > MAX_PENDING.saturating_sub(self.pending_entries.len())
-            || state.steps.len() > MAX_STEPS
+            || sections.len() > MAX_PENDING.saturating_sub(self.pending.len())
+            || out.messages.len() > MAX_PENDING.saturating_sub(self.pending_content.len())
+            || out.teleports.len() > MAX_PENDING.saturating_sub(self.pending_teleports.len())
         {
-            return Err(replication::Error::Bound);
+            // Retry the same inputs and allocations after the queues drain.
+            return Ok(());
+        }
+        let mut population = self.population.clone();
+        if let Some(registrations) = out.registrations {
+            let population = population.as_mut().ok_or(replication::Error::Shape)?;
+            let before = population.registrations().clone();
+            population.update_registrations(&before, registrations)?;
         }
         state.active = active;
         self.players = players;
-        self.event_state = state;
-        self.event_suspended = suspended;
-        if !out.records.is_empty() || !out.deleted.is_empty() {
-            self.pending.push_back(packed(out.records, out.deleted));
+        if let Some(ghosts) = out.logic_ghosts {
+            self.logic_ghosts = ghosts;
         }
+        self.participants = participants;
+        self.event_state = state;
+        if self.event_state.failed {
+            self.events = None;
+        }
+        self.event_suspended = suspended;
+        self.population = population;
+        if let Some(rivals) = out.rivals {
+            self.rival_population = Some(rivals);
+        }
+        self.pending_content.extend(out.messages);
+        self.pending.extend(sections);
         self.pending_rpcs.extend(out.rpcs);
         self.pending_entries.extend(out.entries);
+        self.pending_teleports
+            .extend(out.teleports.into_iter().map(|c| (now_ms, c)));
         for request in completions {
             self.scoring_state.pending_awards.push_back(request);
         }
@@ -600,7 +738,8 @@ impl PlayerListener {
                 .drain(..)
                 .chain(entry.filters.drain(..))
                 .collect();
-            if let Some(race) = entry.race.take() {
+            if let Some(mut race) = entry.race.take() {
+                self.event_ai_stop(players, &mut race, out)?;
                 gone.extend(race.logics.values());
                 gone.extend(race.scene);
                 gone.extend(race.sequence.map(|(_, g, _)| g));
@@ -803,7 +942,19 @@ impl PlayerListener {
             }
             let Some((&participant, _)) = state.entries.iter().find(|(_, e)| {
                 e.race.as_ref().is_some_and(|r| {
-                    r.car == crossing.vehicle && r.phase == Phase::Racing && r.exit.is_none()
+                    matches!(r.phase, Phase::Racing | Phase::Outro)
+                        && !matches!(r.exit, Some(Exit::Restart | Exit::Abandon | Exit::TimedOut))
+                        && (r.car == crossing.vehicle
+                            || r.ai.as_ref().is_some_and(|grid| {
+                                grid.racers.members.iter().any(|m| {
+                                    m.ids.vehicle == crossing.vehicle
+                                        && players.ai_ids(
+                                            HOST_SELECTOR as u8,
+                                            self.persona,
+                                            m.selection.car_key,
+                                        ) == Some(m.ids)
+                                })
+                            }))
                 })
             }) else {
                 return Ok(());
@@ -954,6 +1105,7 @@ impl PlayerListener {
             .find(|(_, (p, ready))| *p == participant && *ready)
             .map(|(car, _)| *car)
             .ok_or(replication::Error::Unsupported)?;
+        let ai = self.event_grid(content, players, state, out)?;
         let gm = content.game_mode(players.objects(), participant, now)?;
         let gm_record = players
             .spawn_entities(vec![gm], content.creation_content())?
@@ -1001,12 +1153,14 @@ impl PlayerListener {
             start: None,
             next: 0,
             lap: 1,
+            progress: None,
             deadline: None,
             finish: None,
             exit: None,
             awaiting_leave: false,
             goals: Vec::new(),
             flags: true,
+            ai,
         });
         records.push(intro);
         event_flags(content, players, state, participant, 0, now_ms, out)?;
@@ -1153,6 +1307,7 @@ impl PlayerListener {
                         }
                     }
                 }
+                self.event_ai_intro(content, players, race, out)?;
             }
             Step::Counting => {
                 let mut creations = Vec::new();
@@ -1202,6 +1357,18 @@ impl PlayerListener {
                 let deadline = now + f64::from(event.dnf_timeout);
                 race.deadline = Some(deadline);
                 race.phase = Phase::Racing;
+                race.progress =
+                    Some(nfs_world::race_progress::Race::new(
+                        event.game_mode.checkpoints.len(),
+                        event.game_mode.laps,
+                        &std::iter::once(participant)
+                            .chain(race.ai.iter().flat_map(|grid| {
+                                grid.racers.members.iter().map(|m| m.ids.participant)
+                            }))
+                            .collect::<Vec<_>>(),
+                        race.start.ok_or(replication::Error::Shape)?,
+                    )?);
+                self.event_ai_start(content, players, participant, race, now_ms, out)?;
                 let p = Some(participant);
                 let mut calls = vec![
                     (Gm::Countdown, 1, p, Arguments::None),
@@ -1216,18 +1383,47 @@ impl PlayerListener {
                     ),
                 }
                 calls.extend([
-                    (Gm::Positions, 0, p, Arguments::Word(0)),
+                    (
+                        Gm::Positions,
+                        0,
+                        p,
+                        Arguments::EventPosition {
+                            position: 0,
+                            active: true,
+                        },
+                    ),
                     (Gm::LocalPosition, 0, None, Arguments::Word(0)),
-                    (Gm::Positions, 0, p, Arguments::Word(0)),
+                    (
+                        Gm::Positions,
+                        0,
+                        p,
+                        Arguments::EventPosition {
+                            position: 0,
+                            active: true,
+                        },
+                    ),
                     (Gm::Dnf, 0, p, Arguments::time(deadline)),
-                    (Gm::LocalPosition, 0, None, Arguments::Word(1)),
-                    (Gm::Positions, 0, p, Arguments::Word(1)),
                 ]);
+                if race.ai.is_none() {
+                    calls.extend([
+                        (Gm::LocalPosition, 0, None, Arguments::Word(1)),
+                        (
+                            Gm::Positions,
+                            0,
+                            p,
+                            Arguments::EventPosition {
+                                position: 1,
+                                active: true,
+                            },
+                        ),
+                    ]);
+                }
                 for (state, method, reference, arguments) in calls {
                     out.rpcs.push(HostRpc::GameMode(world_call(
                         players, state, method, reference, arguments,
                     )?));
                 }
+                self.event_ai_racing_calls(content, players, race, deadline, out)?;
                 tracing::info!(participant, game_mode, deadline, "owned event race running");
             }
             Step::Finished => {
@@ -1255,7 +1451,10 @@ impl PlayerListener {
                     Gm::Positions,
                     0,
                     p,
-                    Arguments::Word(position),
+                    Arguments::EventPosition {
+                        position,
+                        active: false,
+                    },
                 )?));
             }
             Step::Ending => {
@@ -1327,8 +1526,12 @@ impl PlayerListener {
                 let exit = race.exit.ok_or(replication::Error::Shape)?;
                 out.rpcs.push(HostRpc::GameMode(world_call(
                     players,
-                    Gm::DnfTriggered,
-                    0,
+                    if exit == Exit::TimedOut {
+                        Gm::Dnf
+                    } else {
+                        Gm::DnfTriggered
+                    },
+                    u32::from(exit == Exit::TimedOut),
                     p,
                     Arguments::None,
                 )?));
@@ -1364,7 +1567,10 @@ impl PlayerListener {
                     Gm::Positions,
                     0,
                     p,
-                    Arguments::Word(1),
+                    Arguments::EventPosition {
+                        position: 1,
+                        active: false,
+                    },
                 )?));
                 for (state, method) in [(Gm::DnfState, 0), (Gm::DnfState, 1), (Gm::Final, 0)] {
                     out.rpcs.push(HostRpc::GameMode(world_call(
@@ -1375,7 +1581,7 @@ impl PlayerListener {
                         Arguments::None,
                     )?));
                 }
-                if exit == Exit::Abandon {
+                if matches!(exit, Exit::Abandon | Exit::TimedOut) {
                     out.rpcs.push(HostRpc::GameMode(world_call(
                         players,
                         Gm::Root,
@@ -1448,6 +1654,7 @@ impl PlayerListener {
         race.phase = Phase::Countdown;
         let start = now + COUNTDOWN_LEAD_S;
         race.start = Some(start);
+        self.event_ai_countdown(content, players, race, out)?;
         let intro_state = content.spawner(names::INTRO_SEQUENCE)?;
         let world = players.objects();
         let p = Some(participant);
@@ -1535,26 +1742,52 @@ impl PlayerListener {
             .get_mut(&participant)
             .and_then(|e| e.race.as_mut())
             .ok_or(replication::Error::Shape)?;
+        let racer = if crossing.vehicle == race.car {
+            participant
+        } else {
+            race.ai
+                .as_ref()
+                .and_then(|grid| {
+                    grid.racers
+                        .members
+                        .iter()
+                        .find(|m| m.ids.vehicle == crossing.vehicle)
+                })
+                .map(|m| m.ids.participant)
+                .ok_or(replication::Error::UnknownObject)?
+        };
+        let next = race
+            .progress
+            .as_ref()
+            .and_then(|progress| progress.participant(racer))
+            .ok_or(replication::Error::UnknownObject)?
+            .next;
         let expected = route
-            .get(race.next)
+            .get(next)
             .and_then(|&(k, s)| players.objects().scene_endpoint(k, s))
             .map(|(_, s)| s);
         if expected != Some(crossing.selector) {
             return Ok(());
         }
-        let start = race.start.ok_or(replication::Error::Shape)?;
-        let seconds = (crossing.seconds - start).max(0.) as f32;
-        let passed = race.next as u32;
-        let last = race.next + 1 == route.len();
-        let (next, lap) = if last {
-            (0, race.lap + 1)
-        } else {
-            (race.next + 1, race.lap)
+        let Some(progress) = race
+            .progress
+            .as_mut()
+            .ok_or(replication::Error::Shape)?
+            .cross(racer, next, crossing.seconds)?
+        else {
+            return Ok(());
         };
+        if let Some(commands) = race.ai.as_mut().and_then(|grid| grid.commands.as_mut()) {
+            ai::append(out, commands.crossed(players, racer, progress)?);
+        }
+        let seconds = progress.seconds;
+        let passed = progress.passed as u32;
+        let next = progress.next;
+        let lap = progress.lap;
         let deadline = now + f64::from(event.dnf_timeout);
         let world = players.objects();
         let game_mode = race.game_mode;
-        let p = Some(participant);
+        let p = Some(racer);
         out.rpcs.push(HostRpc::GameMode(content.state_call(
             world,
             game_mode,
@@ -1576,9 +1809,13 @@ impl PlayerListener {
             p,
             Arguments::time(deadline),
         )?));
-        race.next = next;
-        race.lap = lap;
-        race.deadline = Some(deadline);
+        if racer == participant {
+            race.next = next;
+            race.lap = lap;
+            race.deadline = Some(deadline);
+        } else if let Some(grid) = &mut race.ai {
+            grid.deadlines.insert(racer, deadline);
+        }
         tracing::info!(
             participant,
             passed,
@@ -1587,17 +1824,34 @@ impl PlayerListener {
             seconds,
             "owned event checkpoint passed"
         );
-        if !(last && lap > event.game_mode.laps) {
+        let Some(position) = progress.finish else {
             return Ok(());
+        };
+        if racer != participant {
+            return self.event_ai_finish(content, players, race, racer, position, now_ms, out);
         }
         // Finish: the results logics and the outro sequence replace the race logics.
         let finish = Finish {
-            race_ms: (f64::from(seconds) * 1000.).round() as i32,
-            position: 1,
+            race_ms: progress.milliseconds()?,
+            position: i32::from(position),
+            // The progress roster retains finished and withdrawn members.
+            participants: race
+                .progress
+                .as_ref()
+                .ok_or(replication::Error::Shape)?
+                .participants()
+                .len(),
         };
         race.finish = Some(finish);
         race.phase = Phase::Outro;
         race.deadline = None;
+        // The category totals the race's driving-style session wrote.
+        let properties = self.event_scoring_properties(participant);
+        tracing::info!(
+            participant,
+            ?properties,
+            "owned event participant properties"
+        );
         let mut creations = Vec::new();
         for logic in [Logic::AddSet(1), Logic::Outro, Logic::Awards] {
             let (name, occurrence) = logic.name();
@@ -1607,7 +1861,10 @@ impl PlayerListener {
                 players.objects(),
                 participant,
                 game_mode,
-                Some(finish),
+                Some(event_logic::Results {
+                    finish,
+                    properties: &properties,
+                }),
             )?);
         }
         let mut records = players.spawn_entities(creations, content.creation_content())?;
@@ -1648,7 +1905,7 @@ impl PlayerListener {
             .checked_add(1)
             .filter(|n| *n < 1 << 19)
             .ok_or(replication::Error::Bound)?;
-        match self.event_completion(content, participant, state.completed)? {
+        match self.event_completion(content, participant, state.completed, finish)? {
             Some(request) => completions.push(request),
             None => tracing::warn!(
                 participant,
@@ -1673,8 +1930,9 @@ impl PlayerListener {
         content: &event_logic::Content,
         participant: u16,
         ordinal: u64,
+        finish: Finish,
     ) -> Result<Option<AwardRequest>, replication::Error> {
-        let rewards = content.event().rewards;
+        let rewards = content.rewards_for_finish(finish)?;
         let Some(thresholds) = self
             .logic
             .as_deref()
@@ -1703,7 +1961,8 @@ impl PlayerListener {
             event: Some(nfs_services::event_rewards::Completion {
                 event_id: content.record_id(),
                 kind: content.category().to_owned(),
-                position: 0,
+                position: u32::try_from(finish.position - 1)
+                    .map_err(|_| replication::Error::Bound)?,
                 cash: u32::try_from(rewards.cash).map_err(|_| replication::Error::Bound)?,
                 rep: nfs_services::reputation::Scores {
                     total: rewards.rep,
@@ -1776,6 +2035,22 @@ impl PlayerListener {
             .ok_or(replication::Error::Shape)?;
         race.exit = Some(exit);
         race.deadline = None;
+        let first_record = out.records.len();
+        let first_deleted = out.deleted.len();
+        let presentation = if exit == Exit::Restart {
+            // Queue the authored relocation presentation before releasing race
+            // HUD state. The relocation owns it until the arrival sequence.
+            Some(restart::presentation(
+                self,
+                crate::garage_logic::Which::InWorldTeleport,
+                players,
+                participant,
+                out,
+            )?)
+        } else {
+            None
+        };
+        self.event_ai_stop(players, race, out)?;
         // The participant's event logics go at once; the game mode stays until the
         // client leaves it (E994: Events, sound, telemetry, restart, leave and
         // racing logics deleted at the choice).
@@ -1800,7 +2075,11 @@ impl PlayerListener {
             .remove(0);
         state.cooldowns.push_back((now_ms + COOLDOWN_MS, record.id));
         out.records.push(record);
-        suspended.remove(&participant);
+        // Restart must not create a transient free-roam scoring session while
+        // the old game mode is still leaving. Release it when relocation ends.
+        if exit != Exit::Restart {
+            suspended.remove(&participant);
+        }
         // Pending steps go, except delayed flag calls (they keep their order).
         state
             .steps
@@ -1808,11 +2087,25 @@ impl PlayerListener {
         state
             .steps
             .push_back((now_ms + FOLLOW_MS, participant, Step::Exiting));
-        tracing::info!(
-            participant,
-            ?exit,
-            "owned event left by choice; free roam resumes"
-        );
+        tracing::info!(participant, ?exit, "owned event exit chosen");
+        if let Some(mut presentation) = presentation {
+            // Race HUD deletion and LoadingScreen activation belong to one
+            // publication. Neither may escape first under queue pressure.
+            presentation
+                .records
+                .extend(out.records.drain(first_record..));
+            presentation
+                .deleted
+                .extend(out.deleted.drain(first_deleted..));
+            out.entries.push((
+                packed(presentation.records, presentation.deleted),
+                presentation
+                    .events
+                    .into_iter()
+                    .map(HostRpc::Event)
+                    .collect(),
+            ));
+        }
         Ok(())
     }
 
@@ -1832,6 +2125,27 @@ impl PlayerListener {
             .get_mut(&participant)
             .ok_or(replication::Error::Shape)?;
         let mut race = entry.race.take().ok_or(replication::Error::Shape)?;
+        if race.exit == Some(Exit::Restart) {
+            if self.world_cars.get(&race.car) != Some(&(participant, true)) {
+                return Err(replication::Error::UnknownObject);
+            }
+            if state.restarts.len() >= MAX_ENTRIES || state.restarts.contains_key(&participant) {
+                return Err(replication::Error::Bound);
+            }
+            let destinations = content
+                .event()
+                .restart
+                .as_ref()
+                .ok_or(replication::Error::Unsupported)?;
+            let destination = *destinations
+                .get(state.restart_cursor)
+                .ok_or(replication::Error::Shape)?;
+            state.restart_cursor = (state.restart_cursor + 1) % destinations.len();
+            state
+                .restarts
+                .insert(participant, restart::Instance::new(race.car, destination));
+        }
+        self.event_ai_stop(players, &mut race, out)?;
         release_goals(
             players,
             self.persona,
@@ -1852,7 +2166,7 @@ impl PlayerListener {
                 calls.push(call(Gm::Main, 0, p)?);
                 calls.push(call(Gm::Final, 1, p)?);
             }
-            Some(Exit::Restart | Exit::Abandon) => {
+            Some(Exit::Restart | Exit::Abandon | Exit::TimedOut) => {
                 calls.push(call(Gm::Root, 7, None)?);
                 calls.push(call(Gm::Final, 1, p)?);
                 calls.push(call(Gm::Main, 0, p)?);

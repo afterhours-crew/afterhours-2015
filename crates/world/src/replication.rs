@@ -26,6 +26,7 @@ pub enum Kind {
     PlayerManager,
     PlayerView,
     Actor,
+    AiPacingGroup,
     Entity,
     Participant,
     ParticipantLocationMap,
@@ -43,6 +44,7 @@ impl Kind {
             Self::PlayerManager => 15,
             Self::PlayerView => 16,
             Self::Actor => 0,
+            Self::AiPacingGroup => 1,
             Self::Entity => 6,
             Self::Participant => 11,
             Self::ParticipantLocationMap => 12,
@@ -60,6 +62,7 @@ impl Kind {
             15 => Ok(Self::PlayerManager),
             16 => Ok(Self::PlayerView),
             0 => Ok(Self::Actor),
+            1 => Ok(Self::AiPacingGroup),
             6 => Ok(Self::Entity),
             11 => Ok(Self::Participant),
             12 => Ok(Self::ParticipantLocationMap),
@@ -177,6 +180,7 @@ pub struct PlayerUpdate {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Initial {
+    AiPacingGroup,
     PlayerView(player_view::Initial),
     PlayerManager,
     ScriptedSplineGoal(spline::Initial),
@@ -204,6 +208,7 @@ pub enum Initial {
 impl Initial {
     pub fn kind(&self) -> Kind {
         match self {
+            Self::AiPacingGroup => Kind::AiPacingGroup,
             Self::Actor(_) => Kind::Actor,
             Self::PlayerManager => Kind::PlayerManager,
             Self::ScriptedSplineGoal(_) => Kind::ScriptedSplineGoal,
@@ -222,12 +227,13 @@ impl Initial {
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Update {
+    AiPacingGroup(pacing::Update),
     PlayerView(player_view::Update),
     PlayerManager(player_manager::Update),
     ScriptedSplineGoal,
     TrafficGoal,
     WanderGoal,
-    GotoWaypointGoal,
+    GotoWaypointGoal(goto_waypoint::Update),
     SpeedLimitGoal,
     Actor(ActorUpdate),
     Entity {
@@ -249,11 +255,12 @@ pub enum Update {
 impl Update {
     pub fn kind(&self) -> Kind {
         match self {
+            Self::AiPacingGroup(_) => Kind::AiPacingGroup,
             Self::PlayerManager(_) => Kind::PlayerManager,
             Self::ScriptedSplineGoal => Kind::ScriptedSplineGoal,
             Self::TrafficGoal => Kind::TrafficGoal,
             Self::WanderGoal => Kind::WanderGoal,
-            Self::GotoWaypointGoal => Kind::GotoWaypointGoal,
+            Self::GotoWaypointGoal(_) => Kind::GotoWaypointGoal,
             Self::SpeedLimitGoal => Kind::SpeedLimitGoal,
             Self::Actor(_) => Kind::Actor,
             Self::Entity { .. } | Self::Vehicle { .. } => Kind::Entity,
@@ -370,6 +377,7 @@ impl Reader<'_> {
                 Initial::GotoWaypointGoal(goto_waypoint::Initial::read(self)?)
             }
             Kind::SpeedLimitGoal => Initial::SpeedLimitGoal(speed_limit::Initial::read(self)?),
+            Kind::AiPacingGroup => Initial::AiPacingGroup,
             Kind::ParticipantLocationMap => Initial::ParticipantLocationMap,
             Kind::PlayerView => Initial::PlayerView(player_view::Initial::read(self)?),
             Kind::Actor => Initial::Actor(ActorInit {
@@ -406,8 +414,9 @@ impl Reader<'_> {
             Kind::ScriptedSplineGoal => Update::ScriptedSplineGoal,
             Kind::TrafficGoal => Update::TrafficGoal,
             Kind::WanderGoal => Update::WanderGoal,
-            Kind::GotoWaypointGoal => Update::GotoWaypointGoal,
+            Kind::GotoWaypointGoal => return Err(Error::Unsupported),
             Kind::SpeedLimitGoal => Update::SpeedLimitGoal,
+            Kind::AiPacingGroup => Update::AiPacingGroup(pacing::Update::read(self)?),
             Kind::SubLevel | Kind::Entity => return Err(Error::Unsupported),
             Kind::Participant => Update::Participant(ParticipantUpdate {
                 player: self.optional(Self::reference)?,
@@ -532,6 +541,7 @@ impl Writer {
             Initial::WanderGoal(v) => v.write(self)?,
             Initial::GotoWaypointGoal(v) => v.write(self)?,
             Initial::SpeedLimitGoal(v) => v.write(self)?,
+            Initial::AiPacingGroup => {}
             Initial::Actor(v) => {
                 self.reference(&v.participant)?;
                 self.bit(v.flag_a)?;
@@ -568,8 +578,9 @@ impl Writer {
             Update::ScriptedSplineGoal => {}
             Update::TrafficGoal => {}
             Update::WanderGoal => {}
-            Update::GotoWaypointGoal => {}
+            Update::GotoWaypointGoal(v) => v.write(self)?,
             Update::SpeedLimitGoal => {}
+            Update::AiPacingGroup(v) => v.write(self)?,
             Update::Participant(v) => {
                 self.optional(&v.player, Self::reference)?;
                 self.optional(&v.entity, Self::reference)?;
@@ -659,6 +670,9 @@ impl Record {
         if kind == Kind::TrafficGoal {
             return Self::decode_traffic(input, bound, None);
         }
+        if kind == Kind::GotoWaypointGoal {
+            return Self::decode_goto_waypoint(input, bound, None);
+        }
         if kind == Kind::SubLevel {
             return Self::decode_scene(input, id, create, r.pos, content, profile);
         }
@@ -679,6 +693,12 @@ impl Record {
         })
     }
     pub fn encode(&self) -> Result<BitWriter, Error> {
+        if let (Some(Initial::GotoWaypointGoal(initial)), Update::GotoWaypointGoal(update)) =
+            (&self.initial, &self.update)
+            && initial.progress_updates != update.progress_updates()
+        {
+            return Err(Error::TypeMismatch);
+        }
         if self
             .initial
             .as_ref()
@@ -719,6 +739,7 @@ impl Record {
 pub mod entity;
 mod entity_record;
 pub mod goto_waypoint;
+pub mod pacing;
 pub mod speed_limit;
 pub mod spline;
 pub mod traffic;

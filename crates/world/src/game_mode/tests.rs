@@ -85,6 +85,37 @@ fn calls_carry_the_client_reader_argument_layouts() {
 }
 
 #[test]
+fn event_positions_include_membership_before_alignment_padding() {
+    // A word-only payload has the same byte size, but its zero padding tells
+    // the client's collector to remove the racer instead of updating it.
+    for position in [0, 1, 6, 255] {
+        for active in [false, true] {
+            let (refs, _, method, args) = route(
+                &call(0, Some(351), Arguments::EventPosition { position, active })
+                    .encode()
+                    .unwrap(),
+            );
+            assert_eq!((refs, method, args.len()), (vec![1503, 351], 0, 37));
+            assert_eq!(word(&args, 0), position);
+            assert_eq!(args[32], active);
+            assert!(args[33..].iter().all(|b| !b));
+        }
+    }
+    assert_eq!(
+        call(
+            0,
+            Some(351),
+            Arguments::EventPosition {
+                position: 256,
+                active: true
+            },
+        )
+        .encode(),
+        Err(Error::Bound)
+    );
+}
+
+#[test]
 fn calls_refuse_invalid_identities_and_times() {
     for reference in [Some(0), Some(8192)] {
         assert_eq!(

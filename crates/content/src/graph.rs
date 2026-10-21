@@ -313,6 +313,21 @@ impl<'a, S: Source> Graph<'a, S> {
         )?;
         Ok(out)
     }
+    /// Every resolved source of one property input (empty when unconnected).
+    pub fn inputs(&mut self, site: &Site, port: u32) -> Result<Vec<Endpoint>, Error> {
+        let mut out = Vec::new();
+        self.resolve(
+            Endpoint {
+                site: site.clone(),
+                port,
+            },
+            Connections::Property,
+            &mut BTreeSet::new(),
+            &mut out,
+            &mut 0,
+        )?;
+        Ok(out)
+    }
     pub fn input(&mut self, site: &Site, port: u32) -> Result<Endpoint, Error> {
         let mut out = Vec::new();
         self.resolve(
@@ -421,6 +436,7 @@ impl<'a, S: Source> Graph<'a, S> {
             } else if kind == Connections::Property
                 || port == 0
                 || object.class == "LinkedSchematicChannelReferenceEntityData"
+                || object.class == "LinkedSchematicChannelRelayEntityData"
             {
                 out.push(next);
             } else {

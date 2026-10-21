@@ -8,7 +8,10 @@
 //! timing and delivery. Layouts, bindings and reward values come from the
 //! installation; synchronized values come from the participant's own event state,
 //! and a value without an owned source is sent absent, never invented.
-use nfs_content::events::{Binding, Event, Field, Layout, SceneLogic, Sequence};
+use nfs_content::{
+    events::{Binding, Event, Field, Layout, Rewards, SceneLogic, Sequence},
+    scoring::participant_properties::Property,
+};
 use nfs_protocol::world::rpc::Serial;
 use nfs_world::{
     game_mode::{Arguments, Call},
@@ -20,7 +23,7 @@ use nfs_world::{
         },
         goto_waypoint, speed_limit,
         state::World,
-        sublevel,
+        sublevel, wander,
     },
 };
 use std::collections::BTreeMap;
@@ -40,6 +43,7 @@ pub fn car_id(blueprint: &str) -> u32 {
 pub enum State {
     /// Root (selector 0): participant join/leave notifications and the end call.
     Root,
+    WaitForAi,
     Main,
     Final,
     Countdown,
@@ -116,8 +120,9 @@ const STATES: [(State, &str, &str); 11] = [
 /// in the installed result and reward prefabs; the E994 win's values in brackets).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Presented {
-    /// A driving-style category's event REP [1284, 3749, 1200, 0, 4557]. This host
-    /// does not score driving style during an event, so each is zero.
+    /// A driving-style category's event REP [1284, 3749, 1200, 0, 4557]: the
+    /// participant property the field mirrors, as the event's driving-style
+    /// session wrote it (#138, E1000).
     Category,
     /// Event REP plus category REP plus awards [20,790].
     TotalRep,
@@ -254,6 +259,23 @@ pub struct Finish {
     pub race_ms: i32,
     /// One-based finishing position.
     pub position: i32,
+    /// Largest membership reached during this race, retained after departures.
+    pub participants: usize,
+}
+
+/// The results logic's inputs: the finish and the participant properties the
+/// race wrote (absent ones present zero).
+#[derive(Clone, Copy, Debug)]
+pub struct Results<'a> {
+    pub finish: Finish,
+    pub properties: &'a BTreeMap<Property, i32>,
+}
+
+fn presented(field: &Field) -> Option<Presented> {
+    RESULTS
+        .iter()
+        .find(|(asset, object, _)| field.asset == *asset && field.object == *object)
+        .map(|(_, _, role)| *role)
 }
 
 /// Typed synchronized value of a creation field.
@@ -280,6 +302,8 @@ pub struct Content {
     record_id: u32,
     creation: CreationContent,
     states: BTreeMap<State, usize>,
+    ai: Option<std::sync::Arc<crate::event_ai::Content>>,
+    navigation: Option<std::sync::Arc<crate::event_ai::navigation::Navigation>>,
 }
 
 fn bad<T>(_: T) -> Error {
@@ -320,7 +344,50 @@ impl Content {
         if category.is_empty() || category.len() > 128 {
             return Err(Error::Shape);
         }
+        if !event.game_mode.standings_interval.is_finite()
+            || !(0.01..=60.).contains(&event.game_mode.standings_interval)
+        {
+            return Err(Error::Bound);
+        }
+        if event.rewards.cash < 0
+            || event.rewards.rep < 0
+            || event.placement_rewards.is_some_and(|tiers| {
+                tiers[0] != event.rewards || tiers.iter().any(|r| r.cash < 0 || r.rep < 0)
+            })
+        {
+            return Err(Error::Shape);
+        }
         let record_id = nfs_content::events::record_id(&event.game_mode_id);
+        if let Some(destinations) = &event.restart {
+            if destinations.is_empty()
+                || destinations.len() > nfs_content::events::restart::MAX_LOCATIONS
+            {
+                return Err(Error::Shape);
+            }
+            for destination in destinations {
+                if destination
+                    .position
+                    .iter()
+                    .any(|v| !v.is_finite() || v.abs() > 1_000_000.)
+                {
+                    return Err(Error::Shape);
+                }
+                nfs_world::replication::vehicle::orientation::quaternion_from_basis(
+                    destination.basis,
+                )?;
+            }
+            let arrivals: Vec<_> = event
+                .sequences
+                .iter()
+                .filter(|s| s.layout.blueprint == request::RESTART_ARRIVAL)
+                .collect();
+            if arrivals.len() != 1
+                || arrivals[0].layout.fields.len() != 1
+                || arrivals[0].layout.fields[0].kind != Kind::SequenceRoot
+            {
+                return Err(Error::Unsupported);
+            }
+        }
         let mut layouts: Vec<&Layout> = vec![&event.game_mode.layout];
         layouts.extend(&event.start_logics);
         layouts.extend(&event.game_mode_logics);
@@ -368,6 +435,18 @@ impl Content {
             selector(&event.game_mode.layout, index)?;
             states.insert(state, index);
         }
+        let waiting: Vec<_> = fields
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.class == "WaitForAllAiToSpawnStateEntityData")
+            .collect();
+        match waiting.as_slice() {
+            [(index, _)] => {
+                selector(&event.game_mode.layout, *index)?;
+                states.insert(State::WaitForAi, *index);
+            }
+            _ => return Err(Error::Unsupported),
+        }
         if fields.first().map(|f| f.kind) != Some(Kind::GameModeRoot)
             || event.game_mode.checkpoints.is_empty()
             || event.start_logics.is_empty()
@@ -377,12 +456,23 @@ impl Content {
         {
             return Err(Error::Shape);
         }
+        // Every category the results present mirrors a participant property.
+        if event
+            .game_mode_logics
+            .iter()
+            .flat_map(|l| &l.fields)
+            .any(|f| presented(f) == Some(Presented::Category) && f.mirrors.is_none())
+        {
+            return Err(Error::Shape);
+        }
         let content = Self {
             event,
             category,
             record_id,
             creation,
             states,
+            ai: None,
+            navigation: None,
         };
         for name in [
             request::INTRO_SEQUENCE,
@@ -400,6 +490,151 @@ impl Content {
     }
     pub fn event(&self) -> &Event {
         &self.event
+    }
+    /// Race-outro compares the one-based position against the running maximum
+    /// participant count. Last place selects "other"; remaining positions clamp
+    /// to the fourth tier. Departures must not reduce `participants`.
+    pub fn rewards_for_finish(&self, finish: Finish) -> Result<Rewards, Error> {
+        let position = usize::try_from(finish.position).map_err(|_| Error::Bound)?;
+        if !(1..=nfs_world::race_progress::MAX_PARTICIPANTS).contains(&finish.participants)
+            || position == 0
+            || position > finish.participants
+        {
+            return Err(Error::Bound);
+        }
+        match self.event.placement_rewards {
+            Some(tiers) => Ok(tiers[if position == finish.participants {
+                3
+            } else {
+                position.min(4) - 1
+            }]),
+            None if position == 1 => Ok(self.event.rewards),
+            None => Err(Error::Unsupported),
+        }
+    }
+    /// Prepare every authored opponent preset off the socket worker. The same
+    /// immutable vehicle definitions serve garages, roaming rivals and events.
+    pub fn with_ai(
+        mut self,
+        vehicles: crate::vehicle_content::Content,
+        items: &nfs_services::item_content::ItemContent,
+    ) -> Result<Self, Error> {
+        if !self.event.ai.spawns.is_empty() {
+            self.race_goal()?;
+            self.outro_goals()?;
+            if self.event.game_mode.pacing.is_none() || self.event.placement_rewards.is_none() {
+                return Err(Error::Unsupported);
+            }
+            self.ai = Some(std::sync::Arc::new(crate::event_ai::Content::new(
+                self.event.ai.clone(),
+                vehicles,
+                items,
+            )?));
+        }
+        Ok(self)
+    }
+
+    pub fn ai(&self) -> Option<&crate::event_ai::Content> {
+        self.ai.as_deref()
+    }
+
+    pub fn with_navigation(
+        mut self,
+        network: std::sync::Arc<nfs_world::road_distance::Network>,
+    ) -> Result<Self, Error> {
+        self.navigation = Some(std::sync::Arc::new(
+            crate::event_ai::navigation::Navigation::new(
+                network,
+                &self.event.game_mode.checkpoint_points,
+                self.event.game_mode.laps,
+                self.event
+                    .game_mode
+                    .pacing
+                    .clone()
+                    .ok_or(Error::Unsupported)?,
+            )?,
+        ));
+        Ok(self)
+    }
+
+    pub fn navigation(&self) -> Option<&crate::event_ai::navigation::Navigation> {
+        self.navigation.as_deref()
+    }
+
+    /// The authored simultaneous wander/speed commands during the results
+    /// sequence. These differ from the director's subsequent free-roam wander.
+    pub fn outro_goals(&self) -> Result<Vec<RecordInitial>, Error> {
+        let data = self
+            .sequence(request::OUTRO_SEQUENCE)?
+            .wander
+            .ok_or(Error::Unsupported)?;
+        if !data.speed_limit.is_finite()
+            || data.speed_limit <= 0.
+            || !data.timeout.is_finite()
+            || data.timeout <= 0.
+        {
+            return Err(Error::Shape);
+        }
+        // The observed normal-event interpreter enables the random-offset flag.
+        // Other authored flag combinations require their own native comparison.
+        if data.urgent || !data.prefer_straight {
+            return Err(Error::Unsupported);
+        }
+        Ok(vec![
+            RecordInitial::WanderGoal(wander::Initial {
+                allocation_serial: 0,
+                flags: [data.urgent, data.prefer_straight, true],
+            }),
+            RecordInitial::SpeedLimitGoal(speed_limit::Initial {
+                selector: 0,
+                serial: 1,
+                allocation_serial: 0,
+                limit: data.speed_limit.to_bits(),
+            }),
+        ])
+    }
+
+    /// Native waypoint-channel command: all authored destinations, lap count,
+    /// DoDrift, 150 m reach radius (0x463dae3), and replicated [index, counter].
+    /// Goal allocation serial is assigned by the world's shared allocator.
+    pub fn race_goal(&self) -> Result<(RecordInitial, nfs_world::replication::Update), Error> {
+        let mode = &self.event.game_mode;
+        if mode.drift != Some(false) {
+            return Err(Error::Unsupported);
+        }
+        if mode.points.is_empty()
+            || mode.points.len() > goto_waypoint::MAX_WAYPOINTS
+            || mode.points.len() != mode.checkpoints.len()
+            || mode.points.iter().flatten().any(|v| !v.is_finite())
+        {
+            return Err(Error::Shape);
+        }
+        Ok((
+            RecordInitial::GotoWaypointGoal(goto_waypoint::Initial {
+                selector: 0,
+                serial: 1,
+                allocation_serial: 0,
+                waypoint: 0,
+                word: mode.laps,
+                points: mode.points.iter().map(|p| p.map(f32::to_bits)).collect(),
+                flags: [false, false],
+                radius: 150f32.to_bits(),
+                progress_updates: true,
+            }),
+            nfs_world::replication::Update::GotoWaypointGoal(goto_waypoint::Update::Progress(
+                Some([0, 0]),
+            )),
+        ))
+    }
+    /// The participant properties the results present as category REP.
+    pub fn presented_properties(&self) -> Vec<&Property> {
+        self.event
+            .game_mode_logics
+            .iter()
+            .flat_map(|l| &l.fields)
+            .filter(|f| presented(f) == Some(Presented::Category))
+            .filter_map(|f| f.mirrors.as_ref())
+            .collect()
     }
     pub fn category(&self) -> &str {
         &self.category
@@ -601,17 +836,20 @@ impl Content {
     }
 
     /// A game-mode logic, owned by the game mode. The results logic presents
-    /// `finish` and the event's rewards; the driving-style logic's Boolean RPCs take
-    /// the E994 creation's initial values (false, false, true) pending their source.
+    /// the finish, the event's rewards and the race's category totals; the
+    /// driving-style logic's Boolean RPCs take the E994 creation's initial values
+    /// (false, false, true) pending their source.
     pub fn game_mode_logic(
         &self,
         layout: &Layout,
         world: &World,
         participant: u16,
         game_mode: u16,
-        finish: Option<Finish>,
+        results: Option<Results<'_>>,
     ) -> Result<Creation, Error> {
-        let rewards = self.event.rewards;
+        let rewards = results
+            .map(|r| self.rewards_for_finish(r.finish))
+            .transpose()?;
         let driving = layout.blueprint == request::DRIVING_STYLE;
         let outro = layout.blueprint == request::OUTRO;
         let bools: Vec<usize> = layout
@@ -630,14 +868,28 @@ impl Content {
             if !outro {
                 return None;
             }
-            let finish = finish?;
-            let role = RESULTS
-                .iter()
-                .find(|(asset, object, _)| field.asset == *asset && field.object == *object)
-                .map(|(_, _, role)| *role)?;
-            let number = match role {
-                Presented::Category | Presented::Zero => 0,
-                Presented::TotalRep | Presented::EventRep => rewards.rep,
+            let Results { finish, properties } = results?;
+            let rewards = rewards?;
+            let category = |field: &Field| {
+                field
+                    .mirrors
+                    .as_ref()
+                    .and_then(|p| properties.get(p))
+                    .copied()
+                    .unwrap_or(0)
+            };
+            let number = match presented(field)? {
+                Presented::Category => category(field),
+                // The total adds the presented categories to the event REP
+                // (E994: 9,000 + 10,790 + an award this host does not grant).
+                Presented::TotalRep => layout
+                    .fields
+                    .iter()
+                    .filter(|f| presented(f) == Some(Presented::Category))
+                    .map(category)
+                    .fold(rewards.rep, i32::saturating_add),
+                Presented::Zero => 0,
+                Presented::EventRep => rewards.rep,
                 Presented::Cash => rewards.cash,
                 Presented::RaceTimeMs => finish.race_ms,
                 Presented::Position => finish.position,
@@ -911,6 +1163,43 @@ impl Content {
             Arguments::None,
         )
     }
+    /// Publish the authored invitation condition for the supported normal-event
+    /// participant set. A missing synchronized value does not initialize the
+    /// client's visibility property; publish false explicitly even in solo play.
+    pub fn invitation_update(
+        &self,
+        players: &mut nfs_world::replication::players::Players,
+        eligible_humans: usize,
+    ) -> Result<Option<nfs_world::replication::Record>, Error> {
+        let binding = self.event.invitations;
+        let Some(scene) = players.objects().scene(binding.scene_content_key) else {
+            return Ok(None);
+        };
+        let object = players.objects().get(scene).ok_or(Error::UnknownObject)?;
+        let RecordInitial::SubLevel {
+            fields: initial, ..
+        } = &object.initial
+        else {
+            return Err(Error::TypeMismatch);
+        };
+        let value = eligible_humans > binding.count_above;
+        match initial.get(binding.serializer) {
+            Some(sublevel::Initial::BoolProperty(Some(old))) if *old == value => return Ok(None),
+            Some(sublevel::Initial::BoolProperty(_)) => {}
+            _ => return Err(Error::TypeMismatch),
+        }
+        let nfs_world::replication::Update::SubLevel { profile, .. } = &object.current else {
+            return Err(Error::TypeMismatch);
+        };
+        let profile = profile.clone();
+        let mut fields = vec![None; profile.kinds().len()];
+        fields[binding.serializer] = Some(sublevel::Update::BoolProperty(Some(value)));
+        players.change(
+            scene,
+            nfs_world::replication::Update::SubLevel { profile, fields },
+        )
+    }
+
     /// A call on one of the in-event flags (E997): method 0 sets it, 1 clears it.
     pub fn flag_call(&self, world: &World, index: usize, method: u32) -> Result<Call, Error> {
         let &(key, serializer) = self
@@ -945,6 +1234,7 @@ impl Content {
                 points: vec![goto.point.map(f32::to_bits)],
                 flags: [false, false],
                 radius: goto.radius.to_bits(),
+                progress_updates: false,
             }),
             RecordInitial::SpeedLimitGoal(speed_limit::Initial {
                 selector: 0,

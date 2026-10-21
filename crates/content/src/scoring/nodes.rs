@@ -44,6 +44,7 @@ pub(super) fn supported(class: &str) -> bool {
             | "CompareBoolEntityData"
             | "ConditionalFloatEntityData"
             | "BoolParticipantPropertyAccessorEntityData"
+            | "IntParticipantPropertyAccessorEntityData"
     )
 }
 fn integer(fields: &Fields, name: &str) -> Result<i32, Error> {
@@ -85,6 +86,13 @@ pub fn compile(object: &Object) -> Result<Configuration, Error> {
         "BoolParticipantPropertyAccessorEntityData" => Definition::ParticipantProperty {
             value: boolean(fields, "Value")?,
         },
+        "IntParticipantPropertyAccessorEntityData" => {
+            defaults.push((
+                nodes::FLOAT_VALUE,
+                Scalar::Integer(integer(fields, "Value")?),
+            ));
+            Definition::IntegerParticipantProperty
+        }
         "IntEntityData" => Definition::Integer {
             default: integer(fields, "DefaultValue")?,
             step: integer(fields, "IncDecValue")?,

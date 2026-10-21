@@ -36,6 +36,7 @@ pub fn compile(object: &Object) -> Result<Option<Realm>, Error> {
         | "RaceVehicleNosQueryEntityData"
         | "PlayerInfoAccessorEntityData"
         | "BoolParticipantPropertyAccessorEntityData"
+        | "IntParticipantPropertyAccessorEntityData"
         | "ParticipantSetCounterEntityData"
         | "AchievementEntityData" => Realm::Server,
         "BoolPresentationDataCollectorEntityData"

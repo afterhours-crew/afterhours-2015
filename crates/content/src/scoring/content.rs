@@ -5,8 +5,11 @@
 //! Everything the server needs to run the two installed driving participants:
 //! their compiled programs, replication layouts, the map from graph nodes to
 //! serializer fields and the map from keeper link IDs to score categories.
+//! The event driving-style participant compiles the same way against the
+//! event's game-mode logic layout.
 use super::{
     events::Composition,
+    participant_properties::Property,
     program::{Sources, compile},
 };
 use crate::{
@@ -25,6 +28,9 @@ use std::sync::Arc;
 
 pub const ACQUISITION: &str = "gameplay/drivingdataacquisition";
 pub const SCORING: &str = "gameplay/scoring/drivingstylescoringparticipantlogic";
+/// The race events' driving-style participant: the free-roam scoring prefab
+/// plus the event tracking logic (E994 ghost 1605).
+pub const EVENT_SCORING: &str = "gameplay/scoring/eventdrivingstylescoringparticipantlogic";
 
 /// One graph node that owns a replicated serializer field.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -51,6 +57,21 @@ pub struct ScoringContent {
     pub scoring: Participant,
     /// Keeper link ID (from the installed channel) to the category it credits.
     pub categories: BTreeMap<u32, Category>,
+}
+
+/// The event driving-style participant (#138). The event creates it in its
+/// game mode; `fields` map graph nodes to that layout's serializers.
+#[derive(Clone, Debug)]
+pub struct EventScoring {
+    pub blueprint: String,
+    pub program: Arc<Program>,
+    pub fields: Vec<Field>,
+    pub bus_entities: Vec<Option<u16>>,
+    /// Keeper link ID to the category it credits.
+    pub categories: BTreeMap<u32, Category>,
+    /// The integer participant properties the program writes, by graph node
+    /// (the category totals the event results present, and award data).
+    pub properties: Vec<(u16, Property)>,
 }
 
 /// Serializer fields in replication order: the composition's object rows in
@@ -221,6 +242,47 @@ impl AssetIndex {
             },
             sources.composition,
         ))
+    }
+
+    /// Compile the event driving-style participant for its event layout.
+    pub fn event_scoring(&mut self, layout: &crate::events::Layout) -> Result<EventScoring, Error> {
+        let sources: Sources = self.scoring_sources(&layout.blueprint)?;
+        let program = compile(&sources)?;
+        let fields = serializer_fields(&sources.composition, &self.identity.participant_logic)?;
+        if fields.len() != layout.fields.len()
+            || fields
+                .iter()
+                .zip(&layout.fields)
+                .any(|(field, layout)| field.kind != layout.kind)
+        {
+            return Err(bad(
+                "event scoring serializer fields disagree with the event layout",
+            ));
+        }
+        let categories = keeper_categories(&program, &sources.composition)?;
+        let mut properties = Vec::new();
+        for (identity, property) in self.integer_participant_properties(&layout.blueprint)? {
+            let node = sources
+                .composition
+                .nodes
+                .iter()
+                .position(|n| n.identity == identity)
+                .ok_or_else(|| bad("participant property accessor outside the program"))?;
+            match program.nodes.get(node).map(|n| &n.behavior) {
+                Some(Behavior::Scalar(
+                    nfs_world::scoring::nodes::Definition::IntegerParticipantProperty,
+                )) => properties.push((node as u16, property)),
+                _ => return Err(bad("participant property accessor behavior")),
+            }
+        }
+        Ok(EventScoring {
+            blueprint: layout.blueprint.clone(),
+            program: Arc::new(program),
+            fields,
+            bus_entities: sources.composition.bus_entities,
+            categories,
+            properties,
+        })
     }
 
     /// Read both installed driving participants for one gameplay scene.

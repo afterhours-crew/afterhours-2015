@@ -731,6 +731,8 @@ async fn run(args: Args) -> Result<(), Failure> {
     let scoring = match (&args.game_dir, garage_logic.is_some()) {
         (Some(game_dir), true) => {
             let game_dir = game_dir.clone();
+            let event_vehicles = vehicles.as_ref().map(|v| v.vehicles.clone());
+            let event_items = args.item_content.as_ref().map(|p| args.root.join(p));
             let content = tokio::task::spawn_blocking(move || {
                 let mut index = nfs_content::assets::AssetIndex::open(
                     &game_dir,
@@ -743,7 +745,41 @@ async fn run(args: Args) -> Result<(), Failure> {
                 // failure leaves scoring on and the event off.
                 let request = nfs_server::event_logic::request::sprint_race_007();
                 let event = index.event(&request).and_then(|event| {
-                    Ok((event, index.speed_wall_category(&request.game_mode_id)?))
+                    // The race's driving-style participant (#138).
+                    let driving = event
+                        .game_mode_logics
+                        .iter()
+                        .find(|l| l.blueprint == nfs_server::event_logic::request::DRIVING_STYLE)
+                        .ok_or_else(|| {
+                            nfs_content::Error::Content("event driving-style layout".into())
+                        })
+                        .and_then(|layout| Ok((index.event_scoring(layout)?, layout.asset)));
+                    let content = nfs_server::event_logic::Content::new(
+                        event,
+                        index.speed_wall_category(&request.game_mode_id)?,
+                    )
+                    .map_err(|e| nfs_content::Error::Content(format!("event layout: {e:?}")))?;
+                    let content = if content.event().ai.spawns.is_empty() {
+                        content
+                    } else {
+                        let definitions = event_vehicles.ok_or_else(|| {
+                            nfs_content::Error::Content("event AI vehicle definitions".into())
+                        })?;
+                        let path = event_items.ok_or_else(|| {
+                            nfs_content::Error::Content("event AI item catalog".into())
+                        })?;
+                        let items =
+                            nfs_services::item_content::ItemContent::load(&path).map_err(|e| {
+                                nfs_content::Error::Content(format!("event AI items: {e:?}"))
+                            })?;
+                        content
+                            .with_navigation(Arc::new(index.road_distance()?))
+                            .and_then(|content| content.with_ai(definitions, &items))
+                            .map_err(|e| {
+                                nfs_content::Error::Content(format!("event AI preparation: {e:?}"))
+                            })?
+                    };
+                    Ok((content, driving))
                 });
                 Ok::<_, nfs_content::Error>((scoring, road, nitrous, event))
             })
@@ -751,17 +787,17 @@ async fn run(args: Args) -> Result<(), Failure> {
             .map_err(|_| Failure::Output)?;
             match content {
                 Ok((content, road, nitrous, event)) => {
-                    match event
-                        .map_err(|e| e.to_string())
-                        .and_then(|(event, category)| {
-                            nfs_server::event_logic::Content::new(event, category)
-                                .map_err(|e| format!("{e:?}"))
-                        }) {
+                    let mut driving = None;
+                    match event.map_err(|e| e.to_string()).map(|(event, scoring)| {
+                        driving = Some(scoring);
+                        event
+                    }) {
                         Ok(event) => {
                             tracing::info!(
                                 event = event.event().game_mode_id,
                                 record_id = event.record_id(),
                                 checkpoints = event.event().game_mode.checkpoints.len(),
+                                opponents = event.ai().map_or(0, |c| c.roster().spawns.len()),
                                 cash = event.event().rewards.cash,
                                 rep = event.event().rewards.rep,
                                 "owned race event compiled from the installation"
@@ -782,6 +818,37 @@ async fn run(args: Args) -> Result<(), Failure> {
                                 .item_catalog(),
                         )
                         .with_nitrous(nitrous);
+                    // The event's driving-style participant runs only with the
+                    // event, and only when every category the results present is a
+                    // property it writes.
+                    match (events.as_deref(), driving) {
+                        (Some(event), Some(Ok((scoring, asset)))) => {
+                            let written: std::collections::BTreeSet<_> =
+                                scoring.properties.iter().map(|(_, p)| p).collect();
+                            let presented = event.presented_properties();
+                            if presented.iter().all(|p| written.contains(p)) {
+                                tracing::info!(
+                                    nodes = scoring.program.nodes.len(),
+                                    unmodeled = scoring.program.unmodeled.len(),
+                                    properties = scoring.properties.len(),
+                                    presented = presented.len(),
+                                    "event driving-style program compiled from the installation"
+                                );
+                                content = content
+                                    .with_event(scoring, event.creation_content(), asset)
+                                    .map_err(|_| Failure::ProfileConfig)?;
+                            } else {
+                                tracing::warn!(
+                                    "event results present properties the event scoring does not write; event scoring stays off"
+                                );
+                            }
+                        }
+                        (Some(_), Some(Err(error))) => tracing::warn!(
+                            ?error,
+                            "event driving-style program unavailable; event scoring stays off"
+                        ),
+                        _ => {}
+                    }
                     match road {
                         Ok(network) => {
                             tracing::info!(

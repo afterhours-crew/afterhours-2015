@@ -58,6 +58,7 @@ pub struct Bindings {
     content: Option<std::sync::Arc<sublevel::Content>>,
     entities: BTreeMap<u16, std::sync::Arc<entity::creation::Binding>>,
     entity_content: Option<std::sync::Arc<entity::creation::Content>>,
+    waypoint_progress: BTreeMap<u16, bool>,
 }
 
 fn id_valid(id: u16) -> Result<(), Error> {
@@ -90,6 +91,13 @@ impl Bindings {
         }
         if kind == Kind::TrafficGoal {
             return Record::decode_traffic(span, bound, self.splines.as_ref());
+        }
+        if kind == Kind::GotoWaypointGoal {
+            return Record::decode_goto_waypoint(
+                span,
+                bound,
+                self.waypoint_progress.get(&id).copied(),
+            );
         }
         Record::decode_context(
             span,
@@ -148,6 +156,7 @@ impl Bindings {
         self.objects.clear();
         self.scenes.clear();
         self.entities.clear();
+        self.waypoint_progress.clear();
     }
 
     pub fn decode(&mut self, input: BitSpan<'_>) -> Result<Decoded, Error> {
@@ -172,6 +181,7 @@ impl Bindings {
             next.objects.remove(&id).ok_or(Error::UnknownObject)?;
             next.scenes.remove(&id);
             next.entities.remove(&id);
+            next.waypoint_progress.remove(&id);
             deleted.push(id);
         }
         let first = prefix
@@ -197,6 +207,9 @@ impl Bindings {
             let kind = decoded.record.update.kind();
             if create {
                 next.objects.insert(id, kind);
+                if let Some(Initial::GotoWaypointGoal(goal)) = &decoded.record.initial {
+                    next.waypoint_progress.insert(id, goal.progress_updates);
+                }
                 if let Some(profile) = decoded.record.scene_profile() {
                     next.scenes.insert(id, profile.clone());
                 }
@@ -248,6 +261,7 @@ impl Bindings {
             next.objects.remove(&id);
             next.scenes.remove(&id);
             next.entities.remove(&id);
+            next.waypoint_progress.remove(&id);
         }
         let first = prefix
             .first_record(SetupProfile::ClientReceivePacked)
@@ -277,6 +291,10 @@ impl Bindings {
                     let kind = decoded.record.update.kind();
                     if decoded.record.initial.is_some() {
                         next.objects.insert(decoded.record.id, kind);
+                        if let Some(Initial::GotoWaypointGoal(goal)) = &decoded.record.initial {
+                            next.waypoint_progress
+                                .insert(decoded.record.id, goal.progress_updates);
+                        }
                         if let Some(profile) = decoded.record.scene_profile() {
                             next.scenes.insert(decoded.record.id, profile.clone());
                         }
@@ -317,12 +335,17 @@ impl Bindings {
             next.objects.remove(&id).ok_or(Error::UnknownObject)?;
             next.scenes.remove(&id);
             next.entities.remove(&id);
+            next.waypoint_progress.remove(&id);
         }
         for record in &section.records {
             let kind = record.update.kind();
             if let Some(initial) = &record.initial {
                 if next.objects.insert(record.id, kind).is_some() {
                     return Err(Error::DuplicateObject);
+                }
+                if let Initial::GotoWaypointGoal(goal) = initial {
+                    next.waypoint_progress
+                        .insert(record.id, goal.progress_updates);
                 }
                 if let Some(profile) = record.scene_profile() {
                     if let (Some(content), Initial::SubLevel { prefix, .. }) =
@@ -344,6 +367,12 @@ impl Bindings {
                 }
             } else {
                 if next.get(record.id).ok_or(Error::UnknownObject)? != kind {
+                    return Err(Error::TypeMismatch);
+                }
+                if let super::Update::GotoWaypointGoal(update) = record.update
+                    && next.waypoint_progress.get(&record.id).copied()
+                        != Some(update.progress_updates())
+                {
                     return Err(Error::TypeMismatch);
                 }
                 if record.scene_profile() != next.scenes.get(&record.id) {

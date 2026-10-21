@@ -292,9 +292,22 @@ enum Stage {
     Closed(Option<Application>),
 }
 
+#[derive(Clone)]
+struct QueuedContent {
+    message: frame::Message<'static>,
+    // Counts of preceding publications, independent of wall time and retries.
+    after_replication: usize,
+    after_rpc: usize,
+}
+impl QueuedContent {
+    fn ready(&self, replication_sent: usize, rpc_sent: usize) -> bool {
+        self.after_replication <= replication_sent && self.after_rpc <= rpc_sent
+    }
+}
+
 pub struct Host {
     stage: Stage,
-    content: std::collections::VecDeque<frame::Message<'static>>,
+    content: std::collections::VecDeque<QueuedContent>,
     content_sent: usize,
     registered_handles: usize,
     replication_queue:
@@ -304,6 +317,11 @@ pub struct Host {
     replication_sent: usize,
     max_replication_frame_bits: usize,
     rpc_queue: std::collections::VecDeque<crate::participants::HostRpc>,
+    rpc_sent: usize,
+    /// A newly queued RPC separates motion snapshots on either side. Once a
+    /// section has been appended after it, later snapshots may coalesce even
+    /// while the RPC waits for its referenced objects or the send window.
+    motion_barrier: bool,
     files: [Option<files::Outgoing>; 2],
     /// Objects the client is told to report movement for (selector 0).
     movement: std::collections::BTreeSet<u16>,
@@ -340,6 +358,8 @@ impl Host {
             replication_bits: 0,
             replication_sent: 0,
             rpc_queue: std::collections::VecDeque::new(),
+            rpc_sent: 0,
+            motion_barrier: false,
             files: [None, None],
             movement: std::collections::BTreeSet::new(),
             movement_sent_ms: None,
@@ -387,7 +407,7 @@ impl Host {
             return Err(Error::Application(application::Error::Bound));
         }
         if before.is_empty()
-            && self.rpc_queue.is_empty()
+            && !self.motion_barrier
             && let Some((tail, old_bits, calls)) = self.replication_queue.back()
             && calls.is_empty()
             && let Some(combined) = motion::combine(tail, &section)
@@ -420,6 +440,7 @@ impl Host {
             .map_err(Error::Replication)?;
         self.replication_bits += bits;
         self.replication_queue.push_back((section, bits, before));
+        self.motion_barrier = false;
         Ok(())
     }
 
@@ -443,6 +464,7 @@ impl Host {
         }
         self.validate_rpc(reply)?;
         self.rpc_queue.push_back(reply);
+        self.motion_barrier = true;
         Ok(())
     }
 
@@ -515,6 +537,34 @@ impl Host {
     }
 
     pub fn queue_content(&mut self, target: u8, bytes: &[u8]) -> Result<usize, Error> {
+        self.queue_content_at(target, bytes, 0, 0)
+    }
+
+    /// Send after all replication and notifications already queued. A blocked
+    /// transport retains this boundary; later motion cannot postpone it. Both
+    /// the notifications and chunks use the same reliable MessageEX sequence.
+    pub fn queue_content_after_replication(
+        &mut self,
+        target: u8,
+        bytes: &[u8],
+    ) -> Result<usize, Error> {
+        let n = self.queue_content_at(
+            target,
+            bytes,
+            self.replication_sent + self.replication_queue.len(),
+            self.rpc_sent + self.rpc_queue.len(),
+        )?;
+        self.motion_barrier = true;
+        Ok(n)
+    }
+
+    fn queue_content_at(
+        &mut self,
+        target: u8,
+        bytes: &[u8],
+        after_replication: usize,
+        after_rpc: usize,
+    ) -> Result<usize, Error> {
         if self.stage() == StageName::Closed {
             return Err(Error::Stage);
         }
@@ -535,7 +585,12 @@ impl Host {
             .registered_handles
             .checked_add(added)
             .ok_or(Error::Application(application::Error::Bound))?;
-        self.content.extend(chunks);
+        self.content
+            .extend(chunks.into_iter().map(|message| QueuedContent {
+                message,
+                after_replication,
+                after_rpc,
+            }));
         Ok(n)
     }
 
@@ -766,25 +821,31 @@ impl Host {
             None => world.client_state_reported && now_ms >= initialized_ms + CONTENT_DELAY_MS,
             Some(_) => world.client_level_ready,
         };
-        if !self.content.is_empty() && due {
+        let ready = self
+            .content
+            .iter()
+            .take_while(|c| c.ready(self.replication_sent, self.rpc_sent))
+            .count();
+        if ready != 0 && due {
             let (take, state) = match world.descriptor_sent {
                 None => {
                     let first_message = self
                         .content
                         .iter()
-                        .position(|m| matches!(m, frame::Message::Chunk { last: true, .. }))
-                        .map_or(self.content.len(), |i| i + 1);
+                        .take(ready)
+                        .position(|m| matches!(m.message, frame::Message::Chunk { last: true, .. }))
+                        .map_or(ready, |i| i + 1);
                     (first_message.min(frame::CHUNKS_PER_FRAME), Some(0))
                 }
-                Some(_) => (self.content.len().min(frame::CHUNKS_PER_FRAME), None),
+                Some(_) => (ready.min(frame::CHUNKS_PER_FRAME), None),
             };
-            let messages: Vec<frame::Message<'static>> = self.content.drain(..take).collect();
+            let messages: Vec<QueuedContent> = self.content.drain(..take).collect();
             let builder = frame::Builder::new().messages(
                 state,
                 vec![frame::Group {
                     channel: 0,
                     sequence: Some(world.next_ex_sequence),
-                    messages: messages.clone(),
+                    messages: messages.iter().map(|c| c.message.clone()).collect(),
                 }],
             );
             match Self::send_built(link, application, &builder, now_ms) {
@@ -794,7 +855,11 @@ impl Host {
                     world.acked_inputs = application.stats().inputs;
                     world.descriptor_sent.get_or_insert(now_ms);
                     self.content_sent += take;
-                    if self.content.is_empty() {
+                    if self
+                        .content
+                        .front()
+                        .is_none_or(|c| !c.ready(self.replication_sent, self.rpc_sent))
+                    {
                         world.content_done_ms = Some(now_ms);
                     }
                     out.events.push(Event::Content {
@@ -879,7 +944,11 @@ impl Host {
         let Some(content_done) = world.content_done_ms else {
             return;
         };
-        if !self.content.is_empty() {
+        if self
+            .content
+            .front()
+            .is_some_and(|c| c.ready(self.replication_sent, self.rpc_sent))
+        {
             return;
         }
         let reliable = |messages: Vec<frame::Message<'static>>, sequence: u8| {
@@ -1038,6 +1107,7 @@ impl Host {
             self.replication_bits -= size;
             self.replication_queue.pop_front();
             self.rpc_queue.drain(..eager);
+            self.rpc_sent += eager;
             self.replication_sent += 1;
             self.replication_clock_ms = Some(now_ms);
             world.next_ex_sequence = (world.next_ex_sequence + notifications as u8) & 0x7f;
@@ -1097,6 +1167,7 @@ impl Host {
                 Ok(wire) => {
                     out.send.push(wire);
                     self.rpc_queue.drain(..count);
+                    self.rpc_sent += count;
                     world.next_ex_sequence = (world.next_ex_sequence + count as u8) & 0x7f;
                     world.acked_inputs = application.stats().inputs;
                     world.last_replication_ms = Some(motion::slot(

@@ -386,3 +386,70 @@ fn duplicate_or_foreign_reader_identities_fail() {
     sources.synced[0].identity = identity("elsewhere", 1, &[]);
     assert!(compile(&sources).is_err());
 }
+
+#[test]
+fn integer_participant_property_accessors_compile_only_when_written() {
+    let root = |i| identity("root", i, &[]);
+    let mut sources = fixture();
+    // An integer (11) writes the accessor's (12) Value.
+    sources
+        .composition
+        .nodes
+        .push(event_node(root(6), "IntEntityData", server(), None));
+    sources.composition.nodes.push(event_node(
+        root(7),
+        "IntParticipantPropertyAccessorEntityData",
+        server(),
+        None,
+    ));
+    sources
+        .composition
+        .properties
+        .push(row(0, 3, port(11, FLOAT_VALUE), port(12, FLOAT_VALUE), 3));
+    sources.declarations.extend([
+        declaration(
+            root(6),
+            "IntEntityData",
+            &[],
+            &[(FLOAT_VALUE, Kind::Integer)],
+        ),
+        declaration(
+            root(7),
+            "IntParticipantPropertyAccessorEntityData",
+            &[(FLOAT_VALUE, Kind::Integer)],
+            &[(nfs_world::scoring::nodes::OUTPUT_VALUE, Kind::Integer)],
+        ),
+    ]);
+    sources.creation.extend([
+        created(root(6), "IntEntityData"),
+        created(root(7), "IntParticipantPropertyAccessorEntityData"),
+    ]);
+    sources.scalars.extend([
+        nodes::Node {
+            identity: root(6),
+            configuration: nodes::Configuration {
+                definition: Scalar::Integer {
+                    default: 5,
+                    step: 1,
+                },
+                defaults: vec![],
+            },
+        },
+        nodes::Node {
+            identity: root(7),
+            configuration: nodes::Configuration {
+                definition: Scalar::IntegerParticipantProperty,
+                defaults: vec![(FLOAT_VALUE, Value::Integer(0))],
+            },
+        },
+    ]);
+    let program = compile(&sources).unwrap();
+    assert_eq!(
+        program.nodes[12].behavior,
+        Behavior::Scalar(Scalar::IntegerParticipantProperty)
+    );
+    // An accessor whose Value nothing writes would read the store: refused.
+    let mut reading = sources.clone();
+    reading.composition.properties.pop();
+    assert!(compile(&reading).is_err());
+}

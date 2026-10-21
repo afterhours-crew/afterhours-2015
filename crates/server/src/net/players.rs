@@ -612,6 +612,10 @@ impl PlayerListener {
     pub(super) fn due_teleport(&self, world_ms: u64) -> Option<nfs_world::teleport::Command> {
         let (at, command) = self.pending_teleports.front()?;
         if *at > world_ms
+            || !self.pending.is_empty()
+            || !self.pending_rpcs.is_empty()
+            || !self.pending_entries.is_empty()
+            || !self.pending_content.is_empty()
             || self
                 .pending_spawns
                 .iter()
@@ -648,6 +652,7 @@ impl PlayerListener {
         if let Some(rivals) = &self.rival_population {
             cars.extend(rivals.delegated(players, HOST_SELECTOR as u8, self.persona));
         }
+        cars.extend(self.event_state.delegated(players, self.persona));
         cars
     }
     pub(super) fn new(persona: u64) -> Self {
@@ -1057,7 +1062,13 @@ impl Listener for PlayerListener {
                     return self.refuse(error);
                 }
             }
-            if self.traffic_population.is_some() || self.rival_population.is_some() {
+            if self.traffic_population.is_some()
+                || self.rival_population.is_some()
+                || !self
+                    .event_state
+                    .delegated(&players, self.persona)
+                    .is_empty()
+            {
                 let delegated = self.delegated_ai(&players);
                 match traffic_reports.receive_ai(
                     &mut players,

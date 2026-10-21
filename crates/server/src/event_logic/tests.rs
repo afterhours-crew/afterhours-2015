@@ -26,6 +26,13 @@ fn field(kind: Kind, class: &str, asset: &str, object: usize, binding: Option<Bi
         asset: asset.into(),
         object,
         binding,
+        mirrors: None,
+    }
+}
+fn category_property() -> Property {
+    Property {
+        channel: "gameplay/scoring/eventresultsdrivingstylescorechannel".into(),
+        port: 2_758_283_283,
     }
 }
 fn scene(serializer: usize) -> Option<Binding> {
@@ -123,6 +130,13 @@ fn game_mode() -> Layout {
         1,
         None,
     ));
+    fields.push(field(
+        Kind::RpcReferences,
+        "WaitForAllAiToSpawnStateEntityData",
+        "synthetic/ai-start",
+        0,
+        None,
+    ));
     let mut l = layout("gameplay/gamemodes/racegamemode", 0, 2, fields);
     l.bus_count = 12;
     l
@@ -214,13 +228,16 @@ pub(crate) fn event() -> Event {
         22,
         7,
         vec![
-            field(
-                Kind::I32Property,
-                "SyncedIntEntityData",
-                "gameplay/scoring/eventresultscorelogic",
-                7,
-                None,
-            ),
+            Field {
+                mirrors: Some(category_property()),
+                ..field(
+                    Kind::I32Property,
+                    "SyncedIntEntityData",
+                    "gameplay/scoring/eventresultscorelogic",
+                    7,
+                    None,
+                )
+            },
             field(
                 Kind::I32Property,
                 "SyncedIntEntityData",
@@ -310,6 +327,7 @@ pub(crate) fn event() -> Event {
             manager: (GAMEPLAY, 4),
             spawner,
             goto: (name == request::INTRO_SEQUENCE).then_some(GOTO),
+            wander: None,
         }
     };
     let root = || {
@@ -396,6 +414,13 @@ pub(crate) fn event() -> Event {
         }
     };
     Event {
+        ai: Default::default(),
+        invitations: nfs_content::events::Invitations {
+            scene_content_key: EVENTS,
+            serializer: 3,
+            count_above: 1,
+        },
+        restart: None,
         scene: "race".into(),
         scene_content_key: RACE,
         game_mode_id: "gameplay/gamemodes/sprint_race_007".into(),
@@ -405,10 +430,33 @@ pub(crate) fn event() -> Event {
             cash: 2000,
             rep: 9000,
         },
+        placement_rewards: Some([
+            Rewards {
+                cash: 2000,
+                rep: 9000,
+            },
+            Rewards {
+                cash: 1000,
+                rep: 7000,
+            },
+            Rewards {
+                cash: 750,
+                rep: 5000,
+            },
+            Rewards {
+                cash: 500,
+                rep: 1500,
+            },
+        ]),
         game_mode: GameMode {
             layout: gm,
             root_bindings: [(GAMEPLAY, 1), (GAMEPLAY, 2), (GAMEPLAY, 3)],
             checkpoints: vec![(RACE, 6), (RACE, 7)],
+            points: vec![[10., 0., 0.], [20., 0., 0.]],
+            checkpoint_points: vec![[10., 0., 0.], [20., 0., 0.]],
+            drift: Some(false),
+            pacing: None,
+            standings_interval: 0.3,
             laps: 1,
         },
         start_logics,
@@ -427,7 +475,7 @@ pub(crate) fn event() -> Event {
 }
 
 /// Three scenes of RPC serializers after a no-op, and one owned participant.
-pub(crate) fn world() -> (Players, Vec<Record>, u16) {
+pub(crate) fn add_scenes(players: &mut Players, first: u16) -> Vec<Record> {
     let kinds = |n| {
         let mut k = vec![SceneKind::Rpc; n];
         k[0] = SceneKind::Noop;
@@ -436,7 +484,10 @@ pub(crate) fn world() -> (Players, Vec<Record>, u16) {
     let profiles = SceneContent::new(vec![
         (RACE, Profile::new(false, &kinds(13)).unwrap()),
         (GAMEPLAY, Profile::new(false, &kinds(6)).unwrap()),
-        (EVENTS, Profile::new(false, &kinds(3)).unwrap()),
+        (
+            EVENTS,
+            Profile::new(false, &[kinds(3), vec![SceneKind::BoolProperty]].concat()).unwrap(),
+        ),
     ])
     .unwrap();
     let creations = profiles
@@ -444,7 +495,7 @@ pub(crate) fn world() -> (Players, Vec<Record>, u16) {
         .enumerate()
         .map(|(i, (key, p))| {
             ordinary::creation(
-                (i + 1) as u16,
+                first + i as u16,
                 key,
                 None,
                 Serial::new(0).unwrap(),
@@ -454,10 +505,13 @@ pub(crate) fn world() -> (Players, Vec<Record>, u16) {
             .unwrap()
         })
         .collect();
+    players
+        .create_scenes(&[first, first + 1, first + 2], creations, &profiles)
+        .unwrap()
+}
+pub(crate) fn world() -> (Players, Vec<Record>, u16) {
     let mut players = Players::default();
-    let scenes = players
-        .create_scenes(&[1, 2, 3], creations, &profiles)
-        .unwrap();
+    let scenes = add_scenes(&mut players, 1);
     let player = players
         .create(
             HOST_SELECTOR as u8,
@@ -478,11 +532,146 @@ pub(crate) fn world() -> (Players, Vec<Record>, u16) {
         .id;
     (players, scenes, participant)
 }
+
+#[test]
+fn invitation_value_is_defined_for_solo_changes_with_humans_and_is_world_local() {
+    let content = content();
+    let (mut first, _, _) = world();
+    let (mut second, _, _) = world();
+    let scene = first.objects().scene(EVENTS).unwrap();
+    let state = |players: &Players| {
+        let RecordInitial::SubLevel { fields, .. } = &players.objects().get(scene).unwrap().initial
+        else {
+            panic!("scene")
+        };
+        fields[3].clone()
+    };
+    assert_eq!(state(&first), sublevel::Initial::BoolProperty(None));
+    let record = content.invitation_update(&mut first, 1).unwrap().unwrap();
+    assert_eq!(record.id, scene);
+    assert_eq!(state(&first), sublevel::Initial::BoolProperty(Some(false)));
+    assert!(content.invitation_update(&mut first, 1).unwrap().is_none());
+    assert_eq!(state(&second), sublevel::Initial::BoolProperty(None));
+    content.invitation_update(&mut second, 2).unwrap().unwrap();
+    assert_eq!(state(&second), sublevel::Initial::BoolProperty(Some(true)));
+    assert_eq!(state(&first), sublevel::Initial::BoolProperty(Some(false)));
+    content.invitation_update(&mut second, 1).unwrap().unwrap();
+    assert_eq!(state(&second), sublevel::Initial::BoolProperty(Some(false)));
+}
 pub(crate) fn content() -> Content {
     Content::new(event(), "SpeedWall_SprintRace".into()).unwrap()
 }
+
+pub(crate) fn ai_content(ai: crate::event_ai::Content) -> Content {
+    use nfs_world::{
+        race_pacing::{AiOnlyMode, Config, Schedule},
+        road_distance::*,
+    };
+    let mut event = event();
+    event.ai = ai.roster().clone();
+    event.game_mode.pacing = Some(
+        Config::new(
+            (1..=11)
+                .map(|n| {
+                    vec![
+                        Schedule {
+                            target: None,
+                            skill: None
+                        };
+                        n
+                    ]
+                })
+                .collect(),
+            0.,
+            1.,
+            AiOnlyMode::Average,
+        )
+        .unwrap(),
+    );
+    event
+        .sequences
+        .iter_mut()
+        .find(|s| s.layout.blueprint == request::OUTRO_SEQUENCE)
+        .unwrap()
+        .wander = Some(nfs_content::events::Wander {
+        urgent: false,
+        prefer_straight: true,
+        speed_limit: 25.,
+        timeout: 30.,
+    });
+    let mut grid = vec![vec![vec![]; GRID_SIZE]; GRID_SIZE];
+    for cell in grid.iter_mut().take(102).skip(99) {
+        for rows in cell.iter_mut().take(102).skip(99) {
+            *rows = vec![0];
+        }
+    }
+    let network = Network::new(
+        2,
+        vec![Lane {
+            start: 0,
+            end: 1,
+            segments: vec![0],
+            layer: 1,
+        }],
+        vec![Spline {
+            controls: [[0.; 3], [0.; 3], [200., 0., 0.], [200., 0., 0.]],
+            coefficients: [[0.; 3], [200., 0., 0.], [0.; 3], [0.; 3]],
+            points: vec![[0.; 3], [200., 0., 0.]],
+            end_times: vec![1.],
+            end_distances: vec![200.],
+        }],
+        grid,
+    )
+    .unwrap();
+    let mut content = Content::new(event, "SpeedWall_SprintRace".into())
+        .unwrap()
+        .with_navigation(std::sync::Arc::new(network))
+        .unwrap();
+    content.ai = Some(std::sync::Arc::new(ai));
+    content
+}
 fn initial(creation: &Creation) -> &[Initial] {
     creation.body.initial.as_deref().unwrap()
+}
+
+#[test]
+fn placement_payouts_use_finish_order_and_the_original_field_size() {
+    let c = content();
+    for (position, participants, cash, rep) in [
+        (1, 6, 2000, 9000),
+        (2, 6, 1000, 7000),
+        (3, 6, 750, 5000),
+        (4, 6, 500, 1500),
+        (6, 6, 500, 1500),
+        (12, 12, 500, 1500),
+        (2, 2, 500, 1500),
+        (3, 3, 500, 1500),
+        (1, 1, 500, 1500),
+        (2, 3, 1000, 7000),
+    ] {
+        let finish = Finish {
+            race_ms: 50_000,
+            position,
+            participants,
+        };
+        assert_eq!(c.rewards_for_finish(finish).unwrap(), Rewards { cash, rep });
+    }
+    for (position, participants) in [(0, 6), (-1, 6), (7, 6), (1, 0), (1, 129)] {
+        assert!(
+            c.rewards_for_finish(Finish {
+                race_ms: 50_000,
+                position,
+                participants,
+            })
+            .is_err()
+        );
+    }
+    let mut bad = event();
+    bad.placement_rewards.as_mut().unwrap()[1].cash = -1;
+    assert!(Content::new(bad, "category".into()).is_err());
+    let mut bad = event();
+    bad.placement_rewards.as_mut().unwrap()[0].rep += 1;
+    assert!(Content::new(bad, "category".into()).is_err());
 }
 
 #[test]
@@ -554,7 +743,12 @@ fn game_mode_binds_the_gameplay_endpoints_route_and_starting_participant() {
             .any(|f| matches!(f, Initial::RpcGuid { guid: None, .. }))
     );
     assert_eq!(
-        creation.body.updates.last(),
+        creation.body.updates.get(
+            fields
+                .iter()
+                .position(|f| matches!(f, Initial::RpcSet64 { .. }))
+                .unwrap()
+        ),
         Some(&Some(Update::Set64(Some(sublevel::Set64 {
             entries: None
         }))))
@@ -645,9 +839,20 @@ fn logics_follow_bindings_and_present_owned_values_only() {
     let finish = Finish {
         race_ms: 148_129,
         position: 1,
+        participants: 6,
     };
+    let none = BTreeMap::new();
     let outro = content
-        .game_mode_logic(outro_layout, world, participant, gm, Some(finish))
+        .game_mode_logic(
+            outro_layout,
+            world,
+            participant,
+            gm,
+            Some(Results {
+                finish,
+                properties: &none,
+            }),
+        )
         .unwrap();
     assert_eq!(
         initial(&outro)[2..].to_vec(),
@@ -662,6 +867,67 @@ fn logics_follow_bindings_and_present_owned_values_only() {
             Initial::I32Property(None),
         ]
     );
+    // A written category total is presented and joins the total REP; other
+    // properties do not.
+    let written = BTreeMap::from([
+        (category_property(), 1284),
+        (
+            Property {
+                channel: "gameplay/eventawardscaptureddatachannel".into(),
+                port: 3_919_538_161,
+            },
+            77,
+        ),
+    ]);
+    let scored = content
+        .game_mode_logic(
+            outro_layout,
+            world,
+            participant,
+            gm,
+            Some(Results {
+                finish,
+                properties: &written,
+            }),
+        )
+        .unwrap();
+    assert_eq!(
+        initial(&scored)[2..4].to_vec(),
+        vec![
+            Initial::I32Property(Some(1284)),
+            Initial::I32Property(Some(10_284)),
+        ]
+    );
+    // Placement affects both the cash and total REP, without altering the
+    // independently earned driving categories or the displayed finish position.
+    for (position, participants, cash, total) in [
+        (2, 6, 1000, 8284),
+        (3, 6, 750, 6284),
+        (4, 6, 500, 2784),
+        (2, 2, 500, 2784),
+        (3, 3, 500, 2784),
+    ] {
+        let created = content
+            .game_mode_logic(
+                outro_layout,
+                world,
+                participant,
+                gm,
+                Some(Results {
+                    finish: Finish {
+                        position,
+                        participants,
+                        ..finish
+                    },
+                    properties: &written,
+                }),
+            )
+            .unwrap();
+        assert_eq!(initial(&created)[2], Initial::I32Property(Some(1284)));
+        assert_eq!(initial(&created)[3], Initial::I32Property(Some(total)));
+        assert_eq!(initial(&created)[6], Initial::I32Property(Some(position)));
+        assert_eq!(initial(&created)[7], Initial::I32Property(Some(cash)));
+    }
     let empty = content
         .game_mode_logic(outro_layout, world, participant, gm, None)
         .unwrap();
@@ -789,4 +1055,89 @@ fn calls_carry_live_serials_selectors_and_references() {
 fn event_logic_call_refuses(world: &World) -> bool {
     super::call(world, 8000, 0, 0, None, Arguments::None).is_err()
         && super::call(world, 1, 0, 0, Some(8000), Arguments::None).is_err()
+}
+
+#[test]
+fn race_goal_uses_authored_destinations_laps_and_drift_and_rejects_invalid_routes() {
+    let mut event = event();
+    event.game_mode.laps = 2;
+    event.game_mode.drift = Some(false);
+    let c = Content::new(event.clone(), "race".into()).unwrap();
+    let (initial, update) = c.race_goal().unwrap();
+    let RecordInitial::GotoWaypointGoal(goal) = &initial else {
+        panic!()
+    };
+    assert_eq!(
+        goal.points,
+        event
+            .game_mode
+            .points
+            .iter()
+            .map(|p| p.map(f32::to_bits))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        (goal.word, goal.flags, goal.progress_updates),
+        (2, [false, false], true)
+    );
+    assert_eq!(goal.radius, 150f32.to_bits());
+    assert_eq!(
+        update,
+        nfs_world::replication::Update::GotoWaypointGoal(goto_waypoint::Update::Progress(Some([
+            0, 0
+        ])))
+    );
+    Record {
+        id: 100,
+        initial: Some(initial),
+        update,
+    }
+    .encode()
+    .unwrap();
+    for (points, drift) in [
+        (vec![], Some(false)),
+        (vec![[0.; 3]], Some(false)),
+        (vec![[f32::NAN; 3]; 2], Some(false)),
+        (event.game_mode.points.clone(), None),
+        (event.game_mode.points.clone(), Some(true)),
+    ] {
+        let mut invalid = event.clone();
+        invalid.game_mode.points = points;
+        invalid.game_mode.drift = drift;
+        assert!(
+            Content::new(invalid, "race".into())
+                .unwrap()
+                .race_goal()
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn outro_commands_use_authored_speed_and_preserve_their_distinct_wander_flags() {
+    let mut c = content();
+    assert!(c.outro_goals().is_err());
+    let seq = c
+        .event
+        .sequences
+        .iter_mut()
+        .find(|s| s.layout.blueprint == request::OUTRO_SEQUENCE)
+        .unwrap();
+    seq.wander = Some(nfs_content::events::Wander {
+        urgent: false,
+        prefer_straight: true,
+        speed_limit: 17.25,
+        timeout: 29.,
+    });
+    let goals = c.outro_goals().unwrap();
+    assert!(matches!(&goals[0], RecordInitial::WanderGoal(w) if w.flags == [false, true, true]));
+    assert!(matches!(&goals[1], RecordInitial::SpeedLimitGoal(s) if s.limit == 17.25f32.to_bits()));
+    let seq = c
+        .event
+        .sequences
+        .iter_mut()
+        .find(|s| s.layout.blueprint == request::OUTRO_SEQUENCE)
+        .unwrap();
+    seq.wander.as_mut().unwrap().urgent = true;
+    assert!(c.outro_goals().is_err());
 }

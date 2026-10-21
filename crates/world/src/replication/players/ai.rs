@@ -8,6 +8,8 @@
 use super::*;
 
 pub const MAX_AI: usize = 128;
+mod goals;
+pub use goals::GoalChanges;
 
 /// Installed serializer ordinals, supplied by content preparation. They are
 /// distinct from RPC selector numbers and allocated scene ghost IDs.
@@ -78,7 +80,7 @@ pub(super) struct Instance {
     request: Request,
     creation: vehicle::EntityCreation,
     ids: Ids,
-    goal: Option<u16>,
+    goals: Vec<u16>,
     managers: Option<Managers>,
     /// The requested control-suppression flag has been cleared after the
     /// car's first accepted client report.
@@ -249,7 +251,7 @@ impl Players {
                 request,
                 creation,
                 ids,
-                goal: None,
+                goals: Vec::new(),
                 managers: None,
                 released: false,
                 slot: None,
@@ -262,12 +264,7 @@ impl Players {
     }
 
     /// Whether `participant` is one of this session's AI participants.
-    pub(super) fn owns_ai_participant(
-        &self,
-        connection: u8,
-        persona: u64,
-        participant: u16,
-    ) -> bool {
+    pub fn owns_ai_participant(&self, connection: u8, persona: u64, participant: u16) -> bool {
         self.ai.iter().any(|(&(c, p, _), instance)| {
             c == connection && p == persona && instance.ids.participant == participant
         }) || self.ai_slots.iter().any(|(&(c, p, _), slot)| {
@@ -424,7 +421,7 @@ impl Players {
                 request,
                 creation,
                 ids,
-                goal: None,
+                goals: Vec::new(),
                 managers: Some(managers),
                 released: false,
                 slot: Some(slot),
@@ -464,7 +461,10 @@ impl Players {
                 participant: owner.participant,
                 actor: owner.actor,
                 vehicle: car.as_ref().map(|(_, i)| i.ids.vehicle),
-                goal: car.as_ref().and_then(|(_, i)| i.goal),
+                goals: car
+                    .as_ref()
+                    .map(|(_, i)| i.goals.clone())
+                    .unwrap_or_default(),
                 alive: Some(owner.managers),
                 tracked: car.is_some().then_some(owner.managers),
             },
@@ -559,7 +559,7 @@ impl Players {
             .ai
             .get(&(connection, persona, key))
             .ok_or(Error::UnknownObject)?;
-        if instance.goal.is_some() {
+        if !instance.goals.is_empty() {
             return Err(Error::DuplicateObject);
         }
         let allocation_serial = (self.goal_allocation_serial + 1) & 63;
@@ -580,7 +580,7 @@ impl Players {
         self.ai
             .get_mut(&(connection, persona, key))
             .ok_or(Error::UnknownObject)?
-            .goal = Some(goal.id);
+            .goals = vec![goal.id];
         Ok((goal, assigned))
     }
 
@@ -613,7 +613,7 @@ impl Players {
                     participant: instance.ids.participant,
                     actor: instance.ids.actor,
                     vehicle: Some(instance.ids.vehicle),
-                    goal: instance.goal,
+                    goals: instance.goals,
                     alive: instance.managers,
                     tracked: instance.managers,
                 },
@@ -634,7 +634,7 @@ impl Players {
                 ..ParticipantUpdate::default()
             }),
         )?);
-        if let Some(goal) = instance.goal {
+        if !instance.goals.is_empty() {
             result.records.extend(next.change(
                 instance.ids.actor,
                 Update::Actor(ActorUpdate {
@@ -643,8 +643,10 @@ impl Players {
                     ..ActorUpdate::default()
                 }),
             )?);
-            next.remove(goal)?;
-            result.deleted.push(goal);
+            for &goal in &instance.goals {
+                next.remove(goal)?;
+                result.deleted.push(goal);
+            }
         }
         next.remove(instance.ids.vehicle)?;
         result.deleted.push(instance.ids.vehicle);
@@ -735,7 +737,7 @@ impl Players {
                 }),
             )?);
         }
-        if let Some(goal) = retired.goal {
+        if !retired.goals.is_empty() {
             result.records.extend(next.change(
                 retired.actor,
                 Update::Actor(ActorUpdate {
@@ -744,8 +746,10 @@ impl Players {
                     ..ActorUpdate::default()
                 }),
             )?);
-            next.remove(goal)?;
-            result.deleted.push(goal);
+            for goal in retired.goals {
+                next.remove(goal)?;
+                result.deleted.push(goal);
+            }
         }
         for id in retired
             .vehicle
@@ -769,6 +773,53 @@ impl Players {
             .collect();
         let mut next = self.clone();
         let mut result = Removed::default();
+        let groups: Vec<_> = next
+            .pacing_groups
+            .iter()
+            .filter(|(_, (c, _))| *c == connection)
+            .map(|(&id, &owner)| (id, owner))
+            .collect();
+        if !groups.is_empty() {
+            for &(group, (c, p)) in &groups {
+                let human_goals: Vec<_> = next
+                    .actors
+                    .iter()
+                    .filter_map(|(&participant, &actor)| {
+                        if !next.owns_participant(c, p, participant) {
+                            return None;
+                        }
+                        let Update::Actor(current) = &next.objects.get(actor)?.current else {
+                            return None;
+                        };
+                        let [goal, pacing] = current.references_a.as_deref()? else {
+                            return None;
+                        };
+                        (*pacing == group).then_some((participant, *goal))
+                    })
+                    .collect();
+                for (participant, goal) in human_goals {
+                    let released =
+                        next.release_player_race_goals(c, p, participant, goal, group)?;
+                    result.records.extend(released.records);
+                    result.deleted.extend(released.deleted);
+                }
+            }
+            let cars: Vec<_> = next
+                .ai
+                .keys()
+                .filter(|(c, _, _)| *c == connection)
+                .copied()
+                .collect();
+            for (c, p, k) in cars {
+                let released = next.replace_ai_goals(c, p, k, vec![], None)?;
+                result.records.extend(released.records);
+                result.deleted.extend(released.deleted);
+            }
+            for (id, (c, p)) in groups {
+                next.remove_ai_pacing_group(c, p, id)?;
+                result.deleted.push(id);
+            }
+        }
         let mut merge = |removed: Removed| {
             result.leave.extend(removed.leave);
             result.untracked.extend(removed.untracked);
@@ -832,7 +883,7 @@ struct Retired {
     participant: u16,
     actor: u16,
     vehicle: Option<u16>,
-    goal: Option<u16>,
+    goals: Vec<u16>,
     alive: Option<Managers>,
     tracked: Option<Managers>,
 }
@@ -929,6 +980,146 @@ mod tests {
             allocation_serial: 63,
             asset_mode: 2,
         }
+    }
+
+    #[test]
+    fn race_commands_replace_atomically_and_share_pacing_until_last_release() {
+        use crate::replication::{goto_waypoint, pacing, speed_limit};
+        let mut world = world();
+        let (creation, content) = car();
+        let a = world
+            .spawn_ai_vehicle(1, 100, request(1), creation.clone(), &content)
+            .unwrap()
+            .unwrap()
+            .ids;
+        let b = world
+            .spawn_ai_vehicle(1, 100, request(2), creation.clone(), &content)
+            .unwrap()
+            .unwrap()
+            .ids;
+        let other = world
+            .spawn_ai_vehicle(2, 200, request(1), creation, &content)
+            .unwrap()
+            .unwrap()
+            .ids;
+        let entry = |p| pacing::Entry {
+            participant: p,
+            value: 0.5f32.to_bits(),
+        };
+        let before = world.objects.snapshot();
+        assert!(
+            world
+                .create_ai_pacing_group(
+                    1,
+                    100,
+                    vec![entry(a.participant), entry(other.participant)]
+                )
+                .is_err()
+        );
+        assert_eq!(world.objects.snapshot(), before);
+        let group = world
+            .create_ai_pacing_group(1, 100, vec![entry(a.participant), entry(b.participant)])
+            .unwrap()
+            .id;
+        let route = || {
+            (
+                Initial::GotoWaypointGoal(goto_waypoint::Initial {
+                    selector: 0,
+                    serial: 1,
+                    allocation_serial: 0,
+                    waypoint: 0,
+                    word: 1,
+                    points: vec![[0; 3], [10f32.to_bits(), 0, 0]],
+                    flags: [false; 2],
+                    radius: 150f32.to_bits(),
+                    progress_updates: true,
+                }),
+                Update::GotoWaypointGoal(goto_waypoint::Update::Progress(Some([0, 0]))),
+            )
+        };
+        let speed = || {
+            (
+                Initial::SpeedLimitGoal(speed_limit::Initial {
+                    selector: 0,
+                    serial: 1,
+                    allocation_serial: 0,
+                    limit: 25f32.to_bits(),
+                }),
+                Update::SpeedLimitGoal,
+            )
+        };
+        let intro = world
+            .replace_ai_goals(1, 100, 1, vec![route(), speed()], None)
+            .unwrap();
+        assert_eq!(intro.goals.len(), 2);
+        let before = world.objects.snapshot();
+        let serial = world.goal_allocation_serial;
+        let mut invalid = speed();
+        if let Initial::SpeedLimitGoal(g) = &mut invalid.0 {
+            g.limit = f32::NAN.to_bits();
+        }
+        assert!(
+            world
+                .replace_ai_goals(1, 100, 1, vec![route(), invalid], Some(group))
+                .is_err()
+        );
+        assert_eq!(world.objects.snapshot(), before);
+        assert_eq!(world.goal_allocation_serial, serial);
+        assert!(
+            world
+                .replace_ai_goals(2, 200, 1, vec![route()], Some(group))
+                .is_err()
+        );
+        assert_eq!(world.objects.snapshot(), before);
+        let race = world
+            .replace_ai_goals(1, 100, 1, vec![route()], Some(group))
+            .unwrap();
+        assert_eq!(race.deleted, intro.goals);
+        assert!(
+            race.deleted
+                .iter()
+                .all(|&id| world.objects.get(id).is_none())
+        );
+        world
+            .replace_ai_goals(1, 100, 2, vec![route()], Some(group))
+            .unwrap();
+        let Update::Actor(actor) = &world.objects.get(a.actor).unwrap().current else {
+            panic!()
+        };
+        assert_eq!(actor.references_a, Some(vec![race.goals[0], group]));
+        assert!(world.remove_ai_pacing_group(1, 100, group).is_err());
+        world.replace_ai_goals(1, 100, 1, vec![], None).unwrap();
+        assert!(world.objects.get(group).is_some());
+        assert!(world.remove_ai_pacing_group(1, 100, group).is_err());
+        world.replace_ai_goals(1, 100, 2, vec![], None).unwrap();
+        assert!(world.remove_ai_pacing_group(2, 200, group).is_err());
+        assert!(world.remove_ai_pacing_group(1, 100, group).unwrap());
+        assert!(!world.remove_ai_pacing_group(1, 100, group).unwrap());
+        world
+            .replace_ai_goals(1, 100, 1, vec![route(), speed()], None)
+            .unwrap();
+        let removed = world.remove_ai_vehicle(1, 100, 1).unwrap();
+        assert_eq!(removed.deleted.len(), 5);
+        assert!(world.objects.get(other.vehicle).is_some());
+        assert!(world.objects.get(b.vehicle).is_some());
+        assert!(
+            world
+                .remove_ai_vehicle(1, 100, 1)
+                .unwrap()
+                .deleted
+                .is_empty()
+        );
+        let group = world
+            .create_ai_pacing_group(1, 100, vec![entry(b.participant)])
+            .unwrap()
+            .id;
+        world
+            .replace_ai_goals(1, 100, 2, vec![route()], Some(group))
+            .unwrap();
+        let removed = world.remove_ai_for_connection(1).unwrap();
+        assert!(removed.deleted.contains(&group));
+        assert!(world.pacing_groups.is_empty());
+        assert!(world.objects.get(other.vehicle).is_some());
     }
 
     #[test]
@@ -1071,7 +1262,7 @@ mod tests {
         ));
         assert_eq!(world.objects.snapshot(), before);
         assert_eq!(world.goal_allocation_serial, 0);
-        assert!(world.ai[&(1, 100, 1)].goal.is_none());
+        assert!(world.ai[&(1, 100, 1)].goals.is_empty());
     }
     #[test]
     fn ai_uses_null_player_identity_and_cannot_be_used_as_owned_inventory() {

@@ -78,11 +78,60 @@ impl Registry {
         }
         true
     }
+
+    /// Move a car's component indices between lifetime owners without changing
+    /// them. A collision or exhausted destination changes neither registry.
+    pub fn transfer_group(&mut self, target: &mut Self, group: u64) -> Result<bool, Error> {
+        let Some(state) = self.groups.get(&group) else {
+            return Ok(false);
+        };
+        if target.groups.contains_key(&group)
+            || state
+                .members
+                .iter()
+                .any(|key| target.members.contains_key(key))
+        {
+            return Err(Error::DuplicateObject);
+        }
+        if target.groups.len() >= MAX_OBJECTS
+            || target.members.len() + state.members.len() > MAX_OBJECTS
+        {
+            return Err(Error::Bound);
+        }
+        let state = self.groups.remove(&group).ok_or(Error::UnknownObject)?;
+        for key in &state.members {
+            let value = self.members.remove(key).ok_or(Error::UnknownObject)?;
+            target.members.insert(*key, value);
+        }
+        target.groups.insert(group, state);
+        Ok(true)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn transfer_preserves_indices_and_rejects_collisions_atomically() {
+        let mut source = Registry::default();
+        source.register(10, 100).unwrap();
+        source.register(10, 101).unwrap();
+        source.unregister(10, 100).unwrap();
+        let mut target = Registry::default();
+        target.register(20, 200).unwrap();
+        assert!(source.transfer_group(&mut target, 10).unwrap());
+        assert_eq!(target.index(10, 101), Ok(1));
+        assert_eq!(target.register(10, 102), Ok(2));
+        assert!(!source.transfer_group(&mut target, 10).unwrap());
+        assert_eq!(source, Registry::default());
+        source.register(30, 101).unwrap();
+        let before = (source.clone(), target.clone());
+        assert_eq!(
+            source.transfer_group(&mut target, 30),
+            Err(Error::DuplicateObject)
+        );
+        assert_eq!((source, target), before);
+    }
     #[test]
     fn ordered_registration_retries_and_owner_isolation() {
         let mut r = Registry::default();

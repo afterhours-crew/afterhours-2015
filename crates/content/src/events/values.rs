@@ -6,7 +6,7 @@
 //! defaults, hubs selected by start-time integer range comparisons, conditional
 //! floats and Math programs. Any other node, or an ambiguous connection, is an
 //! error rather than a guess. Field and event IDs are the client's name hashes.
-use crate::{Error, graph::*, scan::Assets};
+use crate::{Error, graph::*};
 use nfs_frostbite::ebx::Value;
 use nfs_world::scoring::math::{Type, Value as MathValue};
 
@@ -75,12 +75,12 @@ fn default(text: &str) -> Result<Number, Error> {
     })
 }
 
-pub(crate) struct Evaluator<'g, 'a> {
-    pub graph: &'g mut Graph<'a, Assets>,
+pub(crate) struct Evaluator<'g, 'a, S: Source> {
+    pub graph: &'g mut Graph<'a, S>,
     depth: usize,
 }
-impl<'g, 'a> Evaluator<'g, 'a> {
-    pub fn new(graph: &'g mut Graph<'a, Assets>) -> Self {
+impl<'g, 'a, S: Source> Evaluator<'g, 'a, S> {
+    pub fn new(graph: &'g mut Graph<'a, S>) -> Self {
         Self { graph, depth: 0 }
     }
     fn enter(&mut self) -> Result<(), Error> {
@@ -138,7 +138,7 @@ impl<'g, 'a> Evaluator<'g, 'a> {
                 None => Vec::new(),
             };
             if connected.is_empty() {
-                vec![self.interface_default(site, port)?]
+                self.interface_default(site, port)?.into_iter().collect()
             } else {
                 connected
             }
@@ -165,7 +165,7 @@ impl<'g, 'a> Evaluator<'g, 'a> {
         self.depth -= 1;
         Ok(values)
     }
-    fn interface_default(&mut self, site: &Site, port: u32) -> Result<Number, Error> {
+    fn interface_default(&mut self, site: &Site, port: u32) -> Result<Option<Number>, Error> {
         let object = self.graph.object(site)?;
         let fields = object
             .fields
@@ -180,12 +180,21 @@ impl<'g, 'a> Evaluator<'g, 'a> {
         if found.next().is_some() {
             return Err(bad("duplicate interface field"));
         }
-        default(
-            field
-                .get("Value")
-                .and_then(Value::as_str)
-                .ok_or_else(|| bad("interface default value"))?,
-        )
+        let text = field
+            .get("Value")
+            .and_then(Value::as_str)
+            .ok_or_else(|| bad("interface default value"))?;
+        // An empty interface declaration publishes nothing. Receiving nodes
+        // keep their own authored defaults until a source supplies a value.
+        if text.is_empty() {
+            return Ok(None);
+        }
+        default(text).map(Some).map_err(|error| {
+            bad(&format!(
+                "interface {}:{} field {port}: {error}",
+                site.key.0, site.key.1
+            ))
+        })
     }
     /// One value of `values`, refusing a field whose connections disagree.
     fn unique(&mut self, site: &Site, port: u32) -> Result<Number, Error> {
@@ -244,8 +253,18 @@ impl<'g, 'a> Evaluator<'g, 'a> {
                         }
                     }
                 }
-                let [k] = <[u32; 1]>::try_from(selected)
-                    .map_err(|_| bad("hub selection is not unique at start"))?;
+                selected.sort_unstable();
+                selected.dedup();
+                let k = match selected.as_slice() {
+                    [] => object
+                        .fields
+                        .get("InputSelect")
+                        .and_then(Value::bits32)
+                        .filter(|v| *v < count)
+                        .ok_or_else(|| bad("hub default selection"))?,
+                    &[k] => k,
+                    _ => return Err(bad("hub selection is not unique at start")),
+                };
                 self.required(site, name(&format!("In{k}")))?
             }
             "ConditionalFloatEntityData" if port == OUTPUT => {
@@ -290,6 +309,29 @@ impl<'g, 'a> Evaluator<'g, 'a> {
     /// that triggers on start and whose value lies in its closed range.
     fn fires_at_start(&mut self, source: &Site, event: u32) -> Result<bool, Error> {
         let object = self.graph.object(source)?;
+        if object.class == "CompareBoolEntityData" && event == name("OnTrue") {
+            // Initial property publications are pending comparisons until
+            // activation. An unbound interface publishes nothing.
+            let input = self.input(source, name("Bool"))?;
+            let initial = object
+                .fields
+                .get("Bool")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| bad("Boolean selector default"))?;
+            let value = match input {
+                Some(Number::Boolean(v)) => v,
+                None => initial,
+                _ => return Err(bad("Boolean selector input")),
+            };
+            return Ok(value
+                && (object.fields.get("TriggerOnStart").and_then(Value::as_bool) == Some(true)
+                    || (input.is_some()
+                        && object
+                            .fields
+                            .get("TriggerOnPropertyChange")
+                            .and_then(Value::as_bool)
+                            == Some(true))));
+        }
         if object.class != "CompareIntRangeEntityData" || event != IN_RANGE {
             return Err(bad("unsupported hub selector"));
         }

@@ -471,6 +471,20 @@ fn spawn_presentation_waits_for_capacity_with_poll_and_rejects_foreign_owner() {
     assert_eq!(listener.pending_rpcs.len(), 2);
     assert!(listener.pending_spawns.is_empty());
     assert_eq!(listener.due_teleport(100), None);
+    assert_eq!(
+        listener.due_teleport(101),
+        None,
+        "pending assignment must reach the host queue first"
+    );
+    listener.pending_rpcs.clear();
+    assert_eq!(
+        listener.due_teleport(101),
+        None,
+        "bootstrap content and scenes also precede the command"
+    );
+    listener.pending_content.clear();
+    listener.pending.clear();
+    listener.pending_entries.clear();
     assert_eq!(listener.due_teleport(101), Some(teleport(participant, 300)));
     listener.teleport_sent();
     listener

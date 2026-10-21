@@ -45,6 +45,8 @@ fn fixed_creation_realms_ignore_an_authored_realm_and_listener_flags() {
     for (class, expected) in [
         ("RaceVehicleDonutQueryEntityData", Realm::Server),
         ("RaceVehicleNosQueryEntityData", Realm::Server),
+        // Native data getter 0x5134230 (shared with the Boolean accessor): server.
+        ("IntParticipantPropertyAccessorEntityData", Realm::Server),
         ("RaceVehicleNearMissQueryEntityData", Realm::Both),
         ("SyncedFloatEntityData", Realm::Both),
         ("RaceVehicleAnyCollisionEvaluatorEntityData", Realm::Client),

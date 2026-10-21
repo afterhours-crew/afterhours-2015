@@ -198,6 +198,33 @@ pub(crate) fn resolve_reset_volumes(
     Ok(State { scene, serializer })
 }
 
+/// Shared manager identities and lifecycle endpoints for a resolved AI owner.
+pub(crate) fn managers(
+    graph: &mut Graph<crate::scan::Assets>,
+    lookup: &mut SceneLookup,
+    participants: &Site,
+    actors: &Site,
+    ports: Links,
+) -> Result<nfs_world::replication::players::ai::Managers, Error> {
+    if graph.object(participants)?.class != "AiParticipantManagerEntityData"
+        || graph.object(actors)?.class != "AiActorManagerEntityData"
+    {
+        return Err(bad("manager classes"));
+    }
+    let (scene, participant_serializer) = lookup.endpoint(graph, participants)?;
+    let (actor_scene, actor_serializer) = lookup.endpoint(graph, actors)?;
+    if scene != actor_scene || participant_serializer == actor_serializer {
+        return Err(bad("manager scene identity"));
+    }
+    Ok(nfs_world::replication::players::ai::Managers {
+        scene,
+        participants: participant_serializer,
+        actors: actor_serializer,
+        alive: resolve(graph, lookup, participants, ports)?,
+        reset_volumes: resolve_reset_volumes(graph, lookup, ports)?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

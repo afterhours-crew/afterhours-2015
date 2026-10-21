@@ -1273,6 +1273,60 @@ fn adjacent_car_motion_shares_one_bounded_frame_and_preserves_barriers() {
 }
 
 #[test]
+fn waiting_rpc_preserves_its_motion_boundary_without_disabling_later_coalescing() {
+    use crate::{
+        logic::{EntityRef, Fire},
+        participants::HostRpc,
+    };
+    let (mut host, snapshot) = motion_fixture();
+    let callback = HostRpc::Event(Fire {
+        target: EntityRef {
+            ghost: 1,
+            entity: 0,
+        },
+        event: 7,
+        player: None,
+    });
+    host.queue_replication(snapshot(1, 1)).unwrap();
+    host.queue_rpc(callback).unwrap();
+    // The first snapshot after a callback cannot replace one queued before it.
+    host.queue_replication(snapshot(1, 2)).unwrap();
+    assert_eq!(host.replication_progress(), (0, 2));
+    // The callback may await an unsent creation or a blocked transport. Later
+    // absolute snapshots can still supersede each other on this side of it.
+    for revision in 3..=120 {
+        for id in 1..=3 {
+            host.queue_replication(snapshot(id, revision)).unwrap();
+        }
+        assert_eq!(host.replication_progress(), (0, 2));
+    }
+    assert_eq!(host.replication_queue[0].0.records, snapshot(1, 1).records);
+    for id in 1..=3 {
+        assert_eq!(
+            host.replication_queue[1]
+                .0
+                .records
+                .iter()
+                .find(|r| r.id == id),
+            snapshot(id, 120).records.first()
+        );
+    }
+    host.queue_rpc(callback).unwrap();
+    host.queue_replication(snapshot(1, 121)).unwrap();
+    host.queue_replication(snapshot(1, 122)).unwrap();
+    assert_eq!(host.replication_progress(), (0, 3));
+    assert_eq!(host.rpc_queue, [callback, callback]);
+    assert_eq!(
+        host.replication_queue[2].0.records,
+        snapshot(1, 122).records
+    );
+    assert_eq!(
+        host.replication_bits,
+        host.replication_queue.iter().map(|(_, bits, _)| bits).sum()
+    );
+}
+
+#[test]
 fn unsent_car_and_minimap_snapshots_stay_current_during_backpressure() {
     use crate::replication::{Initial, Record, Update, location_map, section::Setup, vehicle};
     let (mut host, section) = motion_fixture();
@@ -2453,4 +2507,132 @@ fn queued_notifications_for_sent_objects_ride_ahead_of_the_next_replication_fram
             remaining: 0
         }]
     );
+}
+
+#[test]
+fn ordered_content_cannot_overtake_notifications_under_a_full_send_window() {
+    use crate::{
+        logic::{EntityRef, Fire},
+        participants::HostRpc,
+        replication::{
+            Record,
+            sublevel::{Rpc, root},
+        },
+    };
+    use nfs_protocol::world::rpc::Serial;
+    let (mut host, mut client, mut listener, now) = established_with_content();
+    let content = root::content().unwrap();
+    let creation = root::creation(
+        Rpc {
+            selector: 0,
+            serial: Serial::new(0).unwrap(),
+        },
+        [None; root::REFERENCES],
+    )
+    .unwrap();
+    let mut initial = owned_section(0);
+    initial
+        .records
+        .push(Record::from_scene(1, creation, &content).unwrap());
+    host.queue_replication(initial).unwrap();
+    let t = now + REPORT_TIMEOUT_MS;
+    host.poll(t);
+    host.poll(t + STATE_WAIT_MS);
+    let t = t + 2 * STATE_WAIT_MS;
+    host.poll(t);
+    assert_eq!(host.replication_progress(), (1, 0));
+    let event = |event| {
+        HostRpc::Event(Fire {
+            target: EntityRef {
+                ghost: 1,
+                entity: 1,
+            },
+            event,
+            player: None,
+        })
+    };
+    let empty_section = || Section {
+        float_bits: None,
+        flag: false,
+        deleted: vec![],
+        setup: None,
+        records: vec![],
+    };
+    host.queue_replication_after(empty_section(), vec![event(3), event(4)])
+        .unwrap();
+    host.queue_rpc(event(5)).unwrap();
+    assert_eq!(
+        host.queue_content_after_replication(47, &[0x88; 50])
+            .unwrap(),
+        2
+    );
+    // Work queued after the command must not move its publication boundary.
+    for _ in 0..4 {
+        host.queue_replication(empty_section()).unwrap();
+    }
+    let Stage::Running {
+        application, world, ..
+    } = &mut host.stage
+    else {
+        panic!()
+    };
+    world.client_level_ready = true;
+    let empty = frame::Builder::new().build().unwrap();
+    let mut latest = None;
+    loop {
+        match application.send_frame(empty.span()) {
+            Ok(body) => {
+                latest = nfs_protocol::world::envelope::ZeroTail::new(1600)
+                    .unwrap()
+                    .decode(&body)
+                    .unwrap()
+                    .sequence()
+                    .map(|s| s.number().value())
+            }
+            Err(application::Error::Window) => break,
+            other => panic!("{other:?}"),
+        }
+    }
+    let out = host.poll(t + 500);
+    assert!(!out.events.iter().any(|e| matches!(
+        e,
+        Event::Content { .. } | Event::Replication { .. } | Event::RpcNotifications { .. }
+    )));
+    assert_eq!(host.content_progress(), (3, 2));
+    assert_eq!(host.replication_progress(), (1, 5));
+    let mut control = crate::bits::BitWriter::new();
+    control.put(1, 1).put(1, 4);
+    let body = application::sequenced(HOST_SELECTOR, 3, latest.unwrap(), u32::MAX, &control);
+    host.receive(&client.app(&body), t + 501, &mut listener);
+    let mut order = Vec::new();
+    for step in 1..=4 {
+        let out = host.poll(t + 501 + step * REPLICATION_INTERVAL_MS);
+        for (bytes, bits) in host_frames(&client, &out.send) {
+            let parsed = frame::parse(
+                BitSpan::new(&bytes, 0, bits).unwrap(),
+                frame::Direction::FromHost,
+            )
+            .unwrap();
+            if let Some(messages) = parsed.messages {
+                for group in messages.groups {
+                    for message in group.messages {
+                        match message {
+                            frame::Message::Opaque { index: 86, .. } => order.push("state"),
+                            frame::Message::Chunk { .. } => order.push("teleport"),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        if host.content_progress().1 == 0 {
+            assert!(
+                host.replication_progress().1 > 0,
+                "later work cannot starve the command"
+            );
+            break;
+        }
+    }
+    assert_eq!(order, ["state", "state", "state", "teleport", "teleport"]);
+    assert_eq!(host.content_progress(), (5, 0));
 }

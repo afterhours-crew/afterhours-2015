@@ -72,6 +72,13 @@ pub enum Definition {
     ParticipantProperty {
         value: bool,
     },
+    /// An integer participant property written through an accessor whose
+    /// `Value` is connected. The native server accessor stores the bound
+    /// Value for its participant and every later change (thunk `0x1446dcc80`
+    /// into `0x144055d20`), and mirrors the stored value in `OutputValue`
+    /// (`0x1446dcbb0`; E1000). The output is therefore the last written
+    /// value; accessors that only read the store are not modeled.
+    IntegerParticipantProperty,
     Float {
         default: f32,
         step: f32,
@@ -235,6 +242,10 @@ impl Node {
             Definition::ParticipantProperty { value } => {
                 vec![Effect::Publish(OUTPUT_VALUE, Value::Boolean(value))]
             }
+            Definition::IntegerParticipantProperty => vec![Effect::Publish(
+                OUTPUT_VALUE,
+                Value::Integer(integer(&mut read, FLOAT_VALUE)?),
+            )],
             Definition::Float { default, .. } => {
                 vec![Effect::Publish(FLOAT_VALUE, Value::Float(default))]
             }
@@ -377,6 +388,10 @@ impl Node {
                 };
                 Ok(vec![Publish(FLOAT_VALUE, Value::Integer(value))])
             }
+            (IntegerParticipantProperty, PropertyChanged(FLOAT_VALUE)) => Ok(vec![Publish(
+                OUTPUT_VALUE,
+                Value::Integer(integer(read, FLOAT_VALUE)?),
+            )]),
             (IntegerCache, Event(LOAD)) => Ok(vec![
                 Publish(CACHE_OUTPUT, Value::Integer(integer(read, CACHE_INPUT)?)),
                 Emit(CACHE_LOADED),

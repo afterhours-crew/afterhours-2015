@@ -42,6 +42,42 @@ pub(crate) fn fixture(
 ) -> (Population, Players, registrations::Registry, Vec<Message>) {
     fixture_mode(connection, true)
 }
+pub(crate) fn event_fixture() -> (crate::event_ai::Content, Players, registrations::Registry) {
+    event_fixture_with(1)
+}
+pub(crate) fn event_fixture_with(
+    connection: u8,
+) -> (crate::event_ai::Content, Players, registrations::Registry) {
+    let (population, world, registry, _) = fixture(connection);
+    let c = &population.content;
+    let grid = &c.data.racers[0];
+    let roster = nfs_content::events::ai::Roster {
+        managers: Some(c.data.managers),
+        completion: Some(nfs_content::events::ai::Completion::GiveIndividualToDirectorAtCompletion),
+        personas: c.data.personas.clone(),
+        pacing_skills: vec![Some(0.5); 2],
+        spawns: (0..2)
+            .map(|i| nfs_content::events::ai::Spawn {
+                personas: vec![0, 1],
+                position: [
+                    grid.position[0],
+                    grid.position[1],
+                    grid.position[2] + i as f32 * 5.,
+                ],
+                basis: grid.basis,
+                team: 2,
+                once: false,
+                store_participant: false,
+                ignore_availability: false,
+            })
+            .collect(),
+    };
+    (
+        crate::event_ai::Content::prepared(roster, c.vehicles.clone(), c.presets.clone()).unwrap(),
+        world,
+        registry,
+    )
+}
 fn fixture_mode(
     connection: u8,
     preloaded: bool,
@@ -213,6 +249,138 @@ fn input(now: u64, focus: &[Focus]) -> Input<'_> {
         now,
         focus,
         random: 12_345,
+        preserved: &[],
+    }
+}
+
+#[test]
+fn event_adoption_preserves_ids_and_retires_outside_view_without_respawn() {
+    let (mut population, mut world, mut registry, _) = fixture(1);
+    population.limit = Some(0); // No authored activations interfere.
+    let (content, _, _) = event_fixture();
+    let selections = crate::event_ai::Cursor::default().select(&content).unwrap();
+    let mut created = content
+        .create(&mut world, &mut registry, 1, 100, &selections)
+        .unwrap();
+    let member = created.racers.members[0];
+    let before = world.objects().snapshot();
+    assert!(
+        population
+            .adopt(&mut world, 2, 100, member, &mut created.racers.authority)
+            .is_err()
+    );
+    assert_eq!(world.objects().snapshot(), before);
+    assert_eq!(population.count(), 0);
+    let changes = population
+        .adopt(&mut world, 1, 100, member, &mut created.racers.authority)
+        .unwrap();
+    assert!(
+        changes
+            .records
+            .iter()
+            .any(|r| matches!(r.initial, Some(Initial::WanderGoal(ref w)) if w.flags == GOAL))
+    );
+    assert_eq!(
+        world.ai_ids(1, 100, member.selection.car_key),
+        Some(member.ids)
+    );
+    assert_eq!(
+        population.delegated(&world, 1, 100),
+        BTreeMap::from([(member.ids.vehicle, member.selection.car_key)])
+    );
+    assert!(
+        population
+            .adopt(&mut world, 1, 100, member, &mut created.racers.authority)
+            .unwrap()
+            .records
+            .is_empty()
+    );
+    let mut position = world
+        .ai_vehicle_physics(1, 100, member.selection.car_key)
+        .unwrap()
+        .decode([0.; 3])
+        .unwrap()
+        .position;
+    let near = [Focus {
+        id: 1,
+        position: [position[0] + 399., 2000., position[2]],
+    }];
+    assert!(
+        population
+            .advance(&mut world, &mut registry, 1, 100, input(1, &near))
+            .unwrap()
+            .deleted
+            .is_empty()
+    );
+    assert_eq!(
+        population.count(),
+        1,
+        "view retention ignores vertical separation"
+    );
+    // Following a former opponent retains its original car well beyond the
+    // finish location. Retention uses current delegated physics, not its spawn
+    // position or time elapsed since adoption.
+    for now in 2..=12 {
+        position[0] += 100.;
+        place(
+            &mut world,
+            member.selection.car_key,
+            position,
+            [20., 0., 0.],
+        );
+        let following = [Focus {
+            id: 1,
+            position: [position[0] - 30., position[1], position[2]],
+        }];
+        let changes = population
+            .advance(
+                &mut world,
+                &mut registry,
+                1,
+                100,
+                input(now * 1000, &following),
+            )
+            .unwrap();
+        assert!(changes.deleted.is_empty());
+        assert!(changes.spawned.is_none());
+        assert_eq!(
+            world.ai_ids(1, 100, member.selection.car_key),
+            Some(member.ids)
+        );
+    }
+    let far = [Focus {
+        id: 1,
+        position: [position[0] + 400., position[1], position[2]],
+    }];
+    let kept = population
+        .advance(
+            &mut world,
+            &mut registry,
+            1,
+            100,
+            Input {
+                preserved: &[member.ids.participant],
+                ..input(13_000, &far)
+            },
+        )
+        .unwrap();
+    assert!(kept.deleted.is_empty());
+    let removed = population
+        .advance(&mut world, &mut registry, 1, 100, input(14_000, &far))
+        .unwrap();
+    assert_eq!(population.count(), 0);
+    assert!(removed.deleted.contains(&member.ids.participant));
+    assert!(removed.deleted.contains(&member.ids.vehicle));
+    assert_eq!(removed.leave.len(), 2);
+    assert_eq!(world.ai_ids(1, 100, member.selection.car_key), None);
+    for now in 15_000..15_011 {
+        assert!(
+            population
+                .advance(&mut world, &mut registry, 1, 100, input(now, &near))
+                .unwrap()
+                .activated
+                .is_none()
+        );
     }
 }
 pub(crate) fn spawn(

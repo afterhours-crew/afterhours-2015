@@ -7,7 +7,12 @@
 //! pure: it builds creation and update records, routes reports and commands,
 //! and aggregates keeper awards into a category credit. The listener commits
 //! records with its frame; the durable credit is applied by the storage path.
-use nfs_content::scoring::content::{Field, Participant, ScoringContent};
+//! An owned race event runs its own driving-style participant on the entity
+//! the event creates in its game mode (#138).
+use nfs_content::scoring::{
+    content::{EventScoring, Field, Participant, ScoringContent},
+    participant_properties::Property,
+};
 use nfs_protocol::world::rpc::Serial;
 use nfs_services::reputation::Scores;
 use nfs_world::{
@@ -23,6 +28,8 @@ use nfs_world::{
     scoring::{
         collision::Command,
         interpreter::{Award, Category, Inputs, Output, Session},
+        nodes::FLOAT_VALUE,
+        program::Program,
         properties::Port,
         reports::{Binding as ReportBinding, Kind as ReportKind},
         synced,
@@ -41,9 +48,19 @@ pub const TIME_SCALE: f32 = 1.0;
 pub enum Which {
     Acquisition,
     Scoring,
+    /// The event driving-style participant, on the event's entity.
+    Event,
 }
 impl Which {
-    pub const ALL: [Which; 2] = [Which::Acquisition, Which::Scoring];
+    /// The participants free roam runs.
+    pub const FREE_ROAM: [Which; 2] = [Which::Acquisition, Which::Scoring];
+}
+
+/// The event driving-style participant and its update binding.
+#[derive(Clone, Debug)]
+struct EventPart {
+    scoring: EventScoring,
+    binding: Arc<Binding>,
 }
 
 #[derive(Clone, Debug)]
@@ -57,6 +74,7 @@ pub struct Content {
     /// Item definitions with the stock vehicle figures for the stats provider.
     items: Option<Arc<nfs_world::items::InventoryCatalog>>,
     nitrous: nfs_content::nitrous::Catalog,
+    event: Option<Arc<EventPart>>,
 }
 
 impl Content {
@@ -96,7 +114,74 @@ impl Content {
             road: None,
             items: None,
             nitrous: Default::default(),
+            event: None,
         })
+    }
+    /// Attach the event driving-style participant. `creation` is the event's
+    /// creation content (its entity lives in the event bundle) and `asset`
+    /// the event layout's asset. Its keepers must credit the categories the
+    /// free-roam participant credits.
+    pub fn with_event(
+        mut self,
+        scoring: EventScoring,
+        creation: &CreationContent,
+        asset: nfs_world::replication::entity::creation::Asset,
+    ) -> Result<Self, replication::Error> {
+        if scoring.categories != self.installed.categories {
+            return Err(replication::Error::Shape);
+        }
+        let binding = Arc::new(creation.binding(asset)?);
+        self.event = Some(Arc::new(EventPart { scoring, binding }));
+        Ok(self)
+    }
+    pub fn has_event(&self) -> bool {
+        self.event.is_some()
+    }
+    fn event_part(&self) -> Result<&EventPart, replication::Error> {
+        self.event.as_deref().ok_or(replication::Error::Unsupported)
+    }
+    /// The compiled program of one participant kind.
+    pub fn program(&self, which: Which) -> Result<&Arc<Program>, replication::Error> {
+        Ok(match which {
+            Which::Acquisition | Which::Scoring => &self.participant(which).program,
+            Which::Event => &self.event_part()?.scoring.program,
+        })
+    }
+    fn fields(&self, which: Which) -> Result<&[Field], replication::Error> {
+        Ok(match which {
+            Which::Acquisition | Which::Scoring => &self.participant(which).fields,
+            Which::Event => &self.event_part()?.scoring.fields,
+        })
+    }
+    /// Composition bus to client entity index, for remote event rows.
+    pub fn bus_entities(&self, which: Which) -> Result<&[Option<u16>], replication::Error> {
+        Ok(match which {
+            Which::Acquisition | Which::Scoring => &self.participant(which).bus_entities,
+            Which::Event => &self.event_part()?.scoring.bus_entities,
+        })
+    }
+    /// The integer participant properties an event session has written:
+    /// each accessor's bound `Value`, the value it last wrote (the category
+    /// totals the event results present, E1000). Nothing in the program reads
+    /// the accessors' outputs, so those have no cell.
+    pub fn event_properties(
+        &self,
+        session: &Session,
+    ) -> Result<BTreeMap<Property, i32>, replication::Error> {
+        let mut values = BTreeMap::new();
+        for (node, property) in &self.event_part()?.scoring.properties {
+            match session.read(Port {
+                node: *node,
+                field: FLOAT_VALUE,
+            }) {
+                Ok(Some(Value::Integer(v))) => {
+                    values.insert(property.clone(), v);
+                }
+                Ok(None) => {}
+                _ => return Err(replication::Error::TypeMismatch),
+            }
+        }
+        Ok(values)
     }
     /// Attach the item definitions (stock vehicle figures).
     pub fn with_items(mut self, items: Arc<nfs_world::items::InventoryCatalog>) -> Self {
@@ -127,14 +212,21 @@ impl Content {
     pub fn installed(&self) -> &ScoringContent {
         &self.installed
     }
+    /// A free-roam participant. The event participant has no installed
+    /// scene layout of its own (its entity is the event's); its program,
+    /// fields and buses come from the other accessors.
     pub fn participant(&self, which: Which) -> &Participant {
         match which {
             Which::Acquisition => &self.installed.acquisition,
-            Which::Scoring => &self.installed.scoring,
+            Which::Scoring | Which::Event => &self.installed.scoring,
         }
     }
-    pub fn binding(&self, which: Which) -> Arc<Binding> {
-        self.bindings[which as usize].clone()
+    pub fn binding(&self, which: Which) -> Result<Arc<Binding>, replication::Error> {
+        Ok(match which {
+            Which::Acquisition => self.bindings[0].clone(),
+            Which::Scoring => self.bindings[1].clone(),
+            Which::Event => self.event_part()?.binding.clone(),
+        })
     }
     pub fn creation_content(&self) -> &CreationContent {
         &self.creation
@@ -146,13 +238,16 @@ impl Content {
         which: Which,
         inputs: &Inputs,
     ) -> Result<(Session, Output), nfs_world::scoring::Error> {
-        let mut session = Session::new(self.participant(which).program.clone())?;
+        let program = self
+            .program(which)
+            .map_err(|_| nfs_world::scoring::Error::InvalidGraph)?;
+        let mut session = Session::new(program.clone())?;
         let output = session.start(inputs)?;
         Ok((session, output))
     }
 
     fn field(&self, which: Which, node: u16) -> Option<Field> {
-        let fields = &self.participant(which).fields;
+        let fields = self.fields(which).ok()?;
         fields
             .binary_search_by_key(&node, |f| f.node)
             .ok()
@@ -171,6 +266,10 @@ impl Content {
         participant: u16,
         players: &Players,
     ) -> Result<Creation, replication::Error> {
+        if which == Which::Event {
+            // The event creates this entity with its game-mode logics.
+            return Err(replication::Error::Unsupported);
+        }
         let part = self.participant(which);
         let world = players.objects();
         let blueprint = world
@@ -303,8 +402,7 @@ impl Content {
         if synced.is_empty() {
             return Ok(None);
         }
-        let part = self.participant(which);
-        let mut fields = vec![None; part.fields.len()];
+        let mut fields = vec![None; self.fields(which)?.len()];
         for (node, value) in synced {
             let field = self
                 .field(which, *node)
@@ -320,7 +418,7 @@ impl Content {
             fields[field.serializer] = Some(update);
         }
         Ok(Some(RecordUpdate::Entity {
-            binding: self.binding(which),
+            binding: self.binding(which)?,
             fields,
         }))
     }
@@ -332,12 +430,12 @@ impl Content {
         players: &Players,
         ghost: u16,
     ) -> Result<Vec<(u16, ReportBinding)>, replication::Error> {
-        let part = self.participant(which);
+        let program = self.program(which)?;
         let mut bindings = Vec::new();
-        for field in &part.fields {
+        for field in self.fields(which)? {
             let kind = match (
                 field.kind,
-                part.program
+                program
                     .node(field.node)
                     .map_err(|_| replication::Error::Shape)?
                     .class
