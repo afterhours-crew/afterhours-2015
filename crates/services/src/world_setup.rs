@@ -8,7 +8,7 @@ use crate::bootstrap::{body_limits, frame_limits};
 use nfs_protocol::{Blob, gamemanager::*, users::*, util::ConfigEntries};
 use std::{
     collections::BTreeMap,
-    net::{Ipv4Addr, SocketAddr},
+    net::{SocketAddr, SocketAddrV4},
 };
 mod allocation;
 pub use allocation::{Generated, SEED_BYTES};
@@ -359,6 +359,33 @@ mod tests {
         );
     }
     #[test]
+    fn world_host_address_is_the_world_endpoint_on_the_listen_address() {
+        let p = player();
+        for (endpoint, ip) in [
+            ("127.0.0.1:9002", 2_130_706_433_u32),
+            ("192.168.1.32:9002", 3_232_235_808),
+        ] {
+            let mut a = allocation();
+            a.endpoint = endpoint.parse().unwrap();
+            let bytes = config().setup(&current(&p), &a, metrics()).unwrap();
+            let d = nfs_fire2::decode(&bytes, frame_limits()).unwrap().unwrap();
+            let s = NotifyGameSetup::decode(d.frame.body, body_limits()).unwrap();
+            let g = s.game_data.as_ref().unwrap();
+            for list in [
+                &g.dedicated_server_host_network_address_list,
+                &g.topology_host_network_address_list,
+            ] {
+                let [NetworkAddress::IpPair(pair)] = &list.as_ref().unwrap().0[..] else {
+                    panic!("{endpoint}")
+                };
+                for address in [&pair.external_address, &pair.internal_address] {
+                    let address = address.as_ref().unwrap();
+                    assert_eq!((address.ip, address.port), (Some(ip), Some(9002)));
+                }
+            }
+        }
+    }
+    #[test]
     fn setup_publication_requires_complete_write_and_retries_are_empty() {
         let p = player();
         let mut s = Publication::new(&config(), &current(&p), &allocation(), metrics()).unwrap();
@@ -396,7 +423,7 @@ mod tests {
             match kind {
                 0 => a.game = owner.group,
                 1 => a.host_session = a.host_connection,
-                2 => a.endpoint = "192.0.2.1:9002".parse().unwrap(),
+                2 => a.endpoint = "0.0.0.0:9002".parse().unwrap(),
                 3 => a.uuid = PLAYER_UUID,
                 4 => owner.persona = 99,
                 5 => m.fit = 101,
@@ -473,7 +500,9 @@ pub struct Current<'a> {
     pub player: &'a [u8],
     pub group_uuid: &'a [u8],
 }
-/// The edge owns ID/entropy uniqueness and a bound loopback endpoint's lifetime.
+/// The edge owns ID/entropy uniqueness and a bound endpoint's lifetime. The
+/// endpoint is on the server's listen address: loopback, or the network
+/// address it serves.
 pub struct Allocation<'a> {
     pub game: u64,
     pub reporting: u64,
@@ -502,8 +531,10 @@ fn host(persona: i64, session: u64, connection: u64, slot: u8) -> HostInfo<'stat
         ..Default::default()
     }
 }
-fn network(endpoint: SocketAddr, connection: u64) -> NetworkAddress<'static> {
-    let ip = u32::from_be_bytes(Ipv4Addr::LOCALHOST.octets());
+/// The world host's address: the world endpoint on the server's listen
+/// address, as both the external and the internal address.
+fn network(endpoint: SocketAddrV4, connection: u64) -> NetworkAddress<'static> {
+    let ip = u32::from(*endpoint.ip());
     let address = || IpAddress {
         ip: Some(ip),
         port: Some(endpoint.port()),
@@ -542,6 +573,7 @@ impl Config {
         m: MatchMetrics,
     ) -> Result<Vec<u8>, Error> {
         a.validate(c)?;
+        let endpoint = crate::advertised(a.endpoint).ok_or(Error::Context)?;
         if m.fit > self.max_fit || m.elapsed_micros < 0 {
             return Err(Error::Context);
         }
@@ -619,7 +651,7 @@ impl Config {
                 0,
             )),
             dedicated_server_host_network_address_list: Some(NetworkAddressList(vec![network(
-                a.endpoint,
+                endpoint,
                 a.host_connection,
             )])),
             external_session_name: Some(a.external_name),
@@ -634,7 +666,7 @@ impl Config {
             game_report_name: Some(self.report_name.as_bytes()),
             game_status_url: Some(b""),
             topology_host_network_address_list: Some(NetworkAddressList(vec![network(
-                a.endpoint,
+                endpoint,
                 a.host_connection,
             )])),
             max_player_capacity: Some(self.max_players),
@@ -756,8 +788,7 @@ impl Allocation<'_> {
             || ids.iter().enumerate().any(|(i, id)| ids[..i].contains(id))
             || a.shared_seed == 0
             || a.clock <= 0
-            || a.endpoint.ip() != std::net::IpAddr::V4(Ipv4Addr::LOCALHOST)
-            || a.endpoint.port() == 0
+            || crate::advertised(a.endpoint).is_none()
             || !uuid(a.uuid)
             || !uuid(c.group_uuid)
             || a.uuid == c.group_uuid

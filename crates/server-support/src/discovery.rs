@@ -2,14 +2,14 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! Strict bounded HTTP/XML discovery for an already-bound loopback listener.
+//! Strict bounded HTTP/XML discovery for an already-bound listener.
 use nfs_protocol::redirector::{
     IpAddress, Limits, ServerInstanceInfo, request::ServerInstanceRequest,
 };
 use std::{
     fmt,
     io::{self, Read},
-    net::{Ipv4Addr, SocketAddr, TcpStream},
+    net::{SocketAddr, TcpStream},
     time::Instant,
 };
 pub const MAX_HEADER: usize = 16 * 1024;
@@ -32,7 +32,9 @@ pub enum Failure {
     Eof,
     Io,
     Allocation,
-    NonLoopback,
+    /// Not one concrete IPv4 address with a port, so the reply could not
+    /// direct the game anywhere.
+    Address,
     Output,
     IneligibleRequest,
     Reply,
@@ -286,18 +288,27 @@ pub fn local_response(address: SocketAddr) -> Result<Vec<u8>, Failure> {
     local_response_with_ca(address, None)
 }
 
+/// The reply directs the game to `address`, the server's Blaze listener:
+/// `127.0.0.1` on this computer, or the one IPv4 address the server listens
+/// on for a network. An unspecified, broadcast or multicast address is not
+/// one the game can connect to.
 pub fn local_response_with_ca(address: SocketAddr, ca: Option<&[u8]>) -> Result<Vec<u8>, Failure> {
-    if address.ip() != Ipv4Addr::LOCALHOST || address.port() == 0 {
-        return Err(Failure::NonLoopback);
+    let SocketAddr::V4(address) = address else {
+        return Err(Failure::Address);
+    };
+    let ip = *address.ip();
+    if ip.is_unspecified() || ip.is_broadcast() || ip.is_multicast() || address.port() == 0 {
+        return Err(Failure::Address);
     }
+    let hostname = ip.to_string();
     if ca.is_some_and(|bytes| bytes.is_empty() || bytes.len() > 4096) {
         return Err(Failure::BodyLimit);
     }
     let certificate_list = ca.into_iter().collect::<Vec<_>>();
     let body = ServerInstanceInfo {
         address: IpAddress {
-            hostname: "127.0.0.1",
-            ip: u32::from(Ipv4Addr::LOCALHOST),
+            hostname: &hostname,
+            ip: u32::from(ip),
             port: address.port(),
         },
         address_remaps: &[],

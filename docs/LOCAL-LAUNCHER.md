@@ -245,8 +245,9 @@ nfs-afterhours stop
 supervises it until it exits, a stop is requested or you press Ctrl+C. On Linux
 and macOS point `--game-dir` at a copy of the installation directory; the
 content readers need its files, not a running game, and the server leaves the
-LSX port disabled. Non-loopback listening for a remote client is not yet
-implemented and is tracked separately.
+LSX port disabled. `serve --server-only --listen <address>` serves one IPv4
+address of this computer for a network instead; see the
+[launcher README](../crates/launcher/README.md).
 
 On Windows a `serve` session can also host the game. It runs the same checks as
 `start` and starts the server the same way, so close EA Desktop and the game

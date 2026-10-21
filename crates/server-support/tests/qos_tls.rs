@@ -353,6 +353,80 @@ fn unknown_ca_rejection_retains_only_numeric_tls_error_and_alert_shape() {
 }
 
 #[test]
+fn identity_names_the_listen_address() {
+    for ip in [
+        Ipv4Addr::UNSPECIFIED,
+        Ipv4Addr::BROADCAST,
+        Ipv4Addr::new(224, 0, 0, 1),
+    ] {
+        assert!(Identity::for_address(ip).is_err(), "{ip}");
+    }
+    // Verified over loopback against the name a client expects; the leaf
+    // names only the chosen address.
+    let lan = Ipv4Addr::new(192, 168, 1, 32);
+    let id = Arc::new(Identity::for_address(lan).unwrap());
+    for (expected, verified) in [(lan, true), (Ipv4Addr::LOCALHOST, false)] {
+        let context = client_context(Some(id.ca_pem()), AES256);
+        let (server, socket) = pair();
+        let served = Arc::clone(&id);
+        let handle = thread::spawn(move || capture(server, Instant::now() + LIMIT, &served));
+        let mut client = client(socket, &context, expected);
+        let established = client.connect().is_ok();
+        let san = client.ssl().peer_certificate().map(|cert| {
+            cert.subject_alt_names()
+                .unwrap()
+                .get(0)
+                .unwrap()
+                .ipaddress()
+                .map(<[u8]>::to_vec)
+        });
+        if established {
+            let _ = client.write_all(b"GET /qos HTTP/1.1\r\nHost: 192.168.1.32\r\n\r\n");
+        }
+        drop(client);
+        let result = handle.join().unwrap();
+        assert_eq!(established, verified, "{expected}");
+        assert_eq!(result.tls_established, verified);
+        if verified {
+            assert_eq!(san, Some(Some(lan.octets().to_vec())));
+            assert_eq!(result.status, Stop::HeaderComplete);
+        }
+    }
+}
+
+#[test]
+fn latency_service_answers_only_on_the_advertised_address() {
+    let udp = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = udp.local_addr().unwrap().port();
+    for (advertised, status) in [
+        // Not an address the game can be told.
+        (
+            std::net::SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port),
+            Stop::Address,
+        ),
+        (
+            std::net::SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0),
+            Stop::Address,
+        ),
+        // Not the address the request arrived at.
+        (
+            std::net::SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), port),
+            Stop::Address,
+        ),
+    ] {
+        let (server, _socket) = pair();
+        let observed = nfs_server_support::qos_tls::serve_latency(
+            server,
+            Instant::now() + LIMIT,
+            &identity(),
+            advertised,
+        );
+        assert_eq!(observed.status, status, "{advertised}");
+        assert!(observed.client_wire.is_empty() && observed.server_wire.is_empty());
+    }
+}
+
+#[test]
 fn wrong_ip_and_nonoverlapping_suite_are_rejected() {
     let id = identity();
     rejected(Some(id.ca_pem()), AES256, Ipv4Addr::new(127, 0, 0, 2));

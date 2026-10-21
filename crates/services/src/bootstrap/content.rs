@@ -268,7 +268,7 @@ impl Config {
             service_id,
             timeout,
         };
-        let endpoint = SocketAddr::from((Ipv4Addr::LOCALHOST, 1));
+        let endpoint = SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 1));
         Profile::new(&config, endpoint, endpoint).map_err(|_| ContentError::Invalid)?;
         Ok(config)
     }

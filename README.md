@@ -137,7 +137,8 @@ It retains no recorded reply. Publication waits for the complete write; failed
 writes and premature retries invalidate the world.
 
 Fresh matchmaking/world allocations use injected raw entropy, local ID domains
-and a caller-owned loopback endpoint. Matchmaking acknowledgements bind an
+and a caller-owned endpoint on the server's listen address, advertised as the
+world host. Matchmaking acknowledgements bind an
 admitted current group/player context, commit only after complete writes and
 bound retries. Typed admission validates the complete supported request form
 against explicit rule policy and the initialized group's current user and network
@@ -175,8 +176,8 @@ mutations remain unsupported; existing state is never rewritten by a read.
 
 ## License
 
-`nfs-server-support` provides bounded HTTP/XML discovery and loopback QoS
-listeners, including an ephemeral TLS identity. Blocking adapters belong on
+`nfs-server-support` provides bounded HTTP/XML discovery and QoS listeners on
+the server's listen address, including an ephemeral TLS identity for it. Blocking adapters belong on
 blocking workers. `nfs-services::user_session` owns the ordered network and
 latency updates used to initialize each authenticated session. Their portable
 tests construct requests and use local ephemeral sockets without recordings.
