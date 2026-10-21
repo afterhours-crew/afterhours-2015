@@ -21,6 +21,7 @@
 //! | `GET /v1/profile` | the `profile` record of the selected save |
 //! | `GET /v1/game` | the `game-endpoints` record: where a game reaches the server |
 //! | `GET /v1/profiles` | the `profile-list` record: every save |
+//! | `GET /v1/profiles/<id>` | the `profile` record of that save |
 //! | `GET /v1/sessions` | the `sessions` record: the newest sessions |
 //! | `GET /v1/sessions/<id>` | the `sessions` record of that session |
 //! | `GET /v1/sessions/<id>/files/<name>` | the `session-file` record: one log or record |
@@ -250,6 +251,8 @@ pub trait Control: Send + Sync + 'static {
     fn game(&self) -> Result<GameEndpoints>;
     /// `profile --list --json`.
     fn profiles(&self) -> Result<crate::profile::Listing>;
+    /// `profile --account-id <id> --json`.
+    fn profile_of(&self, account_id: &str) -> Result<Profile>;
     /// `sessions --json`, or with `--id`.
     fn sessions(&self, id: Option<&str>) -> Result<crate::sessions::SessionList>;
     /// One file of one session folder.
@@ -623,6 +626,10 @@ fn serve(mut stream: TcpStream, shared: &Shared) {
         ("GET", "/v1/profile") => answer(&mut stream, control.profile()),
         ("GET", "/v1/game") => answer(&mut stream, control.game()),
         ("GET", "/v1/profiles") => answer(&mut stream, control.profiles()),
+        ("GET", path) if path.starts_with("/v1/profiles/") => answer(
+            &mut stream,
+            control.profile_of(&path["/v1/profiles/".len()..]),
+        ),
         ("POST", "/v1/car-images") => answer(&mut stream, control.car_images()),
         ("POST", "/v1/map-images") => answer(&mut stream, control.map_images()),
         ("GET", path) if path.starts_with("/v1/content/") => {
@@ -743,6 +750,13 @@ impl Control for LiveControl {
     }
     fn profiles(&self) -> Result<crate::profile::Listing> {
         crate::commands::profile::profile_list_report(&self.data, None)
+    }
+    fn profile_of(&self, account_id: &str) -> Result<Profile> {
+        let args = crate::cli::ProfileArgs {
+            account_id: Some(account_id.to_owned()),
+            ..Default::default()
+        };
+        crate::commands::profile::profile_report(&self.data, &args)
     }
     fn sessions(&self, id: Option<&str>) -> Result<crate::sessions::SessionList> {
         crate::commands::sessions::sessions_report(

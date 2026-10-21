@@ -212,6 +212,7 @@ session's last status, and answers:
 | `PUT /v1/settings` | the `settings` record after saving new amounts, as `settings --json` with `--traffic` and `--rivals` |
 | `GET /v1/profile` | the `profile` record of the selected save, as `profile --json` |
 | `GET /v1/profiles` | the `profile-list` record: every save, as `profile --list --json` |
+| `GET /v1/profiles/<id>` | the `profile` record of that save, as `profile --account-id <id> --json` |
 | `GET /v1/sessions` | the `sessions` record of the newest 20 sessions, as `sessions --json` |
 | `GET /v1/sessions/<id>` | the `sessions` record of that session, as `sessions --id <id> --json` |
 | `GET /v1/sessions/<id>/files/<name>` | the `session-file` record: the start of one record or log the session wrote (4 MiB at most) |

@@ -90,6 +90,9 @@ impl Control for Fake {
     fn profiles(&self) -> Result<crate::profile::Listing> {
         Err(Failure::no_session("No saves yet."))
     }
+    fn profile_of(&self, account_id: &str) -> Result<Profile> {
+        Err(Failure::refused(format!("profile {account_id}")))
+    }
     fn sessions(&self, id: Option<&str>) -> Result<crate::sessions::SessionList> {
         Err(Failure::no_session(format!("sessions {id:?}")))
     }
@@ -378,6 +381,11 @@ fn routes_answer_the_commands_records() {
     let (code, _, body) = request(&server, "GET", "/v1/profiles");
     assert_eq!(code, 409);
     assert!(error_message(&body).contains("No saves"));
+    let (code, _, body) = request(&server, "GET", "/v1/profiles/abc");
+    assert_eq!(
+        (code, error_message(&body)),
+        (409, "profile abc".to_owned())
+    );
     let (code, _, body) = request(&server, "GET", "/v1/sessions");
     assert_eq!(
         (code, error_message(&body)),
@@ -1244,6 +1252,13 @@ fn the_live_api_reads_and_saves_settings_and_reads_the_profile_as_the_commands_d
     let listing: serde_json::Value = serde_json::from_str(&body).unwrap();
     crate::contract::testing::validate("profile-list", &listing);
     assert_eq!(listing["accounts"][0]["display_name"], "Api Tester");
+    let one = format!("/v1/profiles/{}", "5a".repeat(16));
+    let (code, body) = live_request(&record, "GET", &one, None);
+    assert_eq!(code, 200, "{body}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).unwrap()["identity"]["display_name"],
+        "Api Tester"
+    );
     let (code, body) = live_request(&record, "GET", "/v1/sessions", None);
     assert_eq!(code, 200, "{body}");
     let sessions: serde_json::Value = serde_json::from_str(&body).unwrap();
