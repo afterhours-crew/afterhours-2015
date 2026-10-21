@@ -301,9 +301,11 @@ restart. The API then answers `Host: <address>:<port>` only. Listening on the
 network is an explicit opt-in; without `--listen` nothing changes. It needs
 `--server-only`: a game a `serve` session starts on this computer is routed
 to loopback. Plain HTTP with the token is meant for a home network; anyone
-there who learns the token can control the session. Starting the game on
-another PC against this server is the next step (#172), and no game has been
-routed to a non-loopback address yet.
+there who learns the token can control the session. In a live check on
+2026-10-21, a game on the same PC, routed through #172's relay, played
+against a server listening on that PC's network address: redirector, Blaze,
+QoS, world and launcher services all on that address, and the save kept on
+the server. A game on another PC has not been tried yet (#172).
 
 ### Playing in a serve session
 
