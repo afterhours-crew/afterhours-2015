@@ -857,11 +857,19 @@ fn a_serve_session_streams_its_states_and_diagnostics_as_json_lines() {
             .iter()
             .all(|e| e["version"] == 1 && e["utc"].is_string())
     );
-    let states: Vec<&str> = events
-        .iter()
-        .filter(|e| e["event"] == "status")
-        .map(|e| e["status"]["state"].as_str().unwrap())
-        .collect();
+    let statuses: Vec<&serde_json::Value> =
+        events.iter().filter(|e| e["event"] == "status").collect();
+    // The supervisor records and emits a first `preparing` ("Starting the
+    // session.") before its state machine's own, so the stream may carry
+    // `preparing` twice; the states still pass in order, each once.
+    assert_eq!(statuses[0]["status"]["state"], "preparing");
+    let mut states: Vec<&str> = Vec::new();
+    for status in &statuses {
+        let state = status["status"]["state"].as_str().unwrap();
+        if states.last() != Some(&state) {
+            states.push(state);
+        }
+    }
     assert_eq!(states, ["preparing", "ready", "stopping", "finished"]);
     assert!(
         events
