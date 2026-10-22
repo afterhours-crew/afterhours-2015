@@ -46,7 +46,9 @@ GitHub releases prepared with the [bundle workflow](.github/workflows/release.ym
 include `Afterhours-windows-x64.zip`: one terminal executable with its documentation
 and licenses. Drop `Afterhours.exe` beside `NFS16.exe` and double-click it.
 Follow the [tester quickstart](docs/TESTER-QUICKSTART.md) for activation requirements,
-setup progress, local saves and feedback. Earlier source-only checkpoints do not
+setup progress, local saves and feedback, and [Your server on another
+PC](docs/SERVER-ON-ANOTHER-PC.md) to run the server on a second PC on your
+network and play from this one. Earlier source-only checkpoints do not
 contain this bundle. For future releases, pushing a version tag builds and tests
 its exact source, then attaches the finished assets to an unpublished draft.
 Maintainers [review and publish that draft](docs/RELEASING.md); publication does

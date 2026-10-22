@@ -319,7 +319,9 @@ there who learns the token can control the session. In a live check on
 2026-10-21, a game on the same PC, routed through #172's relay, played
 against a server listening on that PC's network address: redirector, Blaze,
 QoS, world and launcher services all on that address, and the save kept on
-the server. A game on another PC has not been tried yet (#172).
+the server. A game on another PC has not been tried yet (#172). The
+step-by-step setup for two PCs, with the desktop launcher or the terminal,
+is [Your server on another PC](../../docs/SERVER-ON-ANOTHER-PC.md).
 
 ### Playing in a serve session
 
