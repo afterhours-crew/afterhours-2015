@@ -122,6 +122,10 @@
     "CarImage": {
       "description": "One cached image for `profile`.",
       "properties": {
+        "file": {
+          "description": "The file below the server's content folder,\n`car-images/<fingerprint>/<name>.png`, as the session API's\n`GET /v1/content/<file>` serves it to a client on any computer.",
+          "type": "string"
+        },
         "height": {
           "format": "uint32",
           "minimum": 0,
@@ -143,6 +147,7 @@
       },
       "required": [
         "path",
+        "file",
         "width",
         "height",
         "source_format"

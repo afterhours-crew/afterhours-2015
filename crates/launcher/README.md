@@ -22,11 +22,13 @@ nfs-afterhours start   --game-dir <DIR>     run the server, start and route the 
 nfs-afterhours status                       report the current session
 nfs-afterhours stop                         ask the live session to close the game, then the server
 nfs-afterhours play                         ask the running serve session to start the game (Windows)
+nfs-afterhours api                          show how to reach the running session's API (--api)
 nfs-afterhours profile [--account-id <ID>]  show a saved driver's profile; change nothing
                        [--game-dir <DIR>]   (car names come from the installed game,
                        [--language <LOCALE>] read-only, in the game's locale)
 nfs-afterhours profile --list               list every saved driver in the data directory
 nfs-afterhours car-images [--game-dir <DIR>]  decode car pictures from the game into the data folder
+nfs-afterhours map-images [--game-dir <DIR>]  decode the world map from the game into the data folder
 nfs-afterhours sessions [--limit N] [--id <ID>]  summarize session folders and logs; change nothing
 nfs-afterhours settings [--traffic <PERCENT>] [--rivals <COUNT|original>]
                                             show or save traffic and rivals for later sessions
@@ -60,11 +62,16 @@ field and a JSON Schema (draft 7) generated from the Rust type that prints it:
 | `stop` | `stop --json`: `outcome` `requested` or `already-over`, with the status |
 | `play` | `play --json`: the status when the request was written and the request file |
 | `session-status` | `setup`/`serve`/`start --json` (the final status); also `status.json`. It carries the session's `action` and `game_running`, so `serve` without a game is hosting and with one is playing |
-| `event` | each line of `setup`/`serve`/`start --events` |
-| `profile`, `profile-list` | `profile --json`, `profile --list --json` |
+| `event` | each line of `setup`/`serve`/`start --events`, including the live map positions (`map-feed`); also each event of the session API's `/v1/events` |
+| `api` | `api --json` and `api.json` in a session started with `--api`: the session ID, the API's address and its token |
+| `api-error` | the body of every refused session API request |
+| `session-file` | the session API's `/v1/sessions/<id>/files/<name>`: the start of one session file |
+| `game-endpoints` | the session API's `/v1/game`: where a game reaches the server |
+| `profile`, `profile-list` | `profile --json` (also the session API's `/v1/profile`), `profile --list --json` |
 | `car-images` | `car-images --json`: the image set, counts per size, formats and unresolved images |
+| `map-images` | `map-images --json`: the tile set, its detail levels, file naming, the world box it covers and any missing tiles |
 | `sessions` | `sessions --json` |
-| `settings` | `settings --json`: saved `traffic_percent` and `rival_limit`, the largest accepted values, and whether this command saved them |
+| `settings` | `settings --json`: saved `traffic_percent` and `rival_limit`, the largest accepted values, and whether this command saved them; also the session API's `/v1/settings` |
 | `recover` | `recover --json` |
 | `version` | `version --json` |
 
@@ -80,8 +87,10 @@ strict checker that rejects any property a schema does not describe.
 `nfs-afterhours`), package version, release tag, source revision (`null` for
 local builds), whether this platform can launch the game, the current version
 of every record, and `capabilities`: `profile`, `sessions`, `events`, `play`,
-`car-images` and `world-settings` (the `settings` command) today. A screen whose capability is missing should say
-the feature is not available yet.
+`car-images`, `map-images`, `world-settings` (the `settings` command),
+`map-feed` (live positions in the event stream) and `api` (the session API)
+today. A screen whose capability is missing should say the feature is not
+available yet.
 
 Versioning: until the desktop launcher's first release, every record stays at
 version 1 and may change in lockstep with the launcher. From that release on,
@@ -103,18 +112,216 @@ are the exit code plus a message on stderr (in event mode, the `final` line).
 - `diagnostic`: one line a child wrote to stderr, with `source` `prepare`,
   `create-account`, `server` or `game`. Lines over 16 KiB are split; if the
   supervisor falls behind, a line saying output was skipped stands in for it.
+- `map-feed`: where the cars are, at most four times a second while the
+  server runs a world session (see [Map feed](#map-feed)).
 - `final`: always the last line, also when preflight refused the command
   before a session existed: `exit_code`, `message` (`null` on success) and the
   final `status` (`null` if none was recorded).
 
 The front-end process writes `session` and `final`; the supervisor it starts
-inherits stdout and writes `status` and `diagnostic`, so the lines never
-interleave. Human console text is silenced in this mode. A failed write, for
+inherits stdout and writes `status`, `diagnostic` and `map-feed`, so the lines
+never interleave. Human console text is silenced in this mode. A failed write, for
 example after the reader closed the pipe, disables further events without
 stopping the session: the supervisor outlives a closed launcher window, and
 `status --json` and `sessions --json` still observe it. A supervisor that is
 refused before its session begins (another session holds the data directory,
 a stop arrived, the server changed) records that reason as a `failed` status.
+
+### Map feed
+
+With `--events`, the supervisor starts the server with `--map-feed`, and
+`serve` and `start` report where the cars are for a map view (capability
+`map-feed`). It is read-only: the server observes the state its world
+sessions already own and changes nothing. Positions come from the cars'
+replicated chassis state (the game's latest report for cars it drives) or,
+for a roaming rival without a car, from the server's own simulation of it on
+the road network.
+
+```json
+{"version":1,"utc":"...","event":"map-feed","frame":42,"skipped":0,"worlds":[
+  {"connection":1,"persona_id":"1000000007","world_ms":81250,
+   "drivers":[{"participant":1,"x":-1234.57,"y":12.35,"z":6543.21,"heading":90.5,"speed":12.35}],
+   "traffic":[{"id":17,"x":-1180.0,"y":11.9,"z":6610.25,"heading":182.3}],
+   "rivals":[{"id":3,"x":-900.5,"y":10.0,"z":6800.0,"heading":null}],
+   "traffic_ring":{"inner":300.0,"outer":450.0},"omitted":0}]}
+```
+
+- `worlds`: one entry per world session (one per connected game), ordered by
+  `connection`. A frame with no worlds means none is running: remove any
+  markers. In a local session every driver is the local player; `persona_id`
+  matches `profile`'s `persona_id`.
+- `drivers` are the players' cars driving in the world (garage and menus show
+  none), ordered by `participant`; `traffic` and `rivals` are ordered by `id`,
+  which is unique within its list for that world session and never reused
+  there, so markers can be keyed by connection, kind and id.
+- Units and axes: x, y and z are world metres (y up), rounded to centimetres.
+  On the `map-images` map +x points right and +z points down, so a position
+  is at u = (x - min_x) / (max_x - min_x), v = (z - min_z) / (max_z - min_z)
+  of its world box. `heading` is the car's forward direction in degrees
+  clockwise from up the map (0 up, 90 right), `0 <= heading < 360`, to a
+  tenth, or `null` when it is unknown or vertical. `speed` is metres per
+  second.
+- `traffic_ring` gives the fixed radii of the native traffic policy, in
+  horizontal metres around each driver: cars are created beyond `inner` and
+  up to a little more than `outer` ahead of where the driver will be in about
+  three seconds (a quarter of those distances to the sides), and kept while
+  within `outer`. It is `null` without traffic or while traffic is off. A
+  circle at these radii is an approximation of that shape.
+- `omitted` counts cars the server left out of the frame (no usable
+  position, state it could not read, or beyond a bound).
+- Rate and order: each world session is observed at most every 250 ms, after
+  its tick's traffic and rival updates, and the server writes a frame when
+  anything changed, at most every 250 ms. The supervisor emits the newest
+  frame on each of its 250 ms polls if it is newer than the last one sent, so
+  `frame` only increases and `skipped` counts the frames in between that were
+  not delivered (superseded before a poll, or unreadable). A slow reader
+  drops frames; it never delays the game.
+- Bounds: 32 worlds, 16 drivers and 128 traffic cars and 128 rivals per
+  world, coordinates within 100 km of the origin, ids at most 2^53 - 1, and
+  1 MiB per server line. The supervisor checks every frame against them and
+  drops one that fails.
+
+How it travels: the server writes each frame as one JSON line on its
+standard output after the readiness line, from its own thread, so a stalled
+pipe never blocks a world session. The supervisor's pump keeps only the
+newest complete line in memory and writes none of them to
+`server.stdout.jsonl`, which keeps just the readiness line. Without
+`--events` the server is not asked for frames.
+
+Not established yet: the positions are what the server holds, but no live
+run has compared markers with the game's own map, and the map orientation
+was checked only by drawing the road network over it.
+
+### Session API
+
+With `--api`, `setup`, `serve` and `start` serve their session over HTTP on
+this computer, so a desktop front end can follow and control it the way it
+would a server on another computer, and can close, crash or reopen without
+affecting the session. The supervisor listens on `127.0.0.1` at a port the
+system picks, from just after it locks the data directory until the
+session's last status, and answers:
+
+| Request | Answer |
+| --- | --- |
+| `GET /v1/info` | the `version` record |
+| `GET /v1/status` | the `status` record, as `status --json` |
+| `GET /v1/events` | the session's `event` records as server-sent events |
+| `POST /v1/stop` | the `stop` record: close the game, then the server, as `stop --json` |
+| `POST /v1/play` | the `play` record: start the game in a `serve` session, as `play --json` |
+| `GET /v1/settings` | the `settings` record: the saved traffic and rivals, as `settings --json` |
+| `PUT /v1/settings` | the `settings` record after saving new amounts, as `settings --json` with `--traffic` and `--rivals` |
+| `GET /v1/profile` | the `profile` record of the selected save, as `profile --json` |
+| `GET /v1/profiles` | the `profile-list` record: every save, as `profile --list --json` |
+| `GET /v1/profiles/<id>` | the `profile` record of that save, as `profile --account-id <id> --json` |
+| `GET /v1/sessions` | the `sessions` record of the newest 20 sessions, as `sessions --json` |
+| `GET /v1/sessions/<id>` | the `sessions` record of that session, as `sessions --id <id> --json` |
+| `GET /v1/sessions/<id>/files/<name>` | the `session-file` record: the start of one record or log the session wrote (4 MiB at most) |
+| `POST /v1/car-images` | the `car-images` record: decode the car pictures, or reuse a complete set, as `car-images --json` |
+| `POST /v1/map-images` | the `map-images` record: decode the world map, or reuse it, as `map-images --json` |
+| `GET /v1/content/<file>` | one decoded picture (`car-images/<fingerprint>/<name>.png`, each car image's `file`) or map tile (`map-images/<fingerprint>/<level>-<column>-<row>.png`), as `image/png` |
+| `GET /v1/game` | the `game-endpoints` record: the server's redirector and launcher-services addresses from its readiness record, for a game routed through a relay (409 until the server is ready) |
+
+Answers are the records the matching commands print, with the same schemas
+and the same checks behind them. A refused request answers an `api-error`
+record (`{"version":1,"message":"..."}`) with status 400 (a malformed
+`Content-Length` or settings body), 401 (no or wrong token), 403 (wrong
+`Host`, or an `Origin` header), 404, 405 (with `Allow`), 409 (the command
+refused, as its exit codes 1 and 4), 411 (a settings body without
+`Content-Length`), 413 (a body on any other request, a settings body over
+1 KiB or a head over 8 KiB), 415 (a settings body that is not
+`application/json`) or 503 (more than 16 connections or 8 event streams).
+Every request needs `Host: 127.0.0.1:<port>` (or `localhost:<port>`) and
+`Authorization: Bearer <token>`: web pages cannot reach it, and other
+programs need the token.
+
+`PUT /v1/settings` is the only request with a body: a JSON object with
+`Content-Type: application/json` and a `Content-Length` of at most 1 KiB,
+holding the `settings` record's `traffic_percent` (0 to
+`max_traffic_percent`), `rival_limit` (0 to `max_rivals`, or `null` for the
+original number) or both, such as `{"traffic_percent":200,"rival_limit":null}`.
+A field left out keeps its saved value; an empty object, any other field, a
+`null` traffic or a value out of range is refused with 400 and saves
+nothing. Saving works as the `settings` command does while a session runs:
+the file is replaced at once and the running server applies it within about
+a second, so the answer has `saved: true` and the new values. The API saves
+one request at a time. `GET /v1/profile` reads the save that `account.json`
+selects, read-only, with the car names of the installation the session
+started; with no save selected it answers 409, as `profile` exits with 4.
+Paths in these records (`file`, a save's `path`, car images) are on the
+computer that runs the session.
+
+How to reach it: the supervisor writes the `api` record (`version`, session
+`id`, `url` such as `http://127.0.0.1:53111`, and a `token` of 64 hexadecimal
+characters from the system's random source) to
+`api.json` in the session directory, readable only by the user where the
+system allows, and removes it when the session ends. `nfs-afterhours api
+--json` prints it for the current session, or exits with 4 when no live
+session serves the API, also while a session that just became current is
+still starting it.
+
+The event stream (`text/event-stream`) sends each event as `id` (its place
+in the session), `event` (its kind) and `data` (the record's JSON on one
+line). It starts with the newest `status` and `map-feed` events, so a reader
+that connects or reconnects knows the state at once, then sends every later
+`status`, `diagnostic` and `map-feed` event in order, with a `: keep-alive`
+comment every 15 seconds while idle, and ends after the session's last
+status. `session` and `final` belong to the command's standard output and
+are not in it. The supervisor keeps the last 512 events (at most 4 MiB) for
+readers that fall behind; a slower reader skips ahead and never holds up
+the session. The session's log files keep every diagnostic.
+
+`--api` is for front ends: it silences console text as `--events` does, and
+standard output holds only the front end's `session` and `final` event
+lines, so a client that starts the command learns why it was refused before
+a session existed, and nothing in the session depends on that pipe. With
+`--events` as well, every event also goes to standard output. The server is
+asked for map frames whenever either is on.
+
+A front end that starts its own server can choose the token instead:
+set `AFTERHOURS_API_TOKEN` to 64 lowercase hexadecimal characters for
+`setup`, `serve` or `start`, and it knows the token without reading this
+computer's files, exactly as for a server elsewhere. Otherwise, **the
+token** is kept in `api-token` in the data directory, readable only by
+the user where the system allows: the first session with `--api` creates it
+and later sessions use it, so a launcher that paired with this server finds
+it again after a restart. Delete the file to choose a new token at the next
+session; a damaged file is refused (exit 1), not replaced.
+
+**On your network.** `serve --server-only --listen <address>` binds the
+server and, with `--api`, its API to that one IPv4 address of this computer
+instead of `127.0.0.1`, and gives that address to the game: redirector,
+Blaze, QoS, the per-connection world sockets and launcher services all listen
+there, with launcher services on a port the system picks, for a game on
+another PC that reaches them through a relay (`GET /v1/game` reports them).
+
+**Playing against it.** `start --remote http://<address>:<port> --token
+<token>` on the player's PC asks that server's `GET /v1/game` where a game
+reaches it, starts no server and prepares nothing here (the server keeps
+the saves), and runs the game checks as `start` does. In the server's place
+it starts this program, copied under the compatibility name the game's SDK
+looks for, as an internal `relay`: it takes launcher services on
+`127.0.0.1:3216` and a redirector port on `127.0.0.1`, forwards each
+connection unchanged to the server, and prints a readiness record like the
+server's. The game is then started, routed by the lease to that loopback
+redirector and supervised exactly as for a local server; the server's own
+answers give it the rest of its addresses. The game's backend host is a
+10-byte field (`127.0.0.1` fits, a typical network address does not), which
+is why the game is never given the server's address. Live checks on
+2026-10-21 played this way against a server on this PC's loopback and then
+on its network address; the lease routed the game to the relay, and the
+game accepted a Blaze address that is not loopback. `--api-port <port>` keeps the API on a fixed port, so a launcher on
+another PC finds `http://<address>:<port>` with the same token after every
+restart. The API then answers `Host: <address>:<port>` only. Listening on the
+network is an explicit opt-in; without `--listen` nothing changes. It needs
+`--server-only`: a game a `serve` session starts on this computer is routed
+to loopback. Plain HTTP with the token is meant for a home network; anyone
+there who learns the token can control the session. In a live check on
+2026-10-21, a game on the same PC, routed through #172's relay, played
+against a server listening on that PC's network address: redirector, Blaze,
+QoS, world and launcher services all on that address, and the save kept on
+the server. A game on another PC has not been tried yet (#172). The
+step-by-step setup for two PCs, with the desktop launcher or the terminal,
+is [Your server on another PC](../../docs/SERVER-ON-ANOTHER-PC.md).
 
 ### Playing in a serve session
 
@@ -173,8 +380,14 @@ directory, writes `request.json` there, removes sessions beyond the newest 20
 with their `artifacts/runs/<id>/` recordings (`retention`; the new and the
 current session are always kept) and starts a second copy of itself
 with the hidden `supervise` subcommand. The supervisor holds the
-data-directory lock, on Windows creates its own job object with kill-on-close, and
-runs the session state machine:
+data-directory lock, records the session's first status (`preparing`,
+"Starting the session.") and only then makes it current in
+`current-session.json`, so `status`, `stop` and `play` read a starting session
+as `preparing`, never as a missing file. A pointer to a session without a
+status, which an earlier launcher left while starting, is exit 4 for each of
+them. The supervisor then starts the session API if requested, on Windows
+creates its own job object with kill-on-close, and runs the session state
+machine:
 
 ```text
 preparing  -> nfs-server prepare-local, then create-account on first use
@@ -304,6 +517,42 @@ and published by one rename. Bounds: 1,024 files and 512 MiB per set,
 index. The `car-images --json` record lists counts per size, formats and
 every named image that could not be decoded with the reason.
 
+## World map
+
+`map-images` decodes the game's pause-menu world map from the installation
+(read-only; `--game-dir`, else the current session's, else the registered
+one) into the data directory for a map view, and reports the world box it
+covers. No image is shipped, committed or embedded. A complete set is reused
+without reading the installation; a damaged one is rebuilt.
+
+What the supported build holds, established from the installed data:
+
+- The map is the `UITiledTextureAsset` `ui/menu/worldmaptiledtexture` in
+  `Win32/levels/genesis01/genesis01`: 256-pixel tiles of a 16,384-pixel map
+  at detail levels 1 to 3 (8,192, 4,096 and 2,048 pixels across; level 0 is
+  not shipped). Each `Tiles` entry gives its level, column
+  (`HorizontalIndex`), row (`VerticalIndex`) and `NormalizedRect`, and imports
+  a `TextureAsset` under `ui/menu/tiledtexture/`, decoded as for car images.
+  A tile whose rectangle does not match its column and row is not used.
+- The world box is the largest unrotated `OBBData` of the UI map's world part
+  `levels/genesis01/ui/layer1_uimap`: 8,192 m either side of the origin in x
+  and z. A world position maps to u = (x - min_x) / (max_x - min_x) and
+  v = (z - min_z) / (max_z - min_z) from the top-left corner, so +z points
+  down the image; at full size one pixel is one metre. That orientation was
+  checked by drawing the game's road network over the decoded map, not yet
+  against a live position. Without a usable box the tiles are still
+  written, `world` is `null` and a warning says why.
+
+On the supported installation all 1,344 tiles decode (BC3), about 28 MiB of
+PNG in about 9 seconds. Files go to
+`artifacts/content/map-images/<content fingerprint>/` as
+`<level>-<column>-<row>.png` (columns from the left, rows from the top,
+from 0) plus `index.json`, published by one rename like the car images.
+Bounds: 4,096 tiles, 8 detail levels, 128 tiles a side, 1,024-pixel tiles,
+256 MiB per set and a 1 MiB index. The `map-images --json` record lists the
+levels with their tile counts, the file pattern, the world box and every
+listed tile that could not be decoded with the reason.
+
 ## Why it is built this way
 
 **Two processes.** The supervisor runs separately from the command you typed
@@ -373,9 +622,12 @@ existing data directories keep working.
 | `platform/` | the `Platform` trait, the shared child with bounded log pumps, and the Windows and Unix implementations; `platform/windows/lease` is the routing lease |
 | `endpoint` | the 13-byte transaction over abstract memory, tested with injected faults |
 | `profile` | read-only profiles from account saves; `profile/content` picks and loads the prepared content; `profile/names` and `profile/images` read car names and pictures from the installation |
+| `map` | the world map's tiles and world box, decoded from the installation by `map-images` |
 | `contract` | record names, versions, capabilities and schema generation; the strict test validator |
 | `sessions` | read-only session folder summaries and the server log scanner |
 | `events` | the JSON-lines event stream |
+| `api` | the session API: `api/hub` keeps the events for its streams, `api/http` the bounded HTTP subset it speaks |
+| `map_feed` | the server's map frames: the newest-line latch, their checks and which become `map-feed` events |
 | `settings` | the saved traffic and rival amounts in `settings.json` and their server options |
 | `paths`, `records`, `session`, `install`, `digest`, `compat`, `marker`, `clock` | portable pieces with their own unit tests |
 
@@ -385,11 +637,14 @@ existing data directories keep working.
 cargo test -p nfs-afterhours -p nfs-afterhours-sys
 ```
 
-Unit tests need no game, server or network. The integration tests in
+Unit tests need no game, server or network; the session API's tests open
+loopback sockets on ports the system picks. The integration tests in
 `tests/cli.rs` drive the built binary; on Unix they run a complete `serve`
 session against a shell script standing in for the server, observe it from a
 second process through `status`, stop it, read the same session as an event
-stream, and also kill a supervisor to see `interrupted` reported. On every
+stream, follow and stop another through the session API (`--api`), reading
+and changing its settings and reading its profile there, and also
+kill a supervisor to see `interrupted` reported. On every
 platform they check `version`, `schema`, `sessions` and a refused event
 stream. The Windows process-layer tests run in CI on a
 Windows runner. Live acceptance on the supported installation is recorded in

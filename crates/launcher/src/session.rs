@@ -90,6 +90,11 @@ pub fn point_current_session(data: &Path, id: &str) -> Result<()> {
 
 /// The current session's status, with `interrupted` derived when its
 /// supervisor is gone. `None` when no session was ever started here.
+///
+/// A supervisor records its session's first status before it points here,
+/// so a starting session reads as `preparing`. A pointer that names a
+/// session without a status (left by an earlier launcher, which pointed
+/// first) is exit 4 for every reader, without changing anything.
 pub fn current_status(data: &Path) -> Result<Option<Status>> {
     let data = paths::checked_data_path(data, None)?;
     let pointer_path = data.join(POINTER_FILE);
@@ -102,7 +107,15 @@ pub fn current_status(data: &Path) -> Result<Option<Status>> {
     }
     let run = paths::session_dir(&data, &pointer.id);
     paths::checked_data_path(&run, None)?;
-    let mut status: Status = records::read_json(&run.join("status.json"))?;
+    let status_path = run.join("status.json");
+    if !status_path.exists() {
+        return Err(Failure::no_session(if lock_is_held(&data)? == Some(true) {
+            "The current session is starting and has not recorded a status yet. Try again shortly."
+        } else {
+            "The current session stopped before it recorded a status. Start a new session."
+        }));
+    }
+    let mut status: Status = records::read_json(&status_path)?;
     if status.id != pointer.id {
         return Err(Failure::refused("Session status identity mismatch."));
     }
@@ -394,7 +407,11 @@ mod tests {
             player_name: "Driver".into(),
             record_protocol: false,
             events: false,
+            api: false,
             game_support,
+            listen: None,
+            api_port: None,
+            remote: None,
             settings: Default::default(),
         };
         let _ = std::fs::remove_file(run.join("request.json"));
@@ -507,6 +524,43 @@ mod tests {
             s.game_running = false;
         });
         assert!(request_play(&data, || Ok(())).is_ok());
+        std::fs::remove_dir_all(data).unwrap();
+    }
+
+    #[test]
+    fn a_pointer_to_a_session_without_a_status_is_nothing_to_act_on_yet() {
+        // An earlier launcher pointed at its session before recording the
+        // first status. `status`, `stop` and `play` answer exit 4, not an
+        // input/output error, and write nothing.
+        use crate::exit::Exit;
+        let data = crate::testing::scratch("unrecorded");
+        let id = "6".repeat(32);
+        let run = paths::session_dir(&data, &id);
+        std::fs::create_dir_all(&run).unwrap();
+        point_current_session(&data, &id).unwrap();
+        let held = Lock::acquire(&data).unwrap();
+        let starting = current_status(&data).unwrap_err();
+        assert_eq!(starting.exit, Exit::NoSession);
+        assert!(starting.message.contains("is starting"), "{starting:?}");
+        assert_eq!(request_stop(&data).unwrap_err(), starting);
+        assert_eq!(request_play(&data, || Ok(())).unwrap_err(), starting);
+        assert!(!run.join(STOP_FILE).exists());
+        assert!(!run.join(PLAY_FILE).exists());
+
+        // Without its supervisor the session never got that far.
+        drop(held);
+        wait_released(&data);
+        let stopped = current_status(&data).unwrap_err();
+        assert_eq!(stopped.exit, Exit::NoSession);
+        assert!(stopped.message.contains("stopped before"), "{stopped:?}");
+
+        // Once its status is recorded, the session reads as usual.
+        let _held = Lock::acquire(&data).unwrap();
+        write_status(&data, &id, State::Preparing);
+        assert_eq!(
+            current_status(&data).unwrap().unwrap().state,
+            State::Preparing
+        );
         std::fs::remove_dir_all(data).unwrap();
     }
 

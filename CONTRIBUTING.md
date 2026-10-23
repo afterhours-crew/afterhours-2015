@@ -42,9 +42,10 @@ Commit `Cargo.lock`; change dependency versions deliberately. First-party Rust
 forbids unsafe code, with one exception: `nfs-afterhours-sys`
 (`crates/launcher-sys`) wraps the operating-system calls the launcher needs
 (job objects, process memory, thread lookup, the TCP ownership table, a
-registry read, console events, Unix signals). It is the only crate allowed
-`unsafe`; every block carries a `SAFETY` comment, Clippy rejects one without,
-and the crate exposes only safe functions over bounded buffers. Keep new OS
+registry read, console events, Unix signals, the system random source). It is
+the only crate allowed `unsafe`; every block carries a `SAFETY` comment, Clippy
+rejects one without, and the crate exposes only safe functions over bounded
+buffers. Keep new OS
 calls there, and keep the launcher itself (`crates/launcher`) safe.
 Every code change must pass:
 
@@ -89,7 +90,7 @@ command links the first-party `nfs-storage`, `nfs-services`,
 names and car pictures from the installation), so the launcher also carries
 the pinned `rusqlite` with bundled SQLite and the installation reader's
 `lz4_flex` and `miniz_oxide` (which also compresses the PNG files `car-images`
-writes). Texture blocks are decoded with bcdec_rs 0.2.0 (MIT; a safe,
+and `map-images` write). Texture blocks are decoded with bcdec_rs 0.2.0 (MIT; a safe,
 dependency-free Rust port of bcdec, BC1-BC7), the only registry crate this
 adds.
 
@@ -113,7 +114,8 @@ vswhom-sys, winnow and winreg (MIT). They are build tools, not runtime services;
 the package notices include their license texts.
 
 Loopback discovery and QoS support uses httparse 1.10.1 (MIT OR Apache-2.0)
-and openssl 0.10.81 (Apache-2.0). Its vendored build uses openssl-src
+and openssl 0.10.81 (Apache-2.0); the launcher's session API (`--api`) reads
+its request heads with the same httparse. Its vendored build uses openssl-src
 300.6.1+3.6.3 (MIT OR Apache-2.0 wrapper; OpenSSL 3.6.3 is Apache-2.0).
 These dependencies are fetched from the Cargo registry, not copied here.
 

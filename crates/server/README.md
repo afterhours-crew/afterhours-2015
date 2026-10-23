@@ -34,8 +34,14 @@ cargo run -p nfs-server --locked -- --help
 
 The executable is `target/debug/nfs-server` (`.exe` on Windows). It can be copied
 to a deployment directory. Its working directory need not contain this source
-tree. It listens on IPv4 loopback only. No EA authentication, telemetry, DNS
-lookup or hosted database is used by the server. Client activation and launching
+tree. It listens on IPv4 loopback unless `--listen <address>` names one IPv4
+address of this computer, which every listener then binds and the server
+advertises to the game (redirector reply and its QoS certificate,
+pre-authentication URLs and latency site, post-auth telemetry and ticker,
+world host address); a loopback listener serves
+only this computer, one on a network address serves that network. No EA
+authentication, telemetry, DNS lookup or hosted database is used by the
+server. Client activation and launching
 remain separate concerns.
 
 Create a deployment directory with `artifacts/`, `artifacts/runs/` and a private
@@ -249,6 +255,7 @@ For world/garage operation also supply:
 | `--rival-content` | Installed roaming racer regions, spawn transforms, vehicle presets and driving personalities; generated with `--game-dir` and requires the owned vehicle configuration |
 | `--traffic-percent`, `--rival-limit` | Player-chosen amounts ([settings](src/ai_settings.rs)): traffic as 0–300 % of the original (default 100; more crashes the client, see `MAX_TRAFFIC_PERCENT`; traffic leaves 15 of the 128 AI cars for rivals), and the number of roaming rivals kept active, 0–15 (default: the original, region-driven number). A number caps the game's own rivals and adds other installed racers near the player up to it ([population](src/rival_content/population.rs)). The launcher passes them from `settings.json` |
 | `--settings-file` | The launcher's `settings.json`, checked once a second by modified time and size and read only when they change ([watcher](src/settings_file.rs)); valid new amounts apply to running sessions on their next tick, an invalid or missing file keeps the current ones. The launcher passes `<data>/settings.json` |
+| `--map-feed` | After the readiness line, print live positions for the launcher's map on standard output: at most every 250 ms, one JSON line `{"map_feed":1,"frame":N,"worlds":[...]}` with every world session's players' cars, traffic and roaming rivals (world metres, map heading) and the traffic policy's radii ([map feed](src/map_feed.rs)). Read-only; sessions publish to a latest-value slot and a separate thread writes, so a slow reader drops frames and never delays a session. The launcher passes it with `--events` and relays the frames as `map-feed` events ([launcher README](../launcher/README.md#map-feed)) |
 
 Sequence content version 2 omits `arrive.spline.base_value`: the six-bit goal
 allocation counter belongs to the current world and wraps after 63. It advances

@@ -353,6 +353,7 @@ dependencies = [
  "anstream",
  "anstyle",
  "clap",
+ "httparse",
  "miniz_oxide",
  "nfs-afterhours-sys",
  "nfs-frostbite",

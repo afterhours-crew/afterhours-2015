@@ -245,8 +245,9 @@ nfs-afterhours stop
 supervises it until it exits, a stop is requested or you press Ctrl+C. On Linux
 and macOS point `--game-dir` at a copy of the installation directory; the
 content readers need its files, not a running game, and the server leaves the
-LSX port disabled. Non-loopback listening for a remote client is not yet
-implemented and is tracked separately.
+LSX port disabled. `serve --server-only --listen <address>` serves one IPv4
+address of this computer for a network instead; see the
+[launcher README](../crates/launcher/README.md).
 
 On Windows a `serve` session can also host the game. It runs the same checks as
 `start` and starts the server the same way, so close EA Desktop and the game
@@ -313,7 +314,10 @@ raw stored integers because the game's units are not confirmed. Car names are
 the game's own, read from your installation each time (`--game-dir` and
 `--language` override the session's installation and the game's locale). Run
 `nfs-afterhours car-images` once after setup to decode each car's pictures from
-your installation into the data folder; `profile` then reports their files. If no complete
+your installation into the data folder; `profile` then reports their files. `nfs-afterhours map-images`
+decodes the game's world map the same way, for a map view; a `serve` or `start`
+session run with `--events` also reports live car positions for it, as
+`map-feed` lines (read-only). If no complete
 account database exists, keep the failed directory for diagnosis and choose a new
 data directory. Do not overwrite it with someone else's profile.
 

@@ -46,6 +46,167 @@
         }
       ]
     },
+    "MapCar": {
+      "description": "A traffic car or a roaming rival.",
+      "properties": {
+        "heading": {
+          "description": "Degrees clockwise from up the map, `0 <= heading < 360`, to a tenth;\n`null` when unknown.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "Unique within its list for the world session, never reused there.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "x": {
+          "description": "World x in metres, to the centimetre: +x points right on the map.",
+          "format": "double",
+          "type": "number"
+        },
+        "y": {
+          "description": "Height in metres, to the centimetre.",
+          "format": "double",
+          "type": "number"
+        },
+        "z": {
+          "description": "World z in metres, to the centimetre: +z points down the map.",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "id",
+        "x",
+        "y",
+        "z",
+        "heading"
+      ],
+      "type": "object"
+    },
+    "MapDriver": {
+      "description": "A player's car.",
+      "properties": {
+        "heading": {
+          "description": "Degrees clockwise from up the map, `0 <= heading < 360`, to a tenth;\n`null` when unknown.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "participant": {
+          "description": "The player's participant in its world session. Unique within it.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "speed": {
+          "description": "Metres per second.",
+          "format": "double",
+          "type": "number"
+        },
+        "x": {
+          "description": "World x in metres, to the centimetre: +x points right on the map.",
+          "format": "double",
+          "type": "number"
+        },
+        "y": {
+          "description": "Height in metres, to the centimetre.",
+          "format": "double",
+          "type": "number"
+        },
+        "z": {
+          "description": "World z in metres, to the centimetre: +z points down the map.",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "participant",
+        "x",
+        "y",
+        "z",
+        "heading",
+        "speed"
+      ],
+      "type": "object"
+    },
+    "MapWorld": {
+      "description": "One world session: the server's view of one game client.",
+      "properties": {
+        "connection": {
+          "description": "The server's control connection of this game client; one world\nsession each. Unique and ascending within a frame.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "drivers": {
+          "description": "The players' cars driving in the world, by `participant`.",
+          "items": {
+            "$ref": "#/definitions/MapDriver"
+          },
+          "type": "array"
+        },
+        "omitted": {
+          "description": "Cars the server left out of this frame: no usable position, state\nthat could not be read, or beyond a bound.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "persona_id": {
+          "description": "The player's persona: `persona_id` in `profile` for the same driver.",
+          "type": "string"
+        },
+        "rivals": {
+          "description": "Roaming rivals, by `id`: the car while the game drives it, otherwise\nthe server's simulation of the racer on the road network.",
+          "items": {
+            "$ref": "#/definitions/MapCar"
+          },
+          "type": "array"
+        },
+        "traffic": {
+          "description": "Ambient traffic cars, by `id`.",
+          "items": {
+            "$ref": "#/definitions/MapCar"
+          },
+          "type": "array"
+        },
+        "traffic_ring": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TrafficRing"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The radii the native traffic policy uses around each driver; `null`\nwithout traffic or while it is off."
+        },
+        "world_ms": {
+          "description": "Milliseconds since this world session started, when it was observed.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "connection",
+        "persona_id",
+        "world_ms",
+        "drivers",
+        "traffic",
+        "rivals",
+        "traffic_ring",
+        "omitted"
+      ],
+      "type": "object"
+    },
     "State": {
       "description": "Session states, in the order a successful session passes through them.",
       "oneOf": [
@@ -168,6 +329,26 @@
         "server_pid"
       ],
       "type": "object"
+    },
+    "TrafficRing": {
+      "description": "Horizontal metres around each driver. Cars are created between `inner`\nand a little more than `outer` ahead of where the driver will be in about\nthree seconds (a quarter of that to the sides), and kept while within\n`outer` of the driver.",
+      "properties": {
+        "inner": {
+          "description": "Metres; cars are created beyond this.",
+          "format": "double",
+          "type": "number"
+        },
+        "outer": {
+          "description": "Metres; cars are kept within this.",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "inner",
+        "outer"
+      ],
+      "type": "object"
     }
   },
   "description": "One line of the event stream.",
@@ -238,6 +419,41 @@
         "event",
         "source",
         "text"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Where the cars are in the server's world sessions, read-only, at\nmost four times a second while one runs, and only when the server\nwrote a newer frame. A frame lists every world session; one with no\nworlds means none is running (any markers go). World positions are\nin metres: on the `map-images` map +x points right and +z points\ndown, and headings are degrees clockwise from up the map. Requires\nthe `map-feed` capability.",
+      "properties": {
+        "event": {
+          "const": "map-feed",
+          "type": "string"
+        },
+        "frame": {
+          "description": "The server's frame number: one more for every frame it wrote,\nso frames only move forward.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "skipped": {
+          "description": "Frames the server wrote since the previous `map-feed` event that\nwere not delivered: a newer one arrived before the supervisor's\nnext poll, or one could not be read.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "worlds": {
+          "description": "Every world session, by `connection`.",
+          "items": {
+            "$ref": "#/definitions/MapWorld"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "event",
+        "frame",
+        "skipped",
+        "worlds"
       ],
       "type": "object"
     },

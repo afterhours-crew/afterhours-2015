@@ -21,7 +21,7 @@ use nfs_world::{
 };
 use std::{
     io::Write,
-    net::{Ipv4Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{
         Arc,
         atomic::{AtomicU32, Ordering},
@@ -76,6 +76,9 @@ pub struct Config {
     /// Player-chosen traffic and roaming-rival amounts, updated while the
     /// server runs when it watches a settings file.
     pub ai: crate::ai_settings::Live,
+    /// Where world sessions publish what the launcher's map shows
+    /// (`--map-feed`); `None` builds no snapshots.
+    pub map_feed: Option<crate::map_feed::Board>,
     pub challenges: Option<Arc<nfs_services::challenges::Catalog>>,
     pub kickback: Option<(nfs_storage::AccountId, Arc<nfs_services::kickback::State>)>,
     pub speedwall: Option<(nfs_storage::AccountId, Arc<nfs_services::speedwall::State>)>,
@@ -100,6 +103,7 @@ pub struct WorldServe {
     pub garage_logic: Option<Arc<crate::garage_logic::GarageLogic>>,
     pub scoring: Option<Arc<crate::scoring::Content>>,
     pub ai: crate::ai_settings::Live,
+    pub map_feed: Option<crate::map_feed::Board>,
 }
 
 mod items;
@@ -613,9 +617,18 @@ pub struct Addresses {
     pub qos_udp: SocketAddr,
 }
 
+/// Whether a listener on `local` serves `peer`. A loopback listener serves
+/// only this computer; one on a network address (`--listen`, an explicit
+/// opt-in) serves the network it was opened to.
+pub fn serves(local: IpAddr, peer: IpAddr) -> bool {
+    !local.is_loopback() || peer.is_loopback()
+}
+
 impl Listeners {
-    pub async fn bind(redirector_port: u16) -> Result<Self, Failure> {
-        let local = |port| SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    /// Bind every listener to `listen`, the one address the server
+    /// advertises; `127.0.0.1` unless the operator chose another.
+    pub async fn bind(listen: Ipv4Addr, redirector_port: u16) -> Result<Self, Failure> {
+        let local = |port| SocketAddr::from((listen, port));
         let tcp = |port| async move {
             TcpListener::bind(local(port))
                 .await
@@ -639,6 +652,20 @@ impl Listeners {
         })
     }
 }
+
+/// The QoS identity and the redirector reply for the bound listeners: the
+/// certificate names the address the game reaches QoS at, and the reply
+/// directs the game to Blaze.
+fn advertise(addresses: &Addresses) -> Result<(qos_tls::Identity, Vec<u8>), Failure> {
+    let IpAddr::V4(qos) = addresses.qos.ip() else {
+        return Err(Failure::Io);
+    };
+    let identity = qos_tls::Identity::for_address(qos).map_err(|_| Failure::Reply)?;
+    let reply = discovery::local_response_with_ca(addresses.blaze, Some(identity.ca_pem()))
+        .map_err(crate::support_failure)?;
+    Ok((identity, reply))
+}
+
 pub async fn serve(
     listeners: Listeners,
     pack: Arc<Deployment>,
@@ -650,11 +677,8 @@ pub async fn serve(
         content.validate_runtime()?;
     }
     let addresses = listeners.addresses()?;
-    let identity = Arc::new(qos_tls::Identity::new().map_err(|_| Failure::Reply)?);
-    let redirector_reply = Arc::new(
-        discovery::local_response_with_ca(addresses.blaze, Some(identity.ca_pem()))
-            .map_err(crate::support_failure)?,
-    );
+    let (identity, redirector_reply) = advertise(&addresses)?;
+    let (identity, redirector_reply) = (Arc::new(identity), Arc::new(redirector_reply));
     let connections = Arc::new(AtomicU32::new(0));
     let mut tasks = JoinSet::new();
 
@@ -697,6 +721,7 @@ pub async fn serve(
                 let traffic = config.traffic.clone();
                 let rivals = config.rivals.clone();
                 let ai = config.ai.clone();
+                let map_feed = config.map_feed.clone();
                 let garage_logic = config.garage_logic.clone();
                 let scoring = config.scoring.clone();
                 let catalogs = config.catalogs.clone();
@@ -710,12 +735,14 @@ pub async fn serve(
                 let speedwall = config.speedwall.clone();
                 let item_licenses = config.item_licenses.clone();
                 let connections = connections.clone();
-                let Ok(world_socket) = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await else {
+                // The world and auxiliary endpoints share the advertised address.
+                let listen = addresses.blaze.ip();
+                let Ok(world_socket) = UdpSocket::bind((listen, 0)).await else {
                     warn!(connection = n, "cannot bind a world endpoint");
                     continue;
                 };
                 let Ok(world_address) = world_socket.local_addr() else { continue };
-                let Ok(auxiliary) = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await else { continue };
+                let Ok(auxiliary) = TcpListener::bind((listen, 0)).await else { continue };
                 let Ok(auxiliary_address) = auxiliary.local_addr() else { continue };
                 let token_seed: [u8; crate::auxiliary::SEED_BYTES] = fresh(&mut OsSeeds)?;
                 let endpoints = Endpoints {
@@ -766,6 +793,7 @@ pub async fn serve(
                             garage_logic,
                             scoring,
                             ai,
+                            map_feed,
                         },
                         n,
                         recorder.clone(),
@@ -836,6 +864,7 @@ pub async fn world_host(
         garage_logic,
         scoring,
         mut ai,
+        map_feed,
     } = serve;
     let Some(binding) = start.recv().await else {
         return;
@@ -892,6 +921,8 @@ pub async fn world_host(
     let Ok(persona) = u64::try_from(persona) else {
         return;
     };
+    // Leaves the map when this world host returns.
+    let mut map_feed = map_feed.map(|board| board.publisher(connection, persona));
     let arrivals = match sequences.as_ref().and_then(|c| c.arrivals()).transpose() {
         Ok(arrivals) => arrivals,
         Err(error) => {
@@ -1015,6 +1046,12 @@ pub async fn world_host(
                 "owned scoring rejected; scoring disabled for this session"
             );
             listener.disable_scoring();
+        }
+        // Read-only: what the launcher's map shows, after this tick's AI.
+        if let Some(feed) = &mut map_feed
+            && feed.due(now_ms())
+        {
+            feed.publish(listener.map_snapshot(now_ms()));
         }
         if !listener.files_alive(now_ms()) {
             warn!(
@@ -1280,4 +1317,125 @@ async fn redirector(
         .chunk("redirector", n, Direction::Out, &response, None)
         .await;
     info!(connection = n, %peer, accepted, written, "redirector request");
+}
+
+#[cfg(test)]
+mod listen_tests {
+    use super::*;
+
+    /// An IPv4 address of this computer other than loopback, if it has one:
+    /// the source a UDP socket would use toward a documentation address
+    /// (connecting a UDP socket sends nothing). None on Windows, where listening
+    /// there asks the person at the computer about the firewall; Linux CI
+    /// covers it.
+    pub(crate) fn network_address() -> Option<Ipv4Addr> {
+        if cfg!(windows) {
+            return None;
+        }
+        let socket = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+        socket.connect((Ipv4Addr::new(192, 0, 2, 1), 9)).ok()?;
+        match socket.local_addr().ok()?.ip() {
+            IpAddr::V4(ip) if !ip.is_loopback() && !ip.is_unspecified() => Some(ip),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn startup_advertises_the_listen_address() {
+        // Regression: on a network address the server stopped right after
+        // its ready line, when this reply and identity required 127.0.0.1.
+        for listen in [Ipv4Addr::LOCALHOST, Ipv4Addr::new(192, 168, 1, 32)] {
+            let at = |port| SocketAddr::from((listen, port));
+            let addresses = Addresses {
+                redirector: at(42127),
+                blaze: at(50001),
+                qos: at(50002),
+                qos_udp: at(50003),
+            };
+            let (_, reply) = advertise(&addresses).unwrap();
+            let reply = String::from_utf8(reply).unwrap();
+            let blaze = format!(
+                "<hostname>{listen}</hostname><ip>{}</ip><port>50001</port>",
+                u32::from(listen)
+            );
+            assert!(reply.contains(&blaze), "{reply}");
+        }
+        let at = |port| SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
+        let unspecified = Addresses {
+            redirector: at(42127),
+            blaze: at(50001),
+            qos: at(50002),
+            qos_udp: at(50003),
+        };
+        assert!(advertise(&unspecified).is_err());
+    }
+
+    #[test]
+    fn a_loopback_listener_serves_only_this_computer() {
+        let me = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let lan = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 5));
+        assert!(serves(me, me));
+        assert!(!serves(me, lan));
+        assert!(serves(lan, lan));
+        assert!(serves(lan, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 9))));
+        assert!(serves(lan, me));
+    }
+
+    #[tokio::test]
+    async fn every_listener_binds_and_advertises_the_chosen_address() {
+        let chosen: Vec<Ipv4Addr> = [Some(Ipv4Addr::LOCALHOST), network_address()]
+            .into_iter()
+            .flatten()
+            .collect();
+        for listen in chosen {
+            let listeners = Listeners::bind(listen, 0).await.unwrap();
+            let a = listeners.addresses().unwrap();
+            for address in [a.redirector, a.blaze, a.qos, a.qos_udp] {
+                assert_eq!(address.ip(), IpAddr::V4(listen), "{address}");
+            }
+            let lsx = crate::lsx::bind(listen, 0).await.unwrap();
+            assert_eq!(lsx.local_addr().unwrap().ip(), IpAddr::V4(listen));
+        }
+    }
+
+    #[tokio::test]
+    async fn qos_serves_one_concrete_shared_address() {
+        let (_stop, shutdown) = tokio::sync::watch::channel(false);
+        let identity = Arc::new(nfs_server_support::qos_tls::Identity::new().unwrap());
+        let start = |tcp: Ipv4Addr, udp: Ipv4Addr| {
+            let tcp = std::net::TcpListener::bind((tcp, 0)).unwrap();
+            let udp = std::net::UdpSocket::bind((udp, 0)).unwrap();
+            qos::serve(
+                tcp,
+                udp,
+                identity.clone(),
+                Duration::from_secs(1),
+                shutdown.clone(),
+            )
+        };
+        // An unspecified address cannot be advertised.
+        assert!(
+            start(Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED)
+                .await
+                .is_err()
+        );
+        if let Some(lan) = network_address() {
+            // Both on the chosen address: serves until shut down.
+            let (stop, shutdown) = tokio::sync::watch::channel(false);
+            let tcp = std::net::TcpListener::bind((lan, 0)).unwrap();
+            let udp = std::net::UdpSocket::bind((lan, 0)).unwrap();
+            let task = tokio::spawn(qos::serve(
+                tcp,
+                udp,
+                identity.clone(),
+                Duration::from_secs(1),
+                shutdown,
+            ));
+            stop.send(true).unwrap();
+            let served = tokio::time::timeout(Duration::from_secs(3), task).await;
+            assert!(matches!(served, Ok(Ok(Ok(())))), "{served:?}");
+            // Different addresses for TCP and UDP are refused.
+            assert!(start(Ipv4Addr::LOCALHOST, lan).await.is_err());
+        }
+    }
 }

@@ -42,6 +42,8 @@ const MAX_QUEUED_CHUNKS: usize = 128;
 #[derive(Default)]
 struct Shared {
     first_line: Option<std::result::Result<String, String>>,
+    /// The newest map frame line after the readiness line.
+    map_feed: crate::map_feed::Latch,
     diagnostics: VecDeque<String>,
     dropped: bool,
     output_truncated: bool,
@@ -90,6 +92,7 @@ impl StdChild {
                 spec.stdout_keeps,
                 Arc::clone(&shared),
                 spec.capture_first_line,
+                spec.map_feed,
                 false,
             ),
             pump(
@@ -97,6 +100,7 @@ impl StdChild {
                 stderr_log,
                 Keep::End,
                 Arc::clone(&shared),
+                false,
                 false,
                 true,
             ),
@@ -181,6 +185,7 @@ fn pump(
     keep: Keep,
     shared: Arc<Mutex<Shared>>,
     capture_first: bool,
+    map_feed: bool,
     queue_diagnostics: bool,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
@@ -209,14 +214,21 @@ fn pump(
                     s.dropped = true;
                 }
             }
+            // What goes to the log: with a map feed, only up to the end of
+            // the readiness line; the frames after it are kept in memory.
+            let mut logged = chunk;
             if !found {
-                for &byte in chunk {
+                for (at, &byte) in chunk.iter().enumerate() {
                     if byte == b'\n' {
                         let text = String::from_utf8_lossy(&line)
                             .trim_end_matches('\r')
                             .to_owned();
                         s.first_line = Some(Ok(text));
                         found = true;
+                        if map_feed {
+                            logged = &chunk[..=at];
+                            s.map_feed.push(&chunk[at + 1..]);
+                        }
                         break;
                     }
                     if line.len() >= MAX_FIRST_LINE_BYTES {
@@ -226,6 +238,13 @@ fn pump(
                     }
                     line.push(byte);
                 }
+            } else if map_feed {
+                s.map_feed.push(chunk);
+                logged = &[];
+            }
+            let (chunk, count) = (logged, logged.len());
+            if count == 0 {
+                continue;
             }
             if keep == Keep::End && kept + count > MAX_LOG_BYTES {
                 match trim_to_newest(&mut log, &mut trimmed) {
@@ -286,6 +305,9 @@ impl ChildProcess for StdChild {
             }
         }
         text
+    }
+    fn take_map_feed(&mut self) -> Option<String> {
+        self.lock().map_feed.take()
     }
     fn logs_finished(&self) -> bool {
         self.pumps.iter().all(JoinHandle::is_finished)
@@ -351,6 +373,7 @@ mod tests {
             stderr_log: dir.join(format!("{mode}.stderr.log")),
             environment: Vec::new(),
             capture_first_line: true,
+            map_feed: false,
         }
     }
 
@@ -506,6 +529,34 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert!(diagnostics.contains("diag"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn map_frames_after_readiness_stay_in_memory_and_only_the_newest_is_kept() {
+        let dir = crate::testing::scratch("child");
+        let script = if cfg!(windows) {
+            "@echo off\r\necho {\"ready\":true}\r\necho {\"frame\":1}\r\necho {\"frame\":2}\r\necho {\"frame\":3}\r\necho diag 1>&2\r\nexit 0\r\n"
+        } else {
+            "printf '{\"ready\":true}\\n{\"frame\":1}\\n{\"frame\":2}\\n'\nprintf '{\"frame\":3}\\n'\necho diag >&2\nexit 0\n"
+        };
+        let mut feed = spec_keeping(&dir, "feed", script, Keep::End);
+        feed.map_feed = true;
+        let mut child = StdChild::spawn(&feed).unwrap();
+        wait_exit(&mut child);
+        child.check_logs().unwrap();
+        assert_eq!(child.first_line().unwrap().unwrap(), "{\"ready\":true}");
+        assert_eq!(child.take_map_feed().as_deref(), Some("{\"frame\":3}"));
+        assert_eq!(child.take_map_feed(), None, "each line is taken once");
+        assert!(child.drain_diagnostics().contains("diag"));
+        let log = std::fs::read_to_string(dir.join("feed.stdout.log")).unwrap();
+        assert_eq!(log.trim_end(), "{\"ready\":true}", "frames are not logged");
+        // Without a map feed the same output is logged and nothing is kept.
+        let mut child = StdChild::spawn(&spec_keeping(&dir, "plain", script, Keep::End)).unwrap();
+        wait_exit(&mut child);
+        assert_eq!(child.take_map_feed(), None);
+        let log = std::fs::read_to_string(dir.join("plain.stdout.log")).unwrap();
+        assert_eq!(log.lines().count(), 4);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

@@ -49,6 +49,9 @@ pub struct SpawnSpec {
     pub environment: Vec<(String, String)>,
     /// Whether the first line of standard output is a readiness record.
     pub capture_first_line: bool,
+    /// Whether every later line of standard output is a map frame: only
+    /// the newest is kept, in memory, and none is written to the log.
+    pub map_feed: bool,
 }
 
 /// A running child the supervisor owns.
@@ -64,6 +67,11 @@ pub trait ChildProcess {
     fn first_line(&mut self) -> Option<Result<String>>;
     /// Diagnostics (standard error) captured since the last call, bounded.
     fn drain_diagnostics(&mut self) -> String;
+    /// The newest map frame line since the last call, for a child spawned
+    /// with [`SpawnSpec::map_feed`].
+    fn take_map_feed(&mut self) -> Option<String> {
+        None
+    }
     /// Whether both log pumps have finished after exit.
     fn logs_finished(&self) -> bool;
     /// Whether standard output exceeded the log bound and, kept from its

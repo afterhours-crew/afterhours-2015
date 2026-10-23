@@ -119,6 +119,25 @@ pub struct SessionArgs {
     /// is silenced; the session keeps running if the reader goes away.
     #[arg(long)]
     pub events: bool,
+
+    /// Serve the session over HTTP on this computer for a desktop front end.
+    ///
+    /// The supervisor listens on 127.0.0.1 at a port the system picks and
+    /// answers `/v1/info`, `/v1/status`, `/v1/events` (the event records as
+    /// server-sent events, map positions included), `/v1/stop`, `/v1/play`,
+    /// `/v1/settings` (read and change the saved traffic and rivals) and
+    /// `/v1/profile`. The address and a token every request must carry are
+    /// written to api.json in the session directory and printed by
+    /// `nfs-afterhours api`. The session does not depend on any client.
+    /// Console text is silenced; standard output holds only the `session`
+    /// and `final` event lines (every event with --events).
+    #[arg(long)]
+    pub api: bool,
+    /// Serve the session API on this port instead of one the system picks,
+    /// so a launcher finds it again after the server restarts or knows it in
+    /// advance. Needs --api.
+    #[arg(long, value_name = "PORT", requires = "api", value_parser = clap::value_parser!(u16).range(1..))]
+    pub api_port: Option<u16>,
 }
 
 /// Arguments for `serve`.
@@ -135,6 +154,22 @@ pub struct ServeArgs {
     /// does. With this flag none of that applies, as on other platforms.
     #[arg(long)]
     pub server_only: bool,
+
+    /// Listen on this IPv4 address of this computer instead of 127.0.0.1,
+    /// so a launcher on another PC on your network reaches this server.
+    ///
+    /// The server and, with --api, its API bind this one address and give
+    /// it to the game. Needs --server-only.
+    #[arg(long, value_name = "ADDRESS", requires = "server_only", value_parser = parse_listen)]
+    pub listen: Option<std::net::Ipv4Addr>,
+}
+
+/// A `--listen` address: one IPv4 address that can be given to the game.
+fn parse_listen(value: &str) -> std::result::Result<std::net::Ipv4Addr, String> {
+    match value.parse::<std::net::Ipv4Addr>() {
+        Ok(ip) if !ip.is_unspecified() && !ip.is_multicast() && !ip.is_broadcast() => Ok(ip),
+        _ => Err("expected one IPv4 address of this computer, such as 192.168.1.20".into()),
+    }
 }
 
 /// Arguments for `sessions`.
@@ -158,8 +193,56 @@ pub struct CarImagesArgs {
     pub game_dir: Option<PathBuf>,
 }
 
-/// Arguments for `profile`.
+/// Arguments for `map-images`.
 #[derive(Debug, Clone, Args)]
+pub struct MapImagesArgs {
+    /// Installed game to read the map from, read-only. Defaults to the one
+    /// the current session started, then the registered one.
+    #[arg(long, value_name = "DIR")]
+    pub game_dir: Option<PathBuf>,
+}
+
+/// Arguments for `start`.
+#[derive(Debug, Clone, Args)]
+pub struct StartArgs {
+    #[command(flatten)]
+    pub session: SessionArgs,
+
+    /// Play against your server at this address instead of starting one
+    /// here: `http://<address>:<port>`, as that server's `api --json`
+    /// prints it. Needs --token.
+    ///
+    /// The game runs on this computer and is routed to a relay here, which
+    /// forwards it to that server; start the server there with `serve
+    /// --server-only --api --listen <address>`.
+    #[arg(long, value_name = "URL", requires = "token")]
+    pub remote: Option<String>,
+
+    /// That server's API token, as its `api --json` prints it.
+    #[arg(long, value_name = "TOKEN", requires = "remote")]
+    pub token: Option<String>,
+}
+
+/// Arguments for the internal `relay` command.
+#[derive(Debug, Clone, Args)]
+pub struct RelayArgs {
+    /// The server's redirector.
+    #[arg(long, value_name = "ADDRESS")]
+    pub redirector: std::net::SocketAddrV4,
+    /// The server's launcher services.
+    #[arg(long, value_name = "ADDRESS")]
+    pub launcher_services: std::net::SocketAddrV4,
+    /// Port on 127.0.0.1 for the game's launcher services.
+    #[arg(long, value_name = "PORT", default_value_t = crate::platform::LSX_PORT)]
+    pub lsx_port: u16,
+    /// Stop when this file appears, as the server does.
+    #[arg(long, value_name = "FILE")]
+    pub stop_file: PathBuf,
+}
+
+/// Arguments for `profile`. The default is the selected save, as the
+/// session API's `GET /v1/profile` reads it.
+#[derive(Debug, Clone, Default, Args)]
 pub struct ProfileArgs {
     /// List every saved driver: name, REP level, bank and last save.
     #[arg(long, conflicts_with = "account_id")]
@@ -229,7 +312,16 @@ pub enum Command {
     /// date marker the client expects, waits for any activation dialog you
     /// complete yourself, applies loopback routing, and supervises both until
     /// the game exits. Quitting the game stops the server.
-    Start(SessionArgs),
+    ///
+    /// With --remote and --token the game plays against your server on
+    /// another computer instead: no server starts here and that server
+    /// keeps the saves.
+    Start(StartArgs),
+
+    /// Relay a game on this computer to a server elsewhere. Internal: the
+    /// supervisor of `start --remote` runs it under the compatibility name.
+    #[command(hide = true)]
+    Relay(RelayArgs),
 
     /// Report the current session's state.
     ///
@@ -254,6 +346,13 @@ pub enum Command {
     /// already running or requested.
     Play,
 
+    /// Show how to reach the running session's API; change nothing.
+    ///
+    /// Prints the address and token of a session started with --api, from
+    /// api.json in its session directory. Exits with code 4 when no live
+    /// session serves the API.
+    Api,
+
     /// Show a saved driver's profile, or list every saved driver; change nothing.
     ///
     /// Read-only. Opens the account's SQLite save without the data-directory
@@ -272,6 +371,16 @@ pub enum Command {
     /// reused, never rewritten. Needs the content a session prepared; exits
     /// with code 4 before the first setup.
     CarImages(CarImagesArgs),
+
+    /// Decode the game's world map from the installation for a map view.
+    ///
+    /// Reads the installed game read-only and writes the map's tiles at every
+    /// shipped detail level as PNG files, `<level>-<column>-<row>.png`, with
+    /// an index to artifacts/content/map-images/<content fingerprint>/ in the
+    /// data directory. Reports the world box the map covers, so positions can
+    /// be placed on it. A complete set is reused, never rewritten. Needs the
+    /// content a session prepared; exits with code 4 before the first setup.
+    MapImages(MapImagesArgs),
 
     /// List the session folders and summarize their logs; change nothing.
     ///
@@ -376,9 +485,10 @@ mod tests {
         .unwrap();
         match start.command {
             Command::Start(args) => {
-                assert_eq!(args.game.game_dir, PathBuf::from("G"));
-                assert_eq!(args.player_name, "Driver");
-                assert!(args.record_protocol);
+                assert_eq!(args.session.game.game_dir, PathBuf::from("G"));
+                assert_eq!(args.session.player_name, "Driver");
+                assert!(args.session.record_protocol);
+                assert_eq!(args.remote, None);
             }
             other => panic!("{other:?}"),
         }
@@ -430,6 +540,74 @@ mod tests {
         ])
         .unwrap();
         assert!(matches!(serve.command, Command::Serve(args) if args.server_only));
+        let token = "a".repeat(64);
+        let remote = Cli::try_parse_from([
+            "nfs-afterhours",
+            "start",
+            "--game-dir",
+            "G",
+            "--remote",
+            "http://192.168.1.20:61000",
+            "--token",
+            &token,
+        ])
+        .unwrap();
+        assert!(matches!(
+            remote.command,
+            Command::Start(args) if args.remote.as_deref() == Some("http://192.168.1.20:61000")
+                && args.token.as_deref() == Some(token.as_str())
+        ));
+        for half in [
+            ["--remote", "http://192.168.1.20:61000"],
+            ["--token", token.as_str()],
+        ] {
+            let mut words = vec!["nfs-afterhours", "start", "--game-dir", "G"];
+            words.extend(half);
+            assert!(Cli::try_parse_from(words).is_err(), "{half:?}");
+        }
+        let relay = Cli::try_parse_from([
+            "nfs-afterhours",
+            "relay",
+            "--redirector",
+            "192.168.1.20:42230",
+            "--launcher-services",
+            "192.168.1.20:51234",
+            "--stop-file",
+            "stop",
+        ])
+        .unwrap();
+        assert!(matches!(
+            relay.command,
+            Command::Relay(args) if args.lsx_port == crate::platform::LSX_PORT
+        ));
+        let serve = |extra: &[&str]| {
+            let mut words = vec!["nfs-afterhours", "serve", "--game-dir", "G"];
+            words.extend_from_slice(extra);
+            Cli::try_parse_from(words)
+        };
+        let network = serve(&[
+            "--server-only",
+            "--api",
+            "--listen",
+            "192.168.1.20",
+            "--api-port",
+            "61000",
+        ])
+        .unwrap();
+        assert!(matches!(
+            network.command,
+            Command::Serve(args) if args.listen == Some([192, 168, 1, 20].into()) && args.session.api_port == Some(61000)
+        ));
+        for bad in [
+            &["--listen", "192.168.1.20"][..],
+            &["--server-only", "--listen", "0.0.0.0"],
+            &["--server-only", "--listen", "localhost"],
+            &["--server-only", "--listen", "::1"],
+            &["--api-port", "61000"],
+            &["--api", "--api-port", "0"],
+        ] {
+            assert!(serve(bad).is_err(), "{bad:?}");
+        }
         assert!(
             Cli::try_parse_from([
                 "nfs-afterhours",
@@ -447,6 +625,23 @@ mod tests {
                 .command,
             Command::Play
         ));
+        assert!(matches!(
+            Cli::try_parse_from(["nfs-afterhours", "api", "--json"])
+                .unwrap()
+                .command,
+            Command::Api
+        ));
+        for action in ["setup", "serve", "start"] {
+            match Cli::try_parse_from(["nfs-afterhours", action, "--game-dir", "G", "--api"])
+                .unwrap()
+                .command
+            {
+                Command::Setup(args) => assert!(args.api && !args.events),
+                Command::Start(args) => assert!(args.session.api && !args.session.events),
+                Command::Serve(args) => assert!(args.session.api && !args.session.events),
+                other => panic!("{other:?}"),
+            }
+        }
         match Cli::try_parse_from(["nfs-afterhours", "sessions"])
             .unwrap()
             .command

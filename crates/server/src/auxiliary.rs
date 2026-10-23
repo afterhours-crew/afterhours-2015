@@ -8,7 +8,6 @@ use nfs_storage::{
     records::{Record, Repository, UnixMicros},
 };
 use std::{
-    net::Ipv4Addr,
     sync::{
         Arc,
         atomic::{AtomicU32, Ordering},
@@ -479,9 +478,8 @@ async fn exchange(
     result: &mut Observation,
 ) -> Result<Stop, Stop> {
     let local = stream.local_addr().map_err(|_| Stop::IoError)?;
-    if local.ip() != Ipv4Addr::LOCALHOST
-        || stream.peer_addr().map_err(|_| Stop::IoError)?.ip() != Ipv4Addr::LOCALHOST
-    {
+    let peer = stream.peer_addr().map_err(|_| Stop::IoError)?;
+    if !crate::net::serves(local.ip(), peer.ip()) {
         return Err(Stop::NonLoopback);
     }
     let mut chunk = [0u8; 1024];

@@ -126,6 +126,7 @@ async fn world_host_handshakes_syncs_publishes_the_proof_and_closes() {
     let address = socket.local_addr().unwrap();
     let (start, start_rx) = mpsc::channel(1);
     let (proof_tx, mut proof) = watch::channel(None);
+    let (board, mut map) = nfs_server::map_feed::Board::new();
     let task = tokio::spawn(world_host(
         socket,
         start_rx,
@@ -141,6 +142,7 @@ async fn world_host_handshakes_syncs_publishes_the_proof_and_closes() {
             traffic: None,
             rivals: None,
             ai: Default::default(),
+            map_feed: Some(board),
             garage_logic: None,
             scoring: None,
         },
@@ -197,12 +199,35 @@ async fn world_host_handshakes_syncs_publishes_the_proof_and_closes() {
         Some(None),
         "synced; a bare binding carries no readiness"
     );
+    // The running world host is on the map: an empty world under its
+    // connection and persona.
+    let line = map
+        .next_line()
+        .unwrap()
+        .expect("published since the host started");
+    let line: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(
+        (line["map_feed"].as_u64(), line["frame"].as_u64()),
+        (Some(1), Some(1))
+    );
+    let [world] = line["worlds"].as_array().unwrap().as_slice() else {
+        panic!("one world: {line}");
+    };
+    assert_eq!(world["connection"], 3);
+    assert_eq!(world["persona_id"], (0x1000_0007u64).to_string());
+    assert_eq!(world["drivers"], serde_json::json!([]));
+    assert_eq!(world["traffic_ring"], serde_json::Value::Null);
 
     client.send(&game.close(host_index)).await.unwrap();
     timeout(Duration::from_secs(5), task)
         .await
         .expect("the host closes after the client's close")
         .unwrap();
+    // A closed host leaves the map, and the board closes with it.
+    let line: serde_json::Value =
+        serde_json::from_str(&map.next_line().unwrap().expect("its removal")).unwrap();
+    assert_eq!(line["worlds"], serde_json::json!([]));
+    assert_eq!(map.next_line(), Err(nfs_server::map_feed::Closed));
     drop(recorder);
     thread.finish().unwrap();
     let events = std::fs::read_to_string(root.output().join("events.jsonl")).unwrap();
@@ -237,6 +262,7 @@ async fn world_host_without_identities_or_template_does_not_serve() {
             traffic: None,
             rivals: None,
             ai: Default::default(),
+            map_feed: None,
             garage_logic: None,
             scoring: None,
         },

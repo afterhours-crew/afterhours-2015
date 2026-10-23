@@ -108,6 +108,7 @@ fn help_lists_every_public_subcommand_and_the_exit_table() {
         "play",
         "profile",
         "car-images",
+        "map-images",
         "sessions",
         "settings",
         "version",
@@ -159,6 +160,14 @@ fn status_and_stop_on_an_unused_data_directory() {
         std::fs::read_dir(&data).unwrap().next().is_none(),
         "play wrote nothing"
     );
+    let out = run(&["--data-dir", data.to_str().unwrap(), "api", "--json"]);
+    assert_eq!(out.status.code(), Some(4), "{}", text(&out.stderr));
+    assert!(out.stdout.is_empty(), "no session, no API record");
+    assert!(text(&out.stderr).contains("--api"));
+    assert!(
+        std::fs::read_dir(&data).unwrap().next().is_none(),
+        "api wrote nothing"
+    );
     std::fs::remove_dir_all(data).unwrap();
 }
 
@@ -181,7 +190,10 @@ fn version_reports_records_and_capabilities_and_schema_prints_each_one() {
             "events",
             "play",
             "car-images",
-            "world-settings"
+            "map-images",
+            "world-settings",
+            "map-feed",
+            "api"
         ])
     );
     assert_eq!(report["os"], std::env::consts::OS);
@@ -209,10 +221,9 @@ fn version_reports_records_and_capabilities_and_schema_prints_each_one() {
         assert_eq!(&schema["properties"]["version"]["const"], version, "{name}");
     }
     let text_version = run(&["version"]);
-    assert!(
-        text(&text_version.stdout)
-            .contains("capabilities: profile, sessions, events, play, car-images, world-settings")
-    );
+    assert!(text(&text_version.stdout).contains(
+        "capabilities: profile, sessions, events, play, car-images, map-images, world-settings, map-feed"
+    ));
     assert_eq!(run(&["schema", "nothing"]).status.code(), Some(2));
 }
 
@@ -284,36 +295,40 @@ fn sessions_summarize_constructed_folders_without_writing() {
 
 #[test]
 fn an_event_stream_refused_before_a_session_is_one_final_line() {
-    let data = scratch("events-refused");
-    let server = data.join(format!("fake-server{}", std::env::consts::EXE_SUFFIX));
-    std::fs::write(&server, b"x").unwrap();
-    let out = run(&[
-        "--data-dir",
-        data.join("store").to_str().unwrap(),
-        "serve",
-        "--events",
-        "--game-dir",
-        data.join("no-game").to_str().unwrap(),
-        "--server",
-        server.to_str().unwrap(),
-    ]);
-    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
-    assert!(
-        out.stderr.is_empty(),
-        "console text is silenced: {}",
-        text(&out.stderr)
-    );
-    let stdout = text(&out.stdout);
-    let lines: Vec<&str> = stdout.lines().collect();
-    assert_eq!(lines.len(), 1, "{stdout}");
-    let event: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
-    assert_eq!(event["version"], 1);
-    assert_eq!(event["event"], "final");
-    assert_eq!(event["exit_code"], 1);
-    assert!(event["status"].is_null());
-    assert!(!event["message"].as_str().unwrap().is_empty());
-    assert!(!data.join("store").exists(), "nothing was written");
-    std::fs::remove_dir_all(data).unwrap();
+    // `--api` alone reports the same way: a front end learns why it was
+    // refused before any session (or API) existed.
+    for mode in ["--events", "--api"] {
+        let data = scratch("events-refused");
+        let server = data.join(format!("fake-server{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(&server, b"x").unwrap();
+        let out = run(&[
+            "--data-dir",
+            data.join("store").to_str().unwrap(),
+            "serve",
+            mode,
+            "--game-dir",
+            data.join("no-game").to_str().unwrap(),
+            "--server",
+            server.to_str().unwrap(),
+        ]);
+        assert_eq!(out.status.code(), Some(1), "{mode}: {}", text(&out.stderr));
+        assert!(
+            out.stderr.is_empty(),
+            "{mode}: console text is silenced: {}",
+            text(&out.stderr)
+        );
+        let stdout = text(&out.stdout);
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(lines.len(), 1, "{mode}: {stdout}");
+        let event: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(event["version"], 1);
+        assert_eq!(event["event"], "final");
+        assert_eq!(event["exit_code"], 1);
+        assert!(event["status"].is_null());
+        assert!(!event["message"].as_str().unwrap().is_empty());
+        assert!(!data.join("store").exists(), "{mode}: nothing was written");
+        std::fs::remove_dir_all(data).unwrap();
+    }
 }
 
 #[test]
@@ -400,28 +415,91 @@ fn recover_restores_a_pointer_only_for_a_real_database() {
     std::fs::remove_dir_all(data).unwrap();
 }
 
-/// A stand-in `nfs-server`: answers `prepare-local` and `create-account`
-/// with the JSON shapes the real server prints, and otherwise prints a
-/// readiness record and waits for its `--stop-file`.
 #[test]
-fn profile_reads_a_saved_driver_and_reports_missing_accounts() {
+fn the_relay_stands_in_for_a_server_until_its_stop_file_appears() {
+    use std::io::{BufRead, Read, Write};
+    // Two stand-in services that echo what they receive.
+    let echo = || {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                std::thread::spawn(move || {
+                    let mut reader = stream.try_clone().unwrap();
+                    let mut writer = stream;
+                    let _ = std::io::copy(&mut reader, &mut writer);
+                });
+            }
+        });
+        address
+    };
+    let (redirector, services) = (echo(), echo());
+    let dir = scratch("relay");
+    std::fs::create_dir_all(&dir).unwrap();
+    let stop = dir.join("stop");
+    let mut relay = bin()
+        .args([
+            "relay",
+            "--redirector",
+            &redirector,
+            "--launcher-services",
+            &services,
+            "--lsx-port",
+            "0",
+            "--stop-file",
+            stop.to_str().unwrap(),
+        ])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    std::io::BufReader::new(relay.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    // The readiness record a supervisor expects from a server.
+    let ready: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(ready["ready"], true);
+    assert_eq!(ready["pid"], relay.id());
+    assert_eq!(ready["relays_to"]["redirector"], redirector.as_str());
+    for key in ["redirector", "lsx"] {
+        let address = ready[key].as_str().unwrap();
+        assert!(address.starts_with("127.0.0.1:"), "{key}: {address}");
+        let mut stream = std::net::TcpStream::connect(address).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .unwrap();
+        stream.write_all(key.as_bytes()).unwrap();
+        let mut answer = vec![0u8; key.len()];
+        stream.read_exact(&mut answer).unwrap();
+        assert_eq!(answer, key.as_bytes());
+    }
+    std::fs::write(&stop, b"stop").unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = relay.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the relay did not stop"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    assert!(status.success());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A synthetic save of account `byte` repeated, for a driver called `name`,
+/// selected by `account.json`; no prepared content. Its path.
+fn save_driver(data: &std::path::Path, byte: u8, name: &str) -> PathBuf {
     use nfs_storage::{
         AccountId, Batch, GarageSlots, Op, Timestamp,
         account::{Document, Kind, Repository},
     };
-    let data = scratch("profile");
-    let dir = data.to_str().unwrap();
-    let out = run(&["profile", "--json", "--data-dir", dir]);
-    assert_eq!(out.status.code(), Some(4), "{}", text(&out.stderr));
-    let out = run(&["profile", "--list", "--json", "--data-dir", dir]);
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    let listing: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(listing["accounts"], serde_json::json!([]));
-    // A synthetic save selected by account.json; no prepared content.
-    let id = "5a".repeat(16);
-    let account = AccountId::from_owned_config([0x5a; 16]).unwrap();
+    let id = format!("{byte:02x}").repeat(16);
+    let account = AccountId::from_owned_config([byte; 16]).unwrap();
     let identity = serde_json::json!({"version": 1, "storage_account": id,
-        "persona": 41, "account": 42, "name": "Cli Tester"});
+        "persona": 41, "account": 42, "name": name});
     let documents: Vec<_> = Kind::ALL
         .into_iter()
         .map(|kind| {
@@ -449,7 +527,23 @@ fn profile_reads_a_saved_driver_and_reports_missing_accounts() {
         format!(r#"{{"version":1,"local_account":"{id}","progression":"post-intro"}}"#),
     )
     .unwrap();
-    let save = accounts.join(format!("{id}.sqlite"));
+    accounts.join(format!("{id}.sqlite"))
+}
+
+/// A stand-in `nfs-server`: answers `prepare-local` and `create-account`
+/// with the JSON shapes the real server prints, and otherwise prints a
+/// readiness record and waits for its `--stop-file`.
+#[test]
+fn profile_reads_a_saved_driver_and_reports_missing_accounts() {
+    let data = scratch("profile");
+    let dir = data.to_str().unwrap();
+    let out = run(&["profile", "--json", "--data-dir", dir]);
+    assert_eq!(out.status.code(), Some(4), "{}", text(&out.stderr));
+    let out = run(&["profile", "--list", "--json", "--data-dir", dir]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let listing: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(listing["accounts"], serde_json::json!([]));
+    let save = save_driver(&data, 0x5a, "Cli Tester");
     let before = std::fs::read(&save).unwrap();
     // An empty game directory: no test reads a registered installation.
     let no_game = scratch("profile-no-game");
@@ -550,13 +644,22 @@ case "$1" in
     exit 0 ;;
 esac
 stop=""
+feed=""
 while [ $# -gt 0 ]; do
   if [ "$1" = "--stop-file" ]; then stop="$2"; fi
+  if [ "$1" = "--map-feed" ]; then feed=1; fi
   shift
 done
 echo "fake server starting" >&2
 printf '{{"ready":true,"pid":%s,"redirector":"127.0.0.1:34567","lsx":null}}\n' "$$"
-while [ ! -e "$stop" ]; do sleep 0.1; done
+frame=0
+while [ ! -e "$stop" ]; do
+  if [ -n "$feed" ]; then
+    frame=$((frame + 1))
+    printf '{{"map_feed":1,"frame":%s,"worlds":[{{"connection":1,"persona_id":"1000000007","world_ms":%s,"drivers":[{{"participant":1,"x":%s.5,"y":0.0,"z":-20.25,"heading":90.0,"speed":3.5}}],"traffic":[],"rivals":[],"traffic_ring":null,"omitted":0}}]}}\n' "$frame" "$((frame * 100))" "$frame"
+  fi
+  sleep 0.1
+done
 echo "fake server stopping" >&2
 exit 0
 "#,
@@ -728,6 +831,8 @@ fn a_serve_session_streams_its_states_and_diagnostics_as_json_lines() {
         assert!(std::time::Instant::now() < deadline, "never ready");
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
+    // Long enough for several of the server's map frames and polls.
+    std::thread::sleep(std::time::Duration::from_millis(1500));
     let stop = run(&["--data-dir", &data_arg, "stop"]);
     assert_eq!(stop.status.code(), Some(0), "{}", text(&stop.stderr));
     let out = supervisor.wait_with_output().unwrap();
@@ -736,6 +841,12 @@ fn a_serve_session_streams_its_states_and_diagnostics_as_json_lines() {
         out.stderr.is_empty(),
         "console text is silenced: {}",
         text(&out.stderr)
+    );
+    let stdout_log = std::fs::read_to_string(run_dir.join("server.stdout.jsonl")).unwrap();
+    assert_eq!(
+        stdout_log.lines().count(),
+        1,
+        "only the readiness line is logged: {stdout_log}"
     );
     let events: Vec<serde_json::Value> = text(&out.stdout)
         .lines()
@@ -746,11 +857,19 @@ fn a_serve_session_streams_its_states_and_diagnostics_as_json_lines() {
             .iter()
             .all(|e| e["version"] == 1 && e["utc"].is_string())
     );
-    let states: Vec<&str> = events
-        .iter()
-        .filter(|e| e["event"] == "status")
-        .map(|e| e["status"]["state"].as_str().unwrap())
-        .collect();
+    let statuses: Vec<&serde_json::Value> =
+        events.iter().filter(|e| e["event"] == "status").collect();
+    // The supervisor records and emits a first `preparing` ("Starting the
+    // session.") before its state machine's own, so the stream may carry
+    // `preparing` twice; the states still pass in order, each once.
+    assert_eq!(statuses[0]["status"]["state"], "preparing");
+    let mut states: Vec<&str> = Vec::new();
+    for status in &statuses {
+        let state = status["status"]["state"].as_str().unwrap();
+        if states.last() != Some(&state) {
+            states.push(state);
+        }
+    }
     assert_eq!(states, ["preparing", "ready", "stopping", "finished"]);
     assert!(
         events
@@ -766,6 +885,32 @@ fn a_serve_session_streams_its_states_and_diagnostics_as_json_lines() {
         .collect();
     assert!(diagnostics.contains(&("server", "fake server starting")));
     assert!(diagnostics.contains(&("server", "fake server stopping")));
+    // The server got --map-feed; its frames arrive while it is ready, only
+    // ever forward, and say how many were skipped in between.
+    let ready = events
+        .iter()
+        .position(|e| e["event"] == "status" && e["status"]["state"] == "ready")
+        .unwrap();
+    let feed: Vec<(usize, &serde_json::Value)> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e["event"] == "map-feed")
+        .collect();
+    assert!(feed.len() >= 2, "map frames while serving: {events:?}");
+    let mut previous = 0;
+    for (at, event) in &feed {
+        assert!(*at > ready);
+        let frame = event["frame"].as_u64().unwrap();
+        assert_eq!(frame, previous + event["skipped"].as_u64().unwrap() + 1);
+        previous = frame;
+        let driver = &event["worlds"][0]["drivers"][0];
+        assert_eq!(driver["x"], frame as f64 + 0.5, "the frame's own data");
+        assert_eq!(
+            (driver["z"].as_f64(), driver["heading"].as_f64()),
+            (Some(-20.25), Some(90.0))
+        );
+        assert_eq!(event["worlds"][0]["persona_id"], "1000000007");
+    }
     let last = events.last().unwrap();
     assert_eq!(
         last["event"], "status",
@@ -777,6 +922,231 @@ fn a_serve_session_streams_its_states_and_diagnostics_as_json_lines() {
         last["status"], stored,
         "events carry the status.json record"
     );
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+/// One request to a session API; its status code and body.
+#[cfg(unix)]
+fn api_request(address: &str, token: &str, method: &str, path: &str) -> (u16, String) {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect(address).unwrap();
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    write!(
+        stream,
+        "{method} {path} HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {token}\r\n\r\n"
+    )
+    .unwrap();
+    let mut answer = String::new();
+    stream.read_to_string(&mut answer).unwrap();
+    let (head, body) = answer.split_once("\r\n\r\n").unwrap();
+    let code = head.split(' ').nth(1).unwrap().parse().unwrap();
+    (code, body.to_owned())
+}
+
+/// `PUT` a JSON body to a session API; the status code and body.
+#[cfg(unix)]
+fn api_put(address: &str, token: &str, path: &str, body: &str) -> (u16, String) {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect(address).unwrap();
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    write!(
+        stream,
+        "PUT {path} HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    let mut answer = String::new();
+    stream.read_to_string(&mut answer).unwrap();
+    let (head, body) = answer.split_once("\r\n\r\n").unwrap();
+    let code = head.split(' ').nth(1).unwrap().parse().unwrap();
+    (code, body.to_owned())
+}
+
+#[cfg(unix)]
+#[test]
+fn a_serve_session_serves_its_api_until_it_stops() {
+    use std::io::{BufRead, Write};
+    let base = scratch("api");
+    let data = base.join("data");
+    let game = base.join("game");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::create_dir_all(&game).unwrap();
+    let server = fake_server(&base, &data);
+    let id = "a".repeat(32);
+    let run_dir = data.join("artifacts").join("launcher").join(&id);
+    std::fs::create_dir_all(&run_dir).unwrap();
+    let request = serde_json::json!({
+        "version": 1, "id": id, "action": "serve",
+        "game_directory": game, "data_directory": data,
+        "server_path": server, "server_sha256": sha256(&server),
+        "player_name": "Tester", "record_protocol": false, "api": true
+    });
+    std::fs::write(run_dir.join("request.json"), request.to_string()).unwrap();
+    let data_arg = data.to_str().unwrap().to_owned();
+    let supervisor = bin()
+        .args([
+            "supervise",
+            "--request",
+            run_dir.join("request.json").to_str().unwrap(),
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    // A front end finds the API through `api --json`, then follows it there.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let record = loop {
+        let out = run(&["--data-dir", &data_arg, "api", "--json"]);
+        if out.status.code() == Some(0) {
+            break json(&out);
+        }
+        assert_eq!(out.status.code(), Some(4), "{}", text(&out.stderr));
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the API never came up"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    assert_eq!(record["id"], id.as_str());
+    let address = record["url"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("http://127.0.0.1:")
+        .map(|port| format!("127.0.0.1:{port}"))
+        .unwrap();
+    let token = record["token"].as_str().unwrap().to_owned();
+    assert_eq!(api_request(&address, "wrong", "GET", "/v1/status").0, 401);
+    loop {
+        let (code, body) = api_request(&address, &token, "GET", "/v1/status");
+        assert_eq!(code, 200, "{body}");
+        if body.contains("\"state\":\"ready\"") {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "never ready: {body}");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let (code, body) = api_request(&address, &token, "GET", "/v1/info");
+    assert_eq!(code, 200);
+    assert!(body.contains("\"api\""), "{body}");
+    // The settings, read and changed there as with `settings`, while the
+    // session runs.
+    let (code, body) = api_request(&address, &token, "GET", "/v1/settings");
+    assert_eq!(code, 200, "{body}");
+    let read: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        read,
+        json(&run(&["--data-dir", &data_arg, "settings", "--json"]))
+    );
+    let change = r#"{"traffic_percent":150,"rival_limit":2}"#;
+    let (code, body) = api_put(&address, &token, "/v1/settings", change);
+    assert_eq!(code, 200, "{body}");
+    let saved: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        (
+            &saved["traffic_percent"],
+            &saved["rival_limit"],
+            &saved["saved"]
+        ),
+        (&150.into(), &2.into(), &true.into())
+    );
+    let after = json(&run(&["--data-dir", &data_arg, "settings", "--json"]));
+    assert_eq!(
+        (&after["traffic_percent"], &after["rival_limit"]),
+        (&150.into(), &2.into())
+    );
+    assert_eq!(
+        api_put(
+            &address,
+            &token,
+            "/v1/settings",
+            r#"{"traffic_percent":301}"#
+        )
+        .0,
+        400
+    );
+    // The selected save's profile, as `profile --json` reads it.
+    save_driver(&data, 0x5b, "Api Tester");
+    let (code, body) = api_request(&address, &token, "GET", "/v1/profile");
+    assert_eq!(code, 200, "{body}");
+    let profile: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(profile["identity"]["display_name"], "Api Tester");
+    assert_eq!(
+        profile,
+        json(&run(&["--data-dir", &data_arg, "profile", "--json"]))
+    );
+    // The event stream, read to its end on its own thread.
+    let reader = {
+        let (address, token) = (address.clone(), token.clone());
+        std::thread::spawn(move || {
+            let mut stream = std::net::TcpStream::connect(&address).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(30)))
+                .unwrap();
+            write!(
+                stream,
+                "GET /v1/events HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {token}\r\n\r\n"
+            )
+            .unwrap();
+            let mut events = Vec::new();
+            let mut kind = String::new();
+            for line in std::io::BufReader::new(stream).lines() {
+                let line = line.unwrap();
+                if let Some(value) = line.strip_prefix("event: ") {
+                    kind = value.to_owned();
+                } else if let Some(value) = line.strip_prefix("data: ") {
+                    let event: serde_json::Value = serde_json::from_str(value).unwrap();
+                    assert_eq!(event["event"], kind.as_str());
+                    events.push(event);
+                }
+            }
+            events
+        })
+    };
+    // Long enough for several of the server's map frames and polls.
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    let (code, body) = api_request(&address, &token, "POST", "/v1/stop");
+    assert_eq!(code, 200, "{body}");
+    assert!(body.contains("\"outcome\":\"requested\""), "{body}");
+    let out = supervisor.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        out.stdout.is_empty(),
+        "without --events the supervisor writes nothing to stdout"
+    );
+    assert!(
+        out.stderr.is_empty(),
+        "console text is silenced: {}",
+        text(&out.stderr)
+    );
+    let events = reader.join().unwrap();
+    assert_eq!(events[0]["event"], "status");
+    assert_eq!(events[0]["status"]["state"], "ready");
+    let states: Vec<&str> = events
+        .iter()
+        .filter(|e| e["event"] == "status")
+        .map(|e| e["status"]["state"].as_str().unwrap())
+        .collect();
+    assert_eq!(states, ["ready", "stopping", "finished"]);
+    let frames: Vec<u64> = events
+        .iter()
+        .filter(|e| e["event"] == "map-feed")
+        .map(|e| e["frame"].as_u64().unwrap())
+        .collect();
+    assert!(frames.len() >= 2, "map frames for the API: {events:?}");
+    assert!(frames.windows(2).all(|w| w[0] < w[1]));
+    assert!(
+        events
+            .iter()
+            .any(|e| e["event"] == "diagnostic" && e["text"] == "fake server stopping")
+    );
+    assert!(!run_dir.join("api.json").exists(), "the token is forgotten");
+    let gone = run(&["--data-dir", &data_arg, "api", "--json"]);
+    assert_eq!(gone.status.code(), Some(4));
+    assert!(std::net::TcpStream::connect(&address).is_err());
     std::fs::remove_dir_all(base).unwrap();
 }
 
@@ -840,6 +1210,16 @@ fn a_session_whose_supervisor_dies_is_reported_interrupted() {
 fn car_images_needs_prepared_content_first() {
     let data = scratch("car-images");
     let out = run(&["car-images", "--json", "--data-dir", data.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(4), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("run setup first"));
+    assert!(!data.join("artifacts").exists(), "nothing was written");
+    std::fs::remove_dir_all(data).unwrap();
+}
+
+#[test]
+fn map_images_needs_prepared_content_first() {
+    let data = scratch("map-images");
+    let out = run(&["map-images", "--json", "--data-dir", data.to_str().unwrap()]);
     assert_eq!(out.status.code(), Some(4), "{}", text(&out.stderr));
     assert!(text(&out.stderr).contains("run setup first"));
     assert!(!data.join("artifacts").exists(), "nothing was written");

@@ -128,6 +128,10 @@ pub struct Index {
 pub struct CarImage {
     /// Absolute path of the PNG file.
     pub path: PathBuf,
+    /// The file below the server's content folder,
+    /// `car-images/<fingerprint>/<name>.png`, as the session API's
+    /// `GET /v1/content/<file>` serves it to a client on any computer.
+    pub file: String,
     pub width: u32,
     pub height: u32,
     /// The source texture's `RenderFormat` name, such as `BC1_UNORM`.
@@ -156,6 +160,14 @@ impl Cached {
         let image = |size| {
             images.get(&size).map(|image: &IndexImage| CarImage {
                 path: self.directory.join(&image.file),
+                file: format!(
+                    "{DIRECTORY}/{}/{}",
+                    self.directory
+                        .file_name()
+                        .map(|name| name.to_string_lossy())
+                        .unwrap_or_default(),
+                    image.file
+                ),
                 width: image.width,
                 height: image.height,
                 source_format: image.format.clone(),
@@ -178,7 +190,7 @@ fn is_image_file(name: &str) -> bool {
         .is_some_and(|stem| records::is_lower_hex(stem, 40))
 }
 
-fn ordinary(path: &Path, directory: bool) -> bool {
+pub(crate) fn ordinary(path: &Path, directory: bool) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|meta| {
         !paths::is_link(&meta)
             && if directory {
@@ -555,7 +567,7 @@ fn decode_all(game: &Path, limits: Limits) -> std::result::Result<(Index, Vec<De
     Ok((index, decoded.into_values().collect()))
 }
 
-fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)

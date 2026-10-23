@@ -6,7 +6,7 @@ use std::{
     fmt,
     io::{self, Read, Write},
     mem,
-    net::{Ipv4Addr, SocketAddrV4, TcpStream},
+    net::{IpAddr, Ipv4Addr, SocketAddrV4, TcpStream},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -51,15 +51,25 @@ pub struct Identity {
     ca_pem: Vec<u8>,
 }
 impl Identity {
+    /// A fresh identity for a QoS service on this computer's loopback address.
     pub fn new() -> Result<Self, Failure> {
-        Self::generate().map_err(|_| Failure::Identity)
+        Self::for_address(Ipv4Addr::LOCALHOST)
+    }
+
+    /// A fresh identity whose leaf certificate names `ip`, the one address the
+    /// game reaches the QoS service at.
+    pub fn for_address(ip: Ipv4Addr) -> Result<Self, Failure> {
+        if !concrete(ip) {
+            return Err(Failure::Identity);
+        }
+        Self::generate(&ip.to_string()).map_err(|_| Failure::Identity)
     }
 
     pub fn ca_pem(&self) -> &[u8] {
         &self.ca_pem
     }
 
-    fn generate() -> Result<Self, ErrorStack> {
+    fn generate(ip: &str) -> Result<Self, ErrorStack> {
         let ca_key = PKey::from_rsa(Rsa::generate(2048)?)?;
         let leaf_key = PKey::from_rsa(Rsa::generate(2048)?)?;
         let mut ca_name = X509NameBuilder::new()?;
@@ -85,7 +95,7 @@ impl Identity {
         let ca = ca.build();
 
         let mut leaf_name = X509NameBuilder::new()?;
-        leaf_name.append_entry_by_text("CN", "127.0.0.1")?;
+        leaf_name.append_entry_by_text("CN", ip)?;
         let mut leaf = X509::builder()?;
         leaf.set_version(2)?;
         leaf.set_serial_number(serial()?.as_ref())?;
@@ -104,7 +114,7 @@ impl Identity {
         )?;
         leaf.append_extension(ExtendedKeyUsage::new().server_auth().build()?)?;
         let san = SubjectAlternativeName::new()
-            .ip("127.0.0.1")
+            .ip(ip)
             .build(&leaf.x509v3_context(Some(&ca), None))?;
         leaf.append_extension(san)?;
         leaf.sign(&ca_key, MessageDigest::sha256())?;
@@ -129,6 +139,12 @@ impl Identity {
     }
 }
 
+/// One address a client can connect to and be told: not unspecified,
+/// broadcast or multicast.
+fn concrete(ip: Ipv4Addr) -> bool {
+    !ip.is_unspecified() && !ip.is_broadcast() && !ip.is_multicast()
+}
+
 fn serial() -> Result<openssl::asn1::Asn1Integer, ErrorStack> {
     let mut serial = BigNum::new()?;
     serial.rand(128, MsbOption::ONE, false)?;
@@ -149,6 +165,9 @@ pub enum Stop {
     TlsFailure,
     Io,
     NonLoopback,
+    /// The advertised UDP address is not one concrete address with a port,
+    /// or not the address the request arrived at.
+    Address,
     Setup,
     Allocation,
 }
@@ -201,14 +220,17 @@ pub fn capture(socket: TcpStream, deadline: Instant, identity: &Identity) -> Obs
     capture_inner(socket, deadline, identity, None, None)
 }
 
+/// Answer one latency request with `udp`, the probe address on the same IP
+/// the request arrived at: loopback serves only this computer, a network
+/// address the computers that reach it.
 pub fn serve_latency(
     socket: TcpStream,
     deadline: Instant,
     identity: &Identity,
     udp: SocketAddrV4,
 ) -> Observation {
-    if *udp.ip() != Ipv4Addr::LOCALHOST || udp.port() == 0 {
-        return Observation::empty(Stop::NonLoopback);
+    if !concrete(*udp.ip()) || udp.port() == 0 {
+        return Observation::empty(Stop::Address);
     }
     capture_inner(socket, deadline, identity, Some(udp), None)
 }
@@ -222,8 +244,8 @@ pub fn serve_latency_cancellable(
     udp: SocketAddrV4,
     cancelled: Arc<AtomicBool>,
 ) -> Observation {
-    if *udp.ip() != Ipv4Addr::LOCALHOST || udp.port() == 0 {
-        return Observation::empty(Stop::NonLoopback);
+    if !concrete(*udp.ip()) || udp.port() == 0 {
+        return Observation::empty(Stop::Address);
     }
     capture_inner(socket, deadline, identity, Some(udp), Some(cancelled))
 }
@@ -239,11 +261,20 @@ fn capture_inner(
     let addresses = socket
         .local_addr()
         .and_then(|local| socket.peer_addr().map(|peer| (local, peer)));
+    // Observation stays loopback-only. Serving answers on the advertised
+    // address, and a loopback listener serves only this computer.
+    let refused = |local: IpAddr, peer: IpAddr| match udp {
+        None if !local.is_loopback() || !peer.is_loopback() => Some(Stop::NonLoopback),
+        Some(udp) if local != IpAddr::V4(*udp.ip()) => Some(Stop::Address),
+        Some(_) if local.is_loopback() && !peer.is_loopback() => Some(Stop::NonLoopback),
+        _ => None,
+    };
     match addresses {
-        Ok((local, peer)) if local.ip().is_loopback() && peer.ip().is_loopback() => {}
-        Ok(_) => {
-            result.status = Stop::NonLoopback;
-            return result;
+        Ok((local, peer)) => {
+            if let Some(status) = refused(local.ip(), peer.ip()) {
+                result.status = status;
+                return result;
+            }
         }
         Err(_) => {
             result.status = Stop::Io;

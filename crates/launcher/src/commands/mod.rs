@@ -8,11 +8,13 @@
 //! one JSON object instead, a record described in [`crate::contract`].
 
 mod launch;
-mod profile;
+pub(crate) mod map;
+pub(crate) mod profile;
 mod recover;
-mod sessions;
-mod settings;
-mod status;
+mod relay;
+pub(crate) mod sessions;
+pub(crate) mod settings;
+pub(crate) mod status;
 mod version;
 
 use crate::{
@@ -98,27 +100,55 @@ fn dispatch(cli: Cli, bundled_server: Option<PathBuf>, build: Build) -> Result<(
     context.bundled_server = bundled_server;
     match cli.command {
         Command::Check(args) => launch::check(&context, &args),
-        Command::Setup(args) => {
-            launch::launch(&context, crate::records::Action::Setup, &args, false)
-        }
+        Command::Setup(args) => launch::launch(
+            &context,
+            crate::records::Action::Setup,
+            &args,
+            launch::Hosting {
+                api_port: args.api_port,
+                ..launch::Hosting::default()
+            },
+        ),
         Command::Serve(args) => launch::launch(
             &context,
             crate::records::Action::Serve,
             &args.session,
-            args.server_only,
+            launch::Hosting {
+                server_only: args.server_only,
+                listen: args.listen,
+                api_port: args.session.api_port,
+                remote: None,
+            },
         ),
         Command::Start(args) => {
-            launch::launch(&context, crate::records::Action::Start, &args, false)
+            // Against a server elsewhere: where its game connections go.
+            let remote = match (&args.remote, &args.token) {
+                (Some(url), Some(token)) => Some(crate::api::fetch_game(url, token)?),
+                _ => None,
+            };
+            launch::launch(
+                &context,
+                crate::records::Action::Start,
+                &args.session,
+                launch::Hosting {
+                    remote,
+                    api_port: args.session.api_port,
+                    ..launch::Hosting::default()
+                },
+            )
         }
+        Command::Relay(args) => relay::relay(&args),
         Command::Status => status::status(&context),
         Command::Stop => status::stop(&context),
         Command::Play => status::play(&context),
+        Command::Api => status::api(&context),
         Command::Profile(args) => profile::profile(&context, &args),
         Command::CarImages(args) => profile::car_images(&context, &args),
+        Command::MapImages(args) => map::map_images(&context, &args),
         Command::Sessions(args) => sessions::sessions(&context, &args),
         Command::Settings(args) => settings::settings(&context, &args),
         Command::Recover { account_id } => recover::recover(&context, &account_id),
-        Command::Supervise { request } => launch::supervise(&request),
+        Command::Supervise { request } => launch::supervise(&request, build),
         Command::Version | Command::Schema { .. } => unreachable!("handled above"),
     }
 }

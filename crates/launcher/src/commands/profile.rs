@@ -3,6 +3,8 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! `profile`: show one saved driver or list every saved driver, read-only.
+//! The session API's `GET /v1/profile` answers with the same record
+//! ([`crate::api`]).
 
 use super::Context;
 use crate::{
@@ -10,16 +12,30 @@ use crate::{
     exit::{Failure, Result},
     profile::{self, CarLocation, Cell, Columns, Listing, Profile, content::Need, grouped, images},
 };
-use std::fmt::Write;
+use std::{fmt::Write, path::Path};
 
 /// `profile`: one account's profile, or with `--list` every account.
 pub fn profile(context: &Context, args: &ProfileArgs) -> Result<()> {
-    let saves = profile::Saves::open(&context.data_dir)?;
     if args.list {
-        let content = profile::content(saves.data(), args.content_dir.as_deref(), Need::Summary)?;
-        let listing = saves.list(&content)?;
+        let listing = profile_list_report(&context.data_dir, args.content_dir.as_deref())?;
         return context.emit(&listing, || list_text(&listing));
     }
+    let profile = profile_report(&context.data_dir, args)?;
+    context.emit(&profile, || text(&profile))
+}
+
+/// The `profile-list` record: every save in the data directory; the
+/// session API's `GET /v1/profiles` answers with it.
+pub(crate) fn profile_list_report(data: &Path, content_dir: Option<&Path>) -> Result<Listing> {
+    let saves = profile::Saves::open(data)?;
+    let content = profile::content(saves.data(), content_dir, Need::Summary)?;
+    saves.list(&content)
+}
+
+/// The `profile` record of one save: the one `args` names, else the
+/// selected one (exit 4 when none is selected).
+pub(crate) fn profile_report(data: &Path, args: &ProfileArgs) -> Result<Profile> {
+    let saves = profile::Saves::open(data)?;
     let id = match &args.account_id {
         Some(id) => id.clone(),
         None => saves.active().map(str::to_owned).ok_or_else(|| {
@@ -41,8 +57,7 @@ pub fn profile(context: &Context, args: &ProfileArgs) -> Result<()> {
             locale,
         },
     )?;
-    let profile = saves.profile(&id, &content)?;
-    context.emit(&profile, || text(&profile))
+    saves.profile(&id, &content)
 }
 
 fn cell(cell: Option<Cell>) -> String {
@@ -239,29 +254,7 @@ fn list_text(listing: &Listing) -> String {
 /// `car-images`: decode each car's images into the data folder, or report
 /// the complete set already there.
 pub fn car_images(context: &Context, args: &CarImagesArgs) -> Result<()> {
-    let data = crate::paths::checked_data_path(&context.data_dir, None)?;
-    let source = profile::content::locate(&data, None)?.ok_or_else(|| {
-        Failure::no_session("This data directory has no prepared content; run setup first.")
-    })?;
-    let fingerprint = source
-        .directory
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or_default()
-        .to_owned();
-    let prepared = match images::load(&data, &fingerprint) {
-        Ok(Some(cached)) => images::Prepared {
-            cached,
-            built: false,
-        },
-        _ => {
-            let (registered, _) = crate::platform::game_registration();
-            let (game, _) = profile::installation(&data, args.game_dir.as_deref(), registered)?
-                .ok_or_else(|| Failure::refused("No game installation found; pass --game-dir."))?;
-            images::prepare(&data, &fingerprint, &game, nfs_frostbite::Limits::default())?
-        }
-    };
-    let report = images::CarImagesReport::new(&prepared, &fingerprint);
+    let report = car_images_report(&context.data_dir, args.game_dir.as_deref())?;
     context.emit(&report, || {
         let mut out = format!(
             "{} {} car images ({} medium, {} large) for {} cars in\n  {}",
@@ -281,4 +274,35 @@ pub fn car_images(context: &Context, args: &CarImagesArgs) -> Result<()> {
         }
         out
     })
+}
+
+/// The `car-images` record: decode the set, or reuse a complete one; the
+/// session API's `POST /v1/car-images` answers with it.
+pub(crate) fn car_images_report(
+    data: &Path,
+    game_dir: Option<&Path>,
+) -> Result<images::CarImagesReport> {
+    let data = crate::paths::checked_data_path(data, None)?;
+    let source = profile::content::locate(&data, None)?.ok_or_else(|| {
+        Failure::no_session("This data directory has no prepared content; run setup first.")
+    })?;
+    let fingerprint = source
+        .directory
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_owned();
+    let prepared = match images::load(&data, &fingerprint) {
+        Ok(Some(cached)) => images::Prepared {
+            cached,
+            built: false,
+        },
+        _ => {
+            let (registered, _) = crate::platform::game_registration();
+            let (game, _) = profile::installation(&data, game_dir, registered)?
+                .ok_or_else(|| Failure::refused("No game installation found; pass --game-dir."))?;
+            images::prepare(&data, &fingerprint, &game, nfs_frostbite::Limits::default())?
+        }
+    };
+    Ok(images::CarImagesReport::new(&prepared, &fingerprint))
 }

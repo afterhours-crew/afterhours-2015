@@ -70,6 +70,8 @@ pub struct LiveSession {
     ready: Option<ServerReady>,
     /// The JSON-lines stream when the request asked for events.
     events: Emitter,
+    /// Which of the server's map frames become `map-feed` events.
+    map_feed: crate::map_feed::Relay,
     /// Games started in this session, which names their logs.
     #[cfg_attr(not(windows), allow(dead_code))]
     games: u32,
@@ -77,6 +79,10 @@ pub struct LiveSession {
     job: Option<platform::windows::JobGuard>,
     #[cfg(windows)]
     lease: Option<platform::windows::lease::EndpointLease>,
+    /// Digest of the relay copy standing in for the server (`start
+    /// --remote`); the routing lease pins it instead of the server.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    relay_sha256: Option<String>,
 }
 
 fn wait_child_exit(child: &mut dyn ChildProcess, grace: Duration) -> Result<()> {
@@ -122,11 +128,13 @@ impl LiveSession {
             server_executable: None,
             ready: None,
             events,
+            map_feed: crate::map_feed::Relay::default(),
             games: 0,
             #[cfg(windows)]
             job,
             #[cfg(windows)]
             lease: None,
+            relay_sha256: None,
         })
     }
 
@@ -137,12 +145,24 @@ impl LiveSession {
             .ok_or_else(|| Failure::refused("This action needs --game-dir."))
     }
 
-    /// Pass a child's diagnostic text to the event stream or the console.
+    /// Pass a child's diagnostic text to the event stream or the console,
+    /// and to the session API when it runs.
     fn forward(&mut self, source: DiagnosticSource, text: &str) {
-        if self.events.enabled() {
-            self.events.diagnostic(source, text);
-        } else {
+        if !self.events.enabled() {
             terminal::raw(text);
+        }
+        self.events.diagnostic(source, text);
+    }
+
+    /// Emit the server's newest map frame, if it is newer than the last.
+    fn relay_map_feed(&mut self) {
+        if !self.events.observed() {
+            return;
+        }
+        if let Some(line) = self.server.as_mut().and_then(|s| s.take_map_feed())
+            && let Some(body) = self.map_feed.accept(&line)
+        {
+            self.events.emit(body);
         }
     }
 
@@ -176,6 +196,7 @@ impl LiveSession {
             stderr_log: self.run.join(format!("{name}.stderr.log")),
             environment: Vec::new(),
             capture_first_line: false,
+            map_feed: false,
         };
         let mut child = self.platform.spawn(&spec)?;
         let source = if name == "create-account" {
@@ -325,10 +346,11 @@ impl LiveSession {
             "--owned-world-connection".into(),
             "--owned-only".into(),
         ];
-        if self.request.serves_game() {
-            // The game expects the launcher services on this port.
+        if let Some(port) = self.request.launcher_services_port() {
+            // A game here expects them on its own port; one elsewhere
+            // reaches them through a relay.
             args.push("--lsx-port".into());
-            args.push(platform::LSX_PORT.to_string());
+            args.push(port.to_string());
         }
         for (name, path) in &prepared.files {
             if name != "account-policy" {
@@ -338,6 +360,14 @@ impl LiveSession {
         }
         if self.request.record_protocol {
             args.push("--record-protocol".into());
+        }
+        if let Some(listen) = self.request.listen {
+            args.push("--listen".into());
+            args.push(listen.to_string());
+        }
+        if self.events.observed() {
+            // Live positions for `map-feed` events, after the readiness line.
+            args.push("--map-feed".into());
         }
         args.extend(self.request.settings.server_arguments());
         // The server applies amounts saved during the session (`settings`).
@@ -357,20 +387,114 @@ impl LiveSession {
         if ready["ready"] != true || ready["pid"] != pid {
             return Err(Failure::session("Server readiness identity mismatch."));
         }
-        if self.request.serves_game() && ready["lsx"] != format!("127.0.0.1:{}", platform::LSX_PORT)
-        {
-            return Err(Failure::session("Server readiness identity mismatch."));
+        if let Some(port) = self.request.launcher_services_port() {
+            let lsx: Option<std::net::SocketAddrV4> =
+                ready["lsx"].as_str().and_then(|text| text.parse().ok());
+            let expected = |a: &std::net::SocketAddrV4| {
+                *a.ip() == self.request.listen_address()
+                    && a.port() != 0
+                    && (port == 0 || a.port() == port)
+            };
+            if !lsx.as_ref().is_some_and(expected) {
+                return Err(Failure::session("Server readiness identity mismatch."));
+            }
         }
         let redirector: std::net::SocketAddr = ready["redirector"]
             .as_str()
             .and_then(|s| s.parse().ok())
-            .ok_or_else(|| Failure::session("Server redirector is not loopback."))?;
-        if redirector.ip() != std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST) {
-            return Err(Failure::session("Server redirector is not loopback."));
+            .ok_or_else(|| Failure::session("Server redirector is invalid."))?;
+        if redirector.ip() != std::net::IpAddr::V4(self.request.listen_address()) {
+            return Err(Failure::session(
+                "Server redirector is not on the session's address.",
+            ));
         }
         Ok(ServerReady {
             redirector_port: redirector.port(),
         })
+    }
+}
+
+impl LiveSession {
+    /// `start --remote`: this program, copied under the compatibility name,
+    /// relays the game's launcher services and redirector to the server
+    /// elsewhere and stands in for a server here, so the game's start,
+    /// routing lease and readiness work as for a local server.
+    fn start_relay(&mut self, remote: records::RemoteGame) -> Result<()> {
+        terminal::heading("Connecting to your server");
+        let registration = self
+            .platform
+            .registered_client_path()?
+            .ok_or_else(|| Failure::refused("Existing game launcher registration is missing or unsupported. Afterhours does not install or modify it."))?;
+        let name = crate::compat::compatibility_name(&registration)?;
+        let own = std::env::current_exe()?;
+        let digest = crate::digest::sha256_file(&own)?;
+        let executable = crate::install::install_compatibility_server(&crate::install::Source {
+            data_directory: &self.data,
+            game_directory: self.request.game_directory.as_deref(),
+            server_path: &own,
+            server_sha256: &digest,
+            compatibility_name: name,
+        })?;
+        let arguments = vec![
+            "relay".into(),
+            "--redirector".into(),
+            remote.redirector.to_string(),
+            "--launcher-services".into(),
+            remote.launcher_services.to_string(),
+            "--stop-file".into(),
+            self.run
+                .join(session::STOP_SERVER_FILE)
+                .to_string_lossy()
+                .into_owned(),
+        ];
+        self.run_server(executable, arguments)?;
+        self.relay_sha256 = Some(digest);
+        terminal::success("Connected to your server.");
+        Ok(())
+    }
+
+    /// Start the server (or the relay standing in for it) and wait for its
+    /// readiness record.
+    fn run_server(&mut self, executable: PathBuf, arguments: Vec<String>) -> Result<()> {
+        let spec = SpawnSpec {
+            executable: executable.clone(),
+            arguments,
+            working_directory: self.data.clone(),
+            stdout_log: self.run.join("server.stdout.jsonl"),
+            stdout_keeps: Keep::End,
+            stderr_log: self.run.join("server.stderr.log"),
+            environment: Vec::new(),
+            capture_first_line: true,
+            // Map frames are only read in event mode or for the session API.
+            map_feed: self.events.observed(),
+        };
+        let mut server = self.platform.spawn(&spec)?;
+        let deadline = Instant::now() + SERVER_READY_DEADLINE;
+        let line = loop {
+            let text = server.drain_diagnostics();
+            self.forward(DiagnosticSource::Server, &text);
+            server.check_logs()?;
+            if let Some(line) = server.first_line() {
+                break line?;
+            }
+            if server.exited() || Instant::now() > deadline {
+                server.kill();
+                return Err(Failure::session("Server did not become ready."));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        let ready = self.parse_ready(&line, server.id());
+        let ready = match ready {
+            Ok(ready) => ready,
+            Err(e) => {
+                server.kill();
+                return Err(e);
+            }
+        };
+        self.server_executable = Some(executable);
+        self.ready = Some(ready);
+        self.server = Some(server);
+        Ok(())
     }
 }
 
@@ -430,10 +554,15 @@ impl Steps for LiveSession {
 
     fn wait(&mut self) {
         self.echo_diagnostics();
+        self.relay_map_feed();
         std::thread::sleep(Duration::from_millis(250));
     }
 
     fn prepare(&mut self) -> Result<()> {
+        // A server elsewhere keeps the saves and its own content.
+        if self.request.remote.is_some() {
+            return Ok(());
+        }
         let game = self.game_directory()?.to_path_buf();
         let report = self.run_tool(
             "prepare",
@@ -459,6 +588,9 @@ impl Steps for LiveSession {
     }
 
     fn start_server(&mut self) -> Result<()> {
+        if let Some(remote) = self.request.remote {
+            return self.start_relay(remote);
+        }
         terminal::heading("Starting your local server");
         terminal::step("Starting local services. This may take a moment...");
         let prepared = self.prepared.clone().unwrap_or_default();
@@ -483,42 +615,8 @@ impl Steps for LiveSession {
             self.request.server_path.clone()
         };
         let arguments = self.server_arguments(&prepared, &account)?;
-        let spec = SpawnSpec {
-            executable: executable.clone(),
-            arguments: self.request.server_arguments(arguments),
-            working_directory: self.data.clone(),
-            stdout_log: self.run.join("server.stdout.jsonl"),
-            stdout_keeps: Keep::End,
-            stderr_log: self.run.join("server.stderr.log"),
-            environment: Vec::new(),
-            capture_first_line: true,
-        };
-        let mut server = self.platform.spawn(&spec)?;
-        let deadline = Instant::now() + SERVER_READY_DEADLINE;
-        let line = loop {
-            let text = server.drain_diagnostics();
-            self.forward(DiagnosticSource::Server, &text);
-            server.check_logs()?;
-            if let Some(line) = server.first_line() {
-                break line?;
-            }
-            if server.exited() || Instant::now() > deadline {
-                server.kill();
-                return Err(Failure::session("Server did not become ready."));
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        };
-        let ready = self.parse_ready(&line, server.id());
-        let ready = match ready {
-            Ok(ready) => ready,
-            Err(e) => {
-                server.kill();
-                return Err(e);
-            }
-        };
-        self.server_executable = Some(executable);
-        self.ready = Some(ready);
-        self.server = Some(server);
+        let arguments = self.request.server_arguments(arguments);
+        self.run_server(executable, arguments)?;
         terminal::success("Your local server is ready.");
         Ok(())
     }
@@ -554,6 +652,7 @@ impl Steps for LiveSession {
             stderr_log: self.run.join(format!("{logs}.stderr.log")),
             environment: vec![("EARtPLaunchCode".into(), marker.to_string())],
             capture_first_line: false,
+            map_feed: false,
         };
         // Own the game before anything else can fail, so a failed start
         // still closes it.
@@ -581,7 +680,9 @@ impl Steps for LiveSession {
             server.id(),
             created(server.id())?,
             &executable,
-            &self.request.server_sha256,
+            self.relay_sha256
+                .as_deref()
+                .unwrap_or(&self.request.server_sha256),
             ready.redirector_port,
         );
         self.lease = Some(lease?);

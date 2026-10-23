@@ -26,6 +26,7 @@
 //! See `crates/launcher/README.md` for how the pieces fit together and
 //! `docs/LOCAL-LAUNCHER.md` for how to run the game.
 
+pub mod api;
 pub mod cli;
 pub mod clock;
 pub mod commands;
@@ -36,12 +37,15 @@ pub mod endpoint;
 pub mod events;
 pub mod exit;
 pub mod install;
+pub mod map;
+pub mod map_feed;
 pub mod marker;
 pub mod paths;
 pub mod platform;
 pub mod preflight;
 pub mod profile;
 pub mod records;
+pub mod relay;
 pub mod retention;
 pub mod session;
 pub mod sessions;

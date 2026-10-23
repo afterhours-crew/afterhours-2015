@@ -30,8 +30,23 @@
           "type": "string"
         },
         {
+          "const": "map-images",
+          "description": "`map-images`: the game's world map and the world box it covers.",
+          "type": "string"
+        },
+        {
           "const": "world-settings",
           "description": "`settings`, and `--traffic` and `--rivals` on `setup`, `serve` and\n`start`: the amounts of traffic and roaming rivals.",
+          "type": "string"
+        },
+        {
+          "const": "map-feed",
+          "description": "`map-feed` events with `--events` on `serve` and `start`: live\npositions of the players' cars, traffic and roaming rivals.",
+          "type": "string"
+        },
+        {
+          "const": "api",
+          "description": "`--api` on `setup`, `serve` and `start`, and `api`: the session over\nHTTP on this computer, with its event stream, `stop` and `play`, the\nsaved `settings` to read and change, and the selected `profile`.",
           "type": "string"
         }
       ]

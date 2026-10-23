@@ -20,7 +20,7 @@
 //! provides.
 
 use crate::{
-    events, profile,
+    api, events, map, profile,
     records::{self, AccountRecord, Preflight, Status},
     sessions,
 };
@@ -80,9 +80,29 @@ impl Record for profile::images::CarImagesReport {
     const NAME: &'static str = "car-images";
     const VERSION: u32 = profile::images::CarImagesReport::VERSION;
 }
+impl Record for map::MapImagesReport {
+    const NAME: &'static str = "map-images";
+    const VERSION: u32 = map::MapImagesReport::VERSION;
+}
 impl Record for sessions::SessionList {
     const NAME: &'static str = "sessions";
     const VERSION: u32 = sessions::FORMAT_VERSION;
+}
+impl Record for api::ApiRecord {
+    const NAME: &'static str = "api";
+    const VERSION: u32 = api::FORMAT_VERSION;
+}
+impl Record for api::GameEndpoints {
+    const NAME: &'static str = "game-endpoints";
+    const VERSION: u32 = api::FORMAT_VERSION;
+}
+impl Record for sessions::file::SessionFileText {
+    const NAME: &'static str = "session-file";
+    const VERSION: u32 = sessions::file::FORMAT_VERSION;
+}
+impl Record for api::ApiError {
+    const NAME: &'static str = "api-error";
+    const VERSION: u32 = api::FORMAT_VERSION;
 }
 impl Record for events::Event {
     const NAME: &'static str = "event";
@@ -115,16 +135,21 @@ fn info<T: Record>() -> RecordInfo {
 }
 
 /// Every record, sorted by name.
-pub fn records() -> [RecordInfo; 13] {
+pub fn records() -> [RecordInfo; 18] {
     let mut all = [
+        info::<api::ApiRecord>(),
+        info::<api::ApiError>(),
+        info::<api::GameEndpoints>(),
         info::<Preflight>(),
         info::<profile::images::CarImagesReport>(),
         info::<events::Event>(),
+        info::<map::MapImagesReport>(),
         info::<profile::Profile>(),
         info::<profile::Listing>(),
         info::<RecoverReport>(),
         info::<Status>(),
         info::<sessions::SessionList>(),
+        info::<sessions::file::SessionFileText>(),
         info::<SettingsReport>(),
         info::<StatusReport>(),
         info::<StopReport>(),
@@ -335,19 +360,31 @@ pub enum Capability {
     Play,
     /// `car-images`, and per-car `image` in `profile`.
     CarImages,
+    /// `map-images`: the game's world map and the world box it covers.
+    MapImages,
     /// `settings`, and `--traffic` and `--rivals` on `setup`, `serve` and
     /// `start`: the amounts of traffic and roaming rivals.
     WorldSettings,
+    /// `map-feed` events with `--events` on `serve` and `start`: live
+    /// positions of the players' cars, traffic and roaming rivals.
+    MapFeed,
+    /// `--api` on `setup`, `serve` and `start`, and `api`: the session over
+    /// HTTP on this computer, with its event stream, `stop` and `play`, the
+    /// saved `settings` to read and change, and the selected `profile`.
+    Api,
 }
 
 /// Capabilities of this build, in a fixed order.
-pub const CAPABILITIES: [Capability; 6] = [
+pub const CAPABILITIES: [Capability; 9] = [
     Capability::Profile,
     Capability::Sessions,
     Capability::Events,
     Capability::Play,
     Capability::CarImages,
+    Capability::MapImages,
     Capability::WorldSettings,
+    Capability::MapFeed,
+    Capability::Api,
 ];
 
 /// Identity of the program the launcher library is running in.

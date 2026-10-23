@@ -66,6 +66,25 @@ pub fn is_privileged() -> std::io::Result<bool> {
     }
 }
 
+/// Fill `buffer` from the operating system's cryptographic random source:
+/// `BCryptGenRandom` with the system-preferred generator on Windows,
+/// `/dev/urandom` elsewhere. For secrets such as an API token.
+pub fn random_bytes(buffer: &mut [u8]) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        windows::random_bytes(buffer)
+    }
+    #[cfg(unix)]
+    {
+        unix::random_bytes(buffer)
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = buffer;
+        Err(std::io::Error::other("No random source on this platform."))
+    }
+}
+
 /// Whether a process with this identifier currently exists.
 pub fn process_exists(pid: u32) -> bool {
     #[cfg(windows)]

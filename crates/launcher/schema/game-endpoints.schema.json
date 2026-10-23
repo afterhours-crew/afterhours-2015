@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "`GET /v1/game`: where a game, on this computer or another, reaches this\nsession's server. A game is routed to a relay on its own computer that\nforwards to these ([`crate::relay`]); the server's answers give it the\nrest of its addresses.",
+  "properties": {
+    "launcher_services": {
+      "description": "The server's launcher services, `<IPv4 address>:<port>`, when it\nserves them (a session with game support); `null` otherwise.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "redirector": {
+      "description": "The server's redirector, `<IPv4 address>:<port>`.",
+      "type": "string"
+    },
+    "version": {
+      "const": 1,
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version",
+    "redirector",
+    "launcher_services"
+  ],
+  "title": "GameEndpoints",
+  "type": "object"
+}

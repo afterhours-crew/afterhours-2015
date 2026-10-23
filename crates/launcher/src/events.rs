@@ -12,17 +12,25 @@
 //!    `status.json`, in order.
 //! 3. `diagnostic`: each line a child wrote to standard error, tagged with
 //!    the child that wrote it.
-//! 4. `final`: the command's outcome and exit code. Always the last line,
+//! 4. `map-feed`: live positions for the map, at most four times a second
+//!    while the server runs a world session ([`crate::map_feed`]).
+//! 5. `final`: the command's outcome and exit code. Always the last line,
 //!    also when the command was refused before a session existed.
 //!
 //! The front-end process writes `session` and `final`; the supervisor it
-//! starts inherits standard output and writes `status` and `diagnostic`.
+//! starts inherits standard output and writes `status`, `diagnostic` and
+//! `map-feed`.
 //! Their writes never interleave: the front end waits for the supervisor.
 //! Human console text is silenced in this mode. A write that fails, for
 //! example because the reader closed the pipe, disables further events and
 //! never stops the session; `status` and `sessions` still observe it.
+//!
+//! With `--api` the supervisor also publishes every event it writes to the
+//! session API's event stream ([`crate::api`]), with or without
+//! `--events`.
 
 use crate::{
+    api::hub::Hub,
     clock,
     records::{Action, Status},
     terminal::Lines,
@@ -30,14 +38,14 @@ use crate::{
 use schemars::JsonSchema;
 use serde::Serialize;
 #[cfg(test)]
-use std::sync::{Arc, Mutex};
-use std::{io::Write, path::PathBuf};
+use std::sync::Mutex;
+use std::{io::Write, path::PathBuf, sync::Arc};
 
 /// Version of [`Event`].
 pub const FORMAT_VERSION: u32 = 1;
 
 /// One line of the event stream.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct Event {
     pub version: u32,
     /// When the event was written, UTC.
@@ -47,7 +55,7 @@ pub struct Event {
 }
 
 /// The kind of event, in the `event` property, and its fields.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 #[serde(tag = "event", rename_all = "kebab-case")]
 pub enum Body {
     /// The session directory was created and the supervisor is starting.
@@ -70,6 +78,24 @@ pub enum Body {
         source: DiagnosticSource,
         text: String,
     },
+    /// Where the cars are in the server's world sessions, read-only, at
+    /// most four times a second while one runs, and only when the server
+    /// wrote a newer frame. A frame lists every world session; one with no
+    /// worlds means none is running (any markers go). World positions are
+    /// in metres: on the `map-images` map +x points right and +z points
+    /// down, and headings are degrees clockwise from up the map. Requires
+    /// the `map-feed` capability.
+    MapFeed {
+        /// The server's frame number: one more for every frame it wrote,
+        /// so frames only move forward.
+        frame: u64,
+        /// Frames the server wrote since the previous `map-feed` event that
+        /// were not delivered: a newer one arrived before the supervisor's
+        /// next poll, or one could not be read.
+        skipped: u64,
+        /// Every world session, by `connection`.
+        worlds: Vec<crate::map_feed::MapWorld>,
+    },
     /// The last line: how the command ended.
     Final {
         /// The process exit code; see the exit code table in `--help`.
@@ -80,6 +106,19 @@ pub enum Body {
         /// before the supervisor recorded one.
         status: Option<Status>,
     },
+}
+
+impl Body {
+    /// The value of the `event` property.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Body::Session { .. } => "session",
+            Body::Status { .. } => "status",
+            Body::Diagnostic { .. } => "diagnostic",
+            Body::MapFeed { .. } => "map-feed",
+            Body::Final { .. } => "final",
+        }
+    }
 }
 
 /// The child that wrote a diagnostic line.
@@ -105,9 +144,11 @@ impl DiagnosticSource {
     ];
 }
 
-/// Writes events as JSON lines, or nothing when disabled.
+/// Writes events as JSON lines, publishes them to the session API, or
+/// does nothing when neither is on.
 pub struct Emitter {
     out: Option<Box<dyn Write + Send>>,
+    hub: Option<Arc<Hub>>,
     pending: [Lines; 4],
 }
 
@@ -130,34 +171,52 @@ impl Emitter {
     fn with(out: Option<Box<dyn Write + Send>>) -> Self {
         Self {
             out,
+            hub: None,
             pending: Default::default(),
         }
     }
 
-    /// Whether events are still being written.
+    /// Also publish every event to the session API's streams.
+    pub fn attach(&mut self, hub: Arc<Hub>) {
+        self.hub = Some(hub);
+    }
+
+    /// Whether events are still being written to standard output.
     pub fn enabled(&self) -> bool {
         self.out.is_some()
     }
 
-    /// Write one event. A failed write disables the emitter.
+    /// Whether anyone takes events: standard output or the session API.
+    pub fn observed(&self) -> bool {
+        self.out.is_some() || self.hub.is_some()
+    }
+
+    /// Write and publish one event. A failed write stops further writes;
+    /// publishing to the session API goes on.
     pub fn emit(&mut self, body: Body) {
-        let Some(out) = self.out.as_mut() else {
+        if !self.observed() {
             return;
-        };
+        }
+        let kind = body.kind();
         let event = Event {
             version: FORMAT_VERSION,
             utc: clock::now_iso(),
             body,
         };
-        let written = serde_json::to_vec(&event)
-            .map_err(std::io::Error::other)
-            .and_then(|mut line| {
-                line.push(b'\n');
-                out.write_all(&line)?;
-                out.flush()
-            });
-        if written.is_err() {
-            self.out = None;
+        let Ok(text) = serde_json::to_string(&event) else {
+            return;
+        };
+        if let Some(out) = self.out.as_mut() {
+            let written = out
+                .write_all(text.as_bytes())
+                .and_then(|()| out.write_all(b"\n"))
+                .and_then(|()| out.flush());
+            if written.is_err() {
+                self.out = None;
+            }
+        }
+        if let Some(hub) = &self.hub {
+            hub.publish(kind, text);
         }
     }
 
@@ -171,7 +230,7 @@ impl Emitter {
     /// Emit every complete line of a child's diagnostic text; keep an
     /// unterminated last line until more text or [`Emitter::flush`].
     pub fn diagnostic(&mut self, source: DiagnosticSource, text: &str) {
-        if !self.enabled() || text.is_empty() {
+        if !self.observed() || text.is_empty() {
             return;
         }
         let mut lines = Vec::new();
@@ -287,6 +346,38 @@ mod tests {
         assert_eq!(lines[2]["source"], "server");
         assert_eq!(lines[2]["text"], "line with \"quotes\" and \u{e5}");
         assert_eq!(lines[4]["status"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn a_map_feed_event_is_one_line_that_matches_the_schema() {
+        let capture = Capture::default();
+        let mut emitter = Emitter::to(capture.clone());
+        let mut relay = crate::map_feed::Relay::default();
+        emitter.emit(
+            relay
+                .accept(&crate::map_feed::tests::sample_line(3))
+                .unwrap(),
+        );
+        let mut empty = crate::map_feed::tests::sample(4);
+        empty["worlds"] = serde_json::json!([]);
+        emitter.emit(relay.accept(&empty.to_string()).unwrap());
+        let lines = capture.lines();
+        assert_eq!(lines.len(), 2);
+        for line in &lines {
+            assert_eq!(line["event"], "map-feed");
+            crate::contract::testing::validate("event", line);
+        }
+        let world = &lines[0]["worlds"][0];
+        assert_eq!(
+            (lines[0]["frame"].as_u64(), lines[0]["skipped"].as_u64()),
+            (Some(3), Some(2))
+        );
+        assert_eq!(world["persona_id"], "1000000007");
+        assert_eq!(world["drivers"][0]["heading"], 90.5);
+        assert_eq!(world["rivals"][0]["heading"], serde_json::Value::Null);
+        assert_eq!(world["traffic_ring"]["outer"], 450.0);
+        assert_eq!(lines[1]["worlds"], serde_json::json!([]));
+        assert_eq!(lines[1]["skipped"], 0);
     }
 
     #[test]

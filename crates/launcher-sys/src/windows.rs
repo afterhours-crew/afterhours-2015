@@ -21,7 +21,10 @@ use windows_sys::Win32::{
         INVALID_HANDLE_VALUE, LPARAM, WAIT_OBJECT_0, WAIT_TIMEOUT,
     },
     NetworkManagement::IpHelper::GetExtendedTcpTable,
-    Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation},
+    Security::{
+        Cryptography::{BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom},
+        GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
+    },
     System::{
         Console::SetConsoleCtrlHandler,
         Diagnostics::{
@@ -97,6 +100,29 @@ impl Drop for Owned {
         // and is closed exactly once here.
         unsafe { CloseHandle(self.0) };
     }
+}
+
+/// Fill `buffer` from the system-preferred cryptographic generator.
+pub fn random_bytes(buffer: &mut [u8]) -> std::io::Result<()> {
+    for chunk in buffer.chunks_mut(u32::MAX as usize) {
+        // SAFETY: a null algorithm handle with BCRYPT_USE_SYSTEM_PREFERRED_RNG
+        // selects the system generator; the pointer and length describe one
+        // writable chunk of the caller's buffer.
+        let status = unsafe {
+            BCryptGenRandom(
+                std::ptr::null_mut(),
+                chunk.as_mut_ptr(),
+                chunk.len() as u32,
+                BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+            )
+        };
+        if status < 0 {
+            return Err(std::io::Error::other(format!(
+                "BCryptGenRandom failed with status {status:#010x}."
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Whether the current process token is elevated.

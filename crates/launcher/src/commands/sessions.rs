@@ -15,21 +15,34 @@ use std::fmt::Write;
 
 /// `sessions`: list session folders, newest first.
 pub fn sessions(context: &Context, args: &SessionsArgs) -> Result<()> {
-    if let Some(id) = &args.id
+    let list = sessions_report(&context.data_dir, usize::from(args.limit), args.id.clone())?;
+    context.emit(&list, || text(&list))
+}
+
+/// The `sessions` record: the newest `limit` sessions, or the one `id`
+/// names (exit 4 when none has it); the session API's `GET /v1/sessions`
+/// answers with it.
+pub(crate) fn sessions_report(
+    data: &std::path::Path,
+    limit: usize,
+    id: Option<String>,
+) -> Result<sessions::SessionList> {
+    if let Some(id) = &id
         && !records::is_id(id)
     {
         return Err(Failure::refused(
             "A session ID is 32 lowercase hexadecimal characters.",
         ));
     }
-    let mut options = Options::new(usize::from(args.limit), args.id.clone());
+    let wanted = id.is_some();
+    let mut options = Options::new(limit, id);
     options.crash_dump_directory = platform::game_crash_dump_dir();
     options.ea_desktop_logs = platform::ea_desktop_logs_dir();
-    let list = sessions::list(&context.data_dir, &options)?;
-    if args.id.is_some() && list.sessions.is_empty() {
+    let list = sessions::list(data, &options)?;
+    if wanted && list.sessions.is_empty() {
         return Err(Failure::no_session("No session folder has that ID."));
     }
-    context.emit(&list, || text(&list))
+    Ok(list)
 }
 
 fn summary(session: &SessionSummary) -> String {

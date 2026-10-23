@@ -208,7 +208,7 @@ fn sample(game: &Path) {
 }
 
 /// The decoded pixels of a PNG this module wrote.
-fn pixels(path: &Path) -> (u32, u32, Vec<u8>) {
+pub(crate) fn pixels(path: &Path) -> (u32, u32, Vec<u8>) {
     let bytes = std::fs::read(path).unwrap();
     assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
     let width = u32::from_be_bytes(bytes[16..20].try_into().unwrap());

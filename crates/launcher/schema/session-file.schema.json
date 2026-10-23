@@ -1,0 +1,44 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "`GET /v1/sessions/<id>/files/<name>`: the start of one session file.",
+  "properties": {
+    "bytes": {
+      "description": "The file's size.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "id": {
+      "description": "The session.",
+      "type": "string"
+    },
+    "name": {
+      "description": "The file's name in the session folder.",
+      "type": "string"
+    },
+    "text": {
+      "description": "The first bytes as text, at most the session's log bound; invalid\nUTF-8 is replaced.",
+      "type": "string"
+    },
+    "truncated": {
+      "description": "Whether the file is longer than what `text` holds.",
+      "type": "boolean"
+    },
+    "version": {
+      "const": 1,
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version",
+    "id",
+    "name",
+    "bytes",
+    "text",
+    "truncated"
+  ],
+  "title": "SessionFileText",
+  "type": "object"
+}

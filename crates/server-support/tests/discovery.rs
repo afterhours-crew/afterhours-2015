@@ -105,17 +105,19 @@ fn eligibility_checks_platform_unknown_fields_and_complete_body() {
     assert!(!eligible(&receive(&mut Cursor::new(wire))));
 }
 #[test]
-fn generated_response_uses_only_owned_loopback_and_bounded_ca() {
+fn generated_response_uses_one_concrete_address_and_bounded_ca() {
     for address in [
         "0.0.0.0:1",
-        "192.0.2.1:1",
-        "127.0.0.2:1",
+        "255.255.255.255:1",
+        "224.0.0.1:1",
         "[::1]:1",
         "127.0.0.1:0",
+        "192.0.2.1:0",
     ] {
         assert_eq!(
             local_response(address.parse().unwrap()),
-            Err(Failure::NonLoopback)
+            Err(Failure::Address),
+            "{address}"
         );
     }
     let addr = "127.0.0.1:12345".parse().unwrap();
@@ -143,6 +145,25 @@ fn generated_response_uses_only_owned_loopback_and_bounded_ca() {
     assert_eq!(length, (wire.len() - end).to_string().as_bytes());
     assert!(std::str::from_utf8(&wire[end..]).unwrap().contains("12345"));
     assert_eq!(local_response(addr).unwrap(), local_response(addr).unwrap());
+}
+#[test]
+fn response_directs_the_game_to_the_listen_address() {
+    // Loopback on this computer; a network address serves other computers.
+    for (address, hostname, ip) in [
+        ("127.0.0.1:12345", "127.0.0.1", 2_130_706_433_u32),
+        ("192.168.1.32:12345", "192.168.1.32", 3_232_235_808),
+        ("192.0.2.1:12345", "192.0.2.1", 3_221_225_985),
+    ] {
+        let wire = local_response(address.parse().unwrap()).unwrap();
+        let body = std::str::from_utf8(&wire).unwrap();
+        let body = body.split("\r\n\r\n").nth(1).unwrap();
+        assert!(
+            body.starts_with(&format!(
+                "<serverinstanceinfo><address member=\"0\"><valu><hostname>{hostname}</hostname><ip>{ip}</ip><port>12345</port></valu></address>"
+            )),
+            "{body}"
+        );
+    }
 }
 #[test]
 fn elapsed_socket_deadline_returns_without_waiting_for_peer() {

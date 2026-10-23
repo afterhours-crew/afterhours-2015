@@ -6,6 +6,12 @@
 
 use std::sync::atomic::Ordering;
 
+/// Fill `buffer` from the kernel's random device.
+pub fn random_bytes(buffer: &mut [u8]) -> std::io::Result<()> {
+    use std::io::Read;
+    std::fs::File::open("/dev/urandom")?.read_exact(buffer)
+}
+
 /// Whether the effective user is root.
 pub fn is_root() -> bool {
     // SAFETY: geteuid takes no arguments and cannot fail.

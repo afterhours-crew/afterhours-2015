@@ -32,6 +32,16 @@ pub fn settings(context: &Context, args: &SettingsArgs) -> Result<()> {
     })
 }
 
+/// The `settings` record, after saving `traffic` and `rivals` when either is
+/// given; the session API's `/v1/settings` answers with it ([`crate::api`]).
+pub(crate) fn settings_report(
+    data: &Path,
+    traffic: Option<u16>,
+    rivals: Option<Rivals>,
+) -> Result<SettingsReport> {
+    Ok(apply(data, traffic, rivals)?.1)
+}
+
 /// Load the settings, or apply and save the given changes. Saving needs no
 /// session lock: the file is replaced atomically, a session that is starting
 /// reads either version, and a running server applies the new one when it
