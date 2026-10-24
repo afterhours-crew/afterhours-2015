@@ -51,7 +51,7 @@ fn story_opponents_are_delegated_and_retire_after_departures_atomically() {
             .len(),
         2
     );
-    let leave = request(
+    let leave = request_with_padding(
         Endpoint {
             scene: root,
             selector: 0,
@@ -59,6 +59,7 @@ fn story_opponents_are_delegated_and_retire_after_departures_atomically() {
         },
         owner.participant,
         0,
+        0b1101101,
     );
     listener.pending_entries.resize(
         MAX_PENDING,
@@ -100,11 +101,19 @@ fn story_opponents_are_delegated_and_retire_after_departures_atomically() {
 }
 
 fn request(endpoint: Endpoint, participant: u16, method: u32) -> BitWriter {
+    request_with_padding(endpoint, participant, method, 0)
+}
+fn request_with_padding(
+    endpoint: Endpoint,
+    participant: u16,
+    method: u32,
+    padding: u8,
+) -> BitWriter {
     let mut payload = BitWriter::new();
     payload
         .put(endpoint.selector.into(), 9)
         .put(method.into(), 32)
-        .align();
+        .put(u64::from(padding), 7);
     let mut body = BitWriter::new();
     body.put(0, 32)
         .put(0, 32)

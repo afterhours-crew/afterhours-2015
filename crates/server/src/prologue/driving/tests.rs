@@ -382,6 +382,115 @@ pub(super) fn clock_fixture_in(countdown: bool, mut players: Players) -> (Player
 }
 
 #[test]
+fn final_dependency_publications_wait_for_the_owned_leave_acknowledgement() {
+    let (mut players, owner, base) = clock_fixture(false);
+    let mut data = base.data;
+    data.game_mode.lifecycle.states[1].kind = StateKind::Simple;
+    data.game_mode.lifecycle.root_state = Some(3);
+    data.game_mode.lifecycle.transitions.push(data::Transition {
+        serializer: 6,
+        kind: data::TransitionKind::Completed,
+        sources: vec![data::Endpoint {
+            serializer: 2,
+            port: 0,
+        }],
+        target: Some(data::Endpoint {
+            serializer: 3,
+            port: 0,
+        }),
+        configuration: data::TransitionConfiguration::Default,
+    });
+    data.game_mode
+        .lifecycle
+        .bindings
+        .order
+        .push(Observer::Transition(6));
+    let mut mode = Mode::new(data, base.parent, base.sequences).unwrap();
+    mode.timing = base.timing;
+    let (mut active, _) = Active::start(&mode, &mut players, owner, 12.).unwrap();
+    assert!(
+        active
+            .leave(&mode, &mut players, owner.participant)
+            .is_err()
+    );
+    active.advance(&mode, &mut players, 15.).unwrap();
+    let sequence = active.sequences[&1].ghost(owner.participant).unwrap();
+    let out = active
+        .completed(
+            &mode,
+            &mut players,
+            Completed {
+                sequence,
+                participant: owner.participant,
+            },
+            123,
+        )
+        .unwrap();
+    let calls = |values: &[HostRpc]| {
+        values
+            .iter()
+            .filter_map(|v| match v {
+                HostRpc::GameMode(c) => Some((c.selector, c.method, c.reference)),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        calls(&out.calls),
+        vec![
+            (1, 1, Some(owner.participant)),
+            (2, 0, Some(owner.participant)),
+            (0, 1, None)
+        ]
+    );
+    assert!(active.ending);
+    // The shared hook completes normally, even while publication awaits ACK.
+    assert!(active.host.machine().members(2).unwrap().is_empty());
+    assert!(
+        active
+            .host
+            .machine()
+            .members(3)
+            .unwrap()
+            .contains(&u64::from(owner.participant))
+    );
+    assert!(
+        active
+            .advance(&mode, &mut players, 16.)
+            .unwrap()
+            .calls
+            .is_empty()
+    );
+    let before = players.objects().snapshot();
+    assert!(
+        active
+            .leave(&mode, &mut players, owner.participant + 1)
+            .is_err()
+    );
+    assert_eq!(players.objects().snapshot(), before);
+    let out = active
+        .leave(&mode, &mut players, owner.participant)
+        .unwrap();
+    assert_eq!(calls(&out.departures), vec![(0, 7, None)]);
+    assert_eq!(
+        &calls(&out.calls)[..3],
+        &[
+            (2, 1, Some(owner.participant)),
+            (3, 0, Some(owner.participant)),
+            (0, 4, Some(owner.participant))
+        ]
+    );
+    assert!(out.deleted.contains(&active.ghost));
+    assert!(active.shutdown_calls.is_empty());
+    let repeated = active
+        .leave(&mode, &mut players, owner.participant)
+        .unwrap();
+    assert!(
+        repeated.calls.is_empty() && repeated.departures.is_empty() && repeated.deleted.is_empty()
+    );
+}
+
+#[test]
 fn zero_countdown_stops_before_native_ack_and_does_not_transition_twice() {
     let (mut players, owner, mode) = clock_fixture(true);
     let (mut active, start) = Active::start(&mode, &mut players, owner, 12.).unwrap();

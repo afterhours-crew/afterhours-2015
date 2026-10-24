@@ -7,6 +7,50 @@
 use super::*;
 
 impl Active {
+    pub(super) fn state_call(
+        &mut self,
+        call: HostRpc,
+        human: bool,
+        out: &mut Output,
+    ) -> Result<(), Error> {
+        if human && self.ending && self.shutdown_barrier {
+            if self.shutdown_calls.len() >= 512 {
+                return Err(Error::Bound);
+            }
+            self.shutdown_calls.push(call);
+        } else {
+            out.calls.push(call);
+        }
+        Ok(())
+    }
+    pub(super) fn begin_finish(
+        &mut self,
+        players: &Players,
+        out: &mut Output,
+    ) -> Result<(), Error> {
+        if !self.ending {
+            out.calls.push(HostRpc::GameMode(event_logic::call(
+                players.objects(),
+                self.ghost,
+                0,
+                1,
+                None,
+                Arguments::None,
+            )?));
+            self.ending = true;
+            if !self.shutdown_barrier {
+                out.calls.push(HostRpc::GameMode(event_logic::call(
+                    players.objects(),
+                    self.ghost,
+                    0,
+                    7,
+                    None,
+                    Arguments::None,
+                )?));
+            }
+        }
+        Ok(())
+    }
     pub fn scene_notification(
         &mut self,
         content: &Mode,
@@ -114,17 +158,7 @@ impl Active {
                 .map_err(invalid)?
                 .contains(&u64::from(self.owner.participant))
         {
-            for method in [1, 7] {
-                out.calls.push(HostRpc::GameMode(event_logic::call(
-                    players.objects(),
-                    self.ghost,
-                    0,
-                    method,
-                    None,
-                    Arguments::None,
-                )?));
-            }
-            self.ending = true;
+            self.begin_finish(players, out)?;
         }
         Ok(())
     }
@@ -160,6 +194,17 @@ impl Active {
         }
         let mut staged = players.clone();
         let mut next = self.clone();
+        if next.shutdown_barrier {
+            out.departures.push(HostRpc::GameMode(event_logic::call(
+                staged.objects(),
+                self.ghost,
+                0,
+                7,
+                None,
+                Arguments::None,
+            )?));
+        }
+        out.calls.append(&mut next.shutdown_calls);
         if let Some((_, _, command)) = &mut next.pacing {
             let changes = command.clear(&mut staged)?;
             out.records.extend(changes.records);

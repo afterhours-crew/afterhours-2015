@@ -411,9 +411,9 @@ impl PlayerListener {
             let leave = nfs_world::game_mode::Leave::decode(body)
                 .map_err(|_| replication::Error::Shape)?
                 .ok_or(replication::Error::Shape)?;
-            if route.arguments().read_u32(0, 7) != Ok(0) {
-                return Err(replication::Error::Shape);
-            }
+            // Leave's seven remaining bits align the method to a byte. The
+            // shared decoder validates their length; native writers need not
+            // zero them.
             return Ok(Some(active.leave(
                 content.mode(*chapter)?,
                 players,

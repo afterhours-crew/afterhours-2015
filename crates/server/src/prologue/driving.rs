@@ -296,6 +296,10 @@ pub struct Active {
     arrived: bool,
     ending: bool,
     left: bool,
+    /// Membership hooks may complete synchronously, but the owner's final-to-
+    /// dependency publications follow its native leave acknowledgement.
+    shutdown_calls: Vec<HostRpc>,
+    shutdown_barrier: bool,
     /// Local observations belong to this mode, even when they have no wire field.
     contexts: BTreeMap<(Property, u16), BTreeSet<u32>>,
     booleans: BTreeMap<(Identity, u16), bool>,
@@ -391,6 +395,8 @@ impl Active {
             arrived: false,
             ending: false,
             left: false,
+            shutdown_calls: vec![],
+            shutdown_barrier: content.data.game_mode.lifecycle.root_state.is_some(),
             contexts: BTreeMap::new(),
             booleans: BTreeMap::new(),
             reporters: BTreeMap::new(),
@@ -453,20 +459,29 @@ impl Active {
                     }) {
                         let (target, selector) =
                             field(players.objects(), self.ghost, state.into())?;
-                        out.calls.push(HostRpc::GameMode(event_logic::call(
+                        let call = HostRpc::GameMode(event_logic::call(
                             players.objects(),
                             target,
                             selector,
                             method,
                             Some(u16::try_from(participant).map_err(invalid)?),
                             Arguments::None,
-                        )?));
+                        )?);
+                        let human = participant == u64::from(self.owner.participant);
+                        self.state_call(call, human, out)?;
+                        if human
+                            && method == 0
+                            && usize::from(state) == content.data.game_mode.lifecycle.final_state
+                        {
+                            self.begin_finish(players, out)?;
+                        }
                         // The root's state-entry observer runs after the state's
                         // entry RPC. Final membership removes an AI from the
-                        // primary set; root-state membership releases its dependency.
-                        if method == 0 && participant != u64::from(self.owner.participant) {
-                            let root_method = if usize::from(state)
-                                == content.data.game_mode.lifecycle.final_state
+                        // primary set; root-state entry registers its dependency.
+                        if method == 0 {
+                            let root_method = if !human
+                                && usize::from(state)
+                                    == content.data.game_mode.lifecycle.final_state
                             {
                                 Some(3)
                             } else if Some(usize::from(state))
@@ -477,14 +492,15 @@ impl Active {
                                 None
                             };
                             if let Some(method) = root_method {
-                                out.calls.push(HostRpc::GameMode(event_logic::call(
+                                let call = HostRpc::GameMode(event_logic::call(
                                     players.objects(),
                                     self.ghost,
                                     0,
                                     method,
                                     Some(self.member(players, participant)?),
                                     Arguments::None,
-                                )?));
+                                )?);
+                                self.state_call(call, human, out)?;
                             }
                         }
                     }
