@@ -357,3 +357,61 @@ fn ordinary_garage_progression_still_uses_its_own_route_when_intro_is_bound() {
     );
     assert_eq!(model, before);
 }
+
+#[test]
+fn first_drive_returns_automatically_and_waits_in_the_selection_composite() {
+    let mut model = ready();
+    model.returning = Some(ReturnBindings {
+        request: endpoint(100),
+        free_roam: endpoint(1),
+        preparing: [61, 63, 65, 73].map(endpoint),
+        sequence: endpoint(67),
+        finishing: [68, 70, 60].map(endpoint),
+    });
+    model.stages.insert(8, Stage::FreeRoam);
+    assert_eq!(model.begin_intro_return(8), Outcome::Unsupported);
+    model.intro_started.insert(8);
+    let Outcome::Advanced(chain) = model.begin_intro_return(8) else {
+        panic!()
+    };
+    assert_eq!(
+        chain
+            .iter()
+            .map(|n| (n.endpoint.selector, n.call))
+            .collect::<Vec<_>>(),
+        vec![
+            (1, Call::Leave),
+            (61, Call::Enter),
+            (61, Call::Leave),
+            (63, Call::Enter),
+            (63, Call::LeaveTagged(31)),
+            (65, Call::Enter),
+            (65, Call::LeaveTagged(31)),
+            (73, Call::Enter),
+            (73, Call::Leave),
+            (67, Call::Enter)
+        ]
+    );
+    assert_eq!(model.stage(8), Some(Stage::IntroEnteringGarage));
+    assert!(model.take_returning().is_empty());
+    assert_eq!(model.begin_intro_return(8), Outcome::Repeated);
+    assert_eq!(model.intro_garage_ready(8), Outcome::Unsupported);
+    assert!(matches!(model.returned_to_garage(8), Outcome::Advanced(_)));
+    assert_eq!(model.stage(8), Some(Stage::IntroLoadingGarage));
+    assert!(model.waiting_garage().is_empty());
+    assert_eq!(model.enter_customization(8), Outcome::Repeated);
+    let Outcome::Advanced(chain) = model.intro_garage_ready(8) else {
+        panic!()
+    };
+    let b = model.bindings.unwrap();
+    assert_eq!(
+        chain,
+        notifications(
+            8,
+            &[(b.loading_garage, Call::Leave), (b.composite, Call::Enter)]
+        )
+    );
+    assert_eq!(model.stage(8), Some(Stage::IntroCarSelection));
+    assert_eq!(model.intro_garage_ready(8), Outcome::Repeated);
+    assert_eq!(model.stage(9), Some(Stage::Progressing));
+}

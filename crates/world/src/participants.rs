@@ -244,6 +244,9 @@ pub enum Stage {
     IntroOpening,
     /// Opening completed; retain input ownership until the first mode is ready.
     IntroStartingDrive,
+    IntroEnteringGarage,
+    IntroLoadingGarage,
+    IntroCarSelection,
     LoadingGarage,
     EntryBlocked,
     Customization,
@@ -300,6 +303,46 @@ pub struct ReturnBindings {
     pub finishing: [Endpoint; 3],
 }
 impl ReturnBindings {
+    fn entering(
+        self,
+        participant: u16,
+        slots: Option<(Bindings, crate::garage::Slots)>,
+    ) -> Vec<Notification> {
+        let mut chain = vec![(self.free_roam, Call::Leave)];
+        for (i, endpoint) in self.preparing.into_iter().enumerate() {
+            chain.push((endpoint, Call::Enter));
+            if i == 3
+                && let Some((bindings, slots)) = slots
+            {
+                chain.extend(
+                    bindings
+                        .garage
+                        .into_iter()
+                        .zip(slots.values())
+                        .map(|(e, item)| {
+                            (e, item.map_or(Call::NotifyTagged(19), Call::GarageItem))
+                        }),
+                );
+            }
+            chain.push((
+                endpoint,
+                if i == 1 || i == 2 {
+                    Call::LeaveTagged(31)
+                } else {
+                    Call::Leave
+                },
+            ));
+        }
+        chain.push((self.sequence, Call::Enter));
+        chain
+            .into_iter()
+            .map(|(endpoint, call)| Notification {
+                endpoint,
+                participant,
+                call,
+            })
+            .collect()
+    }
     pub fn from_records(records: &[Record], startup_key: u32) -> Result<Option<Self>, Error> {
         let mut scenes = records.iter().filter_map(|r| match &r.initial {
             Some(Initial::SubLevel { prefix, fields }) if prefix.content_key == startup_key => {
@@ -500,10 +543,11 @@ impl Lifecycle {
         let Some(stage) = self.stages.get_mut(&participant) else {
             return Outcome::Unsupported;
         };
-        if *stage != Stage::ReturningToGarage {
-            return Outcome::Repeated;
-        }
-        *stage = Stage::LoadingGarage;
+        *stage = match *stage {
+            Stage::ReturningToGarage => Stage::LoadingGarage,
+            Stage::IntroEnteringGarage => Stage::IntroLoadingGarage,
+            _ => return Outcome::Repeated,
+        };
         let mut chain = vec![(r.sequence, Call::Leave)];
         for endpoint in r.finishing {
             chain.extend([(endpoint, Call::Enter), (endpoint, Call::LeaveTagged(31))]);
@@ -1035,44 +1079,8 @@ impl Lifecycle {
         }
         *stage = Stage::ReturningToGarage;
         self.returned_requests.push(participant);
-        let mut chain = vec![(r.free_roam, Call::Leave)];
-        for (i, endpoint) in r.preparing.into_iter().enumerate() {
-            chain.push((endpoint, Call::Enter));
-            if i == 3 {
-                // Refresh the occupied slot with its item and empty slots
-                // with their tagged notification on each return. Initial
-                // login bindings are sent separately by take_garage_bindings.
-                if let (Some(b), Some(slots)) = (self.bindings, self.garage) {
-                    for (endpoint, item) in b.garage.into_iter().zip(slots.values()) {
-                        chain.push((
-                            endpoint,
-                            match item {
-                                Some(item) => Call::GarageItem(item),
-                                None => Call::NotifyTagged(19),
-                            },
-                        ));
-                    }
-                }
-            }
-            chain.push((
-                endpoint,
-                if i == 1 || i == 2 {
-                    Call::LeaveTagged(31)
-                } else {
-                    Call::Leave
-                },
-            ));
-        }
-        chain.push((r.sequence, Call::Enter));
         Ok(Some(Outcome::Advanced(
-            chain
-                .into_iter()
-                .map(|(endpoint, call)| Notification {
-                    endpoint,
-                    participant,
-                    call,
-                })
-                .collect(),
+            r.entering(participant, self.bindings.zip(self.garage)),
         )))
     }
     /// Garage exit and world entry (E747). `Ok(None)` is "not an exit route".

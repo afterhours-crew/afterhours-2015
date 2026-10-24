@@ -21,6 +21,7 @@ type Modes = BTreeMap<
         crate::prologue::driving::Active,
     ),
 >;
+mod garage;
 #[cfg(test)]
 mod tests;
 
@@ -219,6 +220,18 @@ impl PlayerListener {
         let Some((drive, _)) = &content.driving else {
             return Ok(None);
         };
+        if route.selector() == 0
+            && route.method_index() == 0
+            && let Some((active, _)) = modes.values_mut().find(|(a, _)| a.ghost == ghost)
+        {
+            let leave = nfs_world::game_mode::Leave::decode(body)
+                .map_err(|_| replication::Error::Shape)?
+                .ok_or(replication::Error::Shape)?;
+            if route.arguments().read_u32(0, 7) != Ok(0) {
+                return Err(replication::Error::Shape);
+            }
+            return Ok(Some(active.leave(drive, players, leave.participant)?));
+        }
         if matches!(route.method_index(), 2 | 3)
             && drive.data.game_mode.checkpoints.iter().any(|&(k, s)| {
                 players.objects().scene_endpoint(k, s) == Some((ghost, route.selector()))

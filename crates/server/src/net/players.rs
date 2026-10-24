@@ -1639,6 +1639,53 @@ impl Listener for PlayerListener {
                     Err(error) => return self.refuse_rpc(error, body),
                 }
             }
+            if let Some(content) = self.prologue.as_deref() {
+                match Self::intro_garage_input(
+                    content,
+                    &mut intro_modes,
+                    &mut players,
+                    &mut participants,
+                    returns.as_mut(),
+                    population.as_mut(),
+                    sequences.as_mut(),
+                    self.persona,
+                    body,
+                ) {
+                    Ok(Some(out)) => {
+                        if let Some((participant, removed)) = out.removed {
+                            if world_cars.remove(&removed).is_none() {
+                                return self.refuse_rpc(replication::Error::UnknownObject, body);
+                            }
+                            if let Some(crashes) = &mut crashes {
+                                crashes.discard_pending(participant);
+                                if let Err(error) = crashes.retire(participant) {
+                                    return self.refuse_rpc(error, body);
+                                }
+                            }
+                            completed_returns.push((participant, removed));
+                        }
+                        if !out.output.records.is_empty()
+                            || !out.output.deleted.is_empty()
+                            || !out.output.calls.is_empty()
+                        {
+                            exit_entries.push((
+                                Section {
+                                    float_bits: None,
+                                    flag: false,
+                                    setup: (!out.output.records.is_empty())
+                                        .then_some(Setup::RawEscape([0; 3])),
+                                    records: out.output.records,
+                                    deleted: out.output.deleted,
+                                },
+                                out.output.calls,
+                            ));
+                        }
+                        continue;
+                    }
+                    Ok(None) => {}
+                    Err(error) => return self.refuse_rpc(error, body),
+                }
+            }
             if let Some(crashes) = &mut crashes {
                 match Self::finish_crash_call(
                     body,

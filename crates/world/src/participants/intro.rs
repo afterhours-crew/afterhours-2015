@@ -68,6 +68,52 @@ fn notifications(participant: u16, chain: &[(Endpoint, Call)]) -> Vec<Notificati
         .collect()
 }
 impl Lifecycle {
+    pub fn return_bindings(&self) -> Option<ReturnBindings> {
+        self.returning
+    }
+
+    /// The story owner validates destination progress before calling this.
+    /// Intro arrival is automatic and has no owned-car slot refresh.
+    pub fn begin_intro_return(&mut self, participant: u16) -> Outcome {
+        let Some(bindings) = self.returning else {
+            return Outcome::Unsupported;
+        };
+        if !self.intro_started.contains(&participant) {
+            return Outcome::Unsupported;
+        }
+        match self.stages.get_mut(&participant) {
+            Some(stage @ Stage::FreeRoam) => {
+                *stage = Stage::IntroEnteringGarage;
+                Outcome::Advanced(bindings.entering(participant, None))
+            }
+            Some(
+                Stage::IntroEnteringGarage | Stage::IntroLoadingGarage | Stage::IntroCarSelection,
+            ) => Outcome::Repeated,
+            _ => Outcome::Unsupported,
+        }
+    }
+
+    /// The caller has completed the owned garage waiting sequence. The intro's
+    /// composite remains entered while its car-selection sequence runs.
+    pub fn intro_garage_ready(&mut self, participant: u16) -> Outcome {
+        let Some(bindings) = self.bindings else {
+            return Outcome::Unsupported;
+        };
+        match self.stages.get_mut(&participant) {
+            Some(stage @ Stage::IntroLoadingGarage) => {
+                *stage = Stage::IntroCarSelection;
+                Outcome::Advanced(notifications(
+                    participant,
+                    &[
+                        (bindings.loading_garage, Call::Leave),
+                        (bindings.composite, Call::Enter),
+                    ],
+                ))
+            }
+            Some(Stage::IntroCarSelection) => Outcome::Repeated,
+            _ => Outcome::Unsupported,
+        }
+    }
     pub fn bind_intro(&mut self, records: &[Record], startup_key: u32) -> Result<bool, Error> {
         if self.intro.is_some() {
             return Err(Error::DuplicateObject);

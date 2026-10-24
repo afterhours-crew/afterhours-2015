@@ -140,6 +140,9 @@ impl Active {
         players: &mut Players,
         seconds: f64,
     ) -> Result<Output, Error> {
+        if self.left {
+            return Ok(Output::default());
+        }
         let mut next = self.clone();
         let mut staged = players.clone();
         let mut out = Output::default();

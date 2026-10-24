@@ -116,6 +116,7 @@ fn setup() -> (PlayerListener, u16, Arc<nfs_world::items::Collection>) {
         .bind(&records, layout.item_scene_key, 909)
         .unwrap();
     participants.bind_intro(&records, 909).unwrap();
+    participants.bind_return(&records, 909).unwrap();
     let bindings = Bindings::from_records(&records, layout.item_scene_key, 909)
         .unwrap()
         .unwrap();
@@ -200,6 +201,52 @@ fn setup() -> (PlayerListener, u16, Arc<nfs_world::items::Collection>) {
     listener.world_ms = 100_000;
     listener.population = Some(population);
     listener.participants = participants;
+    let definition = |layout, local_index| nfs_world::sequences::Definition {
+        layout,
+        asset: Asset {
+            bundle: 31,
+            type_id: 42,
+            local_index,
+        },
+        manager: Component {
+            scene_key: listener.vehicles.as_ref().unwrap().layout.item_scene_key,
+            index: 3,
+        },
+        channel: Component {
+            scene_key: 909,
+            index: 62,
+        },
+        presentation: (layout == nfs_world::sequences::Layout::GarageEntry).then_some(Component {
+            scene_key: 909,
+            index: 64,
+        }),
+        embedded_bus: 2,
+    };
+    let codec = |d: nfs_world::sequences::Definition| {
+        Content::new(
+            vec![Catalog::new(31, &[(42, 2)]).unwrap()],
+            vec![(d.asset, d.layout.profile())],
+        )
+        .unwrap()
+    };
+    let entry = definition(nfs_world::sequences::Layout::GarageEntry, 0);
+    listener.returns = Some(
+        nfs_world::arrival::Arrivals::returning(entry, codec(entry), 7500)
+            .unwrap()
+            .with_spline(replication::spline::Definition {
+                asset: Asset {
+                    bundle: 31,
+                    type_id: 5100,
+                    local_index: 0,
+                },
+                catalog: Catalog::new(31, &[(5100, 1)]).unwrap(),
+                flag: false,
+            })
+            .unwrap(),
+    );
+    let waiting = definition(nfs_world::sequences::Layout::Waiting, 1);
+    listener.sequences =
+        Some(nfs_world::sequences::Sequences::new(waiting, codec(waiting)).unwrap());
     (listener, participant, items)
 }
 
@@ -526,6 +573,87 @@ fn opening_runs_after_car_and_render_readiness_and_waits_for_native_completion()
     drain(&mut listener);
     listener.advance_prologue().unwrap();
     assert!(listener.pending_rpcs.is_empty());
+    let returning = listener.participants.return_bindings().unwrap();
+    let enter = request(returning.request, participant, 0);
+    listener
+        .returns
+        .as_mut()
+        .unwrap()
+        .poll_capacity(listener.world_ms, 0)
+        .unwrap();
+    listener.pending_entries.resize(
+        MAX_PENDING,
+        (super::super::returning::empty_section(), vec![]),
+    );
+    assert!(!send(&mut listener, 13, 47, enter.span()));
+    assert_eq!(
+        listener.participants.stage(participant),
+        Some(Stage::FreeRoam)
+    );
+    assert!(
+        listener
+            .returns
+            .as_ref()
+            .unwrap()
+            .ghost(participant)
+            .is_none()
+    );
+    drain(&mut listener);
+    assert!(send(&mut listener, 13, 47, enter.span()));
+    assert_eq!(
+        listener.participants.stage(participant),
+        Some(Stage::IntroEnteringGarage)
+    );
+    let entry = listener
+        .returns
+        .as_ref()
+        .unwrap()
+        .ghost(participant)
+        .unwrap();
+    let live = listener.players.objects().snapshot();
+    drain(&mut listener);
+    assert!(send(&mut listener, 14, 47, enter.span()));
+    assert_eq!(listener.players.objects().snapshot(), live);
+    assert!(listener.pending_entries.is_empty());
+    let complete = Completed {
+        sequence: entry,
+        participant,
+    }
+    .encode()
+    .unwrap();
+    assert!(!send(&mut listener, 15, 47, complete.span()));
+    assert_eq!(listener.players.objects().snapshot(), live);
+    let stops = listener
+        .returns
+        .as_mut()
+        .unwrap()
+        .poll_capacity(listener.world_ms + 7500, 1)
+        .unwrap();
+    assert_eq!(stops.len(), 1);
+    listener.pending_entries.resize(
+        MAX_PENDING,
+        (super::super::returning::empty_section(), vec![]),
+    );
+    assert!(!send(&mut listener, 15, 47, complete.span()));
+    assert!(listener.players.objects().get(vehicle).is_some());
+    drain(&mut listener);
+    assert!(send(&mut listener, 15, 47, complete.span()));
+    assert_eq!(
+        listener.participants.stage(participant),
+        Some(Stage::IntroLoadingGarage)
+    );
+    assert!(listener.players.objects().get(vehicle).is_none());
+    assert!(listener.players.objects().get(entry).is_none());
+    assert!(!listener.world_cars.contains_key(&vehicle));
+    assert!(
+        listener
+            .sequences
+            .as_ref()
+            .unwrap()
+            .ghost(participant)
+            .is_some()
+    );
+    assert_eq!(*items, before);
 }
 
 #[test]

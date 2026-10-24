@@ -42,6 +42,7 @@ use std::{
     sync::Arc,
 };
 mod arrival;
+mod garage;
 mod reporters;
 #[cfg(test)]
 pub(crate) mod tests;
@@ -253,6 +254,8 @@ pub struct Active {
     seconds: f64,
     progress: Option<(u16, nfs_world::race_progress::Race)>,
     arrived: bool,
+    ending: bool,
+    left: bool,
     /// Local observations belong to this mode, even when they have no wire field.
     contexts: BTreeMap<Property, BTreeSet<u32>>,
     booleans: BTreeMap<Identity, bool>,
@@ -308,6 +311,8 @@ impl Active {
             seconds,
             progress: None,
             arrived: false,
+            ending: false,
+            left: false,
             contexts: BTreeMap::new(),
             booleans: BTreeMap::new(),
             reporters: BTreeMap::new(),
@@ -364,7 +369,9 @@ impl Active {
                         } => Some((state, participant, 1)),
                         _ => None,
                     };
-                    if let Some((state, participant, method)) = call.filter(|_| !bootstrap) {
+                    if let Some((state, participant, method)) = call.filter(|(state, _, _)| {
+                        !bootstrap && content.plan.external_state(*state).is_none()
+                    }) {
                         let (target, selector) =
                             field(players.objects(), self.ghost, state.into())?;
                         out.calls.push(HostRpc::GameMode(event_logic::call(
@@ -378,6 +385,9 @@ impl Active {
                     }
                 }
                 Effect::Hook(Notification::Entered { state, .. }) => {
+                    if content.plan.external_state(*state).is_some() {
+                        continue;
+                    }
                     let data = content
                         .data
                         .game_mode
