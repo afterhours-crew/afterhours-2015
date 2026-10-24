@@ -41,6 +41,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
 };
+mod arrival;
 mod reporters;
 #[cfg(test)]
 pub(crate) mod tests;
@@ -248,7 +249,10 @@ pub struct Active {
     logics: BTreeMap<usize, u16>,
     sequences: BTreeMap<usize, Instances>,
     goals: Vec<u16>,
-    routes: BTreeMap<Identity, (u64, u16)>,
+    routes: BTreeMap<Identity, (u64, Option<u16>)>,
+    seconds: f64,
+    progress: Option<(u16, nfs_world::race_progress::Race)>,
+    arrived: bool,
     /// Local observations belong to this mode, even when they have no wire field.
     contexts: BTreeMap<Property, BTreeSet<u32>>,
     booleans: BTreeMap<Identity, bool>,
@@ -301,6 +305,9 @@ impl Active {
             sequences: BTreeMap::new(),
             goals: vec![],
             routes: BTreeMap::new(),
+            seconds,
+            progress: None,
+            arrived: false,
             contexts: BTreeMap::new(),
             booleans: BTreeMap::new(),
             reporters: BTreeMap::new(),
@@ -422,7 +429,20 @@ impl Active {
                                 return Err(Error::DuplicateObject);
                             };
                         }
-                        StateKind::Waypoints => {} // Native car binding is supplied by the session after completion.
+                        StateKind::Waypoints => {
+                            if self.progress.is_some() {
+                                return Err(Error::Shape);
+                            }
+                            self.progress = Some((
+                                *state,
+                                nfs_world::race_progress::Race::new(
+                                    content.data.game_mode.checkpoints.len(),
+                                    content.data.game_mode.laps,
+                                    &[self.owner.participant],
+                                    self.seconds,
+                                )?,
+                            ));
+                        }
                         StateKind::GameMode | StateKind::Participant => {}
                         _ => return Err(Error::Unsupported),
                     }
@@ -485,6 +505,14 @@ impl Active {
                 Effect::Reporter(event_logic::lifecycle::reporters::Effect::Event { .. }) => {} // Dispatched synchronously by the Host callback before its next observer.
                 Effect::Ai(event_logic::lifecycle::ai::Effect::Event { .. }) => {} // Same synchronous graph dispatch as reporter events.
                 Effect::Ai(effect) => self.ai(content, players, effect, out)?,
+                Effect::Timing(event_logic::lifecycle::timed::Effect::Finish {
+                    participant,
+                    position: 1,
+                    remaining,
+                    ..
+                }) if *participant == u64::from(self.owner.participant) && remaining.is_empty() => {
+                    self.arrived = true;
+                }
                 _ => return Err(Error::Unsupported),
             }
         }
@@ -549,7 +577,7 @@ impl Active {
                     None,
                 )?;
                 self.routes
-                    .insert(identity.clone(), (*token, changes.goals[0]));
+                    .insert(identity.clone(), (*token, Some(changes.goals[0])));
                 changes
             }
             Effect::Release {
@@ -564,13 +592,17 @@ impl Active {
                 if owned != *token {
                     return Err(Error::UnknownObject);
                 }
-                let changes = players.release_player_route(
-                    self.owner.connection,
-                    self.owner.persona,
-                    self.owner.participant,
-                    goal,
-                    None,
-                )?;
+                let changes = if let Some(goal) = goal {
+                    players.release_player_route(
+                        self.owner.connection,
+                        self.owner.persona,
+                        self.owner.participant,
+                        goal,
+                        None,
+                    )?
+                } else {
+                    nfs_world::replication::players::ai::GoalChanges::default()
+                };
                 self.routes.remove(identity);
                 changes
             }

@@ -35,6 +35,9 @@ impl PlayerListener {
         if self.session_backlog >= MAX_PENDING {
             return Ok(());
         }
+        let Some(seconds) = self.event_seconds(self.world_ms) else {
+            return Ok(());
+        };
         let mut players = self.players.clone();
         let mut population = self
             .population
@@ -47,6 +50,15 @@ impl PlayerListener {
         let mut records = Vec::new();
         let mut messages = Vec::new();
         let mut calls = Vec::new();
+        let mut deleted = Vec::new();
+        if let Some((drive, _)) = &content.driving {
+            for (active, _) in modes.values_mut() {
+                let out = active.advance(drive, &mut players, seconds)?;
+                records.extend(out.records);
+                calls.extend(out.calls);
+                deleted.extend(out.deleted);
+            }
+        }
         let owners = players.player_participants().collect::<Vec<_>>();
         for participant in owners {
             let owner = Owner {
@@ -96,13 +108,13 @@ impl PlayerListener {
                         drive,
                         &mut players,
                         owner,
-                        self.world_ms as f64 / 1000.,
+                        seconds,
                     )?;
                     let (canceller, b) = crate::prologue::driving::Active::start(
                         canceller,
                         &mut players,
                         owner,
-                        self.world_ms as f64 / 1000.,
+                        seconds,
                     )?;
                     if !a.deleted.is_empty() || !b.deleted.is_empty() {
                         return Err(replication::Error::Shape);
@@ -126,14 +138,20 @@ impl PlayerListener {
                 break;
             }
         }
-        if records.is_empty() && messages.is_empty() {
-            return Ok(());
-        }
         // A staged car is constructed with an absolute zero origin. Reserve
         // space for that origin rather than inheriting a prior movement frame.
         let mut sections = split_scenes(records, nfs_world::application::OUTBOUND_FRAME_BITS - 96)?;
         for section in &mut sections {
             section.setup = Some(Setup::RawEscape([0; 3]));
+        }
+        if !deleted.is_empty() {
+            sections.push(Section {
+                float_bits: None,
+                flag: false,
+                setup: None,
+                records: vec![],
+                deleted,
+            });
         }
         if sections.len() > MAX_PENDING.saturating_sub(self.pending.len())
             || messages.len() > MAX_PENDING.saturating_sub(self.pending_content.len())
@@ -171,16 +189,18 @@ impl PlayerListener {
         }
         Ok(false)
     }
-    pub(super) fn driving_completed(
+    pub(super) fn driving_input(
         content: &crate::prologue::Content,
         vehicles: Option<&crate::vehicle_content::GarageContent>,
         modes: &mut Modes,
         players: &mut Players,
+        seconds: Option<f64>,
         body: BitSpan<'_>,
     ) -> Result<Option<crate::prologue::driving::Output>, replication::Error> {
         if modes.is_empty() {
             return Ok(None);
         };
+        let seconds = seconds.ok_or(replication::Error::Shape)?;
         let envelope = Envelope::decode(
             body,
             Limits {
@@ -196,6 +216,31 @@ impl PlayerListener {
         let Some(&ghost) = envelope.references().first() else {
             return Ok(None);
         };
+        let Some((drive, _)) = &content.driving else {
+            return Ok(None);
+        };
+        if matches!(route.method_index(), 2 | 3)
+            && drive.data.game_mode.checkpoints.iter().any(|&(k, s)| {
+                players.objects().scene_endpoint(k, s) == Some((ghost, route.selector()))
+            })
+        {
+            let crossing = nfs_world::game_mode::Crossing::decode(body)
+                .map_err(|_| replication::Error::Shape)?
+                .ok_or(replication::Error::Shape)?;
+            let Some((active, _)) = modes.iter_mut().find_map(|(&p, pair)| {
+                players
+                    .owns_participant_vehicle(
+                        HOST_SELECTOR as u8,
+                        pair.0.owner().persona,
+                        p,
+                        crossing.vehicle,
+                    )
+                    .then_some(pair)
+            }) else {
+                return Ok(Some(crate::prologue::driving::Output::default()));
+            };
+            return Ok(Some(active.crossing(drive, players, crossing, seconds)?));
+        }
         let Some((active, _)) = modes
             .values_mut()
             .find(|(a, _)| a.sequence_owner(ghost, route.selector()))
@@ -209,14 +254,10 @@ impl PlayerListener {
         if (0..route.arguments().len()).any(|bit| route.arguments().read_u32(bit, 1) != Ok(0)) {
             return Err(replication::Error::Shape);
         };
-        let drive = &content
-            .driving
-            .as_ref()
-            .ok_or(replication::Error::Unsupported)?
-            .0;
         let car = vehicles
             .and_then(|v| v.vehicles.definition(&content.start.vehicle_item))
             .ok_or(replication::Error::Unsupported)?;
+        active.clock(seconds)?;
         Ok(Some(active.completed(
             drive,
             players,

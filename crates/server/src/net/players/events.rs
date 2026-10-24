@@ -510,7 +510,7 @@ impl PlayerListener {
             self.participants.stage(*p) == Some(nfs_world::participants::Stage::Crashing)
         })
     }
-    fn event_seconds(&self, now_ms: u64) -> Option<f64> {
+    pub(super) fn event_seconds(&self, now_ms: u64) -> Option<f64> {
         let origin = self.replication_origin_ms?;
         Some(now_ms.saturating_sub(origin) as f64 / 1000.0)
     }

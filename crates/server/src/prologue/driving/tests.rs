@@ -36,6 +36,7 @@ pub(crate) fn content(parent: Asset, manager: Component) -> (Mode, Mode) {
             Kind::RpcReferences,
             Kind::Rpc,
             Kind::RpcReference,
+            Kind::Rpc,
         ]
         .into_iter()
         .enumerate()
@@ -98,6 +99,21 @@ pub(crate) fn content(parent: Asset, manager: Component) -> (Mode, Mode) {
         index,
         instances: vec![],
     };
+    lifecycle.transitions.push(data::Transition {
+        serializer: 6,
+        kind: data::TransitionKind::FinishLine,
+        sources: vec![data::Endpoint {
+            serializer: 2,
+            port: 0,
+        }],
+        target: Some(data::Endpoint {
+            serializer: 3,
+            port: 0,
+        }),
+        configuration: data::TransitionConfiguration::FinishLine { laps: 1 },
+    });
+    lifecycle.registered_transitions.push(6);
+    lifecycle.bindings.order.push(Observer::Transition(6));
     let state = data::Endpoint {
         serializer: 2,
         port: 0,

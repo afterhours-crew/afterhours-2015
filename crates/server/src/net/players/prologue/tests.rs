@@ -196,6 +196,8 @@ fn setup() -> (PlayerListener, u16, Arc<nfs_world::items::Collection>) {
         .with_vehicles(Some(Arc::new(GarageContent { vehicles, layout })))
         .with_prologue(Some(Arc::new(story)));
     listener.players = players;
+    listener.replication_origin_ms = Some(100_000);
+    listener.world_ms = 100_000;
     listener.population = Some(population);
     listener.participants = participants;
     (listener, participant, items)
@@ -394,6 +396,7 @@ fn opening_runs_after_car_and_render_readiness_and_waits_for_native_completion()
             .all(|g| listener.players.objects().get(*g).is_some())
     );
     drain(&mut listener);
+    listener.world_ms = 105_000;
     assert!(send(&mut listener, 7, 47, completed.span()));
     assert!(
         goals
@@ -431,6 +434,98 @@ fn opening_runs_after_car_and_render_readiness_and_waits_for_native_completion()
     assert!(listener.pending_rpcs.is_empty());
     assert_eq!(*items, before);
     assert_eq!(listener.players.objects().snapshot(), before_duplicate);
+    // The route clock starts at driving entry, not process or mode creation time.
+    let (drive, _) = listener
+        .prologue
+        .as_ref()
+        .unwrap()
+        .driving
+        .as_ref()
+        .unwrap();
+    let &(key, serializer) = &drive.data.game_mode.checkpoints[0];
+    let (scene, selector) = listener
+        .players
+        .objects()
+        .scene_endpoint(key, serializer)
+        .unwrap();
+    let crossing = |car, seconds: f64| {
+        let mut payload = BitWriter::new();
+        payload
+            .put(selector.into(), 9)
+            .put(2, 32)
+            .put(seconds.to_bits() >> 32, 32)
+            .put(seconds.to_bits() & 0xffff_ffff, 32)
+            .align();
+        let mut body = BitWriter::new();
+        body.put(0, 32)
+            .put(0, 32)
+            .put(2, 8)
+            .put(scene.into(), 13)
+            .put(car, 13)
+            .put(payload.bytes().len() as u64, 9)
+            .put_span(payload.span());
+        body
+    };
+    listener.world_ms = 107_000;
+    for (sequence, car, seconds) in [
+        (9, u64::from(participant), 7.),
+        (10, u64::from(vehicle), 4.),
+    ] {
+        assert!(send(
+            &mut listener,
+            sequence,
+            47,
+            crossing(car, seconds).span()
+        ));
+        assert!(listener.pending_rpcs.is_empty());
+        assert_eq!(listener.players.objects().snapshot(), before_duplicate);
+    }
+    let accepted = crossing(vehicle.into(), 7.);
+    listener
+        .pending
+        .resize(MAX_PENDING, super::super::returning::empty_section());
+    assert!(!send(&mut listener, 11, 47, accepted.span()));
+    assert_eq!(listener.players.objects().snapshot(), before_duplicate);
+    drain(&mut listener);
+    assert!(send(&mut listener, 11, 47, accepted.span()));
+    assert!(listener.pending_rpcs.iter().any(|r| matches!(r,HostRpc::GameMode(c) if c.method==2 && c.arguments==nfs_world::game_mode::Arguments::Progress { passed:0,next:0,seconds:2f32.to_bits(),lap:2 })));
+    assert!(!listener.intro_modes[&participant].0.arrived());
+    let finished_world = listener.players.objects().snapshot();
+    drain(&mut listener);
+    assert!(send(&mut listener, 12, 47, accepted.span()));
+    assert!(listener.pending_rpcs.is_empty());
+    assert_eq!(listener.players.objects().snapshot(), finished_world);
+    listener.world_ms = 107_499;
+    listener.advance_prologue().unwrap();
+    assert!(!listener.intro_modes[&participant].0.arrived());
+    assert!(listener.pending_rpcs.is_empty());
+    listener.world_ms = 107_500;
+    listener.pending_rpcs.resize(
+        nfs_world::session::MAX_RPC_QUEUE,
+        HostRpc::SequenceStop(nfs_world::sequences::Stop {
+            sequence: drive_sequence,
+            serial: Serial::new(1).unwrap(),
+        }),
+    );
+    listener.advance_prologue().unwrap();
+    assert!(!listener.intro_modes[&participant].0.arrived());
+    drain(&mut listener);
+    listener.advance_prologue().unwrap();
+    assert!(listener.intro_modes[&participant].0.arrived());
+    assert_eq!(
+        listener
+            .pending_rpcs
+            .iter()
+            .filter_map(|r| match r {
+                HostRpc::GameMode(c) => Some((c.selector, c.method)),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![(2, 1), (3, 0)]
+    );
+    drain(&mut listener);
+    listener.advance_prologue().unwrap();
+    assert!(listener.pending_rpcs.is_empty());
 }
 
 #[test]

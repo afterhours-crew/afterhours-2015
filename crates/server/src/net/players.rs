@@ -1614,11 +1614,12 @@ impl Listener for PlayerListener {
                 Err(error) => return self.refuse_rpc(error, body),
             }
             if let Some(content) = self.prologue.as_deref() {
-                match Self::driving_completed(
+                match Self::driving_input(
                     content,
                     self.vehicles.as_deref(),
                     &mut intro_modes,
                     &mut players,
+                    self.event_seconds(self.world_ms),
                     body,
                 ) {
                     Ok(Some(out)) => {
