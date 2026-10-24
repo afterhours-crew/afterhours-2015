@@ -446,6 +446,184 @@ pub(crate) fn inventory(items: Arc<Collection>) -> Inventory {
     }
 }
 
+fn temporary_source(items: Arc<Collection>, scene: u32) -> TemporaryVehicle {
+    TemporaryVehicle {
+        items,
+        vehicle: 1,
+        position: [10., 2., 30.],
+        basis: [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]],
+        blueprint_scene_key: scene,
+    }
+}
+#[test]
+fn temporary_story_car_prepares_its_bundle_without_a_garage_or_item_grant() {
+    let (mut population, mut players, content, layout, items, p) = fixture();
+    let before = (*items).clone();
+    let result = population
+        .spawn_temporary_world(
+            &mut players,
+            owner(p),
+            temporary_source(items.clone(), layout.item_scene_key),
+            &content,
+        )
+        .unwrap();
+    let id = players.temporary_vehicle(3, 0x100000002, p).unwrap();
+    assert!(result.deleted.is_empty());
+    assert_eq!(result.records.last().unwrap().id, id);
+    assert!(matches!(
+        result.records[0].initial,
+        Some(Initial::SubLevel { .. })
+    ));
+    let Some(Initial::Vehicle { prefix, .. }) = &result.records.last().unwrap().initial else {
+        panic!()
+    };
+    assert_eq!(prefix.sub_id, WORLD_SUB_ID);
+    assert!(prefix.parent.as_ref().unwrap().reference.is_some());
+    assert_eq!(
+        prefix.blueprint,
+        players.objects().scene(layout.item_scene_key).unwrap()
+    );
+    assert!(!result.messages.is_empty());
+    assert!(population.spawned.is_empty());
+    assert_eq!(population.temporary_items(p), Some((1, items.as_ref())));
+    assert_eq!(*items, before);
+    assert_eq!(players.owned_vehicle(3, 0x100000002, p, 1), None);
+    assert_eq!(players.vehicle_item_of(3, 0x100000002, id), None);
+    assert!(players.vehicle_physics(3, 0x100000002, id).is_ok());
+    assert_eq!(
+        population
+            .signal_owner(&players, 3, 0x100000002, id)
+            .unwrap()
+            .participant,
+        p
+    );
+    assert!(population.signal_owner(&players, 4, 202, id).is_none());
+    assert_eq!(population.groups.len(), 1);
+    assert!(population.groups.contains_key(&id));
+    assert_eq!(
+        population
+            .remove_temporary_world(&mut players, owner(p))
+            .unwrap(),
+        id
+    );
+    assert!(population.temporary_items(p).is_none());
+    assert!(population.groups.is_empty());
+    assert!(players.objects().get(id).is_none());
+}
+
+#[test]
+fn temporary_lifetimes_preserve_owned_cars_isolate_players_and_roll_back_failed_construction() {
+    let (mut population, mut players, content, layout, items, p) = fixture();
+    let garage = population
+        .spawn(
+            &mut players,
+            owner(p),
+            inventory(items.clone()),
+            &content,
+            &layout,
+            [0.; 3],
+        )
+        .unwrap()
+        .bindings[0]
+        .vehicle;
+    let other = join(&mut players, 4, 202);
+    players.enable_player_manager().unwrap();
+    let before = players.objects().snapshot();
+    let registrations = population.registrations.clone();
+    let authority = population.authority.clone();
+    let group = population.next_group;
+    let mut oversized = (*items).clone();
+    oversized.roots = vec![1; MAX_TEMPORARY_ITEMS + 1];
+    assert_eq!(
+        population
+            .spawn_temporary_world(
+                &mut players,
+                owner(p),
+                temporary_source(Arc::new(oversized), layout.item_scene_key),
+                &content
+            )
+            .unwrap_err(),
+        Error::Bound
+    );
+    let mut invalid = temporary_source(items.clone(), layout.item_scene_key);
+    invalid.position[1] = f32::NAN;
+    assert!(
+        population
+            .spawn_temporary_world(&mut players, owner(p), invalid, &content)
+            .is_err()
+    );
+    assert_eq!(players.objects().snapshot(), before);
+    assert_eq!(population.registrations, registrations);
+    assert_eq!(population.authority, authority);
+    assert_eq!(population.next_group, group);
+    assert!(population.temporary_items(p).is_none());
+    population
+        .spawn_temporary_world(
+            &mut players,
+            owner(p),
+            temporary_source(items.clone(), layout.item_scene_key),
+            &content,
+        )
+        .unwrap();
+    let id = players.temporary_vehicle(3, 0x100000002, p).unwrap();
+    assert_ne!(garage, id);
+    assert_eq!(players.owned_vehicle(3, 0x100000002, p, 1), Some(garage));
+    assert!(
+        population
+            .spawn_temporary_world(
+                &mut players,
+                owner(p),
+                temporary_source(items.clone(), layout.item_scene_key),
+                &content
+            )
+            .is_err()
+    );
+    let foreign = Owner {
+        connection: 4,
+        persona: 202,
+        participant: p,
+    };
+    assert!(
+        population
+            .remove_temporary_world(&mut players, foreign)
+            .is_err()
+    );
+    assert_eq!(players.temporary_vehicle(3, 0x100000002, p), Some(id));
+    let other_owner = Owner {
+        connection: 4,
+        persona: 202,
+        participant: other,
+    };
+    population
+        .spawn_temporary_world(
+            &mut players,
+            other_owner,
+            temporary_source(items.clone(), layout.item_scene_key),
+            &content,
+        )
+        .unwrap();
+    let other_car = players.temporary_vehicle(4, 202, other).unwrap();
+    assert_ne!(id, other_car);
+    players
+        .bind_player_vehicle(3, 0x100000002, p, Some(id))
+        .unwrap();
+    assert!(
+        population
+            .remove_temporary_world(&mut players, owner(p))
+            .is_err()
+    );
+    assert!(population.temporary_items(p).is_some());
+    players
+        .bind_player_vehicle(3, 0x100000002, p, None)
+        .unwrap();
+    population
+        .remove_temporary_world(&mut players, owner(p))
+        .unwrap();
+    assert!(players.objects().get(garage).is_some());
+    assert_eq!(players.temporary_vehicle(4, 202, other), Some(other_car));
+    assert!(population.temporary_items(other).is_some());
+}
+
 #[test]
 fn current_inventory_creates_owned_scene_vehicle_and_matching_offer_once() {
     let (mut population, mut players, content, layout, items, p) = fixture();

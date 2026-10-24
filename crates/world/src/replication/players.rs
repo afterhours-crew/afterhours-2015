@@ -48,6 +48,8 @@ pub struct Players {
     participants: BTreeMap<u16, u16>,
     actors: BTreeMap<u16, u16>,
     vehicles: BTreeMap<(u16, u64), u16>,
+    /// A participant's temporary story car has no persistent inventory identity.
+    temporary_vehicles: BTreeMap<u16, u16>,
     /// Garage display cars prepared while the participant still drives the world car.
     staged_vehicles: BTreeMap<(u16, u64), u16>,
     goal_allocation_serial: u8,

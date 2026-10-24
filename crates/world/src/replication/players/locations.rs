@@ -234,10 +234,7 @@ impl Players {
         let mut entries = Vec::with_capacity(cars.len());
         for (&participant, &car) in cars {
             if !self.owns_participant(connection, persona, participant)
-                || !self
-                    .vehicles
-                    .iter()
-                    .any(|(&(p, _), &v)| p == participant && v == car)
+                || !self.participant_has_vehicle(participant, car)
             {
                 return Err(Error::UnknownObject);
             }

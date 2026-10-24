@@ -36,9 +36,11 @@ pub struct Population {
     pending: Pending,
     next_group: u64,
     groups: BTreeMap<u16, u64>,
+    temporary: BTreeMap<u16, (u64, Arc<Collection>)>,
 }
 /// Sub id of the world car creation (garage display cars use 1; E748).
 pub const WORLD_SUB_ID: u32 = 2;
+const MAX_TEMPORARY_ITEMS: usize = 4096;
 #[derive(Clone, Debug, Default)]
 pub struct WorldSpawn {
     pub deleted: Vec<u16>,
@@ -52,6 +54,7 @@ pub struct Output {
     pub records: Vec<Record>,
     pub bindings: Vec<Binding>,
 }
+#[derive(Clone, Copy, Debug)]
 pub struct Owner {
     pub connection: u8,
     pub persona: u64,
@@ -61,6 +64,22 @@ pub struct Owner {
 pub struct Inventory {
     pub slots: Slots,
     pub items: Arc<Collection>,
+}
+
+/// An in-memory authored car, with no account or garage-slot assignment.
+pub struct TemporaryVehicle {
+    pub items: Arc<Collection>,
+    pub vehicle: u64,
+    pub position: [f32; 3],
+    pub basis: [[f32; 3]; 3],
+    pub blueprint_scene_key: u32,
+}
+struct WorldVehicle<'a> {
+    items: &'a Collection,
+    vehicle: u64,
+    position: [f32; 3],
+    basis: [[f32; 3]; 3],
+    temporary: bool,
 }
 impl Population {
     pub fn registrations(&self) -> &registrations::Registry {
@@ -114,6 +133,7 @@ impl Population {
             pending: Pending::default(),
             next_group: 1,
             groups: BTreeMap::new(),
+            temporary: BTreeMap::new(),
         })
     }
     pub fn spawn(
@@ -325,31 +345,7 @@ impl Population {
                 .map_err(|_| Error::Unsupported)?;
             let registration = prepared.bindings[0];
             output.messages.extend(prepared.messages);
-            let parent = if let Some(scene) = world.objects().scene(registration.content_key) {
-                scene
-            } else {
-                let scene_content = sublevel::Content::new(vec![(
-                    registration.content_key,
-                    sublevel::Profile::new(false, &[sublevel::Kind::Noop])?,
-                )])?;
-                // Like the official host, the bundle scene names the root scene.
-                let root = world
-                    .objects()
-                    .scene(sublevel::root::CONTENT_KEY)
-                    .map(|ghost| sublevel::Blueprint { ghost, sub_id: 1 });
-                let creation = sublevel::passive::creation_with_parent(
-                    registration.level,
-                    registration.content_key,
-                    Serial::new(0).ok_or(Error::Shape)?,
-                    root,
-                    &scene_content,
-                )?;
-                let scenes =
-                    world.create_scenes(&[registration.level], vec![creation], &scene_content)?;
-                let id = scenes[0].id;
-                output.records.extend(scenes);
-                id
-            };
+            let parent = Self::bundle_scene(&mut world, registration, &mut output.records)?;
             let group = next.next_group;
             next.next_group = next.next_group.checked_add(1).ok_or(Error::Bound)?;
             let components = definition
@@ -507,9 +503,6 @@ impl Population {
         if layout.world_spawn().is_none() && layout.exit_teleport().is_none() {
             return Err(Error::Unsupported);
         }
-        let identity = players
-            .owned_identity(owner.connection, owner.persona, owner.participant)
-            .ok_or(Error::UnknownObject)?;
         let entry = *layout
             .occupied(inventory.slots, &inventory.items)?
             .first()
@@ -546,18 +539,159 @@ impl Population {
                 entry.slot.basis(),
             ),
         };
-        let mut prepared = next
+        let mut output = next.world_vehicle(
+            &mut world,
+            owner,
+            WorldVehicle {
+                items: &inventory.items,
+                vehicle: entry.item,
+                position,
+                basis,
+                temporary: false,
+            },
+            content,
+            layout.item_scene_key,
+        )?;
+        output.deleted.push(removed);
+        *self = next;
+        *players = world;
+        Ok(output)
+    }
+    /// Create a story car using the regular world constructor, without an
+    /// inventory grant or garage replacement. The collection remains ephemeral.
+    pub fn spawn_temporary_world(
+        &mut self,
+        players: &mut Players,
+        owner: Owner,
+        source: TemporaryVehicle,
+        content: &Content,
+    ) -> Result<WorldSpawn, Error> {
+        if self.temporary.contains_key(&owner.participant) {
+            return Err(Error::DuplicateObject);
+        }
+        if self.temporary.len() >= 128 {
+            return Err(Error::Bound);
+        }
+        if source.items.items.len() > MAX_TEMPORARY_ITEMS
+            || source.items.roots.len() > MAX_TEMPORARY_ITEMS
+        {
+            return Err(Error::Bound);
+        }
+        if source
+            .items
+            .items
+            .get(&source.vehicle)
+            .is_none_or(|item| item.owner != 0)
+        {
+            return Err(Error::Shape);
+        }
+        let mut next = self.clone();
+        let mut world = players.clone();
+        let output = next.world_vehicle(
+            &mut world,
+            owner,
+            WorldVehicle {
+                items: &source.items,
+                vehicle: source.vehicle,
+                position: source.position,
+                basis: source.basis,
+                temporary: true,
+            },
+            content,
+            source.blueprint_scene_key,
+        )?;
+        next.temporary
+            .insert(owner.participant, (source.vehicle, source.items));
+        *self = next;
+        *players = world;
+        Ok(output)
+    }
+    pub fn temporary_items(&self, participant: u16) -> Option<(u64, &Collection)> {
+        self.temporary
+            .get(&participant)
+            .map(|(id, items)| (*id, items.as_ref()))
+    }
+    pub fn remove_temporary_world(
+        &mut self,
+        players: &mut Players,
+        owner: Owner,
+    ) -> Result<u16, Error> {
+        if !self.temporary.contains_key(&owner.participant) {
+            return Err(Error::UnknownObject);
+        }
+        let id =
+            players.remove_temporary_vehicle(owner.connection, owner.persona, owner.participant)?;
+        if let Some(group) = self.groups.remove(&id) {
+            self.authority.remove_group(group);
+        }
+        self.temporary.remove(&owner.participant);
+        Ok(id)
+    }
+
+    fn bundle_scene(
+        players: &mut Players,
+        registration: registrations::Binding,
+        records: &mut Vec<Record>,
+    ) -> Result<u16, Error> {
+        Ok(
+            if let Some(scene) = players.objects().scene(registration.content_key) {
+                scene
+            } else {
+                let scene_content = sublevel::Content::new(vec![(
+                    registration.content_key,
+                    sublevel::Profile::new(false, &[sublevel::Kind::Noop])?,
+                )])?;
+                // Like the official host, the bundle scene names the root scene.
+                let root = players
+                    .objects()
+                    .scene(sublevel::root::CONTENT_KEY)
+                    .map(|ghost| sublevel::Blueprint { ghost, sub_id: 1 });
+                let creation = sublevel::passive::creation_with_parent(
+                    registration.level,
+                    registration.content_key,
+                    Serial::new(0).ok_or(Error::Shape)?,
+                    root,
+                    &scene_content,
+                )?;
+                let scenes =
+                    players.create_scenes(&[registration.level], vec![creation], &scene_content)?;
+                let id = scenes[0].id;
+                records.extend(scenes);
+                id
+            },
+        )
+    }
+    // Both callers stage Population and Players clones until the whole output
+    // validates, including new bundle scenes and late customization failures.
+    fn world_vehicle(
+        &mut self,
+        players: &mut Players,
+        owner: Owner,
+        source: WorldVehicle<'_>,
+        content: &Content,
+        blueprint_scene_key: u32,
+    ) -> Result<WorldSpawn, Error> {
+        let identity = players
+            .owned_identity(owner.connection, owner.persona, owner.participant)
+            .ok_or(Error::UnknownObject)?;
+        let item = source
+            .items
+            .items
+            .get(&source.vehicle)
+            .ok_or(Error::UnknownObject)?;
+        let definition = content
+            .definition(&item.definition)
+            .ok_or(Error::Unsupported)?;
+        let mut output = WorldSpawn::default();
+        let prepared = self
             .registrations
             .prepare(&[&definition.bundle])
             .map_err(|_| Error::Unsupported)?;
         let registration = prepared.bindings[0];
-        let parent = world
+        let parent = Self::bundle_scene(players, registration, &mut output.records)?;
+        let blueprint = players
             .objects()
-            .scene(registration.content_key)
-            .ok_or(Error::UnknownObject)?;
-        let blueprint = world
-            .objects()
-            .scene(layout.item_scene_key)
+            .scene(blueprint_scene_key)
             .ok_or(Error::UnknownObject)?;
         let resource = vehicle::Resource {
             words: [
@@ -566,8 +700,8 @@ impl Population {
             ],
             name: identity.name,
         };
-        let group = next.next_group;
-        next.next_group = next.next_group.checked_add(1).ok_or(Error::Bound)?;
+        let group = self.next_group;
+        self.next_group = self.next_group.checked_add(1).ok_or(Error::Bound)?;
         let components = definition
             .profile
             .kinds()
@@ -583,10 +717,10 @@ impl Population {
             .collect::<Result<Vec<_>, _>>()?;
         let body = content.construct(
             Request {
-                items: &inventory.items,
-                vehicle: entry.item,
-                locator: position,
-                basis,
+                items: source.items,
+                vehicle: source.vehicle,
+                locator: source.position,
+                basis: source.basis,
                 origin: [0.; 3],
                 speed: Some(0.),
                 connection: Some(owner.connection),
@@ -596,10 +730,10 @@ impl Population {
                 authority_group: group,
                 authority_components: &components,
             },
-            &mut next.authority,
+            &mut self.authority,
             |name| {
-                next.registrations
-                    .resolve_mesh(name, &mut prepared.messages)
+                self.registrations
+                    .resolve_mesh(name, &mut output.messages)
                     .ok()
             },
         )?;
@@ -625,22 +759,28 @@ impl Population {
             },
             body,
         };
-        let record = world.create_vehicle(
-            owner.connection,
-            owner.persona,
-            owner.participant,
-            entry.item,
-            creation,
-            &entity_content,
-        )?;
-        next.groups.insert(record.id, group);
-        *self = next;
-        *players = world;
-        Ok(WorldSpawn {
-            deleted: vec![removed],
-            records: vec![record],
-            messages: prepared.messages,
-        })
+        let record = if source.temporary {
+            players.create_temporary_vehicle(
+                owner.connection,
+                owner.persona,
+                owner.participant,
+                creation,
+                &entity_content,
+            )?
+        } else {
+            players.create_vehicle(
+                owner.connection,
+                owner.persona,
+                owner.participant,
+                source.vehicle,
+                creation,
+                &entity_content,
+            )?
+        };
+        self.groups.insert(record.id, group);
+        output.records.push(record);
+        output.messages.splice(0..0, prepared.messages);
+        Ok(output)
     }
     pub fn acknowledge(
         &mut self,
@@ -677,12 +817,17 @@ impl Population {
         ) {
             return None;
         }
-        for (&participant, spawned) in &self.spawned {
-            if spawned.slots.values().iter().flatten().any(|item| {
-                players.owned_vehicle(connection, persona, participant, *item) == Some(vehicle)
-                    || players.staged_vehicle(connection, persona, participant, *item)
-                        == Some(vehicle)
-            }) {
+        for &participant in self.spawned.keys().chain(self.temporary.keys()) {
+            let temporary =
+                players.temporary_vehicle(connection, persona, participant) == Some(vehicle);
+            let inventory = self.spawned.get(&participant).is_some_and(|spawned| {
+                spawned.slots.values().iter().flatten().any(|item| {
+                    players.owned_vehicle(connection, persona, participant, *item) == Some(vehicle)
+                        || players.staged_vehicle(connection, persona, participant, *item)
+                            == Some(vehicle)
+                })
+            });
+            if temporary || inventory {
                 return Some(crate::glass::Owner {
                     vehicle,
                     participant,

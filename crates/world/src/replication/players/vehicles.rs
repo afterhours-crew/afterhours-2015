@@ -446,8 +446,14 @@ impl Players {
         )
     }
 
-    /// Vehicles of the participants owned by `connection` and `persona`: the
-    /// cars that connection's client simulates.
+    pub(super) fn participant_has_vehicle(&self, participant: u16, vehicle: u16) -> bool {
+        self.vehicles
+            .iter()
+            .any(|(&(p, _), &id)| p == participant && id == vehicle)
+            || self.temporary_vehicles.get(&participant) == Some(&vehicle)
+    }
+    /// Vehicles this connection's client simulates, including temporary cars.
+    /// Temporary cars carry simulation ownership but no persistent item identity.
     pub fn owned_vehicles(&self, connection: u8, persona: u64) -> std::collections::BTreeSet<u16> {
         self.vehicles
             .iter()
@@ -456,6 +462,14 @@ impl Players {
                 self.owns_participant(connection, persona, *participant)
             })
             .map(|(_, id)| *id)
+            .chain(
+                self.temporary_vehicles
+                    .iter()
+                    .filter(|(participant, _)| {
+                        self.owns_participant(connection, persona, **participant)
+                    })
+                    .map(|(_, id)| *id),
+            )
             .collect()
     }
     /// The item of a live car owned through this connection and persona.
@@ -510,6 +524,12 @@ impl Players {
             .vehicles
             .get(&(participant, item))
             .ok_or(Error::UnknownObject)?;
+        self.remove_unbound_vehicle(participant, id)?;
+        self.vehicles.remove(&(participant, item));
+        Ok(id)
+    }
+
+    fn remove_unbound_vehicle(&mut self, participant: u16, id: u16) -> Result<(), Error> {
         // A caller must publish the detach before deleting a referenced car.
         if matches!(self.objects.get(participant).map(|o| &o.current),
             Some(Update::Participant(p)) if p.entity == Some(id))
@@ -522,7 +542,54 @@ impl Players {
             return Err(Error::TypeMismatch);
         }
         self.objects = next;
-        self.vehicles.remove(&(participant, item));
+        Ok(())
+    }
+
+    /// Create one session-only car for this participant, without assigning a
+    /// persistent item ID. It shares normal player seats and simulation authority
+    /// but cannot be addressed by inventory purchase/equipment operations.
+    pub fn create_temporary_vehicle(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        participant: u16,
+        creation: vehicle::EntityCreation,
+        content: &entity::creation::Content,
+    ) -> Result<Record, Error> {
+        if self.owned_actor(connection, persona, participant).is_none() {
+            return Err(Error::UnknownObject);
+        }
+        if self.temporary_vehicles.contains_key(&participant) {
+            return Err(Error::DuplicateObject);
+        }
+        if creation
+            .body
+            .creation
+            .as_ref()
+            .is_none_or(|c| c.connection_id != u16::from(connection))
+        {
+            return Err(Error::Shape);
+        }
+        let record = self.objects.spawn_vehicle(creation, content)?;
+        self.temporary_vehicles.insert(participant, record.id);
+        Ok(record)
+    }
+    pub fn temporary_vehicle(&self, connection: u8, persona: u64, participant: u16) -> Option<u16> {
+        self.owns_participant(connection, persona, participant)
+            .then(|| self.temporary_vehicles.get(&participant).copied())
+            .flatten()
+    }
+    pub fn remove_temporary_vehicle(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        participant: u16,
+    ) -> Result<u16, Error> {
+        let id = self
+            .temporary_vehicle(connection, persona, participant)
+            .ok_or(Error::UnknownObject)?;
+        self.remove_unbound_vehicle(participant, id)?;
+        self.temporary_vehicles.remove(&participant);
         Ok(id)
     }
     pub fn create_vehicle(
