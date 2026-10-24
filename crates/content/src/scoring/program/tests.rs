@@ -142,11 +142,13 @@ pub(crate) fn fixture() -> Sources {
             fields: vec![
                 Field {
                     id: 500,
+                    opaque_default: None,
                     access: Access::Target,
                     default: None,
                 },
                 Field {
                     id: 600,
+                    opaque_default: None,
                     access: Access::Target,
                     default: Some(Value::Float(4.0)),
                 },

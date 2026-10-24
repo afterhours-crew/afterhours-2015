@@ -1169,22 +1169,37 @@ impl<S: crate::graph::Source> crate::graph::Source for Selected<'_, S> {
 }
 
 impl AssetIndex {
-    /// Read every installed input of one composition without compiling it.
+    /// Read one composition's server inputs without compiling it. Full topology
+    /// and creation realms remain available, including client presentation nodes.
     pub fn scoring_sources(&mut self, blueprint: &str) -> Result<Sources, Error> {
         self.scoring_sources_with_native(blueprint, &BTreeSet::new())
     }
 
-    /// Read ordinary node configurations while retaining host-owned nodes in
-    /// the complete composition, creation order and property type inference.
+    /// Read ordinary server node configurations while retaining host-owned nodes
+    /// in the complete composition, creation order and property type inference.
     /// Link resolution is never redirected or hidden by this selection.
     pub fn scoring_sources_with_native(
         &mut self,
         blueprint: &str,
         native: &BTreeSet<Identity>,
     ) -> Result<Sources, Error> {
+        let creation = self.scoring_creation_realms(blueprint)?;
+        let mut excluded: BTreeSet<_> = creation
+            .iter()
+            .filter(|n| !n.realm.includes_server())
+            .map(|n| n.identity.clone())
+            .collect();
+        let declarations = property_types::read(
+            &mut Selected {
+                source: &mut self.assets,
+                native: &excluded,
+            },
+            blueprint,
+        )?;
+        excluded.extend(native.iter().cloned());
         let mut selected = Selected {
             source: &mut self.assets,
-            native,
+            native: &excluded,
         };
         Ok(Sources {
             ai: super::ai::read(&mut selected, blueprint)?,
@@ -1211,12 +1226,12 @@ impl AssetIndex {
                 blueprint,
             )?,
             scalars: super::nodes::read(&mut selected, blueprint)?,
+            arithmetic: super::arithmetic::read(&mut selected, blueprint)?,
             composition: self.scoring_events(blueprint)?,
             interfaces: self.scoring_interfaces(blueprint)?,
-            declarations: self.scoring_property_declarations(blueprint)?,
-            creation: self.scoring_creation_realms(blueprint)?,
+            declarations,
+            creation,
             calculations: self.scoring_calculations(blueprint)?,
-            arithmetic: self.scoring_arithmetic(blueprint)?,
             folds: self.scoring_boolean_folds(blueprint)?,
             gates: self.scoring_property_gates(blueprint)?,
             delays: self.scoring_delays(blueprint)?,

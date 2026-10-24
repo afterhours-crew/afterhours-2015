@@ -10,6 +10,7 @@ use nfs_world::{
     sequences::Component,
 };
 use std::collections::{BTreeMap, BTreeSet};
+pub mod program;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Sequence {

@@ -32,6 +32,7 @@ pub struct Content {
     pub previews: Option<Arc<PreviewCars>>,
     pub loading: Option<loading::Loading>,
     pub selection: Option<Authored>,
+    pub selection_program: Option<Arc<nfs_content::prologue::sequences::program::Definition>>,
     items: Arc<Collection>,
 }
 impl Content {
@@ -85,6 +86,7 @@ impl Content {
             previews: None,
             loading: None,
             selection: None,
+            selection_program: None,
         }
     }
     pub fn prepare(
@@ -110,6 +112,7 @@ impl Content {
         )
         .map_err(|e| nfs_content::Error::Content(format!("starter selection: {e:?}")))?;
         let loading = loading::Loading::prepare(index)?;
+        let selection_program = nfs_content::prologue::sequences::program::extract(index, name)?;
         let driving = Some((
             driving::Mode::prepare(
                 index,
@@ -143,6 +146,7 @@ impl Content {
             driving,
             loading: Some(loading),
             selection: Some(selection),
+            selection_program: Some(Arc::new(selection_program)),
             items: Arc::new(built.collection),
             previews: Some(Arc::new(PreviewCars {
                 garage,

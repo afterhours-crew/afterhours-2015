@@ -286,6 +286,7 @@ fn opening_runs_after_car_and_render_readiness_and_waits_for_native_completion()
     let story = Arc::make_mut(listener.prologue.as_mut().unwrap());
     story.loading = Some(load);
     story.selection = Some(story.opening.clone());
+    story.selection_program = Some(crate::sequence_content::execution::tests::fixture(false));
     listener.roles = Some(crate::scene_roles::SceneRoles {
         level: b"test".to_vec(),
         gameplay: listener.vehicles.as_ref().unwrap().layout.item_scene_key,
@@ -856,6 +857,8 @@ fn opening_runs_after_car_and_render_readiness_and_waits_for_native_completion()
     );
     assert!(listener.players.objects().get(waiting).is_none());
     assert!(listener.selection.ghost(participant).is_some());
+    assert!(listener.selection_execution.contains_key(&participant));
+    assert_eq!(listener.pending_rpcs.iter().filter(|r| matches!(r, HostRpc::Event(f) if f.event == 7 && Some(f.target.ghost) == listener.selection.ghost(participant))).count(), 1);
     let selected = listener.players.objects().snapshot();
     drain(&mut listener);
     listener.advance_prologue().unwrap();

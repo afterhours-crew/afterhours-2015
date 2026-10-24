@@ -92,6 +92,7 @@ pub(super) struct PlayerListener {
     prologue: Option<std::sync::Arc<crate::prologue::Content>>,
     opening: crate::sequence_content::authored::Instances,
     selection: crate::sequence_content::authored::Instances,
+    selection_execution: BTreeMap<u16, crate::sequence_content::execution::Execution>,
     intro_modes: BTreeMap<
         u16,
         (
@@ -722,6 +723,7 @@ impl PlayerListener {
             prologue: None,
             opening: crate::sequence_content::authored::Instances::default(),
             selection: crate::sequence_content::authored::Instances::default(),
+            selection_execution: BTreeMap::new(),
             intro_modes: BTreeMap::new(),
             vehicles: None,
             population: None,

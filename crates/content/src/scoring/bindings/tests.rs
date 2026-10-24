@@ -54,11 +54,13 @@ fn fixture() -> (Composition, Vec<Interface>) {
         fields: vec![
             Field {
                 id: 100,
+                opaque_default: None,
                 access: Access::Target,
                 default: None,
             },
             Field {
                 id: 200,
+                opaque_default: None,
                 access: Access::Source,
                 default: None,
             },
@@ -80,6 +82,31 @@ fn fixture() -> (Composition, Vec<Interface>) {
         },
         interfaces,
     )
+}
+
+#[test]
+fn opaque_interface_defaults_are_retained_but_cannot_feed_a_server_cell() {
+    let (mut graph, mut interfaces) = fixture();
+    interfaces[0].fields[0].opaque_default = Some("Vec2 (1,2)".into());
+    assert!(
+        graph
+            .typed_property_layout(&interfaces, Realm::Server, &[])
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported retained interface default")
+    );
+    for row in &mut graph.properties {
+        row.flags = Some(2);
+    }
+    assert!(
+        graph
+            .typed_property_layout(&interfaces, Realm::Server, &[])
+            .is_ok()
+    );
+    assert_eq!(
+        interfaces[0].fields[0].opaque_default.as_deref(),
+        Some("Vec2 (1,2)")
+    );
 }
 
 #[test]
@@ -177,6 +204,7 @@ fn implicit_outputs_use_blueprint_identity_and_signed_field_order() {
     ];
     interfaces[0].fields.push(Field {
         id: 3,
+        opaque_default: None,
         access: Access::Target,
         default: None,
     });
@@ -277,6 +305,7 @@ fn conflicting_external_output_aliases_fail_instead_of_losing_a_parent_value() {
     c.properties.push(row(1, 2, port(5, 40), port(7, 201), 19));
     interfaces[0].fields.push(Field {
         id: 201,
+        opaque_default: None,
         access: Access::Source,
         default: None,
     });

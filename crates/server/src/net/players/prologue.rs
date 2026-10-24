@@ -46,6 +46,7 @@ impl PlayerListener {
             .ok_or(replication::Error::Unsupported)?;
         let mut opening = self.opening.clone();
         let mut selection = self.selection.clone();
+        let mut selection_execution = self.selection_execution.clone();
         let mut modes = self.intro_modes.clone();
         let mut participants = self.participants.clone();
         let mut cars = self.world_cars.clone();
@@ -173,7 +174,50 @@ impl PlayerListener {
                         records.extend(out.records);
                         deleted.extend(out.deleted);
                         calls.extend(out.calls);
-                        records.extend(selection.start(authored, &mut players, owner)?);
+                        if let Some(record) = selection.start(authored, &mut players, owner)? {
+                            if let Some(program) = &content.selection_program {
+                                if selection_execution.len() >= nfs_world::sequences::MAX_INSTANCES
+                                {
+                                    return Err(replication::Error::Bound);
+                                }
+                                let slot = players
+                                    .local_slot(owner.connection, owner.persona, participant)
+                                    .ok_or(replication::Error::UnknownObject)?;
+                                let (execution, output) =
+                                    crate::sequence_content::execution::Execution::start(
+                                        program.clone(),
+                                        record.id,
+                                        participant,
+                                        slot,
+                                        seconds,
+                                    )
+                                    .map_err(|_| replication::Error::Shape)?;
+                                if !output.commands.is_empty() {
+                                    return Err(replication::Error::Unsupported);
+                                }
+                                for message in output.remote {
+                                    let nfs_world::logic::Message::Fire {
+                                        events,
+                                        player,
+                                        target,
+                                    } = message
+                                    else {
+                                        return Err(replication::Error::Shape);
+                                    };
+                                    calls.extend(events.into_iter().map(|event| {
+                                        HostRpc::Event(nfs_world::logic::Fire {
+                                            event,
+                                            player,
+                                            target,
+                                        })
+                                    }));
+                                }
+                                if selection_execution.insert(participant, execution).is_some() {
+                                    return Err(replication::Error::DuplicateObject);
+                                }
+                            }
+                            records.push(record);
+                        }
                     }
                 }
                 _ => {}
@@ -210,6 +254,7 @@ impl PlayerListener {
         self.population = Some(population);
         self.opening = opening;
         self.selection = selection;
+        self.selection_execution = selection_execution;
         self.intro_modes = modes;
         self.participants = participants;
         self.world_cars = cars;

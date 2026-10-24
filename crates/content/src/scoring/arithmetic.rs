@@ -229,7 +229,7 @@ pub fn compile(object: &Object) -> Result<Configuration, Error> {
         _ => Err(bad("unsupported arithmetic class")),
     }
 }
-fn read<S: Source>(source: &mut S, blueprint: &str) -> Result<Vec<Node>, Error> {
+pub(crate) fn read<S: Source>(source: &mut S, blueprint: &str) -> Result<Vec<Node>, Error> {
     if blueprint.is_empty() || blueprint.len() > 512 {
         return Err(bad("scoring blueprint name"));
     }

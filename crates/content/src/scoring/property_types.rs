@@ -486,38 +486,42 @@ impl AssetIndex {
     /// Read supported declarations, retaining prefab occurrence identity. This
     /// does not validate or implement classes absent from the returned list.
     pub fn scoring_property_declarations(&mut self, blueprint: &str) -> Result<Vec<Node>, Error> {
-        if blueprint.is_empty() || blueprint.len() > 512 {
-            return Err(bad("scoring blueprint name"));
-        }
-        let mut result = Vec::new();
-        let mut count = 0usize;
-        let mut graph = Graph::new(&mut self.assets);
-        for node in graph.read(Site::root(blueprint))? {
-            let declaration = if matches!(
-                node.object.class.as_str(),
-                "LinkedSchematicChannelEntityData" | "LinkedSchematicChannelReferenceEntityData"
-            ) {
-                let key = graph.target_field(&node.site, "ChannelAsset")?;
-                Some(channel_declaration(&graph.source.object(&key)?)?)
-            } else {
-                compile(&node.object)?
-            };
-            if let Some(declaration) = declaration {
-                count = count
-                    .saturating_add(declaration.inputs.len())
-                    .saturating_add(declaration.outputs.len());
-                if count > MAX_PORTS {
-                    return Err(bad("property declaration port bound"));
-                }
-                result.push(Node {
-                    identity: Identity::from(&node.site),
-                    class: node.object.class,
-                    declaration,
-                });
-            }
-        }
-        Ok(result)
+        read(&mut self.assets, blueprint)
     }
+}
+
+pub(crate) fn read<S: Source>(source: &mut S, blueprint: &str) -> Result<Vec<Node>, Error> {
+    if blueprint.is_empty() || blueprint.len() > 512 {
+        return Err(bad("scoring blueprint name"));
+    }
+    let mut result = Vec::new();
+    let mut count = 0usize;
+    let mut graph = Graph::new(source);
+    for node in graph.read(Site::root(blueprint))? {
+        let declaration = if matches!(
+            node.object.class.as_str(),
+            "LinkedSchematicChannelEntityData" | "LinkedSchematicChannelReferenceEntityData"
+        ) {
+            let key = graph.target_field(&node.site, "ChannelAsset")?;
+            Some(channel_declaration(&graph.source.object(&key)?)?)
+        } else {
+            compile(&node.object)?
+        };
+        if let Some(declaration) = declaration {
+            count = count
+                .saturating_add(declaration.inputs.len())
+                .saturating_add(declaration.outputs.len());
+            if count > MAX_PORTS {
+                return Err(bad("property declaration port bound"));
+            }
+            result.push(Node {
+                identity: Identity::from(&node.site),
+                class: node.object.class,
+                declaration,
+            });
+        }
+    }
+    Ok(result)
 }
 
 /// A channel asset declares scalar types independently of runtime values and
@@ -631,6 +635,14 @@ impl Composition {
                 .position(|n| n.identity == interface.identity)
                 .ok_or_else(|| bad("property interface identity"))? as u16;
             for field in &interface.fields {
+                if field.opaque_default.is_some()
+                    && layout.outputs.contains_key(&Port {
+                        node: index,
+                        field: field.id,
+                    })
+                {
+                    return Err(bad("unsupported retained interface default"));
+                }
                 if let Some(value) = field.default.clone() {
                     // A retained descriptor port is an internal source. Source
                     // declarations without an output cell do not create one.
