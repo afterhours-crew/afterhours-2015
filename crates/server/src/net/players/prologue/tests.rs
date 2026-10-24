@@ -253,6 +253,52 @@ fn setup() -> (PlayerListener, u16, Arc<nfs_world::items::Collection>) {
 #[test]
 fn opening_runs_after_car_and_render_readiness_and_waits_for_native_completion() {
     let (mut listener, participant, items) = setup();
+    let load_asset = Asset {
+        bundle: 32,
+        type_id: 10,
+        local_index: 0,
+    };
+    let load = crate::prologue::loading::Loading::new(nfs_content::participant_logic::Layout {
+        asset: load_asset,
+        catalog: vec![(10, 1)],
+        scene_content_key: 909,
+        owner: nfs_content::participant_logic::Owner::Scene,
+        bus_count: 1,
+        fields: vec![
+            nfs_content::participant_logic::Field {
+                kind: entity::Kind::Root,
+                channel: None,
+            },
+            nfs_content::participant_logic::Field {
+                kind: entity::Kind::BoolProperty,
+                channel: None,
+            },
+            nfs_content::participant_logic::Field {
+                kind: entity::Kind::RpcReference,
+                channel: Some(nfs_content::participant_logic::Channel::Scene {
+                    content_key: 909,
+                    serializer: 1,
+                }),
+            },
+        ],
+    })
+    .unwrap();
+    let story = Arc::make_mut(listener.prologue.as_mut().unwrap());
+    story.loading = Some(load);
+    story.selection = Some(story.opening.clone());
+    listener.roles = Some(crate::scene_roles::SceneRoles {
+        level: b"test".to_vec(),
+        gameplay: listener.vehicles.as_ref().unwrap().layout.item_scene_key,
+        startup: 909,
+        garage: listener.vehicles.as_ref().unwrap().layout.scene_key,
+        progression: 909,
+        traffic: [0; 10],
+        customization_timer: load_asset,
+        streaming_gate: load_asset,
+        spawn_points: None,
+        free_roam: None,
+        bank: None,
+    });
     let before = (*items).clone();
     listener.advance_prologue().unwrap();
     let vehicle = listener
@@ -276,7 +322,46 @@ fn opening_runs_after_car_and_render_readiness_and_waits_for_native_completion()
     }
     .encode()
     .unwrap();
-    assert!(send(&mut listener, 0, 82, glass.span()));
+    let loading = listener.players.objects().iter().find_map(|(id,o)| matches!(&o.initial, replication::Initial::Entity{prefix,..} if prefix.asset == load_asset).then_some(id)).unwrap();
+    let streamed = nfs_world::logic::Message::Reached {
+        event: nfs_world::sequences::STREAMING_LOADED,
+        target: nfs_world::logic::EntityRef {
+            ghost: loading,
+            entity: 1,
+        },
+        player: 0,
+    }
+    .encode()
+    .unwrap();
+    let first = frame::Builder::new()
+        .messages(
+            None,
+            vec![
+                frame::Group {
+                    channel: 2,
+                    sequence: Some(0),
+                    messages: vec![frame::Message::Opaque {
+                        index: 82,
+                        body: streamed.span(),
+                    }],
+                },
+                frame::Group {
+                    channel: 0,
+                    sequence: Some(0),
+                    messages: vec![frame::Message::Opaque {
+                        index: 82,
+                        body: glass.span(),
+                    }],
+                },
+            ],
+        )
+        .build()
+        .unwrap();
+    assert!(listener.frame(Queued {
+        advertised: None,
+        frame: 0,
+        data: first.span()
+    }));
     assert_eq!(
         listener.participants.stage(participant),
         Some(Stage::IntroTeleporting)
@@ -574,10 +659,15 @@ fn opening_runs_after_car_and_render_readiness_and_waits_for_native_completion()
     listener.advance_prologue().unwrap();
     assert!(listener.pending_rpcs.is_empty());
     let returning = listener.participants.return_bindings().unwrap();
-    let preview_source = crate::vehicle_content::population::tests::previews(
+    let mut preview_source = crate::vehicle_content::population::tests::previews(
         &listener.vehicles.as_ref().unwrap().layout,
         items.clone(),
     );
+    // This fixture also exposes the shared ItemBuilder at serializer 3.
+    // Reserve distinct serializers for the three vehicle acknowledgements.
+    for slot in &mut Arc::make_mut(&mut preview_source).garage.slots {
+        std::mem::swap(&mut slot.component, &mut slot.item_component);
+    }
     Arc::make_mut(listener.prologue.as_mut().unwrap()).previews = Some(preview_source);
     let enter = request(returning.request, participant, 0);
     listener
@@ -635,6 +725,14 @@ fn opening_runs_after_car_and_render_readiness_and_waits_for_native_completion()
             .count(),
         3
     );
+    let preview_bindings = listener
+        .pending_rpcs
+        .iter()
+        .filter_map(|r| match r {
+            HostRpc::Vehicle(b) => Some(*b),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
     assert_eq!(
         listener
             .players
@@ -662,11 +760,12 @@ fn opening_runs_after_car_and_render_readiness_and_waits_for_native_completion()
     .unwrap();
     assert!(!send(&mut listener, 15, 47, complete.span()));
     assert_eq!(listener.players.objects().snapshot(), live);
+    listener.world_ms += 7500;
     let stops = listener
         .returns
         .as_mut()
         .unwrap()
-        .poll_capacity(listener.world_ms + 7500, 1)
+        .poll_capacity(listener.world_ms, 1)
         .unwrap();
     assert_eq!(stops.len(), 1);
     listener.pending_entries.resize(
@@ -677,6 +776,15 @@ fn opening_runs_after_car_and_render_readiness_and_waits_for_native_completion()
     assert!(listener.players.objects().get(vehicle).is_some());
     drain(&mut listener);
     assert!(send(&mut listener, 15, 47, complete.span()));
+    assert_eq!(
+        listener
+            .pending_entries
+            .iter()
+            .flat_map(|(_, calls)| calls)
+            .filter(|call| matches!(call, HostRpc::GaragePresence(p) if p.enabled))
+            .count(),
+        1
+    );
     assert_eq!(
         listener.participants.stage(participant),
         Some(Stage::IntroLoadingGarage)
@@ -693,6 +801,66 @@ fn opening_runs_after_car_and_render_readiness_and_waits_for_native_completion()
             .is_some()
     );
     assert_eq!(*items, before);
+    let waiting = listener
+        .sequences
+        .as_ref()
+        .unwrap()
+        .ghost(participant)
+        .unwrap();
+    drain(&mut listener);
+    listener.advance_sequences(listener.world_ms).unwrap();
+    let complete = Completed {
+        sequence: waiting,
+        participant,
+    }
+    .encode()
+    .unwrap();
+    assert!(!send(&mut listener, 16, 47, complete.span()));
+    for (i, b) in preview_bindings.iter().enumerate() {
+        let ack = b.expected().encode().unwrap();
+        assert!(send(&mut listener, 16 + i as u8, 47, ack.span()));
+    }
+    listener.advance_sequences(listener.world_ms).unwrap();
+    assert!(
+        listener
+            .pending_rpcs
+            .iter()
+            .all(|r| !matches!(r, HostRpc::SequenceStop(_)))
+    );
+    listener
+        .advance_sequences(listener.world_ms + nfs_world::sequences::FIRST_READY_MS)
+        .unwrap();
+    assert!(
+        listener
+            .pending_rpcs
+            .iter()
+            .any(|r| matches!(r, HostRpc::SequenceStop(s) if s.sequence == waiting))
+    );
+    drain(&mut listener);
+    assert!(send(&mut listener, 19, 47, complete.span()));
+    listener
+        .pending
+        .resize(MAX_PENDING, super::super::returning::empty_section());
+    let before_selection = listener.players.objects().snapshot();
+    listener.advance_prologue().unwrap();
+    assert_eq!(listener.players.objects().snapshot(), before_selection);
+    assert_eq!(
+        listener.participants.stage(participant),
+        Some(Stage::IntroLoadingGarage)
+    );
+    drain(&mut listener);
+    listener.advance_prologue().unwrap();
+    assert_eq!(
+        listener.participants.stage(participant),
+        Some(Stage::IntroCarSelection)
+    );
+    assert!(listener.players.objects().get(waiting).is_none());
+    assert!(listener.selection.ghost(participant).is_some());
+    let selected = listener.players.objects().snapshot();
+    drain(&mut listener);
+    listener.advance_prologue().unwrap();
+    assert_eq!(listener.players.objects().snapshot(), selected);
+    assert!(listener.pending_rpcs.is_empty());
 }
 
 #[test]

@@ -447,6 +447,9 @@ pub(crate) fn fixture() -> (Population, Players, Content, Layout, Arc<Collection
     ];
     let population = Population::new(&messages).unwrap();
     let mut players = Players::default();
+    let mut garage_fields = vec![sublevel::Kind::Noop; 25];
+    garage_fields[1..7].fill(sublevel::Kind::Rpc);
+    garage_fields[nfs_world::garage::presence::COMPONENT] = sublevel::Kind::RpcBool;
     let scene_content = sublevel::Content::new(vec![
         (
             layout.item_scene_key,
@@ -454,19 +457,7 @@ pub(crate) fn fixture() -> (Population, Players, Content, Layout, Arc<Collection
         ),
         (
             layout.scene_key,
-            sublevel::Profile::new(
-                false,
-                &[
-                    sublevel::Kind::Noop,
-                    sublevel::Kind::Rpc,
-                    sublevel::Kind::Rpc,
-                    sublevel::Kind::Rpc,
-                    sublevel::Kind::Rpc,
-                    sublevel::Kind::Rpc,
-                    sublevel::Kind::Rpc,
-                ],
-            )
-            .unwrap(),
+            sublevel::Profile::new(false, &garage_fields).unwrap(),
         ),
     ])
     .unwrap();

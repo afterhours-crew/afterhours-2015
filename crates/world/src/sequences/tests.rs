@@ -261,7 +261,6 @@ fn sequence_resource_limit_is_transactional() {
                 phase: Phase::Running {
                     fallback_at: FALLBACK_MS,
                 },
-                streaming: None,
                 garage_loaded: false,
                 ready_at: None,
             },
@@ -424,6 +423,45 @@ fn readiness_requires_streaming_and_every_slot_and_does_not_reset_on_repeats() {
                 .is_empty()
         );
     }
+}
+
+#[test]
+fn streaming_reports_before_sequence_creation_are_owned_and_remembered() {
+    let (mut players, mut sequences) = setup();
+    let owner = join(&mut players, 1, 10);
+    let other = join(&mut players, 2, 20);
+    let ghost = streaming(&mut players, owner);
+    assert!(
+        sequences
+            .bind_streaming(&players, other, ghost, STREAMING_ASSET)
+            .is_err()
+    );
+    sequences
+        .bind_streaming(&players, owner, ghost, STREAMING_ASSET)
+        .unwrap();
+    assert!(
+        sequences
+            .streaming_event(&reached(ghost, STREAMING_LOADED, 1))
+            .is_err()
+    );
+    assert!(
+        sequences
+            .streaming_event(&reached(ghost, STREAMING_LOADED, 0))
+            .unwrap()
+    );
+    assert!(sequences.poll(90_000, 1).unwrap().is_empty());
+    let sequence = sequences.start(&mut players, owner).unwrap().unwrap().id;
+    sequences.garage_loaded(owner, true).unwrap();
+    assert!(
+        sequences
+            .poll(90_000 + FIRST_READY_MS - 1, 1)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        sequences.poll(90_000 + FIRST_READY_MS, 1).unwrap()[0].sequence,
+        sequence
+    );
 }
 
 #[test]

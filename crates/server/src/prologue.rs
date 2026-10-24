@@ -22,6 +22,7 @@ use nfs_world::{
 };
 use std::sync::Arc;
 pub mod driving;
+pub mod loading;
 
 #[derive(Clone, Debug)]
 pub struct Content {
@@ -29,6 +30,8 @@ pub struct Content {
     pub opening: Authored,
     pub driving: Option<(driving::Mode, driving::Mode)>,
     pub previews: Option<Arc<PreviewCars>>,
+    pub loading: Option<loading::Loading>,
+    pub selection: Option<Authored>,
     items: Arc<Collection>,
 }
 impl Content {
@@ -80,6 +83,8 @@ impl Content {
             items,
             driving: Some(driving::tests::content(parent, manager)),
             previews: None,
+            loading: None,
+            selection: None,
         }
     }
     pub fn prepare(
@@ -97,6 +102,14 @@ impl Content {
         }
         let opening = Authored::new(sequence, parent, stops)
             .map_err(|e| nfs_content::Error::Content(format!("opening construction: {e:?}")))?;
+        let name = "gameplay/progression/intro/introcarselectsequence";
+        let selection = Authored::new(
+            sequences::extract(index, name)?,
+            parent,
+            sequences::direct_stop_signals(index, name)?,
+        )
+        .map_err(|e| nfs_content::Error::Content(format!("starter selection: {e:?}")))?;
+        let loading = loading::Loading::prepare(index)?;
         let driving = Some((
             driving::Mode::prepare(
                 index,
@@ -128,6 +141,8 @@ impl Content {
             start,
             opening,
             driving,
+            loading: Some(loading),
+            selection: Some(selection),
             items: Arc::new(built.collection),
             previews: Some(Arc::new(PreviewCars {
                 garage,

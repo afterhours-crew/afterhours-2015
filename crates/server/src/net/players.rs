@@ -91,6 +91,7 @@ pub(super) struct PlayerListener {
     progression: Option<std::sync::Arc<crate::progression::Content>>,
     prologue: Option<std::sync::Arc<crate::prologue::Content>>,
     opening: crate::sequence_content::authored::Instances,
+    selection: crate::sequence_content::authored::Instances,
     intro_modes: BTreeMap<
         u16,
         (
@@ -720,6 +721,7 @@ impl PlayerListener {
             progression: None,
             prologue: None,
             opening: crate::sequence_content::authored::Instances::default(),
+            selection: crate::sequence_content::authored::Instances::default(),
             intro_modes: BTreeMap::new(),
             vehicles: None,
             population: None,
@@ -1221,7 +1223,6 @@ impl Listener for PlayerListener {
                     &players,
                     &participants,
                     population.as_ref(),
-                    &logic_ghosts,
                     self.persona,
                 )?;
             }
@@ -1651,7 +1652,7 @@ impl Listener for PlayerListener {
                     self.persona,
                     body,
                 ) {
-                    Ok(Some(out)) => {
+                    Ok(Some(mut out)) => {
                         if let Some((participant, removed)) = out.removed {
                             if world_cars.remove(&removed).is_none() {
                                 return self.refuse_rpc(replication::Error::UnknownObject, body);
@@ -1663,6 +1664,21 @@ impl Listener for PlayerListener {
                                 }
                             }
                             completed_returns.push((participant, removed));
+                            let presence = (|| {
+                                let endpoint =
+                                    Self::presence_endpoint(self.roles.as_ref(), &players)?;
+                                garage_presence.set(endpoint, participant, true, |id| {
+                                    players.owns_participant(HOST_SELECTOR as u8, self.persona, id)
+                                })
+                            })();
+                            match presence {
+                                Ok(Some(value)) => out
+                                    .output
+                                    .calls
+                                    .push(nfs_world::participants::HostRpc::GaragePresence(value)),
+                                Ok(None) => {}
+                                Err(error) => return self.refuse_rpc(error, body),
+                            }
                         }
                         if !out.output.records.is_empty()
                             || !out.output.deleted.is_empty()

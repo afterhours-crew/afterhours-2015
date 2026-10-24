@@ -1205,29 +1205,52 @@ pub(crate) fn logic_creation(
     layout: &Layout,
     blueprint: u16,
     participant: u16,
-    mut resolve: impl FnMut(Binding) -> Result<(u16, u16), Error>,
+    resolve: impl FnMut(Binding) -> Result<(u16, u16), Error>,
     value: &dyn Fn(usize, &Field) -> Option<Value>,
 ) -> Result<Creation, Error> {
-    let mut initial = Vec::with_capacity(layout.fields.len());
-    let mut updates = Vec::with_capacity(layout.fields.len());
+    logic_creation_fields(
+        layout.asset,
+        (layout.sub_id, layout.bus_count),
+        blueprint,
+        participant,
+        layout
+            .fields
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (f.kind, f.binding, value(i, f))),
+        resolve,
+    )
+}
+
+/// Shared serializer construction for installed event and scene participant logic.
+pub(crate) fn logic_creation_fields(
+    asset: Asset,
+    buses: (u32, u16),
+    blueprint: u16,
+    participant: u16,
+    fields: impl ExactSizeIterator<Item = (Kind, Option<Binding>, Option<Value>)>,
+    mut resolve: impl FnMut(Binding) -> Result<(u16, u16), Error>,
+) -> Result<Creation, Error> {
+    let mut initial = Vec::with_capacity(fields.len());
+    let mut updates = Vec::with_capacity(fields.len());
     let mut next = 0u16;
-    for (index, field) in layout.fields.iter().enumerate() {
+    for (index, (kind, binding, value)) in fields.enumerate() {
         let mut take = || -> Result<Rpc, Error> {
             let current = rpc(next)?;
             next = next.checked_add(1).ok_or(Error::Bound)?;
             Ok(current)
         };
-        let (first, update) = match field.kind {
+        let (first, update) = match kind {
             Kind::Root if index == 0 => (
                 Initial::Root {
-                    value: layout.bus_count,
+                    value: buses.1,
                     rpc: take()?,
                     reference: participant,
                 },
                 Update::Noop,
             ),
             Kind::RpcReference => {
-                let binding = field.binding.ok_or(Error::Unsupported)?;
+                let binding = binding.ok_or(Error::Unsupported)?;
                 let (reference, target_selector) = resolve(binding)?;
                 (
                     Initial::RpcReference {
@@ -1240,7 +1263,7 @@ pub(crate) fn logic_creation(
             }
             Kind::Rpc => (Initial::Rpc(take()?), Update::Noop),
             Kind::RpcBool => {
-                let initial = match value(index, field) {
+                let initial = match value {
                     Some(Value::Bool(v)) => v,
                     None => false,
                     Some(_) => return Err(Error::TypeMismatch),
@@ -1260,19 +1283,19 @@ pub(crate) fn logic_creation(
                 },
                 Update::Noop,
             ),
-            Kind::BoolProperty => match value(index, field) {
+            Kind::BoolProperty => match value {
                 Some(Value::Bool(v)) => {
                     (Initial::BoolProperty(Some(v)), Update::BoolProperty(None))
                 }
                 None => (Initial::BoolProperty(None), Update::BoolProperty(None)),
                 Some(_) => return Err(Error::TypeMismatch),
             },
-            Kind::I32Property => match value(index, field) {
+            Kind::I32Property => match value {
                 Some(Value::Int(v)) => (Initial::I32Property(Some(v)), Update::I32Property(None)),
                 None => (Initial::I32Property(None), Update::I32Property(None)),
                 Some(_) => return Err(Error::TypeMismatch),
             },
-            Kind::FloatProperty => match value(index, field) {
+            Kind::FloatProperty => match value {
                 Some(Value::Float(v)) if v.is_finite() => (
                     Initial::FloatProperty(Some(v.to_bits())),
                     Update::FloatProperty(None),
@@ -1290,9 +1313,9 @@ pub(crate) fn logic_creation(
         prefix: Prefix {
             parent: None,
             blueprint,
-            sub_id: layout.sub_id,
+            sub_id: buses.0,
             owner: None,
-            asset: layout.asset,
+            asset,
         },
         body: Body {
             initial: Some(initial),

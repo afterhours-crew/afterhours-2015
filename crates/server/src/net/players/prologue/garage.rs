@@ -11,7 +11,7 @@ pub(in crate::net::players) struct GarageOutput {
     pub removed: Option<(u16, u16)>,
 }
 
-fn notify(
+pub(super) fn notify(
     content: &crate::prologue::Content,
     modes: &mut Modes,
     players: &mut Players,

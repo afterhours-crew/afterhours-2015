@@ -68,6 +68,9 @@ fn notifications(participant: u16, chain: &[(Endpoint, Call)]) -> Vec<Notificati
         .collect()
 }
 impl Lifecycle {
+    pub fn intro_participants(&self) -> impl Iterator<Item = u16> + '_ {
+        self.intro_started.iter().copied()
+    }
     pub fn return_bindings(&self) -> Option<ReturnBindings> {
         self.returning
     }

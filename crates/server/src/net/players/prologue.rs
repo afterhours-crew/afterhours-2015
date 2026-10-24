@@ -45,6 +45,7 @@ impl PlayerListener {
             .clone()
             .ok_or(replication::Error::Unsupported)?;
         let mut opening = self.opening.clone();
+        let mut selection = self.selection.clone();
         let mut modes = self.intro_modes.clone();
         let mut participants = self.participants.clone();
         let mut cars = self.world_cars.clone();
@@ -67,6 +68,12 @@ impl PlayerListener {
                 persona: self.persona,
                 participant,
             };
+            if participants.intro_participants().any(|p| p == participant)
+                && let Some(loading) = &content.loading
+                && let Some(record) = loading.spawn(&mut players, owner)?
+            {
+                records.push(record);
+            }
             match self.participants.stage(participant) {
                 Some(Stage::IntroSpawning)
                     if players
@@ -147,6 +154,27 @@ impl PlayerListener {
                         messages.extend(out.messages);
                         calls.extend(out.bindings.into_iter().map(HostRpc::Vehicle));
                     }
+                    if self.participants.stage(participant) == Some(Stage::IntroLoadingGarage)
+                        && let Some(waiting) = &self.sequences
+                        && waiting.is_complete(participant)
+                        && let Some(authored) = &content.selection
+                    {
+                        let ghost = waiting
+                            .ghost(participant)
+                            .ok_or(replication::Error::UnknownObject)?;
+                        players.remove_entities(&[ghost])?;
+                        deleted.push(ghost);
+                        let Outcome::Advanced(chain) = participants.intro_garage_ready(participant)
+                        else {
+                            return Err(replication::Error::Shape);
+                        };
+                        let mut out = crate::prologue::driving::Output::default();
+                        garage::notify(content, &mut modes, &mut players, chain, &mut out)?;
+                        records.extend(out.records);
+                        deleted.extend(out.deleted);
+                        calls.extend(out.calls);
+                        records.extend(selection.start(authored, &mut players, owner)?);
+                    }
                 }
                 _ => {}
             }
@@ -181,6 +209,7 @@ impl PlayerListener {
         self.players = players;
         self.population = Some(population);
         self.opening = opening;
+        self.selection = selection;
         self.intro_modes = modes;
         self.participants = participants;
         self.world_cars = cars;

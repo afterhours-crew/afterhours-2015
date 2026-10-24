@@ -268,13 +268,13 @@ struct Instance {
     owner: Owner,
     ghost: u16,
     phase: Phase,
-    streaming: Option<Streaming>,
     garage_loaded: bool,
     ready_at: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug)]
 struct Streaming {
+    owner: Owner,
     ghost: u16,
     slot: u8,
     loaded: bool,
@@ -308,6 +308,7 @@ pub struct Sequences {
     definition: Definition,
     content: Content,
     entries: BTreeMap<u16, Instance>,
+    streaming: BTreeMap<u16, Streaming>,
     world_ms: u64,
 }
 impl Sequences {
@@ -341,6 +342,7 @@ impl Sequences {
             definition,
             content,
             entries: BTreeMap::new(),
+            streaming: BTreeMap::new(),
             world_ms: 0,
         })
     }
@@ -348,7 +350,6 @@ impl Sequences {
         if !players.owns_participant(owner.connection, owner.persona, owner.participant) {
             return Err(Error::UnknownObject);
         }
-        let mut streaming = None;
         if let Some(old) = self.entries.get(&owner.participant) {
             if old.owner != owner {
                 return Err(Error::DuplicateObject);
@@ -356,7 +357,6 @@ impl Sequences {
             if old.phase != Phase::ReadyForRestart {
                 return Ok(None);
             }
-            streaming = old.streaming;
         }
         if !self.entries.contains_key(&owner.participant) && self.entries.len() >= MAX_INSTANCES {
             return Err(Error::Bound);
@@ -376,7 +376,6 @@ impl Sequences {
                 owner,
                 ghost: record.id,
                 phase: Phase::Running { fallback_at },
-                streaming,
                 garage_loaded: false,
                 ready_at: None,
             },
@@ -402,25 +401,25 @@ impl Sequences {
         {
             return Err(Error::TypeMismatch);
         }
-        let instance = self
-            .entries
-            .get_mut(&owner.participant)
-            .ok_or(Error::UnknownObject)?;
-        if instance.owner != owner {
-            return Err(Error::UnknownObject);
-        }
-        if let Some(old) = instance.streaming {
-            return if old.ghost == ghost && old.slot == slot {
+        if let Some(old) = self.streaming.get(&owner.participant) {
+            return if old.owner == owner && old.ghost == ghost && old.slot == slot {
                 Ok(())
             } else {
                 Err(Error::DuplicateObject)
             };
         }
-        instance.streaming = Some(Streaming {
-            ghost,
-            slot,
-            loaded: false,
-        });
+        if self.streaming.len() >= MAX_INSTANCES {
+            return Err(Error::Bound);
+        }
+        self.streaming.insert(
+            owner.participant,
+            Streaming {
+                owner,
+                ghost,
+                slot,
+                loaded: false,
+            },
+        );
         Ok(())
     }
     pub fn streaming_event(&mut self, message: &crate::logic::Message) -> Result<bool, Error> {
@@ -432,24 +431,27 @@ impl Sequences {
         else {
             return Ok(false);
         };
-        let Some(instance) = self
-            .entries
+        let Some(streaming) = self
+            .streaming
             .values_mut()
-            .find(|i| i.streaming.is_some_and(|s| s.ghost == target.ghost))
+            .find(|s| s.ghost == target.ghost)
         else {
             return Ok(false);
         };
         if target.entity != 1 || !matches!(*event, STREAMING_LOADED | STREAMING_UNLOADED) {
             return Ok(false);
         }
-        let streaming = instance.streaming.as_ref().expect("matched binding");
         if *player != streaming.slot {
             return Err(Error::UnknownObject);
         }
         let loaded = *event == STREAMING_LOADED;
-        let ready_at = instance.deadline(self.world_ms, loaded, instance.garage_loaded)?;
-        instance.streaming.as_mut().expect("matched binding").loaded = loaded;
-        instance.ready_at = ready_at;
+        if let Some(instance) = self.entries.get_mut(&streaming.owner.participant) {
+            if instance.owner != streaming.owner {
+                return Err(Error::UnknownObject);
+            }
+            instance.ready_at = instance.deadline(self.world_ms, loaded, instance.garage_loaded)?;
+        }
+        streaming.loaded = loaded;
         Ok(true)
     }
     pub fn garage_loaded(&mut self, owner: Owner, loaded: bool) -> Result<(), Error> {
@@ -462,7 +464,9 @@ impl Sequences {
         }
         let ready_at = instance.deadline(
             self.world_ms,
-            instance.streaming.is_some_and(|s| s.loaded),
+            self.streaming
+                .get(&owner.participant)
+                .is_some_and(|s| s.owner == owner && s.loaded),
             loaded,
         )?;
         instance.garage_loaded = loaded;

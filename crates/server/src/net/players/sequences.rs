@@ -53,13 +53,14 @@ impl PlayerListener {
             self.world_ms = world_ms;
             return Ok(());
         };
+        // Readiness observed this tick starts its delay on this tick's clock.
+        sequences.poll(world_ms, 0)?;
         Self::refresh_readiness(
             self.roles.as_ref(),
             &mut sequences,
             &self.players,
             &self.participants,
             self.population.as_ref(),
-            &self.logic_ghosts,
             self.persona,
         )?;
         let capacity = nfs_world::session::MAX_RPC_QUEUE.saturating_sub(self.pending_rpcs.len());
@@ -176,34 +177,45 @@ impl PlayerListener {
         players: &Players,
         participants: &Lifecycle,
         population: Option<&Population>,
-        logic_ghosts: &BTreeMap<u16, BTreeMap<u16, u16>>,
         persona: u64,
     ) -> Result<(), replication::Error> {
-        for participant in participants.waiting_garage() {
-            if sequences.ghost(participant).is_none() {
-                continue;
-            }
+        let Some(roles) = roles else {
+            return Ok(());
+        };
+        for participant in players.player_participants() {
             let owner = Owner {
                 connection: HOST_SELECTOR as u8,
                 persona,
                 participant,
             };
-            if let Some(ghosts) = logic_ghosts.get(&participant) {
-                let asset = roles.ok_or(replication::Error::Unsupported)?.streaming_gate;
-                let mut candidates = ghosts.values().copied().filter(|ghost| {
-                    matches!(
-                    players.objects().get(*ghost).map(|o| &o.initial),
-                    Some(replication::Initial::Entity { prefix, .. }) if prefix.asset == asset)
-                });
-                if let Some(ghost) = candidates.next() {
-                    if candidates.next().is_some() {
-                        return Err(replication::Error::DuplicateObject);
-                    }
-                    sequences.bind_streaming(players, owner, ghost, asset)?;
-                }
+            if !players.owns_participant(owner.connection, owner.persona, participant) {
+                continue;
             }
-            sequences
-                .garage_loaded(owner, population.is_some_and(|p| p.all_loaded(participant)))?;
+            let asset = roles.streaming_gate;
+            let mut candidates = players.objects().iter().filter_map(|(ghost, object)| {
+                matches!(&object.initial,
+                    replication::Initial::Entity { prefix, fields } if prefix.asset == asset
+                    && matches!(fields.first(), Some(replication::entity::Initial::Root {reference,..}) if *reference == participant)
+                ).then_some(ghost)
+            });
+            if let Some(ghost) = candidates.next() {
+                if candidates.next().is_some() {
+                    return Err(replication::Error::DuplicateObject);
+                }
+                sequences.bind_streaming(players, owner, ghost, asset)?;
+            }
+            if sequences.ghost(participant).is_some() {
+                let loaded = population.is_some_and(|p| match participants.stage(participant) {
+                    Some(nfs_world::participants::Stage::IntroLoadingGarage) => {
+                        p.previews_loaded(participant)
+                    }
+                    Some(nfs_world::participants::Stage::LoadingGarage) => {
+                        p.all_loaded(participant)
+                    }
+                    _ => false,
+                });
+                sequences.garage_loaded(owner, loaded)?;
+            }
         }
         Ok(())
     }

@@ -10,6 +10,23 @@ use serde_json::json;
 use std::collections::BTreeSet;
 pub mod starter;
 
+/// The level's shared garage streaming reporter, with its scene-owned channels.
+pub fn loading(index: &mut AssetIndex) -> Result<crate::participant_logic::Layout, Error> {
+    let directory = index
+        .identity
+        .scenes
+        .level
+        .rsplit_once('/')
+        .ok_or_else(|| bad("level directory"))?
+        .0;
+    let scene = format!("{directory}/garage");
+    index.participant_layout(
+        &scene,
+        "gameplay/garageloadlogic",
+        crate::participant_logic::Owner::Scene,
+    )
+}
+
 /// Port identifiers understood by this build's garage, persistence and exit code.
 /// These identify link/property contracts, never particular scene instances.
 #[derive(Clone, Debug, Eq, PartialEq)]
