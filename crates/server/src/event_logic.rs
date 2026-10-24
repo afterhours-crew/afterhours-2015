@@ -1197,55 +1197,27 @@ impl Content {
         let layout = &sequence.layout;
         let (manager, manager_selector) = self.manager(world, name)?;
         let number = live_sequences(world, (manager, manager_selector));
-        let mut initial = Vec::with_capacity(layout.fields.len());
-        for (index, field) in layout.fields.iter().enumerate() {
-            let r = rpc(selector(layout, index)?)?;
-            initial.push(match field.kind {
-                Kind::SequenceRoot if index == 0 => Initial::SequenceRoot {
-                    value: layout.bus_count,
-                    rpc: r,
-                    manager,
-                    manager_selector,
-                    sequence: number,
-                    participants: vec![participant],
-                    stopping: false,
-                },
-                Kind::RpcOptionalReference => Initial::RpcOptionalReference {
-                    rpc: r,
-                    reference: Some(participant),
-                },
-                Kind::RpcReference => {
-                    let binding = field.binding.ok_or(Error::Unsupported)?;
-                    let (reference, target_selector) =
-                        self.bound(world, binding, Some(game_mode))?;
-                    Initial::RpcReference {
-                        rpc: r,
-                        reference,
-                        target_selector,
-                    }
-                }
-                Kind::RpcReferences => Initial::RpcReferences {
-                    rpc: r,
-                    references: vec![participant],
-                },
-                Kind::Rpc => Initial::Rpc(r),
-                _ => return Err(Error::Unsupported),
-            });
-        }
-        let updates = vec![Some(Update::Noop); initial.len()];
-        let creation = Creation {
-            prefix: Prefix {
-                parent: None,
-                blueprint: manager,
-                sub_id: layout.sub_id,
-                owner: None,
-                asset: layout.asset,
+        let blueprint = nfs_world::sequences::authored::Blueprint::new(
+            layout.asset,
+            layout.sub_id,
+            layout.bus_count,
+            &layout
+                .fields
+                .iter()
+                .map(|field| field.kind)
+                .collect::<Vec<_>>(),
+        )?;
+        let creation = blueprint.creation(
+            nfs_world::sequences::authored::Instance {
+                manager: (manager, manager_selector),
+                number,
+                participant,
             },
-            body: Body {
-                initial: Some(initial),
-                updates,
+            |index| {
+                let binding = layout.fields[index].binding.ok_or(Error::Unsupported)?;
+                self.bound(world, binding, Some(game_mode))
             },
-        };
+        )?;
         creation.encode(&self.creation)?;
         Ok(creation)
     }

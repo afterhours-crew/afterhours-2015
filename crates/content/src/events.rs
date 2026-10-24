@@ -968,44 +968,7 @@ impl AssetIndex {
         for name in request.sequences.iter().chain(sequence_registries.keys()) {
             let name = name.to_lowercase();
             let nodes = graph.read(Site::root(&name))?;
-            let mut buses = 0u16;
-            let mut field_sites = Vec::new();
-            for node in &nodes {
-                if node.object.class.ends_with("Blueprint") {
-                    let flags = match node.object.fields.get("Flags") {
-                        Some(Value::UInt16(v)) => u32::from(*v),
-                        Some(v) => bits32(v)?,
-                        None => return Err(bad("sequence bus flags")),
-                    };
-                    buses += u16::from(flags & 1 != 0);
-                    continue;
-                }
-                let role = seq_rules
-                    .classes
-                    .get(&node.object.class)
-                    .ok_or_else(|| bad(&format!("unknown sequence class {}", node.object.class)))?;
-                let kind = match role.as_deref() {
-                    None => continue,
-                    Some("root") => Kind::SequenceRoot,
-                    Some("provider") => Kind::RpcOptionalReference,
-                    Some("event") => Kind::Rpc,
-                    Some("channel") => Kind::RpcReference,
-                    Some("participants") => Kind::RpcReferences,
-                    Some(_) => return Err(bad("sequence role")),
-                };
-                field_sites.push((node.site.clone(), node.object.class.clone(), kind));
-            }
-            if field_sites
-                .first()
-                .is_none_or(|(_, _, k)| *k != Kind::SequenceRoot)
-                || field_sites
-                    .iter()
-                    .filter(|(_, _, k)| *k == Kind::SequenceRoot)
-                    .count()
-                    != 1
-            {
-                return Err(bad("sequence root"));
-            }
+            let (buses, field_sites) = crate::sequences::authored::shape(&nodes, &seq_rules)?;
             let refs: Vec<Site> = field_sites
                 .iter()
                 .filter(|(_, _, k)| *k == Kind::RpcReference)

@@ -12,6 +12,7 @@ use nfs_protocol::world::{
     rpc::{Envelope, Limits, RouteProfile, Serial},
 };
 use std::collections::BTreeMap;
+pub mod authored;
 
 pub const MAX_INSTANCES: usize = 128;
 pub const FALLBACK_MS: u64 = 300_000;
