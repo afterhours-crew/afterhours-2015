@@ -138,6 +138,7 @@ pub(crate) fn fixture(fail: bool) -> Arc<Definition> {
             (8, Service::Console),
         ]),
         root: 0,
+        links: BTreeMap::new(),
     })
 }
 fn reached(event: u32, player: u8) -> Message {

@@ -22,6 +22,7 @@ type Modes = BTreeMap<
     ),
 >;
 mod garage;
+mod story;
 #[cfg(test)]
 mod tests;
 

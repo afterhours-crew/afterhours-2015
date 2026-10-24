@@ -32,6 +32,7 @@ const BATCH_NAMESPACE: u64 = 3 << 60;
 const OPERATION_MASK: u64 = (1 << 60) - 1;
 
 pub mod editing;
+pub mod rewards;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Checkpoint {
@@ -192,6 +193,7 @@ impl Policy<'_> {
             .intro_order(self.settings)
             .map_err(|_| Error::Config)?;
         let ledger = self.ledger(snapshot)?;
+        let rewards = rewards::read(snapshot, self.catalog)?;
         let objectives = self.objectives(snapshot)?;
         let position = order.iter().take_while(|id| objectives[id].1).count();
         if order[position..].iter().any(|id| objectives[id].1) {
@@ -209,7 +211,7 @@ impl Policy<'_> {
                     played: flag(row, PLAYED)?,
                     edited: flag(row, EDITED)?,
                     existing: flag(row, EXISTING)? || (completed && row.is_none()),
-                    reward_claimed: flag(row, CLAIMED)?,
+                    reward_claimed: flag(row, CLAIMED)? || rewards.contains_key(&id),
                 })
             })
             .collect::<Result<_, Error>>()?;

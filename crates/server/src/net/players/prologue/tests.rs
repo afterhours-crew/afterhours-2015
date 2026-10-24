@@ -60,7 +60,7 @@ fn drain(listener: &mut PlayerListener) {
     listener.pending_content.clear();
     listener.pending_entries.clear();
 }
-fn setup() -> (PlayerListener, u16, Arc<nfs_world::items::Collection>) {
+pub(super) fn setup() -> (PlayerListener, u16, Arc<nfs_world::items::Collection>) {
     let _ = tracing_subscriber::fmt()
         .with_test_writer()
         .without_time()
@@ -671,6 +671,9 @@ fn opening_runs_after_car_and_render_readiness_and_waits_for_native_completion()
     }
     Arc::make_mut(listener.prologue.as_mut().unwrap()).previews = Some(preview_source);
     let enter = request(returning.request, participant, 0);
+    listener.progression = Some(Arc::new(
+        crate::progression::Content::from_json(&crate::progression::tests::combined()).unwrap(),
+    ));
     listener
         .returns
         .as_mut()
@@ -682,6 +685,7 @@ fn opening_runs_after_car_and_render_readiness_and_waits_for_native_completion()
         (super::super::returning::empty_section(), vec![]),
     );
     assert!(!send(&mut listener, 13, 47, enter.span()));
+    assert!(listener.story_pending.is_empty());
     assert_eq!(
         listener.participants.stage(participant),
         Some(Stage::FreeRoam)
@@ -696,6 +700,11 @@ fn opening_runs_after_car_and_render_readiness_and_waits_for_native_completion()
     );
     drain(&mut listener);
     assert!(send(&mut listener, 13, 47, enter.span()));
+    assert_eq!(listener.story_pending.len(), 1);
+    assert_eq!(
+        listener.story_pending[0].action,
+        crate::net::items::story::Action::Complete { objective: 42 }
+    );
     assert_eq!(
         listener.participants.stage(participant),
         Some(Stage::IntroEnteringGarage)

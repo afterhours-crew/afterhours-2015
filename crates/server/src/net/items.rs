@@ -6,6 +6,7 @@ use super::players::{
     AwardRequest, Credited, EquipmentRequest, GarageOperation, GarageRequest, PlayerListener,
 };
 mod garage;
+pub(super) mod story;
 use crate::inventory;
 use nfs_storage::{AccountId, InventoryRepository, Timestamp};
 use nfs_world::{
@@ -677,6 +678,8 @@ pub(super) struct Exchanges {
     equipment: JoinSet<(EquipmentRequest, Result<Equipped, Error>)>,
     garage: JoinSet<(GarageRequest, Result<garage::Updated, Error>)>,
     awards: JoinSet<(AwardRequest, Result<Credited, Error>)>,
+    story: JoinSet<(story::Request, Result<story::Committed, Error>)>,
+    story_delivery: Option<(story::Request, story::Committed)>,
     pending: [Option<Completed>; 2],
     started: [Option<u64>; 2],
     /// Unsolicited notifications awaiting the request handler, in order.
@@ -696,6 +699,8 @@ impl Exchanges {
             equipment: JoinSet::new(),
             garage: JoinSet::new(),
             awards: JoinSet::new(),
+            story: JoinSet::new(),
+            story_delivery: None,
             pending: [None, None],
             started: [None, None],
             notifications: VecDeque::new(),
@@ -710,8 +715,27 @@ impl Exchanges {
             || !self.equipment.is_empty()
             || !self.awards.is_empty()
             || !self.garage.is_empty()
+            || !self.story.is_empty()
     }
     pub(super) fn start(&mut self, listener: &mut PlayerListener, now: u64, utc: Timestamp) {
+        if self.pending.iter().all(Option::is_none)
+            && self.started.iter().all(Option::is_none)
+            && self.notifications.is_empty()
+            && let Some((request, committed)) = &self.story_delivery
+        {
+            match listener.story_committed(request, committed.clone()) {
+                Ok(()) => self.story_delivery = None,
+                Err(nfs_world::replication::Error::Bound) => return,
+                Err(error) => {
+                    warn!(
+                        connection = self.connection,
+                        ?error,
+                        "committed story snapshot rejected"
+                    );
+                    self.failed = true;
+                }
+            }
+        }
         if self.pending.iter().all(Option::is_none)
             && self.started.iter().all(Option::is_none)
             && let Some(updated) = self.garage_delivery.take()
@@ -733,10 +757,26 @@ impl Exchanges {
             return;
         }
         if self.working()
+            || self.story_delivery.is_some()
             || self.pending.iter().any(Option::is_some)
             || self.started.iter().any(Option::is_some)
             || !self.notifications.is_empty()
         {
+            return;
+        }
+        if let Some(request) = listener.take_story() {
+            if let Some(profile) = self.profile.clone() {
+                self.story.spawn(async move {
+                    let result = profile.story(&request, utc).await;
+                    (request, result)
+                });
+            } else {
+                warn!(
+                    connection = self.connection,
+                    "story persistence service not configured"
+                );
+                self.failed = true;
+            }
             return;
         }
         if let Some(request) = listener.take_equipment() {
@@ -853,6 +893,33 @@ impl Exchanges {
         }
     }
     pub(super) async fn completed(&mut self, listener: &mut PlayerListener) -> bool {
+        if !self.story.is_empty() {
+            let Some(Ok((request, result))) = self.story.join_next().await else {
+                return false;
+            };
+            return match result {
+                Ok(mut committed) => {
+                    self.notifications.extend(
+                        std::mem::take(&mut committed.notifications)
+                            .into_iter()
+                            .map(|bytes| Completed {
+                                name: b"Items".to_vec(),
+                                bytes,
+                            }),
+                    );
+                    self.story_delivery = Some((request, committed));
+                    true
+                }
+                Err(error) => {
+                    warn!(
+                        connection = self.connection,
+                        ?error,
+                        "story persistence failed"
+                    );
+                    false
+                }
+            };
+        }
         if !self.garage.is_empty() {
             let Some(Ok((request, result))) = self.garage.join_next().await else {
                 return false;

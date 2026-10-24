@@ -29,7 +29,7 @@ pub enum Command {
     Stop,
     Award { node: u16, definition: [u8; 16] },
     Select { node: u16 },
-    Load { node: u16 },
+    Unload { node: u16 },
     ParticipantEvent { node: u16, event: u32 },
 }
 #[derive(Clone, Debug, Default)]
@@ -63,7 +63,9 @@ impl Host for Services {
                     definition: *definition,
                 },
                 (Service::ItemSelector, 0xc6f6_466d) => Command::Select { node: request.node },
-                (Service::VehicleSlotLoader, 2_968_292_408) => Command::Load { node: request.node },
+                (Service::VehicleSlotLoader, 2_968_292_408) => {
+                    Command::Unload { node: request.node }
+                }
                 (Service::ParticipantEvent, 3_135_534_132 | 1_055_657_837) => {
                     Command::ParticipantEvent {
                         node: request.node,

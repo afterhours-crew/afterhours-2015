@@ -84,6 +84,12 @@ impl Restored {
     }
 }
 impl Catalog {
+    pub fn story_policy(&self, settings: Settings) -> nfs_services::story::Policy<'_> {
+        nfs_services::story::Policy {
+            catalog: &self.definition,
+            settings,
+        }
+    }
     pub fn objective_ids(&self, branch: Branch) -> BTreeSet<u64> {
         self.definition.objective_ids(branch)
     }

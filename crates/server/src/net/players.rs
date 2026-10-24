@@ -93,6 +93,7 @@ pub(super) struct PlayerListener {
     opening: crate::sequence_content::authored::Instances,
     selection: crate::sequence_content::authored::Instances,
     selection_execution: BTreeMap<u16, crate::sequence_content::execution::Execution>,
+    story_pending: VecDeque<super::items::story::Request>,
     intro_modes: BTreeMap<
         u16,
         (
@@ -724,6 +725,7 @@ impl PlayerListener {
             opening: crate::sequence_content::authored::Instances::default(),
             selection: crate::sequence_content::authored::Instances::default(),
             selection_execution: BTreeMap::new(),
+            story_pending: VecDeque::new(),
             intro_modes: BTreeMap::new(),
             vehicles: None,
             population: None,
@@ -1209,6 +1211,7 @@ impl Listener for PlayerListener {
         let mut sequences = self.sequences.clone();
         let mut logic_ghosts = self.logic_ghosts.clone();
         let mut opening = self.opening.clone();
+        let mut story_pending = self.story_pending.clone();
         let mut intro_modes = self.intro_modes.clone();
         let mut unsupported_logic = 0;
         let mut event_inputs = Vec::new();
@@ -2438,6 +2441,41 @@ impl Listener for PlayerListener {
         // Packing them here prevents one frame per delegated car from filling
         // the listener queue before the session can coalesce them. The helper
         // preserves non-motion records as ordering barriers.
+        if let (Some(content), Some(progression), Some(bindings)) = (
+            self.prologue.as_deref(),
+            self.progression.as_ref(),
+            participants.return_bindings(),
+        ) {
+            for call in responses
+                .iter()
+                .chain(entries.iter().flat_map(|(_, calls)| calls))
+            {
+                if let nfs_world::participants::HostRpc::Participant(n) = call
+                    && n.endpoint == bindings.preparing[0]
+                    && n.call == nfs_world::participants::Call::Enter
+                    && participants
+                        .intro_participants()
+                        .any(|p| p == n.participant)
+                {
+                    if story_pending.len() >= MAX_PENDING {
+                        return self.refuse(replication::Error::Bound);
+                    }
+                    let Some(player_index) =
+                        players.runtime_index(HOST_SELECTOR as u8, self.persona, n.participant)
+                    else {
+                        return self.refuse(replication::Error::UnknownObject);
+                    };
+                    story_pending.push_back(super::items::story::Request {
+                        participant: n.participant,
+                        player_index: u32::from(player_index),
+                        progression: progression.clone(),
+                        action: super::items::story::Action::Complete {
+                            objective: content.start.objective,
+                        },
+                    });
+                }
+            }
+        }
         deferred_sections = output::pack_motion(deferred_sections);
         if spawned.messages.len() > MAX_PENDING.saturating_sub(self.pending_content.len())
             || scheduled_returns.len() > MAX_PENDING.saturating_sub(self.pending_returns.len())
@@ -2476,6 +2514,7 @@ impl Listener for PlayerListener {
         self.launchers = launchers;
         self.participants = participants;
         self.opening = opening;
+        self.story_pending = story_pending;
         self.intro_modes = intro_modes;
         self.pending_rpcs.extend(responses);
         for input in event_inputs {

@@ -26,6 +26,13 @@ pub(crate) fn tables() -> persistent::Catalog {
         {"name":"ints","key":INTS,"value_type":"int","default":"0"},
         {"name":"dynamicKeyFloats","key":persistent::key("dynamicKeyFloats"),"value_type":"float","default":""}
     ]);
+    let stats = v["tables"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|t| t["name"] == "ProgressionStats")
+        .unwrap();
+    stats["columns"][0] = json!({"name":"IntroCompleted","key":persistent::key("IntroCompleted"),"value_type":"int","default":"0"});
     persistent::Catalog::from_json(&v).unwrap()
 }
 fn empty(repo: &dyn InventoryRepository, who: AccountId) -> Snapshot {
@@ -272,12 +279,15 @@ fn dispatch_consumes_link_order_once_and_readiness_needs_both_branches() {
     assert!(ready(&partial, true));
     assert!(!ready(&partial, false));
 }
-#[test]
-fn combined_content_checks_objective_roles_against_the_restoration_catalog() {
-    let valid = json!({"format":FORMAT,"version":VERSION,"build_sha256":BUILD,
+pub(crate) fn combined() -> Json {
+    json!({"format":FORMAT,"version":VERSION,"build_sha256":BUILD,
         "sources":[{"path":"redacted","sha256":"00".repeat(32)}],
         "restoration":content(),"entities":entities::tests::construction_json(),
-        "settings":{"consumer_beta":false,"enable_speed_lists":false}});
+        "settings":{"consumer_beta":false,"enable_speed_lists":false}})
+}
+#[test]
+fn combined_content_checks_objective_roles_against_the_restoration_catalog() {
+    let valid = combined();
     let loaded = Content::from_json(&valid).unwrap();
     assert!(!loaded.speed_list_bypass);
     assert!(!loaded.settings.consumer_beta);

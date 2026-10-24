@@ -119,6 +119,26 @@ fn bindings<S: Source>(
 /// Resolve a sequence only through its unique referer in the intro branch.
 /// The same channel asset in another prefab or scene is never a candidate.
 pub fn extract(index: &mut AssetIndex, name: &str) -> Result<Sequence, Error> {
+    Ok(extract_bound(index, name, false)?.0)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ServiceLink {
+    /// None is an explicitly identified, non-replicated node in the parent
+    /// participant graph. It is not a missing wire endpoint.
+    pub target: Option<Channel>,
+    pub identity: crate::scoring::events::Identity,
+    pub port: u32,
+    pub class: String,
+    pub definition: Option<[u8; 16]>,
+}
+type ServiceLinks = BTreeMap<crate::scoring::events::Identity, BTreeMap<u32, ServiceLink>>;
+
+fn extract_bound(
+    index: &mut AssetIndex,
+    name: &str,
+    include_services: bool,
+) -> Result<(Sequence, ServiceLinks), Error> {
     if name.is_empty() || name.len() > 512 || name.contains("..") {
         return Err(bad("sequence name"));
     }
@@ -216,6 +236,96 @@ pub fn extract(index: &mut AssetIndex, name: &str) -> Result<Sequence, Error> {
         };
         channels.insert(i, channel);
     }
+    let mut service_links = BTreeMap::new();
+    for node in &sequence_nodes {
+        if !include_services {
+            break;
+        }
+        let ports: &[u32] = match node.object.class.as_str() {
+            "AwardItemTransactionEntityData" => &[2_612_322_229],
+            "ItemSelectorEntityData" => &[3_339_738_264, 2_356_970_361],
+            "VehicleSlotLoaderEntityData" => &[926_267_033],
+            "ParticipantEventEntityData" => &[3_253_352_650],
+            "ParticipantProviderStateReporterEntityData" => &[230_748_402],
+            _ => continue,
+        };
+        let mut links = BTreeMap::new();
+        for &port in ports {
+            let mut ends = graph.links(&node.site, port)?;
+            let mut visited = BTreeSet::new();
+            let end = loop {
+                let [end] = ends.as_slice() else {
+                    return Err(bad(&format!(
+                        "sequence service link cardinality {} {:?} port {port}: {ends:?}",
+                        node.object.class, node.site
+                    )));
+                };
+                if !visited.insert(end.clone()) || visited.len() > 64 {
+                    return Err(bad("sequence service channel cycle"));
+                }
+                if graph.object(&end.site)?.class != "LinkedSchematicChannelReferenceEntityData" {
+                    break end.clone();
+                }
+                let target = bound
+                    .get(&end.site)
+                    .or_else(|| parent_bindings.get(&end.site))
+                    .ok_or_else(|| bad("unbound sequence service channel"))?;
+                ends = graph.links(target, end.port)?;
+            };
+            let object = graph.object(&end.site)?;
+            let target = if let Some(serializer) = parent_fields.get(&end.site) {
+                Some(Channel::Participant {
+                    serializer: *serializer,
+                })
+            } else if branch.iter().any(|n| n.site == end.site) {
+                None
+            } else {
+                let (content_key, serializer) =
+                    scenes.endpoint(&mut graph, &end.site).map_err(|e| {
+                        bad(&format!(
+                            "service {} port {port} target {:?} ({}) : {e}",
+                            node.object.class, end, object.class
+                        ))
+                    })?;
+                Some(Channel::Scene {
+                    content_key,
+                    serializer,
+                })
+            };
+            let definition = if object.class == "ItemEntityData" {
+                let pointer = object
+                    .fields
+                    .get("Item")
+                    .and_then(Value::as_pointer)
+                    .ok_or_else(|| bad("sequence item pointer"))?;
+                if let Some(key) = graph.source.target(&end.site.key.0, pointer)? {
+                    Some(
+                        graph
+                            .source
+                            .object(&key)?
+                            .guid
+                            .filter(|g| *g != [0; 16])
+                            .ok_or_else(|| bad("sequence source item definition"))?,
+                    )
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            links.insert(
+                port,
+                ServiceLink {
+                    target,
+                    identity: crate::scoring::events::Identity::from(&end.site),
+                    port: end.port,
+                    class: object.class,
+                    definition,
+                },
+            );
+        }
+        service_links.insert(crate::scoring::events::Identity::from(&node.site), links);
+    }
     let manager_nodes = graph.read(
         scenes
             .roots
@@ -237,7 +347,7 @@ pub fn extract(index: &mut AssetIndex, name: &str) -> Result<Sequence, Error> {
         channels,
     };
     sequence.profile()?;
-    Ok(sequence)
+    Ok((sequence, service_links))
 }
 
 #[cfg(test)]

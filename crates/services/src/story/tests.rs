@@ -6,6 +6,7 @@ use super::*;
 use crate::bank::Balance;
 use nfs_storage::{AccountId, InventoryRepository, MemoryRepository, SqliteRepository, Timestamp};
 use serde_json::json;
+mod rewards;
 
 fn catalog() -> Catalog {
     Catalog::from_json(

@@ -38,6 +38,7 @@ pub struct Definition {
     pub signals: Vec<Binding>,
     pub services: BTreeMap<u16, Service>,
     pub root: u16,
+    pub links: BTreeMap<u16, BTreeMap<u32, super::ServiceLink>>,
 }
 
 fn service(class: &str) -> Option<Service> {
@@ -124,6 +125,7 @@ fn services<S: Source>(
 }
 
 pub fn extract(index: &mut AssetIndex, name: &str) -> Result<Definition, Error> {
+    let (_, bound) = super::extract_bound(index, name, true)?;
     let composition = index.scoring_events(name)?;
     let services = services(&mut index.assets, name, &composition)?;
     let roots = services
@@ -140,12 +142,25 @@ pub fn extract(index: &mut AssetIndex, name: &str) -> Result<Definition, Error> 
     let sources = index.scoring_sources_with_native(name, &native)?;
     let program = program::compile_with_native(&sources, &BTreeMap::new(), &native)?;
     let signals = index.scoring_event_sync(name, &composition)?;
+    let links = bound
+        .into_iter()
+        .map(|(identity, links)| {
+            let id = composition
+                .nodes
+                .iter()
+                .position(|n| n.identity == identity)
+                .and_then(|i| u16::try_from(i).ok())
+                .ok_or_else(|| bad("sequence service link identity"))?;
+            Ok((id, links))
+        })
+        .collect::<Result<_, Error>>()?;
     Ok(Definition {
         program,
         composition,
         signals,
         services,
         root: *root,
+        links,
     })
 }
 

@@ -6,8 +6,8 @@ use super::{CommandId, Error, Reason, apply, ledger};
 use crate::{bank::Balance, inventory};
 use nfs_storage::{AccountId, GarageSlots, InventoryRepository, ItemId, Op, Snapshot, Timestamp};
 use nfs_world_core::items::{
-    self, Collection, DefinitionClass, Guid, InventoryCatalog, Item, PurchaseRequest,
-    PurchaseSelection, SellRequest,
+    self, Collection, DefinitionClass, Guid, InventoryCatalog, PurchaseRequest, PurchaseSelection,
+    SellRequest,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -162,9 +162,7 @@ pub fn buy(
             .debit(definition.buy_price)
             .ok_or(Error::Rejected(Reason::Funds))?;
         let (first, _) = crate::purchase::reserve_ids(&snapshot, 0)?;
-        let mut built = catalog
-            .instantiate_vehicle(guid, first)
-            .map_err(inventory::Error::from)?;
+        let mut built = inventory::vehicle_grant(&snapshot, catalog, guid, first)?;
         let car = promoted.map_or(first, ItemId::get);
         if car != first {
             let mut root = built
@@ -179,38 +177,6 @@ pub fn buy(
                 }
             }
             built.collection.items.insert(car, root);
-        }
-        let mut grants = BTreeSet::new();
-        for guid in &definition.additional_items {
-            if !grants.insert(*guid)
-                || snapshot.items.values().any(|r| {
-                    r.definition.0 == *guid && r.owner.is_none() && r.state == items::OWNED
-                })
-            {
-                continue;
-            }
-            let d = catalog.definition(guid).map_err(inventory::Error::from)?;
-            built.collection.items.insert(
-                built.next_id,
-                Item {
-                    id: built.next_id,
-                    definition: *guid,
-                    owner: 0,
-                    defaults: vec![],
-                    children: vec![],
-                    state: items::OWNED,
-                    buy_price: d.buy_price,
-                    sell_price: d.sell_price,
-                    derived: d
-                        .default_derived
-                        .clone()
-                        .ok_or(Error::Rejected(Reason::Offer))?,
-                },
-            );
-            built.next_id = built
-                .next_id
-                .checked_add(1)
-                .ok_or(nfs_storage::Error::Bounds)?;
         }
         built.collection.roots = built.collection.items.keys().copied().collect();
         let mut replacement = None;
