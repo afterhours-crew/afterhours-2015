@@ -148,6 +148,34 @@ impl Players {
         Ok(records)
     }
 
+    /// Create the startup scene tree, parents before children, writing each
+    /// parent's ghost into its children's prefixes the way the official host
+    /// does (`sublevel::genesis`). A parent that is not a spawned scene of the
+    /// batch or the world refuses the whole batch and changes nothing.
+    pub fn create_scene_tree(
+        &mut self,
+        scenes: Vec<sublevel::genesis::Scene>,
+        content: &sublevel::Content,
+    ) -> Result<Vec<Record>, Error> {
+        if scenes.len() > sublevel::MAX_PROFILES {
+            return Err(Error::Bound);
+        }
+        let levels: Vec<u16> = scenes.iter().map(|s| s.creation.prefix.level_id).collect();
+        let mut next = self.objects.clone();
+        next.register_levels(&levels)?;
+        let mut records = Vec::with_capacity(scenes.len());
+        for scene in scenes {
+            let mut creation = scene.creation;
+            if let Some(key) = scene.parent_key {
+                let ghost = next.scene(key).ok_or(Error::UnknownObject)?;
+                creation.prefix.blueprint = Some(sublevel::genesis::Scene::parent(ghost));
+            }
+            records.push(next.spawn_scene(creation, content)?);
+        }
+        self.objects = next;
+        Ok(records)
+    }
+
     pub fn spawn_entities(
         &mut self,
         creations: Vec<entity::creation::Creation>,

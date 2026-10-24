@@ -374,7 +374,9 @@ pub fn runtime_world() -> Vec<Asset> {
             guid(0x30),
             vec![
                 ("Name", Field::CString(RUNTIME_LEVEL.into())),
-                ("Objects", Field::RawPointers(vec![7])),
+                // Installed roots list every object; the five sub-levels keep
+                // their role order and the layer comes last.
+                ("Objects", Field::RawPointers((2..=7).collect())),
             ],
             extras,
         ),
@@ -701,10 +703,24 @@ fn bundle_ref(name: &str) -> Vec<(&'static str, Field)> {
     vec![("Name", Field::CString(name.into()))]
 }
 
+/// A scene whose root lists every extra object in order, as installed scenes do.
 fn scene(
     seed: u8,
     name: &str,
     class: &str,
+    extras: Vec<(&'static str, Vec<(&'static str, Field)>)>,
+) -> Asset {
+    let listed = (2..=(extras.len() + 1) as u32).collect();
+    scene_listed(seed, name, class, listed, extras)
+}
+
+/// A scene whose root lists `objects` (1-based partition indexes, the root is
+/// 1) in that order; the list order is the startup order of its sub-levels.
+pub(crate) fn scene_listed(
+    seed: u8,
+    name: &str,
+    class: &str,
+    objects: Vec<u32>,
     extras: Vec<(&'static str, Vec<(&'static str, Field)>)>,
 ) -> Asset {
     Asset {
@@ -713,10 +729,52 @@ fn scene(
             guid(seed),
             class,
             guid(seed | 0x10),
-            vec![("Name", Field::CString(name.into()))],
+            vec![
+                ("Name", Field::CString(name.into())),
+                ("Objects", Field::RawPointers(objects)),
+            ],
             extras,
         ),
     }
+}
+
+/// `level()` with the root listing Beta before Alpha (object order is Alpha,
+/// Off, Beta), the shape the installed Gameplay scene has.
+#[cfg(test)]
+pub(crate) fn level_listed_out_of_object_order() -> Vec<Asset> {
+    let mut assets = level();
+    assets[0] = scene_listed(
+        0xC0,
+        LEVEL,
+        "LevelData",
+        vec![4, 2, 3, 5],
+        vec![
+            sub_world("Levels/Synth/Alpha", true),
+            sub_world("levels/Synth/Off", false),
+            sub_world("levels/Synth/Beta", true),
+            layer_reference(0xC5),
+        ],
+    );
+    assets
+}
+
+/// `level()` whose root leaves the auto-loaded Beta out of its object list.
+#[cfg(test)]
+pub(crate) fn level_with_unlisted_sub_level() -> Vec<Asset> {
+    let mut assets = level();
+    assets[0] = scene_listed(
+        0xC0,
+        LEVEL,
+        "LevelData",
+        vec![2, 3, 5],
+        vec![
+            sub_world("Levels/Synth/Alpha", true),
+            sub_world("levels/Synth/Off", false),
+            sub_world("levels/Synth/Beta", true),
+            layer_reference(0xC5),
+        ],
+    );
+    assets
 }
 
 /// A level with sub-levels Alpha (child Gamma), Off (not auto-loaded) and

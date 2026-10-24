@@ -97,7 +97,7 @@ fn run(cache: &Path, game: &Path) -> Result<serde_json::Value, String> {
         .ok_or("player")?;
     world.join(1, 1, player.id).map_err(error)?;
     let profiles = content.scene_profiles.as_ref().ok_or("profiles")?;
-    let creations = sublevel::genesis::hierarchy(
+    let scenes = sublevel::genesis::tree(
         sublevel::Rpc {
             selector: 0,
             serial: nfs_protocol::world::rpc::Serial::new(0).ok_or("serial")?,
@@ -107,13 +107,7 @@ fn run(cache: &Path, game: &Path) -> Result<serde_json::Value, String> {
         &content.roles.as_ref().ok_or("roles")?.traffic,
     )
     .map_err(error)?;
-    let levels = creations
-        .iter()
-        .map(|c| c.prefix.level_id)
-        .collect::<Vec<_>>();
-    world
-        .create_scenes(&levels, creations, profiles)
-        .map_err(error)?;
+    world.create_scene_tree(scenes, profiles).map_err(error)?;
     let before = world.objects().snapshot();
     let mut new_scenes = std::collections::BTreeSet::new();
     let mut updates = Vec::new();
