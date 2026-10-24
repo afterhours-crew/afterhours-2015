@@ -233,6 +233,9 @@ pub(crate) fn content(parent: Asset, manager: Component) -> (Mode, Mode) {
 }
 
 fn clock_fixture(countdown: bool) -> (Players, Owner, Mode) {
+    clock_fixture_in(countdown, Players::default())
+}
+pub(super) fn clock_fixture_in(countdown: bool, mut players: Players) -> (Players, Owner, Mode) {
     use nfs_protocol::world::rpc::Serial;
     use nfs_world::replication::{
         entity::{
@@ -242,17 +245,16 @@ fn clock_fixture(countdown: bool) -> (Players, Owner, Mode) {
         players::Request,
         sublevel,
     };
-    let mut players = Players::default();
     let scenes = sublevel::Content::new(vec![(
         7,
         sublevel::Profile::new(false, &[sublevel::Kind::Noop, sublevel::Kind::Rpc]).unwrap(),
     )])
     .unwrap();
-    let scene = sublevel::passive::creation(1, 7, Serial::new(1).unwrap(), &scenes).unwrap();
-    players.create_scenes(&[1], vec![scene], &scenes).unwrap();
+    let scene = sublevel::passive::creation(777, 7, Serial::new(1).unwrap(), &scenes).unwrap();
+    let scene_id = players.create_scenes(&[777], vec![scene], &scenes).unwrap()[0].id;
     let player = players
         .create(
-            3,
+            4,
             10,
             Request {
                 name: b"Clock".to_vec(),
@@ -264,9 +266,9 @@ fn clock_fixture(countdown: bool) -> (Players, Owner, Mode) {
         .unwrap()
         .id;
     let owner = Owner {
-        connection: 3,
+        connection: 4,
         persona: 10,
-        participant: players.join(3, 10, player).unwrap().unwrap().id,
+        participant: players.join(4, 10, player).unwrap().unwrap().id,
     };
     let parent = Asset {
         bundle: 4,
@@ -283,7 +285,7 @@ fn clock_fixture(countdown: bool) -> (Players, Owner, Mode) {
             vec![Creation {
                 prefix: Prefix {
                     parent: None,
-                    blueprint: 1,
+                    blueprint: scene_id,
                     sub_id: 1,
                     owner: None,
                     asset: parent,

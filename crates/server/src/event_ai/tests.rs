@@ -20,6 +20,26 @@ fn selections() -> [Selection; 2] {
     ]
 }
 
+pub(crate) fn story_fixture() -> (Content, Players, registrations::Registry) {
+    let (ordinary, players, registry) = event_fixture();
+    let mut roster = ordinary.roster.clone();
+    roster.completion = Some(Completion::UnspawnAllAtShutdown);
+    for s in &mut roster.spawns {
+        s.ignore_availability = true;
+    }
+    (
+        Content::prepared_with_policy(
+            roster,
+            ordinary.vehicles,
+            ordinary.presets,
+            Completion::UnspawnAllAtShutdown,
+        )
+        .unwrap(),
+        players,
+        registry,
+    )
+}
+
 #[test]
 fn provider_cursor_and_spawn_namespaces_are_session_owned() {
     let (content, _, _) = event_fixture();

@@ -7,7 +7,7 @@
 use crate::{
     event_logic::{
         self,
-        lifecycle::{Effect, Host, Plan},
+        lifecycle::{Effect, Host, Plan, commands::Command},
     },
     sequence_content::authored::{Authored, Instances},
 };
@@ -40,6 +40,7 @@ use std::{
 };
 mod arrival;
 mod garage;
+pub(crate) mod opponents;
 mod reporters;
 #[cfg(test)]
 pub(crate) mod tests;
@@ -53,6 +54,7 @@ pub struct Mode {
     sequences: BTreeMap<usize, Authored>,
     timing: BTreeMap<usize, f64>,
     reporters: Option<reporters::Reporters>,
+    opponents: Option<Arc<crate::event_ai::Content>>,
 }
 fn invalid<T>(_: T) -> Error {
     Error::Shape
@@ -161,6 +163,7 @@ impl Mode {
             sequences,
             timing: BTreeMap::new(),
             reporters: None,
+            opponents: None,
         })
     }
     fn parent(&self, world: &World, participant: u16) -> Result<u16, Error> {
@@ -267,6 +270,8 @@ fn field(world: &World, ghost: u16, serializer: usize) -> Result<(u16, u16), Err
 
 #[derive(Clone, Debug, Default)]
 pub struct Output {
+    /// Publish before every detach/deletion in this output.
+    pub departures: Vec<HostRpc>,
     pub records: Vec<Record>,
     pub deleted: Vec<u16>,
     pub calls: Vec<HostRpc>,
@@ -277,12 +282,14 @@ pub struct Active {
     parent: u16,
     pub ghost: u16,
     host: Host,
-    logics: BTreeMap<usize, u16>,
+    logics: BTreeMap<(usize, u16), u16>,
     sequences: BTreeMap<usize, Instances>,
     sequence_deadlines: BTreeMap<usize, f64>,
     goals: Vec<u16>,
-    routes: BTreeMap<Identity, (u64, Option<u16>)>,
-    pacing: Option<(Identity, u64, crate::event_ai::Commands)>,
+    routes: BTreeMap<(Identity, u16), (u64, Option<u16>)>,
+    pacing: Option<(Identity, BTreeMap<u16, u64>, crate::event_ai::Commands)>,
+    opponents: Option<crate::event_ai::Racers>,
+    opponent_deadlines: BTreeMap<(u16, u16), f64>,
     seconds: f64,
     progress: Option<(u16, nfs_world::race_progress::Race)>,
     car_id: Option<u32>,
@@ -290,12 +297,27 @@ pub struct Active {
     ending: bool,
     left: bool,
     /// Local observations belong to this mode, even when they have no wire field.
-    contexts: BTreeMap<Property, BTreeSet<u32>>,
-    booleans: BTreeMap<Identity, bool>,
+    contexts: BTreeMap<(Property, u16), BTreeSet<u32>>,
+    booleans: BTreeMap<(Identity, u16), bool>,
     reporters: BTreeMap<Identity, i32>,
     callbacks: Option<reporters::Reporters>,
+    results: BTreeMap<u16, event_logic::lifecycle::results::Snapshot>,
 }
 impl Active {
+    fn dispatch(&mut self, commands: Vec<Command>) -> Result<Vec<Effect>, Error> {
+        self.host
+            .dispatch(commands, &mut |_, e| {
+                self.callbacks
+                    .as_mut()
+                    .map_or_else(|| Ok(vec![]), |r| r.effect(e))
+            })
+            .map_err(invalid)
+    }
+    /// Authored collector output is retained until the story owner consumes it.
+    /// This snapshot alone does not grant rewards or complete an objective.
+    pub fn result(&self, participant: u16) -> Option<&event_logic::lifecycle::results::Snapshot> {
+        self.results.get(&participant)
+    }
     /// Bootstrap before publication: initial membership is included in creation.
     /// No transient entry/exit RPC is sent for a root the client does not own yet.
     pub fn start(
@@ -330,11 +352,11 @@ impl Active {
             callbacks.bind_human(owner.participant);
         }
         let effects = host
-            .apply(
-                &[Action::Enter {
+            .dispatch(
+                vec![Command::State(Action::Enter {
                     state: content.data.game_mode.lifecycle.initial as u16,
                     participant: owner.participant.into(),
-                }],
+                })],
                 &mut |_, e| {
                     callbacks
                         .as_mut()
@@ -361,6 +383,8 @@ impl Active {
             goals: vec![],
             routes: BTreeMap::new(),
             pacing: None,
+            opponents: None,
+            opponent_deadlines: BTreeMap::new(),
             seconds,
             progress: None,
             car_id: None,
@@ -371,6 +395,7 @@ impl Active {
             booleans: BTreeMap::new(),
             reporters: BTreeMap::new(),
             callbacks,
+            results: BTreeMap::new(),
         };
         active.effects(content, &mut staged, &effects, true, &mut out)?;
         let (target, selector) = field(staged.objects(), parent, content.data.launcher)?;
@@ -436,9 +461,38 @@ impl Active {
                             Some(u16::try_from(participant).map_err(invalid)?),
                             Arguments::None,
                         )?));
+                        // The root's state-entry observer runs after the state's
+                        // entry RPC. Final membership removes an AI from the
+                        // primary set; root-state membership releases its dependency.
+                        if method == 0 && participant != u64::from(self.owner.participant) {
+                            let root_method = if usize::from(state)
+                                == content.data.game_mode.lifecycle.final_state
+                            {
+                                Some(3)
+                            } else if Some(usize::from(state))
+                                == content.data.game_mode.lifecycle.root_state
+                            {
+                                Some(4)
+                            } else {
+                                None
+                            };
+                            if let Some(method) = root_method {
+                                out.calls.push(HostRpc::GameMode(event_logic::call(
+                                    players.objects(),
+                                    self.ghost,
+                                    0,
+                                    method,
+                                    Some(self.member(players, participant)?),
+                                    Arguments::None,
+                                )?));
+                            }
+                        }
                     }
                 }
-                Effect::Hook(Notification::Entered { state, .. }) => {
+                Effect::Hook(Notification::Entered {
+                    state, participant, ..
+                }) => {
+                    let participant = self.member(players, *participant)?;
                     if content.plan.external_state(*state).is_some() {
                         continue;
                     }
@@ -458,6 +512,17 @@ impl Active {
                                 .iter()
                                 .find(|s| s.spawner == Some(usize::from(*state)))
                                 .ok_or(Error::Unsupported)?;
+                            if participant != self.owner.participant {
+                                self.opponent_sequence(
+                                    content,
+                                    players,
+                                    participant,
+                                    *state,
+                                    s,
+                                    out,
+                                )?;
+                                continue;
+                            }
                             let mut instances = Instances::default();
                             let record = instances
                                 .start_bound(
@@ -498,18 +563,21 @@ impl Active {
                             };
                         }
                         StateKind::Waypoints => {
-                            if self.progress.is_some() {
+                            if self.progress.is_none() {
+                                self.progress = Some((
+                                    *state,
+                                    nfs_world::race_progress::Race::new(
+                                        content.data.game_mode.checkpoints.len(),
+                                        content.data.game_mode.laps,
+                                        &self.members(),
+                                        self.seconds,
+                                    )?,
+                                ));
+                            } else if self.progress.as_ref().is_none_or(|(s, r)| {
+                                s != state || r.participant(participant).is_none()
+                            }) {
                                 return Err(Error::Shape);
                             }
-                            self.progress = Some((
-                                *state,
-                                nfs_world::race_progress::Race::new(
-                                    content.data.game_mode.checkpoints.len(),
-                                    content.data.game_mode.laps,
-                                    &[self.owner.participant],
-                                    self.seconds,
-                                )?,
-                            ));
                             let (target, selector) =
                                 field(players.objects(), self.ghost, (*state).into())?;
                             out.calls.push(HostRpc::GameMode(event_logic::call(
@@ -517,8 +585,8 @@ impl Active {
                                 target,
                                 selector,
                                 3,
-                                Some(self.owner.participant),
-                                Arguments::Word(self.car_id.ok_or(Error::Shape)?),
+                                Some(participant),
+                                Arguments::Word(self.participant_car_id(content, participant)?),
                             )?));
                         }
                         StateKind::GameMode
@@ -534,9 +602,7 @@ impl Active {
                     participant,
                     create,
                 } => {
-                    if *participant != u64::from(self.owner.participant) {
-                        return Err(Error::UnknownObject);
-                    };
+                    let participant = self.member(players, *participant)?;
                     if *create {
                         let layout = content
                             .data
@@ -546,7 +612,7 @@ impl Active {
                         let creation = event_logic::logic_creation(
                             layout,
                             self.ghost,
-                            self.owner.participant,
+                            participant,
                             |b| {
                                 content.binding(players.objects(), self.parent, Some(self.ghost), b)
                             },
@@ -555,27 +621,28 @@ impl Active {
                         let record = players
                             .spawn_entities(vec![creation], &content.content)?
                             .remove(0);
-                        if self.logics.insert(*spawner, record.id).is_some() {
+                        if self
+                            .logics
+                            .insert((*spawner, participant), record.id)
+                            .is_some()
+                        {
                             return Err(Error::DuplicateObject);
                         };
                         out.records.push(record);
-                    } else if let Some(ghost) = self.logics.remove(spawner) {
+                    } else if let Some(ghost) = self.logics.remove(&(*spawner, participant)) {
                         players.remove_entities(&[ghost])?;
                         out.deleted.push(ghost);
                     }
                 }
                 Effect::Context { manager, change } => {
-                    if change.participant != u64::from(self.owner.participant) {
-                        return Err(Error::UnknownObject);
-                    };
+                    let participant = self.member(players, change.participant)?;
                     self.contexts
-                        .insert(manager.clone(), change.categories.clone());
+                        .insert((manager.clone(), participant), change.categories.clone());
                 }
                 Effect::Boolean { identity, change } => {
-                    if change.participant != u64::from(self.owner.participant) {
-                        return Err(Error::UnknownObject);
-                    };
-                    self.booleans.insert(identity.clone(), change.value);
+                    let participant = self.member(players, change.participant)?;
+                    self.booleans
+                        .insert((identity.clone(), participant), change.value);
                 }
                 Effect::Reporter(event_logic::lifecycle::reporters::Effect::Count {
                     identity,
@@ -624,30 +691,58 @@ impl Active {
                     participant,
                     deadline,
                     ..
-                }) if *participant == u64::from(self.owner.participant) => {
+                }) => {
+                    let participant = self.member(players, *participant)?;
                     let (target, selector) = field(players.objects(), self.ghost, *transition)?;
                     out.calls.push(HostRpc::GameMode(event_logic::call(
                         players.objects(),
                         target,
                         selector,
                         0,
-                        Some(self.owner.participant),
+                        Some(participant),
                         Arguments::time(*deadline),
                     )?));
                 }
                 Effect::Timing(event_logic::lifecycle::timed::Effect::Finish {
                     participant,
-                    position: 1,
-                    remaining,
                     ..
-                }) if *participant == u64::from(self.owner.participant) && remaining.is_empty() => {
-                    self.arrived = true;
+                }) => {
+                    self.member(players, *participant)?;
+                    if *participant == u64::from(self.owner.participant) {
+                        self.arrived = true;
+                    }
+                }
+                Effect::Timing(event_logic::lifecycle::timed::Effect::Dnf {
+                    transition,
+                    participant,
+                    ..
+                }) => {
+                    let p = self.member(players, *participant)?;
+                    self.progress.as_mut().ok_or(Error::Shape)?.1.withdraw(p);
+                    let (target, selector) = field(players.objects(), self.ghost, *transition)?;
+                    out.calls.push(HostRpc::GameMode(event_logic::call(
+                        players.objects(),
+                        target,
+                        selector,
+                        1,
+                        Some(p),
+                        Arguments::None,
+                    )?));
+                }
+                Effect::Results(result) => {
+                    let participant = self.member(players, result.triggering_participant)?;
+                    if let Some(previous) = self.results.insert(participant, result.clone())
+                        && previous != *result
+                    {
+                        return Err(Error::Shape);
+                    }
                 }
                 _ => return Err(Error::Unsupported),
             }
         }
         // Final state can be reached by a scene callback, a clock transition,
         // or sequence completion. All paths publish the same native shutdown.
+        self.control_updates(players, out)?;
         self.finish_if_final(content, players, out)
     }
     fn ai(
@@ -667,8 +762,10 @@ impl Active {
                 commands,
                 ..
             } => {
-                if *participant != u64::from(self.owner.participant)
-                    || self.routes.contains_key(identity)
+                let participant_id = self.member(players, *participant)?;
+                if self
+                    .routes
+                    .contains_key(&(identity.clone(), participant_id))
                 {
                     return Err(Error::Shape);
                 }
@@ -719,24 +816,26 @@ impl Active {
                     if pacing_state != state
                         || pacing_route != route
                         || content.data.game_mode.pacing.is_none()
-                        || self.pacing.is_some()
                     {
                         return Err(Error::Shape);
                     }
-                    let (command, changes) = crate::event_ai::Commands::start_player(
-                        players,
-                        self.owner.connection,
-                        self.owner.persona,
-                        self.owner.participant,
-                        event_logic::route_goal(&content.data.game_mode)?,
-                        0.5,
-                    )?;
-                    self.pacing = Some((identity.clone(), *token, command));
+                    if let Some((owned, tokens, _)) = &mut self.pacing {
+                        if owned != identity || tokens.insert(participant_id, *token).is_some() {
+                            return Err(Error::Shape);
+                        }
+                        return Ok(());
+                    }
+                    let (command, changes) = self.start_race_commands(content, players)?;
+                    self.pacing = Some((
+                        identity.clone(),
+                        BTreeMap::from([(participant_id, *token)]),
+                        command,
+                    ));
                     out.records.extend(changes.records);
                     out.deleted.extend(changes.deleted);
                     return Ok(());
                 }
-                if commands.len() != 1 {
+                if commands.len() != 1 || participant_id != self.owner.participant {
                     return Err(Error::Unsupported);
                 }
                 let changes = players.start_player_route(
@@ -746,8 +845,10 @@ impl Active {
                     event_logic::route_goal(&content.data.game_mode)?,
                     None,
                 )?;
-                self.routes
-                    .insert(identity.clone(), (*token, Some(changes.goals[0])));
+                self.routes.insert(
+                    (identity.clone(), participant_id),
+                    (*token, Some(changes.goals[0])),
+                );
                 changes
             }
             Effect::Release {
@@ -755,22 +856,27 @@ impl Active {
                 participant,
                 token,
             } => {
-                if *participant != u64::from(self.owner.participant) {
-                    return Err(Error::UnknownObject);
-                }
-                if let Some((id, owned, command)) = &mut self.pacing
+                let participant_id = self.member(players, *participant)?;
+                if let Some((id, tokens, command)) = &mut self.pacing
                     && id == identity
                 {
-                    if owned != token {
+                    if tokens.get(&participant_id) != Some(token) {
                         return Err(Error::UnknownObject);
                     }
-                    let changes = command.clear(players)?;
-                    self.pacing = None;
+                    let mut changes = command.withdraw(players, participant_id)?;
+                    tokens.remove(&participant_id);
+                    if tokens.is_empty() {
+                        let cleared = command.clear(players)?;
+                        changes.records.extend(cleared.records);
+                        changes.deleted.extend(cleared.deleted);
+                        self.pacing = None;
+                    }
                     out.records.extend(changes.records);
                     out.deleted.extend(changes.deleted);
                     return Ok(());
                 }
-                let &(owned, goal) = self.routes.get(identity).ok_or(Error::UnknownObject)?;
+                let key = (identity.clone(), participant_id);
+                let &(owned, goal) = self.routes.get(&key).ok_or(Error::UnknownObject)?;
                 if owned != *token {
                     return Err(Error::UnknownObject);
                 }
@@ -785,7 +891,7 @@ impl Active {
                 } else {
                     nfs_world::replication::players::ai::GoalChanges::default()
                 };
-                self.routes.remove(identity);
+                self.routes.remove(&key);
                 changes
             }
             Effect::Event { .. } => return Err(Error::Unsupported),
@@ -874,20 +980,18 @@ impl Active {
             return Err(Error::Shape);
         }
         next.car_id = Some(car_id);
-        let effects = next
-            .host
-            .apply(
-                &[Action::Complete {
-                    state: state as u16,
-                    participant: next.owner.participant.into(),
-                }],
-                &mut |_, e| {
-                    next.callbacks
-                        .as_mut()
-                        .map_or_else(|| Ok(vec![]), |r| r.effect(e))
-                },
-            )
-            .map_err(invalid)?;
+        let completion = if content.timing.contains_key(&state) {
+            Action::Complete {
+                state: state as u16,
+                participant: next.owner.participant.into(),
+            }
+        } else {
+            Action::CompleteAll {
+                state: state as u16,
+                only_incomplete: true,
+            }
+        };
+        let effects = next.dispatch(vec![Command::State(completion)])?;
         next.effects(content, &mut staged, &effects, false, &mut out)?;
         *self = next;
         *players = staged;

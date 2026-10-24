@@ -48,21 +48,31 @@ impl Active {
         seconds: f64,
     ) -> Result<Output, Error> {
         let mut out = Output::default();
-        if !crossing.inside
-            || !players.owns_participant_vehicle(
-                self.owner.connection,
-                self.owner.persona,
-                self.owner.participant,
-                crossing.vehicle,
-            )
-        {
+        if self.left || !crossing.inside {
             return Ok(out);
         }
+        let participant = if players.owns_participant_vehicle(
+            self.owner.connection,
+            self.owner.persona,
+            self.owner.participant,
+            crossing.vehicle,
+        ) {
+            self.owner.participant
+        } else if let Some(member) = self
+            .opponents
+            .iter()
+            .flat_map(|r| &r.members)
+            .find(|m| m.ids.vehicle == crossing.vehicle)
+        {
+            self.member(players, member.ids.participant.into())?
+        } else {
+            return Ok(out);
+        };
         let Some((state, race)) = &self.progress else {
             return Ok(out);
         };
         let next_checkpoint = race
-            .participant(self.owner.participant)
+            .participant(participant)
             .ok_or(Error::UnknownObject)?
             .next;
         if content
@@ -80,14 +90,17 @@ impl Active {
         let mut staged = players.clone();
         next.clock(seconds)?;
         let Some(progress) = next.progress.as_mut().ok_or(Error::Shape)?.1.cross(
-            next.owner.participant,
+            participant,
             next_checkpoint,
             crossing.seconds,
         )?
         else {
             return Ok(out);
         };
-        for (_, goal) in next.routes.values_mut() {
+        for ((_, p), (_, goal)) in &mut next.routes {
+            if *p != participant {
+                continue;
+            }
             let Some(id) = *goal else { continue };
             if let Some(pair) = progress.goal_progress {
                 out.records.extend(staged.change(
@@ -110,7 +123,7 @@ impl Active {
             }
         }
         if let Some((_, _, command)) = &mut next.pacing {
-            let changes = command.crossed(&mut staged, next.owner.participant, progress)?;
+            let changes = command.crossed(&mut staged, participant, progress)?;
             out.records.extend(changes.records);
             out.deleted.extend(changes.deleted);
         }
@@ -120,7 +133,7 @@ impl Active {
             target,
             selector,
             2,
-            Some(next.owner.participant),
+            Some(participant),
             Arguments::Progress {
                 passed: progress.passed as u32,
                 next: progress.next as u32,
@@ -128,20 +141,14 @@ impl Active {
                 lap: u32::from(progress.lap),
             },
         )?));
-        let effects = next
-            .host
-            .waypoint(
-                state,
-                next.owner.participant.into(),
-                progress.lap,
-                progress.seconds,
-                &mut |_, e| {
-                    next.callbacks
-                        .as_mut()
-                        .map_or_else(|| Ok(vec![]), |r| r.effect(e))
-                },
-            )
-            .map_err(invalid)?;
+        let effects = next.dispatch(vec![Command::Timing(
+            event_logic::lifecycle::timed::Command::Waypoint {
+                source: state,
+                participant: participant.into(),
+                lap: progress.lap,
+                seconds: progress.seconds,
+            },
+        )])?;
         next.effects(content, &mut staged, &effects, false, &mut out)?;
         *self = next;
         *players = staged;
@@ -162,6 +169,27 @@ impl Active {
         let mut out = Output::default();
         next.clock(seconds)?;
         let elapsed = next
+            .opponent_deadlines
+            .iter()
+            .filter_map(|(&key, &deadline)| (seconds >= deadline).then_some(key))
+            .collect::<Vec<_>>();
+        for (state, p) in elapsed {
+            next.opponent_deadlines.remove(&(state, p));
+            if next
+                .host
+                .machine()
+                .members(state)
+                .map_err(invalid)?
+                .contains(&u64::from(p))
+            {
+                let effects = next.dispatch(vec![Command::State(Action::Complete {
+                    state,
+                    participant: p.into(),
+                })])?;
+                next.effects(content, &mut staged, &effects, false, &mut out)?;
+            }
+        }
+        let elapsed = next
             .sequence_deadlines
             .iter()
             .filter_map(|(&state, &deadline)| (seconds >= deadline).then_some(state))
@@ -181,28 +209,21 @@ impl Active {
             if state.kind != StateKind::Countdown {
                 continue;
             }
-            let effects = next
-                .host
-                .update_countdown(state.serializer as u16, &mut |_, e| {
-                    next.callbacks
-                        .as_mut()
-                        .map_or_else(|| Ok(vec![]), |r| r.effect(e))
-                })
-                .map_err(invalid)?;
+            let effects = next.dispatch(vec![Command::Timing(
+                event_logic::lifecycle::timed::Command::Countdown(state.serializer as u16),
+            )])?;
             next.effects(content, &mut staged, &effects, false, &mut out)?;
         }
         for transition in &content.data.game_mode.lifecycle.transitions {
-            if transition.kind != TransitionKind::FinishLine {
+            if !matches!(
+                transition.kind,
+                TransitionKind::FinishLine | TransitionKind::Dnf
+            ) {
                 continue;
             }
-            let effects = next
-                .host
-                .update_transition(transition.serializer, &mut |_, e| {
-                    next.callbacks
-                        .as_mut()
-                        .map_or_else(|| Ok(vec![]), |r| r.effect(e))
-                })
-                .map_err(invalid)?;
+            let effects = next.dispatch(vec![Command::Timing(
+                event_logic::lifecycle::timed::Command::Transition(transition.serializer),
+            )])?;
             next.effects(content, &mut staged, &effects, false, &mut out)?;
         }
         *self = next;

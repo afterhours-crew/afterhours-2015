@@ -702,6 +702,9 @@ impl PlayerListener {
             cars.extend(rivals.delegated(players, HOST_SELECTOR as u8, self.persona));
         }
         cars.extend(self.event_state.delegated(players, self.persona));
+        for (active, _, _) in self.intro_modes.values() {
+            cars.extend(active.delegated(players));
+        }
         cars
     }
     pub(super) fn new(persona: u64) -> Self {
@@ -1167,6 +1170,10 @@ impl Listener for PlayerListener {
                     .event_state
                     .delegated(&players, self.persona)
                     .is_empty()
+                || self
+                    .intro_modes
+                    .values()
+                    .any(|(a, _, _)| !a.delegated(&players).is_empty())
             {
                 let delegated = self.delegated_ai(&players);
                 match traffic_reports.receive_ai(
@@ -1742,6 +1749,13 @@ impl Listener for PlayerListener {
                     body,
                 ) {
                     Ok(Some(out)) => {
+                        if !out.departures.is_empty() {
+                            match prologue::retirement(out) {
+                                Ok(retired) => exit_entries.extend(retired),
+                                Err(error) => return self.refuse(error),
+                            }
+                            continue;
+                        }
                         if !out.records.is_empty() || !out.deleted.is_empty() {
                             deferred_sections.push(Section {
                                 float_bits: None,

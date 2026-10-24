@@ -813,7 +813,19 @@ async fn run(args: Args) -> Result<(), Failure> {
                     let items = intro_items.ok_or_else(|| {
                         nfs_content::Error::Content("intro item catalog missing".into())
                     })?;
-                    nfs_server::prologue::Content::prepare(&mut index, parent, &items)
+                    let prepared =
+                        nfs_server::prologue::Content::prepare(&mut index, parent, &items)?;
+                    let vehicles = event_vehicles.clone().ok_or_else(|| {
+                        nfs_content::Error::Content("intro vehicle content missing".into())
+                    })?;
+                    let path = event_items.as_ref().ok_or_else(|| {
+                        nfs_content::Error::Content("intro item content missing".into())
+                    })?;
+                    let ai_items =
+                        nfs_services::item_content::ItemContent::load(path).map_err(|e| {
+                            nfs_content::Error::Content(format!("intro AI items: {e:?}"))
+                        })?;
+                    prepared.with_opponents(&mut index, vehicles, &ai_items)
                 })();
                 Ok::<_, nfs_content::Error>((scoring, road, nitrous, event, story))
             })

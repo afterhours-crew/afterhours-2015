@@ -17,6 +17,88 @@ use nfs_world::{
 };
 use std::sync::Arc;
 
+#[test]
+fn story_opponents_are_delegated_and_retire_after_departures_atomically() {
+    let (players, owner, mode, active) =
+        crate::prologue::driving::opponents::tests::finished_fixture();
+    assert_eq!(owner.connection, HOST_SELECTOR as u8);
+    let (template, _, _) = setup();
+    let mut content = (**template.prologue.as_ref().unwrap()).clone();
+    content.driving = Some((mode.clone(), mode));
+    let cars = active.delegated(&players);
+    let root = active.ghost;
+    let mut listener = PlayerListener::new(owner.persona).with_prologue(Some(Arc::new(content)));
+    listener.players = players;
+    listener.replication_origin_ms = Some(100_000);
+    listener.world_ms = 112_100;
+    listener.intro_modes.insert(
+        owner.participant,
+        (active.clone(), active, Chapter::FirstDrive),
+    );
+    for &car in cars.keys() {
+        assert!(listener.movement_objects().contains(&car));
+        assert!(
+            listener
+                .rival_glass_owner(&listener.players, car, 0)
+                .is_some()
+        );
+    }
+    assert_eq!(
+        listener
+            .rival_map(&listener.players)
+            .unwrap()
+            .unwrap()
+            .len(),
+        2
+    );
+    let leave = request(
+        Endpoint {
+            scene: root,
+            selector: 0,
+            serial: Serial::new(1).unwrap(),
+        },
+        owner.participant,
+        0,
+    );
+    listener.pending_entries.resize(
+        MAX_PENDING,
+        (super::super::returning::empty_section(), vec![]),
+    );
+    let before = listener.players.objects().snapshot();
+    assert!(!send(&mut listener, 0, 47, leave.span()));
+    assert_eq!(listener.players.objects().snapshot(), before);
+    assert!(!listener.intro_modes[&owner.participant].0.has_left());
+    drain(&mut listener);
+    assert!(send(&mut listener, 0, 47, leave.span()));
+    assert!(listener.intro_modes[&owner.participant].0.has_left());
+    assert!(listener.delegated_ai(&listener.players).is_empty());
+    assert!(listener.pending.iter().all(|s| s.deleted.is_empty()));
+    let first_delete = listener
+        .pending_entries
+        .iter()
+        .position(|(s, _)| !s.deleted.is_empty())
+        .unwrap();
+    assert!(first_delete > 0);
+    let departures = listener
+        .pending_entries
+        .iter()
+        .take(first_delete)
+        .flat_map(|(_, calls)| calls)
+        .count();
+    assert!(departures >= 4);
+    for (section, calls) in &listener.pending_entries {
+        assert!(
+            nfs_world::session::replication_frame(section, calls, 0)
+                .unwrap()
+                .len()
+                <= nfs_world::application::OUTBOUND_FRAME_BITS
+        );
+    }
+    drain(&mut listener);
+    assert!(send(&mut listener, 1, 47, leave.span()));
+    assert!(listener.pending_entries.is_empty());
+}
+
 fn request(endpoint: Endpoint, participant: u16, method: u32) -> BitWriter {
     let mut payload = BitWriter::new();
     payload

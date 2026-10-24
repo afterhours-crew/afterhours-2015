@@ -43,6 +43,30 @@ pub struct Race {
     pub mode: driving::Mode,
 }
 impl Content {
+    /// Resolve the authored story grid using the same prepared vehicle/item
+    /// content as ordinary events. Missing opponents disable preparation.
+    pub fn with_opponents(
+        mut self,
+        index: &mut AssetIndex,
+        vehicles: crate::vehicle_content::Content,
+        items: &nfs_services::item_content::ItemContent,
+    ) -> Result<Self, nfs_content::Error> {
+        let race = self
+            .first_race
+            .as_mut()
+            .ok_or_else(|| nfs_content::Error::Content("first race missing".into()))?;
+        let roster = nfs_content::events::intro::roster(
+            index,
+            &race.mode.data.game_mode.layout.blueprint,
+            "gameplay/progression/intro/introracespikeandamy",
+        )?;
+        race.mode = race
+            .mode
+            .clone()
+            .with_opponents(roster, vehicles, items)
+            .map_err(|e| nfs_content::Error::Content(format!("intro opponents: {e:?}")))?;
+        Ok(self)
+    }
     pub fn mode(
         &self,
         chapter: nfs_world::participants::intro::Chapter,

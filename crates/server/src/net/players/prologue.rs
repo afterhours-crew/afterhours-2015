@@ -29,6 +29,24 @@ mod story;
 #[cfg(test)]
 mod tests;
 
+pub(super) fn retirement(
+    out: crate::prologue::driving::Output,
+) -> Result<Vec<Finished>, replication::Error> {
+    let mut entries = super::traffic::ai_departures(&out.departures);
+    for mut section in split_scenes(
+        out.records,
+        nfs_world::application::OUTBOUND_FRAME_BITS - 96,
+    )? {
+        section.setup = Some(Setup::RawEscape([0; 3]));
+        entries.push((section, vec![]));
+    }
+    entries.extend(super::traffic::ai_departures(&out.calls));
+    let mut section = returning::empty_section();
+    section.deleted = out.deleted;
+    entries.push((section, vec![]));
+    Ok(entries)
+}
+
 impl PlayerListener {
     pub(super) fn advance_prologue(&mut self) -> Result<(), replication::Error> {
         let Some(content) = self.prologue.as_deref() else {
@@ -52,6 +70,7 @@ impl PlayerListener {
         let mut selection = self.selection.clone();
         let mut selection_execution = self.selection_execution.clone();
         let mut modes = self.intro_modes.clone();
+        let mut ai_cursor = self.event_state.ai_cursor.clone();
         let mut participants = self.participants.clone();
         let mut cars = self.world_cars.clone();
         let mut records = Vec::new();
@@ -158,7 +177,7 @@ impl PlayerListener {
                         return Err(replication::Error::Bound);
                     };
                     let chapter = chapter.ok_or(replication::Error::Shape)?;
-                    let (drive, a) = crate::prologue::driving::Active::start(
+                    let (mut drive, a) = crate::prologue::driving::Active::start(
                         content.mode(chapter)?,
                         &mut players,
                         owner,
@@ -187,6 +206,30 @@ impl PlayerListener {
                         return Err(replication::Error::Shape);
                     };
                     calls.extend(alive.into_iter().map(HostRpc::Participant));
+                    if let Some(ai) = content.mode(chapter)?.opponents() {
+                        let previous = population.registrations().clone();
+                        let mut registrations = previous.clone();
+                        let selected = ai_cursor.select(ai)?;
+                        let mut created = ai.create(
+                            &mut players,
+                            &mut registrations,
+                            owner.connection,
+                            owner.persona,
+                            &selected,
+                        )?;
+                        let admitted = drive.admit(
+                            content.mode(chapter)?,
+                            &mut players,
+                            &mut created.racers,
+                        )?;
+                        population.update_registrations(&previous, registrations)?;
+                        records.extend(created.records);
+                        messages.extend(created.messages);
+                        calls.extend(created.calls);
+                        records.extend(admitted.records);
+                        deleted.extend(admitted.deleted);
+                        calls.extend(admitted.calls);
+                    }
                     modes.insert(participant, (drive, canceller, chapter));
                 }
                 Some(Stage::IntroEnteringGarage | Stage::IntroLoadingGarage) => {
@@ -309,6 +352,7 @@ impl PlayerListener {
         self.selection = selection;
         self.selection_execution = selection_execution;
         self.intro_modes = modes;
+        self.event_state.ai_cursor = ai_cursor;
         self.participants = participants;
         self.world_cars = cars;
         self.pending.extend(sections);
@@ -388,14 +432,9 @@ impl PlayerListener {
             let crossing = nfs_world::game_mode::Crossing::decode(body)
                 .map_err(|_| replication::Error::Shape)?
                 .ok_or(replication::Error::Shape)?;
-            let Some((active, _, chapter)) = modes.iter_mut().find_map(|(&p, pair)| {
-                players
-                    .owns_participant_vehicle(
-                        HOST_SELECTOR as u8,
-                        pair.0.owner().persona,
-                        p,
-                        crossing.vehicle,
-                    )
+            let Some((active, _, chapter)) = modes.values_mut().find_map(|pair| {
+                pair.0
+                    .owns_vehicle(players, crossing.vehicle)
                     .then_some(pair)
             }) else {
                 return Ok(Some(crate::prologue::driving::Output::default()));

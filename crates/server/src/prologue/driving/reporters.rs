@@ -6,8 +6,9 @@
 //! participant transitions. Reuse their core models; any other reached class
 //! or remote contextual emission is an error, rather than a dropped callback.
 use super::*;
+use event_logic::lifecycle::commands::Command;
 use nfs_world::scoring::{
-    self,
+    self, ai_control,
     events::{self, Dispatch, Endpoint, Handler},
     nodes, transitions,
 };
@@ -17,8 +18,11 @@ struct HandlerState {
     forward: BTreeMap<u16, u16>,
     gates: BTreeMap<u16, nodes::Node>,
     transitions: BTreeMap<u16, (Vec<u16>, Option<u16>)>,
-    actions: Vec<Action>,
+    actions: Vec<Command>,
+    results: BTreeMap<u16, Identity>,
     ai_only: BTreeSet<u16>,
+    ai_controls: BTreeSet<u16>,
+    controls: BTreeMap<u64, ai_control::Stack>,
     human: Option<u64>,
 }
 impl HandlerState {
@@ -32,6 +36,47 @@ impl HandlerState {
         // racers. Their population owner supplies their separate callbacks.
         if self.ai_only.contains(&target.node) && participant.is_some() && participant == self.human
         {
+            return Ok(());
+        }
+        if self.ai_controls.contains(&target.node) {
+            let participant = participant.ok_or(scoring::Error::MissingInput)?;
+            if self.controls.len() >= ai_control::MAX_OVERRIDES
+                && !self.controls.contains_key(&participant)
+            {
+                return Err(scoring::Error::Bound);
+            }
+            let stack = self.controls.entry(participant).or_default();
+            let key = ai_control::Key {
+                instance: 1,
+                node: target.node,
+            };
+            let event = match target.event {
+                ai_control::ENABLE | ai_control::DISABLE => {
+                    stack.acquire(key)?;
+                    let enabled = target.event == ai_control::ENABLE;
+                    stack.set(key, enabled)?;
+                    Some(if enabled {
+                        ai_control::ENABLED
+                    } else {
+                        ai_control::DISABLED
+                    })
+                }
+                ai_control::RELEASE => {
+                    stack.release(key);
+                    None
+                }
+                _ => return Err(scoring::Error::UnsupportedEvent),
+            };
+            if let Some(event) = event {
+                d.emit_participant(
+                    self,
+                    Endpoint {
+                        node: target.node,
+                        event,
+                    },
+                    participant,
+                )?;
+            }
             return Ok(());
         }
         if let Some(&node) = self.forward.get(&target.node) {
@@ -83,17 +128,29 @@ impl HandlerState {
             if self.actions.len() >= 256 {
                 return Err(scoring::Error::Bound);
             };
-            self.actions.push(match (target.event, participant) {
-                (transitions::TRIGGER, Some(participant)) => Action::MoveFirstCompleted {
-                    sources: sources.clone(),
-                    participant,
-                    target: *target_state,
-                },
-                (transitions::TRIGGER_ALL, _) => Action::MoveAll {
-                    sources: sources.clone(),
-                    target: *target_state,
-                },
-                _ => return Err(scoring::Error::UnsupportedEvent),
+            self.actions
+                .push(Command::State(match (target.event, participant) {
+                    (transitions::TRIGGER, Some(participant)) => Action::MoveFirstCompleted {
+                        sources: sources.clone(),
+                        participant,
+                        target: *target_state,
+                    },
+                    (transitions::TRIGGER_ALL, _) => Action::MoveAll {
+                        sources: sources.clone(),
+                        target: *target_state,
+                    },
+                    _ => return Err(scoring::Error::UnsupportedEvent),
+                }));
+            return Ok(());
+        }
+        if let Some(identity) = self.results.get(&target.node) {
+            if self.actions.len() >= 256 {
+                return Err(scoring::Error::Bound);
+            }
+            self.actions.push(Command::Results {
+                identity: identity.clone(),
+                event: target.event,
+                context: participant.map(events::Context::Participant),
             });
             return Ok(());
         }
@@ -136,7 +193,7 @@ impl Reporters {
             .map(|(i, n)| (n.identity.clone(), i as u16))
             .collect::<BTreeMap<_, _>>();
         let mut gates = BTreeMap::new();
-        let ai_only = index
+        let ai_only: BTreeSet<_> = index
             .scoring_ai_inclusions(&data.game_mode.layout.blueprint)?
             .into_iter()
             .filter_map(|(identity, inclusion)| {
@@ -180,7 +237,6 @@ impl Reporters {
                 .filter(|s| s.kind == StateKind::Countdown)
                 .map(|s| (s.serializer as u16, ids[&serializers[s.serializer]]))
                 .collect(),
-            identities: ids,
             state: HandlerState {
                 forward: composition
                     .nodes
@@ -191,18 +247,31 @@ impl Reporters {
                 gates,
                 transitions,
                 actions: vec![],
+                results: plan
+                    .data()
+                    .bindings
+                    .results
+                    .iter()
+                    .map(|r| (ids[&r.identity], r.identity.clone()))
+                    .collect(),
+                ai_controls: ai_only.clone(),
                 ai_only,
+                controls: BTreeMap::new(),
                 human: None,
             },
+            identities: ids,
         })
     }
     pub(super) fn bind_human(&mut self, participant: u16) {
         self.state.human = Some(u64::from(participant));
     }
+    pub(super) fn controls(&self) -> impl Iterator<Item = (u64, bool)> + '_ {
+        self.state.controls.iter().map(|(&p, s)| (p, s.current()))
+    }
     pub(super) fn effect(
         &mut self,
         e: &Effect,
-    ) -> Result<Vec<Action>, nfs_world::participant_states::Error> {
+    ) -> Result<Vec<Command>, nfs_world::participant_states::Error> {
         let (node, event, participant) = match e {
             Effect::Reporter(event_logic::lifecycle::reporters::Effect::Event {
                 identity,
@@ -294,7 +363,10 @@ mod tests {
                 )]),
                 transitions: BTreeMap::from([(2, (vec![7], Some(8)))]),
                 actions: vec![],
+                results: BTreeMap::new(),
                 ai_only: BTreeSet::new(),
+                ai_controls: BTreeSet::new(),
+                controls: BTreeMap::new(),
                 human: None,
             },
         }
@@ -315,11 +387,11 @@ mod tests {
         let mut r = fixture(false);
         assert_eq!(
             r.effect(&effect()).unwrap(),
-            vec![Action::MoveFirstCompleted {
+            vec![Command::State(Action::MoveFirstCompleted {
                 sources: vec![7],
                 participant: 19,
                 target: Some(8)
-            }]
+            })]
         );
         assert!(r.effect(&effect()).unwrap().is_empty());
     }
@@ -343,5 +415,61 @@ mod tests {
         foreign.bind_human(20);
         assert!(foreign.effect(&effect()).is_err());
         assert!(foreign.state.actions.is_empty());
+    }
+
+    #[test]
+    fn result_callback_preserves_the_triggering_participant() {
+        let mut r = fixture(false);
+        let identity = Identity {
+            asset: "test/result".into(),
+            index: 8,
+            instances: vec![],
+        };
+        r.state.results.insert(3, identity.clone());
+        r.graph = events::Graph::new(
+            4,
+            vec![events::Connection {
+                source: Endpoint { node: 0, event: 41 },
+                target: Endpoint {
+                    node: 3,
+                    event: nfs_content::events::lifecycle::bindings::results::TRIGGER,
+                },
+                delivery: events::Delivery::Local,
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            r.effect(&effect()).unwrap(),
+            vec![Command::Results {
+                identity,
+                event: nfs_content::events::lifecycle::bindings::results::TRIGGER,
+                context: Some(events::Context::Participant(19)),
+            }]
+        );
+    }
+
+    #[test]
+    fn ai_control_override_is_per_participant_and_releases_to_previous_value() {
+        let mut r = fixture(false);
+        r.state.ai_controls.extend([2, 3]);
+        r.state.ai_only.extend([2, 3]);
+        r.bind_human(19);
+        let graph = events::Graph::new(4, vec![]).unwrap();
+        let mut apply = |p, node, event| {
+            let (state, remote) = graph
+                .transaction(&r.state, |s, d| {
+                    s.receive(Endpoint { node, event }, Some(p), d)
+                })
+                .unwrap();
+            assert!(remote.is_empty());
+            r.state = state;
+            r.state.controls.get(&p).map(ai_control::Stack::current)
+        };
+        assert_eq!(apply(19, 2, ai_control::ENABLE), None);
+        assert_eq!(apply(20, 2, ai_control::ENABLE), Some(true));
+        assert_eq!(apply(20, 3, ai_control::DISABLE), Some(false));
+        assert_eq!(apply(21, 3, ai_control::DISABLE), Some(false));
+        assert_eq!(apply(20, 3, ai_control::RELEASE), Some(true));
+        assert_eq!(apply(20, 2, ai_control::RELEASE), Some(false));
     }
 }

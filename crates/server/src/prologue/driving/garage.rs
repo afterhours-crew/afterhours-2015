@@ -40,6 +40,7 @@ impl Active {
         for (key, serializer) in sources {
             let value = self.scene_state(content, players, key, serializer, entered)?;
             out.records.extend(value.records);
+            out.departures.extend(value.departures);
             out.deleted.extend(value.deleted);
             out.calls.extend(value.calls);
         }
@@ -93,14 +94,7 @@ impl Active {
         let mut next = self.clone();
         let mut staged = players.clone();
         let mut out = Output::default();
-        let effects = next
-            .host
-            .apply(&actions, &mut |_, e| {
-                next.callbacks
-                    .as_mut()
-                    .map_or_else(|| Ok(vec![]), |r| r.effect(e))
-            })
-            .map_err(invalid)?;
+        let effects = next.dispatch(actions.into_iter().map(Command::State).collect())?;
         next.effects(content, &mut staged, &effects, false, &mut out)?;
         *self = next;
         *players = staged;
@@ -152,13 +146,49 @@ impl Active {
         }
         if !self.ending
             || !self.goals.is_empty()
-            || !self.logics.is_empty()
+            || self
+                .logics
+                .keys()
+                .any(|(_, p)| *p == self.owner.participant)
             || self.routes.values().any(|(_, goal)| goal.is_some())
-            || self.pacing.is_some()
+            || self
+                .pacing
+                .as_ref()
+                .is_some_and(|(_, tokens, _)| tokens.contains_key(&self.owner.participant))
         {
             return Err(Error::Shape);
         }
         let mut staged = players.clone();
+        let mut next = self.clone();
+        if let Some((_, _, command)) = &mut next.pacing {
+            let changes = command.clear(&mut staged)?;
+            out.records.extend(changes.records);
+            out.deleted.extend(changes.deleted);
+        }
+        next.pacing = None;
+        for ghost in next.logics.values().copied() {
+            staged.remove_entities(&[ghost])?;
+            out.deleted.push(ghost);
+        }
+        next.logics.clear();
+        if let Some(racers) = &mut next.opponents {
+            let changes = content.opponents().ok_or(Error::Unsupported)?.shutdown(
+                racers,
+                &mut staged,
+                self.owner.connection,
+                self.owner.persona,
+            )?;
+            out.departures
+                .extend(changes.leave.into_iter().map(HostRpc::Participant));
+            out.departures
+                .extend(changes.untracked.into_iter().map(HostRpc::WorldActivation));
+            out.records.extend(changes.records);
+            out.deleted.extend(changes.deleted);
+        }
+        next.opponents = None;
+        next.opponent_deadlines.clear();
+        next.contexts.clear();
+        next.booleans.clear();
         staged.remove_entities(&[self.ghost])?;
         out.deleted.push(self.ghost);
         for &(key, slot) in &content.data.game_mode.checkpoints {
@@ -176,7 +206,8 @@ impl Active {
             )?));
         }
         *players = staged;
-        self.left = true;
+        next.left = true;
+        *self = next;
         Ok(out)
     }
 }

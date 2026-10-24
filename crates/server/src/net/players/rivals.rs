@@ -19,6 +19,9 @@ impl PlayerListener {
             .map(|r| r.delegated(players, connection, self.persona))
             .unwrap_or_default();
         delegated.extend(self.event_state.delegated(players, self.persona));
+        for (active, _, _) in self.intro_modes.values() {
+            delegated.extend(active.delegated(players));
+        }
         let ids = players.ai_ids(connection, self.persona, *delegated.get(&vehicle)?)?;
         Some(crate::glass::Owner {
             vehicle,
@@ -46,6 +49,9 @@ impl PlayerListener {
             .transpose()?
             .unwrap_or_default();
         locations.extend(self.event_state.locations(players, self.persona)?);
+        for (active, _, _) in self.intro_modes.values() {
+            locations.extend(active.locations(players)?);
+        }
         Ok(Some(locations))
     }
 
@@ -72,7 +78,10 @@ impl PlayerListener {
                 .collect()
         };
         let mut players = self.players.clone();
-        let preserved = self.event_state.preserved(&players, self.persona);
+        let mut preserved = self.event_state.preserved(&players, self.persona);
+        for (active, _, _) in self.intro_modes.values() {
+            preserved.extend(active.locations(&players)?.into_iter().map(|(p, _)| p));
+        }
         let changes = rivals.advance(
             &mut players,
             &mut registrations,

@@ -207,7 +207,7 @@ pub(in crate::net) struct State {
     cooldowns: VecDeque<(u64, u16)>,
     /// Completions of this session, the event half of the credit batch IDs.
     completed: u64,
-    ai_cursor: crate::event_ai::Cursor,
+    pub(in crate::net::players) ai_cursor: crate::event_ai::Cursor,
     failed: bool,
     restarts: BTreeMap<u16, restart::Instance>,
     /// Next authored location in this session's event restart grid.
