@@ -10,7 +10,9 @@ use nfs_world::{
     sequences::Component,
 };
 use std::collections::{BTreeMap, BTreeSet};
+mod parent;
 pub mod program;
+pub use parent::Relay;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Sequence {
@@ -131,6 +133,7 @@ pub struct ServiceLink {
     pub port: u32,
     pub class: String,
     pub definition: Option<[u8; 16]>,
+    pub relay: Option<Relay>,
 }
 type ServiceLinks = BTreeMap<crate::scoring::events::Identity, BTreeMap<u32, ServiceLink>>;
 
@@ -313,6 +316,46 @@ fn extract_bound(
             } else {
                 None
             };
+            let relay = if object.class == "ParticipantEventRelayEntityData" {
+                let event = graph.target_field(&node.site, "EventAsset")?;
+                let resolved = parent::read(
+                    &mut graph,
+                    &end.site,
+                    &event,
+                    progression.ports["stable_id"],
+                )?;
+                let mut slot = resolved.slot;
+                let mut visited = BTreeSet::new();
+                while graph.object(&slot.site)?.class == "LinkedSchematicChannelReferenceEntityData"
+                {
+                    if !visited.insert(slot.clone()) || visited.len() > 64 {
+                        return Err(bad("parent slot channel cycle"));
+                    }
+                    let target = parent_bindings
+                        .get(&slot.site)
+                        .ok_or_else(|| bad("parent slot binding"))?;
+                    let ends = graph.links(target, slot.port)?;
+                    let [end] = ends.as_slice() else {
+                        return Err(bad("parent slot cardinality"));
+                    };
+                    slot = end.clone();
+                }
+                if graph.object(&slot.site)?.class != "VehicleSlotEntityData" {
+                    return Err(bad("parent vehicle slot class"));
+                }
+                let (content_key, serializer) = scenes.endpoint(&mut graph, &slot.site)?;
+                Some(Relay {
+                    objective: resolved.objective,
+                    selected: resolved.selected,
+                    watched: resolved.watched,
+                    primary_slot: Channel::Scene {
+                        content_key,
+                        serializer,
+                    },
+                })
+            } else {
+                None
+            };
             links.insert(
                 port,
                 ServiceLink {
@@ -321,6 +364,7 @@ fn extract_bound(
                     port: end.port,
                     class: object.class,
                     definition,
+                    relay,
                 },
             );
         }

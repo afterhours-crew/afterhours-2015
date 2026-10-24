@@ -622,7 +622,9 @@ impl Lifecycle {
                 continue;
             }
             owned = true;
-            if stage != Stage::Customization || !self.garage_sent.contains(&participant) {
+            if !matches!(stage, Stage::Customization | Stage::IntroCarSelection)
+                || (stage == Stage::Customization && !self.garage_sent.contains(&participant))
+            {
                 return Err(Error::Shape);
             }
             for (i, endpoint) in bindings.garage.into_iter().enumerate() {

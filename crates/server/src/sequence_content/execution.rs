@@ -81,7 +81,7 @@ impl Host for Services {
         }
         match command {
             Command::Award { node, .. } => {
-                if self.awards.contains_key(&node) {
+                if !self.awards.is_empty() {
                     return Ok(());
                 }
                 self.awards.insert(node, false);
@@ -109,6 +109,9 @@ pub struct Execution {
     slot: u8,
 }
 impl Execution {
+    pub fn definition(&self) -> &Definition {
+        &self.definition
+    }
     pub fn start(
         definition: Arc<Definition>,
         ghost: u16,

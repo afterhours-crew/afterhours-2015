@@ -303,6 +303,25 @@ impl Instances {
         {
             return Ok(None);
         }
+        self.stop(content, players, owner)
+    }
+    /// Stop requested by the owned server interpreter after its authored graph
+    /// conditions have been met. Shares the native handshake with EventSync.
+    pub fn stop(
+        &mut self,
+        content: &Authored,
+        players: &Players,
+        owner: Owner,
+    ) -> Result<Option<Stop>, Error> {
+        let active = self
+            .entries
+            .get_mut(&owner.participant)
+            .ok_or(Error::UnknownObject)?;
+        if active.owner != owner
+            || !players.owns_participant(owner.connection, owner.persona, owner.participant)
+        {
+            return Err(Error::UnknownObject);
+        }
         if active.phase != Phase::Playing {
             return Ok(None);
         }

@@ -87,6 +87,56 @@ pub(super) fn read(
 }
 
 impl Policy<'_> {
+    /// Finish the authored selection after its grant. The selected slot and
+    /// objective commit together. Other owned cars remain available, including
+    /// a full garage's former primary car in the warehouse.
+    pub fn select_reward(
+        &self,
+        snapshot: &Snapshot,
+        objective: u64,
+        receipt: Receipt,
+    ) -> Result<super::Prepared, Error> {
+        if self.reward(snapshot, objective)? != Some(receipt) {
+            return Err(Error::Conflict);
+        }
+        let view = self.inspect(snapshot)?;
+        if view
+            .milestones
+            .iter()
+            .any(|m| m.id == objective && m.completed)
+        {
+            return Ok(super::Prepared::Replayed);
+        }
+        let item = snapshot.items.get(&receipt.item).ok_or(Error::Invalid)?;
+        if item.owner.is_some()
+            || item.definition.0 != receipt.definition
+            || item.state != nfs_world_core::items::OWNED
+        {
+            return Err(Error::Invalid);
+        }
+        let mut slots = snapshot.garage.ok_or(Error::Config)?;
+        if let Some(index) = slots.0.iter().position(|id| *id == Some(receipt.item)) {
+            slots.0.swap(0, index);
+        } else {
+            let previous = slots.0[0].replace(receipt.item);
+            if let Some(empty) = slots.0[1..].iter_mut().find(|id| id.is_none()) {
+                *empty = previous;
+            }
+        }
+        let super::Prepared::Mutation(mut batch) = self.complete(
+            snapshot,
+            snapshot.generation,
+            self.next_operation(snapshot)?,
+            objective,
+            vec![],
+        )?
+        else {
+            return Err(Error::Conflict);
+        };
+        batch.ops.push(Op::SetGarage(slots));
+        batch.validate()?;
+        Ok(super::Prepared::Mutation(batch))
+    }
     /// Synchronous repository port: execute on a blocking worker. A competing
     /// transaction can share a generation retry key, so reload and verify the
     /// semantic receipt before acknowledging success to the sequence.

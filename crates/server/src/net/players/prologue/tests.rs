@@ -46,7 +46,12 @@ fn packet(sequence: u8, index: u8, body: BitSpan<'_>) -> BitWriter {
         .build()
         .unwrap()
 }
-fn send(listener: &mut PlayerListener, sequence: u8, index: u8, body: BitSpan<'_>) -> bool {
+pub(super) fn send(
+    listener: &mut PlayerListener,
+    sequence: u8,
+    index: u8,
+    body: BitSpan<'_>,
+) -> bool {
     let wire = packet(sequence, index, body);
     listener.frame(Queued {
         advertised: None,
@@ -54,7 +59,7 @@ fn send(listener: &mut PlayerListener, sequence: u8, index: u8, body: BitSpan<'_
         data: wire.span(),
     })
 }
-fn drain(listener: &mut PlayerListener) {
+pub(super) fn drain(listener: &mut PlayerListener) {
     listener.pending.clear();
     listener.pending_rpcs.clear();
     listener.pending_content.clear();
@@ -252,6 +257,11 @@ pub(super) fn setup() -> (PlayerListener, u16, Arc<nfs_world::items::Collection>
 
 #[test]
 fn opening_runs_after_car_and_render_readiness_and_waits_for_native_completion() {
+    ready_for_selection(false);
+}
+pub(super) fn ready_for_selection(
+    with_services: bool,
+) -> (PlayerListener, u16, Arc<nfs_world::items::Collection>) {
     let (mut listener, participant, items) = setup();
     let load_asset = Asset {
         bundle: 32,
@@ -670,6 +680,10 @@ fn opening_runs_after_car_and_render_readiness_and_waits_for_native_completion()
         std::mem::swap(&mut slot.component, &mut slot.item_component);
     }
     Arc::make_mut(listener.prologue.as_mut().unwrap()).previews = Some(preview_source);
+    if with_services {
+        let definition = super::selection::tests::program(&listener);
+        Arc::make_mut(listener.prologue.as_mut().unwrap()).selection_program = Some(definition);
+    }
     let enter = request(returning.request, participant, 0);
     listener.progression = Some(Arc::new(
         crate::progression::Content::from_json(&crate::progression::tests::combined()).unwrap(),
@@ -873,6 +887,7 @@ fn opening_runs_after_car_and_render_readiness_and_waits_for_native_completion()
     listener.advance_prologue().unwrap();
     assert_eq!(listener.players.objects().snapshot(), selected);
     assert!(listener.pending_rpcs.is_empty());
+    (listener, participant, items)
 }
 
 #[test]

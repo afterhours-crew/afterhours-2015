@@ -92,7 +92,7 @@ pub(super) struct PlayerListener {
     prologue: Option<std::sync::Arc<crate::prologue::Content>>,
     opening: crate::sequence_content::authored::Instances,
     selection: crate::sequence_content::authored::Instances,
-    selection_execution: BTreeMap<u16, crate::sequence_content::execution::Execution>,
+    selection_execution: BTreeMap<u16, prologue::selection::State>,
     story_pending: VecDeque<super::items::story::Request>,
     intro_modes: BTreeMap<
         u16,
@@ -1211,6 +1211,8 @@ impl Listener for PlayerListener {
         let mut sequences = self.sequences.clone();
         let mut logic_ghosts = self.logic_ghosts.clone();
         let mut opening = self.opening.clone();
+        let mut selection = self.selection.clone();
+        let mut selection_execution = self.selection_execution.clone();
         let mut story_pending = self.story_pending.clone();
         let mut intro_modes = self.intro_modes.clone();
         let mut unsupported_logic = 0;
@@ -1234,6 +1236,58 @@ impl Listener for PlayerListener {
             for body in logic_events {
                 let message = nfs_world::logic::Message::decode(82, body)
                     .map_err(|_| replication::Error::Shape)?;
+                if let nfs_world::logic::Message::Reached { target, .. } = &message
+                    && let Some(owner) = selection.owner(target.ghost)
+                {
+                    if owner.connection != HOST_SELECTOR as u8 || owner.persona != self.persona {
+                        return Err(replication::Error::UnknownObject);
+                    }
+                    let state = selection_execution
+                        .get_mut(&owner.participant)
+                        .ok_or(replication::Error::UnknownObject)?;
+                    let effects = state.signal(
+                        &message,
+                        &mut prologue::selection::Context {
+                            content: self
+                                .prologue
+                                .as_deref()
+                                .ok_or(replication::Error::Unsupported)?,
+                            vehicles: self
+                                .vehicles
+                                .as_deref()
+                                .ok_or(replication::Error::Unsupported)?,
+                            progression: self
+                                .progression
+                                .as_ref()
+                                .ok_or(replication::Error::Unsupported)?,
+                            players: &mut players,
+                            population: population
+                                .as_mut()
+                                .ok_or(replication::Error::Unsupported)?,
+                            instances: &mut selection,
+                            owner,
+                            inventory: self.inventory.as_ref(),
+                            seconds: self
+                                .event_seconds(self.world_ms)
+                                .ok_or(replication::Error::Shape)?,
+                        },
+                    )?;
+                    if effects.jobs.len() > MAX_PENDING.saturating_sub(story_pending.len()) {
+                        return Err(replication::Error::Bound);
+                    }
+                    story_pending.extend(effects.jobs);
+                    responses.extend(effects.calls);
+                    if !effects.deleted.is_empty() {
+                        deferred_sections.push(Section {
+                            float_bits: None,
+                            flag: false,
+                            setup: None,
+                            records: vec![],
+                            deleted: effects.deleted,
+                        });
+                    }
+                    continue;
+                }
                 if let Some(content) = self.prologue.as_deref()
                     && Self::opening_signal(
                         content,
@@ -1600,6 +1654,21 @@ impl Listener for PlayerListener {
                     continue;
                 }
                 Ok(Some(_)) => continue,
+                Ok(None) => {}
+                Err(error) => return self.refuse_rpc(error, body),
+            }
+            match prologue::selection::completed(&mut selection, &mut players, self.persona, body) {
+                Ok(Some(Some(ghost))) => {
+                    deferred_sections.push(Section {
+                        float_bits: None,
+                        flag: false,
+                        setup: None,
+                        records: vec![],
+                        deleted: vec![ghost],
+                    });
+                    continue;
+                }
+                Ok(Some(None)) => continue,
                 Ok(None) => {}
                 Err(error) => return self.refuse_rpc(error, body),
             }
@@ -2514,6 +2583,8 @@ impl Listener for PlayerListener {
         self.launchers = launchers;
         self.participants = participants;
         self.opening = opening;
+        self.selection = selection;
+        self.selection_execution = selection_execution;
         self.story_pending = story_pending;
         self.intro_modes = intro_modes;
         self.pending_rpcs.extend(responses);

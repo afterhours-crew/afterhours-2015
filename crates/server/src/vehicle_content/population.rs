@@ -92,6 +92,9 @@ enum Lifetime {
     Preview(u16),
 }
 impl Population {
+    pub fn has_spawned(&self, participant: u16) -> bool {
+        self.spawned.contains_key(&participant)
+    }
     pub fn registrations(&self) -> &registrations::Registry {
         &self.registrations
     }

@@ -33,7 +33,7 @@ impl PlayerListener {
         if committed.loaded.generation() < before.generation() {
             return Err(replication::Error::Shape);
         }
-        let calls = progression_calls(
+        let mut calls = progression_calls(
             &request.progression,
             before,
             &committed.loaded,
@@ -44,21 +44,157 @@ impl PlayerListener {
             return Err(replication::Error::Bound);
         }
         let mut population = self.population.clone();
-        let inventory = self.inventory.as_ref().map(|old| Inventory {
-            slots: old.slots,
+        let slots = nfs_world::garage::Slots::new(committed.loaded.garage())
+            .map_err(|_| replication::Error::Shape)?;
+        let inventory = self.inventory.as_ref().map(|_| Inventory {
+            slots,
             items: committed.items.clone(),
         });
+        let mut players = self.players.clone();
+        let mut participants = self.participants.clone();
+        let mut selection = self.selection.clone();
+        let mut states = self.selection_execution.clone();
+        let mut output = crate::vehicle_content::population::Output::default();
         if let (Some(population), Some(old), Some(next)) =
             (&mut population, &self.inventory, &inventory)
         {
-            population.refresh_inventory(
-                &self.players,
-                HOST_SELECTOR as u8,
-                self.persona,
-                old,
-                next,
-            )?;
+            if let crate::net::items::story::Action::Choose {
+                sequence,
+                node,
+                definition,
+                ..
+            } = request.action
+            {
+                let owner = selection
+                    .owner(sequence)
+                    .ok_or(replication::Error::UnknownObject)?;
+                let reward = committed.reward.ok_or(replication::Error::Shape)?;
+                if owner.participant != request.participant
+                    || owner.connection != HOST_SELECTOR as u8
+                    || owner.persona != self.persona
+                    || reward.definition != definition
+                    || next.slots.values()[0] != Some(reward.item.get())
+                {
+                    return Err(replication::Error::Shape);
+                }
+                let vehicles = self
+                    .vehicles
+                    .as_deref()
+                    .ok_or(replication::Error::Unsupported)?;
+                let car_owner = crate::vehicle_content::population::Owner {
+                    connection: owner.connection,
+                    persona: owner.persona,
+                    participant: owner.participant,
+                };
+                if old.slots != next.slots || !population.has_spawned(owner.participant) {
+                    output = if population.has_spawned(owner.participant) {
+                        population.reconcile(
+                            &mut players,
+                            car_owner,
+                            old,
+                            next.clone(),
+                            &vehicles.vehicles,
+                            &vehicles.layout,
+                        )?
+                    } else {
+                        population.spawn(
+                            &mut players,
+                            car_owner,
+                            next.clone(),
+                            &vehicles.vehicles,
+                            &vehicles.layout,
+                            [0.; 3],
+                        )?
+                    };
+                    calls.extend(
+                        participants
+                            .replace_garage(old.slots, next.slots, |p| {
+                                players.owns_participant(owner.connection, owner.persona, p)
+                            })?
+                            .into_iter()
+                            .map(HostRpc::Garage),
+                    );
+                    calls.extend(output.bindings.iter().copied().map(HostRpc::Vehicle));
+                } else {
+                    population.refresh_inventory(
+                        &players,
+                        owner.connection,
+                        owner.persona,
+                        old,
+                        next,
+                    )?;
+                }
+                let effects = states
+                    .get_mut(&owner.participant)
+                    .ok_or(replication::Error::UnknownObject)?
+                    .awarded(
+                        node,
+                        reward,
+                        &mut super::selection::Context {
+                            content: self
+                                .prologue
+                                .as_deref()
+                                .ok_or(replication::Error::Unsupported)?,
+                            vehicles,
+                            progression: &request.progression,
+                            players: &mut players,
+                            population,
+                            instances: &mut selection,
+                            owner,
+                            inventory: Some(next),
+                            seconds: self
+                                .event_seconds(self.world_ms)
+                                .ok_or(replication::Error::Shape)?,
+                        },
+                    )?;
+                if !effects.jobs.is_empty() || !effects.deleted.is_empty() {
+                    return Err(replication::Error::Shape);
+                }
+                calls.extend(effects.calls);
+            } else {
+                population.refresh_inventory(
+                    &players,
+                    HOST_SELECTOR as u8,
+                    self.persona,
+                    old,
+                    next,
+                )?;
+            }
+        } else if matches!(
+            request.action,
+            crate::net::items::story::Action::Choose { .. }
+        ) {
+            return Err(replication::Error::Unsupported);
         }
+        let mut sections = split_scenes(
+            output.records,
+            nfs_world::application::OUTBOUND_FRAME_BITS - 96,
+        )?;
+        for section in &mut sections {
+            section.setup = Some(Setup::RawEscape([0; 3]));
+        }
+        if !output.deleted.is_empty() {
+            sections.push(Section {
+                float_bits: None,
+                flag: false,
+                setup: None,
+                records: vec![],
+                deleted: output.deleted,
+            });
+        }
+        if sections.len() > MAX_PENDING.saturating_sub(self.pending.len())
+            || output.messages.len() > MAX_PENDING.saturating_sub(self.pending_content.len())
+            || calls.len()
+                > nfs_world::session::MAX_RPC_QUEUE.saturating_sub(self.pending_rpcs.len())
+        {
+            return Err(replication::Error::Bound);
+        }
+        self.players = players;
+        self.participants = participants;
+        self.selection = selection;
+        self.selection_execution = states;
+        self.pending.extend(sections);
+        self.pending_content.extend(output.messages);
         self.pending_rpcs.extend(calls);
         self.population = population;
         self.inventory = inventory;
@@ -200,6 +336,7 @@ mod tests {
             loaded: after.clone(),
             items,
             notifications: vec![],
+            reward: None,
         };
         let call = nfs_world::participants::EntityCall {
             entity: blueprint_scene,

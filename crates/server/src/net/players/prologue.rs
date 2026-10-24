@@ -22,6 +22,7 @@ type Modes = BTreeMap<
     ),
 >;
 mod garage;
+pub(super) mod selection;
 mod story;
 #[cfg(test)]
 mod tests;
@@ -213,7 +214,10 @@ impl PlayerListener {
                                         })
                                     }));
                                 }
-                                if selection_execution.insert(participant, execution).is_some() {
+                                if selection_execution
+                                    .insert(participant, selection::State::new(execution))
+                                    .is_some()
+                                {
                                     return Err(replication::Error::DuplicateObject);
                                 }
                             }

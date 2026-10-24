@@ -71,6 +71,108 @@ fn grant(
     repo.snapshot(who).unwrap()
 }
 #[test]
+fn selection_commits_primary_and_completion_together_and_retries_do_not_swap_back() {
+    let repo = MemoryRepository::default();
+    let who = account(11);
+    let c = catalog();
+    let p = policy(&c);
+    let inv = inventory();
+    let before = init(&repo, who);
+    repo.apply(
+        who,
+        &Batch {
+            id: 2,
+            expected_generation: before.generation,
+            ops: vec![Op::SetGarage(nfs_storage::GarageSlots::default())],
+        },
+        Timestamp(2),
+    )
+    .unwrap();
+    let awarded = grant(&repo, who, &p, &inv);
+    let receipt = p.reward(&awarded, OBJECTIVE).unwrap().unwrap();
+    let Prepared::Mutation(batch) = p.select_reward(&awarded, OBJECTIVE, receipt).unwrap() else {
+        panic!()
+    };
+    let mut failed = batch.clone();
+    failed
+        .ops
+        .push(Op::Remove(nfs_storage::ItemId::new(99999).unwrap()));
+    assert!(repo.apply(who, &failed, Timestamp(4)).is_err());
+    assert_eq!(repo.snapshot(who).unwrap(), awarded);
+    repo.apply(who, &batch, Timestamp(4)).unwrap();
+    let saved = repo.snapshot(who).unwrap();
+    assert_eq!(saved.garage.unwrap().0[0], Some(receipt.item));
+    assert!(p.inspect(&saved).unwrap().milestones[0].completed);
+    assert_eq!(saved.items, awarded.items);
+    assert_eq!(
+        p.select_reward(&saved, OBJECTIVE, receipt).unwrap(),
+        Prepared::Replayed
+    );
+    let mut wrong = receipt;
+    wrong.definition = [4; 16];
+    assert!(p.select_reward(&saved, OBJECTIVE, wrong).is_err());
+}
+
+#[test]
+fn replay_selection_preserves_a_full_garage_and_its_former_primary() {
+    let repo = MemoryRepository::default();
+    let who = account(12);
+    let c = catalog();
+    let p = policy(&c);
+    let inv = inventory();
+    let before = init(&repo, who);
+    let mut ops = vec![];
+    let slots = std::array::from_fn(|i| Some(nfs_storage::ItemId::new(100 + i as u64).unwrap()));
+    for id in slots.into_iter().flatten() {
+        ops.push(Op::Insert(nfs_storage::ItemRecord {
+            id,
+            definition: nfs_storage::DefinitionGuid([4; 16]),
+            owner: None,
+            state: nfs_world_core::items::OWNED,
+            buy_price: 0,
+            sell_price: 0,
+            default_items: vec![],
+            sub_items: vec![],
+            derived: vec![0; 68],
+        }));
+    }
+    ops.push(Op::SetGarage(nfs_storage::GarageSlots(slots)));
+    repo.apply(
+        who,
+        &Batch {
+            id: 2,
+            expected_generation: before.generation,
+            ops,
+        },
+        Timestamp(2),
+    )
+    .unwrap();
+    let awarded = grant(&repo, who, &p, &inv);
+    let receipt = p.reward(&awarded, OBJECTIVE).unwrap().unwrap();
+    let saved = apply(
+        &repo,
+        who,
+        p.select_reward(&awarded, OBJECTIVE, receipt).unwrap(),
+    );
+    assert_eq!(saved.items, awarded.items);
+    assert_eq!(saved.garage.unwrap().0[0], Some(receipt.item));
+    assert_eq!(&saved.garage.unwrap().0[1..], &slots[1..]);
+    assert!(saved.items.contains_key(&slots[0].unwrap()));
+    // A later normal change is not undone by an old completion delivery.
+    let changed = Batch {
+        id: 22,
+        expected_generation: saved.generation,
+        ops: vec![Op::SetGarage(nfs_storage::GarageSlots(slots))],
+    };
+    repo.apply(who, &changed, Timestamp(6)).unwrap();
+    let later = repo.snapshot(who).unwrap();
+    assert_eq!(
+        p.select_reward(&later, OBJECTIVE, receipt).unwrap(),
+        Prepared::Replayed
+    );
+    assert_eq!(repo.snapshot(who).unwrap(), later);
+}
+#[test]
 fn award_precedes_completion_and_survives_rewind_without_a_second_grant() {
     let repo = MemoryRepository::default();
     let who = account(1);
