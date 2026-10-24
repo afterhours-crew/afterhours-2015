@@ -446,3 +446,51 @@ fn race_command_failure_rolls_back_pacing_allocation_and_intro_commands() {
     );
     assert_eq!(world.objects().snapshot(), before);
 }
+
+#[test]
+fn human_only_pacing_preserves_manual_control_and_releases_once() {
+    let (_, mut world, _) = event_fixture();
+    let human = human(&mut world);
+    let before = world.objects().snapshot();
+    assert!(Commands::start_player(&mut world, 2, 100, human, race_route(), 0.5).is_err());
+    assert!(Commands::start_player(&mut world, 1, 100, human, race_route(), f32::NAN).is_err());
+    assert_eq!(world.objects().snapshot(), before);
+    let (mut command, created) =
+        Commands::start_player(&mut world, 1, 100, human, race_route(), 0.5).unwrap();
+    assert_eq!(command.members(), &[human]);
+    let group = command.pacing().unwrap();
+    let actor = world.owned_actor(1, 100, human).unwrap();
+    let Update::Actor(current) = &world.objects().get(actor).unwrap().current else {
+        panic!()
+    };
+    assert_eq!(current.flag_a, Some(false));
+    assert_eq!(current.references_a.as_ref().unwrap()[1], group);
+    let mut progress = nfs_world::race_progress::Race::new(2, 1, &[human], 0.).unwrap();
+    let first = progress.cross(human, 0, 1.).unwrap().unwrap();
+    assert_eq!(
+        command
+            .crossed(&mut world, human, first)
+            .unwrap()
+            .records
+            .len(),
+        1
+    );
+    let finish = progress.cross(human, 1, 2.).unwrap().unwrap();
+    let released = command.crossed(&mut world, human, finish).unwrap();
+    assert!(
+        world.objects().get(group).is_some(),
+        "controller still owns the empty group"
+    );
+    assert!(
+        command
+            .crossed(&mut world, human, finish)
+            .unwrap()
+            .deleted
+            .is_empty()
+    );
+    assert!(command.clear(&mut world).unwrap().deleted.contains(&group));
+    assert!(command.clear(&mut world).unwrap().deleted.is_empty());
+    for record in created.records.into_iter().chain(released.records) {
+        record.encode().unwrap();
+    }
+}

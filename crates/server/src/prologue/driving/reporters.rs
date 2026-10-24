@@ -18,6 +18,8 @@ struct HandlerState {
     gates: BTreeMap<u16, nodes::Node>,
     transitions: BTreeMap<u16, (Vec<u16>, Option<u16>)>,
     actions: Vec<Action>,
+    ai_only: BTreeSet<u16>,
+    human: Option<u64>,
 }
 impl HandlerState {
     fn receive(
@@ -26,6 +28,12 @@ impl HandlerState {
         participant: Option<u64>,
         d: &mut Dispatch<'_>,
     ) -> Result<(), scoring::Error> {
+        // The mode's human membership callbacks do not enable/disable AI-only
+        // racers. Their population owner supplies their separate callbacks.
+        if self.ai_only.contains(&target.node) && participant.is_some() && participant == self.human
+        {
+            return Ok(());
+        }
         if let Some(&node) = self.forward.get(&target.node) {
             return match participant {
                 Some(p) => d.emit_participant(
@@ -109,6 +117,7 @@ impl Handler for HandlerState {
 pub(super) struct Reporters {
     graph: events::Graph,
     identities: BTreeMap<Identity, u16>,
+    countdowns: BTreeMap<u16, u16>,
     state: HandlerState,
 }
 impl Reporters {
@@ -127,6 +136,13 @@ impl Reporters {
             .map(|(i, n)| (n.identity.clone(), i as u16))
             .collect::<BTreeMap<_, _>>();
         let mut gates = BTreeMap::new();
+        let ai_only = index
+            .scoring_ai_inclusions(&data.game_mode.layout.blueprint)?
+            .into_iter()
+            .filter_map(|(identity, inclusion)| {
+                (inclusion == nfs_world::scoring::ai_control::Inclusion::Ai).then(|| ids[&identity])
+            })
+            .collect();
         for node in index.scoring_nodes(&data.game_mode.layout.blueprint)? {
             if matches!(
                 node.configuration.definition,
@@ -156,6 +172,14 @@ impl Reporters {
             .collect();
         Ok(Self {
             graph: composition.dispatcher()?,
+            countdowns: data
+                .game_mode
+                .lifecycle
+                .states
+                .iter()
+                .filter(|s| s.kind == StateKind::Countdown)
+                .map(|s| (s.serializer as u16, ids[&serializers[s.serializer]]))
+                .collect(),
             identities: ids,
             state: HandlerState {
                 forward: composition
@@ -167,14 +191,19 @@ impl Reporters {
                 gates,
                 transitions,
                 actions: vec![],
+                ai_only,
+                human: None,
             },
         })
+    }
+    pub(super) fn bind_human(&mut self, participant: u16) {
+        self.state.human = Some(u64::from(participant));
     }
     pub(super) fn effect(
         &mut self,
         e: &Effect,
     ) -> Result<Vec<Action>, nfs_world::participant_states::Error> {
-        let (identity, event, participant) = match e {
+        let (node, event, participant) = match e {
             Effect::Reporter(event_logic::lifecycle::reporters::Effect::Event {
                 identity,
                 event,
@@ -184,24 +213,35 @@ impl Reporters {
                 identity,
                 event,
                 participant,
-            }) => (identity, event, participant),
+            }) => (
+                *self
+                    .identities
+                    .get(identity)
+                    .ok_or(nfs_world::participant_states::Error::Invalid)?,
+                *event,
+                Some(*participant),
+            ),
+            Effect::Timing(event_logic::lifecycle::timed::Effect::CountdownEvent {
+                state,
+                event,
+            }) => (
+                *self
+                    .countdowns
+                    .get(state)
+                    .ok_or(nfs_world::participant_states::Error::Invalid)?,
+                *event,
+                None,
+            ),
             _ => return Ok(vec![]),
         };
-        let node = *self
-            .identities
-            .get(identity)
-            .ok_or(nfs_world::participant_states::Error::Invalid)?;
         let (mut next, remote) = self
             .graph
             .transaction(&self.state, |s, d| {
-                d.emit_participant(
-                    s,
-                    Endpoint {
-                        node,
-                        event: *event,
-                    },
-                    *participant,
-                )
+                let source = Endpoint { node, event };
+                match participant {
+                    Some(p) => d.emit_participant(s, source, p),
+                    None => d.emit(s, source),
+                }
             })
             .map_err(|_| nfs_world::participant_states::Error::Invalid)?;
         if !remote.is_empty() {
@@ -245,6 +285,7 @@ mod tests {
         Reporters {
             graph: events::Graph::new(4, connections).unwrap(),
             identities: BTreeMap::from([(id, 0)]),
+            countdowns: BTreeMap::new(),
             state: HandlerState {
                 forward: BTreeMap::new(),
                 gates: BTreeMap::from([(
@@ -253,6 +294,8 @@ mod tests {
                 )]),
                 transitions: BTreeMap::from([(2, (vec![7], Some(8)))]),
                 actions: vec![],
+                ai_only: BTreeSet::new(),
+                human: None,
             },
         }
     }
@@ -287,5 +330,18 @@ mod tests {
         assert!(r.state.actions.is_empty());
         r.graph = fixture(false).graph;
         assert_eq!(r.effect(&effect()).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn ai_only_filter_excludes_only_the_bound_human_participant() {
+        let mut r = fixture(true);
+        r.state.ai_only.insert(3);
+        r.bind_human(19);
+        assert_eq!(r.effect(&effect()).unwrap().len(), 1);
+        let mut foreign = fixture(true);
+        foreign.state.ai_only.insert(3);
+        foreign.bind_human(20);
+        assert!(foreign.effect(&effect()).is_err());
+        assert!(foreign.state.actions.is_empty());
     }
 }

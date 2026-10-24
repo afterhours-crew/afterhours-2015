@@ -20,7 +20,16 @@ impl Active {
         self.host
             .clocks(Clocks {
                 receipt_seconds: seconds,
-                channels: BTreeMap::new(),
+                channels: self
+                    .host
+                    .plan()
+                    .data()
+                    .bindings
+                    .clocks
+                    .values()
+                    .cloned()
+                    .map(|key| (key, seconds))
+                    .collect(),
             })
             .map_err(invalid)?;
         self.seconds = seconds;
@@ -100,6 +109,11 @@ impl Active {
                 *goal = None;
             }
         }
+        if let Some((_, _, command)) = &mut next.pacing {
+            let changes = command.crossed(&mut staged, next.owner.participant, progress)?;
+            out.records.extend(changes.records);
+            out.deleted.extend(changes.deleted);
+        }
         let (target, selector) = field(staged.objects(), next.ghost, state.into())?;
         out.calls.push(HostRpc::GameMode(event_logic::call(
             staged.objects(),
@@ -147,6 +161,36 @@ impl Active {
         let mut staged = players.clone();
         let mut out = Output::default();
         next.clock(seconds)?;
+        let elapsed = next
+            .sequence_deadlines
+            .iter()
+            .filter_map(|(&state, &deadline)| (seconds >= deadline).then_some(state))
+            .collect::<Vec<_>>();
+        for state in elapsed {
+            let instances = next.sequences.get_mut(&state).ok_or(Error::UnknownObject)?;
+            if let Some(stop) = instances.stop(
+                content.sequences.get(&state).ok_or(Error::Unsupported)?,
+                &staged,
+                next.owner,
+            )? {
+                out.calls.push(HostRpc::SequenceStop(stop));
+            }
+            next.sequence_deadlines.remove(&state);
+        }
+        for state in &content.data.game_mode.lifecycle.states {
+            if state.kind != StateKind::Countdown {
+                continue;
+            }
+            let effects = next
+                .host
+                .update_countdown(state.serializer as u16, &mut |_, e| {
+                    next.callbacks
+                        .as_mut()
+                        .map_or_else(|| Ok(vec![]), |r| r.effect(e))
+                })
+                .map_err(invalid)?;
+            next.effects(content, &mut staged, &effects, false, &mut out)?;
+        }
         for transition in &content.data.game_mode.lifecycle.transitions {
             if transition.kind != TransitionKind::FinishLine {
                 continue;

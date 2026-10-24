@@ -143,6 +143,7 @@ impl Active {
             || !self.goals.is_empty()
             || !self.logics.is_empty()
             || self.routes.values().any(|(_, goal)| goal.is_some())
+            || self.pacing.is_some()
         {
             return Err(Error::Shape);
         }

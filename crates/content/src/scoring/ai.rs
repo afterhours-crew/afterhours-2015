@@ -26,6 +26,46 @@ pub struct Node {
     pub definition: Definition<Identity>,
 }
 
+impl crate::assets::AssetIndex {
+    /// Inclusion filters can reject a participant before resolving commands or
+    /// manager links owned by a different runtime (for example AI race members).
+    pub fn scoring_ai_inclusions(
+        &mut self,
+        blueprint: &str,
+    ) -> Result<Vec<(Identity, Inclusion)>, Error> {
+        inclusions(&mut self.assets, blueprint)
+    }
+}
+
+fn inclusion(f: &nfs_frostbite::ebx::Fields) -> Result<Inclusion, Error> {
+    match field(f, "PlayerInclusionMode")? {
+        Value::Enum {
+            value: 0,
+            name: Some(n),
+        } if n == "PlayerInclusion_OnlyHuman" => Ok(Inclusion::Human),
+        Value::Enum {
+            value: 1,
+            name: Some(n),
+        } if n == "PlayerInclusion_OnlyAi" => Ok(Inclusion::Ai),
+        Value::Enum {
+            value: 2,
+            name: Some(n),
+        } if n == "PlayerInclusion_All" => Ok(Inclusion::All),
+        _ => Err(bad("AI player inclusion enum")),
+    }
+}
+fn inclusions<S: Source>(
+    source: &mut S,
+    blueprint: &str,
+) -> Result<Vec<(Identity, Inclusion)>, Error> {
+    Graph::new(source)
+        .read(Site::root(blueprint))?
+        .into_iter()
+        .filter(|n| n.object.class == "EnableAiOnParticipantEntityData")
+        .map(|n| Ok((Identity::from(&n.site), inclusion(&n.object.fields)?)))
+        .collect()
+}
+
 fn local<S: Source>(
     graph: &mut Graph<S>,
     site: &Site,
@@ -57,21 +97,7 @@ pub(crate) fn read<S: Source>(source: &mut S, blueprint: &str) -> Result<Vec<Nod
                 send_rpc: boolean(f, "SendRpcToClientSide")?,
             },
             "EnableAiOnParticipantEntityData" => {
-                let inclusion = match field(f, "PlayerInclusionMode")? {
-                    Value::Enum {
-                        value: 0,
-                        name: Some(n),
-                    } if n == "PlayerInclusion_OnlyHuman" => Inclusion::Human,
-                    Value::Enum {
-                        value: 1,
-                        name: Some(n),
-                    } if n == "PlayerInclusion_OnlyAi" => Inclusion::Ai,
-                    Value::Enum {
-                        value: 2,
-                        name: Some(n),
-                    } if n == "PlayerInclusion_All" => Inclusion::All,
-                    _ => return Err(bad("AI player inclusion enum")),
-                };
+                let inclusion = inclusion(f)?;
                 let states = local(
                     &mut graph,
                     &n.site,

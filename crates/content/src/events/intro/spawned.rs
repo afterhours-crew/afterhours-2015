@@ -98,7 +98,8 @@ pub(super) fn extract(
             .get(id)
             .ok_or_else(|| bad("intro sequence state missing from table"))?;
         let nodes = g.read(Site::root(name))?;
-        let (buses, fields) = crate::sequences::authored::shape(&nodes, c.sequences)?;
+        let (buses, fields) = crate::sequences::authored::shape(&nodes, c.sequences)
+            .map_err(|e| bad(&format!("intro sequence {name}: {e}")))?;
         let spawner = &c
             .mode_fields
             .get(state.serializer)

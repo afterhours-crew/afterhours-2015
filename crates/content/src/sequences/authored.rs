@@ -13,10 +13,12 @@ use nfs_world::replication::entity::{Kind, Profile};
 /// Native serializer order, independently of the service which spawns it.
 pub(crate) type Field = (Site, String, Kind);
 pub(crate) fn shape(nodes: &[Node], rules: &Rules) -> Result<(u16, Vec<Field>), Error> {
-    if nodes
-        .first()
-        .is_none_or(|n| n.object.class != "ParticipantStateSequenceBlueprint")
-    {
+    if nodes.first().is_none_or(|n| {
+        !matches!(
+            n.object.class.as_str(),
+            "ParticipantStateSequenceBlueprint" | "VehicleStateSequenceBlueprint"
+        )
+    }) {
         return Err(bad("sequence blueprint class"));
     }
     let mut buses = 0u16;
@@ -57,4 +59,44 @@ pub(crate) fn shape(nodes: &[Node], rules: &Rules) -> Result<(u16, Vec<Field>), 
     Profile::new(&fields.iter().map(|(_, _, k)| *k).collect::<Vec<_>>())
         .map_err(|_| bad("sequence serializer profile"))?;
     Ok((buses, fields))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::{
+        Graph,
+        tests::{Memory, local},
+    };
+
+    #[test]
+    fn participant_and_vehicle_sequences_share_root_shape_but_unknown_roots_fail() {
+        let rules = crate::builds::profiles().unwrap().remove(0).sequences;
+        for (blueprint, root) in [
+            (
+                "ParticipantStateSequenceBlueprint",
+                "ParticipantStateSequenceEntityData",
+            ),
+            (
+                "VehicleStateSequenceBlueprint",
+                "VehicleStateSequenceEntityData",
+            ),
+        ] {
+            let mut source = Memory::default();
+            source.put(
+                "a",
+                0,
+                blueprint,
+                &[("Flags", Value::UInt16(1)), ("Object", local(1))],
+            );
+            source.put("a", 1, root, &[]);
+            let mut nodes = Graph::new(&mut source).read(Site::root("a")).unwrap();
+            let (buses, fields) = shape(&nodes, &rules).unwrap();
+            assert_eq!(buses, 1);
+            assert_eq!(fields.len(), 1);
+            assert_eq!(fields[0].2, Kind::SequenceRoot);
+            nodes[0].object.class = "OtherBlueprint".into();
+            assert!(shape(&nodes, &rules).is_err());
+        }
+    }
 }

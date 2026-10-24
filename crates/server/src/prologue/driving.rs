@@ -13,10 +13,7 @@ use crate::{
 };
 use nfs_content::{
     assets::AssetIndex,
-    events::{
-        Binding, intro,
-        lifecycle::{StateConfiguration, StateKind},
-    },
+    events::{Binding, intro, lifecycle::StateKind},
     scoring::{events::Identity, participant_properties::Property},
 };
 use nfs_world::{
@@ -54,6 +51,7 @@ pub struct Mode {
     plan: Arc<Plan>,
     content: CreationContent,
     sequences: BTreeMap<usize, Authored>,
+    timing: BTreeMap<usize, f64>,
     reporters: Option<reporters::Reporters>,
 }
 fn invalid<T>(_: T) -> Error {
@@ -65,15 +63,45 @@ impl Mode {
         parent: Asset,
         name: &str,
     ) -> Result<Self, nfs_content::Error> {
-        let data = intro::extract(index, name, None)?;
+        Self::prepare_from(index, parent, name, None)
+    }
+    /// Reused modes keep the channels and route of their declaring story prefab.
+    pub fn prepare_from(
+        index: &mut AssetIndex,
+        parent: Asset,
+        name: &str,
+        launcher: Option<&str>,
+    ) -> Result<Self, nfs_content::Error> {
+        let data = intro::extract(index, name, launcher)?;
         let mut sequences = BTreeMap::new();
+        let mut timing = BTreeMap::new();
         for s in &data.sequences {
-            let stops =
-                nfs_content::prologue::sequences::direct_stop_signals(index, &s.layout.blueprint)?;
-            if stops.is_empty() {
-                return Err(nfs_content::Error::Content(
-                    "intro driving sequence completion signal".into(),
-                ));
+            let countdown = data.game_mode.lifecycle.states.iter().any(|state| {
+                Some(state.serializer) == s.spawner && state.kind == StateKind::Countdown
+            });
+            let stops = if countdown {
+                vec![]
+            } else {
+                nfs_content::prologue::sequences::direct_stop_signals(index, &s.layout.blueprint)?
+            };
+            let deadline = if countdown {
+                None
+            } else {
+                nfs_content::prologue::sequences::timing::extract(index, &s.layout.blueprint)?
+            };
+            if let Some(seconds) = deadline {
+                timing.insert(
+                    s.spawner.ok_or_else(|| {
+                        nfs_content::Error::Content("timed sequence spawner".into())
+                    })?,
+                    seconds,
+                );
+            }
+            if !countdown && stops.is_empty() && deadline.is_none() {
+                return Err(nfs_content::Error::Content(format!(
+                    "intro driving sequence {} completion signal",
+                    s.layout.blueprint
+                )));
             }
             let authored = Authored::from_mode(s, parent, data.game_mode.layout.asset, stops)
                 .map_err(|e| nfs_content::Error::Content(format!("intro sequence: {e:?}")))?;
@@ -93,6 +121,7 @@ impl Mode {
         }
         let mut mode = Self::new(data, parent, sequences)
             .map_err(|e| nfs_content::Error::Content(format!("intro mode: {e:?}")))?;
+        mode.timing = timing;
         mode.reporters = Some(reporters::Reporters::prepare(
             index, &mode.data, &mode.plan,
         )?);
@@ -130,6 +159,7 @@ impl Mode {
             plan,
             content,
             sequences,
+            timing: BTreeMap::new(),
             reporters: None,
         })
     }
@@ -249,10 +279,13 @@ pub struct Active {
     host: Host,
     logics: BTreeMap<usize, u16>,
     sequences: BTreeMap<usize, Instances>,
+    sequence_deadlines: BTreeMap<usize, f64>,
     goals: Vec<u16>,
     routes: BTreeMap<Identity, (u64, Option<u16>)>,
+    pacing: Option<(Identity, u64, crate::event_ai::Commands)>,
     seconds: f64,
     progress: Option<(u16, nfs_world::race_progress::Race)>,
+    car_id: Option<u32>,
     arrived: bool,
     ending: bool,
     left: bool,
@@ -277,7 +310,25 @@ impl Active {
         let mut staged = players.clone();
         let parent = content.parent(staged.objects(), owner.participant)?;
         let mut host = Host::new(content.plan.clone()).map_err(invalid)?;
+        host.clocks(event_logic::lifecycle::timed::Clocks {
+            receipt_seconds: seconds,
+            channels: content
+                .plan
+                .data()
+                .bindings
+                .clocks
+                .values()
+                .cloned()
+                .map(|key| (key, seconds))
+                .collect(),
+        })
+        .map_err(invalid)?;
+        // The human is not a pending AI spawn. Native intro construction has
+        // already advanced their membership when the mode is first published.
         let mut callbacks = content.reporters.clone();
+        if let Some(callbacks) = &mut callbacks {
+            callbacks.bind_human(owner.participant);
+        }
         let effects = host
             .apply(
                 &[Action::Enter {
@@ -306,10 +357,13 @@ impl Active {
             host,
             logics: BTreeMap::new(),
             sequences: BTreeMap::new(),
+            sequence_deadlines: BTreeMap::new(),
             goals: vec![],
             routes: BTreeMap::new(),
+            pacing: None,
             seconds,
             progress: None,
+            car_id: None,
             arrived: false,
             ending: false,
             left: false,
@@ -397,7 +451,7 @@ impl Active {
                         .find(|s| s.serializer == usize::from(*state))
                         .ok_or(Error::UnknownObject)?;
                     match data.kind {
-                        StateKind::Sequence => {
+                        StateKind::Sequence | StateKind::Countdown => {
                             let s = content
                                 .data
                                 .sequences
@@ -417,6 +471,10 @@ impl Active {
                                 )?
                                 .ok_or(Error::Shape)?;
                             out.records.push(record);
+                            if let Some(duration) = content.timing.get(&usize::from(*state)) {
+                                self.sequence_deadlines
+                                    .insert(usize::from(*state), self.seconds + duration);
+                            }
                             if let Some(goto) = s.goto {
                                 if !self.goals.is_empty() {
                                     return Err(Error::Shape);
@@ -452,8 +510,21 @@ impl Active {
                                     self.seconds,
                                 )?,
                             ));
+                            let (target, selector) =
+                                field(players.objects(), self.ghost, (*state).into())?;
+                            out.calls.push(HostRpc::GameMode(event_logic::call(
+                                players.objects(),
+                                target,
+                                selector,
+                                3,
+                                Some(self.owner.participant),
+                                Arguments::Word(self.car_id.ok_or(Error::Shape)?),
+                            )?));
                         }
-                        StateKind::GameMode | StateKind::Participant => {}
+                        StateKind::GameMode
+                        | StateKind::Participant
+                        | StateKind::Simple
+                        | StateKind::WaitForAi => {}
                         _ => return Err(Error::Unsupported),
                     }
                 }
@@ -515,6 +586,55 @@ impl Active {
                 Effect::Reporter(event_logic::lifecycle::reporters::Effect::Event { .. }) => {} // Dispatched synchronously by the Host callback before its next observer.
                 Effect::Ai(event_logic::lifecycle::ai::Effect::Event { .. }) => {} // Same synchronous graph dispatch as reporter events.
                 Effect::Ai(effect) => self.ai(content, players, effect, out)?,
+                Effect::Timing(event_logic::lifecycle::timed::Effect::CountdownDeadline {
+                    state,
+                    deadline,
+                }) => {
+                    let (target, selector) = field(players.objects(), self.ghost, (*state).into())?;
+                    out.calls.push(HostRpc::GameMode(event_logic::call(
+                        players.objects(),
+                        target,
+                        selector,
+                        2,
+                        None,
+                        Arguments::time(*deadline),
+                    )?));
+                }
+                Effect::Timing(event_logic::lifecycle::timed::Effect::CountdownStop { state }) => {
+                    let instances = self
+                        .sequences
+                        .get_mut(&usize::from(*state))
+                        .ok_or(Error::UnknownObject)?;
+                    if let Some(stop) = instances.stop(
+                        content
+                            .sequences
+                            .get(&usize::from(*state))
+                            .ok_or(Error::Unsupported)?,
+                        players,
+                        self.owner,
+                    )? {
+                        out.calls.push(HostRpc::SequenceStop(stop));
+                    }
+                }
+                Effect::Timing(event_logic::lifecycle::timed::Effect::CountdownEvent {
+                    ..
+                }) => {} // Dispatched by the graph callback.
+                Effect::Timing(event_logic::lifecycle::timed::Effect::DnfDeadline {
+                    transition,
+                    participant,
+                    deadline,
+                    ..
+                }) if *participant == u64::from(self.owner.participant) => {
+                    let (target, selector) = field(players.objects(), self.ghost, *transition)?;
+                    out.calls.push(HostRpc::GameMode(event_logic::call(
+                        players.objects(),
+                        target,
+                        selector,
+                        0,
+                        Some(self.owner.participant),
+                        Arguments::time(*deadline),
+                    )?));
+                }
                 Effect::Timing(event_logic::lifecycle::timed::Effect::Finish {
                     participant,
                     position: 1,
@@ -550,7 +670,7 @@ impl Active {
                 {
                     return Err(Error::Shape);
                 }
-                let [command] = commands.as_slice() else {
+                let Some(command) = commands.first() else {
                     return Err(Error::Unsupported);
                 };
                 let Some(Command::Waypoints {
@@ -579,6 +699,44 @@ impl Active {
                 {
                     return Err(Error::Shape);
                 }
+                if let [_, pacing] = commands.as_slice() {
+                    let Some(Command::Pacing {
+                        state: pacing_state,
+                        route: pacing_route,
+                        ..
+                    }) = content
+                        .data
+                        .game_mode
+                        .lifecycle
+                        .bindings
+                        .ai_commands
+                        .get(pacing)
+                    else {
+                        return Err(Error::Unsupported);
+                    };
+                    if pacing_state != state
+                        || pacing_route != route
+                        || content.data.game_mode.pacing.is_none()
+                        || self.pacing.is_some()
+                    {
+                        return Err(Error::Shape);
+                    }
+                    let (command, changes) = crate::event_ai::Commands::start_player(
+                        players,
+                        self.owner.connection,
+                        self.owner.persona,
+                        self.owner.participant,
+                        event_logic::route_goal(&content.data.game_mode)?,
+                        0.5,
+                    )?;
+                    self.pacing = Some((identity.clone(), *token, command));
+                    out.records.extend(changes.records);
+                    out.deleted.extend(changes.deleted);
+                    return Ok(());
+                }
+                if commands.len() != 1 {
+                    return Err(Error::Unsupported);
+                }
                 let changes = players.start_player_route(
                     self.owner.connection,
                     self.owner.persona,
@@ -597,6 +755,18 @@ impl Active {
             } => {
                 if *participant != u64::from(self.owner.participant) {
                     return Err(Error::UnknownObject);
+                }
+                if let Some((id, owned, command)) = &mut self.pacing
+                    && id == identity
+                {
+                    if owned != token {
+                        return Err(Error::UnknownObject);
+                    }
+                    let changes = command.clear(players)?;
+                    self.pacing = None;
+                    out.records.extend(changes.records);
+                    out.deleted.extend(changes.deleted);
+                    return Ok(());
                 }
                 let &(owned, goal) = self.routes.get(identity).ok_or(Error::UnknownObject)?;
                 if owned != *token {
@@ -641,6 +811,9 @@ impl Active {
                 self.owner,
                 message,
             )?;
+            if stop.is_some() {
+                self.sequence_deadlines.remove(&state);
+            }
             return Ok(Some(stop.into_iter().map(HostRpc::SequenceStop).collect()));
         }
         Ok(None)
@@ -672,6 +845,20 @@ impl Active {
             return Ok(out);
         };
         out.deleted.push(deleted);
+        // The clock already completed countdown membership before native
+        // acknowledgement; this acknowledgement only releases its sequence.
+        if content
+            .data
+            .game_mode
+            .lifecycle
+            .states
+            .iter()
+            .any(|s| s.serializer == state && s.kind == StateKind::Countdown)
+        {
+            *self = next;
+            *players = staged;
+            return Ok(out);
+        }
         if !next.goals.is_empty() {
             out.records.push(staged.release_controlled_goals(
                 next.owner.connection,
@@ -681,6 +868,10 @@ impl Active {
             )?);
             out.deleted.append(&mut next.goals);
         }
+        if next.car_id.is_some_and(|old| old != car_id) {
+            return Err(Error::Shape);
+        }
+        next.car_id = Some(car_id);
         let effects = next
             .host
             .apply(
@@ -696,26 +887,6 @@ impl Active {
             )
             .map_err(invalid)?;
         next.effects(content, &mut staged, &effects, false, &mut out)?;
-        for state in &content.data.game_mode.lifecycle.states {
-            if matches!(state.configuration, StateConfiguration::Waypoints { .. })
-                && next
-                    .host
-                    .machine()
-                    .members(state.serializer as u16)
-                    .map_err(invalid)?
-                    .contains(&u64::from(next.owner.participant))
-            {
-                let (target, selector) = field(staged.objects(), next.ghost, state.serializer)?;
-                out.calls.push(HostRpc::GameMode(event_logic::call(
-                    staged.objects(),
-                    target,
-                    selector,
-                    3,
-                    Some(next.owner.participant),
-                    Arguments::Word(car_id),
-                )?));
-            }
-        }
         *self = next;
         *players = staged;
         Ok(out)

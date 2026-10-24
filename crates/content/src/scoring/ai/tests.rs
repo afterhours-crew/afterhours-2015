@@ -13,6 +13,16 @@ fn set(m: &mut Memory, index: usize, name: &str, value: Value) {
         fields.push((name.into(), value));
     }
 }
+
+#[test]
+fn enabler_reader_does_not_compile_commands_owned_by_the_mode() {
+    let mut m = fixture();
+    m.0.get_mut(&("r".into(), 3)).unwrap().fields.0.clear();
+    let selected = inclusions(&mut m, "r").unwrap();
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].1, Inclusion::All);
+    assert!(read(&mut m, "r").is_err());
+}
 fn links() -> Vec<Value> {
     vec![
         edge(local(1), 0xe5c2_fc2d, local(2), 0),

@@ -45,9 +45,45 @@ impl Commands {
         route: goto_waypoint::Initial,
         skills: &[f32],
     ) -> Result<(Self, ai::GoalChanges), Error> {
-        if racers.members.is_empty()
-            || racers.members.len() > nfs_world::race_pacing::MAX_OPPONENTS
-            || skills.len() != racers.members.len() + 1
+        if racers.members.is_empty() {
+            return Err(Error::Shape);
+        }
+        Self::start_members(
+            players,
+            connection,
+            persona,
+            human,
+            &racers.members,
+            route,
+            skills,
+        )
+    }
+
+    /// The native route and pacing command with one human member. Story
+    /// membership can start before its separately owned opponents are ready.
+    pub fn start_player(
+        players: &mut Players,
+        connection: u8,
+        persona: u64,
+        human: u16,
+        route: goto_waypoint::Initial,
+        skill: f32,
+    ) -> Result<(Self, ai::GoalChanges), Error> {
+        Self::start_members(players, connection, persona, human, &[], route, &[skill])
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_members(
+        players: &mut Players,
+        connection: u8,
+        persona: u64,
+        human: u16,
+        racers: &[Member],
+        route: goto_waypoint::Initial,
+        skills: &[f32],
+    ) -> Result<(Self, ai::GoalChanges), Error> {
+        if racers.len() > nfs_world::race_pacing::MAX_OPPONENTS
+            || skills.len() != racers.len() + 1
             || skills.iter().any(|v| !v.is_finite())
             || !route.progress_updates
             || route.waypoint != 0
@@ -57,13 +93,13 @@ impl Commands {
         let actor = players
             .owned_actor(connection, persona, human)
             .ok_or(Error::UnknownObject)?;
-        for member in &racers.members {
+        for member in racers {
             if players.ai_ids(connection, persona, member.selection.car_key) != Some(member.ids) {
                 return Err(Error::UnknownObject);
             }
         }
         let members: Vec<_> = std::iter::once(human)
-            .chain(racers.members.iter().map(|m| m.ids.participant))
+            .chain(racers.iter().map(|m| m.ids.participant))
             .collect();
         let mut world = players.clone();
         let pacing = world.create_ai_pacing_group(
@@ -94,7 +130,7 @@ impl Commands {
             },
         )]);
         extend(&mut changes, first);
-        for member in &racers.members {
+        for member in racers {
             let assigned = world.replace_ai_goals(
                 connection,
                 persona,

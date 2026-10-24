@@ -4,7 +4,7 @@
 use super::*;
 use nfs_content::events::{
     Field, GameMode, Goto, Layout, Sequence,
-    lifecycle::{self as data, bindings::Observer},
+    lifecycle::{self as data, StateConfiguration, bindings::Observer},
 };
 use nfs_world::{replication::entity::Kind, sequences::Component};
 
@@ -230,4 +230,275 @@ pub(crate) fn content(parent: Asset, manager: Component) -> (Mode, Mode) {
         Mode::new(data, parent, BTreeMap::from([(1, authored)])).unwrap(),
         Mode::new(cancel, parent, BTreeMap::new()).unwrap(),
     )
+}
+
+fn clock_fixture(countdown: bool) -> (Players, Owner, Mode) {
+    use nfs_protocol::world::rpc::Serial;
+    use nfs_world::replication::{
+        entity::{
+            Body, Initial, Profile, Rpc, Update,
+            creation::{Creation, Prefix},
+        },
+        players::Request,
+        sublevel,
+    };
+    let mut players = Players::default();
+    let scenes = sublevel::Content::new(vec![(
+        7,
+        sublevel::Profile::new(false, &[sublevel::Kind::Noop, sublevel::Kind::Rpc]).unwrap(),
+    )])
+    .unwrap();
+    let scene = sublevel::passive::creation(1, 7, Serial::new(1).unwrap(), &scenes).unwrap();
+    players.create_scenes(&[1], vec![scene], &scenes).unwrap();
+    let player = players
+        .create(
+            3,
+            10,
+            Request {
+                name: b"Clock".to_vec(),
+                flag: false,
+                slot: 0,
+            },
+        )
+        .unwrap()
+        .unwrap()
+        .id;
+    let owner = Owner {
+        connection: 3,
+        persona: 10,
+        participant: players.join(3, 10, player).unwrap().unwrap().id,
+    };
+    let parent = Asset {
+        bundle: 4,
+        type_id: 8,
+        local_index: 0,
+    };
+    let codec = CreationContent::new(
+        vec![Catalog::new(4, &[(8, 1), (9, 2), (10, 2)]).unwrap()],
+        vec![(parent, Profile::new(&[Kind::Root, Kind::Rpc]).unwrap())],
+    )
+    .unwrap();
+    players
+        .spawn_entities(
+            vec![Creation {
+                prefix: Prefix {
+                    parent: None,
+                    blueprint: 1,
+                    sub_id: 1,
+                    owner: None,
+                    asset: parent,
+                },
+                body: Body {
+                    initial: Some(vec![
+                        Initial::Root {
+                            value: 1,
+                            rpc: Rpc {
+                                selector: 0,
+                                serial: Serial::new(1).unwrap(),
+                            },
+                            reference: owner.participant,
+                        },
+                        Initial::Rpc(Rpc {
+                            selector: 1,
+                            serial: Serial::new(1).unwrap(),
+                        }),
+                    ]),
+                    updates: vec![Some(Update::Noop); 2],
+                },
+            }],
+            &codec,
+        )
+        .unwrap();
+    let (base, _) = content(
+        parent,
+        Component {
+            scene_key: 7,
+            index: 1,
+        },
+    );
+    let mut data = base.data;
+    data.sequences[0].goto = None;
+    data.game_mode.layout.fields[2].kind = Kind::RpcReferences;
+    data.game_mode.lifecycle.states[1].kind = StateKind::GameMode;
+    data.game_mode.lifecycle.states[1].configuration = StateConfiguration::Default;
+    data.game_mode.lifecycle.final_state = 2;
+    data.game_mode.lifecycle.transitions.truncate(1);
+    data.game_mode.lifecycle.registered_transitions = vec![4];
+    data.game_mode.lifecycle.bindings = data::bindings::Bindings {
+        order: vec![Observer::Transition(4)],
+        ..Default::default()
+    };
+    if countdown {
+        let clock = Property {
+            channel: "test/clock".into(),
+            port: 1,
+        };
+        data.game_mode.layout.fields[1].kind = Kind::CountdownState;
+        data.game_mode.lifecycle.states[0].kind = StateKind::Countdown;
+        data.game_mode.lifecycle.states[0].configuration = StateConfiguration::Countdown {
+            sequence: ("test/id".into(), 0),
+            seconds: 0.,
+        };
+        data.game_mode.lifecycle.states[2].kind = StateKind::Sequence;
+        data.game_mode.lifecycle.states[2].configuration = StateConfiguration::Sequence {
+            sequence: ("test/intro-id".into(), 0),
+        };
+        let mut intro = data.sequences[0].clone();
+        intro.spawner = Some(3);
+        data.sequences.push(intro);
+        data.game_mode.lifecycle.initial = 3;
+        data.game_mode.lifecycle.bindings.clocks.insert(1, clock);
+        data.game_mode.lifecycle.transitions.push(data::Transition {
+            serializer: 6,
+            kind: data::TransitionKind::Completed,
+            sources: vec![data::Endpoint {
+                serializer: 3,
+                port: 0,
+            }],
+            target: Some(data::Endpoint {
+                serializer: 1,
+                port: 0,
+            }),
+            configuration: data::TransitionConfiguration::Default,
+        });
+        data.game_mode.lifecycle.registered_transitions.push(6);
+        data.game_mode
+            .lifecycle
+            .bindings
+            .order
+            .push(Observer::Transition(6));
+    }
+    let mut sequences = base.sequences;
+    if countdown {
+        sequences.insert(3, sequences[&1].clone());
+    }
+    let mut mode = Mode::new(data, parent, sequences).unwrap();
+    if !countdown {
+        mode.timing.insert(1, 2.);
+    }
+    (players, owner, mode)
+}
+
+#[test]
+fn zero_countdown_stops_before_native_ack_and_does_not_transition_twice() {
+    let (mut players, owner, mode) = clock_fixture(true);
+    let (mut active, start) = Active::start(&mode, &mut players, owner, 12.).unwrap();
+    assert_eq!(
+        start.records.len(),
+        2,
+        "human immediately enters its sequence"
+    );
+    let intro = active.sequences[&3].ghost(owner.participant).unwrap();
+    active
+        .sequences
+        .get_mut(&3)
+        .unwrap()
+        .stop(&mode.sequences[&3], &players, owner)
+        .unwrap()
+        .unwrap();
+    active
+        .completed(
+            &mode,
+            &mut players,
+            Completed {
+                sequence: intro,
+                participant: owner.participant,
+            },
+            123,
+        )
+        .unwrap();
+    let sequence = active.sequences[&1].ghost(owner.participant).unwrap();
+    let call = Completed {
+        sequence,
+        participant: owner.participant,
+    };
+    assert!(active.completed(&mode, &mut players, call, 123).is_err());
+    assert!(
+        active
+            .advance(&mode, &mut players, 12.)
+            .unwrap()
+            .calls
+            .is_empty()
+    );
+    assert!(active.advance(&mode, &mut players, 11.).is_err());
+    let tick = active.advance(&mode, &mut players, 12.01).unwrap();
+    assert!(matches!(tick.calls.first(), Some(HostRpc::SequenceStop(_))));
+    assert_eq!(
+        active.host.machine().members(2).unwrap(),
+        &BTreeSet::from([u64::from(owner.participant)])
+    );
+    let ack = active.completed(&mode, &mut players, call, 123).unwrap();
+    assert_eq!(ack.deleted, vec![sequence]);
+    assert!(
+        ack.calls.is_empty(),
+        "native acknowledgement must not advance membership twice"
+    );
+    assert!(
+        active
+            .completed(&mode, &mut players, call, 123)
+            .unwrap()
+            .deleted
+            .is_empty()
+    );
+    assert!(
+        active
+            .advance(&mode, &mut players, 13.)
+            .unwrap()
+            .calls
+            .is_empty()
+    );
+}
+
+#[test]
+fn authored_timer_stops_once_and_still_requires_the_owned_native_acknowledgement() {
+    let (mut players, owner, mode) = clock_fixture(false);
+    let (mut active, _) = Active::start(&mode, &mut players, owner, 20.).unwrap();
+    let sequence = active.sequences[&1].ghost(owner.participant).unwrap();
+    assert!(
+        active
+            .advance(&mode, &mut players, 21.99)
+            .unwrap()
+            .calls
+            .is_empty()
+    );
+    assert!(matches!(
+        active
+            .advance(&mode, &mut players, 22.)
+            .unwrap()
+            .calls
+            .as_slice(),
+        [HostRpc::SequenceStop(_)]
+    ));
+    assert!(
+        active
+            .advance(&mode, &mut players, 23.)
+            .unwrap()
+            .calls
+            .is_empty()
+    );
+    assert!(
+        active
+            .completed(
+                &mode,
+                &mut players,
+                Completed {
+                    sequence,
+                    participant: owner.participant + 1
+                },
+                123
+            )
+            .is_err()
+    );
+    let out = active
+        .completed(
+            &mode,
+            &mut players,
+            Completed {
+                sequence,
+                participant: owner.participant,
+            },
+            123,
+        )
+        .unwrap();
+    assert_eq!(out.deleted, vec![sequence]);
 }

@@ -12,6 +12,7 @@ use nfs_world::{
 use std::collections::{BTreeMap, BTreeSet};
 mod parent;
 pub mod program;
+pub mod timing;
 pub use parent::Relay;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
