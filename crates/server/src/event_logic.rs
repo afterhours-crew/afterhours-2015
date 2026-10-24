@@ -18,7 +18,7 @@ use nfs_world::{
     replication::{
         Error, Initial as RecordInitial,
         entity::{
-            Body, GameModeRoot, Initial, Kind, Rpc, Update,
+            Body, Initial, Kind, Rpc, Update,
             creation::{Asset, Catalog, Content as CreationContent, Creation, Prefix},
         },
         goto_waypoint, speed_limit,
@@ -784,6 +784,7 @@ impl Content {
                 game_mode.ok_or(Error::Shape)?,
                 selector(&self.event.game_mode.layout, serializer)?,
             )),
+            Binding::Participant { .. } => Err(Error::Unsupported),
         }
     }
 
@@ -1059,14 +1060,13 @@ impl Content {
         }
         let layout = &self.event.game_mode.layout;
         let (manager_key, _) = self.event.game_mode.root_bindings[1];
-        let blueprint = world.scene(manager_key).ok_or(Error::UnknownObject)?;
+        world.scene(manager_key).ok_or(Error::UnknownObject)?;
         let mut bindings = [(0, 0); 3];
         for (slot, &(key, serializer)) in self.event.game_mode.root_bindings.iter().enumerate() {
             bindings[slot] = world
                 .scene_endpoint(key, serializer)
                 .ok_or(Error::UnknownObject)?;
         }
-        let intro = self.spawner(request::INTRO_SEQUENCE)?;
         let mut waypoints = Vec::with_capacity(self.event.game_mode.checkpoints.len());
         for &(key, serializer) in &self.event.game_mode.checkpoints {
             waypoints.push(
@@ -1075,103 +1075,27 @@ impl Content {
                     .ok_or(Error::UnknownObject)?,
             );
         }
-        let mut initial = Vec::with_capacity(layout.fields.len());
-        let mut updates = Vec::with_capacity(layout.fields.len());
-        for (index, field) in layout.fields.iter().enumerate() {
-            let r = rpc(selector(layout, index)?)?;
-            let (first, update) = match field.kind {
-                Kind::GameModeRoot if index == 0 => (
-                    Initial::GameModeRoot(Box::new(GameModeRoot {
-                        value: layout.bus_count,
-                        rpc: r,
-                        start: start_seconds.to_bits(),
-                        age: 0f32.to_bits(),
-                        bindings,
-                        participants: vec![participant],
-                        others: Vec::new(),
-                        flag: false,
-                    })),
-                    Update::Noop,
-                ),
-                Kind::RpcReference => {
-                    let binding = field.binding.ok_or(Error::Unsupported)?;
-                    let (reference, target_selector) = self.bound(world, binding, None)?;
-                    (
-                        Initial::RpcReference {
-                            rpc: r,
-                            reference,
-                            target_selector,
-                        },
-                        Update::Noop,
-                    )
-                }
-                Kind::Rpc => (Initial::Rpc(r), Update::Noop),
-                Kind::RpcReferences => (
-                    Initial::RpcReferences {
-                        rpc: r,
-                        references: if index == intro {
-                            vec![participant]
-                        } else {
-                            Vec::new()
-                        },
-                    },
-                    Update::Noop,
-                ),
-                Kind::CountdownState => (
-                    Initial::CountdownState {
-                        rpc: r,
-                        references: Vec::new(),
-                        start: None,
-                    },
-                    Update::Noop,
-                ),
-                Kind::WaypointsState => (
-                    Initial::WaypointsState {
-                        rpc: r,
-                        references: Vec::new(),
-                        words: [0; 3],
-                    },
-                    Update::Noop,
-                ),
-                Kind::DnfTransition => (
-                    Initial::DnfTransition {
-                        rpc: r,
-                        values: Vec::new(),
-                    },
-                    Update::Noop,
-                ),
-                Kind::WaypointList => (
-                    Initial::WaypointList {
-                        rpc: r,
-                        laps: self.event.game_mode.laps,
-                        waypoints: waypoints.clone(),
-                    },
-                    Update::Noop,
-                ),
-                Kind::RpcGuid => (Initial::RpcGuid { rpc: r, guid: None }, Update::Noop),
-                // E994's creations carry a present, empty outro player set.
-                Kind::RpcSet64 => (
-                    Initial::RpcSet64(r),
-                    Update::Set64(Some(sublevel::Set64 { entries: None })),
-                ),
-                _ => return Err(Error::Unsupported),
-            };
-            initial.push(first);
-            updates.push(Some(update));
-        }
-        let creation = Creation {
-            prefix: Prefix {
-                parent: None,
-                blueprint,
-                sub_id: layout.sub_id,
-                owner: None,
-                asset: layout.asset,
+        let shape = nfs_world::game_mode::authored::Blueprint::new(
+            layout.asset,
+            layout.sub_id,
+            layout.bus_count,
+            &layout.fields.iter().map(|f| f.kind).collect::<Vec<_>>(),
+        )?;
+        let creation = shape.creation(
+            nfs_world::game_mode::authored::Instance {
+                bindings,
+                participant,
+                start_seconds,
+                age_seconds: 0.,
+                members: BTreeSet::from([self.spawner(request::INTRO_SEQUENCE)?]),
+                laps: self.event.game_mode.laps,
+                waypoints,
             },
-            body: Body {
-                initial: Some(initial),
-                updates,
+            |index| {
+                let binding = layout.fields[index].binding.ok_or(Error::Unsupported)?;
+                self.bound(world, binding, None)
             },
-        };
+        )?;
         creation.encode(&self.creation)?;
         Ok(creation)
     }

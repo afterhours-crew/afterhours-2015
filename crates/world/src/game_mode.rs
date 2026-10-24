@@ -13,6 +13,7 @@
 //! notification's set (0) and clear (1), and the launcher's launched-game-mode call
 //! (method 4 with the game mode as the second reference).
 use crate::bits::BitWriter;
+pub mod authored;
 use nfs_protocol::world::{
     BitSpan,
     rpc::{Envelope, Limits, RouteProfile, Serial},

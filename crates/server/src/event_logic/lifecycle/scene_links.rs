@@ -90,6 +90,7 @@ impl Registry {
                     instance,
                     serializers.get(serializer).ok_or(Error::MissingInput)?,
                 ),
+                Binding::Participant { .. } => return Err(Error::MissingInput),
             };
             if identity != &channel.definition {
                 return Err(Error::InvalidGraph);

@@ -555,7 +555,13 @@ pub(super) fn resolve_imports<S: Source>(
         let (channel, _) = channels
             .get(reference)
             .ok_or_else(|| bad("unbound external state channel"))?;
-        let sites = imported_sites(graph, channel, endpoint.port, &mut BTreeSet::new())?;
+        let sites = imported_sites(
+            graph,
+            channel,
+            endpoint.port,
+            channels,
+            &mut BTreeSet::new(),
+        )?;
         let mut resolved = Vec::new();
         for site in sites {
             let object = graph.object(&site)?;
@@ -624,17 +630,21 @@ fn imported_sites<S: Source>(
     graph: &mut Graph<S>,
     site: &Site,
     port: u32,
+    channels: &BTreeMap<Site, (Site, Binding)>,
     active: &mut BTreeSet<(Site, u32)>,
 ) -> Result<Vec<Site>, Error> {
     if active.len() >= 64 || !active.insert((site.clone(), port)) {
         return Err(bad("external state link cycle"));
     }
     let mut result = Vec::new();
-    for link in graph.links(site, port)? {
+    let actual = channels.get(site).map_or(site, |(target, _)| target);
+    for link in graph.links(actual, port)? {
         if link.port == 0 {
             result.push(link.site);
         } else {
-            result.extend(imported_sites(graph, &link.site, link.port, active)?);
+            result.extend(imported_sites(
+                graph, &link.site, link.port, channels, active,
+            )?);
         }
         if result.len() > MAX_STATES {
             return Err(bad("external state list bound"));

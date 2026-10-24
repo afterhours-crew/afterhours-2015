@@ -27,6 +27,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub mod ai;
 pub mod awards;
 pub mod discovery;
+pub mod intro;
 mod invitations;
 pub mod lifecycle;
 mod pacing;
@@ -68,8 +69,17 @@ const MANAGER_CLASSES: [&str; 3] = [
 /// event's game mode.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum Binding {
-    Scene { content_key: u32, serializer: usize },
-    GameMode { serializer: usize },
+    Scene {
+        content_key: u32,
+        serializer: usize,
+    },
+    GameMode {
+        serializer: usize,
+    },
+    /// Channel owned by the participant logic that launched this mode.
+    Participant {
+        serializer: usize,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -400,13 +410,23 @@ fn bind<S: Source>(
     spawner: &Site,
     rules: &Rules,
 ) -> Result<Vec<Site>, Error> {
+    let targets = graph.links(spawner, rules.spawner_channels)?;
+    bind_targets(graph, references, root, rules, &targets)
+}
+
+fn bind_targets<S: Source>(
+    graph: &mut Graph<S>,
+    references: &[(Site, String)],
+    root: &Site,
+    rules: &Rules,
+    targets: &[Endpoint],
+) -> Result<Vec<Site>, Error> {
     let linked: BTreeSet<Site> = graph
         .links(root, rules.root_channels)?
         .into_iter()
         .filter(|e| e.port == 0)
         .map(|e| e.site)
         .collect();
-    let targets = graph.links(spawner, rules.spawner_channels)?;
     let mut used = BTreeSet::new();
     let mut out = Vec::new();
     for (site, class) in references {
@@ -424,7 +444,10 @@ fn bind<S: Source>(
             if used.contains(&index) || target.port != 0 {
                 continue;
             }
-            if graph.object(&target.site)?.class != wanted {
+            let target_class = graph.object(&target.site)?.class;
+            if target_class != wanted
+                && !(class == "LinkedSchematicChannelReferenceEntityData" && target_class == *class)
+            {
                 continue;
             }
             if let Some(asset) = &asset
