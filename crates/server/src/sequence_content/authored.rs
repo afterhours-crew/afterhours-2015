@@ -149,6 +149,7 @@ impl Authored {
         players: &Players,
         owner: Owner,
         game_mode: Option<u16>,
+        stopping: bool,
     ) -> Result<entity::creation::Creation, Error> {
         if !players.owns_participant(owner.connection, owner.persona, owner.participant) {
             return Err(Error::UnknownObject);
@@ -165,12 +166,13 @@ impl Authored {
         let manager = world
             .scene_endpoint(self.data.manager.scene_key, self.data.manager.index)
             .ok_or(Error::UnknownObject)?;
-        self.blueprint.creation(
+        self.blueprint.creation_with_stop(
             Instance {
                 manager,
                 participant: owner.participant,
                 number: crate::event_logic::live_sequences(world, manager),
             },
+            stopping,
             |field| match self.channels.get(&field).ok_or(Error::Shape)? {
                 ChannelBinding::GameMode { serializer } => {
                     let ghost=game_mode.ok_or(Error::UnknownObject)?;
@@ -214,6 +216,24 @@ pub struct Instances {
     entries: BTreeMap<u16, Active>,
 }
 impl Instances {
+    /// Retire an owned completed entry before starting the next story sequence.
+    /// Playing/stopping entries cannot be replaced or lose their native ack.
+    pub fn retire_completed(&mut self, players: &Players, owner: Owner) -> Result<(), Error> {
+        let active = self
+            .entries
+            .get(&owner.participant)
+            .ok_or(Error::UnknownObject)?;
+        if active.owner != owner
+            || !players.owns_participant(owner.connection, owner.persona, owner.participant)
+        {
+            return Err(Error::UnknownObject);
+        }
+        if active.phase != Phase::Complete {
+            return Err(Error::Shape);
+        }
+        self.entries.remove(&owner.participant);
+        Ok(())
+    }
     pub fn owner(&self, ghost: u16) -> Option<Owner> {
         self.entries
             .values()
@@ -241,6 +261,26 @@ impl Instances {
         owner: Owner,
         game_mode: Option<u16>,
     ) -> Result<Option<Record>, Error> {
+        self.spawn(content, players, owner, game_mode, Phase::Playing)
+    }
+    /// An authored immediate stop can precede initial replication. The native
+    /// constructor then carries stopping=true and still requires Completed.
+    pub fn start_stopped(
+        &mut self,
+        content: &Authored,
+        players: &mut Players,
+        owner: Owner,
+    ) -> Result<Option<Record>, Error> {
+        self.spawn(content, players, owner, None, Phase::Stopping)
+    }
+    fn spawn(
+        &mut self,
+        content: &Authored,
+        players: &mut Players,
+        owner: Owner,
+        game_mode: Option<u16>,
+        phase: Phase,
+    ) -> Result<Option<Record>, Error> {
         if !players.owns_participant(owner.connection, owner.persona, owner.participant) {
             return Err(Error::UnknownObject);
         }
@@ -254,7 +294,7 @@ impl Instances {
         if self.entries.len() >= nfs_world::sequences::MAX_INSTANCES {
             return Err(Error::Bound);
         }
-        let creation = content.creation(players, owner, game_mode)?;
+        let creation = content.creation(players, owner, game_mode, phase == Phase::Stopping)?;
         let record = players
             .spawn_entities(vec![creation], &content.content)?
             .remove(0);
@@ -263,7 +303,7 @@ impl Instances {
             Active {
                 owner,
                 ghost: record.id,
-                phase: Phase::Playing,
+                phase,
             },
         );
         Ok(Some(record))

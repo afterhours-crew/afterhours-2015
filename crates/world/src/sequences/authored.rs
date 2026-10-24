@@ -68,6 +68,16 @@ impl Blueprint {
     pub fn creation(
         &self,
         instance: Instance,
+        channel: impl FnMut(usize) -> Result<(u16, u16), Error>,
+    ) -> Result<Creation, Error> {
+        self.creation_with_stop(instance, false, channel)
+    }
+    /// Stop may already be set when an immediate authored sequence is first
+    /// replicated. The client still acknowledges completion of that instance.
+    pub fn creation_with_stop(
+        &self,
+        instance: Instance,
+        stopping: bool,
         mut channel: impl FnMut(usize) -> Result<(u16, u16), Error>,
     ) -> Result<Creation, Error> {
         let valid_ref = |id: u16| id != 0 && id <= 8191;
@@ -91,7 +101,7 @@ impl Blueprint {
                     manager_selector: instance.manager.1,
                     sequence: instance.number,
                     participants: vec![instance.participant],
-                    stopping: false,
+                    stopping,
                 },
                 Kind::RpcOptionalReference => Initial::RpcOptionalReference {
                     rpc,

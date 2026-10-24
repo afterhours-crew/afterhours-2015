@@ -646,7 +646,9 @@ impl Active {
                 _ => return Err(Error::Unsupported),
             }
         }
-        Ok(())
+        // Final state can be reached by a scene callback, a clock transition,
+        // or sequence completion. All paths publish the same native shutdown.
+        self.finish_if_final(content, players, out)
     }
     fn ai(
         &mut self,

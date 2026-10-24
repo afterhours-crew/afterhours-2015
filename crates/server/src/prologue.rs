@@ -33,9 +33,41 @@ pub struct Content {
     pub loading: Option<loading::Loading>,
     pub selection: Option<Authored>,
     pub selection_program: Option<Arc<nfs_content::prologue::sequences::program::Definition>>,
+    pub first_race: Option<Race>,
     items: Arc<Collection>,
 }
+#[derive(Clone, Debug)]
+pub struct Race {
+    pub destination: nfs_content::prologue::Destination,
+    pub arrival: Authored,
+    pub mode: driving::Mode,
+}
 impl Content {
+    pub fn mode(
+        &self,
+        chapter: nfs_world::participants::intro::Chapter,
+    ) -> Result<&driving::Mode, Error> {
+        use nfs_world::participants::intro::Chapter;
+        match chapter {
+            Chapter::FirstDrive => self.driving.as_ref().map(|pair| &pair.0),
+            Chapter::FirstRace => self.first_race.as_ref().map(|race| &race.mode),
+        }
+        .ok_or(Error::Unsupported)
+    }
+    pub fn arrival(
+        &self,
+        chapter: nfs_world::participants::intro::Chapter,
+    ) -> Result<&Authored, Error> {
+        use nfs_world::participants::intro::Chapter;
+        match chapter {
+            Chapter::FirstDrive => Ok(&self.opening),
+            Chapter::FirstRace => self
+                .first_race
+                .as_ref()
+                .map(|race| &race.arrival)
+                .ok_or(Error::Unsupported),
+        }
+    }
     #[cfg(test)]
     pub(crate) fn for_test(
         items: Arc<Collection>,
@@ -87,6 +119,7 @@ impl Content {
             loading: None,
             selection: None,
             selection_program: None,
+            first_race: None,
         }
     }
     pub fn prepare(
@@ -113,6 +146,35 @@ impl Content {
         .map_err(|e| nfs_content::Error::Content(format!("starter selection: {e:?}")))?;
         let loading = loading::Loading::prepare(index)?;
         let selection_program = nfs_content::prologue::sequences::program::extract(index, name)?;
+        let capability = "gameplay/progression/intro/introracespikeandamy";
+        let destination = nfs_content::prologue::destination(index, capability)?;
+        // This arrival has a direct Started -> Stop connection. A different
+        // authored clock requires an explicit owned timer before it can run.
+        if sequences::timing::extract(index, &destination.opening_blueprint)? != Some(0.) {
+            return Err(nfs_content::Error::Content(
+                "first race arrival timing".into(),
+            ));
+        }
+        let arrival = Authored::new(
+            sequences::extract_referenced(
+                index,
+                &destination.opening_blueprint,
+                &destination.reference,
+            )?,
+            parent,
+            vec![],
+        )
+        .map_err(|e| nfs_content::Error::Content(format!("race arrival: {e:?}")))?;
+        let first_race = Some(Race {
+            destination,
+            arrival,
+            mode: driving::Mode::prepare_from(
+                index,
+                parent,
+                "gameplay/progression/intro/introracegamemode",
+                Some(capability),
+            )?,
+        });
         let driving = Some((
             driving::Mode::prepare(
                 index,
@@ -147,6 +209,7 @@ impl Content {
             loading: Some(loading),
             selection: Some(selection),
             selection_program: Some(Arc::new(selection_program)),
+            first_race,
             items: Arc::new(built.collection),
             previews: Some(Arc::new(PreviewCars {
                 garage,

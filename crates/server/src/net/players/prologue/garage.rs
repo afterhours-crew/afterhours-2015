@@ -11,23 +11,23 @@ pub(in crate::net::players) struct GarageOutput {
     pub removed: Option<(u16, u16)>,
 }
 
-pub(super) fn notify(
+pub(in crate::net::players) fn notify(
     content: &crate::prologue::Content,
     modes: &mut Modes,
     players: &mut Players,
     chain: Vec<Notification>,
     out: &mut Output,
 ) -> Result<(), replication::Error> {
-    let (drive, canceller) = content
+    let (_, canceller) = content
         .driving
         .as_ref()
         .ok_or(replication::Error::Unsupported)?;
     for notification in chain {
         out.calls.push(HostRpc::Participant(notification));
-        let (a, b) = modes
+        let (a, b, chapter) = modes
             .get_mut(&notification.participant)
             .ok_or(replication::Error::UnknownObject)?;
-        for (active, mode) in [(a, drive), (b, canceller)] {
+        for (active, mode) in [(a, content.mode(*chapter)?), (b, canceller)] {
             let value = active.scene_notification(mode, players, notification)?;
             out.records.extend(value.records);
             out.deleted.extend(value.deleted);
@@ -84,7 +84,7 @@ impl PlayerListener {
         let &[_, participant] = envelope.references() else {
             return Err(replication::Error::Shape);
         };
-        let Some((active, _)) = modes.get(&participant) else {
+        let Some((active, _, Chapter::FirstDrive)) = modes.get(&participant) else {
             return Ok(None);
         };
         if !players.owns_participant(HOST_SELECTOR as u8, persona, participant) {

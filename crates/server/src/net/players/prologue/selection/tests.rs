@@ -125,7 +125,32 @@ pub(in crate::net::players::prologue) fn program(listener: &PlayerListener) -> A
 
 #[test]
 fn choice_waits_for_commit_then_unloads_previews_and_finishes_once() {
+    selected(false);
+}
+
+pub(in crate::net::players::prologue) fn selected(handoff: bool) -> (PlayerListener, u16) {
     let (mut listener, participant, items) = super::super::tests::ready_for_selection(true);
+    if handoff {
+        let story = Arc::make_mut(listener.prologue.as_mut().unwrap());
+        story.first_race = Some(crate::prologue::Race {
+            destination: nfs_content::prologue::Destination {
+                objective: 21,
+                opening_blueprint: "test/arrival".into(),
+                opening_guid: [0; 16],
+                teleport: nfs_content::prologue::Pose {
+                    position: [100., 20., 300.],
+                    basis: [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]],
+                },
+                reference: nfs_content::scoring::events::Identity {
+                    asset: "test/story".into(),
+                    index: 1,
+                    instances: vec![],
+                },
+            },
+            arrival: story.opening.clone(),
+            mode: story.driving.as_ref().unwrap().0.clone(),
+        });
+    }
     let ghost = listener.selection.ghost(participant).unwrap();
     let reached = |event, player| {
         nfs_world::logic::Message::Reached {
@@ -307,9 +332,34 @@ fn choice_waits_for_commit_then_unloads_previews_and_finishes_once() {
             .any(|r| matches!(r, HostRpc::SequenceStop(s) if s.sequence == ghost))
     );
     drain(&mut listener);
+    if handoff {
+        listener
+            .pending
+            .resize(MAX_PENDING, super::super::super::returning::empty_section());
+        let before = listener.players.objects().snapshot();
+        assert!(!send(&mut listener, 26, 47, complete.span()));
+        assert_eq!(listener.players.objects().snapshot(), before);
+        assert_eq!(
+            listener.participants.stage(participant),
+            Some(Stage::IntroCarSelection)
+        );
+        drain(&mut listener);
+    }
     assert!(send(&mut listener, 26, 47, complete.span()));
     assert!(listener.players.objects().get(ghost).is_none());
+    if handoff {
+        assert_eq!(
+            listener.participants.intro_chapter(participant),
+            Some(Chapter::FirstRace)
+        );
+        assert_eq!(
+            listener.participants.stage(participant),
+            Some(Stage::IntroSpawning)
+        );
+        assert!(listener.opening.ghost(participant).is_none());
+    }
     drain(&mut listener);
     assert!(send(&mut listener, 27, 47, complete.span()));
     assert!(listener.pending.is_empty());
+    (listener, participant)
 }

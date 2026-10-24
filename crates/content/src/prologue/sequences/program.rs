@@ -125,7 +125,7 @@ fn services<S: Source>(
 }
 
 pub fn extract(index: &mut AssetIndex, name: &str) -> Result<Definition, Error> {
-    let (_, bound) = super::extract_bound(index, name, true)?;
+    let (_, bound) = super::extract_bound(index, name, true, None)?;
     let composition = index.scoring_events(name)?;
     let services = services(&mut index.assets, name, &composition)?;
     let roots = services

@@ -8,20 +8,22 @@ use nfs_protocol::world::{
     rpc::{Envelope, Limits, RouteProfile},
 };
 use nfs_world::{
+    participants::intro::Chapter,
     participants::{HostRpc, Lifecycle, Outcome, Stage},
     sequences::{Completed, Owner},
     teleport::Command,
 };
 type Ready = (Vec<replication::Record>, Vec<HostRpc>, Command);
 type Finished = (Section, Vec<HostRpc>);
-type Modes = BTreeMap<
+pub(super) type Modes = BTreeMap<
     u16,
     (
         crate::prologue::driving::Active,
         crate::prologue::driving::Active,
+        Chapter,
     ),
 >;
-mod garage;
+pub(super) mod garage;
 pub(super) mod selection;
 mod story;
 #[cfg(test)]
@@ -56,9 +58,9 @@ impl PlayerListener {
         let mut messages = Vec::new();
         let mut calls = Vec::new();
         let mut deleted = Vec::new();
-        if let Some((drive, _)) = &content.driving {
-            for (active, _) in modes.values_mut() {
-                let out = active.advance(drive, &mut players, seconds)?;
+        {
+            for (active, _, chapter) in modes.values_mut() {
+                let out = active.advance(content.mode(*chapter)?, &mut players, seconds)?;
                 records.extend(out.records);
                 calls.extend(out.calls);
                 deleted.extend(out.deleted);
@@ -77,56 +79,102 @@ impl PlayerListener {
             {
                 records.push(record);
             }
+            let chapter = participants.intro_chapter(participant);
             match self.participants.stage(participant) {
-                Some(Stage::IntroSpawning)
-                    if players
-                        .temporary_vehicle(owner.connection, owner.persona, participant)
-                        .is_none() =>
-                {
+                Some(Stage::IntroSpawning) if !cars.values().any(|(p, _)| *p == participant) => {
                     if cars.len() >= MAX_WORLD_CARS {
                         return Err(replication::Error::Bound);
                     }
-                    let spawned = population.spawn_temporary_world(
-                        &mut players,
-                        crate::vehicle_content::population::Owner {
-                            connection: owner.connection,
-                            persona: owner.persona,
-                            participant,
-                        },
-                        content.temporary_vehicle(vehicles)?,
-                        &vehicles.vehicles,
-                    )?;
-                    let ghost = players
-                        .temporary_vehicle(owner.connection, owner.persona, participant)
-                        .ok_or(replication::Error::UnknownObject)?;
+                    let vehicle_owner = crate::vehicle_content::population::Owner {
+                        connection: owner.connection,
+                        persona: owner.persona,
+                        participant,
+                    };
+                    let spawned = if chapter == Some(Chapter::FirstRace) {
+                        population.spawn_world(
+                            &mut players,
+                            vehicle_owner,
+                            self.inventory
+                                .as_ref()
+                                .ok_or(replication::Error::Unsupported)?,
+                            &vehicles.vehicles,
+                            &vehicles.layout,
+                        )?
+                    } else {
+                        population.spawn_temporary_world(
+                            &mut players,
+                            vehicle_owner,
+                            content.temporary_vehicle(vehicles)?,
+                            &vehicles.vehicles,
+                        )?
+                    };
+                    // A newly registered vehicle bundle can precede its car in
+                    // the creation batch. Resolve the owned car, not record 0.
+                    let ghost = if chapter == Some(Chapter::FirstRace) {
+                        let item = self
+                            .inventory
+                            .as_ref()
+                            .and_then(|i| i.slots.values()[0])
+                            .ok_or(replication::Error::UnknownObject)?;
+                        players.owned_vehicle(owner.connection, owner.persona, participant, item)
+                    } else {
+                        players.temporary_vehicle(owner.connection, owner.persona, participant)
+                    }
+                    .ok_or(replication::Error::UnknownObject)?;
                     cars.insert(ghost, (participant, false));
                     records.extend(spawned.records);
                     messages.extend(spawned.messages);
+                    deleted.extend(spawned.deleted);
                 }
                 Some(Stage::IntroOpening) => {
-                    if let Some(record) = opening.start(&content.opening, &mut players, owner)? {
+                    let chapter = chapter.ok_or(replication::Error::Shape)?;
+                    let arrival = content.arrival(chapter)?;
+                    let record = if chapter == Chapter::FirstRace {
+                        opening.start_stopped(arrival, &mut players, owner)?
+                    } else {
+                        opening.start(arrival, &mut players, owner)?
+                    };
+                    if let Some(record) = record {
                         records.push(record);
                     }
                 }
-                Some(Stage::IntroStartingDrive) if !modes.contains_key(&participant) => {
-                    let Some((drive, canceller)) = content.driving.as_ref() else {
+                Some(Stage::IntroStartingDrive)
+                    if modes
+                        .get(&participant)
+                        .is_none_or(|pair| Some(pair.2) != chapter) =>
+                {
+                    if modes
+                        .get(&participant)
+                        .is_some_and(|pair| !pair.0.has_left())
+                    {
+                        continue;
+                    }
+                    let Some((_, canceller_content)) = content.driving.as_ref() else {
                         continue;
                     };
-                    if modes.len() >= nfs_world::sequences::MAX_INSTANCES {
+                    if !modes.contains_key(&participant)
+                        && modes.len() >= nfs_world::sequences::MAX_INSTANCES
+                    {
                         return Err(replication::Error::Bound);
                     };
+                    let chapter = chapter.ok_or(replication::Error::Shape)?;
                     let (drive, a) = crate::prologue::driving::Active::start(
-                        drive,
+                        content.mode(chapter)?,
                         &mut players,
                         owner,
                         seconds,
                     )?;
-                    let (canceller, b) = crate::prologue::driving::Active::start(
-                        canceller,
-                        &mut players,
-                        owner,
-                        seconds,
-                    )?;
+                    let (canceller, b) = if let Some((_, canceller, _)) = modes.remove(&participant)
+                    {
+                        (canceller, crate::prologue::driving::Output::default())
+                    } else {
+                        crate::prologue::driving::Active::start(
+                            canceller_content,
+                            &mut players,
+                            owner,
+                            seconds,
+                        )?
+                    };
                     if !a.deleted.is_empty() || !b.deleted.is_empty() {
                         return Err(replication::Error::Shape);
                     };
@@ -139,7 +187,7 @@ impl PlayerListener {
                         return Err(replication::Error::Shape);
                     };
                     calls.extend(alive.into_iter().map(HostRpc::Participant));
-                    modes.insert(participant, (drive, canceller));
+                    modes.insert(participant, (drive, canceller, chapter));
                 }
                 Some(Stage::IntroEnteringGarage | Stage::IntroLoadingGarage) => {
                     if let Some(previews) = &content.previews {
@@ -275,11 +323,8 @@ impl PlayerListener {
         message: &nfs_world::logic::Message,
         responses: &mut Vec<HostRpc>,
     ) -> Result<bool, replication::Error> {
-        let Some((drive, _)) = &content.driving else {
-            return Ok(false);
-        };
-        for (active, _) in modes.values_mut() {
-            if let Some(calls) = active.signal(drive, players, message)? {
+        for (active, _, chapter) in modes.values_mut() {
+            if let Some(calls) = active.signal(content.mode(*chapter)?, players, message)? {
                 responses.extend(calls);
                 return Ok(true);
             };
@@ -289,6 +334,7 @@ impl PlayerListener {
     pub(super) fn driving_input(
         content: &crate::prologue::Content,
         vehicles: Option<&crate::vehicle_content::GarageContent>,
+        inventory: Option<&Inventory>,
         modes: &mut Modes,
         players: &mut Players,
         seconds: Option<f64>,
@@ -313,12 +359,10 @@ impl PlayerListener {
         let Some(&ghost) = envelope.references().first() else {
             return Ok(None);
         };
-        let Some((drive, _)) = &content.driving else {
-            return Ok(None);
-        };
         if route.selector() == 0
             && route.method_index() == 0
-            && let Some((active, _)) = modes.values_mut().find(|(a, _)| a.ghost == ghost)
+            && let Some((active, _, chapter)) =
+                modes.values_mut().find(|(a, _, _)| a.ghost == ghost)
         {
             let leave = nfs_world::game_mode::Leave::decode(body)
                 .map_err(|_| replication::Error::Shape)?
@@ -326,17 +370,25 @@ impl PlayerListener {
             if route.arguments().read_u32(0, 7) != Ok(0) {
                 return Err(replication::Error::Shape);
             }
-            return Ok(Some(active.leave(drive, players, leave.participant)?));
+            return Ok(Some(active.leave(
+                content.mode(*chapter)?,
+                players,
+                leave.participant,
+            )?));
         }
         if matches!(route.method_index(), 2 | 3)
-            && drive.data.game_mode.checkpoints.iter().any(|&(k, s)| {
-                players.objects().scene_endpoint(k, s) == Some((ghost, route.selector()))
+            && modes.values().any(|(_, _, chapter)| {
+                content.mode(*chapter).is_ok_and(|drive| {
+                    drive.data.game_mode.checkpoints.iter().any(|&(k, s)| {
+                        players.objects().scene_endpoint(k, s) == Some((ghost, route.selector()))
+                    })
+                })
             })
         {
             let crossing = nfs_world::game_mode::Crossing::decode(body)
                 .map_err(|_| replication::Error::Shape)?
                 .ok_or(replication::Error::Shape)?;
-            let Some((active, _)) = modes.iter_mut().find_map(|(&p, pair)| {
+            let Some((active, _, chapter)) = modes.iter_mut().find_map(|(&p, pair)| {
                 players
                     .owns_participant_vehicle(
                         HOST_SELECTOR as u8,
@@ -348,11 +400,16 @@ impl PlayerListener {
             }) else {
                 return Ok(Some(crate::prologue::driving::Output::default()));
             };
-            return Ok(Some(active.crossing(drive, players, crossing, seconds)?));
+            return Ok(Some(active.crossing(
+                content.mode(*chapter)?,
+                players,
+                crossing,
+                seconds,
+            )?));
         }
-        let Some((active, _)) = modes
+        let Some((active, _, chapter)) = modes
             .values_mut()
-            .find(|(a, _)| a.sequence_owner(ghost, route.selector()))
+            .find(|(a, _, _)| a.sequence_owner(ghost, route.selector()))
         else {
             return Ok(None);
         };
@@ -363,12 +420,25 @@ impl PlayerListener {
         if (0..route.arguments().len()).any(|bit| route.arguments().read_u32(bit, 1) != Ok(0)) {
             return Err(replication::Error::Shape);
         };
+        let definition = match chapter {
+            Chapter::FirstDrive => content.start.vehicle_item,
+            Chapter::FirstRace => {
+                let inventory = inventory.ok_or(replication::Error::Unsupported)?;
+                let item = inventory.slots.values()[0].ok_or(replication::Error::UnknownObject)?;
+                inventory
+                    .items
+                    .items
+                    .get(&item)
+                    .ok_or(replication::Error::UnknownObject)?
+                    .definition
+            }
+        };
         let car = vehicles
-            .and_then(|v| v.vehicles.definition(&content.start.vehicle_item))
+            .and_then(|v| v.vehicles.definition(&definition))
             .ok_or(replication::Error::Unsupported)?;
         active.clock(seconds)?;
         Ok(Some(active.completed(
-            drive,
+            content.mode(*chapter)?,
             players,
             call,
             crate::event_logic::car_id(&car.blueprint),
@@ -386,9 +456,30 @@ impl PlayerListener {
             return Ok(None);
         }
         let content = content.ok_or(replication::Error::Unsupported)?;
-        if players.temporary_vehicle(HOST_SELECTOR as u8, persona, participant) != Some(vehicle) {
+        if !players.owns_participant_vehicle(HOST_SELECTOR as u8, persona, participant, vehicle) {
             return Err(replication::Error::UnknownObject);
         }
+        let pose = match participants
+            .intro_chapter(participant)
+            .ok_or(replication::Error::Shape)?
+        {
+            Chapter::FirstDrive => {
+                if players.temporary_vehicle(HOST_SELECTOR as u8, persona, participant)
+                    != Some(vehicle)
+                {
+                    return Err(replication::Error::UnknownObject);
+                }
+                content.start.teleport
+            }
+            Chapter::FirstRace => {
+                content
+                    .first_race
+                    .as_ref()
+                    .ok_or(replication::Error::Unsupported)?
+                    .destination
+                    .teleport
+            }
+        };
         let mut records = players.bind_player_vehicle(
             HOST_SELECTOR as u8,
             persona,
@@ -403,8 +494,8 @@ impl PlayerListener {
                 .teleport,
             participant,
             vehicle,
-            position: content.start.teleport.position,
-            basis: content.start.teleport.basis,
+            position: pose.position,
+            basis: pose.basis,
             speed: 0.,
         };
         command.encode()?;

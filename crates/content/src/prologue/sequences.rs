@@ -85,13 +85,16 @@ fn bindings<S: Source>(
     sequence_name: &str,
     rules: &crate::sequences::Rules,
     parent_bindings: &BTreeMap<Site, Site>,
+    reference: Option<&crate::scoring::events::Identity>,
 ) -> Result<BTreeMap<Site, Site>, Error> {
     let mut referers = Vec::new();
     for node in branch
         .iter()
         .filter(|n| n.object.class == "StateSequenceRefererEntityData")
     {
-        if graph.target_field(&node.site, "Sequence")? == (sequence_name.into(), 0) {
+        if reference.is_none_or(|r| *r == crate::scoring::events::Identity::from(&node.site))
+            && graph.target_field(&node.site, "Sequence")? == (sequence_name.into(), 0)
+        {
             referers.push(node.site.clone());
         }
     }
@@ -122,7 +125,17 @@ fn bindings<S: Source>(
 /// Resolve a sequence only through its unique referer in the intro branch.
 /// The same channel asset in another prefab or scene is never a candidate.
 pub fn extract(index: &mut AssetIndex, name: &str) -> Result<Sequence, Error> {
-    Ok(extract_bound(index, name, false)?.0)
+    Ok(extract_bound(index, name, false, None)?.0)
+}
+
+/// Reused sequences bind through the exact referer selected by the story graph.
+/// A missing or foreign occurrence never falls back to another matching asset.
+pub fn extract_referenced(
+    index: &mut AssetIndex,
+    name: &str,
+    reference: &crate::scoring::events::Identity,
+) -> Result<Sequence, Error> {
+    Ok(extract_bound(index, name, false, Some(reference))?.0)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -142,6 +155,7 @@ fn extract_bound(
     index: &mut AssetIndex,
     name: &str,
     include_services: bool,
+    selected: Option<&crate::scoring::events::Identity>,
 ) -> Result<(Sequence, ServiceLinks), Error> {
     if name.is_empty() || name.len() > 512 || name.contains("..") {
         return Err(bad("sequence name"));
@@ -218,6 +232,7 @@ fn extract_bound(
         &name,
         &sequence_rules,
         &parent_bindings,
+        selected,
     )?;
     let mut channels = BTreeMap::new();
     for (i, (site, _, kind)) in fields.iter().enumerate() {
@@ -557,7 +572,16 @@ mod tests {
         let mut graph = Graph::new(&mut memory);
         let owner = graph.read(Site::root("a")).unwrap();
         let sequence = graph.read(Site::root("b")).unwrap();
-        let bound = bindings(&mut graph, &owner, &sequence, "b", &rules, &BTreeMap::new()).unwrap();
+        let bound = bindings(
+            &mut graph,
+            &owner,
+            &sequence,
+            "b",
+            &rules,
+            &BTreeMap::new(),
+            None,
+        )
+        .unwrap();
         assert_eq!(bound.len(), 2);
         for i in [2, 4] {
             let site = &sequence
@@ -597,8 +621,84 @@ mod tests {
             let owner = graph.read(Site::root("a")).unwrap();
             let sequence = graph.read(Site::root("b")).unwrap();
             assert!(
-                bindings(&mut graph, &owner, &sequence, "b", &rules, &BTreeMap::new()).is_err()
+                bindings(
+                    &mut graph,
+                    &owner,
+                    &sequence,
+                    "b",
+                    &rules,
+                    &BTreeMap::new(),
+                    None
+                )
+                .is_err()
             );
         }
+    }
+
+    #[test]
+    fn explicit_referer_keeps_its_channels_and_rejects_foreign_or_missing_occurrences() {
+        let (mut memory, rules) = fixture(true, false);
+        let mut graph = Graph::new(&mut memory);
+        let owner = graph.read(Site::root("a")).unwrap();
+        let sequence = graph.read(Site::root("b")).unwrap();
+        let selected = crate::scoring::events::Identity::from(
+            &owner
+                .iter()
+                .find(|n| n.site.key == ("a".into(), 1))
+                .unwrap()
+                .site,
+        );
+        let bound = bindings(
+            &mut graph,
+            &owner,
+            &sequence,
+            "b",
+            &rules,
+            &BTreeMap::new(),
+            Some(&selected),
+        )
+        .unwrap();
+        assert_eq!(bound.len(), 2);
+        let mut invalid = selected.clone();
+        invalid.index = 4;
+        assert!(
+            bindings(
+                &mut graph,
+                &owner,
+                &sequence,
+                "b",
+                &rules,
+                &BTreeMap::new(),
+                Some(&invalid)
+            )
+            .is_err()
+        );
+        invalid.asset = "foreign".into();
+        assert!(
+            bindings(
+                &mut graph,
+                &owner,
+                &sequence,
+                "b",
+                &rules,
+                &BTreeMap::new(),
+                Some(&invalid)
+            )
+            .is_err()
+        );
+        invalid = selected.clone();
+        invalid.instances.push(("other-parent".into(), 1));
+        assert!(
+            bindings(
+                &mut graph,
+                &owner,
+                &sequence,
+                "b",
+                &rules,
+                &BTreeMap::new(),
+                Some(&invalid)
+            )
+            .is_err()
+        );
     }
 }

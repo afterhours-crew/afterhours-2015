@@ -426,3 +426,86 @@ fn bad_channel_and_ambiguous_owner_do_not_allocate() {
     );
     assert_eq!(players.objects().snapshot(), before);
 }
+
+#[test]
+fn next_story_sequence_requires_owned_completion_and_preserves_other_players() {
+    let (mut players, content, a, b) = fixture();
+    let mut instances = Instances::default();
+    let first = instances
+        .start(&content, &mut players, a)
+        .unwrap()
+        .unwrap()
+        .id;
+    let other = instances
+        .start(&content, &mut players, b)
+        .unwrap()
+        .unwrap()
+        .id;
+    assert_eq!(instances.retire_completed(&players, a), Err(Error::Shape));
+    assert_eq!(
+        instances.retire_completed(
+            &players,
+            Owner {
+                persona: b.persona,
+                ..a
+            }
+        ),
+        Err(Error::UnknownObject)
+    );
+    instances.stop(&content, &players, a).unwrap().unwrap();
+    assert_eq!(instances.retire_completed(&players, a), Err(Error::Shape));
+    let ack = Completed {
+        sequence: first,
+        participant: a.participant,
+    };
+    instances.complete(&mut players, a, ack).unwrap().unwrap();
+    instances.retire_completed(&players, a).unwrap();
+    let next = instances
+        .start(&content, &mut players, a)
+        .unwrap()
+        .unwrap()
+        .id;
+    assert_ne!(first, next);
+    assert_eq!(
+        instances.complete(&mut players, a, ack),
+        Err(Error::UnknownObject)
+    );
+    assert_eq!(instances.ghost(b.participant), Some(other));
+    assert!(players.objects().get(other).is_some());
+    assert!(players.objects().get(next).is_some());
+}
+
+#[test]
+fn immediate_stop_is_in_the_creation_and_requires_one_owned_native_ack() {
+    let (mut players, content, a, b) = fixture();
+    let mut instances = Instances::default();
+    let record = instances
+        .start_stopped(&content, &mut players, a)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        fields(&record)[0],
+        Initial::SequenceRoot { stopping: true, .. }
+    ));
+    assert!(
+        instances
+            .start_stopped(&content, &mut players, a)
+            .unwrap()
+            .is_none()
+    );
+    assert!(instances.stop(&content, &players, a).unwrap().is_none());
+    let call = Completed {
+        sequence: record.id,
+        participant: a.participant,
+    };
+    assert_eq!(
+        instances.complete(&mut players, b, call),
+        Err(Error::UnknownObject)
+    );
+    assert!(players.objects().get(record.id).is_some());
+    assert_eq!(
+        instances.complete(&mut players, a, call).unwrap(),
+        Some(record.id)
+    );
+    assert_eq!(instances.complete(&mut players, a, call).unwrap(), None);
+}

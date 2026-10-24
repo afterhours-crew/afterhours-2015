@@ -51,6 +51,9 @@ impl Active {
             .and_then(|(_, r)| r.participant(self.owner.participant))
             .is_some_and(|p| p.finished.is_some())
     }
+    pub fn has_left(&self) -> bool {
+        self.left
+    }
 
     pub fn scene_state(
         &mut self,
@@ -99,29 +102,37 @@ impl Active {
             })
             .map_err(invalid)?;
         next.effects(content, &mut staged, &effects, false, &mut out)?;
-        if !next.ending
-            && next
+        *self = next;
+        *players = staged;
+        Ok(out)
+    }
+    pub(super) fn finish_if_final(
+        &mut self,
+        content: &Mode,
+        players: &Players,
+        out: &mut Output,
+    ) -> Result<(), Error> {
+        if !self.ending
+            && self
                 .host
                 .machine()
                 .members(content.data.game_mode.lifecycle.final_state as u16)
                 .map_err(invalid)?
-                .contains(&u64::from(next.owner.participant))
+                .contains(&u64::from(self.owner.participant))
         {
             for method in [1, 7] {
                 out.calls.push(HostRpc::GameMode(event_logic::call(
-                    staged.objects(),
-                    next.ghost,
+                    players.objects(),
+                    self.ghost,
                     0,
                     method,
                     None,
                     Arguments::None,
                 )?));
             }
-            next.ending = true;
+            self.ending = true;
         }
-        *self = next;
-        *players = staged;
-        Ok(out)
+        Ok(())
     }
 
     /// Only the owner's acknowledgement after final-state publication retires

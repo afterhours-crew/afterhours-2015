@@ -7,6 +7,14 @@
 //! These gates never select or grant an inventory item or start a timer.
 use super::*;
 
+/// Transient flow position. The session restores it from durable story state;
+/// it is never itself proof that an objective has completed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Chapter {
+    FirstDrive,
+    FirstRace,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Bindings {
     pub parameters: Endpoint,
@@ -17,6 +25,7 @@ pub struct Bindings {
     pub render_ready: Endpoint,
     pub opening: Endpoint,
     pub alive: Endpoint,
+    pub pending_items: Endpoint,
 }
 impl Bindings {
     pub fn from_records(records: &[Record], startup_key: u32) -> Result<Option<Self>, Error> {
@@ -54,6 +63,7 @@ impl Bindings {
             render_ready: endpoint(81)?,
             opening: endpoint(79)?,
             alive: endpoint(2)?,
+            pending_items: endpoint(94)?,
         }))
     }
 }
@@ -69,7 +79,10 @@ fn notifications(participant: u16, chain: &[(Endpoint, Call)]) -> Vec<Notificati
 }
 impl Lifecycle {
     pub fn intro_participants(&self) -> impl Iterator<Item = u16> + '_ {
-        self.intro_started.iter().copied()
+        self.intro_started.keys().copied()
+    }
+    pub fn intro_chapter(&self, participant: u16) -> Option<Chapter> {
+        self.intro_started.get(&participant).copied()
     }
     pub fn return_bindings(&self) -> Option<ReturnBindings> {
         self.returning
@@ -81,7 +94,7 @@ impl Lifecycle {
         let Some(bindings) = self.returning else {
             return Outcome::Unsupported;
         };
-        if !self.intro_started.contains(&participant) {
+        if !self.intro_started.contains_key(&participant) {
             return Outcome::Unsupported;
         }
         match self.stages.get_mut(&participant) {
@@ -116,6 +129,38 @@ impl Lifecycle {
             Some(Stage::IntroCarSelection) => Outcome::Repeated,
             _ => Outcome::Unsupported,
         }
+    }
+
+    /// The caller has committed the selected car, drained item notifications
+    /// and validated the native selection completion. The owned world car and
+    /// its readiness still gate teleport and the next arrival sequence.
+    pub fn intro_selection_complete(&mut self, participant: u16) -> Outcome {
+        let (Some(b), Some(i)) = (self.bindings, self.intro) else {
+            return Outcome::Unsupported;
+        };
+        if self.intro_started.get(&participant) == Some(&Chapter::FirstRace) {
+            return Outcome::Repeated;
+        }
+        if self.intro_started.get(&participant) != Some(&Chapter::FirstDrive)
+            || self.stages.get(&participant) != Some(&Stage::IntroCarSelection)
+        {
+            return Outcome::Unsupported;
+        }
+        self.intro_started.insert(participant, Chapter::FirstRace);
+        self.stages.insert(participant, Stage::IntroSpawning);
+        Outcome::Advanced(notifications(
+            participant,
+            &[
+                (b.composite, Call::Leave),
+                (b.initial_teleport, Call::Enter),
+                (b.initial_teleport, Call::Leave),
+                (i.pending_items, Call::Enter),
+                (i.pending_items, Call::Leave),
+                (i.parameters, Call::Enter),
+                (i.parameters, Call::LeaveTagged(31)),
+                (i.spawning, Call::Enter),
+            ],
+        ))
     }
     pub fn bind_intro(&mut self, records: &[Record], startup_key: u32) -> Result<bool, Error> {
         if self.intro.is_some() {
@@ -216,7 +261,7 @@ impl Lifecycle {
             rpc.encode()?;
         }
         *stage = Stage::IntroSpawning;
-        self.intro_started.insert(participant);
+        self.intro_started.insert(participant, Chapter::FirstDrive);
         Ok(out)
     }
     pub fn intro_vehicle_ready(&mut self, participant: u16) -> Outcome {
@@ -297,7 +342,7 @@ impl Lifecycle {
             .stages
             .get_mut(&participant)
             .ok_or(Error::UnknownObject)?;
-        if !self.intro_started.contains(&participant) {
+        if !self.intro_started.contains_key(&participant) {
             return Ok(None);
         }
         if !matches!(

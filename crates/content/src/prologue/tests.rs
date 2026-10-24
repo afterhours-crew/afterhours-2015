@@ -166,6 +166,20 @@ fn fixture() -> (Memory, Links, crate::progression::Rules) {
 fn run(m: &mut Memory, links: &Links, rules: &crate::progression::Rules) -> Result<Start, Error> {
     read(&mut Graph::new(m), links, rules, Site::root("c"))
 }
+
+#[test]
+fn destination_preserves_the_declaring_occurrence_without_reading_an_inventory_item() {
+    let (mut m, links, rules) = fixture();
+    m.0.remove(&("d".into(), 0));
+    let (destination, _) =
+        read_destination(&mut Graph::new(&mut m), &links, &rules, Site::root("c")).unwrap();
+    assert_eq!(destination.objective, 9_007_199_254_740_993);
+    assert_eq!(destination.teleport.position, [1., 2., 3.]);
+    assert_eq!(destination.reference.asset, "b");
+    assert_eq!(destination.reference.index, 4);
+    assert_eq!(destination.reference.instances, vec![("a".into(), 1)]);
+    assert!(run(&mut m, &links, &rules).is_err());
+}
 fn object<'a>(m: &'a mut Memory, asset: &str, index: usize) -> &'a mut Object {
     m.0.get_mut(&(asset.into(), index)).unwrap()
 }

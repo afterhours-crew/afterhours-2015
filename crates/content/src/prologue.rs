@@ -83,6 +83,17 @@ pub struct Start {
     pub opening_guid: [u8; 16],
     pub teleport: Pose,
 }
+
+/// A story capability with one arrival path. Ambiguous conditional arrivals
+/// require selecting the reached branch before this reader can be used.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Destination {
+    pub objective: u64,
+    pub opening_blueprint: String,
+    pub opening_guid: [u8; 16],
+    pub teleport: Pose,
+    pub reference: crate::scoring::events::Identity,
+}
 fn unique<'a>(nodes: &'a [Node], class: &str) -> Result<&'a Site, Error> {
     let mut found = nodes.iter().filter(|n| n.object.class == class);
     let site = &found
@@ -147,12 +158,12 @@ fn pose(o: &nfs_frostbite::ebx::Object) -> Result<Pose, Error> {
         .map_err(|_| bad("locator basis"))?;
     Ok(p)
 }
-fn read<S: Source>(
+fn read_destination<S: Source>(
     graph: &mut Graph<S>,
     links: &Links,
     progression: &crate::progression::Rules,
     scene: Site,
-) -> Result<Start, Error> {
+) -> Result<(Destination, Vec<Node>), Error> {
     Links::from_json(&links.to_json())?;
     let progression = crate::progression::Rules::from_json(&progression.to_json())?;
     let branch = graph.read(Site::root(&progression.intro))?;
@@ -175,18 +186,8 @@ fn read<S: Source>(
         .filter(|n| n.site.bus == first.bus && n.site.parents == first.parents)
         .cloned()
         .collect::<Vec<_>>();
-    let item = endpoint(
-        graph,
-        unique(&nodes, "ItemSelectorEntityData")?,
-        links.item_definition,
-        "ItemEntityData",
-    )?;
-    let vehicle = graph.target_field(&item, "Item")?;
-    let vehicle_item = exported(graph, &vehicle, "RaceVehicleItemData")?;
-    let sequence = graph.target_field(
-        unique(&nodes, "StateSequenceRefererEntityData")?,
-        "Sequence",
-    )?;
+    let referer = unique(&nodes, "StateSequenceRefererEntityData")?;
+    let sequence = graph.target_field(referer, "Sequence")?;
     let opening_guid = exported(graph, &sequence, "ParticipantStateSequenceBlueprint")?;
     let stable = endpoint(
         graph,
@@ -243,12 +244,39 @@ fn read<S: Source>(
         links.teleport_locator,
         "LocatorEntityData",
     )?;
+    Ok((
+        Destination {
+            objective,
+            opening_blueprint: sequence.0,
+            opening_guid,
+            teleport: pose(&graph.object(&locator)?)?,
+            reference: crate::scoring::events::Identity::from(referer),
+        },
+        nodes,
+    ))
+}
+
+fn read<S: Source>(
+    graph: &mut Graph<S>,
+    links: &Links,
+    progression: &crate::progression::Rules,
+    scene: Site,
+) -> Result<Start, Error> {
+    let (destination, nodes) = read_destination(graph, links, progression, scene)?;
+    let item = endpoint(
+        graph,
+        unique(&nodes, "ItemSelectorEntityData")?,
+        links.item_definition,
+        "ItemEntityData",
+    )?;
+    let vehicle = graph.target_field(&item, "Item")?;
+    let vehicle_item = exported(graph, &vehicle, "RaceVehicleItemData")?;
     Ok(Start {
-        objective,
+        objective: destination.objective,
         vehicle_item,
-        opening_blueprint: sequence.0,
-        opening_guid,
-        teleport: pose(&graph.object(&locator)?)?,
+        opening_blueprint: destination.opening_blueprint,
+        opening_guid: destination.opening_guid,
+        teleport: destination.teleport,
     })
 }
 
@@ -265,6 +293,24 @@ pub fn extract(index: &mut AssetIndex) -> Result<Start, Error> {
         .ok_or_else(|| bad("progression scene is not loaded"))?
         .clone();
     read(&mut graph, &links, &progression, root)
+}
+
+/// Read a selected capability through its occurrence in the intro participant
+/// and that participant's bound scene, including the exact arrival referer.
+pub fn destination(index: &mut AssetIndex, capability: &str) -> Result<Destination, Error> {
+    let mut links = index.identity.prologue_links.clone();
+    links.first_drive = capability.into();
+    Links::from_json(&links.to_json())?;
+    let progression = index.identity.progression.clone();
+    let rules = index.identity.scenes.clone();
+    let startup = index.startup_entries(&rules.level)?;
+    let mut graph = Graph::new(&mut index.assets);
+    let roots = scene_roots(&mut graph, &rules.level, &startup)?;
+    let root = roots
+        .get(&progression.scene)
+        .ok_or_else(|| bad("progression scene is not loaded"))?
+        .clone();
+    Ok(read_destination(&mut graph, &links, &progression, root)?.0)
 }
 
 #[cfg(test)]

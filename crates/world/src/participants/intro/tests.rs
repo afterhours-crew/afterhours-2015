@@ -20,6 +20,7 @@ fn bindings() -> Bindings {
         render_ready: endpoint(80),
         opening: endpoint(78),
         alive: endpoint(1),
+        pending_items: endpoint(93),
     }
 }
 fn ready() -> Lifecycle {
@@ -71,6 +72,38 @@ fn calls(out: Outcome) -> Vec<(u16, Call)> {
             (n.endpoint.selector, n.call)
         })
         .collect()
+}
+
+#[test]
+fn completed_selection_enters_the_owned_car_spawn_once_without_restarting_the_opening_drive() {
+    let mut model = ready();
+    assert_eq!(model.intro_selection_complete(8), Outcome::Unsupported);
+    model.enter_intro_with_actor(actor()).unwrap();
+    assert_eq!(model.intro_selection_complete(8), Outcome::Unsupported);
+    model.stages.insert(8, Stage::IntroCarSelection);
+    assert_eq!(
+        calls(model.intro_selection_complete(8)),
+        vec![
+            (88, Call::Leave),
+            (85, Call::Enter),
+            (85, Call::Leave),
+            (93, Call::Enter),
+            (93, Call::Leave),
+            (3, Call::Enter),
+            (3, Call::LeaveTagged(31)),
+            (2, Call::Enter),
+        ]
+    );
+    assert_eq!(model.intro_chapter(8), Some(Chapter::FirstRace));
+    assert_eq!(model.stage(8), Some(Stage::IntroSpawning));
+    assert_eq!(model.intro_selection_complete(8), Outcome::Repeated);
+    assert_eq!(model.intro_chapter(9), None);
+    assert_eq!(model.intro_selection_complete(9), Outcome::Unsupported);
+    assert_eq!(
+        calls(model.intro_vehicle_ready(8)),
+        vec![(2, Call::Leave), (76, Call::Enter)]
+    );
+    assert_eq!(model.intro_chapter(8), Some(Chapter::FirstRace));
 }
 
 #[test]
@@ -370,7 +403,7 @@ fn first_drive_returns_automatically_and_waits_in_the_selection_composite() {
     });
     model.stages.insert(8, Stage::FreeRoam);
     assert_eq!(model.begin_intro_return(8), Outcome::Unsupported);
-    model.intro_started.insert(8);
+    model.intro_started.insert(8, Chapter::FirstDrive);
     let Outcome::Advanced(chain) = model.begin_intro_return(8) else {
         panic!()
     };

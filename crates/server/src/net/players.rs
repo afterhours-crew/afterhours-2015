@@ -94,13 +94,7 @@ pub(super) struct PlayerListener {
     selection: crate::sequence_content::authored::Instances,
     selection_execution: BTreeMap<u16, prologue::selection::State>,
     story_pending: VecDeque<super::items::story::Request>,
-    intro_modes: BTreeMap<
-        u16,
-        (
-            crate::prologue::driving::Active,
-            crate::prologue::driving::Active,
-        ),
-    >,
+    intro_modes: prologue::Modes,
     vehicles: Option<std::sync::Arc<GarageContent>>,
     population: Option<Population>,
     traffic_content: Option<std::sync::Arc<nfs_content::traffic::Content>>,
@@ -1376,6 +1370,10 @@ impl Listener for PlayerListener {
                         self.persona,
                         owner.participant,
                     ) == Some(target.ghost)
+                        || (participants.intro_chapter(owner.participant).is_some()
+                            && world_cars
+                                .get(&target.ghost)
+                                .is_some_and(|(p, _)| *p == owner.participant))
                     {
                         responses.push(nfs_world::participants::HostRpc::Event(fire));
                         if let Some((records, calls, command)) = Self::intro_car_ready(
@@ -1659,6 +1657,51 @@ impl Listener for PlayerListener {
             }
             match prologue::selection::completed(&mut selection, &mut players, self.persona, body) {
                 Ok(Some(Some(ghost))) => {
+                    if let Some(content) =
+                        self.prologue.as_deref().filter(|c| c.first_race.is_some())
+                    {
+                        let transition = (|| {
+                            let owner = selection
+                                .owner(ghost)
+                                .ok_or(replication::Error::UnknownObject)?;
+                            opening.retire_completed(&players, owner)?;
+                            let nfs_world::participants::Outcome::Advanced(chain) =
+                                participants.intro_selection_complete(owner.participant)
+                            else {
+                                return Err(replication::Error::Shape);
+                            };
+                            let mut out = crate::prologue::driving::Output::default();
+                            prologue::garage::notify(
+                                content,
+                                &mut intro_modes,
+                                &mut players,
+                                chain,
+                                &mut out,
+                            )?;
+                            deferred_sections.extend(Self::binding_sections(out.records)?);
+                            if !out.deleted.is_empty() {
+                                deferred_sections.push(Section {
+                                    float_bits: None,
+                                    flag: false,
+                                    setup: None,
+                                    records: vec![],
+                                    deleted: out.deleted,
+                                });
+                            }
+                            responses.extend(out.calls);
+                            responses.extend(Self::garage_presence_leave(
+                                self.roles.as_ref(),
+                                &players,
+                                &mut garage_presence,
+                                owner.participant,
+                                self.persona,
+                            )?);
+                            Ok::<_, replication::Error>(())
+                        })();
+                        if let Err(error) = transition {
+                            return self.refuse_rpc(error, body);
+                        }
+                    }
                     deferred_sections.push(Section {
                         float_bits: None,
                         flag: false,
@@ -1692,6 +1735,7 @@ impl Listener for PlayerListener {
                 match Self::driving_input(
                     content,
                     self.vehicles.as_deref(),
+                    self.inventory.as_ref(),
                     &mut intro_modes,
                     &mut players,
                     self.event_seconds(self.world_ms),
