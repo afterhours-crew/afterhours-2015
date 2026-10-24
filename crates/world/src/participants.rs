@@ -14,6 +14,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const MAX_PARTICIPANTS: usize = 128;
 
+pub mod intro;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Endpoint {
     pub scene: u16,
@@ -235,6 +237,13 @@ pub enum Stage {
     LoadingPersistentData,
     PersistentDataLoaded,
     Progressing,
+    /// First-drive bootstrap; the temporary vehicle must be ready before teleport.
+    IntroSpawning,
+    IntroTeleporting,
+    IntroRendering,
+    IntroOpening,
+    /// Opening completed; retain input ownership until the first mode is ready.
+    IntroStartingDrive,
     LoadingGarage,
     EntryBlocked,
     Customization,
@@ -400,6 +409,7 @@ pub struct Entry {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Lifecycle {
     bindings: Option<Bindings>,
+    intro: Option<intro::Bindings>,
     stages: BTreeMap<u16, Stage>,
     garage: Option<crate::garage::Slots>,
     garage_sent: BTreeSet<u16>,
@@ -870,6 +880,9 @@ impl Lifecycle {
         let route = envelope
             .route(RouteProfile::ClientSend)
             .map_err(|_| Error::Shape)?;
+        if let Some(outcome) = self.intro_route(&envelope, &route, &owns)? {
+            return Ok(outcome);
+        }
         if let Some(outcome) = self.return_route(&envelope, &route, &owns)? {
             return Ok(outcome);
         }
@@ -903,6 +916,11 @@ impl Lifecycle {
                 Stage::LoadingPersistentData
                     | Stage::PersistentDataLoaded
                     | Stage::Progressing
+                    | Stage::IntroSpawning
+                    | Stage::IntroTeleporting
+                    | Stage::IntroRendering
+                    | Stage::IntroOpening
+                    | Stage::IntroStartingDrive
                     | Stage::LoadingGarage
                     | Stage::EntryBlocked
                     | Stage::Customization

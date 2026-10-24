@@ -88,7 +88,7 @@ fn garage_loading_chain_follows_persistent_loaded_once_in_captured_order() {
         assert!(n.encode().is_ok());
     }
 }
-fn ready() -> Lifecycle {
+pub(super) fn ready() -> Lifecycle {
     Lifecycle {
         bindings: Some(bindings()),
         stages: BTreeMap::new(),

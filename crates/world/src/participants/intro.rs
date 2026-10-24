@@ -1,0 +1,282 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+//! First-drive startup inside the participant's existing lifecycle. The caller
+//! owns the temporary car, teleport command, opening sequence and first mode.
+//! These gates never select or grant an inventory item or start a timer.
+use super::*;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Bindings {
+    pub parameters: Endpoint,
+    pub spawning: Endpoint,
+    pub teleport: Endpoint,
+    pub check_player: Endpoint,
+    pub render_wait: Endpoint,
+    pub render_ready: Endpoint,
+    pub opening: Endpoint,
+    pub alive: Endpoint,
+}
+impl Bindings {
+    pub fn from_records(records: &[Record], startup_key: u32) -> Result<Option<Self>, Error> {
+        let mut found = records.iter().filter_map(|record| match &record.initial {
+            Some(Initial::SubLevel { prefix, fields }) if prefix.content_key == startup_key => {
+                Some((record.id, fields))
+            }
+            _ => None,
+        });
+        let Some((scene, fields)) = found.next() else {
+            return Ok(None);
+        };
+        if found.next().is_some() {
+            return Err(Error::DuplicateObject);
+        }
+        let endpoint = |index| {
+            let rpc = match fields.get(index) {
+                Some(
+                    sublevel::Initial::Rpc(rpc) | sublevel::Initial::RpcReferences { rpc, .. },
+                ) => rpc,
+                _ => return Err(Error::TypeMismatch),
+            };
+            Ok(Endpoint {
+                scene,
+                selector: rpc.selector,
+                serial: rpc.serial,
+            })
+        };
+        Ok(Some(Self {
+            parameters: endpoint(4)?,
+            spawning: endpoint(3)?,
+            teleport: endpoint(77)?,
+            check_player: endpoint(83)?,
+            render_wait: endpoint(78)?,
+            render_ready: endpoint(81)?,
+            opening: endpoint(79)?,
+            alive: endpoint(2)?,
+        }))
+    }
+}
+fn notifications(participant: u16, chain: &[(Endpoint, Call)]) -> Vec<Notification> {
+    chain
+        .iter()
+        .map(|&(endpoint, call)| Notification {
+            endpoint,
+            participant,
+            call,
+        })
+        .collect()
+}
+impl Lifecycle {
+    pub fn bind_intro(&mut self, records: &[Record], startup_key: u32) -> Result<bool, Error> {
+        if self.intro.is_some() {
+            return Err(Error::DuplicateObject);
+        }
+        self.intro = Bindings::from_records(records, startup_key)?;
+        Ok(self.intro.is_some())
+    }
+    pub fn intro_bindings(&self) -> Option<Bindings> {
+        self.intro
+    }
+
+    /// Start from restored progress, keeping the persistent garage untouched.
+    /// The zero item reference and actor association precede spawning. Vehicle
+    /// construction/binding must finish before `intro_vehicle_ready` is called.
+    pub fn enter_intro_with_actor(
+        &mut self,
+        actor: crate::actors::Binding,
+    ) -> Result<Vec<HostRpc>, Error> {
+        actor.encode()?;
+        let b = self.bindings.ok_or(Error::UnknownObject)?;
+        let i = self.intro.ok_or(Error::UnknownObject)?;
+        let stage = self
+            .stages
+            .get_mut(&actor.participant)
+            .ok_or(Error::UnknownObject)?;
+        if *stage != Stage::Progressing {
+            return Err(Error::Shape);
+        }
+        if actor.endpoint.scene != b.manager.scene {
+            return Err(Error::UnknownObject);
+        }
+        let participant = actor.participant;
+        let mut out = notifications(
+            participant,
+            &[
+                (b.persistent_loaded, Call::Leave),
+                (b.recovery, Call::Enter),
+                (b.recovery, Call::Leave),
+                (b.progression_loaded, Call::Enter),
+                (b.progression_loaded, Call::Leave),
+                (b.entered_game, Call::Enter),
+            ],
+        )
+        .into_iter()
+        .map(HostRpc::Participant)
+        .collect::<Vec<_>>();
+        out.push(HostRpc::Garage(crate::garage::Binding {
+            endpoint: b.garage[0],
+            participant,
+            item: 0,
+        }));
+        out.extend(
+            notifications(
+                participant,
+                &[(b.entered_game, Call::Leave), (i.parameters, Call::Enter)],
+            )
+            .into_iter()
+            .map(HostRpc::Participant),
+        );
+        out.push(HostRpc::Actor(actor));
+        out.extend(
+            notifications(
+                participant,
+                &[
+                    (i.parameters, Call::LeaveTagged(31)),
+                    (i.spawning, Call::Enter),
+                ],
+            )
+            .into_iter()
+            .map(HostRpc::Participant),
+        );
+        // Validate all output before committing lifecycle state.
+        for rpc in &out {
+            rpc.encode()?;
+        }
+        *stage = Stage::IntroSpawning;
+        Ok(out)
+    }
+    pub fn intro_vehicle_ready(&mut self, participant: u16) -> Outcome {
+        let Some(i) = self.intro else {
+            return Outcome::Unsupported;
+        };
+        match self.stages.get_mut(&participant) {
+            Some(stage @ Stage::IntroSpawning) => {
+                *stage = Stage::IntroTeleporting;
+                Outcome::Advanced(notifications(
+                    participant,
+                    &[(i.spawning, Call::Leave), (i.teleport, Call::Enter)],
+                ))
+            }
+            Some(
+                Stage::IntroTeleporting
+                | Stage::IntroRendering
+                | Stage::IntroOpening
+                | Stage::IntroStartingDrive
+                | Stage::FreeRoam,
+            ) => Outcome::Repeated,
+            _ => Outcome::Unsupported,
+        }
+    }
+    /// Call only after the owned opening sequence's validated completion.
+    /// The first mode and car bindings still gate normal driving presentation.
+    pub fn intro_opening_complete(&mut self, participant: u16) -> Outcome {
+        let Some(i) = self.intro else {
+            return Outcome::Unsupported;
+        };
+        match self.stages.get_mut(&participant) {
+            Some(stage @ Stage::IntroOpening) => {
+                *stage = Stage::IntroStartingDrive;
+                Outcome::Advanced(notifications(participant, &[(i.opening, Call::Leave)]))
+            }
+            Some(Stage::IntroStartingDrive | Stage::FreeRoam) => Outcome::Repeated,
+            _ => Outcome::Unsupported,
+        }
+    }
+    pub fn intro_drive_ready(&mut self, participant: u16) -> Outcome {
+        let Some(i) = self.intro else {
+            return Outcome::Unsupported;
+        };
+        match self.stages.get_mut(&participant) {
+            Some(stage @ Stage::IntroStartingDrive) => {
+                *stage = Stage::FreeRoam;
+                Outcome::Advanced(notifications(participant, &[(i.alive, Call::Enter)]))
+            }
+            Some(Stage::FreeRoam) => Outcome::Repeated,
+            _ => Outcome::Unsupported,
+        }
+    }
+    pub(super) fn intro_route(
+        &mut self,
+        envelope: &Envelope<'_>,
+        route: &nfs_protocol::world::rpc::Route<'_>,
+        owns: &impl Fn(u16) -> bool,
+    ) -> Result<Option<Outcome>, Error> {
+        let Some(i) = self.intro else {
+            return Ok(None);
+        };
+        let matches = |e: Endpoint, method| {
+            envelope.references().first() == Some(&e.scene)
+                && route.selector() == e.selector
+                && route.method_index() == method
+        };
+        let teleported = matches(i.teleport, 3);
+        if !teleported && !matches(i.render_ready, 0) {
+            return Ok(None);
+        }
+        let &[_, participant] = envelope.references() else {
+            return Err(Error::Shape);
+        };
+        if !owns(participant) {
+            return Err(Error::UnknownObject);
+        }
+        let stage = self
+            .stages
+            .get_mut(&participant)
+            .ok_or(Error::UnknownObject)?;
+        if !matches!(
+            stage,
+            Stage::IntroSpawning
+                | Stage::IntroTeleporting
+                | Stage::IntroRendering
+                | Stage::IntroOpening
+                | Stage::IntroStartingDrive
+                | Stage::FreeRoam
+        ) {
+            return Ok(None);
+        }
+        if envelope.words() != [0, 0]
+            || !envelope.remaining().is_empty()
+            || route.arguments().len() != 7
+            || (0..7).any(|bit| route.arguments().read_u32(bit, 1) != Ok(0))
+        {
+            return Err(Error::Shape);
+        }
+        let chain = match (teleported, *stage) {
+            (true, Stage::IntroTeleporting) => {
+                *stage = Stage::IntroRendering;
+                notifications(
+                    participant,
+                    &[
+                        (i.teleport, Call::Leave),
+                        (i.check_player, Call::Enter),
+                        (i.check_player, Call::Leave),
+                        (i.render_wait, Call::Enter),
+                    ],
+                )
+            }
+            (false, Stage::IntroRendering) => {
+                *stage = Stage::IntroOpening;
+                notifications(
+                    participant,
+                    &[(i.render_wait, Call::Leave), (i.opening, Call::Enter)],
+                )
+            }
+            (
+                true,
+                Stage::IntroRendering
+                | Stage::IntroOpening
+                | Stage::IntroStartingDrive
+                | Stage::FreeRoam,
+            )
+            | (false, Stage::IntroOpening | Stage::IntroStartingDrive | Stage::FreeRoam) => {
+                return Ok(Some(Outcome::Repeated));
+            }
+            _ => return Err(Error::Shape),
+        };
+        Ok(Some(Outcome::Advanced(chain)))
+    }
+}
+
+#[cfg(test)]
+mod tests;

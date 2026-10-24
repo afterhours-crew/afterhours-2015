@@ -1,0 +1,330 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+use super::*;
+
+fn endpoint(selector: u16) -> Endpoint {
+    Endpoint {
+        scene: 4,
+        selector,
+        serial: Serial::new(12).unwrap(),
+    }
+}
+fn bindings() -> Bindings {
+    Bindings {
+        parameters: endpoint(3),
+        spawning: endpoint(2),
+        teleport: endpoint(76),
+        check_player: endpoint(82),
+        render_wait: endpoint(77),
+        render_ready: endpoint(80),
+        opening: endpoint(78),
+        alive: endpoint(1),
+    }
+}
+fn ready() -> Lifecycle {
+    let mut model = super::super::tests::ready();
+    model.intro = Some(bindings());
+    model.stages.insert(8, Stage::Progressing);
+    model.stages.insert(9, Stage::Progressing);
+    model
+        .set_garage([Some(123), None, None, None, None])
+        .unwrap();
+    model
+}
+fn actor() -> crate::actors::Binding {
+    crate::actors::Binding {
+        endpoint: Endpoint {
+            scene: 2,
+            selector: 22,
+            serial: Serial::new(8).unwrap(),
+        },
+        participant: 8,
+        actor: 19,
+    }
+}
+fn request(participant: u16, selector: u16, method: u32, tail: u8) -> BitWriter {
+    let mut payload = BitWriter::new();
+    payload
+        .put(selector.into(), 9)
+        .put(method.into(), 32)
+        .put(tail.into(), 7);
+    let mut body = BitWriter::new();
+    body.put(0, 32)
+        .put(0, 32)
+        .put(2, 8)
+        .put(4, 13)
+        .put(participant.into(), 13)
+        .put(payload.bytes().len() as u64, 9)
+        .put_span(payload.span());
+    body
+}
+fn calls(out: Outcome) -> Vec<(u16, Call)> {
+    let Outcome::Advanced(chain) = out else {
+        panic!("expected one committed transition");
+    };
+    chain
+        .into_iter()
+        .map(|n| {
+            n.encode().unwrap();
+            assert_eq!(n.participant, 8);
+            (n.endpoint.selector, n.call)
+        })
+        .collect()
+}
+
+#[test]
+fn actor_and_empty_runtime_item_precede_spawning_and_leave_the_owned_garage_intact() {
+    let mut model = ready();
+    let before = model.clone();
+    let mut bad = actor();
+    bad.actor = 0;
+    assert!(model.enter_intro_with_actor(bad).is_err());
+    assert_eq!(model, before);
+    let mut bad = actor();
+    bad.endpoint.scene = 77;
+    assert!(model.enter_intro_with_actor(bad).is_err());
+    assert_eq!(model, before);
+    let out = model.enter_intro_with_actor(actor()).unwrap();
+    assert_eq!(model.garage, before.garage);
+    assert_eq!(model.stage(9), Some(Stage::Progressing));
+    assert_eq!(model.stage(8), Some(Stage::IntroSpawning));
+    let start = out
+        .iter()
+        .take(6)
+        .map(|rpc| match rpc {
+            HostRpc::Participant(n) => (n.endpoint.selector, n.call),
+            _ => panic!(),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        start,
+        [
+            (24, Call::Leave),
+            (20, Call::Enter),
+            (20, Call::Leave),
+            (17, Call::Enter),
+            (17, Call::Leave),
+            (18, Call::Enter),
+        ]
+    );
+    assert!(matches!(
+        out[6],
+        HostRpc::Garage(crate::garage::Binding {
+            participant: 8,
+            item: 0,
+            ..
+        })
+    ));
+    assert!(matches!(
+        out[7],
+        HostRpc::Participant(Notification {
+            call: Call::Leave,
+            ..
+        })
+    ));
+    assert!(matches!(
+        out[8],
+        HostRpc::Participant(Notification {
+            call: Call::Enter,
+            ..
+        })
+    ));
+    assert_eq!(out[9], HostRpc::Actor(actor()));
+    assert!(matches!(
+        out[10],
+        HostRpc::Participant(Notification {
+            call: Call::LeaveTagged(31),
+            ..
+        })
+    ));
+    assert!(matches!(
+        out[11],
+        HostRpc::Participant(Notification {
+            call: Call::Enter,
+            ..
+        })
+    ));
+    for rpc in out {
+        rpc.encode().unwrap();
+    }
+    assert!(model.enter_intro_with_actor(actor()).is_err());
+    assert_eq!(model.intro_drive_ready(8), Outcome::Unsupported);
+    assert_eq!(model.intro_opening_complete(8), Outcome::Unsupported);
+    assert_eq!(
+        calls(model.intro_vehicle_ready(8)),
+        [(2, Call::Leave), (76, Call::Enter)]
+    );
+    assert_eq!(model.intro_vehicle_ready(8), Outcome::Repeated);
+}
+
+#[test]
+fn owned_acknowledgements_gate_render_opening_and_first_mode_without_duplicate_output() {
+    let mut model = ready();
+    model.enter_intro_with_actor(actor()).unwrap();
+    let teleport = request(8, 76, 3, 0);
+    let rendering = request(8, 80, 0, 0);
+    let before = model.clone();
+    assert!(model.receive(teleport.span(), |p| p == 8).is_err());
+    assert_eq!(model, before);
+    model.intro_vehicle_ready(8);
+    let before = model.clone();
+    assert!(model.receive(rendering.span(), |p| p == 8).is_err());
+    assert_eq!(model, before);
+    assert!(model.receive(teleport.span(), |p| p == 9).is_err());
+    assert_eq!(model, before);
+    for tail in [1, 127] {
+        assert!(
+            model
+                .receive(request(8, 76, 3, tail).span(), |_| true)
+                .is_err()
+        );
+        assert_eq!(model, before);
+    }
+    assert_eq!(
+        calls(model.receive(teleport.span(), |p| p == 8).unwrap()),
+        [
+            (76, Call::Leave),
+            (82, Call::Enter),
+            (82, Call::Leave),
+            (77, Call::Enter)
+        ]
+    );
+    assert_eq!(model.stage(8), Some(Stage::IntroRendering));
+    assert!(model.in_free_roam().is_empty());
+    assert_eq!(
+        model.receive(teleport.span(), |p| p == 8).unwrap(),
+        Outcome::Repeated
+    );
+    assert_eq!(
+        calls(model.receive(rendering.span(), |p| p == 8).unwrap()),
+        [(77, Call::Leave), (78, Call::Enter)]
+    );
+    assert_eq!(
+        model.receive(rendering.span(), |p| p == 8).unwrap(),
+        Outcome::Repeated
+    );
+    assert!(model.in_free_roam().is_empty());
+    assert_eq!(model.intro_drive_ready(8), Outcome::Unsupported);
+    assert_eq!(calls(model.intro_opening_complete(8)), [(78, Call::Leave)]);
+    assert_eq!(model.intro_opening_complete(8), Outcome::Repeated);
+    assert!(model.in_free_roam().is_empty());
+    assert_eq!(calls(model.intro_drive_ready(8)), [(1, Call::Enter)]);
+    assert_eq!(model.in_free_roam(), [8]);
+    assert_eq!(model.stage(9), Some(Stage::Progressing));
+    assert_eq!(model.intro_drive_ready(8), Outcome::Repeated);
+    assert_eq!(
+        model.receive(teleport.span(), |p| p == 8).unwrap(),
+        Outcome::Repeated
+    );
+    assert_eq!(
+        model.receive(rendering.span(), |p| p == 8).unwrap(),
+        Outcome::Repeated
+    );
+    assert!(
+        model
+            .receive(request(10, 76, 3, 0).span(), |_| true)
+            .is_err()
+    );
+}
+
+fn scene() -> Record {
+    let mut fields: Vec<_> = (0..100)
+        .map(|index| sublevel::Initial::RpcReferences {
+            rpc: sublevel::Rpc {
+                selector: index * 2,
+                serial: Serial::new(index).unwrap(),
+            },
+            value: vec![],
+        })
+        .collect();
+    fields[0] = sublevel::Initial::Empty;
+    let mut kinds = [sublevel::Kind::RpcReferences; 100];
+    kinds[0] = sublevel::Kind::Noop;
+    Record {
+        id: 7,
+        initial: Some(Initial::SubLevel {
+            prefix: sublevel::Prefix {
+                level_id: 0,
+                content_key: 222,
+                blueprint: None,
+                word_a: 0,
+                word_b: 0,
+                constructor_word: None,
+            },
+            fields,
+        }),
+        update: crate::replication::Update::SubLevel {
+            profile: sublevel::Profile::new(false, &kinds).unwrap(),
+            fields: vec![Some(sublevel::Update::Noop); 100],
+        },
+    }
+}
+#[test]
+fn binding_uses_live_scene_identity_and_rejects_missing_wrong_and_duplicate_fields() {
+    let record = scene();
+    let bound = Bindings::from_records(std::slice::from_ref(&record), 222)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        bound.teleport,
+        Endpoint {
+            scene: 7,
+            selector: 154,
+            serial: Serial::new(77).unwrap()
+        }
+    );
+    assert_eq!(bound.parameters.selector, 8);
+    assert_eq!(bound.opening.selector, 158);
+    assert_eq!(
+        Bindings::from_records(std::slice::from_ref(&record), 111),
+        Ok(None)
+    );
+    assert_eq!(
+        Bindings::from_records(&[record.clone(), record.clone()], 222),
+        Err(Error::DuplicateObject)
+    );
+    let mut malformed = record.clone();
+    let Some(Initial::SubLevel { fields, .. }) = &mut malformed.initial else {
+        panic!()
+    };
+    fields[77] = sublevel::Initial::Empty;
+    assert_eq!(
+        Bindings::from_records(&[malformed.clone()], 222),
+        Err(Error::TypeMismatch)
+    );
+    let mut model = Lifecycle::default();
+    assert!(model.bind_intro(&[malformed], 222).is_err());
+    assert!(model.intro_bindings().is_none());
+    assert!(
+        model
+            .bind_intro(std::slice::from_ref(&record), 222)
+            .unwrap()
+    );
+    assert_eq!(
+        model.bind_intro(&[record], 222),
+        Err(Error::DuplicateObject)
+    );
+    assert_eq!(model.intro_bindings(), Some(bound));
+}
+
+#[test]
+fn ordinary_garage_progression_still_uses_its_own_route_when_intro_is_bound() {
+    let mut model = ready();
+    let garage = model.enter_garage_loading(8);
+    assert_eq!(model.stage(8), Some(Stage::LoadingGarage));
+    assert!(
+        garage
+            .iter()
+            .any(|n| n.endpoint == model.bindings.unwrap().enter_garage_from_boot)
+    );
+    assert_eq!(model.intro_vehicle_ready(8), Outcome::Unsupported);
+    let before = model.clone();
+    assert_eq!(
+        model
+            .receive(request(8, 76, 3, 0).span(), |_| true)
+            .unwrap(),
+        Outcome::Unsupported
+    );
+    assert_eq!(model, before);
+}
