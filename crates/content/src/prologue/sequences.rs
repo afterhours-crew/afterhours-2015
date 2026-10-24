@@ -29,6 +29,51 @@ impl Sequence {
     }
 }
 
+/// EventSync outputs connected directly to the sequence root's server Stop.
+/// Other outputs (including selection/load callbacks) are deliberately not
+/// completion signals. The existing composition reader filters client-only rows.
+pub fn direct_stop_signals(
+    index: &mut AssetIndex,
+    name: &str,
+) -> Result<Vec<nfs_world::scoring::event_sync::Binding>, Error> {
+    let composition = index.scoring_events(name)?;
+    let signals = index.scoring_event_sync(name, &composition)?;
+    stop_signals(&composition, &signals)
+}
+fn stop_signals(
+    composition: &crate::scoring::events::Composition,
+    signals: &[nfs_world::scoring::event_sync::Binding],
+) -> Result<Vec<nfs_world::scoring::event_sync::Binding>, Error> {
+    use nfs_world::scoring::{events::Delivery, nodes::OUT};
+    const STOP: u32 = 2_089_401_213;
+    let roots: Vec<_> = composition
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| n.class == "ParticipantStateSequenceEntityData")
+        .map(|(i, _)| i)
+        .collect();
+    let [root] = roots.as_slice() else {
+        return Err(bad("sequence completion root"));
+    };
+    let mut out = Vec::new();
+    for signal in signals {
+        if composition.connections.iter().any(|c| {
+            c.source.node == signal.node
+                && c.source.event == OUT
+                && usize::from(c.target.node) == *root
+                && c.target.event == STOP
+                && matches!(
+                    c.delivery,
+                    Delivery::Local | Delivery::NetworkedClientAndServer(_)
+                )
+        }) {
+            out.push(*signal);
+        }
+    }
+    Ok(out)
+}
+
 fn bindings<S: Source>(
     graph: &mut Graph<S>,
     branch: &[Node],
@@ -198,6 +243,90 @@ pub fn extract(index: &mut AssetIndex, name: &str) -> Result<Sequence, Error> {
 mod tests {
     use super::*;
     use crate::graph::tests::{Memory, edge, local, ptr};
+
+    #[test]
+    fn stop_callbacks_require_the_direct_server_root_edge() {
+        use crate::scoring::events::{Composition, Identity, Node};
+        use nfs_world::scoring::{
+            event_sync::Binding,
+            events::{Connection, Delivery, Endpoint, Remote},
+            nodes::OUT,
+        };
+        let nodes = [
+            "ParticipantStateSequenceEntityData",
+            "EventSyncEntityData",
+            "EventSyncEntityData",
+            "EventSyncEntityData",
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, class)| Node {
+            identity: Identity {
+                asset: "a".into(),
+                index,
+                instances: vec![],
+            },
+            class: class.into(),
+            listeners: None,
+            forward: None,
+        })
+        .collect();
+        let mut composition = Composition {
+            nodes,
+            buses: vec![],
+            bus_entities: vec![],
+            connections: vec![
+                Connection {
+                    source: Endpoint {
+                        node: 1,
+                        event: OUT,
+                    },
+                    target: Endpoint {
+                        node: 0,
+                        event: 2_089_401_213,
+                    },
+                    delivery: Delivery::Local,
+                },
+                Connection {
+                    source: Endpoint {
+                        node: 2,
+                        event: OUT,
+                    },
+                    target: Endpoint {
+                        node: 0,
+                        event: 2_089_401_213,
+                    },
+                    delivery: Delivery::NetworkedClient(Remote { bus: 0, index: 0 }),
+                },
+                Connection {
+                    source: Endpoint {
+                        node: 3,
+                        event: OUT,
+                    },
+                    target: Endpoint {
+                        node: 1,
+                        event: 2_089_401_213,
+                    },
+                    delivery: Delivery::Local,
+                },
+            ],
+            properties: vec![],
+            links: vec![],
+        };
+        let signals = (1..=3)
+            .map(|node| Binding {
+                entity: 1,
+                event: u32::from(node) + 10,
+                node,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            stop_signals(&composition, &signals).unwrap(),
+            vec![signals[0]]
+        );
+        composition.nodes[0].class = "Other".into();
+        assert!(stop_signals(&composition, &signals).is_err());
+    }
 
     fn fixture(duplicate: bool, missing: bool) -> (Memory, crate::sequences::Rules) {
         let rules = crate::BuildIdentity::supported().sequences;

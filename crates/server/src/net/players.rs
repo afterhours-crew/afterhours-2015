@@ -30,6 +30,7 @@ pub(super) use scoring::{AwardRequest, Credited};
 mod launchers;
 mod map_feed;
 mod output;
+mod prologue;
 mod purchases;
 mod refusal;
 mod returning;
@@ -88,6 +89,8 @@ pub(super) struct PlayerListener {
     participants: nfs_world::participants::Lifecycle,
     persistent: Option<std::sync::Arc<crate::persistent::Loaded>>,
     progression: Option<std::sync::Arc<crate::progression::Content>>,
+    prologue: Option<std::sync::Arc<crate::prologue::Content>>,
+    opening: crate::sequence_content::authored::Instances,
     vehicles: Option<std::sync::Arc<GarageContent>>,
     population: Option<Population>,
     traffic_content: Option<std::sync::Arc<nfs_content::traffic::Content>>,
@@ -448,7 +451,15 @@ impl PlayerListener {
                 let binding = players
                     .bind_actor(roles.gameplay, HOST_SELECTOR as u8, persona, participant)?
                     .ok_or(replication::Error::Shape)?;
-                replies.extend(participants.enter_garage_with_actor(binding)?);
+                let intro = self
+                    .prologue
+                    .as_ref()
+                    .is_some_and(|content| content.active(&restored));
+                replies.extend(if intro {
+                    participants.enter_intro_with_actor(binding)?
+                } else {
+                    participants.enter_garage_with_actor(binding)?
+                });
                 if let Some(bank) = roles.bank {
                     let scene = players
                         .objects()
@@ -474,7 +485,7 @@ impl PlayerListener {
                         },
                     ));
                 }
-                if let Some(logic) = logic {
+                if let Some(logic) = logic.filter(|_| !intro) {
                     let ghosts = logic_ghosts.entry(participant).or_default();
                     if !ghosts.is_empty() {
                         return Err(replication::Error::DuplicateObject);
@@ -700,6 +711,8 @@ impl PlayerListener {
             participants: nfs_world::participants::Lifecycle::default(),
             persistent: None,
             progression: None,
+            prologue: None,
+            opening: crate::sequence_content::authored::Instances::default(),
             vehicles: None,
             population: None,
             traffic_content: None,
@@ -819,6 +832,13 @@ impl PlayerListener {
         self.crashes = crashes;
         self
     }
+    pub(super) fn with_prologue(
+        mut self,
+        content: Option<std::sync::Arc<crate::prologue::Content>>,
+    ) -> Self {
+        self.prologue = content;
+        self
+    }
     pub(super) fn with_sequences(
         mut self,
         sequences: Option<nfs_world::sequences::Sequences>,
@@ -899,6 +919,9 @@ impl PlayerListener {
         }
         let mut participants = self.participants.clone();
         participants.bind(&records, roles.gameplay, roles.startup)?;
+        if self.prologue.is_some() && !participants.bind_intro(&records, roles.startup)? {
+            return Err(replication::Error::UnknownObject);
+        }
         match participants.bind_exit(&records, roles.startup, roles.garage) {
             Ok(true) => {}
             Ok(false) => tracing::info!("garage exit scenes absent; garage exit stays unsupported"),
@@ -1173,6 +1196,7 @@ impl Listener for PlayerListener {
         let mut return_trace = false;
         let mut sequences = self.sequences.clone();
         let mut logic_ghosts = self.logic_ghosts.clone();
+        let mut opening = self.opening.clone();
         let mut unsupported_logic = 0;
         let mut event_inputs = Vec::new();
         let mut glass = self.glass.clone();
@@ -1195,6 +1219,18 @@ impl Listener for PlayerListener {
             for body in logic_events {
                 let message = nfs_world::logic::Message::decode(82, body)
                     .map_err(|_| replication::Error::Shape)?;
+                if let Some(content) = self.prologue.as_deref()
+                    && Self::opening_signal(
+                        content,
+                        &mut opening,
+                        &players,
+                        self.persona,
+                        &message,
+                        &mut responses,
+                    )?
+                {
+                    continue;
+                }
                 if self.event_claims_logic(&message) {
                     event_inputs.push(Self::event_input_logic(&message));
                     continue;
@@ -1255,6 +1291,28 @@ impl Listener for PlayerListener {
                         .or_else(|| self.rival_glass_owner(&players, target.ghost, *player))
                         .ok_or(replication::Error::UnknownObject)?;
                     let fire = glass.receive(owner, &message)?;
+                    if players.temporary_vehicle(
+                        HOST_SELECTOR as u8,
+                        self.persona,
+                        owner.participant,
+                    ) == Some(target.ghost)
+                    {
+                        responses.push(nfs_world::participants::HostRpc::Event(fire));
+                        if let Some((records, calls, command)) = Self::intro_car_ready(
+                            self.prologue.as_deref(),
+                            &mut players,
+                            &mut participants,
+                            self.persona,
+                            owner.participant,
+                            target.ghost,
+                        )? {
+                            deferred_sections.extend(Self::binding_sections(records)?);
+                            responses.extend(calls);
+                            scheduled_teleports.push((self.world_ms, command));
+                            world_cars.insert(target.ghost, (owner.participant, true));
+                        }
+                        continue;
+                    }
                     match world_cars.get(&target.ghost) {
                         // A world car's replies wait for the participant's
                         // spawn-zone report; garage cars answer at once.
@@ -1503,6 +1561,37 @@ impl Listener for PlayerListener {
                         return self.refuse_rpc(error, body);
                     }
                 }
+            }
+            match participants.receive_intro(body, |id| {
+                players.owns_participant(HOST_SELECTOR as u8, self.persona, id)
+            }) {
+                Ok(Some(nfs_world::participants::Outcome::Advanced(calls))) => {
+                    responses.extend(
+                        calls
+                            .into_iter()
+                            .map(nfs_world::participants::HostRpc::Participant),
+                    );
+                    continue;
+                }
+                Ok(Some(_)) => continue,
+                Ok(None) => {}
+                Err(error) => return self.refuse_rpc(error, body),
+            }
+            match Self::opening_completed(
+                &mut opening,
+                &mut players,
+                &mut participants,
+                self.persona,
+                body,
+            ) {
+                Ok(Some(Some((section, calls)))) => {
+                    deferred_sections.push(section);
+                    responses.extend(calls);
+                    continue;
+                }
+                Ok(Some(None)) => continue,
+                Ok(None) => {}
+                Err(error) => return self.refuse_rpc(error, body),
             }
             if let Some(crashes) = &mut crashes {
                 match Self::finish_crash_call(
@@ -2275,6 +2364,7 @@ impl Listener for PlayerListener {
         self.players = players;
         self.launchers = launchers;
         self.participants = participants;
+        self.opening = opening;
         self.pending_rpcs.extend(responses);
         for input in event_inputs {
             if self.event_state.inputs.len() >= events::MAX_INPUTS {

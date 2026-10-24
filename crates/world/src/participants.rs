@@ -412,6 +412,8 @@ pub struct Entry {
 pub struct Lifecycle {
     bindings: Option<Bindings>,
     intro: Option<intro::Bindings>,
+    /// Only participants who entered this session's intro own its late replies.
+    intro_started: std::collections::BTreeSet<u16>,
     stages: BTreeMap<u16, Stage>,
     garage: Option<crate::garage::Slots>,
     garage_sent: BTreeSet<u16>,

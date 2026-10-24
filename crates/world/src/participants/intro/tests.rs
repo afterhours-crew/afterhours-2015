@@ -228,6 +228,35 @@ fn owned_acknowledgements_gate_render_opening_and_first_mode_without_duplicate_o
     );
 }
 
+#[test]
+fn early_intro_router_does_not_consume_another_participants_shared_teleport() {
+    let mut model = ready();
+    model.enter_intro_with_actor(actor()).unwrap();
+    model.intro_vehicle_ready(8);
+    model.stages.insert(9, Stage::FreeRoam);
+    assert_eq!(
+        model
+            .receive_intro(request(9, 76, 3, 0).span(), |_| true)
+            .unwrap(),
+        None
+    );
+    let before = model.clone();
+    assert!(
+        model
+            .receive_intro(request(8, 76, 3, 0).span(), |_| false)
+            .is_err()
+    );
+    assert_eq!(model, before);
+    assert!(matches!(
+        model
+            .receive_intro(request(8, 76, 3, 0).span(), |_| true)
+            .unwrap(),
+        Some(Outcome::Advanced(_))
+    ));
+    assert_eq!(model.stage(8), Some(Stage::IntroRendering));
+    assert_eq!(model.stage(9), Some(Stage::FreeRoam));
+}
+
 fn scene() -> Record {
     let mut fields: Vec<_> = (0..100)
         .map(|index| sublevel::Initial::RpcReferences {

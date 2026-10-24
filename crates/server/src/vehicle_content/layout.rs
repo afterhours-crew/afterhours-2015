@@ -171,6 +171,10 @@ impl Layout {
     pub fn world_spawn(&self) -> Option<&Slot> {
         self.world_spawn.as_ref()
     }
+    /// Authored garage staging location, independent of account occupancy.
+    pub fn slot(&self, index: usize) -> Option<&Slot> {
+        self.slots.get(index)
+    }
     pub fn exit_teleport(&self) -> Option<&Slot> {
         self.exit_teleport.as_ref()
     }

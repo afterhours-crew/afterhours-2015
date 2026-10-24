@@ -35,6 +35,7 @@ pub mod net;
 pub mod persistent;
 pub mod prepare_content;
 pub mod progression;
+pub mod prologue;
 pub mod recommendations;
 pub mod record;
 pub mod reputation_account;

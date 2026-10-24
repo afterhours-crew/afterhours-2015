@@ -766,11 +766,20 @@ async fn run(args: Args) -> Result<(), Failure> {
     // Free-roam scoring compiles the installed driving participants directly
     // from the installation; without it (or without garage logic) scoring stays off.
     let mut events = None;
+    let mut prologue = None;
     let scoring = match (&args.game_dir, garage_logic.is_some()) {
         (Some(game_dir), true) => {
             let game_dir = game_dir.clone();
             let event_vehicles = vehicles.as_ref().map(|v| v.vehicles.clone());
             let event_items = args.item_content.as_ref().map(|p| args.root.join(p));
+            let intro_parent = progression
+                .as_ref()
+                .and_then(|p| {
+                    p.construction
+                        .blueprint(nfs_server::progression::Branch::Intro)
+                })
+                .map(|b| b.asset());
+            let intro_items = inventory.as_ref().map(|i| i.item_catalog());
             let content = tokio::task::spawn_blocking(move || {
                 let mut index = nfs_content::assets::AssetIndex::open(
                     &game_dir,
@@ -797,12 +806,28 @@ async fn run(args: Args) -> Result<(), Failure> {
                         items.as_ref(),
                     )
                 })();
-                Ok::<_, nfs_content::Error>((scoring, road, nitrous, event))
+                let story = (|| {
+                    let parent = intro_parent.ok_or_else(|| {
+                        nfs_content::Error::Content("intro participant content missing".into())
+                    })?;
+                    let items = intro_items.ok_or_else(|| {
+                        nfs_content::Error::Content("intro item catalog missing".into())
+                    })?;
+                    nfs_server::prologue::Content::prepare(&mut index, parent, &items)
+                })();
+                Ok::<_, nfs_content::Error>((scoring, road, nitrous, event, story))
             })
             .await
             .map_err(|_| Failure::Output)?;
             match content {
-                Ok((content, road, nitrous, event)) => {
+                Ok((content, road, nitrous, event, story)) => {
+                    match story {
+                        Ok(content) => {
+                            prologue = Some(Arc::new(content));
+                            tracing::info!("installed prologue opening prepared");
+                        }
+                        Err(error) => tracing::warn!(%error,"prologue opening unavailable"),
+                    }
                     let mut content = nfs_server::scoring::Content::new(Arc::new(content))
                         .map_err(|_| Failure::ProfileConfig)?
                         .with_items(
@@ -1021,6 +1046,7 @@ async fn run(args: Args) -> Result<(), Failure> {
         world_content,
         inventory,
         progression,
+        prologue,
         vehicles,
         sequences,
         traffic,

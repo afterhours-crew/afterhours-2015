@@ -58,6 +58,7 @@ pub struct Config {
     pub world_content: Option<Arc<crate::content::WorldContent>>,
     pub inventory: Option<InventoryProfile>,
     pub progression: Option<Arc<crate::progression::Content>>,
+    pub prologue: Option<Arc<crate::prologue::Content>>,
     pub vehicles: Option<Arc<crate::vehicle_content::GarageContent>>,
     pub sequences: Option<Arc<crate::sequence_content::SequenceContent>>,
     pub traffic: Option<Arc<nfs_content::traffic::Content>>,
@@ -99,6 +100,7 @@ pub struct WorldServe {
     pub persona: i64,
     pub inventory: Option<InventoryProfile>,
     pub progression: Option<Arc<crate::progression::Content>>,
+    pub prologue: Option<Arc<crate::prologue::Content>>,
     pub vehicles: Option<Arc<crate::vehicle_content::GarageContent>>,
     pub sequences: Option<Arc<crate::sequence_content::SequenceContent>>,
     pub traffic: Option<Arc<nfs_content::traffic::Content>>,
@@ -761,6 +763,7 @@ pub async fn serve(
                 let garage_logic = config.garage_logic.clone();
                 let scoring = config.scoring.clone();
                 let events = config.events.clone();
+                let prologue = config.prologue.clone();
                 let catalogs = config.catalogs.clone();
                 let entitlements = config.entitlements.clone();
                 let user_settings = config.user_settings.clone();
@@ -824,6 +827,7 @@ pub async fn serve(
                             persona: profiles.persona,
                             inventory,
                             progression,
+                            prologue,
                             vehicles,
                             sequences,
                             traffic,
@@ -896,6 +900,7 @@ pub async fn world_host(
         persona,
         inventory,
         progression,
+        prologue,
         vehicles,
         sequences,
         traffic,
@@ -1009,6 +1014,7 @@ pub async fn world_host(
     let mut listener = players::PlayerListener::new(persona)
         .with_connection(connection)
         .with_progression(progression)
+        .with_prologue(prologue)
         .with_vehicles(vehicles)
         .with_sequences(sequences)
         .with_traffic(traffic)

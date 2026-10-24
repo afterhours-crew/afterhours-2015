@@ -41,6 +41,13 @@ impl PlayerListener {
                 continue;
             };
             let connection = HOST_SELECTOR as u8;
+            // The opening's staged car has no durable inventory identity and
+            // is not yet in a state that can enter crash recovery.
+            if players.temporary_vehicle(connection, persona, participant) == Some(record.id)
+                && !eligible(participants, event.0, participant)
+            {
+                continue;
+            }
             let item = players
                 .vehicle_item_of(connection, persona, record.id)
                 .ok_or(replication::Error::UnknownObject)?;

@@ -78,6 +78,29 @@ impl Lifecycle {
     pub fn intro_bindings(&self) -> Option<Bindings> {
         self.intro
     }
+    /// Route intro gates before other owners of the shared teleport endpoint.
+    pub fn receive_intro(
+        &mut self,
+        body: BitSpan<'_>,
+        owns: impl Fn(u16) -> bool,
+    ) -> Result<Option<Outcome>, Error> {
+        if self.intro.is_none() {
+            return Ok(None);
+        }
+        let envelope = Envelope::decode(
+            body,
+            Limits {
+                max_input_bits: 4096,
+                max_references: 32,
+                max_payload_bytes: 256,
+            },
+        )
+        .map_err(|_| Error::Shape)?;
+        let route = envelope
+            .route(RouteProfile::ClientSend)
+            .map_err(|_| Error::Shape)?;
+        self.intro_route(&envelope, &route, &owns)
+    }
 
     /// Start from restored progress, keeping the persistent garage untouched.
     /// The zero item reference and actor association precede spawning. Vehicle
@@ -144,6 +167,7 @@ impl Lifecycle {
             rpc.encode()?;
         }
         *stage = Stage::IntroSpawning;
+        self.intro_started.insert(participant);
         Ok(out)
     }
     pub fn intro_vehicle_ready(&mut self, participant: u16) -> Outcome {
@@ -224,6 +248,9 @@ impl Lifecycle {
             .stages
             .get_mut(&participant)
             .ok_or(Error::UnknownObject)?;
+        if !self.intro_started.contains(&participant) {
+            return Ok(None);
+        }
         if !matches!(
             stage,
             Stage::IntroSpawning

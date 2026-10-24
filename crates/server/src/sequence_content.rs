@@ -7,6 +7,7 @@ use nfs_content::sequences::{ParseError, SequenceContent as Data};
 use nfs_world::{arrival::Arrivals, sequences::Sequences};
 use serde_json::Value;
 use std::{ops::Deref, path::Path};
+pub mod authored;
 #[derive(Clone, Debug)]
 pub struct SequenceContent(Data);
 impl Deref for SequenceContent {
