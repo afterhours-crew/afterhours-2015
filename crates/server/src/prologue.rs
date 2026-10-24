@@ -18,11 +18,13 @@ use nfs_world::{
     replication::{Error, entity::creation::Asset},
 };
 use std::sync::Arc;
+pub mod driving;
 
 #[derive(Clone, Debug)]
 pub struct Content {
     pub start: Start,
     pub opening: Authored,
+    pub driving: Option<(driving::Mode, driving::Mode)>,
     items: Arc<Collection>,
 }
 impl Content {
@@ -72,6 +74,7 @@ impl Content {
             )
             .unwrap(),
             items,
+            driving: Some(driving::tests::content(parent, manager)),
         }
     }
     pub fn prepare(
@@ -89,6 +92,18 @@ impl Content {
         }
         let opening = Authored::new(sequence, parent, stops)
             .map_err(|e| nfs_content::Error::Content(format!("opening construction: {e:?}")))?;
+        let driving = Some((
+            driving::Mode::prepare(
+                index,
+                parent,
+                "gameplay/progression/intro/introdrivetoclubgamemode",
+            )?,
+            driving::Mode::prepare(
+                index,
+                parent,
+                "gameplay/progression/intro/evencancellergamemode",
+            )?,
+        ));
         let mut built = items
             .instantiate_vehicle(start.vehicle_item, 1)
             .map_err(|e| nfs_content::Error::Content(format!("intro vehicle: {e}")))?;
@@ -98,6 +113,7 @@ impl Content {
         Ok(Self {
             start,
             opening,
+            driving,
             items: Arc::new(built.collection),
         })
     }

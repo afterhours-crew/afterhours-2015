@@ -528,6 +528,18 @@ impl Players {
             .any(|(&(p, _), &id)| p == participant && id == vehicle)
             || self.temporary_vehicles.get(&participant) == Some(&vehicle)
     }
+    /// Simulation ownership covers both an inventory car and a session-only car.
+    /// This check grants no item, equipment or purchase authority.
+    pub fn owns_participant_vehicle(
+        &self,
+        connection: u8,
+        persona: u64,
+        participant: u16,
+        vehicle: u16,
+    ) -> bool {
+        self.owns_participant(connection, persona, participant)
+            && self.participant_has_vehicle(participant, vehicle)
+    }
     /// Vehicles this connection's client simulates, including temporary cars.
     /// Temporary cars carry simulation ownership but no persistent item identity.
     pub fn owned_vehicles(&self, connection: u8, persona: u64) -> std::collections::BTreeSet<u16> {

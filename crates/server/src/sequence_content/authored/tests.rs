@@ -167,6 +167,99 @@ fn fields(record: &Record) -> &[Initial] {
     fields
 }
 #[test]
+fn mode_bound_sequences_reject_foreign_modes_and_bind_live_mode_selectors() {
+    let (mut players, opening, a, b) = fixture();
+    let asset = Asset {
+        bundle: 4,
+        type_id: 10,
+        local_index: 0,
+    };
+    let shape = nfs_world::game_mode::authored::Blueprint::new(
+        asset,
+        1,
+        1,
+        &[Kind::GameModeRoot, Kind::RpcReferences, Kind::RpcReference],
+    )
+    .unwrap();
+    let catalog = Content::new(
+        vec![Catalog::new(4, &[(10, 1)]).unwrap()],
+        vec![(asset, shape.profile().clone())],
+    )
+    .unwrap();
+    let mut roots = vec![];
+    for owner in [a, b] {
+        let creation = shape
+            .creation(
+                nfs_world::game_mode::authored::Instance {
+                    bindings: [(1, 0); 3],
+                    participant: owner.participant,
+                    start_seconds: 1.,
+                    age_seconds: 0.,
+                    laps: 1,
+                    waypoints: vec![],
+                    members: std::collections::BTreeSet::from([1]),
+                },
+                |_| Ok((1, 0)),
+            )
+            .unwrap();
+        roots.push(players.spawn_entities(vec![creation], &catalog).unwrap()[0].id);
+    }
+    let sequence = events::Sequence {
+        layout: events::Layout {
+            blueprint: "test/mode-sequence".into(),
+            asset: opening.data.asset,
+            catalog: opening.data.catalog.clone(),
+            bus_count: 1,
+            sub_id: 2,
+            occurrence: 0,
+            fields: [Kind::SequenceRoot, Kind::RpcReference]
+                .into_iter()
+                .enumerate()
+                .map(|(i, k)| events::Field {
+                    kind: k,
+                    class: "test".into(),
+                    asset: "test".into(),
+                    object: i,
+                    binding: (i == 1).then_some(ChannelBinding::GameMode { serializer: 2 }),
+                    mirrors: None,
+                })
+                .collect(),
+        },
+        manager: (7, 2),
+        spawner: Some(1),
+        goto: None,
+        wander: None,
+    };
+    let content = Authored::from_mode(
+        &sequence,
+        opening.parent,
+        asset,
+        opening.stop_signals.clone(),
+    )
+    .unwrap();
+    let before = players.objects().snapshot();
+    let mut instances = Instances::default();
+    assert!(
+        instances
+            .start_bound(&content, &mut players, a, Some(roots[1]))
+            .is_err()
+    );
+    assert!(
+        instances
+            .start_bound(&content, &mut players, a, None)
+            .is_err()
+    );
+    assert_eq!(players.objects().snapshot(), before);
+    assert_eq!(instances.ghost(a.participant), None);
+    let record = instances
+        .start_bound(&content, &mut players, a, Some(roots[0]))
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(&fields(&record)[1],Initial::RpcReference{reference,target_selector:2,..} if *reference==roots[0])
+    );
+}
+#[test]
 fn resolves_live_selectors_and_owner_instead_of_serializer_positions_or_fixed_ids() {
     let (mut players, content, a, b) = fixture();
     let mut instances = Instances::default();
@@ -293,18 +386,16 @@ fn completion_requires_the_owned_signal_then_stop_and_is_repeat_safe() {
 fn bad_channel_and_ambiguous_owner_do_not_allocate() {
     let (mut players, mut content, a, _) = fixture();
     content
-        .data
         .channels
-        .insert(1, Channel::Participant { serializer: 1 });
+        .insert(1, ChannelBinding::Participant { serializer: 1 });
     let before = players.objects().snapshot();
     let mut instances = Instances::default();
     assert!(instances.start(&content, &mut players, a).is_err());
     assert_eq!(players.objects().snapshot(), before);
     assert_eq!(instances.ghost(a.participant), None);
     content
-        .data
         .channels
-        .insert(1, Channel::Participant { serializer: 2 });
+        .insert(1, ChannelBinding::Participant { serializer: 2 });
     let (prefix,initial)=players.objects().iter().find_map(|(_,o)| match &o.initial {
         replication::Initial::Entity{prefix,fields} if prefix.asset==content.parent && matches!(fields[0],Initial::Root{reference,..} if reference==a.participant)=>Some((prefix.clone(),fields.clone())),_=>None,
     }).unwrap();

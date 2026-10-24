@@ -32,6 +32,33 @@ pub mod catalog;
 pub mod lifecycle;
 pub mod request;
 
+/// Native waypoint-channel command, shared by races and solo story drives.
+pub(crate) fn route_goal(
+    mode: &nfs_content::events::GameMode,
+) -> Result<goto_waypoint::Initial, Error> {
+    if mode.drift != Some(false) {
+        return Err(Error::Unsupported);
+    }
+    if mode.points.is_empty()
+        || mode.points.len() > goto_waypoint::MAX_WAYPOINTS
+        || mode.points.len() != mode.checkpoints.len()
+        || mode.points.iter().flatten().any(|v| !v.is_finite())
+    {
+        return Err(Error::Shape);
+    }
+    Ok(goto_waypoint::Initial {
+        selector: 0,
+        serial: 1,
+        allocation_serial: 0,
+        waypoint: 0,
+        word: mode.laps,
+        points: mode.points.iter().map(|p| p.map(f32::to_bits)).collect(),
+        flags: [false, false],
+        radius: 150f32.to_bits(),
+        progress_updates: true,
+    })
+}
+
 /// The waypoints state's method-3 car ID: the client name hash (djb2 with XOR) of the
 /// car's lower-case blueprint path (E996: 762201586 is
 /// `vehicles/player/car_subaru_brzpremium_2014/car_subaru_brzpremium_2014`, the car
@@ -283,7 +310,7 @@ fn presented(field: &Field) -> Option<Presented> {
 
 /// Typed synchronized value of a creation field.
 #[derive(Clone, Debug, PartialEq)]
-enum Value {
+pub(crate) enum Value {
     Bool(bool),
     Int(i32),
     Float(f32),
@@ -679,28 +706,9 @@ impl Content {
     /// Goal allocation serial is assigned by the world's shared allocator.
     pub fn race_goal(&self) -> Result<(RecordInitial, nfs_world::replication::Update), Error> {
         let mode = &self.event.game_mode;
-        if mode.drift != Some(false) {
-            return Err(Error::Unsupported);
-        }
-        if mode.points.is_empty()
-            || mode.points.len() > goto_waypoint::MAX_WAYPOINTS
-            || mode.points.len() != mode.checkpoints.len()
-            || mode.points.iter().flatten().any(|v| !v.is_finite())
-        {
-            return Err(Error::Shape);
-        }
+        let route = route_goal(mode)?;
         Ok((
-            RecordInitial::GotoWaypointGoal(goto_waypoint::Initial {
-                selector: 0,
-                serial: 1,
-                allocation_serial: 0,
-                waypoint: 0,
-                word: mode.laps,
-                points: mode.points.iter().map(|p| p.map(f32::to_bits)).collect(),
-                flags: [false, false],
-                radius: 150f32.to_bits(),
-                progress_updates: true,
-            }),
+            RecordInitial::GotoWaypointGoal(route),
             nfs_world::replication::Update::GotoWaypointGoal(goto_waypoint::Update::Progress(
                 Some([0, 0]),
             )),
@@ -799,101 +807,13 @@ impl Content {
         game_mode: Option<u16>,
         value: &dyn Fn(usize, &Field) -> Option<Value>,
     ) -> Result<Creation, Error> {
-        let mut initial = Vec::with_capacity(layout.fields.len());
-        let mut updates = Vec::with_capacity(layout.fields.len());
-        let mut next = 0u16;
-        for (index, field) in layout.fields.iter().enumerate() {
-            let mut take = || -> Result<Rpc, Error> {
-                let current = rpc(next)?;
-                next = next.checked_add(1).ok_or(Error::Bound)?;
-                Ok(current)
-            };
-            let (first, update) = match field.kind {
-                Kind::Root if index == 0 => (
-                    Initial::Root {
-                        value: layout.bus_count,
-                        rpc: take()?,
-                        reference: participant,
-                    },
-                    Update::Noop,
-                ),
-                Kind::RpcReference => {
-                    let binding = field.binding.ok_or(Error::Unsupported)?;
-                    let (reference, target_selector) = self.bound(world, binding, game_mode)?;
-                    (
-                        Initial::RpcReference {
-                            rpc: take()?,
-                            reference,
-                            target_selector,
-                        },
-                        Update::Noop,
-                    )
-                }
-                Kind::Rpc => (Initial::Rpc(take()?), Update::Noop),
-                Kind::RpcBool => {
-                    let initial = match value(index, field) {
-                        Some(Value::Bool(v)) => v,
-                        None => false,
-                        Some(_) => return Err(Error::TypeMismatch),
-                    };
-                    (
-                        Initial::RpcBool {
-                            rpc: take()?,
-                            value: initial,
-                        },
-                        Update::Noop,
-                    )
-                }
-                Kind::RpcReferences => (
-                    Initial::RpcReferences {
-                        rpc: take()?,
-                        references: Vec::new(),
-                    },
-                    Update::Noop,
-                ),
-                Kind::BoolProperty => match value(index, field) {
-                    Some(Value::Bool(v)) => {
-                        (Initial::BoolProperty(Some(v)), Update::BoolProperty(None))
-                    }
-                    None => (Initial::BoolProperty(None), Update::BoolProperty(None)),
-                    Some(_) => return Err(Error::TypeMismatch),
-                },
-                Kind::I32Property => match value(index, field) {
-                    Some(Value::Int(v)) => {
-                        (Initial::I32Property(Some(v)), Update::I32Property(None))
-                    }
-                    None => (Initial::I32Property(None), Update::I32Property(None)),
-                    Some(_) => return Err(Error::TypeMismatch),
-                },
-                Kind::FloatProperty => match value(index, field) {
-                    Some(Value::Float(v)) if v.is_finite() => (
-                        Initial::FloatProperty(Some(v.to_bits())),
-                        Update::FloatProperty(None),
-                    ),
-                    None => (Initial::FloatProperty(None), Update::FloatProperty(None)),
-                    Some(_) => return Err(Error::TypeMismatch),
-                },
-                Kind::StringProperty => {
-                    (Initial::StringProperty(None), Update::StringProperty(None))
-                }
-                _ => return Err(Error::Unsupported),
-            };
-            initial.push(first);
-            updates.push(Some(update));
-        }
-        let creation = Creation {
-            prefix: Prefix {
-                parent: None,
-                blueprint,
-                sub_id: layout.sub_id,
-                owner: None,
-                asset: layout.asset,
-            },
-            body: Body {
-                initial: Some(initial),
-                updates,
-            },
-        };
+        let creation = logic_creation(
+            layout,
+            blueprint,
+            participant,
+            |binding| self.bound(world, binding, game_mode),
+            value,
+        )?;
         creation.encode(&self.creation)?;
         Ok(creation)
     }
@@ -1235,29 +1155,7 @@ impl Content {
         let Some(goto) = self.sequence(request::INTRO_SEQUENCE)?.goto else {
             return Ok(None);
         };
-        let serial = Serial::new(0)
-            .ok_or(Error::Shape)?
-            .next_initialization()
-            .value();
-        Ok(Some(vec![
-            RecordInitial::GotoWaypointGoal(goto_waypoint::Initial {
-                selector: 0,
-                serial,
-                allocation_serial: 0,
-                waypoint: 0,
-                word: 1,
-                points: vec![goto.point.map(f32::to_bits)],
-                flags: [false, false],
-                radius: goto.radius.to_bits(),
-                progress_updates: false,
-            }),
-            RecordInitial::SpeedLimitGoal(speed_limit::Initial {
-                selector: 0,
-                serial,
-                allocation_serial: 0,
-                limit: goto.speed_limit.to_bits(),
-            }),
-        ]))
+        Ok(Some(goto_goals(goto)?))
     }
     /// A call on an event-scene serializer.
     pub fn scene_call(
@@ -1272,6 +1170,136 @@ impl Content {
             .ok_or(Error::UnknownObject)?;
         call(world, scene, selector, method, reference, Arguments::None)
     }
+}
+
+/// Native arrival goals shared by event and story sequences.
+pub(crate) fn goto_goals(goto: nfs_content::events::Goto) -> Result<Vec<RecordInitial>, Error> {
+    let serial = Serial::new(0)
+        .ok_or(Error::Shape)?
+        .next_initialization()
+        .value();
+    Ok(vec![
+        RecordInitial::GotoWaypointGoal(goto_waypoint::Initial {
+            selector: 0,
+            serial,
+            allocation_serial: 0,
+            waypoint: 0,
+            word: 1,
+            points: vec![goto.point.map(f32::to_bits)],
+            flags: [false, false],
+            radius: goto.radius.to_bits(),
+            progress_updates: false,
+        }),
+        RecordInitial::SpeedLimitGoal(speed_limit::Initial {
+            selector: 0,
+            serial,
+            allocation_serial: 0,
+            limit: goto.speed_limit.to_bits(),
+        }),
+    ])
+}
+
+/// Shared typed participant-logic constructor. The caller resolves live bindings
+/// and validates the result with its own catalog before publishing it.
+pub(crate) fn logic_creation(
+    layout: &Layout,
+    blueprint: u16,
+    participant: u16,
+    mut resolve: impl FnMut(Binding) -> Result<(u16, u16), Error>,
+    value: &dyn Fn(usize, &Field) -> Option<Value>,
+) -> Result<Creation, Error> {
+    let mut initial = Vec::with_capacity(layout.fields.len());
+    let mut updates = Vec::with_capacity(layout.fields.len());
+    let mut next = 0u16;
+    for (index, field) in layout.fields.iter().enumerate() {
+        let mut take = || -> Result<Rpc, Error> {
+            let current = rpc(next)?;
+            next = next.checked_add(1).ok_or(Error::Bound)?;
+            Ok(current)
+        };
+        let (first, update) = match field.kind {
+            Kind::Root if index == 0 => (
+                Initial::Root {
+                    value: layout.bus_count,
+                    rpc: take()?,
+                    reference: participant,
+                },
+                Update::Noop,
+            ),
+            Kind::RpcReference => {
+                let binding = field.binding.ok_or(Error::Unsupported)?;
+                let (reference, target_selector) = resolve(binding)?;
+                (
+                    Initial::RpcReference {
+                        rpc: take()?,
+                        reference,
+                        target_selector,
+                    },
+                    Update::Noop,
+                )
+            }
+            Kind::Rpc => (Initial::Rpc(take()?), Update::Noop),
+            Kind::RpcBool => {
+                let initial = match value(index, field) {
+                    Some(Value::Bool(v)) => v,
+                    None => false,
+                    Some(_) => return Err(Error::TypeMismatch),
+                };
+                (
+                    Initial::RpcBool {
+                        rpc: take()?,
+                        value: initial,
+                    },
+                    Update::Noop,
+                )
+            }
+            Kind::RpcReferences => (
+                Initial::RpcReferences {
+                    rpc: take()?,
+                    references: Vec::new(),
+                },
+                Update::Noop,
+            ),
+            Kind::BoolProperty => match value(index, field) {
+                Some(Value::Bool(v)) => {
+                    (Initial::BoolProperty(Some(v)), Update::BoolProperty(None))
+                }
+                None => (Initial::BoolProperty(None), Update::BoolProperty(None)),
+                Some(_) => return Err(Error::TypeMismatch),
+            },
+            Kind::I32Property => match value(index, field) {
+                Some(Value::Int(v)) => (Initial::I32Property(Some(v)), Update::I32Property(None)),
+                None => (Initial::I32Property(None), Update::I32Property(None)),
+                Some(_) => return Err(Error::TypeMismatch),
+            },
+            Kind::FloatProperty => match value(index, field) {
+                Some(Value::Float(v)) if v.is_finite() => (
+                    Initial::FloatProperty(Some(v.to_bits())),
+                    Update::FloatProperty(None),
+                ),
+                None => (Initial::FloatProperty(None), Update::FloatProperty(None)),
+                Some(_) => return Err(Error::TypeMismatch),
+            },
+            Kind::StringProperty => (Initial::StringProperty(None), Update::StringProperty(None)),
+            _ => return Err(Error::Unsupported),
+        };
+        initial.push(first);
+        updates.push(Some(update));
+    }
+    let creation = Creation {
+        prefix: Prefix {
+            parent: None,
+            blueprint,
+            sub_id: layout.sub_id,
+            owner: None,
+            asset: layout.asset,
+        },
+        body: Body {
+            initial: Some(initial),
+            updates,
+        },
+    };
+    Ok(creation)
 }
 
 /// Live sequences that name the manager endpoint.

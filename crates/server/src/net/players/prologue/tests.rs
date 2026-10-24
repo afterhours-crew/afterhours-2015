@@ -315,6 +315,122 @@ fn opening_runs_after_car_and_render_readiness_and_waits_for_native_completion()
             .vehicle_item_of(HOST_SELECTOR as u8, listener.persona, vehicle),
         None
     );
+    // Mode/sequence/goals publication waits for both replication and RPC space.
+    let before_mode = listener.players.objects().snapshot();
+    listener
+        .pending
+        .resize(MAX_PENDING, super::super::returning::empty_section());
+    listener.advance_prologue().unwrap();
+    assert_eq!(listener.players.objects().snapshot(), before_mode);
+    assert!(listener.intro_modes.is_empty());
+    drain(&mut listener);
+    listener.advance_prologue().unwrap();
+    assert_eq!(
+        listener.participants.stage(participant),
+        Some(Stage::FreeRoam)
+    );
+    assert_eq!(listener.intro_modes.len(), 1);
+    let mut roots = vec![];
+    let mut goals = vec![];
+    for (id, object) in listener.players.objects().iter() {
+        match &object.initial {
+            replication::Initial::Entity { fields, .. }
+                if matches!(fields.first(), Some(entity::Initial::SequenceRoot { .. })) =>
+            {
+                roots.push(id)
+            }
+            replication::Initial::GotoWaypointGoal(_) | replication::Initial::SpeedLimitGoal(_) => {
+                goals.push(id)
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(roots.len(), 1);
+    assert_eq!(goals.len(), 2);
+    let drive_sequence = roots[0];
+    drain(&mut listener);
+    listener.advance_prologue().unwrap();
+    assert!(listener.pending.is_empty());
+    let completed = Completed {
+        sequence: drive_sequence,
+        participant,
+    }
+    .encode()
+    .unwrap();
+    // Completion before the installed stop signal is refused without deleting goals.
+    assert!(!send(&mut listener, 6, 47, completed.span()));
+    assert!(
+        goals
+            .iter()
+            .all(|g| listener.players.objects().get(*g).is_some())
+    );
+    let signal = nfs_world::logic::Message::Reached {
+        event: 43,
+        target: nfs_world::logic::EntityRef {
+            ghost: drive_sequence,
+            entity: 1,
+        },
+        player: 0,
+    }
+    .encode()
+    .unwrap();
+    assert!(send(&mut listener, 6, 82, signal.span()));
+    assert_eq!(
+        listener
+            .pending_rpcs
+            .iter()
+            .filter(|r| matches!(r,HostRpc::SequenceStop(s) if s.sequence==drive_sequence))
+            .count(),
+        1
+    );
+    drain(&mut listener);
+    listener
+        .pending
+        .resize(MAX_PENDING, super::super::returning::empty_section());
+    assert!(!send(&mut listener, 7, 47, completed.span()));
+    assert!(
+        goals
+            .iter()
+            .all(|g| listener.players.objects().get(*g).is_some())
+    );
+    drain(&mut listener);
+    assert!(send(&mut listener, 7, 47, completed.span()));
+    assert!(
+        goals
+            .iter()
+            .all(|g| listener.players.objects().get(*g).is_none())
+    );
+    assert!(listener.players.objects().get(drive_sequence).is_none());
+    let methods = listener
+        .pending_rpcs
+        .iter()
+        .filter_map(|r| match r {
+            HostRpc::GameMode(c) => Some((c.selector, c.method)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(methods, vec![(1, 1), (2, 0), (2, 3)]);
+    let actor = listener
+        .players
+        .owned_actor(HOST_SELECTOR as u8, listener.persona, participant)
+        .unwrap();
+    let replication::Update::Actor(control) =
+        &listener.players.objects().get(actor).unwrap().current
+    else {
+        panic!()
+    };
+    assert_eq!(control.flag_a, Some(false));
+    let routes = control.references_a.as_ref().unwrap();
+    assert_eq!(routes.len(), 1);
+    assert!(
+        matches!(&listener.players.objects().get(routes[0]).unwrap().initial,replication::Initial::GotoWaypointGoal(route) if route.progress_updates)
+    );
+    let before_duplicate = listener.players.objects().snapshot();
+    drain(&mut listener);
+    assert!(send(&mut listener, 8, 47, completed.span()));
+    assert!(listener.pending_rpcs.is_empty());
+    assert_eq!(*items, before);
+    assert_eq!(listener.players.objects().snapshot(), before_duplicate);
 }
 
 #[test]

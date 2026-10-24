@@ -14,6 +14,13 @@ use nfs_world::{
 };
 type Ready = (Vec<replication::Record>, Vec<HostRpc>, Command);
 type Finished = (Section, Vec<HostRpc>);
+type Modes = BTreeMap<
+    u16,
+    (
+        crate::prologue::driving::Active,
+        crate::prologue::driving::Active,
+    ),
+>;
 #[cfg(test)]
 mod tests;
 
@@ -34,9 +41,12 @@ impl PlayerListener {
             .clone()
             .ok_or(replication::Error::Unsupported)?;
         let mut opening = self.opening.clone();
+        let mut modes = self.intro_modes.clone();
+        let mut participants = self.participants.clone();
         let mut cars = self.world_cars.clone();
         let mut records = Vec::new();
         let mut messages = Vec::new();
+        let mut calls = Vec::new();
         let owners = players.player_participants().collect::<Vec<_>>();
         for participant in owners {
             let owner = Owner {
@@ -75,6 +85,39 @@ impl PlayerListener {
                         records.push(record);
                     }
                 }
+                Some(Stage::IntroStartingDrive) if !modes.contains_key(&participant) => {
+                    let Some((drive, canceller)) = content.driving.as_ref() else {
+                        continue;
+                    };
+                    if modes.len() >= nfs_world::sequences::MAX_INSTANCES {
+                        return Err(replication::Error::Bound);
+                    };
+                    let (drive, a) = crate::prologue::driving::Active::start(
+                        drive,
+                        &mut players,
+                        owner,
+                        self.world_ms as f64 / 1000.,
+                    )?;
+                    let (canceller, b) = crate::prologue::driving::Active::start(
+                        canceller,
+                        &mut players,
+                        owner,
+                        self.world_ms as f64 / 1000.,
+                    )?;
+                    if !a.deleted.is_empty() || !b.deleted.is_empty() {
+                        return Err(replication::Error::Shape);
+                    };
+                    records.extend(a.records);
+                    records.extend(b.records);
+                    calls.extend(a.calls);
+                    calls.extend(b.calls);
+                    let Outcome::Advanced(alive) = participants.intro_drive_ready(participant)
+                    else {
+                        return Err(replication::Error::Shape);
+                    };
+                    calls.extend(alive.into_iter().map(HostRpc::Participant));
+                    modes.insert(participant, (drive, canceller));
+                }
                 _ => {}
             }
             // One owner per tick keeps a busy multi-player session within the
@@ -94,16 +137,92 @@ impl PlayerListener {
         }
         if sections.len() > MAX_PENDING.saturating_sub(self.pending.len())
             || messages.len() > MAX_PENDING.saturating_sub(self.pending_content.len())
+            || calls.len()
+                > nfs_world::session::MAX_RPC_QUEUE.saturating_sub(self.pending_rpcs.len())
         {
             return Ok(());
         }
         self.players = players;
         self.population = Some(population);
         self.opening = opening;
+        self.intro_modes = modes;
+        self.participants = participants;
         self.world_cars = cars;
         self.pending.extend(sections);
         self.pending_content.extend(messages);
+        self.pending_rpcs.extend(calls);
         Ok(())
+    }
+    pub(super) fn driving_signal(
+        content: &crate::prologue::Content,
+        modes: &mut Modes,
+        players: &Players,
+        message: &nfs_world::logic::Message,
+        responses: &mut Vec<HostRpc>,
+    ) -> Result<bool, replication::Error> {
+        let Some((drive, _)) = &content.driving else {
+            return Ok(false);
+        };
+        for (active, _) in modes.values_mut() {
+            if let Some(calls) = active.signal(drive, players, message)? {
+                responses.extend(calls);
+                return Ok(true);
+            };
+        }
+        Ok(false)
+    }
+    pub(super) fn driving_completed(
+        content: &crate::prologue::Content,
+        vehicles: Option<&crate::vehicle_content::GarageContent>,
+        modes: &mut Modes,
+        players: &mut Players,
+        body: BitSpan<'_>,
+    ) -> Result<Option<crate::prologue::driving::Output>, replication::Error> {
+        if modes.is_empty() {
+            return Ok(None);
+        };
+        let envelope = Envelope::decode(
+            body,
+            Limits {
+                max_input_bits: 4096,
+                max_references: 32,
+                max_payload_bytes: 256,
+            },
+        )
+        .map_err(|_| replication::Error::Shape)?;
+        let route = envelope
+            .route(RouteProfile::ClientSend)
+            .map_err(|_| replication::Error::Shape)?;
+        let Some(&ghost) = envelope.references().first() else {
+            return Ok(None);
+        };
+        let Some((active, _)) = modes
+            .values_mut()
+            .find(|(a, _)| a.sequence_owner(ghost, route.selector()))
+        else {
+            return Ok(None);
+        };
+        if route.method_index() != 1 {
+            return Ok(None);
+        };
+        let call = Completed::decode(body)?;
+        if (0..route.arguments().len()).any(|bit| route.arguments().read_u32(bit, 1) != Ok(0)) {
+            return Err(replication::Error::Shape);
+        };
+        let drive = &content
+            .driving
+            .as_ref()
+            .ok_or(replication::Error::Unsupported)?
+            .0;
+        let car = vehicles
+            .and_then(|v| v.vehicles.definition(&content.start.vehicle_item))
+            .ok_or(replication::Error::Unsupported)?;
+        Ok(Some(active.completed(
+            drive,
+            players,
+            call,
+            crate::event_logic::car_id(&car.blueprint),
+        )?))
     }
     pub(super) fn intro_car_ready(
         content: Option<&crate::prologue::Content>,

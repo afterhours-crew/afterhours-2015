@@ -133,6 +133,11 @@ fn temporary_player_car_has_seats_physics_and_map_but_no_inventory_identity() {
     assert_eq!(world.temporary_vehicle(1, 101, one), Some(temporary));
     assert_eq!(world.temporary_vehicle(2, 202, one), None);
     assert_eq!(world.vehicle_item_of(1, 101, temporary), None);
+    assert!(world.owns_participant_vehicle(1, 101, one, temporary));
+    assert!(world.owns_participant_vehicle(1, 101, one, owned));
+    assert!(!world.owns_participant_vehicle(2, 202, two, temporary));
+    assert!(!world.owns_participant_vehicle(1, 202, one, temporary));
+    assert!(!world.owns_participant_vehicle(2, 101, one, temporary));
     assert_eq!(
         world.owned_vehicles(1, 101),
         [owned, temporary].into_iter().collect()
@@ -179,6 +184,7 @@ fn temporary_player_car_has_seats_physics_and_map_but_no_inventory_identity() {
     world.bind_player_vehicle(1, 101, one, None).unwrap();
     assert_eq!(world.remove_temporary_vehicle(1, 101, one), Ok(temporary));
     assert_eq!(world.temporary_vehicle(1, 101, one), None);
+    assert!(!world.owns_participant_vehicle(1, 101, one, temporary));
     assert!(world.vehicle_physics(1, 101, temporary).is_err());
     assert_eq!(world.owned_vehicle(1, 101, one, 1), Some(owned));
     assert!(world.objects().get(owned).is_some());

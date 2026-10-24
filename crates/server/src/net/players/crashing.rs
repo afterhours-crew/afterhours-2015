@@ -48,11 +48,8 @@ impl PlayerListener {
             {
                 continue;
             }
-            let item = players
-                .vehicle_item_of(connection, persona, record.id)
-                .ok_or(replication::Error::UnknownObject)?;
             if record.component != 0
-                || players.owned_vehicle(connection, persona, participant, item) != Some(record.id)
+                || !players.owns_participant_vehicle(connection, persona, participant, record.id)
             {
                 return Err(replication::Error::UnknownObject);
             }

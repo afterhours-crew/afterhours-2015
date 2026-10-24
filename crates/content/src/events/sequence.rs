@@ -2,18 +2,72 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-use super::Wander;
+use super::{GOTO_COMMAND, GOTO_PRECISION, Goto, LOCATOR, SPEED_LIMIT, Wander, finite, location};
 use crate::{
     Error,
-    graph::{Graph, Node, Source, bad},
+    graph::{Graph, Node, Site, Source, bad},
 };
 use nfs_frostbite::ebx::Value;
+use std::collections::{BTreeMap, BTreeSet};
 
 const COMMANDS: u32 = (-1_858_790_887i32) as u32;
 const STARTED: u32 = 216_863_469;
 const STOP: u32 = 2_089_401_213;
 const IN: u32 = 5_862_146;
 const OUT: u32 = 193_453_899;
+
+/// Read the AI arrival command through this sequence's bound channel instances.
+/// Intro sequences may reach those definitions through their parent logic.
+pub(super) fn goto<S: Source>(
+    graph: &mut Graph<S>,
+    nodes: &[Node],
+    channels: &[Site],
+    aliases: &BTreeMap<Site, Site>,
+) -> Result<Option<Goto>, Error> {
+    if !nodes.iter().any(|n| n.object.class == GOTO_COMMAND) {
+        return Ok(None);
+    }
+    let mut precision = nodes.iter().filter(|n| n.object.class == GOTO_PRECISION);
+    let node = precision
+        .next()
+        .ok_or_else(|| bad("go-to sequence has no precision setting"))?;
+    if precision.next().is_some() {
+        return Err(bad("go-to sequence has several precision settings"));
+    }
+    let radius = finite(
+        node.object.fields.get("LocationReachedRadius"),
+        "go-to reach radius",
+    )?;
+    let (mut points, mut limits) = (Vec::new(), Vec::new());
+    for channel in channels {
+        let actual = aliases.get(channel).unwrap_or(channel);
+        for port in graph.link_ports(actual)? {
+            for target in super::intro::links(graph, channel, port, aliases, &mut BTreeSet::new())?
+            {
+                let object = graph.object(&target.site)?;
+                match object.class.as_str() {
+                    LOCATOR => points.push(location(&object)?),
+                    SPEED_LIMIT => limits.push(finite(
+                        object.fields.get("SpeedLimit"),
+                        "go-to speed limit",
+                    )?),
+                    _ => {}
+                }
+            }
+        }
+    }
+    let ([point], [speed_limit]) = (points.as_slice(), limits.as_slice()) else {
+        return Err(bad("missing or ambiguous go-to waypoint or speed limit"));
+    };
+    if radius <= 0. || *speed_limit <= 0. {
+        return Err(bad("go-to radius or speed limit"));
+    }
+    Ok(Some(Goto {
+        point: *point,
+        radius,
+        speed_limit: *speed_limit,
+    }))
+}
 
 pub(super) fn wander<S: Source>(
     graph: &mut Graph<S>,
@@ -140,6 +194,96 @@ mod tests {
         tests::{Memory, edge, local},
     };
     use nfs_frostbite::ebx::Fields;
+
+    #[test]
+    fn goto_reads_only_the_bound_instance_and_follows_parent_aliases() {
+        let mut m = Memory::default();
+        m.put(
+            "a",
+            0,
+            "Blueprint",
+            &[(
+                "LinkConnections",
+                Value::Array(vec![
+                    edge(local(3), 10, local(4), 0),
+                    edge(local(3), 11, local(5), 0),
+                ]),
+            )],
+        );
+        m.put("a", 1, GOTO_COMMAND, &[]);
+        m.put(
+            "a",
+            2,
+            GOTO_PRECISION,
+            &[("LocationReachedRadius", Value::Float32(12.))],
+        );
+        m.put("a", 3, "LinkedSchematicChannelEntityData", &[]);
+        m.put(
+            "a",
+            4,
+            LOCATOR,
+            &[(
+                "Transform",
+                Value::Struct(Fields(vec![(
+                    "trans".into(),
+                    Value::Struct(Fields(vec![
+                        ("x".into(), Value::Float32(2.)),
+                        ("y".into(), Value::Float32(3.)),
+                        ("z".into(), Value::Float32(4.)),
+                    ])),
+                )])),
+            )],
+        );
+        m.put("a", 5, SPEED_LIMIT, &[("SpeedLimit", Value::Float32(8.))]);
+        m.put("a", 6, SPEED_LIMIT, &[("SpeedLimit", Value::Float32(99.))]);
+        let site = |i| Site {
+            key: ("a".into(), i),
+            ..Site::root("a")
+        };
+        let nodes = (1..=6)
+            .map(|i| Node {
+                site: site(i),
+                object: m.object(&("a".into(), i)).unwrap(),
+            })
+            .collect::<Vec<_>>();
+        let reference = Site::root("reference");
+        let aliases = BTreeMap::from([(reference.clone(), site(3))]);
+        assert_eq!(
+            goto(
+                &mut Graph::new(&mut m),
+                &nodes,
+                std::slice::from_ref(&reference),
+                &aliases
+            )
+            .unwrap(),
+            Some(Goto {
+                point: [2., 3., 4.],
+                radius: 12.,
+                speed_limit: 8.
+            })
+        );
+        // Repeated bound channels would make the AI target ambiguous.
+        assert!(
+            goto(
+                &mut Graph::new(&mut m),
+                &nodes,
+                &[reference.clone(), reference],
+                &aliases
+            )
+            .is_err()
+        );
+        let mut invalid = nodes;
+        invalid[1].object.fields.0[0].1 = Value::Float32(f32::NAN);
+        assert!(
+            goto(
+                &mut Graph::new(&mut m),
+                &invalid,
+                &[site(3)],
+                &BTreeMap::new()
+            )
+            .is_err()
+        );
+    }
 
     fn event(from: usize, out: u32, to: usize, input: u32) -> Value {
         Value::Struct(Fields(vec![

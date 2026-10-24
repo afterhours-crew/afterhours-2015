@@ -200,12 +200,12 @@ impl Crashes {
         eligible: bool,
         route: Option<route::Sample>,
     ) -> Result<(), Error> {
-        let item = players
-            .vehicle_item_of(owner.connection, owner.persona, vehicle)
-            .ok_or(Error::UnknownObject)?;
-        if players.owned_vehicle(owner.connection, owner.persona, owner.participant, item)
-            != Some(vehicle)
-        {
+        if !players.owns_participant_vehicle(
+            owner.connection,
+            owner.persona,
+            owner.participant,
+            vehicle,
+        ) {
             return Err(Error::UnknownObject);
         }
         let revision = sample.physics.identity_words[2];

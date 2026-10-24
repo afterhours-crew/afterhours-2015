@@ -91,6 +91,13 @@ pub(super) struct PlayerListener {
     progression: Option<std::sync::Arc<crate::progression::Content>>,
     prologue: Option<std::sync::Arc<crate::prologue::Content>>,
     opening: crate::sequence_content::authored::Instances,
+    intro_modes: BTreeMap<
+        u16,
+        (
+            crate::prologue::driving::Active,
+            crate::prologue::driving::Active,
+        ),
+    >,
     vehicles: Option<std::sync::Arc<GarageContent>>,
     population: Option<Population>,
     traffic_content: Option<std::sync::Arc<nfs_content::traffic::Content>>,
@@ -713,6 +720,7 @@ impl PlayerListener {
             progression: None,
             prologue: None,
             opening: crate::sequence_content::authored::Instances::default(),
+            intro_modes: BTreeMap::new(),
             vehicles: None,
             population: None,
             traffic_content: None,
@@ -1197,6 +1205,7 @@ impl Listener for PlayerListener {
         let mut sequences = self.sequences.clone();
         let mut logic_ghosts = self.logic_ghosts.clone();
         let mut opening = self.opening.clone();
+        let mut intro_modes = self.intro_modes.clone();
         let mut unsupported_logic = 0;
         let mut event_inputs = Vec::new();
         let mut glass = self.glass.clone();
@@ -1233,6 +1242,17 @@ impl Listener for PlayerListener {
                 }
                 if self.event_claims_logic(&message) {
                     event_inputs.push(Self::event_input_logic(&message));
+                    continue;
+                }
+                if let Some(content) = self.prologue.as_deref()
+                    && Self::driving_signal(
+                        content,
+                        &mut intro_modes,
+                        &players,
+                        &message,
+                        &mut responses,
+                    )?
+                {
                     continue;
                 }
                 if sequences
@@ -1592,6 +1612,31 @@ impl Listener for PlayerListener {
                 Ok(Some(None)) => continue,
                 Ok(None) => {}
                 Err(error) => return self.refuse_rpc(error, body),
+            }
+            if let Some(content) = self.prologue.as_deref() {
+                match Self::driving_completed(
+                    content,
+                    self.vehicles.as_deref(),
+                    &mut intro_modes,
+                    &mut players,
+                    body,
+                ) {
+                    Ok(Some(out)) => {
+                        if !out.records.is_empty() || !out.deleted.is_empty() {
+                            deferred_sections.push(Section {
+                                float_bits: None,
+                                flag: false,
+                                setup: None,
+                                records: out.records,
+                                deleted: out.deleted,
+                            });
+                        }
+                        responses.extend(out.calls);
+                        continue;
+                    }
+                    Ok(None) => {}
+                    Err(error) => return self.refuse_rpc(error, body),
+                }
             }
             if let Some(crashes) = &mut crashes {
                 match Self::finish_crash_call(
@@ -2365,6 +2410,7 @@ impl Listener for PlayerListener {
         self.launchers = launchers;
         self.participants = participants;
         self.opening = opening;
+        self.intro_modes = intro_modes;
         self.pending_rpcs.extend(responses);
         for input in event_inputs {
             if self.event_state.inputs.len() >= events::MAX_INPUTS {

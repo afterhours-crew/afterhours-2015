@@ -1075,52 +1075,7 @@ impl AssetIndex {
                     bindings.insert(site.clone(), binding);
                 }
             }
-            let goto = if nodes.iter().any(|n| n.object.class == GOTO_COMMAND) {
-                let mut precision = nodes.iter().filter(|n| n.object.class == GOTO_PRECISION);
-                let node = precision
-                    .next()
-                    .ok_or_else(|| bad("go-to sequence has no precision setting"))?;
-                if precision.next().is_some() {
-                    return Err(bad("go-to sequence has several precision settings"));
-                }
-                let radius = finite(
-                    node.object.fields.get("LocationReachedRadius"),
-                    "go-to reach radius",
-                )?;
-                let (mut points, mut limits) = (Vec::new(), Vec::new());
-                for channel in &channels {
-                    for port in graph.link_ports(channel)? {
-                        for target in graph.links(channel, port)? {
-                            if target.port != 0 {
-                                continue;
-                            }
-                            let object = graph.object(&target.site)?;
-                            match object.class.as_str() {
-                                LOCATOR => points.push(location(&object)?),
-                                SPEED_LIMIT => limits.push(finite(
-                                    object.fields.get("SpeedLimit"),
-                                    "go-to speed limit",
-                                )?),
-                                _ => {}
-                            }
-                        }
-                    }
-                }
-                let ([point], [speed_limit]) = (points.as_slice(), limits.as_slice()) else {
-                    return Err(bad("missing or ambiguous go-to waypoint or speed limit"));
-                };
-                // Both are finite: `finite` refused anything else.
-                if radius <= 0. || *speed_limit <= 0. {
-                    return Err(bad("go-to radius or speed limit"));
-                }
-                Some(Goto {
-                    point: *point,
-                    radius,
-                    speed_limit: *speed_limit,
-                })
-            } else {
-                None
-            };
+            let goto = sequence::goto(&mut graph, &nodes, &channels, &BTreeMap::new())?;
             let (sequence_bundle, sequence_catalog, r) = match sequence_registries.get(&name) {
                 Some((b, c, r)) => (*b, c, r),
                 None => (

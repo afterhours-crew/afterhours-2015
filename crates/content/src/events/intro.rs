@@ -5,10 +5,13 @@
 //! Modes launched by the intro participant. Reuse event topology and serializer
 //! rules without inventing a free-roam start area, rewards or DNF controller.
 use super::*;
+mod spawned;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Mode {
     pub game_mode: GameMode,
+    pub sequences: Vec<Sequence>,
+    pub logics: Vec<Layout>,
     /// Serializer of the launcher in the owning intro participant logic.
     pub launcher: usize,
 }
@@ -48,7 +51,7 @@ fn launcher<S: Source>(
 /// Follow declared channel ports across the intro's own scene bindings. Direct
 /// channel references remain aliases for replication; only link lookup follows
 /// their definitions. Repeated occurrences and source order are retained.
-fn links<S: Source>(
+pub(super) fn links<S: Source>(
     graph: &mut Graph<S>,
     site: &Site,
     port: u32,
@@ -88,7 +91,8 @@ pub fn extract(
     let progression = index.identity.progression.clone();
     let scene_rules = index.identity.scenes.clone();
     let rules = index.identity.participant_logic.clone();
-    let manager_scene = index.identity.sequences.manager_scene.clone();
+    let sequence_rules = index.identity.sequences.clone();
+    let manager_scene = sequence_rules.manager_scene.clone();
     let startup = index.startup_entries(&scene_rules.level)?;
     let bundle = startup
         .iter()
@@ -263,6 +267,24 @@ pub fn extract(
         root_bindings[slot] = scenes.endpoint(&mut graph, unique(&managers, class)?)?;
     }
     let sub_id = embedded_bus(&managers, unique(&managers, MANAGER_CLASSES[1])?)?;
+    let (mut sequences, mut logics) = spawned::extract(
+        &mut graph,
+        &mut scenes,
+        spawned::Context {
+            mode_nodes: &nodes,
+            mode_fields: &field_sites,
+            parent_fields: &parent_fields,
+            aliases: &aliases,
+            bound: &logical,
+            rules: &rules,
+            sequences: &sequence_rules,
+            lifecycle: &lifecycle,
+        },
+    )?;
+    let recovery = recovery::extract(&nodes)?;
+    let drift = route::drift(&nodes)?;
+    let pacing = pacing::extract(&mut graph, &nodes, &logical)?;
+    let standings_interval = standings::interval(&mut graph, &nodes)?;
     let fields = field_sites
         .iter()
         .map(|(s, c, k)| {
@@ -276,6 +298,20 @@ pub fn extract(
             })
         })
         .collect::<Result<_, Error>>()?;
+    drop(graph);
+    for child in logics
+        .iter_mut()
+        .chain(sequences.iter_mut().map(|s| &mut s.layout))
+    {
+        let r = index.reference(&progression.scene, &child.blueprint)?;
+        child.asset = Asset {
+            bundle,
+            type_id: u16::try_from(r.class_id).map_err(|_| bad("intro child class"))?,
+            local_index: u16::try_from(r.local_index).map_err(|_| bad("intro child ordinal"))?,
+        };
+        child.catalog = catalog.clone();
+        child.profile()?;
+    }
     let layout = Layout {
         blueprint: name,
         asset: Asset {
@@ -292,20 +328,22 @@ pub fn extract(
     };
     layout.profile()?;
     Ok(Mode {
+        sequences,
+        logics,
         launcher: *parent_fields
             .get(&launcher)
             .ok_or_else(|| bad("intro launcher serializer"))?,
         game_mode: GameMode {
             lifecycle,
-            recovery: recovery::extract(&nodes)?,
+            recovery,
             layout,
             root_bindings,
             checkpoints,
             points,
             checkpoint_points,
-            drift: route::drift(&nodes)?,
-            pacing: None,
-            standings_interval: None,
+            drift,
+            pacing,
+            standings_interval,
             laps,
         },
     })

@@ -13,13 +13,28 @@ impl Players {
         connection: u8,
         persona: u64,
         participant: u16,
-        mut route: goto_waypoint::Initial,
+        route: goto_waypoint::Initial,
         pacing: u16,
+    ) -> Result<ai::GoalChanges, Error> {
+        self.start_player_route(connection, persona, participant, route, Some(pacing))
+    }
+
+    /// Assign an authored route to a human Actor, optionally with shared pacing.
+    /// A solo drive has no pacing allocation. Both forms preserve manual control.
+    pub fn start_player_route(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        participant: u16,
+        mut route: goto_waypoint::Initial,
+        pacing: Option<u16>,
     ) -> Result<ai::GoalChanges, Error> {
         let actor = self
             .owned_actor(connection, persona, participant)
             .ok_or(Error::UnknownObject)?;
-        self.check_pacing_member(connection, persona, participant, pacing)?;
+        if let Some(pacing) = pacing {
+            self.check_pacing_member(connection, persona, participant, pacing)?;
+        }
         let Some(state::Object {
             current: Update::Actor(current),
             ..
@@ -49,7 +64,7 @@ impl Players {
             .change(
                 actor,
                 Update::Actor(ActorUpdate {
-                    references_a: Some(vec![goal.id, pacing]),
+                    references_a: Some(std::iter::once(goal.id).chain(pacing).collect()),
                     ..Default::default()
                 }),
             )?
@@ -73,10 +88,25 @@ impl Players {
         goal: u16,
         pacing: u16,
     ) -> Result<ai::GoalChanges, Error> {
+        self.release_player_route(connection, persona, participant, goal, Some(pacing))
+    }
+
+    /// Release only the route assigned to this human. A shared pacing group, if
+    /// present, remains owned by the event.
+    pub fn release_player_route(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        participant: u16,
+        goal: u16,
+        pacing: Option<u16>,
+    ) -> Result<ai::GoalChanges, Error> {
         let actor = self
             .owned_actor(connection, persona, participant)
             .ok_or(Error::UnknownObject)?;
-        self.check_pacing_member(connection, persona, participant, pacing)?;
+        if let Some(pacing) = pacing {
+            self.check_pacing_member(connection, persona, participant, pacing)?;
+        }
         let Some(state::Object {
             current: Update::Actor(current),
             ..
@@ -84,8 +114,9 @@ impl Players {
         else {
             return Err(Error::TypeMismatch);
         };
+        let expected = std::iter::once(goal).chain(pacing).collect::<Vec<_>>();
         if current.flag_a != Some(false)
-            || current.references_a.as_deref() != Some(&[goal, pacing])
+            || current.references_a.as_ref() != Some(&expected)
             || !self.objects.get(goal).is_some_and(|object| {
                 matches!(&object.initial, Initial::GotoWaypointGoal(g) if g.progress_updates)
             })
@@ -457,6 +488,82 @@ impl Players {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn solo_routes_keep_control_and_reject_foreign_release_or_reassignment() {
+        let mut world = Players::default();
+        let human = join(&mut world, 3, 101, 0);
+        let other = join(&mut world, 7, 202, 0);
+        let actor = world.create_actor(3, 101, human).unwrap().unwrap().id;
+        world.create_actor(7, 202, other).unwrap();
+        let route = goto_waypoint::Initial {
+            selector: 0,
+            serial: 1,
+            allocation_serial: 0,
+            waypoint: 0,
+            word: 1,
+            points: vec![[7f32.to_bits(); 3]],
+            flags: [false; 2],
+            radius: 150f32.to_bits(),
+            progress_updates: true,
+        };
+        let change = world
+            .start_player_route(3, 101, human, route.clone(), None)
+            .unwrap();
+        let goal = change.goals[0];
+        let before = world.objects.snapshot();
+        assert!(
+            world
+                .start_player_route(3, 101, human, route.clone(), None)
+                .is_err()
+        );
+        assert!(
+            world
+                .release_player_route(7, 202, other, goal, None)
+                .is_err()
+        );
+        assert!(
+            world
+                .release_player_route(7, 101, human, goal, None)
+                .is_err()
+        );
+        assert!(
+            world
+                .release_player_route(3, 101, human, goal, Some(goal))
+                .is_err()
+        );
+        assert_eq!(world.objects.snapshot(), before);
+        let Update::Actor(control) = &world.objects.get(actor).unwrap().current else {
+            panic!()
+        };
+        assert_eq!(control.flag_a, Some(false));
+        assert_eq!(control.references_a, Some(vec![goal]));
+        let gone = world
+            .release_player_route(3, 101, human, goal, None)
+            .unwrap();
+        assert_eq!(gone.deleted, vec![goal]);
+        assert!(
+            world
+                .release_player_route(3, 101, human, goal, None)
+                .is_err()
+        );
+        let next = world
+            .start_player_route(3, 101, human, route.clone(), None)
+            .unwrap()
+            .goals[0];
+        let other_goal = world
+            .start_player_route(7, 202, other, route, None)
+            .unwrap()
+            .goals[0];
+        assert_eq!(
+            world
+                .release_player_route(3, 101, human, next, None)
+                .unwrap()
+                .deleted,
+            vec![next]
+        );
+        assert!(world.objects.get(other_goal).is_some());
+    }
 
     #[test]
     fn race_goals_preserve_manual_control_and_shared_pacing_ownership() {

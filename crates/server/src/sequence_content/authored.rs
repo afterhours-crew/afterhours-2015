@@ -4,7 +4,11 @@
 
 //! Bind installed sequence channels to one live participant. The caller stages
 //! this owner alongside Players and publishes its records/RPCs transactionally.
-use nfs_content::{participant_logic::Channel, prologue::sequences::Sequence};
+use nfs_content::{
+    events::{self, Binding as ChannelBinding},
+    participant_logic::Channel,
+    prologue::sequences::Sequence,
+};
 use nfs_world::{
     logic::Message,
     replication::{
@@ -26,6 +30,8 @@ use std::collections::BTreeMap;
 #[derive(Clone, Debug)]
 pub struct Authored {
     data: Sequence,
+    channels: BTreeMap<usize, ChannelBinding>,
+    game_mode: Option<Asset>,
     parent: Asset,
     blueprint: Blueprint,
     content: Content,
@@ -33,6 +39,70 @@ pub struct Authored {
 }
 impl Authored {
     pub fn new(data: Sequence, parent: Asset, stop_signals: Vec<Binding>) -> Result<Self, Error> {
+        let channels = data
+            .channels
+            .iter()
+            .map(|(&i, c)| {
+                (
+                    i,
+                    match *c {
+                        Channel::Participant { serializer } => {
+                            ChannelBinding::Participant { serializer }
+                        }
+                        Channel::Scene {
+                            content_key,
+                            serializer,
+                        } => ChannelBinding::Scene {
+                            content_key,
+                            serializer,
+                        },
+                    },
+                )
+            })
+            .collect();
+        Self::build(data, channels, parent, None, stop_signals)
+    }
+    /// Sequence spawned by a mode that also binds channels from its parent story.
+    pub fn from_mode(
+        data: &events::Sequence,
+        parent: Asset,
+        mode: Asset,
+        stop_signals: Vec<Binding>,
+    ) -> Result<Self, Error> {
+        let channels = data
+            .layout
+            .fields
+            .iter()
+            .enumerate()
+            .filter_map(|(i, f)| f.binding.map(|b| (i, b)))
+            .collect();
+        Self::build(
+            Sequence {
+                blueprint: data.layout.blueprint.clone(),
+                asset: data.layout.asset,
+                catalog: data.layout.catalog.clone(),
+                manager: nfs_world::sequences::Component {
+                    scene_key: data.manager.0,
+                    index: data.manager.1,
+                },
+                embedded_bus: data.layout.sub_id,
+                bus_count: data.layout.bus_count,
+                fields: data.layout.fields.iter().map(|f| f.kind).collect(),
+                channels: BTreeMap::new(),
+            },
+            channels,
+            parent,
+            Some(mode),
+            stop_signals,
+        )
+    }
+    fn build(
+        data: Sequence,
+        channels: BTreeMap<usize, ChannelBinding>,
+        parent: Asset,
+        game_mode: Option<Asset>,
+        stop_signals: Vec<Binding>,
+    ) -> Result<Self, Error> {
         let blueprint =
             Blueprint::new(data.asset, data.embedded_bus, data.bus_count, &data.fields)?;
         let fields: Vec<_> = data
@@ -41,7 +111,12 @@ impl Authored {
             .enumerate()
             .filter_map(|(i, k)| (*k == entity::Kind::RpcReference).then_some(i))
             .collect();
-        if fields != data.channels.keys().copied().collect::<Vec<_>>() {
+        if fields != channels.keys().copied().collect::<Vec<_>>()
+            || (game_mode.is_none()
+                && channels
+                    .values()
+                    .any(|c| matches!(c, ChannelBinding::GameMode { .. })))
+        {
             return Err(Error::Shape);
         }
         nfs_world::scoring::event_sync::Router::new(1, &stop_signals).map_err(|_| Error::Shape)?;
@@ -61,6 +136,8 @@ impl Authored {
         )?;
         Ok(Self {
             data,
+            channels,
+            game_mode,
             parent,
             blueprint,
             content,
@@ -71,6 +148,7 @@ impl Authored {
         &self,
         players: &Players,
         owner: Owner,
+        game_mode: Option<u16>,
     ) -> Result<entity::creation::Creation, Error> {
         if !players.owns_participant(owner.connection, owner.persona, owner.participant) {
             return Err(Error::UnknownObject);
@@ -93,8 +171,14 @@ impl Authored {
                 participant: owner.participant,
                 number: crate::event_logic::live_sequences(world, manager),
             },
-            |field| match self.data.channels.get(&field).ok_or(Error::Shape)? {
-                Channel::Participant { serializer } => Ok((
+            |field| match self.channels.get(&field).ok_or(Error::Shape)? {
+                ChannelBinding::GameMode { serializer } => {
+                    let ghost=game_mode.ok_or(Error::UnknownObject)?;
+                    let replication::Initial::Entity{prefix,fields}=&world.get(ghost).ok_or(Error::UnknownObject)?.initial else {return Err(Error::TypeMismatch)};
+                    if Some(prefix.asset)!=self.game_mode || !matches!(fields.first(),Some(entity::Initial::GameModeRoot(root)) if root.participants.contains(&owner.participant)) {return Err(Error::UnknownObject)};
+                    Ok((ghost, fields.get(*serializer).and_then(entity::Initial::rpc).ok_or(Error::TypeMismatch)?.selector))
+                },
+                ChannelBinding::Participant { serializer } => Ok((
                     parent,
                     fields
                         .get(*serializer)
@@ -102,7 +186,7 @@ impl Authored {
                         .ok_or(Error::TypeMismatch)?
                         .selector,
                 )),
-                Channel::Scene {
+                ChannelBinding::Scene {
                     content_key,
                     serializer,
                 } => world
@@ -148,6 +232,15 @@ impl Instances {
         players: &mut Players,
         owner: Owner,
     ) -> Result<Option<Record>, Error> {
+        self.start_bound(content, players, owner, None)
+    }
+    pub fn start_bound(
+        &mut self,
+        content: &Authored,
+        players: &mut Players,
+        owner: Owner,
+        game_mode: Option<u16>,
+    ) -> Result<Option<Record>, Error> {
         if !players.owns_participant(owner.connection, owner.persona, owner.participant) {
             return Err(Error::UnknownObject);
         }
@@ -161,7 +254,7 @@ impl Instances {
         if self.entries.len() >= nfs_world::sequences::MAX_INSTANCES {
             return Err(Error::Bound);
         }
-        let creation = content.creation(players, owner)?;
+        let creation = content.creation(players, owner, game_mode)?;
         let record = players
             .spawn_entities(vec![creation], &content.content)?
             .remove(0);
