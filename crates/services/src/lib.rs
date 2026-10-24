@@ -23,11 +23,13 @@ pub mod item_builder;
 pub mod item_content;
 pub mod item_unlocks;
 pub mod persistent;
+pub mod progression;
 pub mod purchase;
 pub mod recommendations;
 pub mod reputation;
 pub mod shared_wraps;
 pub mod stats;
+pub mod story;
 pub mod telemetry;
 pub mod text_filter;
 

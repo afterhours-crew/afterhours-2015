@@ -269,6 +269,17 @@ pub struct ProfileArgs {
     pub language: Option<String>,
 }
 
+/// Arguments for the read-only story view.
+#[derive(Debug, Clone, Default, Args)]
+pub struct StoryArgs {
+    /// Account ID; defaults to the selected driver.
+    #[arg(long, value_name = "ID")]
+    pub account_id: Option<String>,
+    /// Prepared installation content; defaults to the current session's cache.
+    #[arg(long, value_name = "DIR")]
+    pub content_dir: Option<PathBuf>,
+}
+
 /// Arguments for `settings`.
 #[derive(Debug, Clone, Args)]
 pub struct SettingsArgs {
@@ -362,6 +373,13 @@ pub enum Command {
     /// distances, times and speeds are not confirmed. Exits with code 4
     /// when there is no saved account to show.
     Profile(ProfileArgs),
+
+    /// Show saved story checkpoints and completion provenance; change nothing.
+    ///
+    /// Reads the account and its prepared progression content without changing
+    /// the save. Reports each intro objective, the current checkpoint and whether
+    /// completion was played, edited or inherited from an existing save.
+    Story(StoryArgs),
 
     /// Decode each car's in-game images from the installation for `profile`.
     ///

@@ -370,6 +370,12 @@ fn routes_answer_the_commands_records() {
     let (code, _, body) = request(&server, "GET", "/v1/profile");
     assert_eq!(code, 409, "no save selected, as profile exits with 4");
     assert!(error_message(&body).contains("No saved driver"));
+    let (code, _, body) = request(&server, "GET", "/v1/story");
+    assert_eq!(code, 409);
+    assert!(error_message(&body).contains("Story content is not configured"));
+    let (code, head, _) = request(&server, "PUT", "/v1/story");
+    assert_eq!(code, 405);
+    assert!(head.contains("Allow: GET\r\n"));
     let (code, _, body) = request(&server, "GET", "/v1/game");
     assert_eq!(code, 200, "{body}");
     let game: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -1002,6 +1008,7 @@ fn a_game_against_a_server_elsewhere_answers_no_saves_or_settings_here() {
         control.settings().unwrap_err(),
         control.save_settings(Some(100), None).unwrap_err(),
         control.profile().unwrap_err(),
+        control.story().unwrap_err(),
         control.profiles().unwrap_err(),
         control.profile_of(&"5a".repeat(16)).unwrap_err(),
     ] {

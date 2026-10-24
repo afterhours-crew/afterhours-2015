@@ -64,6 +64,10 @@ impl Record for SettingsReport {
     const NAME: &'static str = "settings";
     const VERSION: u32 = 1;
 }
+impl Record for crate::story::StoryReport {
+    const NAME: &'static str = "story";
+    const VERSION: u32 = 1;
+}
 impl Record for VersionReport {
     const NAME: &'static str = "version";
     const VERSION: u32 = 1;
@@ -135,7 +139,7 @@ fn info<T: Record>() -> RecordInfo {
 }
 
 /// Every record, sorted by name.
-pub fn records() -> [RecordInfo; 18] {
+pub fn records() -> [RecordInfo; 19] {
     let mut all = [
         info::<api::ApiRecord>(),
         info::<api::ApiError>(),
@@ -151,6 +155,7 @@ pub fn records() -> [RecordInfo; 18] {
         info::<sessions::SessionList>(),
         info::<sessions::file::SessionFileText>(),
         info::<SettingsReport>(),
+        info::<crate::story::StoryReport>(),
         info::<StatusReport>(),
         info::<StopReport>(),
         info::<PlayReport>(),
@@ -365,6 +370,8 @@ pub enum Capability {
     /// `settings`, and `--traffic` and `--rivals` on `setup`, `serve` and
     /// `start`: the amounts of traffic and roaming rivals.
     WorldSettings,
+    /// Read durable checkpoints and completion provenance with `story`.
+    Story,
     /// `map-feed` events with `--events` on `serve` and `start`: live
     /// positions of the players' cars, traffic and roaming rivals.
     MapFeed,
@@ -375,7 +382,7 @@ pub enum Capability {
 }
 
 /// Capabilities of this build, in a fixed order.
-pub const CAPABILITIES: [Capability; 9] = [
+pub const CAPABILITIES: [Capability; 10] = [
     Capability::Profile,
     Capability::Sessions,
     Capability::Events,
@@ -385,6 +392,7 @@ pub const CAPABILITIES: [Capability; 9] = [
     Capability::WorldSettings,
     Capability::MapFeed,
     Capability::Api,
+    Capability::Story,
 ];
 
 /// Identity of the program the launcher library is running in.

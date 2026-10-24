@@ -208,7 +208,18 @@ fn restoration<S: Source>(
             }
             let id = stable(expressions.graph, rules, &endpoint.site)?;
             let active = expressions.input(&endpoint.site, rules.ports["active"])?;
-            rows.push(json!({"id":id,"active":active}));
+            let mut row = json!({"id":id,"active":active});
+            if let Some(label) = expressions
+                .graph
+                .object(&endpoint.site)?
+                .fields
+                .get("DebugName")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty() && s.len() <= 256 && !s.chars().any(char::is_control))
+            {
+                row["label"] = json!(label);
+            }
+            rows.push(row);
         }
         let ints = ints
             .into_iter()

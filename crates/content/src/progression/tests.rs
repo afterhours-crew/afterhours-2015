@@ -7,6 +7,7 @@ use crate::{
     assets::AssetIndex,
     synthetic::{self, Field},
 };
+use std::collections::BTreeSet;
 struct Installation(std::path::PathBuf);
 impl Drop for Installation {
     fn drop(&mut self) {
@@ -185,7 +186,7 @@ fn activation_evaluates_against_completed_objectives_and_post_intro_rows_follow(
     let on = Settings {
         consumer_beta: true,
     };
-    let main = &catalog.branches()[&Branch::Main].objectives;
+    let main = catalog.branches()[&Branch::Main].objectives();
     let intro = catalog.objective_ids(Branch::Intro);
     assert_eq!(intro, BTreeSet::from([10, 20]));
     let (first, second, never) = (&main[0].1, &main[1].1, &main[2].1);

@@ -846,7 +846,7 @@ impl Saves {
         self.active.as_deref()
     }
 
-    fn inspect(&self, id: &str) -> Result<(AccountId, PathBuf, Inspection)> {
+    pub(crate) fn inspect(&self, id: &str) -> Result<(AccountId, PathBuf, Inspection)> {
         let account = parse_account(id)?;
         let (_, repository) = self.repository.as_ref().ok_or_else(|| {
             Failure::no_session("This data directory has no saved accounts yet; run setup first.")

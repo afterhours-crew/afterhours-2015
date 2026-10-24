@@ -50,6 +50,7 @@ pub mod retention;
 pub mod session;
 pub mod sessions;
 pub mod settings;
+pub mod story;
 pub mod supervisor;
 pub mod terminal;
 
