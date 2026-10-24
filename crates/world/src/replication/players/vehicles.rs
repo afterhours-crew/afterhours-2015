@@ -541,7 +541,8 @@ impl Players {
             && self.participant_has_vehicle(participant, vehicle)
     }
     /// Vehicles this connection's client simulates, including temporary cars.
-    /// Temporary cars carry simulation ownership but no persistent item identity.
+    /// Temporary and display cars carry simulation ownership but no item identity;
+    /// display cars remain excluded from participant driving assignments.
     pub fn owned_vehicles(&self, connection: u8, persona: u64) -> std::collections::BTreeSet<u16> {
         self.vehicles
             .iter()
@@ -555,6 +556,14 @@ impl Players {
                     .iter()
                     .filter(|(participant, _)| {
                         self.owns_participant(connection, persona, **participant)
+                    })
+                    .map(|(_, id)| *id),
+            )
+            .chain(
+                self.preview_vehicles
+                    .iter()
+                    .filter(|((participant, _), _)| {
+                        self.owns_participant(connection, persona, *participant)
                     })
                     .map(|(_, id)| *id),
             )
@@ -701,6 +710,69 @@ impl Players {
         let record = self.objects.spawn_vehicle(creation, content)?;
         self.vehicles.insert((participant, item), record.id);
         Ok(record)
+    }
+
+    pub fn create_preview_vehicle(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        participant: u16,
+        slot: u16,
+        creation: vehicle::EntityCreation,
+        content: &entity::creation::Content,
+    ) -> Result<Record, Error> {
+        if self.owned_actor(connection, persona, participant).is_none() {
+            return Err(Error::UnknownObject);
+        }
+        if slot > 511
+            || self
+                .preview_vehicles
+                .keys()
+                .filter(|(p, _)| *p == participant)
+                .count()
+                >= 16
+        {
+            return Err(Error::Bound);
+        }
+        if self.preview_vehicles.contains_key(&(participant, slot)) {
+            return Err(Error::DuplicateObject);
+        }
+        if creation
+            .body
+            .creation
+            .as_ref()
+            .is_none_or(|c| c.connection_id != u16::from(connection))
+        {
+            return Err(Error::Shape);
+        }
+        let record = self.objects.spawn_vehicle(creation, content)?;
+        self.preview_vehicles.insert((participant, slot), record.id);
+        Ok(record)
+    }
+    pub fn preview_vehicle(
+        &self,
+        connection: u8,
+        persona: u64,
+        participant: u16,
+        slot: u16,
+    ) -> Option<u16> {
+        self.owns_participant(connection, persona, participant)
+            .then(|| self.preview_vehicles.get(&(participant, slot)).copied())
+            .flatten()
+    }
+    pub fn remove_preview_vehicle(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        participant: u16,
+        slot: u16,
+    ) -> Result<u16, Error> {
+        let id = self
+            .preview_vehicle(connection, persona, participant, slot)
+            .ok_or(Error::UnknownObject)?;
+        self.remove_unbound_vehicle(participant, id)?;
+        self.preview_vehicles.remove(&(participant, slot));
+        Ok(id)
     }
 
     pub fn staged_vehicle(

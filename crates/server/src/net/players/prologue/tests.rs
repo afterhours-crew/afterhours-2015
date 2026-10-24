@@ -574,6 +574,11 @@ fn opening_runs_after_car_and_render_readiness_and_waits_for_native_completion()
     listener.advance_prologue().unwrap();
     assert!(listener.pending_rpcs.is_empty());
     let returning = listener.participants.return_bindings().unwrap();
+    let preview_source = crate::vehicle_content::population::tests::previews(
+        &listener.vehicles.as_ref().unwrap().layout,
+        items.clone(),
+    );
+    Arc::make_mut(listener.prologue.as_mut().unwrap()).previews = Some(preview_source);
     let enter = request(returning.request, participant, 0);
     listener
         .returns
@@ -610,6 +615,40 @@ fn opening_runs_after_car_and_render_readiness_and_waits_for_native_completion()
         .unwrap()
         .ghost(participant)
         .unwrap();
+    let before_previews = listener.players.objects().snapshot();
+    // The entry notification is an ordering barrier for later preview cars.
+    listener.advance_prologue().unwrap();
+    assert_eq!(listener.players.objects().snapshot(), before_previews);
+    drain(&mut listener);
+    listener
+        .pending
+        .resize(MAX_PENDING, super::super::returning::empty_section());
+    listener.advance_prologue().unwrap();
+    assert_eq!(listener.players.objects().snapshot(), before_previews);
+    drain(&mut listener);
+    listener.advance_prologue().unwrap();
+    assert_eq!(
+        listener
+            .pending_rpcs
+            .iter()
+            .filter(|r| matches!(r, HostRpc::Vehicle(_)))
+            .count(),
+        3
+    );
+    assert_eq!(
+        listener
+            .players
+            .owned_vehicles(HOST_SELECTOR as u8, listener.persona),
+        listener
+            .pending_rpcs
+            .iter()
+            .filter_map(|r| match r {
+                HostRpc::Vehicle(b) => Some(b.vehicle),
+                _ => None,
+            })
+            .chain([vehicle])
+            .collect()
+    );
     let live = listener.players.objects().snapshot();
     drain(&mut listener);
     assert!(send(&mut listener, 14, 47, enter.span()));

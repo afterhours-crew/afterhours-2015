@@ -50,6 +50,8 @@ const INTRO_AUDIO_TAIL: [u8; 6] = [0, 0, 0, 0, 0, 1];
 pub enum Placement {
     /// Garage locator, axle-weighted resting height and installed reset mode.
     Garage,
+    /// Authored starter display: garage placement with an empty nitrous tank.
+    IntroGarage,
     /// Exact world root position and the official player start state (E748).
     PlayerWorld,
     /// Temporary opening car: world pose, empty nitrous and intro audio flags.
@@ -355,7 +357,7 @@ impl Content {
         );
         let position = match request.placement {
             Placement::PlayerWorld | Placement::IntroWorld => request.locator,
-            Placement::Garage => d
+            Placement::Garage | Placement::IntroGarage => d
                 .resting
                 .position_at(request.locator)?
                 .map(|v| v.map_or(0., f32::from_bits)),
@@ -431,7 +433,10 @@ impl Content {
             resolve_level,
         )?;
         let mut nitrous = nos::Runtime::new(1.)?;
-        if request.placement == Placement::IntroWorld {
+        if matches!(
+            request.placement,
+            Placement::IntroWorld | Placement::IntroGarage
+        ) {
             nitrous.set_amount(0.)?;
         }
         let mut updates = Vec::with_capacity(d.profile.kinds().len());

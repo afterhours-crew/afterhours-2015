@@ -33,7 +33,7 @@ impl PlayerListener {
         let Some(vehicles) = self.vehicles.as_deref() else {
             return Err(replication::Error::Unsupported);
         };
-        if self.session_backlog >= MAX_PENDING {
+        if self.session_backlog >= MAX_PENDING || !self.pending_entries.is_empty() {
             return Ok(());
         }
         let Some(seconds) = self.event_seconds(self.world_ms) else {
@@ -130,6 +130,23 @@ impl PlayerListener {
                     };
                     calls.extend(alive.into_iter().map(HostRpc::Participant));
                     modes.insert(participant, (drive, canceller));
+                }
+                Some(Stage::IntroEnteringGarage | Stage::IntroLoadingGarage) => {
+                    if let Some(previews) = &content.previews {
+                        let out = population.spawn_previews(
+                            &mut players,
+                            crate::vehicle_content::population::Owner {
+                                connection: owner.connection,
+                                persona: owner.persona,
+                                participant,
+                            },
+                            previews.clone(),
+                            &vehicles.vehicles,
+                        )?;
+                        records.extend(out.records);
+                        messages.extend(out.messages);
+                        calls.extend(out.bindings.into_iter().map(HostRpc::Vehicle));
+                    }
                 }
                 _ => {}
             }

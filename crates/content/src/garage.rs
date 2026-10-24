@@ -8,6 +8,7 @@ use crate::{Error, assets::AssetIndex, scan::Assets, scenes};
 use nfs_frostbite::ebx::{Fields, Value};
 use serde_json::json;
 use std::collections::BTreeSet;
+pub mod starter;
 
 /// Port identifiers understood by this build's garage, persistence and exit code.
 /// These identify link/property contracts, never particular scene instances.

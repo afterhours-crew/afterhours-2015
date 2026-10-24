@@ -21,6 +21,8 @@ use nfs_world::{
     },
 };
 use std::{collections::BTreeMap, sync::Arc};
+mod preview;
+pub use preview::PreviewCars;
 
 #[derive(Clone, Debug)]
 struct Spawned {
@@ -37,6 +39,8 @@ pub struct Population {
     next_group: u64,
     groups: BTreeMap<u16, u64>,
     temporary: BTreeMap<u16, (u64, Arc<Collection>)>,
+    previews: BTreeMap<u16, preview::Spawned>,
+    preview_pending: Pending,
 }
 /// Sub id of the world car creation (garage display cars use 1; E748).
 pub const WORLD_SUB_ID: u32 = 2;
@@ -74,12 +78,18 @@ pub struct TemporaryVehicle {
     pub basis: [[f32; 3]; 3],
     pub blueprint_scene_key: u32,
 }
-struct WorldVehicle<'a> {
+struct VehicleSource<'a> {
     items: &'a Collection,
     vehicle: u64,
     position: [f32; 3],
     basis: [[f32; 3]; 3],
-    temporary: bool,
+    lifetime: Lifetime,
+}
+#[derive(Clone, Copy)]
+enum Lifetime {
+    Owned,
+    Temporary,
+    Preview(u16),
 }
 impl Population {
     pub fn registrations(&self) -> &registrations::Registry {
@@ -134,6 +144,8 @@ impl Population {
             next_group: 1,
             groups: BTreeMap::new(),
             temporary: BTreeMap::new(),
+            previews: BTreeMap::new(),
+            preview_pending: Pending::default(),
         })
     }
     pub fn spawn(
@@ -542,12 +554,12 @@ impl Population {
         let mut output = next.world_vehicle(
             &mut world,
             owner,
-            WorldVehicle {
+            VehicleSource {
                 items: &inventory.items,
                 vehicle: entry.item,
                 position,
                 basis,
-                temporary: false,
+                lifetime: Lifetime::Owned,
             },
             content,
             layout.item_scene_key,
@@ -590,12 +602,12 @@ impl Population {
         let output = next.world_vehicle(
             &mut world,
             owner,
-            WorldVehicle {
+            VehicleSource {
                 items: &source.items,
                 vehicle: source.vehicle,
                 position: source.position,
                 basis: source.basis,
-                temporary: true,
+                lifetime: Lifetime::Temporary,
             },
             content,
             source.blueprint_scene_key,
@@ -667,7 +679,7 @@ impl Population {
         &mut self,
         players: &mut Players,
         owner: Owner,
-        source: WorldVehicle<'_>,
+        source: VehicleSource<'_>,
         content: &Content,
         blueprint_scene_key: u32,
     ) -> Result<WorldSpawn, Error> {
@@ -722,14 +734,14 @@ impl Population {
                 locator: source.position,
                 basis: source.basis,
                 origin: [0.; 3],
-                speed: Some(0.),
+                speed: (!matches!(source.lifetime, Lifetime::Preview(_))).then_some(0.),
                 connection: Some(owner.connection),
                 owner: resource,
-                customization_attached: false,
-                placement: if source.temporary {
-                    super::Placement::IntroWorld
-                } else {
-                    super::Placement::PlayerWorld
+                customization_attached: matches!(source.lifetime, Lifetime::Preview(_)),
+                placement: match source.lifetime {
+                    Lifetime::Temporary => super::Placement::IntroWorld,
+                    Lifetime::Owned => super::Placement::PlayerWorld,
+                    Lifetime::Preview(_) => super::Placement::IntroGarage,
                 },
                 authority_group: group,
                 authority_components: &components,
@@ -757,29 +769,40 @@ impl Population {
                     reference: Some(parent),
                 }),
                 blueprint,
-                sub_id: WORLD_SUB_ID,
+                sub_id: if matches!(source.lifetime, Lifetime::Preview(_)) {
+                    1
+                } else {
+                    WORLD_SUB_ID
+                },
                 owner: None,
                 asset,
             },
             body,
         };
-        let record = if source.temporary {
-            players.create_temporary_vehicle(
+        let record = match source.lifetime {
+            Lifetime::Temporary => players.create_temporary_vehicle(
                 owner.connection,
                 owner.persona,
                 owner.participant,
                 creation,
                 &entity_content,
-            )?
-        } else {
-            players.create_vehicle(
+            )?,
+            Lifetime::Owned => players.create_vehicle(
                 owner.connection,
                 owner.persona,
                 owner.participant,
                 source.vehicle,
                 creation,
                 &entity_content,
-            )?
+            )?,
+            Lifetime::Preview(slot) => players.create_preview_vehicle(
+                owner.connection,
+                owner.persona,
+                owner.participant,
+                slot,
+                creation,
+                &entity_content,
+            )?,
         };
         self.groups.insert(record.id, group);
         output.records.push(record);
@@ -795,6 +818,14 @@ impl Population {
         if loaded.participant != owner.participant {
             return Err(Error::UnknownObject);
         }
+        if self
+            .preview_pending
+            .has_endpoint(loaded.scene, loaded.selector)
+        {
+            return self.preview_pending.acknowledge(loaded, |id| {
+                players.owns_participant(owner.connection, owner.persona, id)
+            });
+        }
         self.pending.acknowledge(loaded, |id| {
             players.owns_participant(owner.connection, owner.persona, id)
         })
@@ -807,6 +838,7 @@ impl Population {
     }
     pub fn has_endpoint(&self, scene: u16, selector: u16) -> bool {
         self.pending.has_endpoint(scene, selector)
+            || self.preview_pending.has_endpoint(scene, selector)
     }
     pub fn signal_owner(
         &self,
@@ -821,7 +853,12 @@ impl Population {
         ) {
             return None;
         }
-        for &participant in self.spawned.keys().chain(self.temporary.keys()) {
+        for &participant in self
+            .spawned
+            .keys()
+            .chain(self.temporary.keys())
+            .chain(self.previews.keys())
+        {
             let temporary =
                 players.temporary_vehicle(connection, persona, participant) == Some(vehicle);
             let inventory = self.spawned.get(&participant).is_some_and(|spawned| {
@@ -831,7 +868,11 @@ impl Population {
                             == Some(vehicle)
                 })
             });
-            if temporary || inventory {
+            let preview = self
+                .previews
+                .get(&participant)
+                .is_some_and(|p| p.bindings.iter().any(|b| b.vehicle == vehicle));
+            if temporary || inventory || preview {
                 return Some(crate::glass::Owner {
                     vehicle,
                     participant,

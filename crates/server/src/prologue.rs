@@ -6,7 +6,10 @@
 //! is never the storage for the temporary first-drive vehicle.
 use crate::{
     sequence_content::authored::Authored,
-    vehicle_content::{GarageContent, population::TemporaryVehicle},
+    vehicle_content::{
+        GarageContent,
+        population::{PreviewCars, TemporaryVehicle},
+    },
 };
 use nfs_content::{
     assets::AssetIndex,
@@ -25,6 +28,7 @@ pub struct Content {
     pub start: Start,
     pub opening: Authored,
     pub driving: Option<(driving::Mode, driving::Mode)>,
+    pub previews: Option<Arc<PreviewCars>>,
     items: Arc<Collection>,
 }
 impl Content {
@@ -75,6 +79,7 @@ impl Content {
             .unwrap(),
             items,
             driving: Some(driving::tests::content(parent, manager)),
+            previews: None,
         }
     }
     pub fn prepare(
@@ -110,11 +115,26 @@ impl Content {
         // SubItems belong to the ephemeral vehicle; optional AdditionalItems
         // are not an account grant or equipped parts.
         built.collection.roots = built.collection.items.keys().copied().collect();
+        let garage = nfs_content::garage::starter::extract(index)?;
+        let mut previews = vec![];
+        for slot in &garage.slots {
+            let mut car = items
+                .instantiate_vehicle(slot.definition, 1)
+                .map_err(|e| nfs_content::Error::Content(format!("starter preview: {e}")))?;
+            car.collection.roots = car.collection.items.keys().copied().collect();
+            previews.push(Arc::new(car.collection));
+        }
         Ok(Self {
             start,
             opening,
             driving,
             items: Arc::new(built.collection),
+            previews: Some(Arc::new(PreviewCars {
+                garage,
+                items: previews
+                    .try_into()
+                    .map_err(|_| nfs_content::Error::Content("starter count".into()))?,
+            })),
         })
     }
     pub fn active(&self, restored: &crate::progression::Restored) -> bool {

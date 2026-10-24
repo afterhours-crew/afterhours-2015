@@ -9,6 +9,96 @@ use nfs_world::{
 };
 use serde_json::json;
 
+pub(crate) fn previews(layout: &Layout, items: Arc<Collection>) -> Arc<PreviewCars> {
+    Arc::new(PreviewCars {
+        garage: nfs_content::garage::starter::Garage {
+            scene_key: layout.scene_key,
+            creation_scene_key: layout.item_scene_key,
+            component: 6,
+            slots: std::array::from_fn(|i| nfs_content::garage::starter::Slot {
+                component: i + 1,
+                item_component: i + 4,
+                definition: items.items[&1].definition,
+                transform: std::array::from_fn(|j| match j {
+                    0 | 5 | 10 => 1f32.to_bits(),
+                    12 => (i as f32 * 10.).to_bits(),
+                    _ => 0,
+                }),
+            }),
+        },
+        items: [items.clone(), items.clone(), items],
+    })
+}
+#[test]
+fn starter_previews_are_atomic_and_load_independently_of_owned_inventory() {
+    let (mut population, mut players, content, layout, items, p) = fixture();
+    let before_items = (*items).clone();
+    let source = previews(&layout, items.clone());
+    let before = players.objects().snapshot();
+    let registry = population.registrations.clone();
+    let mut invalid = (*source).clone();
+    invalid.garage.slots[2].item_component = 500;
+    assert!(
+        population
+            .spawn_previews(&mut players, owner(p), Arc::new(invalid), &content)
+            .is_err()
+    );
+    assert_eq!(players.objects().snapshot(), before);
+    assert_eq!(population.registrations, registry);
+    assert!(population.groups.is_empty());
+    let result = population
+        .spawn_previews(&mut players, owner(p), source.clone(), &content)
+        .unwrap();
+    assert_eq!(result.bindings.len(), 3);
+    assert!(!population.previews_loaded(p));
+    assert!(!population.all_loaded(p));
+    assert_eq!(players.owned_vehicles(3, 0x100000002).len(), 3);
+    assert!(players.owned_vehicle(3, 0x100000002, p, 1).is_none());
+    let created = players.objects().snapshot();
+    assert!(
+        population
+            .spawn_previews(&mut players, owner(p), source, &content)
+            .unwrap()
+            .records
+            .is_empty()
+    );
+    assert!(population.remove_previews(&mut players, owner(p)).is_err());
+    assert_eq!(players.objects().snapshot(), created);
+    for binding in &result.bindings {
+        assert!(
+            population
+                .signal_owner(&players, 3, 0x100000002, binding.vehicle)
+                .is_some()
+        );
+        assert!(
+            population
+                .signal_owner(&players, 4, 202, binding.vehicle)
+                .is_none()
+        );
+        let mut wrong = binding.expected();
+        wrong.vehicle = p;
+        assert!(population.acknowledge(&players, owner(p), wrong).is_err());
+        assert!(
+            population
+                .acknowledge(&players, owner(p), binding.expected())
+                .unwrap()
+        );
+    }
+    assert!(population.previews_loaded(p));
+    let deleted = population.remove_previews(&mut players, owner(p)).unwrap();
+    assert_eq!(deleted.len(), 3);
+    assert!(population.groups.is_empty());
+    for b in result.bindings {
+        assert!(
+            !population
+                .acknowledge(&players, owner(p), b.expected())
+                .unwrap()
+        );
+        assert!(players.objects().get(b.vehicle).is_none());
+    }
+    assert_eq!(*items, before_items);
+}
+
 #[test]
 fn garage_transactions_replace_only_changed_slots_and_retire_old_acks() {
     let (mut population, mut players, content, layout, items, p) = fixture();

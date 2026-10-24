@@ -105,6 +105,60 @@ fn car_creation(c: u8) -> (vehicle::EntityCreation, entity::creation::Content) {
     (creation, content)
 }
 
+#[test]
+fn previews_are_owned_displays_without_inventory_or_driving_authority() {
+    let mut world = Players::default();
+    let (player_id, one) = player(&mut world, 1, 101);
+    let (_, two) = player(&mut world, 2, 202);
+    let owned = car(&mut world, 1, 101, one, 1);
+    let (creation, content) = car_creation(1);
+    let preview = world
+        .create_preview_vehicle(1, 101, one, 17, creation.clone(), &content)
+        .unwrap()
+        .id;
+    assert_eq!(world.preview_vehicle(1, 101, one, 17), Some(preview));
+    assert_eq!(
+        world.owned_vehicles(1, 101),
+        [owned, preview].into_iter().collect()
+    );
+    assert_eq!(world.player_vehicle_item(1, 101, player_id, preview), None);
+    assert!(!world.owns_participant_vehicle(1, 101, one, preview));
+    assert!(
+        world
+            .bind_player_vehicle(1, 101, one, Some(preview))
+            .is_err()
+    );
+    let before = world.objects().snapshot();
+    assert!(
+        world
+            .create_preview_vehicle(1, 101, one, 17, creation.clone(), &content)
+            .is_err()
+    );
+    assert!(
+        world
+            .create_preview_vehicle(1, 101, two, 17, creation.clone(), &content)
+            .is_err()
+    );
+    let mut wrong = creation.clone();
+    wrong.body.creation.as_mut().unwrap().connection_id = 2;
+    assert!(
+        world
+            .create_preview_vehicle(1, 101, one, 18, wrong, &content)
+            .is_err()
+    );
+    assert!(world.remove_preview_vehicle(2, 202, one, 17).is_err());
+    assert_eq!(world.objects().snapshot(), before);
+    let (creation, other_content) = car_creation(2);
+    let other = world
+        .create_preview_vehicle(2, 202, two, 17, creation, &other_content)
+        .unwrap()
+        .id;
+    assert_eq!(world.remove_preview_vehicle(1, 101, one, 17), Ok(preview));
+    assert!(world.objects().get(preview).is_none());
+    assert_eq!(world.preview_vehicle(2, 202, two, 17), Some(other));
+    assert_eq!(world.owned_vehicle(1, 101, one, 1), Some(owned));
+}
+
 fn entries(record: &Record) -> Vec<Entry> {
     let Update::ParticipantLocationMap(map) = &record.update else {
         panic!()
