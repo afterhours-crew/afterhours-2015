@@ -39,6 +39,87 @@ fn provider_cursor_and_spawn_namespaces_are_session_owned() {
 }
 
 #[test]
+fn story_policy_is_explicit_and_shutdown_is_owned_atomic_and_retry_safe() {
+    let (ordinary, mut world, mut registry) = event_fixture();
+    let mut roster = ordinary.roster.clone();
+    roster.completion = Some(Completion::UnspawnAllAtShutdown);
+    for spawn in &mut roster.spawns {
+        spawn.ignore_availability = true;
+    }
+    assert!(
+        Content::prepared(
+            roster.clone(),
+            ordinary.vehicles.clone(),
+            ordinary.presets.clone()
+        )
+        .is_err()
+    );
+    let story = Content::prepared_with_policy(
+        roster,
+        ordinary.vehicles.clone(),
+        ordinary.presets.clone(),
+        Completion::UnspawnAllAtShutdown,
+    )
+    .unwrap();
+    let mut racers = story
+        .create(&mut world, &mut registry, 1, 100, &selections())
+        .unwrap()
+        .racers;
+    let others = selections().map(|s| Selection {
+        slot_key: s.slot_key + 20,
+        car_key: s.car_key + 20,
+        ..s
+    });
+    let preserved = ordinary
+        .create(&mut world, &mut registry, 1, 100, &others)
+        .unwrap()
+        .racers;
+    let snapshot = world.objects().snapshot();
+    assert_eq!(
+        ordinary
+            .shutdown(&mut racers, &mut world, 1, 100)
+            .unwrap_err(),
+        Error::Unsupported
+    );
+    assert_eq!(
+        story.shutdown(&mut racers, &mut world, 2, 100).unwrap_err(),
+        Error::UnknownObject
+    );
+    let mut wrong = racers.clone();
+    wrong.members[1].selection.slot_key += 1;
+    assert_eq!(
+        story.shutdown(&mut wrong, &mut world, 1, 100).unwrap_err(),
+        Error::UnknownObject
+    );
+    assert_eq!(world.objects().snapshot(), snapshot);
+    let expected = racers.members.clone();
+    let removed = story.shutdown(&mut racers, &mut world, 1, 100).unwrap();
+    assert!(racers.members.is_empty());
+    assert_eq!(racers.authority, vehicle::authority::Registry::default());
+    assert_eq!((removed.leave.len(), removed.untracked.len()), (2, 2));
+    for member in expected {
+        for id in [member.ids.participant, member.ids.actor, member.ids.vehicle] {
+            assert!(removed.deleted.contains(&id));
+        }
+        assert!(world.ai_slot(1, 100, member.selection.slot_key).is_none());
+    }
+    for member in preserved.members {
+        assert_eq!(
+            world.ai_ids(1, 100, member.selection.car_key),
+            Some(member.ids)
+        );
+    }
+    assert_eq!((world.ai_count(), world.ai_slot_count()), (2, 2));
+    assert_eq!(
+        story.shutdown(&mut racers, &mut world, 1, 100).unwrap(),
+        ai::Removed::default()
+    );
+    for record in removed.records {
+        record.encode().unwrap();
+    }
+}
+
+#[test]
 fn grid_cars_use_authored_pose_and_wait_for_the_first_client_report() {
     let (content, mut world, mut registry) = event_fixture();
     let created = content

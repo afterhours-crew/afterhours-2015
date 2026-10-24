@@ -347,3 +347,49 @@ fn no_linked_spawn_is_an_empty_roster_and_counts_are_bounded() {
     edges.extend((0..MAX_PERSONAS).map(|_| edge(local(8), ports().personas, local(11), 0)));
     assert!(read(&mut m).is_err());
 }
+
+#[test]
+fn explicit_story_spawner_keeps_shutdown_and_availability_policy() {
+    let mut m = fixture();
+    set(
+        &mut m,
+        "a",
+        2,
+        "AiActionOnGameModeCompletion",
+        Value::Enum {
+            value: 0,
+            name: Some("AiAction_UnspawnAllAiOnGameModeShutdown".into()),
+        },
+    );
+    set(
+        &mut m,
+        "a",
+        3,
+        "IgnorePersonaAvailability",
+        Value::Bool(true),
+    );
+    let expected = read(&mut m).unwrap();
+    let nodes = managers(&m);
+    let direct = extract_spawner(&mut Graph::new(&mut m), &site("a", 2), &nodes, ports()).unwrap();
+    assert_eq!(direct, expected);
+    assert_eq!(direct.completion, Some(Completion::UnspawnAllAtShutdown));
+    assert!(direct.spawns[0].ignore_availability);
+    assert!(!direct.spawns[1].ignore_availability);
+    assert!(extract_spawner(&mut Graph::new(&mut m), &site("a", 3), &nodes, ports()).is_err());
+}
+
+#[test]
+fn directly_linked_narrative_set_preserves_filtering_and_rejects_ambiguity() {
+    let mut m = fixture();
+    let expected = read(&mut m).unwrap();
+    let Value::Array(edges) = &mut m.0.get_mut(&("a".into(), 0)).unwrap().fields.0[0].1 else {
+        panic!()
+    };
+    edges[5] = edge(local(5), ports().provider, local(8), 0);
+    assert_eq!(read(&mut m).unwrap(), expected);
+    let Value::Array(edges) = &mut m.0.get_mut(&("a".into(), 0)).unwrap().fields.0[0].1 else {
+        panic!()
+    };
+    edges.push(edge(local(5), ports().provider, local(8), 0));
+    assert!(read(&mut m).is_err());
+}

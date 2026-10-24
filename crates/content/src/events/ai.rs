@@ -75,8 +75,16 @@ fn provider_set<S: Source>(
     let [relay] = links.as_slice() else {
         return Err(bad("AI union provider source count"));
     };
-    if g.object(&relay.site)?.class != "LinkedSchematicChannelRelayEntityData" {
-        return Err(bad("AI union provider requires a channel relay"));
+    let class = g.object(&relay.site)?.class;
+    // Story providers reach the narrative set directly through the scene's
+    // interface. Preserve that occurrence and its original persona ordinals.
+    if class == "PersonaSetEntityData" && relay.port == 0 {
+        return Ok(relay.site.clone());
+    }
+    if class != "LinkedSchematicChannelRelayEntityData" {
+        return Err(bad(
+            "AI union provider requires a persona set or channel relay",
+        ));
     }
     let asset = g.target_field(&relay.site, "ChannelAsset")?;
     let mut found = Vec::new();
@@ -104,7 +112,21 @@ pub(crate) fn extract<S: Source>(
         return Ok(Roster::default());
     }
     let spawner = one(g, area, EVENT_SPAWNER, "SpawnAiForEventEntityData")?;
-    let object = g.object(&spawner)?;
+    extract_spawner(g, &spawner, manager, ports)
+}
+
+/// A story launcher may bind its spawner through the progression scene rather
+/// than a free-roam start area. The roster semantics are identical.
+pub(crate) fn extract_spawner<S: Source>(
+    g: &mut Graph<S>,
+    spawner: &Site,
+    manager: &[Node],
+    ports: Links,
+) -> Result<Roster, Error> {
+    let object = g.object(spawner)?;
+    if object.class != "SpawnAiForEventEntityData" {
+        return Err(bad("AI event spawner class"));
+    }
     let completion = match object
         .fields
         .get("AiActionOnGameModeCompletion")
@@ -144,7 +166,7 @@ pub(crate) fn extract<S: Source>(
             return Err(bad("AI personality library identity"));
         }
     }
-    let spawns = g.links(&spawner, SPAWNS)?;
+    let spawns = g.links(spawner, SPAWNS)?;
     if spawns.len() > MAX_SPAWNS {
         return Err(bad("AI spawn count"));
     }

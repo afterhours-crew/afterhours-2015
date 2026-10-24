@@ -48,6 +48,64 @@ fn launcher<S: Source>(
     }
 }
 
+fn participant_context<S: Source>(
+    graph: &mut Graph<S>,
+    scene: Site,
+    progression: &crate::progression::Rules,
+) -> Result<(Vec<Node>, BTreeMap<Site, Site>), Error> {
+    let branch = graph.read(Site::root(&progression.intro))?;
+    let scene_nodes = graph.read(scene)?;
+    let mut spawners = vec![];
+    for n in scene_nodes
+        .iter()
+        .filter(|n| n.object.class == "ParticipantLogicSpawnerEntityData")
+    {
+        if graph.target_field(&n.site, "ParticipantLogicBlueprint")?
+            == (progression.intro.clone(), 0)
+        {
+            spawners.push(n.site.clone());
+        }
+    }
+    let [spawner] = spawners.as_slice() else {
+        return Err(bad("intro participant spawner occurrence"));
+    };
+    let refs = graph.links(
+        unique(&branch, "ParticipantLogicEntityData")?,
+        progression.ports["root_channels"],
+    )?;
+    let targets = graph.links(spawner, progression.ports["spawner_channels"])?;
+    let aliases = crate::participant_logic::bind(graph, &branch, refs, targets)?;
+    Ok((branch, aliases))
+}
+
+/// Resolve the opponent spawner through the selected mode's authored spawn
+/// state and its launcher-specific channel bindings.
+pub fn roster(
+    index: &mut AssetIndex,
+    name: &str,
+    launcher_asset: &str,
+) -> Result<ai::Roster, Error> {
+    extract_inner(index, name, Some(launcher_asset), true)?
+        .1
+        .ok_or_else(|| bad("intro opponent roster missing"))
+}
+
+fn opponent_spawner<S: Source>(
+    graph: &mut Graph<S>,
+    nodes: &[Node],
+    aliases: &BTreeMap<Site, Site>,
+) -> Result<Site, Error> {
+    let state = unique(nodes, "SpawnAiForGameModeStateEntityData")?;
+    let ends = links(graph, state, 356_246_362, aliases, &mut BTreeSet::new())?;
+    let [end] = ends.as_slice() else {
+        return Err(bad("intro opponent spawner occurrence"));
+    };
+    if graph.object(&end.site)?.class != "SpawnAiForEventEntityData" {
+        return Err(bad("intro opponent spawner class"));
+    }
+    Ok(end.site.clone())
+}
+
 /// Follow declared channel ports across the intro's own scene bindings. Direct
 /// channel references remain aliases for replication; only link lookup follows
 /// their definitions. Repeated occurrences and source order are retained.
@@ -84,6 +142,15 @@ pub fn extract(
     name: &str,
     launcher_asset: Option<&str>,
 ) -> Result<Mode, Error> {
+    Ok(extract_inner(index, name, launcher_asset, false)?.0)
+}
+
+fn extract_inner(
+    index: &mut AssetIndex,
+    name: &str,
+    launcher_asset: Option<&str>,
+    include_roster: bool,
+) -> Result<(Mode, Option<ai::Roster>), Error> {
     let name = name.to_lowercase();
     if name.is_empty() || name.len() > 512 || name.contains("..") {
         return Err(bad("intro mode name"));
@@ -93,6 +160,8 @@ pub fn extract(
     let rules = index.identity.participant_logic.clone();
     let sequence_rules = index.identity.sequences.clone();
     let manager_scene = sequence_rules.manager_scene.clone();
+    let rival_links = index.identity.rival_links;
+    let ai_links = index.identity.ai_links;
     let startup = index.startup_entries(&scene_rules.level)?;
     let bundle = startup
         .iter()
@@ -110,7 +179,15 @@ pub fn extract(
         endpoints: BTreeMap::new(),
         loaded: BTreeSet::new(),
     };
-    let branch = graph.read(Site::root(&progression.intro))?;
+    let (branch, aliases) = participant_context(
+        &mut graph,
+        scenes
+            .roots
+            .get(&progression.scene)
+            .ok_or_else(|| bad("intro mode scene"))?
+            .clone(),
+        &progression,
+    )?;
     let mut parent_fields = BTreeMap::new();
     for n in &branch {
         if progression
@@ -123,33 +200,6 @@ pub fn extract(
         }
     }
     let launcher = launcher(&mut graph, &branch, &name, launcher_asset)?;
-    let scene_nodes = graph.read(
-        scenes
-            .roots
-            .get(&progression.scene)
-            .ok_or_else(|| bad("intro mode scene"))?
-            .clone(),
-    )?;
-    let mut spawners = vec![];
-    for n in scene_nodes
-        .iter()
-        .filter(|n| n.object.class == "ParticipantLogicSpawnerEntityData")
-    {
-        if graph.target_field(&n.site, "ParticipantLogicBlueprint")?
-            == (progression.intro.clone(), 0)
-        {
-            spawners.push(n.site.clone());
-        }
-    }
-    let [spawner] = spawners.as_slice() else {
-        return Err(bad("intro participant spawner occurrence"));
-    };
-    let refs = graph.links(
-        unique(&branch, "ParticipantLogicEntityData")?,
-        progression.ports["root_channels"],
-    )?;
-    let targets = graph.links(spawner, progression.ports["spawner_channels"])?;
-    let aliases = crate::participant_logic::bind(&mut graph, &branch, refs, targets)?;
     let nodes = graph.read(Site::root(&name))?;
     let (bus_count, field_sites) = fields(&nodes, &rules, "GameModeEntityData")?;
     let channels: Vec<_> = field_sites
@@ -262,6 +312,24 @@ pub fn extract(
             .ok_or_else(|| bad("intro manager scene"))?
             .clone(),
     )?;
+    let roster = if include_roster {
+        let aliases = logical
+            .iter()
+            .map(|(s, (t, _))| (s.clone(), t.clone()))
+            .collect();
+        let spawner = opponent_spawner(&mut graph, &nodes, &aliases)?;
+        let mut roster = ai::extract_spawner(&mut graph, &spawner, &managers, rival_links)?;
+        roster.managers = Some(crate::ai::managers(
+            &mut graph,
+            &mut scenes,
+            unique(&managers, "AiParticipantManagerEntityData")?,
+            unique(&managers, "AiActorManagerEntityData")?,
+            ai_links,
+        )?);
+        Some(roster)
+    } else {
+        None
+    };
     let mut root_bindings = [(0, 0); 3];
     for (slot, class) in MANAGER_CLASSES.iter().enumerate() {
         root_bindings[slot] = scenes.endpoint(&mut graph, unique(&managers, class)?)?;
@@ -327,26 +395,29 @@ pub fn extract(
         fields,
     };
     layout.profile()?;
-    Ok(Mode {
-        sequences,
-        logics,
-        launcher: *parent_fields
-            .get(&launcher)
-            .ok_or_else(|| bad("intro launcher serializer"))?,
-        game_mode: GameMode {
-            lifecycle,
-            recovery,
-            layout,
-            root_bindings,
-            checkpoints,
-            points,
-            checkpoint_points,
-            drift,
-            pacing,
-            standings_interval,
-            laps,
+    Ok((
+        Mode {
+            sequences,
+            logics,
+            launcher: *parent_fields
+                .get(&launcher)
+                .ok_or_else(|| bad("intro launcher serializer"))?,
+            game_mode: GameMode {
+                lifecycle,
+                recovery,
+                layout,
+                root_bindings,
+                checkpoints,
+                points,
+                checkpoint_points,
+                drift,
+                pacing,
+                standings_interval,
+                laps,
+            },
         },
-    })
+        roster,
+    ))
 }
 
 #[cfg(test)]
@@ -378,6 +449,57 @@ mod tests {
         assert_eq!(
             launcher(&mut g, &nodes, "m", Some("a")).unwrap(),
             site("a", 1)
+        );
+    }
+
+    #[test]
+    fn opponents_follow_the_selected_spawn_state_binding_and_reject_duplicates() {
+        let mut m = Memory::default();
+        m.put(
+            "a",
+            0,
+            "Blueprint",
+            &[(
+                "LinkConnections",
+                Value::Array(vec![
+                    edge(local(1), 356_246_362, local(2), 70),
+                    edge(local(3), 70, local(5), 0),
+                    edge(local(4), 70, local(6), 0),
+                ]),
+            )],
+        );
+        m.put("a", 1, "SpawnAiForGameModeStateEntityData", &[]);
+        m.put("a", 2, "LinkedSchematicChannelReferenceEntityData", &[]);
+        for i in [3, 4] {
+            m.put("a", i, "LinkedSchematicChannelEntityData", &[]);
+        }
+        for i in [5, 6] {
+            m.put("a", i, "SpawnAiForEventEntityData", &[]);
+        }
+        let nodes = vec![Node {
+            site: site("a", 1),
+            object: m.object(&("a".into(), 1)).unwrap(),
+        }];
+        let mut g = Graph::new(&mut m);
+        for (binding, expected) in [(3, 5), (4, 6)] {
+            assert_eq!(
+                opponent_spawner(
+                    &mut g,
+                    &nodes,
+                    &BTreeMap::from([(site("a", 2), site("a", binding))])
+                )
+                .unwrap(),
+                site("a", expected)
+            );
+        }
+        assert!(opponent_spawner(&mut g, &nodes, &BTreeMap::new()).is_err());
+        assert!(
+            opponent_spawner(
+                &mut g,
+                &[nodes[0].clone(), nodes[0].clone()],
+                &BTreeMap::new()
+            )
+            .is_err()
         );
     }
 

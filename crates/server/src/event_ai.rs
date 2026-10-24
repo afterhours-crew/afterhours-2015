@@ -101,6 +101,30 @@ impl Content {
         vehicles: vehicle_content::Content,
         items: &nfs_services::item_content::ItemContent,
     ) -> Result<Self, Error> {
+        Self::build(
+            roster,
+            vehicles,
+            items,
+            Completion::GiveIndividualToDirectorAtCompletion,
+        )
+    }
+
+    /// Intro opponents belong to the mode until its shutdown. The story owner
+    /// must retire the whole roster; normal events retain their director policy.
+    pub fn for_story(
+        roster: Roster,
+        vehicles: vehicle_content::Content,
+        items: &nfs_services::item_content::ItemContent,
+    ) -> Result<Self, Error> {
+        Self::build(roster, vehicles, items, Completion::UnspawnAllAtShutdown)
+    }
+
+    fn build(
+        roster: Roster,
+        vehicles: vehicle_content::Content,
+        items: &nfs_services::item_content::ItemContent,
+        completion: Completion,
+    ) -> Result<Self, Error> {
         let catalog = items.inventory().ok_or(Error::Unsupported)?;
         let offers = items.purchase_offers().ok_or(Error::Unsupported)?;
         let presets = roster
@@ -116,16 +140,31 @@ impl Content {
                     .map_err(|_| Error::Shape)
             })
             .collect::<Result<_, _>>()?;
-        Self::prepared(roster, vehicles, presets)
+        Self::prepared_with_policy(roster, vehicles, presets, completion)
     }
 
+    #[cfg(test)]
     pub(crate) fn prepared(
         roster: Roster,
         vehicles: vehicle_content::Content,
         presets: Vec<Arc<Collection>>,
     ) -> Result<Self, Error> {
+        Self::prepared_with_policy(
+            roster,
+            vehicles,
+            presets,
+            Completion::GiveIndividualToDirectorAtCompletion,
+        )
+    }
+
+    fn prepared_with_policy(
+        roster: Roster,
+        vehicles: vehicle_content::Content,
+        presets: Vec<Arc<Collection>>,
+        completion: Completion,
+    ) -> Result<Self, Error> {
         if roster.managers.is_none()
-            || roster.completion != Some(Completion::GiveIndividualToDirectorAtCompletion)
+            || roster.completion != Some(completion)
             || roster.spawns.is_empty()
             || roster.spawns.len() > nfs_world::race_pacing::MAX_OPPONENTS
             || roster.personas.is_empty()
@@ -142,7 +181,7 @@ impl Content {
         for spawn in &roster.spawns {
             if spawn.once
                 || spawn.store_participant
-                || spawn.ignore_availability
+                || (spawn.ignore_availability && completion != Completion::UnspawnAllAtShutdown)
                 || spawn.personas.is_empty()
                 || spawn.personas.iter().any(|&i| i >= presets.len())
                 || spawn.personas.iter().collect::<BTreeSet<_>>().len() != spawn.personas.len()
@@ -161,6 +200,49 @@ impl Content {
 
     pub fn roster(&self) -> &Roster {
         &self.roster
+    }
+
+    /// Remove this story roster at mode shutdown. Validate every retained
+    /// identity before deleting anything; other races and ambient cars survive.
+    /// The caller releases its route/pacing commands before retiring the cars.
+    pub fn shutdown(
+        &self,
+        racers: &mut Racers,
+        players: &mut Players,
+        connection: u8,
+        persona: u64,
+    ) -> Result<ai::Removed, Error> {
+        if self.roster.completion != Some(Completion::UnspawnAllAtShutdown) {
+            return Err(Error::Unsupported);
+        }
+        for member in &racers.members {
+            if players.ai_ids(connection, persona, member.selection.car_key) != Some(member.ids)
+                || !players
+                    .ai_slot(connection, persona, member.selection.slot_key)
+                    .is_some_and(|slot| {
+                        slot.participant == member.ids.participant
+                            && slot.actor == member.ids.actor
+                            && slot.car == Some(member.selection.car_key)
+                    })
+            {
+                return Err(Error::UnknownObject);
+            }
+        }
+        let mut staged = players.clone();
+        let mut out = ai::Removed::default();
+        let mut authority = racers.authority.clone();
+        for member in &racers.members {
+            let removed = staged.remove_ai_slot(connection, persona, member.selection.slot_key)?;
+            out.leave.extend(removed.leave);
+            out.untracked.extend(removed.untracked);
+            out.records.extend(removed.records);
+            out.deleted.extend(removed.deleted);
+            authority.remove_group(member.selection.car_key);
+        }
+        *players = staged;
+        racers.members.clear();
+        racers.authority = authority;
+        Ok(out)
     }
 
     pub(crate) fn car_id(&self, persona: usize) -> Result<u32, Error> {
