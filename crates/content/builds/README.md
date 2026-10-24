@@ -10,7 +10,7 @@ for example `nfs16-92aa6ff4b5f8d0f0.json`.
 
 | Field | Meaning |
 | --- | --- |
-| `format`, `version` | `nfs-build-profile`, `14` |
+| `format`, `version` | `nfs-build-profile`, `15` |
 | `description` | Human-readable identification of the build |
 | `executable`, `executable_sha256` | File name in the installation root and its exact digest |
 | `world_mac_template.rva`, `.sha256` | Relative virtual address (hex) of the 64-byte world MAC template inside the executable image, and the digest the bytes must have. The bytes themselves are read from the player's executable, never stored here |
@@ -18,6 +18,7 @@ for example `nfs16-92aa6ff4b5f8d0f0.json`.
 | `garage_links` | Port IDs for the primary/secondary garage slots, location/transform property, five persistent inventory-slot roles and the SpawnPoints exit-location export. These select installed connections, not fixed scene indexes or transforms |
 | `vehicles` | Vehicle class-to-serializer rules, bus and mesh-extra classes, mesh-link port, and player-bundle namespace. Profiles, mesh lists and defaults are read from installed assets |
 | `progression` | Main/intro capability roots and scene name, class-to-role rules and named persistence/property/channel port IDs. Stable IDs, expressions, bindings and serializer arrays come from installed graphs |
+| `prologue_links` | First-drive capability path and item/teleport/locator link ports. The temporary car, opening sequence, objective identity and destination come from that instance's installed graph and owning spawner |
 | `sequences` | Waiting/exit capability roots and owning scenes, class-to-role rules, channel/spline port IDs and spline runtime class ID. Registry ordinals, manager and channel indexes, embedded manager bus and loop flag come from installed graphs |
 | `traffic_spline_class_id` | Runtime TrafficSpline class ID; its catalog order, geometry, personas and manager ordinals come from installed data |
 | `traffic_links` | Road, persona-provider and provider-member port IDs. Linked order, scene ownership and provider-local persona indices come from installed graphs |

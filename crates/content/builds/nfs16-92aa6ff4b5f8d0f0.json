@@ -1,6 +1,12 @@
 {
   "format": "nfs-build-profile",
-  "version": 14,
+  "version": 15,
+  "prologue_links": {
+    "first_drive": "gameplay/progression/intro/introdrivetoclub",
+    "item_definition": 3339738264,
+    "teleport_location": 2261334425,
+    "teleport_locator": 1361382029
+  },
   "traffic_spline_class_id": 5372,
   "traffic_links": {
     "roads": 2618941240,

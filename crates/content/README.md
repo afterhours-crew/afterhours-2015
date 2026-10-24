@@ -104,6 +104,14 @@ allocation counter; that value belongs to owned runtime state.
 
 ## Participant logic layouts
 
+`prologue::extract` reads the first-drive capability named by the build profile.
+It derives the objective ID, temporary car definition, opening sequence reference
+and teleport pose from the installation. The destination follows the intro
+spawner's explicit channel binding, then its location/locator links; compatible
+channels elsewhere are not substitutes. Missing exports, duplicate occurrences,
+ambiguous links and invalid transforms refuse extraction. This is a static reader;
+it does not allocate live objects, grant a car or execute the opening sequence.
+
 `AssetIndex::participant_layout(scene, blueprint, owner)` derives a registered
 participant blueprint's asset reference, catalog, bus count, serializer profile
 and contextual channel bindings. Scene-owned logic uses the blueprint's unique

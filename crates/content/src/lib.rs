@@ -31,6 +31,7 @@ pub mod nitrous;
 pub mod participant_logic;
 mod progress;
 pub mod progression;
+pub mod prologue;
 mod reputation;
 pub mod rivals;
 pub mod road_network;
@@ -79,6 +80,7 @@ pub struct BuildIdentity {
     pub garage_links: garage::Links,
     pub vehicles: vehicle_profiles::Rules,
     pub progression: progression::Rules,
+    pub prologue_links: prologue::Links,
     pub sequences: sequences::Rules,
     pub participant_logic: participant_logic::Rules,
     pub traffic_spline_class_id: u16,
