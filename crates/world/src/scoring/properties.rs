@@ -18,24 +18,31 @@ pub struct Port {
     pub field: u32,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum Kind {
+    Text,
     Boolean,
     Integer,
+    Unsigned32,
+    Unsigned64,
     Float,
     Vec3,
     Vec4,
     Transform,
 }
 impl Kind {
-    pub(crate) fn validate(self, value: Value) -> Result<(), Error> {
+    pub(crate) fn validate(self, value: &Value) -> Result<(), Error> {
         match (self, value) {
-            (Self::Boolean, Value::Boolean(_)) | (Self::Integer, Value::Integer(_)) => Ok(()),
-            (Self::Float, Value::Float(value)) => finite(value).map(|_| ()),
-            (Self::Vec3, Value::Vec3(value)) => validate_components(value),
-            (Self::Vec4, Value::Vec4(value)) => validate_components(value),
+            (Self::Text, Value::Text(_)) => Ok(()),
+            (Self::Boolean, Value::Boolean(_))
+            | (Self::Integer, Value::Integer(_))
+            | (Self::Unsigned32, Value::Unsigned32(_))
+            | (Self::Unsigned64, Value::Unsigned64(_)) => Ok(()),
+            (Self::Float, Value::Float(value)) => finite(*value).map(|_| ()),
+            (Self::Vec3, Value::Vec3(value)) => validate_components(value.iter().copied()),
+            (Self::Vec4, Value::Vec4(value)) => validate_components(value.iter().copied()),
             (Self::Transform, Value::Transform(value)) => {
-                validate_components(value.into_iter().flatten())
+                validate_components(value.iter().flatten().copied())
             }
             _ => Err(Error::InvalidGraph),
         }
@@ -114,7 +121,7 @@ impl Store {
             if cell.ports.is_empty() {
                 return Err(Error::InvalidGraph);
             }
-            if let Some(value) = cell.initial {
+            if let Some(value) = &cell.initial {
                 cell.kind.validate(value)?;
             }
             for &port in &cell.ports {
@@ -174,11 +181,16 @@ impl Store {
     /// Read the current shared cell, including changes made by nested handlers.
     pub fn read(&self, port: Port) -> Result<Option<Value>, Error> {
         let index = self.ports.get(&port).ok_or(Error::MissingInput)?;
-        Ok(self.cells[*index].initial)
+        Ok(self.cells[*index].initial.clone())
     }
 
     pub(crate) fn nodes(&self) -> usize {
         self.nodes
+    }
+
+    pub(crate) fn listeners(&self, port: Port) -> Result<Vec<Registration>, Error> {
+        let index = *self.ports.get(&port).ok_or(Error::MissingInput)?;
+        Ok(self.registrations[index].clone())
     }
 
     /// Append without invoking the new listener, even when its source is ready.
@@ -209,7 +221,7 @@ impl Store {
     pub(crate) fn write(&mut self, port: Port, value: Value) -> Result<Change, Error> {
         let index = self.ports.get(&port).ok_or(Error::MissingInput)?;
         let cell = &mut self.cells[*index];
-        cell.kind.validate(value)?;
+        cell.kind.validate(&value)?;
         let first = cell.initial.replace(value).is_none();
         Ok(Change {
             first,

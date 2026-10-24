@@ -149,6 +149,10 @@ pub enum Which {
     WorldSettled,
     /// Completion presentation and world membership have been queued.
     FreeRoam,
+    /// Hide world presentation and hold the black screen during relocation.
+    InWorldTeleport,
+    /// Release the black screen as the in-world arrival sequence starts.
+    InWorldArrival,
     /// Prepare the return cinematic and retire driving-only presentation.
     Returning,
     ReturnRequested,
@@ -175,6 +179,8 @@ pub struct GarageLogic {
     world_spawn: Batch,
     world_settled: Batch,
     free_roam: Batch,
+    in_world_teleport: Batch,
+    in_world_arrival: Batch,
     returning: Batch,
     return_requested: Batch,
     returned: Batch,
@@ -617,6 +623,47 @@ impl GarageLogic {
         let world_settled = event_phase("world_settled", &exited)?;
         let free_roam = event_phase("free_roam", &after(&after(&exited, &arrive), &arrived))?;
         let driving = after(&after(&exited, &arrive), &arrived);
+        // In-world relocation replaces live presentation roles, including a
+        // new lifetime for free-roam statistics. Validate deletions against the
+        // old roles and creations/events against the surviving roles.
+        let transition = |name: &str, live: &BTreeSet<u16>| -> Result<Batch, Failure> {
+            let Some(value) = v.get(name) else {
+                return Ok(Batch::default());
+            };
+            let mut deletion = value.clone();
+            deletion["entities"] = serde_json::json!([]);
+            deletion["events"] = serde_json::json!([]);
+            let deleted = batch(&deletion, &content, live)?.delete;
+            let remaining = live
+                .difference(&deleted.iter().copied().collect())
+                .copied()
+                .collect();
+            let mut creation = value.clone();
+            creation["delete_capture_ids"] = serde_json::json!([]);
+            let mut result = batch(&creation, &content, &remaining)?;
+            if !result.scene_updates.is_empty() || !result.entity_updates.is_empty() {
+                return Err(Failure::ProfileConfig);
+            }
+            result.delete = deleted;
+            Ok(result)
+        };
+        let replaced = |live: &BTreeSet<u16>, b: &Batch| -> BTreeSet<u16> {
+            live.iter()
+                .copied()
+                .filter(|id| !b.delete.contains(id))
+                .chain(b.entities.iter().map(|e| e.capture_id))
+                .collect()
+        };
+        let in_world_teleport = transition("in_world_teleport", &driving)?;
+        let loading = replaced(&driving, &in_world_teleport);
+        let in_world_arrival = transition("in_world_arrival", &loading)?;
+        if !in_world_teleport.entities.is_empty() || !in_world_teleport.delete.is_empty() {
+            let arrival = replaced(&loading, &in_world_arrival);
+            let restore = batch(&v["arrived"], &content, &arrival)?;
+            if after(&arrival, &restore) != driving {
+                return Err(Failure::ProfileConfig);
+            }
+        }
         let crashed = v
             .get("crashed")
             .map(|b| batch(b, &content, &driving))
@@ -694,6 +741,8 @@ impl GarageLogic {
             .chain(&arrived.entities)
             .chain(&returning.entities)
             .chain(&returned.entities)
+            .chain(&in_world_teleport.entities)
+            .chain(&in_world_arrival.entities)
             .chain(&crashed.entities)
             .chain(&recovered.entities)
             .chain(&resetting.entities)
@@ -752,6 +801,8 @@ impl GarageLogic {
             world_spawn,
             world_settled,
             free_roam,
+            in_world_teleport,
+            in_world_arrival,
             returning,
             return_requested,
             returned,
@@ -783,6 +834,8 @@ impl GarageLogic {
             Which::WorldSpawn => &self.world_spawn,
             Which::WorldSettled => &self.world_settled,
             Which::FreeRoam => &self.free_roam,
+            Which::InWorldTeleport => &self.in_world_teleport,
+            Which::InWorldArrival => &self.in_world_arrival,
             Which::Returning => &self.returning,
             Which::ReturnRequested => &self.return_requested,
             Which::Returned => &self.returned,
@@ -807,6 +860,8 @@ impl GarageLogic {
             Which::WorldSpawn,
             Which::WorldSettled,
             Which::FreeRoam,
+            Which::InWorldTeleport,
+            Which::InWorldArrival,
             Which::Returning,
             Which::ReturnRequested,
             Which::Returned,
@@ -898,6 +953,10 @@ impl GarageLogic {
         if part == Part::Deletions {
             return Self::delete_batch(batch, players, ghosts, output);
         }
+        let replaces = matches!(which, Which::InWorldTeleport | Which::InWorldArrival);
+        if replaces && part == Part::All {
+            output = Self::delete_batch(batch, players, ghosts, output)?;
+        }
         for update in &batch.scene_updates {
             let scene = players
                 .objects()
@@ -954,7 +1013,7 @@ impl GarageLogic {
             ghosts.insert(definition.capture_id, record.id);
             output.records.push(record);
         }
-        if part != Part::Creations {
+        if part != Part::Creations && !replaces {
             output = Self::delete_batch(batch, players, ghosts, output)?;
         }
         output.events = self.events(which, players, ghosts)?;
@@ -1204,6 +1263,8 @@ pub(crate) mod tests {
         v["arrive"] = phase(&[15]);
         v["arrived"] = phase(&[16]);
         v["free_roam"] = phase(&[17]);
+        v["in_world_teleport"] = phase(&[22, 23]);
+        v["in_world_arrival"] = phase(&[24]);
         v
     }
 
@@ -1322,6 +1383,8 @@ pub(crate) mod tests {
             (Which::WorldSpawn, vec![14]),
             (Which::WorldSettled, vec![21, 20]),
             (Which::FreeRoam, vec![17]),
+            (Which::InWorldTeleport, vec![22, 23]),
+            (Which::InWorldArrival, vec![24]),
         ] {
             let events = logic.events(phase, &players, &ghosts).unwrap();
             assert_eq!(events.iter().map(|e| e.event).collect::<Vec<_>>(), expected);
@@ -1330,7 +1393,14 @@ pub(crate) mod tests {
         assert_eq!(players.objects().snapshot(), before);
         players.remove_entities(&[target]).unwrap();
         assert!(logic.events(Which::WorldReady, &players, &ghosts).is_err());
-        for phase in ["world_ready", "world_spawn", "world_settled", "free_roam"] {
+        for phase in [
+            "world_ready",
+            "world_spawn",
+            "world_settled",
+            "free_roam",
+            "in_world_teleport",
+            "in_world_arrival",
+        ] {
             let mut bad = v.clone();
             bad[phase]["entity_updates"] = json!([{"capture_id":291,"field":3,"bool":false}]);
             assert!(GarageLogic::from_json(&bad).is_err());

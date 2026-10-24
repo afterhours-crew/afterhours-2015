@@ -356,6 +356,14 @@ impl Profile {
         nfs_services::awards::Current::from_snapshot(&snapshot, loaded, thresholds)
             .map_err(|_| crate::Failure::ProfileConfig)
     }
+    pub async fn current_speedwall(
+        &self,
+        now: Timestamp,
+    ) -> Result<nfs_services::speedwall::Current, crate::Failure> {
+        let (snapshot, _) = self.current_account(now, false).await?;
+        nfs_services::speedwall::Current::from_snapshot(self.account, &snapshot)
+            .map_err(|_| crate::Failure::ProfileConfig)
+    }
     pub async fn current_challenges(
         &self,
         now: Timestamp,
@@ -455,6 +463,7 @@ impl Profile {
         let batch_id = request.batch_id;
         let thresholds = request.thresholds.clone();
         let player_index = request.player_index;
+        let event = request.event.clone();
         timeout(JOB_TIMEOUT, async move {
             let permit = service
                 .workers
@@ -484,9 +493,23 @@ impl Profile {
                 };
                 let before = inventory::collection(&snapshot, service.catalog.bindings())
                     .map_err(Error::Inventory)?;
-                let batch = policy
-                    .prepare(&snapshot, credit, batch_id)
-                    .map_err(Error::Inventory)?;
+                let batch = match &event {
+                    // An event completion's rewards commit as one transaction.
+                    Some(event) => {
+                        let snapshot = nfs_services::awards::ensure_empty(
+                            service.repository.as_ref(),
+                            account,
+                            snapshot,
+                            now,
+                        )
+                        .map_err(|_| Error::Inventory(nfs_storage::Error::Config.into()))?;
+                        nfs_services::event_rewards::prepare(&policy, &snapshot, event)
+                            .map_err(Error::Inventory)?
+                    }
+                    None => policy
+                        .prepare(&snapshot, credit, batch_id)
+                        .map_err(Error::Inventory)?,
+                };
                 let applied = service
                     .repository
                     .apply(account, &batch, now)

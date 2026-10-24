@@ -8,6 +8,33 @@ use crate::{
     world::{StartupEntry, StartupKind},
 };
 
+/// UI widget children have a client owner. The supported data-vtable realm
+/// getter05546180 returns Realm_Client for these classes; their widget
+/// blueprints are not children of the server's scene execution context.
+pub(crate) struct ServerScene<'a, S> {
+    pub source: &'a mut S,
+}
+impl<S: Source> Source for ServerScene<'_, S> {
+    fn include_node(&self, site: &Site) -> bool {
+        self.source.include_node(site)
+    }
+    fn object(&mut self, key: &Key) -> Result<Object, Error> {
+        self.source.object(key)
+    }
+    fn target(&mut self, source: &str, pointer: Pointer) -> Result<Option<Key>, Error> {
+        self.source.target(source, pointer)
+    }
+    fn expand_node(&self, site: &Site, object: &Object) -> bool {
+        self.source.expand_node(site, object)
+            && !matches!(
+                object.class.as_str(),
+                "UIWidgetEntityData"
+                    | "UIElementWidgetReferenceEntityData"
+                    | "ProgressionTrackStageButtonWidgetData"
+            )
+    }
+}
+
 /// Parent references preserve the instance context when a channel link leaves
 /// a subworld through its interface and enters a sibling or ancestor scene.
 pub(crate) fn scene_roots(

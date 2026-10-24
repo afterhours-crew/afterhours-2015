@@ -194,6 +194,7 @@ pub struct ChassisUpdate {
     pub physics: Option<Physics>,
     pub flag: Option<bool>,
     pub custom: Option<Customization>,
+    /// Burnout tendency override: raw float bits, then enabled (mask 8).
     pub pair: Option<(u32, bool)>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]

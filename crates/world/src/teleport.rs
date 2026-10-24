@@ -7,7 +7,7 @@
 //! Method 2 on the startup scene's TeleportingParticipantState endpoint
 //! (field 77, wire selector 76) with references `[scene, participant,
 //! vehicle]`. The arguments are the destination as three f32, its rotation
-//! in the `Quaternion25` layout and 33 zero bits. The official hosts in E101
+//! in the `Quaternion25` layout and a forward speed in metres/second. The official hosts in E101
 //! (100,891 ms) and E742 window 4 (125,909 ms) send identical arguments, the
 //! SpawnPoints TeleportLocation by the garage, as chunked content (target
 //! 47, the RPC message index), 0.7–0.9 s after the exit frame; the client
@@ -23,8 +23,6 @@ use crate::{
 pub const METHOD: u32 = 2;
 /// Content target that carries a chunked RPC envelope.
 pub const CONTENT_TARGET: u8 = 47;
-/// Trailing argument bits, zero in both official commands.
-const RESERVED_BITS: usize = 33;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Command {
@@ -34,6 +32,8 @@ pub struct Command {
     pub position: [f32; 3],
     /// Rows: right, up, forward.
     pub basis: [[f32; 3]; 3],
+    /// The client applies this along the destination's forward axis.
+    pub speed: f32,
 }
 
 impl Command {
@@ -45,6 +45,8 @@ impl Command {
             .any(|&id| id == 0 || usize::from(id) > MAX_OBJECTS)
             || self.endpoint.selector > 511
             || self.position.iter().any(|v| !v.is_finite())
+            || !self.speed.is_finite()
+            || !(0.0..=1_000.).contains(&self.speed)
         {
             return Err(Error::Bound);
         }
@@ -66,7 +68,7 @@ impl Command {
                 payload.put(mantissa.into(), 23);
             }
         }
-        payload.put(0, RESERVED_BITS);
+        payload.put(self.speed.to_bits().into(), 32);
         payload.align();
         let mut body = BitWriter::new();
         body.put(0, 32).put(0, 32).put(ids.len() as u64, 8);
@@ -98,6 +100,7 @@ mod tests {
             participant: 178,
             vehicle: 205,
             position: [12.5, -3.25, 400.0],
+            speed: 0.,
             // A quarter turn about the vertical axis.
             basis: [[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]],
         }
@@ -151,11 +154,49 @@ mod tests {
             expected.axes.map(|a| a.mantissa.is_some()),
             [false, true, false]
         );
-        // 33 reserved zero bits, then byte alignment of the payload.
+        // A zero forward speed, then byte alignment of the payload.
         let rest = args.len() - at;
-        assert!((33..33 + 8).contains(&rest));
+        assert!((32..32 + 8).contains(&rest));
         assert!((at..args.len()).all(|i| args.read_u32(i, 1).unwrap() == 0));
         assert_eq!((51 + args.len()) % 8, 0);
+    }
+
+    #[test]
+    fn moving_teleports_write_speed_after_every_quaternion_shape_without_extra_padding() {
+        use crate::replication::vehicle::orientation::basis_from_quaternion;
+        for q in [
+            [0., 0., 0., 1.],
+            [0., 0.6, 0., 0.8],
+            [0.3, 0.4, 0., 0.75_f32.sqrt()],
+            [0.5; 4],
+        ] {
+            let mut c = command();
+            c.basis = basis_from_quaternion(q).unwrap();
+            c.speed = 37.25;
+            let bytes = c.encode().unwrap();
+            let e = Envelope::decode(
+                BitSpan::new(&bytes, 0, bytes.len() * 8).unwrap(),
+                Limits {
+                    max_input_bits: 4096,
+                    max_references: 32,
+                    max_payload_bytes: 256,
+                },
+            )
+            .unwrap();
+            let route = e.route(RouteProfile::ClientReceive).unwrap();
+            let args = route.arguments();
+            let rotation = Quaternion25::from_basis(c.basis).unwrap();
+            let speed_at = 96
+                + 7
+                + 23 * rotation
+                    .axes
+                    .iter()
+                    .filter(|a| a.mantissa.is_some())
+                    .count();
+            assert_eq!(f32::from_bits(args.read_u32(speed_at, 32).unwrap()), 37.25);
+            assert_eq!(51 + args.len(), (51 + speed_at + 32).div_ceil(8) * 8);
+            assert!((speed_at + 32..args.len()).all(|i| args.read_u32(i, 1).unwrap() == 0));
+        }
     }
 
     #[test]
@@ -165,6 +206,10 @@ mod tests {
             |c| c.participant = (MAX_OBJECTS + 1) as u16,
             |c| c.endpoint.selector = 512,
             |c| c.position[1] = f32::NAN,
+            |c| c.speed = f32::NAN,
+            |c| c.speed = f32::INFINITY,
+            |c| c.speed = -1.,
+            |c| c.speed = 1_001.,
         ] {
             let mut c = command();
             change(&mut c);

@@ -13,10 +13,12 @@ impl PlayerListener {
         local_slot: u8,
     ) -> Option<crate::glass::Owner> {
         let connection = HOST_SELECTOR as u8;
-        let delegated =
-            self.rival_population
-                .as_ref()?
-                .delegated(players, connection, self.persona);
+        let mut delegated = self
+            .rival_population
+            .as_ref()
+            .map(|r| r.delegated(players, connection, self.persona))
+            .unwrap_or_default();
+        delegated.extend(self.event_state.delegated(players, self.persona));
         let ids = players.ai_ids(connection, self.persona, *delegated.get(&vehicle)?)?;
         Some(crate::glass::Owner {
             vehicle,
@@ -37,13 +39,14 @@ impl PlayerListener {
         if !self.pending_entries.is_empty() {
             return Ok(None);
         }
-        Ok(Some(
-            self.rival_population
-                .as_ref()
-                .map(|r| r.locations(players, HOST_SELECTOR as u8, self.persona))
-                .transpose()?
-                .unwrap_or_default(),
-        ))
+        let mut locations = self
+            .rival_population
+            .as_ref()
+            .map(|r| r.locations(players, HOST_SELECTOR as u8, self.persona))
+            .transpose()?
+            .unwrap_or_default();
+        locations.extend(self.event_state.locations(players, self.persona)?);
+        Ok(Some(locations))
     }
 
     pub(in crate::net) fn advance_rivals(&mut self, now: u64) -> Result<(), replication::Error> {
@@ -69,6 +72,7 @@ impl PlayerListener {
                 .collect()
         };
         let mut players = self.players.clone();
+        let preserved = self.event_state.preserved(&players, self.persona);
         let changes = rivals.advance(
             &mut players,
             &mut registrations,
@@ -78,6 +82,7 @@ impl PlayerListener {
                 now,
                 focus: &focus,
                 random: crate::seeds::OsRandom.next_u32(),
+                preserved: &preserved,
             },
         )?;
         let mut entries: Vec<_> = split_scenes(

@@ -56,6 +56,7 @@ pub struct Players {
     ai: BTreeMap<(u8, u64, u64), ai::Instance>,
     /// Persistent AI participants whose cars come and go (roaming rivals).
     ai_slots: BTreeMap<(u8, u64, u64), ai::Slot>,
+    pacing_groups: BTreeMap<u16, (u8, u64)>,
 }
 
 /// Native runtime index of the player on `connection` and local `slot`.
@@ -73,6 +74,12 @@ fn runtime_index(connection: u8, slot: u8) -> Option<u8> {
 impl Players {
     pub fn objects(&self) -> &state::World {
         &self.objects
+    }
+
+    /// Joined human participants in this world. AI slots have separate ownership
+    /// and must not make player invitations available.
+    pub fn player_participants(&self) -> impl Iterator<Item = u16> + '_ {
+        self.participants.values().copied()
     }
 
     pub fn owns(&self, connection: u8, persona: u64, id: u16) -> bool {

@@ -121,18 +121,30 @@ impl State {
 }
 
 fn references(creation: &Creation, bindings: Bindings<'_>) -> Result<(), Error> {
+    validate_references(
+        &creation.prefix,
+        creation.body.initial.as_deref().ok_or(Error::Shape)?,
+        &creation.body.updates,
+        bindings,
+    )
+}
+
+/// Check references in already validated state without encoding its payload.
+/// Namespace removal changes reference availability, not serializer shape.
+pub(crate) fn validate_references(
+    prefix: &Prefix,
+    initial: &[Initial],
+    updates: &[Option<Update>],
+    bindings: Bindings<'_>,
+) -> Result<(), Error> {
     let ghost = |id| id == 0 || (bindings.ghost)(id);
     let level = |id| id == u16::MAX || (bindings.level)(id);
-    if !(bindings.level)(creation.prefix.level_id)
-        || creation
-            .prefix
-            .blueprint
-            .as_ref()
-            .is_some_and(|v| !ghost(v.ghost))
+    if !(bindings.level)(prefix.level_id)
+        || prefix.blueprint.as_ref().is_some_and(|v| !ghost(v.ghost))
     {
         return Err(Error::UnknownObject);
     }
-    for value in creation.body.initial.as_ref().ok_or(Error::Shape)? {
+    for value in initial {
         let valid = match value {
             Initial::RpcReferences { value, .. }
             | Initial::RpcSpawnInactive {
@@ -147,7 +159,7 @@ fn references(creation: &Creation, bindings: Bindings<'_>) -> Result<(), Error> 
             return Err(Error::UnknownObject);
         }
     }
-    for value in creation.body.updates.iter().flatten() {
+    for value in updates.iter().flatten() {
         let valid = match value {
             Update::LevelReference(value) => value.is_none_or(level),
             Update::ReferenceMap(value) => value

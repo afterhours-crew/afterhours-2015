@@ -17,6 +17,8 @@ pub mod control;
 pub mod customization_timer;
 pub mod deployment;
 mod diagnostics;
+pub mod event_ai;
+pub mod event_logic;
 pub mod fresh_account;
 pub mod garage_logic;
 pub mod glass;

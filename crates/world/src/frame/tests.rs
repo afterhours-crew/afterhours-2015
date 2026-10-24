@@ -492,3 +492,76 @@ fn host_movement_grants_build_in_the_official_layout_and_parse() {
         Some(Error::Bound)
     );
 }
+
+#[test]
+fn speed_wall_sync_has_its_native_bounded_layout() {
+    // Independently packed: value 0x0102_0304_0506_0708, count 2, then two
+    // (u32, f32, f32) entries.
+    let mut w = BitWriter::new();
+    w.put(0x0102_0304, 32).put(0x0506_0708, 32).put(2, 32);
+    for (id, a, b) in [(1_761_118_161u32, 117_128f32, 22_087f32), (7, 0., 1.5)] {
+        w.put(u64::from(id), 32)
+            .put(u64::from(a.to_bits()), 32)
+            .put(u64::from(b.to_bits()), 32);
+    }
+    let bytes = w.bytes().to_vec();
+    assert_eq!(bytes.len() * 8, 64 + 32 + 2 * 96);
+    let Ok(Message::Opaque { index, body }) = assembled_message(EX_SPEED_WALLS_TO_SERVER, &bytes)
+    else {
+        panic!("decoded")
+    };
+    assert_eq!(
+        (index, body.len()),
+        (EX_SPEED_WALLS_TO_SERVER, 64 + 32 + 2 * 96)
+    );
+    // A truncated entry, trailing whole bytes and an oversized count are refused.
+    assert_eq!(
+        assembled_message(EX_SPEED_WALLS_TO_SERVER, &bytes[..bytes.len() - 1]),
+        Err(Error::Truncated)
+    );
+    let mut longer = bytes.clone();
+    longer.push(0);
+    assert_eq!(
+        assembled_message(EX_SPEED_WALLS_TO_SERVER, &longer),
+        Err(Error::Shape)
+    );
+    let mut huge = BitWriter::new();
+    huge.put(0, 32)
+        .put(0, 32)
+        .put((MAX_SPEED_WALL_ENTRIES + 1) as u64, 32);
+    assert_eq!(
+        assembled_message(EX_SPEED_WALLS_TO_SERVER, huge.bytes()),
+        Err(Error::Bound)
+    );
+}
+
+#[test]
+fn recommendations_sync_entries_have_their_native_layout() {
+    // Value 9, count 1, then (u32, f32, u32, u64, Boolean, Boolean); 2 pad bits.
+    let mut w = BitWriter::new();
+    w.put(0, 32).put(9, 32).put(1, 32);
+    w.put(5, 32).put(u64::from(1.5f32.to_bits()), 32).put(3, 32);
+    w.put(0, 32).put(7, 32).put(1, 1).put(0, 1);
+    let bytes = w.bytes().to_vec();
+    let Ok(Message::Opaque { index, body }) = assembled_message(89, &bytes) else {
+        panic!("decoded")
+    };
+    assert_eq!((index, body.len()), (89, 64 + 32 + 162));
+    assert_eq!(
+        assembled_message(89, &bytes[..bytes.len() - 2]),
+        Err(Error::Truncated)
+    );
+}
+
+#[test]
+fn load_reports_require_the_entire_declared_list_before_proving_readiness() {
+    let mut valid = BitWriter::new();
+    valid.put(1, 32).put(2, 32).put(175, 16).put(511, 16);
+    assert_eq!(sublevel_report_ids(valid.span()), [175, 511]);
+    for count in [2, u32::MAX] {
+        let mut truncated = BitWriter::new();
+        truncated.put(1, 32).put(count.into(), 32).put(175, 16);
+        assert!(sublevel_report_ids(truncated.span()).is_empty());
+    }
+    assert!(sublevel_report_ids(BitWriter::new().span()).is_empty());
+}

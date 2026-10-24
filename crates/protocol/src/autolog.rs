@@ -15,6 +15,8 @@ pub const GET_TIME_LIMITED_FEATURES: u16 = 78;
 mod awards;
 mod speedwall;
 pub use speedwall::*;
+mod walls;
+pub use walls::*;
 mod settings;
 pub use awards::*;
 mod startup;

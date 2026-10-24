@@ -75,6 +75,7 @@ pub struct Startup<'p> {
     current_stats: Option<nfs_services::stats::Current>,
     kickback: Option<(&'p nfs_services::kickback::State, nfs_storage::AccountId)>,
     speedwall: Option<(&'p nfs_services::speedwall::State, nfs_storage::AccountId)>,
+    current_speedwall: Option<nfs_services::speedwall::Current>,
     item_licenses: Option<&'p nfs_services::item_licenses::Content>,
     owned_local_social: bool,
     owned_menu_awards: bool,
@@ -146,6 +147,7 @@ impl<'p> Startup<'p> {
             entitlements: None,
             kickback: None,
             speedwall: None,
+            current_speedwall: None,
             item_licenses: None,
             stats: None,
             current_stats: None,
@@ -229,6 +231,19 @@ impl<'p> Startup<'p> {
     ) -> Self {
         self.speedwall = Some((state, account));
         self
+    }
+
+    pub fn needs_speedwall_view(&self, request: &[u8]) -> bool {
+        self.users.is_none()
+            && self.speedwall.is_some()
+            && RequestRoute::of(request).is_some_and(|r| {
+                r.category == 0
+                    && (nfs_services::speedwall::owns(r.component, r.command)
+                        || nfs_services::speedwall::owns_walls(r.component, r.command))
+            })
+    }
+    pub fn speedwall_view(&mut self, current: nfs_services::speedwall::Current) {
+        self.current_speedwall = Some(current);
     }
 
     pub fn with_item_licenses(mut self, content: &'p nfs_services::item_licenses::Content) -> Self {
@@ -529,7 +544,38 @@ impl<'p> Startup<'p> {
             if self.users.is_some() {
                 return Ok(None);
             }
+            let refreshed = self
+                .current_speedwall
+                .as_ref()
+                .map(|c| state.with_current(c))
+                .transpose()
+                .map_err(|_| Failure::ProfileConfig)?;
+            let state = refreshed.as_ref().unwrap_or(state);
             return match state.reply(
+                request,
+                account,
+                self.identities.persona,
+                &self.identities.name,
+            ) {
+                Ok(reply) => Ok(Some(vec![reply])),
+                Err(nfs_services::speedwall::Error::Encode) => Err(Failure::Reply),
+                Err(_) => Ok(None),
+            };
+        }
+        if nfs_services::speedwall::owns_walls(route.component, route.command)
+            && let Some((state, account)) = self.speedwall
+        {
+            if self.users.is_some() {
+                return Ok(None);
+            }
+            let refreshed = self
+                .current_speedwall
+                .as_ref()
+                .map(|c| state.with_current(c))
+                .transpose()
+                .map_err(|_| Failure::ProfileConfig)?;
+            let state = refreshed.as_ref().unwrap_or(state);
+            return match state.reply_walls(
                 request,
                 account,
                 self.identities.persona,

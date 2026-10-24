@@ -26,6 +26,7 @@ impl PlayerListener {
     }
     pub(super) fn ai_focus(&self) -> Result<Vec<Focus>, replication::Error> {
         let mut focus = Vec::new();
+        let arriving: BTreeSet<_> = self.event_state.restart_arrivals().collect();
         let participants: BTreeSet<_> = self
             .world_cars
             .values()
@@ -38,6 +39,7 @@ impl PlayerListener {
                 Some(Stage::Crashing) => {}
                 Some(Stage::FreeRoam | Stage::ReturnPrompted)
                     if self.free_roam_presented.contains(&participant) => {}
+                _ if arriving.contains(&participant) => {}
                 _ => continue,
             }
             let Some((&car, _)) = self

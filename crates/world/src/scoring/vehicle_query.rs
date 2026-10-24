@@ -25,7 +25,7 @@ pub enum Query {
     Drift,
     Draft,
 }
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Output {
     pub field: u32,
     pub kind: Kind,
@@ -156,8 +156,8 @@ pub struct DriftSample {
 }
 impl DriftSample {
     pub(crate) fn validate(self) -> Result<(), Error> {
-        Kind::Transform.validate(Value::Transform(self.transform))?;
-        Kind::Vec3.validate(Value::Vec3(self.velocity))
+        Kind::Transform.validate(&Value::Transform(self.transform))?;
+        Kind::Vec3.validate(&Value::Vec3(self.velocity))
     }
     /// Signed radians: atan(lateral / abs(forward)), except that a forward
     /// magnitude below f32::EPSILON uses the lateral value directly. This is

@@ -8,6 +8,8 @@ use nfs_protocol::world::{BitSpan, rpc::Serial};
 
 pub const MAX_SERIALIZERS: usize = 512;
 pub const MAX_REFERENCES: usize = 1024;
+/// Bound of a synced string's 10-bit byte length.
+pub const MAX_STRING_BYTES: usize = 1023;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Kind {
@@ -26,7 +28,36 @@ pub enum Kind {
     RpcVariant,
     RpcGhostReference,
     RpcOptionalReference,
+    /// RPC identity followed by an optional participant reference and signed
+    /// 32-bit value. The sorter's query-by-index snapshot uses this pair.
+    RpcOptionalReferenceI32,
+    /// Optional byte string with a 10-bit length, in creations and updates.
+    StringProperty,
+    /// Game-mode root (client reader `0x14404c330`): bus count, RPC, the f64 start
+    /// time as 64 bits, an f32 the client adds to it, three (reference, selector)
+    /// bindings, two 8-bit-count reference lists and a flag.
+    GameModeRoot,
+    /// Countdown state (`0x444feb0`): RPC, 16-bit-count participant references and an
+    /// optional 64-bit start time.
+    CountdownState,
+    /// Waypoints state (`0x4465310`): RPC, 16-bit-count participant references, three
+    /// 32-bit words and an 8-bit-count record list. Only the empty list is modeled.
+    WaypointsState,
+    /// DNF transition (`0x4464d90`): RPC and an 8-bit-count list of (participant
+    /// reference, 64-bit value, high word first) (`0x14445f6d0`).
+    DnfTransition,
+    /// Channel waypoint list provider (`0x446b480`): RPC, a 4-bit lap count and an
+    /// 8-bit-count list of (scene reference, 9-bit selector).
+    WaypointList,
+    /// RPC and an optional 128-bit identifier (`0x42150f0`), as the scene codec reads it.
+    RpcGuid,
+    /// RPC whose update is the scene codec's optional set: an optional 7-bit-count list
+    /// of 64-bit values, low word first.
+    RpcSet64,
 }
+
+pub const MAX_WAYPOINTS: usize = 255;
+pub const MAX_SET64: usize = 127;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Profile(Vec<Kind>);
@@ -35,7 +66,8 @@ impl Profile {
         if kinds.is_empty() || kinds.len() > MAX_SERIALIZERS {
             return Err(Error::Bound);
         }
-        let root = |kind: &Kind| matches!(kind, Kind::Root | Kind::SequenceRoot);
+        let root =
+            |kind: &Kind| matches!(kind, Kind::Root | Kind::SequenceRoot | Kind::GameModeRoot);
         if !root(&kinds[0]) || kinds[1..].iter().any(root) {
             return Err(Error::Unsupported);
         }
@@ -50,6 +82,20 @@ impl Profile {
 pub struct Rpc {
     pub selector: u16,
     pub serial: Serial,
+}
+
+/// The game-mode root's initial values. `start` holds f64 bits on the host's
+/// replication clock; `age` holds f32 bits that the client adds to `start`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GameModeRoot {
+    pub value: u16,
+    pub rpc: Rpc,
+    pub start: u64,
+    pub age: u32,
+    pub bindings: [(u16, u16); 3],
+    pub participants: Vec<u16>,
+    pub others: Vec<u16>,
+    pub flag: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -102,6 +148,36 @@ pub enum Initial {
         rpc: Rpc,
         reference: Option<u16>,
     },
+    RpcOptionalReferenceI32 {
+        rpc: Rpc,
+        value: Option<(u16, i32)>,
+    },
+    StringProperty(Option<Vec<u8>>),
+    GameModeRoot(Box<GameModeRoot>),
+    CountdownState {
+        rpc: Rpc,
+        references: Vec<u16>,
+        start: Option<u64>,
+    },
+    WaypointsState {
+        rpc: Rpc,
+        references: Vec<u16>,
+        words: [u32; 3],
+    },
+    DnfTransition {
+        rpc: Rpc,
+        values: Vec<(u16, u64)>,
+    },
+    WaypointList {
+        rpc: Rpc,
+        laps: u8,
+        waypoints: Vec<(u16, u16)>,
+    },
+    RpcGuid {
+        rpc: Rpc,
+        guid: Option<[u8; 16]>,
+    },
+    RpcSet64(Rpc),
 }
 impl Initial {
     pub fn kind(&self) -> Kind {
@@ -119,6 +195,42 @@ impl Initial {
             Self::RpcVariant { .. } => Kind::RpcVariant,
             Self::RpcGhostReference { .. } => Kind::RpcGhostReference,
             Self::RpcOptionalReference { .. } => Kind::RpcOptionalReference,
+            Self::RpcOptionalReferenceI32 { .. } => Kind::RpcOptionalReferenceI32,
+            Self::StringProperty(_) => Kind::StringProperty,
+            Self::GameModeRoot(_) => Kind::GameModeRoot,
+            Self::CountdownState { .. } => Kind::CountdownState,
+            Self::WaypointsState { .. } => Kind::WaypointsState,
+            Self::DnfTransition { .. } => Kind::DnfTransition,
+            Self::WaypointList { .. } => Kind::WaypointList,
+            Self::RpcGuid { .. } => Kind::RpcGuid,
+            Self::RpcSet64(_) => Kind::RpcSet64,
+        }
+    }
+    /// The RPC identity, when this initial value carries one.
+    pub fn rpc(&self) -> Option<&Rpc> {
+        match self {
+            Self::Root { rpc, .. }
+            | Self::SequenceRoot { rpc, .. }
+            | Self::Rpc(rpc)
+            | Self::RpcReference { rpc, .. }
+            | Self::RpcFlags { rpc, .. }
+            | Self::RpcBool { rpc, .. }
+            | Self::RpcReferences { rpc, .. }
+            | Self::RpcVariant { rpc, .. }
+            | Self::RpcGhostReference { rpc, .. }
+            | Self::RpcOptionalReference { rpc, .. }
+            | Self::RpcOptionalReferenceI32 { rpc, .. }
+            | Self::CountdownState { rpc, .. }
+            | Self::WaypointsState { rpc, .. }
+            | Self::DnfTransition { rpc, .. }
+            | Self::WaypointList { rpc, .. }
+            | Self::RpcGuid { rpc, .. }
+            | Self::RpcSet64(rpc) => Some(rpc),
+            Self::GameModeRoot(root) => Some(&root.rpc),
+            Self::BoolProperty(_)
+            | Self::FloatProperty(_)
+            | Self::I32Property(_)
+            | Self::StringProperty(_) => None,
         }
     }
 }
@@ -130,6 +242,9 @@ pub enum Update {
     FloatProperty(Option<u32>),
     I32Property(Option<i32>),
     GhostReference(Option<u16>),
+    StringProperty(Option<Vec<u8>>),
+    /// The scene codec's optional set of 64-bit values.
+    Set64(Option<super::sublevel::Set64>),
 }
 impl Update {
     fn matches(&self, kind: Kind) -> bool {
@@ -146,12 +261,70 @@ impl Update {
                     | Kind::RpcReferences
                     | Kind::RpcVariant
                     | Kind::RpcOptionalReference
+                    | Kind::RpcOptionalReferenceI32
+                    | Kind::GameModeRoot
+                    | Kind::CountdownState
+                    | Kind::WaypointsState
+                    | Kind::DnfTransition
+                    | Kind::WaypointList
+                    | Kind::RpcGuid
             ) | (Self::BoolProperty(_), Kind::BoolProperty)
                 | (Self::FloatProperty(_), Kind::FloatProperty)
                 | (Self::GhostReference(_), Kind::RpcGhostReference)
                 | (Self::I32Property(_), Kind::I32Property)
+                | (Self::StringProperty(_), Kind::StringProperty)
+                | (Self::Set64(_), Kind::RpcSet64)
         )
     }
+}
+
+fn read_u64(r: &mut Reader<'_>) -> Result<u64, Error> {
+    let high = u64::from(r.take(32)?);
+    Ok((high << 32) | u64::from(r.take(32)?))
+}
+fn write_u64(w: &mut Writer, v: u64) -> Result<(), Error> {
+    w.put(v >> 32, 32)?;
+    w.put(v & 0xffff_ffff, 32)
+}
+fn read_wide_references(r: &mut Reader<'_>) -> Result<Vec<u16>, Error> {
+    let count = r.take(16)? as usize;
+    if count > MAX_REFERENCES {
+        return Err(Error::Bound);
+    }
+    (0..count).map(|_| r.reference()).collect()
+}
+fn write_wide_references(w: &mut Writer, references: &[u16]) -> Result<(), Error> {
+    if references.len() > MAX_REFERENCES {
+        return Err(Error::Bound);
+    }
+    w.put(references.len() as u64, 16)?;
+    references.iter().try_for_each(|r| w.reference(r))
+}
+fn read_set64(r: &mut Reader<'_>) -> Result<Option<super::sublevel::Set64>, Error> {
+    r.optional(|r| {
+        Ok(super::sublevel::Set64 {
+            entries: r.optional(|r| {
+                let count = r.take(7)? as usize;
+                (0..count)
+                    .map(|_| Ok(u64::from(r.take(32)?) | (u64::from(r.take(32)?) << 32)))
+                    .collect()
+            })?,
+        })
+    })
+}
+fn write_set64(w: &mut Writer, set: &Option<super::sublevel::Set64>) -> Result<(), Error> {
+    w.optional(set, |w, set| {
+        w.optional(&set.entries, |w, values| {
+            if values.len() > MAX_SET64 {
+                return Err(Error::Bound);
+            }
+            w.put(values.len() as u64, 7)?;
+            values.iter().try_for_each(|v| {
+                w.put(u64::from(*v as u32), 32)?;
+                w.put(*v >> 32, 32)
+            })
+        })
+    })
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -258,6 +431,86 @@ impl Body {
                         rpc: read_rpc(&mut r)?,
                         reference: r.optional(Reader::reference)?,
                     },
+                    Kind::RpcOptionalReferenceI32 => Initial::RpcOptionalReferenceI32 {
+                        rpc: read_rpc(&mut r)?,
+                        value: r.optional(|r| Ok((r.reference()?, r.take(32)? as i32)))?,
+                    },
+                    Kind::StringProperty => {
+                        Initial::StringProperty(r.optional(|r| r.string(10, MAX_STRING_BYTES))?)
+                    }
+                    Kind::GameModeRoot => {
+                        let value = r.take(16)? as u16;
+                        let rpc = read_rpc(&mut r)?;
+                        let start = read_u64(&mut r)?;
+                        let age = r.take(32)?;
+                        let mut bindings = [(0, 0); 3];
+                        for binding in &mut bindings {
+                            *binding = (r.reference()?, r.take(9)? as u16);
+                        }
+                        Initial::GameModeRoot(Box::new(GameModeRoot {
+                            value,
+                            rpc,
+                            start,
+                            age,
+                            bindings,
+                            participants: r.references()?,
+                            others: r.references()?,
+                            flag: r.bit()?,
+                        }))
+                    }
+                    Kind::CountdownState => Initial::CountdownState {
+                        rpc: read_rpc(&mut r)?,
+                        references: read_wide_references(&mut r)?,
+                        start: r.optional(read_u64)?,
+                    },
+                    Kind::WaypointsState => {
+                        let rpc = read_rpc(&mut r)?;
+                        let references = read_wide_references(&mut r)?;
+                        let words = [r.take(32)?, r.take(32)?, r.take(32)?];
+                        // Record elements (three bytes, a value and a car ID per the
+                        // client reader) are not modeled; official creations hold none.
+                        if r.take(8)? != 0 {
+                            return Err(Error::Unsupported);
+                        }
+                        Initial::WaypointsState {
+                            rpc,
+                            references,
+                            words,
+                        }
+                    }
+                    Kind::DnfTransition => {
+                        let rpc = read_rpc(&mut r)?;
+                        let count = r.take(8)? as usize;
+                        Initial::DnfTransition {
+                            rpc,
+                            values: (0..count)
+                                .map(|_| Ok((r.reference()?, read_u64(&mut r)?)))
+                                .collect::<Result<_, Error>>()?,
+                        }
+                    }
+                    Kind::WaypointList => {
+                        let rpc = read_rpc(&mut r)?;
+                        let laps = r.take(4)? as u8;
+                        let count = r.take(8)? as usize;
+                        Initial::WaypointList {
+                            rpc,
+                            laps,
+                            waypoints: (0..count)
+                                .map(|_| Ok((r.reference()?, r.take(9)? as u16)))
+                                .collect::<Result<_, Error>>()?,
+                        }
+                    }
+                    Kind::RpcGuid => Initial::RpcGuid {
+                        rpc: read_rpc(&mut r)?,
+                        guid: r.optional(|r| {
+                            let mut bytes = [0; 16];
+                            for byte in &mut bytes {
+                                *byte = r.take(8)? as u8;
+                            }
+                            Ok(bytes)
+                        })?,
+                    },
+                    Kind::RpcSet64 => Initial::RpcSet64(read_rpc(&mut r)?),
                 });
             }
             Some(values)
@@ -278,7 +531,15 @@ impl Body {
                     | Kind::RpcBool
                     | Kind::RpcReferences
                     | Kind::RpcVariant
-                    | Kind::RpcOptionalReference => Update::Noop,
+                    | Kind::RpcOptionalReference
+                    | Kind::RpcOptionalReferenceI32
+                    | Kind::GameModeRoot
+                    | Kind::CountdownState
+                    | Kind::WaypointsState
+                    | Kind::DnfTransition
+                    | Kind::WaypointList
+                    | Kind::RpcGuid => Update::Noop,
+                    Kind::RpcSet64 => Update::Set64(read_set64(&mut r)?),
                     Kind::RpcGhostReference => {
                         Update::GhostReference(r.optional(Reader::reference)?)
                     }
@@ -286,6 +547,9 @@ impl Body {
                     Kind::FloatProperty => Update::FloatProperty(r.optional(|r| r.take(32))?),
                     Kind::I32Property => {
                         Update::I32Property(r.optional(|r| Ok(r.take(32)? as i32))?)
+                    }
+                    Kind::StringProperty => {
+                        Update::StringProperty(r.optional(|r| r.string(10, MAX_STRING_BYTES))?)
                     }
                 })
             } else {
@@ -402,6 +666,87 @@ impl Body {
                         write_rpc(&mut w, rpc)?;
                         w.optional(reference, Writer::reference)?;
                     }
+                    Initial::RpcOptionalReferenceI32 { rpc, value } => {
+                        write_rpc(&mut w, rpc)?;
+                        w.optional(value, |w, (reference, value)| {
+                            w.reference(reference)?;
+                            w.put(u64::from(*value as u32), 32)
+                        })?;
+                    }
+                    Initial::StringProperty(v) => {
+                        w.optional(v, |w, v| w.string(v, 10, MAX_STRING_BYTES))?
+                    }
+                    Initial::GameModeRoot(root) => {
+                        w.put(u64::from(root.value), 16)?;
+                        write_rpc(&mut w, &root.rpc)?;
+                        write_u64(&mut w, root.start)?;
+                        w.put(u64::from(root.age), 32)?;
+                        for (reference, selector) in &root.bindings {
+                            w.reference(reference)?;
+                            w.put(u64::from(*selector), 9)?;
+                        }
+                        if root.participants.len() > 255 || root.others.len() > 255 {
+                            return Err(Error::Bound);
+                        }
+                        w.references(&root.participants)?;
+                        w.references(&root.others)?;
+                        w.bit(root.flag)?;
+                    }
+                    Initial::CountdownState {
+                        rpc,
+                        references,
+                        start,
+                    } => {
+                        write_rpc(&mut w, rpc)?;
+                        write_wide_references(&mut w, references)?;
+                        w.optional(start, |w, v| write_u64(w, *v))?;
+                    }
+                    Initial::WaypointsState {
+                        rpc,
+                        references,
+                        words,
+                    } => {
+                        write_rpc(&mut w, rpc)?;
+                        write_wide_references(&mut w, references)?;
+                        for word in words {
+                            w.put(u64::from(*word), 32)?;
+                        }
+                        w.put(0, 8)?;
+                    }
+                    Initial::DnfTransition { rpc, values } => {
+                        if values.len() > 255 {
+                            return Err(Error::Bound);
+                        }
+                        write_rpc(&mut w, rpc)?;
+                        w.put(values.len() as u64, 8)?;
+                        for (participant, v) in values {
+                            w.reference(participant)?;
+                            write_u64(&mut w, *v)?;
+                        }
+                    }
+                    Initial::WaypointList {
+                        rpc,
+                        laps,
+                        waypoints,
+                    } => {
+                        if waypoints.len() > MAX_WAYPOINTS {
+                            return Err(Error::Bound);
+                        }
+                        write_rpc(&mut w, rpc)?;
+                        w.put(u64::from(*laps), 4)?;
+                        w.put(waypoints.len() as u64, 8)?;
+                        for (reference, selector) in waypoints {
+                            w.reference(reference)?;
+                            w.put(u64::from(*selector), 9)?;
+                        }
+                    }
+                    Initial::RpcGuid { rpc, guid } => {
+                        write_rpc(&mut w, rpc)?;
+                        w.optional(guid, |w, bytes| {
+                            bytes.iter().try_for_each(|b| w.put(u64::from(*b), 8))
+                        })?;
+                    }
+                    Initial::RpcSet64(rpc) => write_rpc(&mut w, rpc)?,
                 }
             }
         }
@@ -423,6 +768,10 @@ impl Body {
                     Update::I32Property(v) => {
                         w.optional(v, |w, v| w.put(u64::from(*v as u32), 32))?
                     }
+                    Update::StringProperty(v) => {
+                        w.optional(v, |w, v| w.string(v, 10, MAX_STRING_BYTES))?
+                    }
+                    Update::Set64(set) => write_set64(&mut w, set)?,
                 }
             }
         }
@@ -432,6 +781,8 @@ impl Body {
 
 #[cfg(test)]
 mod float_tests;
+#[cfg(test)]
+mod game_mode_tests;
 #[cfg(test)]
 mod query_tests;
 #[cfg(test)]

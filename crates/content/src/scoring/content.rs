@@ -5,9 +5,12 @@
 //! Everything the server needs to run the two installed driving participants:
 //! their compiled programs, replication layouts, the map from graph nodes to
 //! serializer fields and the map from keeper link IDs to score categories.
+//! The event driving-style participant compiles the same way against the
+//! event's game-mode logic layout.
 use super::{
     events::Composition,
-    program::{Sources, compile},
+    participant_properties::Property,
+    program::{Sources, compile, compile_with_properties},
 };
 use crate::{
     Error,
@@ -25,6 +28,9 @@ use std::sync::Arc;
 
 pub const ACQUISITION: &str = "gameplay/drivingdataacquisition";
 pub const SCORING: &str = "gameplay/scoring/drivingstylescoringparticipantlogic";
+/// The race events' driving-style participant: the free-roam scoring prefab
+/// plus the event tracking logic (E994 ghost 1605).
+pub const EVENT_SCORING: &str = "gameplay/scoring/eventdrivingstylescoringparticipantlogic";
 
 /// One graph node that owns a replicated serializer field.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -51,6 +57,59 @@ pub struct ScoringContent {
     pub scoring: Participant,
     /// Keeper link ID (from the installed channel) to the category it credits.
     pub categories: BTreeMap<u32, Category>,
+}
+
+/// Any authored event participant logic, including setup, scoring, controls,
+/// results and cleanup. It need not own REP keepers. The event host supplies
+/// the instance's channels and lifetime through its actual spawner.
+#[derive(Clone, Debug)]
+pub struct EventParticipant {
+    pub blueprint: String,
+    pub program: Arc<Program>,
+    pub fields: Vec<Field>,
+    pub bus_entities: Vec<Option<u16>>,
+    pub event_sync: Vec<super::event_sync::Binding>,
+}
+
+impl EventParticipant {
+    /// Reusing a compiled blueprint across events is valid only when each
+    /// spawner's serializer layout still matches its graph identities.
+    pub fn validate_layout(&self, layout: &crate::events::Layout) -> Result<(), Error> {
+        if self.blueprint != layout.blueprint || self.fields.len() != layout.fields.len() {
+            return Err(bad("event participant layout identity"));
+        }
+        for (ordinal, (field, layout)) in self.fields.iter().zip(&layout.fields).enumerate() {
+            let node = self
+                .program
+                .nodes
+                .get(usize::from(field.node))
+                .ok_or_else(|| bad("event serializer graph node"))?;
+            if field.serializer != ordinal
+                || field.kind != layout.kind
+                || node.identity.asset != layout.asset
+                || node.identity.index as usize != layout.object
+                || node.class != layout.class
+            {
+                return Err(bad("event graph and serializer identities disagree"));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The event driving-style participant (#138). The event creates it in its
+/// game mode; `fields` map graph nodes to that layout's serializers.
+#[derive(Clone, Debug)]
+pub struct EventScoring {
+    pub blueprint: String,
+    pub program: Arc<Program>,
+    pub fields: Vec<Field>,
+    pub bus_entities: Vec<Option<u16>>,
+    /// Keeper link ID to the category it credits.
+    pub categories: BTreeMap<u32, Category>,
+    /// The integer participant properties the program writes, by graph node
+    /// (the category totals the event results present, and award data).
+    pub properties: Vec<(u16, Property)>,
 }
 
 /// Serializer fields in replication order: the composition's object rows in
@@ -223,6 +282,82 @@ impl AssetIndex {
         ))
     }
 
+    fn compile_event_participant(
+        &mut self,
+        layout: &crate::events::Layout,
+        owned_properties: bool,
+    ) -> Result<(EventParticipant, Composition), Error> {
+        let sources: Sources = self.scoring_sources(&layout.blueprint)?;
+        let program = if owned_properties {
+            let properties = self
+                .owned_participant_properties(&layout.blueprint)?
+                .into_iter()
+                .collect();
+            compile_with_properties(&sources, &properties)?
+        } else {
+            compile(&sources)?
+        };
+        let event_sync = self.scoring_event_sync(&layout.blueprint, &sources.composition)?;
+        let fields = serializer_fields(&sources.composition, &self.identity.participant_logic)?;
+        if fields.len() != layout.fields.len()
+            || fields
+                .iter()
+                .zip(&layout.fields)
+                .any(|(field, layout)| field.kind != layout.kind)
+        {
+            return Err(bad(
+                "event scoring serializer fields disagree with the event layout",
+            ));
+        }
+        let participant = EventParticipant {
+            blueprint: layout.blueprint.clone(),
+            program: Arc::new(program),
+            fields,
+            bus_entities: sources.composition.bus_entities.clone(),
+            event_sync,
+        };
+        participant.validate_layout(layout)?;
+        Ok((participant, sources.composition))
+    }
+
+    /// Compile setup/scoring/results/cleanup logic without requiring REP
+    /// keepers or selecting one special driving-style blueprint.
+    pub fn event_participant(
+        &mut self,
+        layout: &crate::events::Layout,
+    ) -> Result<EventParticipant, Error> {
+        self.compile_event_participant(layout, true).map(|(p, _)| p)
+    }
+
+    /// Compile the event driving-style participant for its event layout.
+    pub fn event_scoring(&mut self, layout: &crate::events::Layout) -> Result<EventScoring, Error> {
+        let (compiled, composition) = self.compile_event_participant(layout, false)?;
+        let program = &compiled.program;
+        let categories = keeper_categories(program, &composition)?;
+        let mut properties = Vec::new();
+        for (identity, property) in self.integer_participant_properties(&layout.blueprint)? {
+            let node = composition
+                .nodes
+                .iter()
+                .position(|n| n.identity == identity)
+                .ok_or_else(|| bad("participant property accessor outside the program"))?;
+            match program.nodes.get(node).map(|n| &n.behavior) {
+                Some(Behavior::Scalar(
+                    nfs_world::scoring::nodes::Definition::IntegerParticipantProperty,
+                )) => properties.push((node as u16, property)),
+                _ => return Err(bad("participant property accessor behavior")),
+            }
+        }
+        Ok(EventScoring {
+            blueprint: compiled.blueprint,
+            program: compiled.program,
+            fields: compiled.fields,
+            bus_entities: compiled.bus_entities,
+            categories,
+            properties,
+        })
+    }
+
     /// Read both installed driving participants for one gameplay scene.
     pub fn scoring_content(&mut self, scene: &str) -> Result<ScoringContent, Error> {
         let (acquisition, acquisition_composition) =
@@ -248,6 +383,52 @@ mod tests {
         program::tests::fixture,
     };
     use nfs_world::scoring::program::{Keeper, Node};
+
+    #[test]
+    fn compiled_event_logic_rejects_same_kind_but_different_serializer_identity() {
+        let sources = fixture();
+        let program = Arc::new(compile(&sources).unwrap());
+        let compiled = EventParticipant {
+            blueprint: "root".into(),
+            program,
+            fields: vec![Field {
+                node: 2,
+                serializer: 0,
+                kind: Kind::FloatProperty,
+            }],
+            bus_entities: vec![Some(1)],
+            event_sync: vec![],
+        };
+        let mut layout = crate::events::Layout {
+            blueprint: "root".into(),
+            asset: nfs_world::replication::entity::creation::Asset {
+                bundle: 1,
+                type_id: 1,
+                local_index: 0,
+            },
+            catalog: vec![],
+            bus_count: 1,
+            sub_id: 1,
+            occurrence: 0,
+            fields: vec![crate::events::Field {
+                kind: Kind::FloatProperty,
+                class: "SyncedFloatEntityData".into(),
+                asset: "root".into(),
+                object: 2,
+                binding: None,
+                mirrors: None,
+            }],
+        };
+        compiled.validate_layout(&layout).unwrap();
+        layout.fields[0].object = 3;
+        assert!(compiled.validate_layout(&layout).is_err());
+        layout.fields[0].object = 2;
+        layout.fields[0].class = "SyncedBoolEntityData".into();
+        assert!(compiled.validate_layout(&layout).is_err());
+        layout.fields[0].class = "SyncedFloatEntityData".into();
+        layout.blueprint = "other".into();
+        assert!(compiled.validate_layout(&layout).is_err());
+    }
 
     #[test]
     fn serializer_fields_follow_traversal_order_and_skip_interfaces() {

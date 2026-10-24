@@ -184,6 +184,45 @@ impl Settings {
     }
 }
 
+/// Native VehicleTuningQuery (0474b9a0): weighted drift/grip index from the
+/// first installed item of each tuning class. Missing items contribute five.
+/// This reads item settings directly, without an asset-presence gate, and is
+/// separate from the component's tuning serialization and transmission mode.
+pub fn drift_grip(collection: &Collection, classes: &Catalog, vehicle: u64) -> Result<f32, Error> {
+    let mut settings = Settings::default();
+    let mut seen = Vec::new();
+    for (item, class) in super::parts::installed(collection, classes, vehicle)? {
+        if applies(class) && !seen.contains(&class) {
+            seen.push(class);
+            apply(&item.derived, &mut |setting, value| {
+                settings.set(setting, value)
+            })?;
+        }
+    }
+    use Setting::*;
+    // Keep the native floating-point accumulation order.
+    let terms = [
+        (Downforce, 1.0),
+        (BrakeStrength, 1.0),
+        (BrakeBias, 1.0),
+        (HandbrakeStrength, 1.0),
+        (DifferentialType, 2.0),
+        (Abs, 0.5),
+        (StabilityControl, 1.0),
+        (TractionControl, 0.5),
+        (AirPressureFront, 2.0),
+        (AirPressureRear, 2.0),
+        (SteerRate, 2.0),
+        (SteerRange, 2.0),
+        (Tire, 2.0),
+    ];
+    let mut total = 0.0;
+    for (setting, weight) in terms {
+        total += f32::from(settings.0[setting as usize]) * weight;
+    }
+    Ok(total / 18.0)
+}
+
 fn apply(
     value: &Derived,
     set: &mut impl FnMut(Setting, u32) -> Result<(), Error>,

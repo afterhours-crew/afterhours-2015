@@ -155,6 +155,37 @@ fn malformed_and_nonfinite_curves_do_not_produce_scores() {
 }
 
 #[test]
+fn authored_knots_keep_native_bisection_order_and_zero_width_fallback() {
+    let make = |points: &[(f32, f32)]| {
+        Curve::from_authored(
+            [0., 1.],
+            [10., 20.],
+            1.,
+            3.,
+            Interpolation::Linear,
+            points
+                .iter()
+                .map(|&(x, y)| Knot {
+                    x,
+                    y,
+                    coefficient: 0.,
+                })
+                .collect(),
+        )
+        .unwrap()
+    };
+    // The decreasing middle pair is preserved. Native midpoint comparison at
+    // index 1 selects 0..1 for x=.5; sorting would select another segment.
+    let c = make(&[(0., 0.), (0.75, 0.75), (0.25, 0.1), (1., 1.)]);
+    assert_eq!(c.evaluate(0.5), Ok(45.));
+    let c = make(&[(0., 0.), (0.5, 0.25), (0.5, 0.75), (1., 1.)]);
+    assert_eq!(c.evaluate(0.5), Ok(52.5));
+    // Degenerate outer segment returns raw zero, not the minimum output range.
+    assert_eq!(make(&[(0., 0.2), (0., 0.8)]).evaluate(0.), Ok(0.));
+    assert_eq!(make(&[(1., 0.2), (0., 0.8)]).evaluate(0.5), Ok(0.));
+}
+
+#[test]
 fn outer_segments_extrapolate_to_header_bounds() {
     let rows = vec![
         Knot {

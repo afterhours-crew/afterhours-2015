@@ -32,6 +32,11 @@ pub const MAX_GHOST_DELETIONS: usize = 1024;
 pub const MAX_COLLECTION_RECORDS: usize = 1024;
 pub const EX_STATE: u8 = 88;
 pub const EX_COLLECTION: u8 = 63;
+/// `RaceNetworkSpeedWallsToServerDataSyncMessage` (registry key djb2-xor of its
+/// name; E997): the client sends it once SpeedWall data has loaded.
+pub const EX_SPEED_WALLS_TO_SERVER: u8 = 103;
+/// Entries one SpeedWall or recommendations sync message may carry (local bound).
+pub const MAX_SPEED_WALL_ENTRIES: usize = 4096;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -120,6 +125,8 @@ pub enum Message<'a> {
     BankBalance(crate::bank::Balance),
     /// Host control call on a scoring query serializer of an owned entity.
     QueryControl(crate::participants::EntityCall),
+    /// An owned event's game-mode, logic or scene call.
+    GameModeCall(crate::game_mode::Call),
     Opaque {
         index: u8,
         body: BitSpan<'a>,
@@ -144,7 +151,8 @@ impl Message<'_> {
             | Self::GaragePresence(_)
             | Self::SequenceStop(_)
             | Self::WorldActivation(_)
-            | Self::QueryControl(_) => 47,
+            | Self::QueryControl(_)
+            | Self::GameModeCall(_) => 47,
             Self::LogicEvent(v) => v.index(),
             Self::Opaque { index, .. } => *index,
         }
@@ -344,12 +352,31 @@ fn message<'a>(r: &mut Reader<'a>, index: u8) -> Result<Message<'a>, Error> {
             let body = r.span.slice(start, r.pos - start)?;
             Message::Opaque { index, body }
         }
+        // `RaceNetworkRecommendationsSyncRequestMessage`, parser `0x554cdc0` (E998):
+        // a 64-bit value, a 32-bit count and that many (u32, f32, u32, u64, two
+        // Booleans) entries.
         89 => {
             let start = r.pos;
             r.take64(64)?;
-            if r.take(32)? != 0 {
-                return Err(Error::Unsupported(index));
+            let count = r.take(32)? as usize;
+            if count > MAX_SPEED_WALL_ENTRIES {
+                return Err(Error::Bound);
             }
+            r.slice(count * 162)?;
+            let body = r.span.slice(start, r.pos - start)?;
+            Message::Opaque { index, body }
+        }
+        // Parser `0x5555a70`: a 64-bit value, a 32-bit count and that many
+        // (u32, f32, f32) entries. Kept opaque: the host does not act on it, but
+        // an undecodable copy would block the reliable channel behind it (E998).
+        EX_SPEED_WALLS_TO_SERVER => {
+            let start = r.pos;
+            r.take64(64)?;
+            let count = r.take(32)? as usize;
+            if count > MAX_SPEED_WALL_ENTRIES {
+                return Err(Error::Bound);
+            }
+            r.slice(count * 96)?;
             let body = r.span.slice(start, r.pos - start)?;
             Message::Opaque { index, body }
         }
@@ -661,6 +688,9 @@ pub fn sublevel_report_ids(body: BitSpan<'_>) -> Vec<u16> {
     let Ok(count) = body.read_u32(32, 32) else {
         return Vec::new();
     };
+    if count as usize > body.len().saturating_sub(64) / 16 {
+        return Vec::new();
+    }
     (0..count as usize)
         .filter_map(|i| body.read_u32(64 + 16 * i, 16).ok().map(|v| v as u16))
         .collect()
@@ -784,6 +814,9 @@ impl<'a> Builder<'a> {
                 w.put_span(value.encode().map_err(|_| Error::Shape)?.span());
             }
             Message::QueryControl(value) => {
+                w.put_span(value.encode().map_err(|_| Error::Shape)?.span());
+            }
+            Message::GameModeCall(value) => {
                 w.put_span(value.encode().map_err(|_| Error::Shape)?.span());
             }
             Message::SequenceStop(value) => {

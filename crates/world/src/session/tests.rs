@@ -832,6 +832,58 @@ fn actor_rpc_requires_all_three_typed_ghosts_in_the_same_observer_queue() {
 }
 
 #[test]
+fn sequence_stop_accepts_any_sequence_root_entity_and_refuses_other_entities() {
+    use crate::{
+        participants::HostRpc,
+        replication::entity::{
+            Kind, Profile,
+            creation::{Asset, Catalog, Content},
+        },
+        sequences::Stop,
+    };
+    use nfs_protocol::world::rpc::Serial;
+    let asset = |local_index| Asset {
+        bundle: 3,
+        type_id: 4,
+        local_index,
+    };
+    // An event intro's layout (E995): sequence root, optional reference, five
+    // channel references and a reference list; and a plain logic layout.
+    let intro = Profile::new(&[
+        Kind::SequenceRoot,
+        Kind::RpcOptionalReference,
+        Kind::RpcReference,
+        Kind::RpcReference,
+        Kind::RpcReference,
+        Kind::RpcReference,
+        Kind::RpcReference,
+        Kind::RpcReferences,
+    ])
+    .unwrap();
+    let logic = Profile::new(&[Kind::Root, Kind::Rpc]).unwrap();
+    let content = Content::new(
+        vec![Catalog::new(3, &[(4, 2)]).unwrap()],
+        vec![(asset(0), intro), (asset(1), logic)],
+    )
+    .unwrap();
+    let mut host = host();
+    host.replication_bindings = Bindings::default().with_entities(content);
+    host.replication_bindings.bind_entity(7, asset(0)).unwrap();
+    host.replication_bindings.bind_entity(8, asset(1)).unwrap();
+    let stop = |sequence| {
+        HostRpc::SequenceStop(Stop {
+            sequence,
+            serial: Serial::new(1).unwrap(),
+        })
+    };
+    host.queue_rpc(stop(7)).unwrap();
+    assert_eq!(host.rpc_queue.len(), 1);
+    assert!(host.queue_rpc(stop(8)).is_err());
+    assert!(host.queue_rpc(stop(9)).is_err());
+    assert_eq!(host.rpc_queue.len(), 1);
+}
+
+#[test]
 fn typed_queue_limits_and_rejections_preserve_observer_bindings() {
     let mut host = host();
     let section = owned_section(1);
@@ -1008,6 +1060,7 @@ fn refused_frames_do_not_commit_world_pacing_signals() {
     let mut observing = Observing {
         inner: &mut retain,
         seen: Seen::default(),
+        waiting_level: None,
     };
     assert!(!observing.frame(application::Queued {
         advertised: None,
@@ -1023,6 +1076,208 @@ fn refused_frames_do_not_commit_world_pacing_signals() {
         data: wire.span()
     }));
     assert_eq!(observing.seen.state_reports, 1);
+}
+
+#[test]
+fn a_blocked_scene_can_learn_its_load_confirmation_without_accepting_gameplay() {
+    use crate::replication::{Record, sublevel::root};
+    for level in [175, 206, 511] {
+        let (mut host, mut client, _, now) = established_with_content();
+        let content = root::traffic_content(&crate::test_data::TRAFFIC_KEYS).unwrap();
+        let mut section = owned_section(1);
+        section.records = vec![
+            Record::from_scene(
+                1,
+                root::traffic_creation(&crate::test_data::TRAFFIC_KEYS, 0, level).unwrap(),
+                &content,
+            )
+            .unwrap(),
+        ];
+        host.queue_replication(section).unwrap();
+        let now = now + REPORT_TIMEOUT_MS;
+        host.poll(now);
+        host.poll(now + STATE_WAIT_MS);
+        let now = now + 2 * STATE_WAIT_MS;
+        assert_eq!(
+            host.poll(now).events,
+            vec![Event::ReplicationWaiting { level }]
+        );
+
+        // A load confirmation shares the reliable frame with gameplay which
+        // cannot commit while its resulting output queue is full. Learning
+        // unrelated load IDs or pacing signals must still wait for acceptance.
+        let mut report = crate::bits::BitWriter::new();
+        report
+            .put(1, 32)
+            .put(2, 32)
+            .put(level.into(), 16)
+            .put(600, 16);
+        let frame = frame::Builder::new()
+            .messages(
+                None,
+                vec![frame::Group {
+                    channel: 0,
+                    sequence: Some(0),
+                    messages: vec![
+                        frame::Message::State(7),
+                        frame::Message::Opaque {
+                            index: frame::EX_SUBLEVEL_REPORT,
+                            body: report.span(),
+                        },
+                    ],
+                }],
+            )
+            .build()
+            .unwrap();
+        let input = |number| {
+            let mut queued = crate::bits::BitWriter::new();
+            queued
+                .put(0, 1)
+                .put(0, 1)
+                .put(number, 16)
+                .put(0, 6)
+                .put(frame.len() as u64, 15)
+                .put(1, 1)
+                .put_span(frame.span());
+            application::sequenced(HOST_SELECTOR, number as u16, 0, 0, &queued)
+        };
+        let accepted = host.application().unwrap().stats().frames_accepted;
+        let state_reports = match &host.stage {
+            Stage::Running { world, .. } => world.state_reports,
+            _ => panic!(),
+        };
+        let mut backpressure = Retain::default();
+        host.receive(&client.app(&input(3)), now + 1, &mut backpressure);
+        assert_eq!(backpressure.frames, 1);
+        assert_eq!(
+            host.application().unwrap().stats().frames_accepted,
+            accepted,
+            "readiness must not acknowledge rejected gameplay"
+        );
+        let Stage::Running { world, .. } = &host.stage else {
+            panic!()
+        };
+        assert!(
+            world.reported.contains(&level),
+            "refusing the confirmation deadlocks the queue that needs it"
+        );
+        assert!(!world.reported.contains(&600));
+        assert_eq!(world.state_reports, state_reports);
+        assert!(host.poll(now + 2).events.iter().any(|e| matches!(
+            e,
+            Event::Replication {
+                records: 1,
+                remaining: 0,
+                ..
+            }
+        )));
+
+        // The rejected gameplay remains available in a later handler frame's
+        // retry, with the same MessageEX sequence, after the output drains.
+        let mut accept = AcceptSignals;
+        host.receive(&client.app(&input(4)), now + 3, &mut accept);
+        assert_eq!(
+            host.application().unwrap().stats().frames_accepted,
+            accepted + 1
+        );
+        let Stage::Running { world, .. } = &host.stage else {
+            panic!()
+        };
+        assert!(world.reported.contains(&600));
+        assert_eq!(world.state_reports, state_reports + 1);
+    }
+}
+
+#[test]
+fn learning_a_blocked_load_does_not_skip_reliable_gaps_or_repeat_gameplay() {
+    #[derive(Default)]
+    struct Ordered {
+        receiver: frame::receive::Receiver,
+        allowed: bool,
+        committed: usize,
+    }
+    impl Listener for Ordered {
+        fn frame(&mut self, queued: application::Queued<'_>) -> bool {
+            let parsed = frame::parse_prefix(queued.data, frame::Direction::FromClient).unwrap();
+            let Ok((next, messages)) = self.receiver.prepare(parsed.messages.as_ref().unwrap(), 1)
+            else {
+                return false;
+            };
+            if !self.allowed {
+                return false;
+            }
+            self.committed += messages.len();
+            self.receiver = next;
+            true
+        }
+    }
+    let group = |sequence, messages| frame::Group {
+        channel: 0,
+        sequence: Some(sequence),
+        messages,
+    };
+    let mut gameplay = Ordered::default();
+    let (receiver, _) = gameplay
+        .receiver
+        .prepare(
+            &frame::Messages {
+                state: None,
+                groups: vec![group(57, vec![frame::Message::State(1)])],
+            },
+            0,
+        )
+        .unwrap();
+    gameplay.receiver = receiver;
+    let mut load = crate::bits::BitWriter::new();
+    load.put(1, 32).put(1, 32).put(206, 16);
+    let future = frame::Builder::new()
+        .messages(
+            None,
+            vec![group(
+                73,
+                vec![
+                    frame::Message::Opaque {
+                        index: frame::EX_SUBLEVEL_REPORT,
+                        body: load.span(),
+                    },
+                    frame::Message::State(7),
+                ],
+            )],
+        )
+        .build()
+        .unwrap();
+    let missing = frame::Builder::new()
+        .messages(None, vec![group(58, vec![frame::Message::State(2); 15])])
+        .build()
+        .unwrap();
+    let mut observing = Observing {
+        inner: &mut gameplay,
+        seen: Seen::default(),
+        waiting_level: Some(206),
+    };
+    assert!(!observing.frame(application::Queued {
+        advertised: None,
+        frame: 1,
+        data: future.span(),
+    }));
+    assert_eq!(observing.seen.reported, [206]);
+    assert_eq!(observing.seen.state_reports, 0);
+    assert_eq!(gameplay.committed, 0);
+
+    // Resource readiness releases output capacity. Fill the original gap first,
+    // then accept its successor, and suppress an old reliable-message retry.
+    gameplay.allowed = true;
+    for (number, data) in [missing.span(), future.span(), missing.span()]
+        .into_iter()
+        .enumerate()
+    {
+        assert!(gameplay.frame(application::Queued {
+            advertised: None,
+            frame: number as u16 + 2,
+            data,
+        }));
+    }
+    assert_eq!(gameplay.committed, 17);
 }
 
 #[test]
@@ -1218,6 +1473,60 @@ fn adjacent_car_motion_shares_one_bounded_frame_and_preserves_barriers() {
     };
     c.flag = Some(true);
     assert!(super::motion::combine(&section(1), &changed).is_none());
+}
+
+#[test]
+fn waiting_rpc_preserves_its_motion_boundary_without_disabling_later_coalescing() {
+    use crate::{
+        logic::{EntityRef, Fire},
+        participants::HostRpc,
+    };
+    let (mut host, snapshot) = motion_fixture();
+    let callback = HostRpc::Event(Fire {
+        target: EntityRef {
+            ghost: 1,
+            entity: 0,
+        },
+        event: 7,
+        player: None,
+    });
+    host.queue_replication(snapshot(1, 1)).unwrap();
+    host.queue_rpc(callback).unwrap();
+    // The first snapshot after a callback cannot replace one queued before it.
+    host.queue_replication(snapshot(1, 2)).unwrap();
+    assert_eq!(host.replication_progress(), (0, 2));
+    // The callback may await an unsent creation or a blocked transport. Later
+    // absolute snapshots can still supersede each other on this side of it.
+    for revision in 3..=120 {
+        for id in 1..=3 {
+            host.queue_replication(snapshot(id, revision)).unwrap();
+        }
+        assert_eq!(host.replication_progress(), (0, 2));
+    }
+    assert_eq!(host.replication_queue[0].0.records, snapshot(1, 1).records);
+    for id in 1..=3 {
+        assert_eq!(
+            host.replication_queue[1]
+                .0
+                .records
+                .iter()
+                .find(|r| r.id == id),
+            snapshot(id, 120).records.first()
+        );
+    }
+    host.queue_rpc(callback).unwrap();
+    host.queue_replication(snapshot(1, 121)).unwrap();
+    host.queue_replication(snapshot(1, 122)).unwrap();
+    assert_eq!(host.replication_progress(), (0, 3));
+    assert_eq!(host.rpc_queue, [callback, callback]);
+    assert_eq!(
+        host.replication_queue[2].0.records,
+        snapshot(1, 122).records
+    );
+    assert_eq!(
+        host.replication_bits,
+        host.replication_queue.iter().map(|(_, bits, _)| bits).sum()
+    );
 }
 
 #[test]
@@ -2460,5 +2769,172 @@ fn queued_notifications_for_sent_objects_ride_ahead_of_the_next_replication_fram
             count: 1,
             remaining: 0
         }]
+    );
+}
+
+#[test]
+fn ordered_content_cannot_overtake_notifications_under_a_full_send_window() {
+    ordered_content_barrier(47, &[0x88; 50]);
+}
+
+#[test]
+fn speedwall_progress_keeps_its_reliable_finish_boundary_under_pressure() {
+    let progress = crate::speedwall::Progress {
+        score_bits: 0,
+        time_ms_bits: 123_000f32.to_bits(),
+        rep_bits: 9000f32.to_bits(),
+        position: 2,
+        event_id: 0xf123_4567,
+        vehicle: b"ID_CAR_TEST".to_vec(),
+    };
+    ordered_content_barrier(
+        crate::speedwall::CONTENT_TARGET,
+        &progress.encode().unwrap(),
+    );
+}
+
+fn ordered_content_barrier(target: u8, payload: &[u8]) {
+    use crate::{
+        logic::{EntityRef, Fire},
+        participants::HostRpc,
+        replication::{
+            Record,
+            sublevel::{Rpc, root},
+        },
+    };
+    use nfs_protocol::world::rpc::Serial;
+    let (mut host, mut client, mut listener, now) = established_with_content();
+    let content = root::content().unwrap();
+    let creation = root::creation(
+        Rpc {
+            selector: 0,
+            serial: Serial::new(0).unwrap(),
+        },
+        [None; root::REFERENCES],
+    )
+    .unwrap();
+    let mut initial = owned_section(0);
+    initial
+        .records
+        .push(Record::from_scene(1, creation, &content).unwrap());
+    host.queue_replication(initial).unwrap();
+    let t = now + REPORT_TIMEOUT_MS;
+    host.poll(t);
+    host.poll(t + STATE_WAIT_MS);
+    let t = t + 2 * STATE_WAIT_MS;
+    host.poll(t);
+    assert_eq!(host.replication_progress(), (1, 0));
+    let event = |event| {
+        HostRpc::Event(Fire {
+            target: EntityRef {
+                ghost: 1,
+                entity: 1,
+            },
+            event,
+            player: None,
+        })
+    };
+    let empty_section = || Section {
+        float_bits: None,
+        flag: false,
+        deleted: vec![],
+        setup: None,
+        records: vec![],
+    };
+    host.queue_replication_after(empty_section(), vec![event(3), event(4)])
+        .unwrap();
+    host.queue_rpc(event(5)).unwrap();
+    assert_eq!(
+        host.queue_content_after_replication(target, payload)
+            .unwrap(),
+        2
+    );
+    // Work queued after the command must not move its publication boundary.
+    for _ in 0..4 {
+        host.queue_replication(empty_section()).unwrap();
+    }
+    let Stage::Running {
+        application, world, ..
+    } = &mut host.stage
+    else {
+        panic!()
+    };
+    world.client_level_ready = true;
+    let empty = frame::Builder::new().build().unwrap();
+    let mut latest = None;
+    loop {
+        match application.send_frame(empty.span()) {
+            Ok(body) => {
+                latest = nfs_protocol::world::envelope::ZeroTail::new(1600)
+                    .unwrap()
+                    .decode(&body)
+                    .unwrap()
+                    .sequence()
+                    .map(|s| s.number().value())
+            }
+            Err(application::Error::Window) => break,
+            other => panic!("{other:?}"),
+        }
+    }
+    let out = host.poll(t + 500);
+    assert!(!out.events.iter().any(|e| matches!(
+        e,
+        Event::Content { .. } | Event::Replication { .. } | Event::RpcNotifications { .. }
+    )));
+    assert_eq!(host.content_progress(), (3, 2));
+    assert_eq!(host.replication_progress(), (1, 5));
+    let mut control = crate::bits::BitWriter::new();
+    control.put(1, 1).put(1, 4);
+    let body = application::sequenced(HOST_SELECTOR, 3, latest.unwrap(), u32::MAX, &control);
+    host.receive(&client.app(&body), t + 501, &mut listener);
+    let mut order = Vec::new();
+    let mut content_chunks: Vec<frame::Message<'static>> = Vec::new();
+    for step in 1..=4 {
+        let out = host.poll(t + 501 + step * REPLICATION_INTERVAL_MS);
+        for (bytes, bits) in host_frames(&client, &out.send) {
+            let parsed = frame::parse(
+                BitSpan::new(&bytes, 0, bits).unwrap(),
+                frame::Direction::FromHost,
+            )
+            .unwrap();
+            if let Some(messages) = parsed.messages {
+                for group in messages.groups {
+                    for message in group.messages {
+                        match message {
+                            frame::Message::Opaque { index: 86, .. } => order.push("state"),
+                            frame::Message::Chunk {
+                                ordinal,
+                                target,
+                                last,
+                                bytes,
+                            } => {
+                                order.push("teleport");
+                                content_chunks.push(frame::Message::Chunk {
+                                    ordinal,
+                                    target,
+                                    last,
+                                    bytes,
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        if host.content_progress().1 == 0 {
+            assert!(
+                host.replication_progress().1 > 0,
+                "later work cannot starve the command"
+            );
+            break;
+        }
+    }
+    assert_eq!(order, ["state", "state", "state", "teleport", "teleport"]);
+    assert_eq!(host.content_progress(), (5, 0));
+    let references = content_chunks.iter().collect::<Vec<_>>();
+    assert_eq!(
+        frame::reassemble(&references),
+        Some((target, payload.to_vec()))
     );
 }

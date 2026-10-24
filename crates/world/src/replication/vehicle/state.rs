@@ -51,7 +51,16 @@ fn merge(old: &mut Option<Update>, new: Option<Update>) {
             field(b, d);
         }
         (Update::Chassis(a), Update::Chassis(b)) => {
-            field(&mut a.physics, b.physics);
+            if let Some(mut physics) = b.physics {
+                // The optional tire block is a partial control update, not a
+                // reset. Native chassis reports leave those measurements alone
+                // when the block is absent (041c8b70/041cadd0).
+                if physics.controls.wheel_pairs.is_none() {
+                    physics.controls.wheel_pairs =
+                        a.physics.as_ref().and_then(|old| old.controls.wheel_pairs);
+                }
+                a.physics = Some(physics);
+            }
             field(&mut a.flag, b.flag);
             field(&mut a.custom, b.custom);
             field(&mut a.pair, b.pair);

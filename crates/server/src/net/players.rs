@@ -22,12 +22,14 @@ mod crashing;
 mod customization;
 mod diagnostics;
 mod equipment;
+mod events;
 mod garage;
 pub(super) use equipment::EquipmentRequest;
 pub(super) use garage::{GarageOperation, GarageRequest};
 pub(super) use scoring::{AwardRequest, Credited};
 mod launchers;
 mod map_feed;
+mod output;
 mod purchases;
 mod refusal;
 mod returning;
@@ -113,6 +115,7 @@ pub(super) struct PlayerListener {
     pending_settled: VecDeque<(u64, u16)>,
     /// Host teleports of world cars, due at world ms (sent as content).
     pending_teleports: VecDeque<(u64, nfs_world::teleport::Command)>,
+    pub(super) pending_speedwalls: VecDeque<nfs_world::speedwall::Progress>,
     /// World clock at which each participant's spawn assignment was queued.
     /// The teleport waits for it: the client adopts the assigned spawn id
     /// only when the assignment precedes its spawn-zone report, and the
@@ -151,6 +154,13 @@ pub(super) struct PlayerListener {
     free_roam_presented: BTreeSet<u16>,
     scoring: Option<std::sync::Arc<crate::scoring::Content>>,
     scoring_state: scoring::State,
+    events: Option<std::sync::Arc<crate::event_logic::catalog::Catalog>>,
+    event_state: events::State,
+    event_discovery: events::discovery::State,
+    /// Participants in an owned event: free-roam scoring is retired meanwhile.
+    event_suspended: BTreeSet<u16>,
+    /// The session's replication clock origin, set by the world loop each pass.
+    pub(in crate::net) replication_origin_ms: Option<u64>,
     pub(super) pending_content: VecDeque<nfs_world::content::Message>,
     pub(super) pending_rpcs: VecDeque<nfs_world::participants::HostRpc>,
     unsupported_rpcs: usize,
@@ -608,11 +618,15 @@ impl PlayerListener {
     pub(super) fn due_teleport(&self, world_ms: u64) -> Option<nfs_world::teleport::Command> {
         let (at, command) = self.pending_teleports.front()?;
         if *at > world_ms
+            || !self.pending.is_empty()
+            || !self.pending_rpcs.is_empty()
+            || !self.pending_entries.is_empty()
+            || !self.pending_content.is_empty()
             || (self
                 .crashes
                 .as_ref()
                 .is_some_and(|c| c.relocating(command.participant))
-                && (!self.pending_entries.is_empty() || self.session_backlog != 0))
+                && self.session_backlog != 0)
             || self
                 .pending_spawns
                 .iter()
@@ -624,7 +638,26 @@ impl PlayerListener {
         {
             return None;
         }
-        Some(*command)
+        let mut command = *command;
+        if let Some(crashes) = &self.crashes
+            && crashes.relocating(command.participant)
+        {
+            if !self.event_state.inputs.is_empty() {
+                return None;
+            }
+            if !crashes.route_is_current(
+                command.participant,
+                self.event_state
+                    .recovery_key(command.participant, command.vehicle),
+            ) {
+                command.speed = 0.;
+                if let Some(destination) = crashes.fallback_destination(command.participant) {
+                    command.position = destination.position;
+                    command.basis = destination.basis;
+                }
+            }
+        }
+        Some(command)
     }
     pub(super) fn teleport_sent(&mut self) {
         if let Some((_, command)) = self.pending_teleports.pop_front()
@@ -653,6 +686,7 @@ impl PlayerListener {
         if let Some(rivals) = &self.rival_population {
             cars.extend(rivals.delegated(players, HOST_SELECTOR as u8, self.persona));
         }
+        cars.extend(self.event_state.delegated(players, self.persona));
         cars
     }
     pub(super) fn new(persona: u64) -> Self {
@@ -685,6 +719,7 @@ impl PlayerListener {
             spawn_settled: BTreeSet::new(),
             pending_settled: VecDeque::new(),
             pending_teleports: VecDeque::new(),
+            pending_speedwalls: VecDeque::new(),
             spawn_released: BTreeMap::new(),
             pending_binding_refreshes: VecDeque::new(),
             pending_returns: VecDeque::new(),
@@ -713,6 +748,11 @@ impl PlayerListener {
                 trace: std::env::var_os("NFS_SCORING_TRACE").is_some(),
                 ..scoring::State::default()
             },
+            events: None,
+            event_state: events::State::default(),
+            event_discovery: events::discovery::State::default(),
+            event_suspended: BTreeSet::new(),
+            replication_origin_ms: None,
             pending_content: VecDeque::new(),
             pending_rpcs: VecDeque::new(),
             unsupported_rpcs: 0,
@@ -1085,11 +1125,18 @@ impl Listener for PlayerListener {
                     &world_cars,
                     self.persona,
                     movement,
+                    (&self.event_state, self.events.as_deref()),
                 )
             {
                 return self.refuse(error);
             }
-            if self.traffic_population.is_some() || self.rival_population.is_some() {
+            if self.traffic_population.is_some()
+                || self.rival_population.is_some()
+                || !self
+                    .event_state
+                    .delegated(&players, self.persona)
+                    .is_empty()
+            {
                 let delegated = self.delegated_ai(&players);
                 match traffic_reports.receive_ai(
                     &mut players,
@@ -1127,6 +1174,7 @@ impl Listener for PlayerListener {
         let mut sequences = self.sequences.clone();
         let mut logic_ghosts = self.logic_ghosts.clone();
         let mut unsupported_logic = 0;
+        let mut event_inputs = Vec::new();
         let mut glass = self.glass.clone();
         let mut customization = self.customization.clone();
         customization.retain_ghosts(|id| players.objects().get(id).is_some());
@@ -1147,6 +1195,10 @@ impl Listener for PlayerListener {
             for body in logic_events {
                 let message = nfs_world::logic::Message::decode(82, body)
                     .map_err(|_| replication::Error::Shape)?;
+                if self.event_claims_logic(&message) {
+                    event_inputs.push(Self::event_input_logic(&message));
+                    continue;
+                }
                 if sequences
                     .as_mut()
                     .map(|s| s.streaming_event(&message))
@@ -1334,6 +1386,10 @@ impl Listener for PlayerListener {
         let mut garage_commands = self.garage_commands.clone();
         let delegated = self.delegated_ai(&players);
         for body in rpcs {
+            if self.event_claims_rpc(body) {
+                event_inputs.push(Self::event_input_rpc(body));
+                continue;
+            }
             if self.world_ms < self.return_trace_until
                 && let Some(label) = refusal::route_label(body)
             {
@@ -1458,6 +1514,7 @@ impl Listener for PlayerListener {
                     &mut logic_ghosts,
                     self.persona,
                     self.vehicles.as_deref().map(|c| &c.layout),
+                    &self.event_state,
                 ) {
                     Ok(Some(Some((section, events, teleport)))) => {
                         // Recovery events name the replacement driving objects.
@@ -2177,6 +2234,11 @@ impl Listener for PlayerListener {
         if let Some(section) = movement_section {
             deferred_sections.insert(0, section);
         }
+        // These snapshots all originate in the same accepted client frame.
+        // Packing them here prevents one frame per delegated car from filling
+        // the listener queue before the session can coalesce them. The helper
+        // preserves non-motion records as ordering barriers.
+        deferred_sections = output::pack_motion(deferred_sections);
         if spawned.messages.len() > MAX_PENDING.saturating_sub(self.pending_content.len())
             || scheduled_returns.len() > MAX_PENDING.saturating_sub(self.pending_returns.len())
             || scheduled_teleports.len() > MAX_PENDING.saturating_sub(self.pending_teleports.len())
@@ -2214,6 +2276,13 @@ impl Listener for PlayerListener {
         self.launchers = launchers;
         self.participants = participants;
         self.pending_rpcs.extend(responses);
+        for input in event_inputs {
+            if self.event_state.inputs.len() >= events::MAX_INPUTS {
+                tracing::warn!("owned event input queue full; input dropped");
+                break;
+            }
+            self.event_state.inputs.push_back(input);
+        }
         for participant in self.participants.waiting_garage() {
             if population
                 .as_ref()

@@ -64,6 +64,8 @@ pub struct Config {
     pub rivals: Option<Arc<crate::rival_content::Content>>,
     pub garage_logic: Option<Arc<crate::garage_logic::GarageLogic>>,
     pub scoring: Option<Arc<crate::scoring::Content>>,
+    /// The owned race event, compiled from the installation (with scoring).
+    pub events: Option<Arc<crate::event_logic::catalog::Catalog>>,
     pub user_settings: Option<Arc<crate::user_settings::Store>>,
     pub catalogs: Option<Arc<nfs_services::control_catalogs::Catalog>>,
     pub entitlements: Option<(
@@ -88,6 +90,7 @@ pub struct AccountServices {
     pub settings: Option<Arc<crate::user_settings::Store>>,
     pub stats: Option<(InventoryProfile, nfs_services::reputation::Thresholds)>,
     pub challenges: Option<InventoryProfile>,
+    pub speedwall: Option<InventoryProfile>,
 }
 #[derive(Clone)]
 pub struct WorldServe {
@@ -102,6 +105,7 @@ pub struct WorldServe {
     pub rivals: Option<Arc<crate::rival_content::Content>>,
     pub garage_logic: Option<Arc<crate::garage_logic::GarageLogic>>,
     pub scoring: Option<Arc<crate::scoring::Content>>,
+    pub events: Option<Arc<crate::event_logic::catalog::Catalog>>,
     pub ai: crate::ai_settings::Live,
     pub map_feed: Option<crate::map_feed::Board>,
 }
@@ -216,6 +220,10 @@ impl application::Listener for Accepting {
     }
 }
 pub trait FrameHandler: Send {
+    fn needs_speedwall_view(&self, _wire: &[u8]) -> bool {
+        false
+    }
+    fn speedwall_view(&mut self, _current: nfs_services::speedwall::Current) {}
     fn needs_challenges_view(&self, _wire: &[u8]) -> bool {
         false
     }
@@ -256,6 +264,12 @@ pub trait FrameHandler: Send {
 }
 
 impl FrameHandler for ControlSession<'_> {
+    fn needs_speedwall_view(&self, wire: &[u8]) -> bool {
+        ControlSession::needs_speedwall_view(self, wire)
+    }
+    fn speedwall_view(&mut self, current: nfs_services::speedwall::Current) {
+        ControlSession::speedwall_view(self, current);
+    }
     fn needs_challenges_view(&self, wire: &[u8]) -> bool {
         ControlSession::needs_challenges_view(self, wire)
     }
@@ -399,6 +413,28 @@ pub async fn run_control(
                     }
                     Err(error) => {
                         warn!(connection, ?route, ?error, "account challenges unavailable");
+                        return End::Internal;
+                    }
+                }
+            } else if handler.needs_speedwall_view(&frame)
+                && services.as_ref().is_some_and(|s| s.speedwall.is_some())
+            {
+                let Some(profile) = services.as_ref().and_then(|s| s.speedwall.as_ref()) else {
+                    return End::Internal;
+                };
+                let now = nfs_storage::Timestamp(u64::try_from(unix_micros() / 1000).unwrap_or(0));
+                match profile.current_speedwall(now).await {
+                    Ok(current) => {
+                        info!(
+                            connection,
+                            ?route,
+                            generation = current.generation,
+                            "current account Speedwall prepared"
+                        );
+                        handler.speedwall_view(current);
+                    }
+                    Err(error) => {
+                        warn!(connection, ?route, ?error, "account Speedwall unavailable");
                         return End::Internal;
                     }
                 }
@@ -724,6 +760,7 @@ pub async fn serve(
                 let map_feed = config.map_feed.clone();
                 let garage_logic = config.garage_logic.clone();
                 let scoring = config.scoring.clone();
+                let events = config.events.clone();
                 let catalogs = config.catalogs.clone();
                 let entitlements = config.entitlements.clone();
                 let user_settings = config.user_settings.clone();
@@ -765,6 +802,7 @@ pub async fn serve(
                     let account_services = AccountServices {
                         settings: user_settings.clone(),
                         challenges: challenges.as_ref().and(inventory.clone()),
+                        speedwall: speedwall.as_ref().and(inventory.clone()),
                         stats: if stats.is_some() || owned_menu_awards {
                             inventory.clone().zip(garage_logic.as_ref().and_then(|l| l.reputation_thresholds()).cloned())
                         } else { None },
@@ -792,6 +830,7 @@ pub async fn serve(
                             rivals,
                             garage_logic,
                             scoring,
+                            events,
                             ai,
                             map_feed,
                         },
@@ -863,6 +902,7 @@ pub async fn world_host(
         rivals,
         garage_logic,
         scoring,
+        events,
         mut ai,
         map_feed,
     } = serve;
@@ -979,7 +1019,8 @@ pub async fn world_host(
         .with_returns(returns)
         .with_crashes(crashes)
         .with_garage_logic(garage_logic)
-        .with_scoring(scoring, unix_micros().max(0) as u64);
+        .with_scoring(scoring, unix_micros().max(0) as u64)
+        .with_events(events);
     let mut items = items::Exchanges::new(inventory, connection);
     if let Some(content) = &content
         && let Err(error) = listener.initialize_world(content)
@@ -992,10 +1033,12 @@ pub async fn world_host(
     let mut proof_sent = false;
     let mut last_input = Instant::now();
     let mut tick = tokio::time::interval(WORLD_TICK);
+    let mut delay_reported = None;
     #[cfg(feature = "network-test")]
     let mut test_loss = test_loss::Loss::new(recorder.loss_trigger(connection));
     info!(connection, "world host ready");
     loop {
+        let advance_started = Instant::now();
         if let Err(error) = listener.advance_sequences(now_ms()) {
             warn!(connection, ?error, "sequence world clock rejected");
             return;
@@ -1053,6 +1096,24 @@ pub async fn world_host(
         {
             feed.publish(listener.map_snapshot(now_ms()));
         }
+        listener.replication_origin_ms = host.application().and_then(|a| a.origin_ms());
+        if let Err(error) = listener.advance_events(now_ms()) {
+            // A first fault stages event teardown while retaining delegation.
+            // If teardown itself fails, dropping this session owns all cleanup.
+            if !listener.disable_events() {
+                warn!(
+                    connection,
+                    ?error,
+                    "owned event teardown rejected; closing world"
+                );
+                return;
+            }
+            warn!(
+                connection,
+                ?error,
+                "owned event rejected; scheduling event teardown"
+            );
+        }
         if !listener.files_alive(now_ms()) {
             warn!(
                 connection,
@@ -1060,36 +1121,12 @@ pub async fn world_host(
             );
             return;
         }
-        while let Some(command) = listener.due_teleport(now_ms()) {
-            let bytes = match command.encode() {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    warn!(connection, ?error, "owned car teleport rejected");
-                    return;
-                }
-            };
-            match host.queue_content(nfs_world::teleport::CONTENT_TARGET, &bytes) {
-                Ok(chunks) => {
-                    info!(
-                        connection,
-                        chunks,
-                        participant = command.participant,
-                        vehicle = command.vehicle,
-                        "owned car teleport queued"
-                    );
-                    listener.teleport_sent();
-                }
-                Err(nfs_world::session::Error::Application(application::Error::Window)) => break,
-                Err(error) => {
-                    warn!(connection, ?error, "owned car teleport rejected");
-                    return;
-                }
-            }
-        }
         if let Err(error) = host.set_movement(listener.movement_objects()) {
             warn!(connection, ?error, "movement grants rejected");
             return;
         }
+        let advance_ms = advance_started.elapsed().as_millis() as u64;
+        let receive_started = Instant::now();
         let output = tokio::select! {
             success = items.completed(&mut listener), if items.working() => {
                 if !success { return; }
@@ -1134,6 +1171,8 @@ pub async fn world_host(
                 host.poll(now_ms())
             }
         };
+        let receive_or_poll_ms = receive_started.elapsed().as_millis() as u64;
+        let queue_started = Instant::now();
         if !items.advance(&mut host, &output.events, now_ms()) {
             return;
         }
@@ -1223,6 +1262,70 @@ pub async fn world_host(
                 }
             }
         }
+        while let Some(command) = listener.due_teleport(now_ms()) {
+            let bytes = match command.encode() {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    warn!(connection, ?error, "owned car teleport rejected");
+                    return;
+                }
+            };
+            match host.queue_content_after_replication(nfs_world::teleport::CONTENT_TARGET, &bytes)
+            {
+                Ok(chunks) => {
+                    info!(
+                        connection,
+                        chunks,
+                        participant = command.participant,
+                        vehicle = command.vehicle,
+                        "owned car teleport queued"
+                    );
+                    listener.teleport_sent();
+                }
+                Err(nfs_world::session::Error::Application(application::Error::Window)) => break,
+                Err(error) => {
+                    warn!(connection, ?error, "owned car teleport rejected");
+                    return;
+                }
+            }
+        }
+        // A reliable boundary after result reporting prevents a later mode
+        // deletion from overtaking its Speedwall handoff under queue pressure.
+        while listener.pending_content.is_empty()
+            && listener.pending.is_empty()
+            && listener.pending_rpcs.is_empty()
+            && listener.pending_entries.is_empty()
+        {
+            let Some(progress) = listener.pending_speedwalls.front() else {
+                break;
+            };
+            let bytes = match progress.encode() {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    warn!(connection, ?error, "owned Speedwall progress rejected");
+                    return;
+                }
+            };
+            match host.queue_content_after_replication(nfs_world::speedwall::CONTENT_TARGET, &bytes)
+            {
+                Ok(chunks) => {
+                    info!(
+                        connection,
+                        chunks,
+                        event = progress.event_id,
+                        "owned Speedwall progress queued"
+                    );
+                    listener.pending_speedwalls.pop_front();
+                }
+                Err(nfs_world::session::Error::Application(application::Error::Window)) => break,
+                Err(error) => {
+                    warn!(connection, ?error, "owned Speedwall handoff rejected");
+                    return;
+                }
+            }
+        }
+        let queue_ms = queue_started.elapsed().as_millis() as u64;
+        let send_started = Instant::now();
         for event in &output.events {
             match event {
                 Event::Application(application::Event::UnknownControl(subtype)) => {
@@ -1248,6 +1351,15 @@ pub async fn world_host(
                     return;
                 }
             }
+        }
+        let send_and_record_ms = send_started.elapsed().as_millis() as u64;
+        if (advance_ms + queue_ms + send_and_record_ms >= 100 || receive_or_poll_ms >= 250)
+            && delay_reported.is_none_or(|last| now_ms().saturating_sub(last) >= 1000)
+        {
+            delay_reported = Some(now_ms());
+            warn!(connection, advance_ms, receive_or_poll_ms, queue_ms, send_and_record_ms,
+                replication = ?host.replication_progress(), content = ?host.content_progress(),
+                "world loop delay");
         }
         if !proof_sent && host.link().is_some_and(|l| l.running()) {
             proof_sent = true;

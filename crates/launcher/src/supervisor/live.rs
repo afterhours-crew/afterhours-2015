@@ -32,8 +32,9 @@ use std::{
 
 /// How long preparation subcommands may run.
 const PREPARATION_DEADLINE: Duration = Duration::from_secs(600);
-/// How long the server may take to print its readiness record.
-const SERVER_READY_DEADLINE: Duration = Duration::from_secs(120);
+/// The server also compiles installed event content before publishing readiness,
+/// so it needs the same bounded preparation budget as the content subcommands.
+const SERVER_READY_DEADLINE: Duration = PREPARATION_DEADLINE;
 /// How long a child gets to close normally before it is killed.
 const CLOSE_GRACE: Duration = Duration::from_secs(15);
 /// How long a killed child gets to disappear.

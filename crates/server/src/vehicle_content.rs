@@ -10,6 +10,7 @@ use nfs_world::{
 use serde_json::Value;
 use std::{collections::BTreeMap, fs::File, io::Read, path::Path, sync::Arc};
 
+pub(crate) mod ai;
 pub mod layout;
 mod parse;
 

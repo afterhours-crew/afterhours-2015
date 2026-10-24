@@ -48,8 +48,11 @@ impl PropertyHandler for State {
     }
     fn property_changed(&mut self, port: Port, _: bool, d: &mut Dispatch<'_>) -> Result<(), Error> {
         let value = self.store.read(port)?.unwrap();
-        self.log
-            .push(Entry::Property(port.field, value, self.node.querying()));
+        self.log.push(Entry::Property(
+            port.field,
+            value.clone(),
+            self.node.querying(),
+        ));
         if port.field == collision::QUERYING
             && value == Value::Boolean(false)
             && std::mem::take(&mut self.restart)

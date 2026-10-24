@@ -11,12 +11,70 @@ use crate::{
 };
 use nfs_protocol::world::{
     BitSpan,
-    rpc::{Envelope, Limits, RouteProfile},
+    rpc::{Envelope, Limits, Route, RouteProfile},
 };
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const MAX_VOLUMES: usize = 512;
 pub const MAX_PARTICIPANTS: usize = 128;
+
+/// Common participant-volume report contract, also used by game-mode volume
+/// filters. The clock is encoded high word first; its interpretation belongs
+/// to the receiver. Native mode filters compare the token and ignore the clock.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Crossing {
+    pub object: u16,
+    pub selector: u16,
+    pub participant: u16,
+    pub token: u32,
+    pub seconds: f64,
+    pub inside: bool,
+}
+impl Crossing {
+    pub fn decode(body: BitSpan<'_>) -> Result<Option<Self>, Error> {
+        let envelope = Envelope::decode(
+            body,
+            Limits {
+                max_input_bits: 4096,
+                max_references: 32,
+                max_payload_bytes: 256,
+            },
+        )
+        .map_err(|_| Error::Shape)?;
+        let route = envelope
+            .route(RouteProfile::ClientSend)
+            .map_err(|_| Error::Shape)?;
+        Self::from_route(&envelope, &route)
+    }
+    fn from_route(envelope: &Envelope<'_>, route: &Route<'_>) -> Result<Option<Self>, Error> {
+        if !matches!(route.method_index(), 2 | 3) {
+            return Ok(None);
+        }
+        let &[object, participant] = envelope.references() else {
+            return Err(Error::Shape);
+        };
+        if envelope.words() != [0, 0]
+            || !envelope.remaining().is_empty()
+            || route.arguments().len() != 103
+        {
+            return Err(Error::Shape);
+        }
+        if object == 0 || participant == 0 {
+            return Err(Error::UnknownObject);
+        }
+        let bits = route.arguments();
+        let high = bits.read_u32(0, 32).map_err(|_| Error::Shape)?;
+        let low = bits.read_u32(32, 32).map_err(|_| Error::Shape)?;
+        Ok(Some(Self {
+            object,
+            selector: route.selector(),
+            participant,
+            token: bits.read_u32(64, 32).map_err(|_| Error::Shape)?,
+            seconds: f64::from_bits((u64::from(high) << 32) | u64::from(low)),
+            inside: route.method_index() == 2,
+        }))
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct Site {
@@ -395,14 +453,9 @@ impl Activation {
             };
             return Ok(Some(Report::Location { participant, first }));
         }
-        if route.arguments().len() != 103 {
-            return Err(Error::Shape);
-        }
-        let bits = route.arguments();
-        let high = bits.read_u32(0, 32).map_err(|_| Error::Shape)?;
-        let low = bits.read_u32(32, 32).map_err(|_| Error::Shape)?;
-        let seconds = f64::from_bits((u64::from(high) << 32) | u64::from(low));
-        let token = bits.read_u32(64, 32).map_err(|_| Error::Shape)?;
+        let crossing = Crossing::from_route(&envelope, &route)?.ok_or(Error::Shape)?;
+        let seconds = crossing.seconds;
+        let token = crossing.token;
         if !seconds.is_finite() || seconds < 0. || token != 0 {
             return Err(Error::Shape);
         }
@@ -413,7 +466,7 @@ impl Activation {
                 Err(Error::UnknownObject)
             };
         };
-        let inside = route.method_index() == 2;
+        let inside = crossing.inside;
         let previous = member.observations.get(&key);
         let fresh = previous.is_none_or(|(time, _)| seconds > *time);
         let changed = fresh && previous.map_or(inside, |(_, old)| *old != inside);

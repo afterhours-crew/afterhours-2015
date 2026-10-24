@@ -49,6 +49,17 @@ fn default(value: &str) -> Result<Option<Scalar>, Error> {
     let scalar = match (kind, text) {
         ("Boolean", "False") => Scalar::Boolean(false),
         ("Boolean", "True") => Scalar::Boolean(true),
+        ("Int32", text)
+            if !text.is_empty()
+                && text
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || b"+-".contains(&b)) =>
+        {
+            Scalar::Integer(
+                text.parse()
+                    .map_err(|_| bad("interface signed integer default"))?,
+            )
+        }
         ("Float32", text)
             if !text.is_empty()
                 && text
@@ -67,7 +78,7 @@ fn default(value: &str) -> Result<Option<Scalar>, Error> {
     Ok(Some(scalar))
 }
 
-/// Read the supported empty/Boolean/Float32 subset. Unknown types, reference
+/// Read the supported empty/Boolean/Int32/Float32 subset. Unknown types, reference
 /// defaults, malformed enums and duplicate IDs fail rather than gaining a value.
 pub fn compile(object: &Object) -> Result<Vec<Field>, Error> {
     if object.class != "InterfaceDescriptorData" {

@@ -10,16 +10,18 @@ pub use super::nodes::{IN, ON_FALSE, ON_TRUE, OUT, SET_FALSE, SET_TRUE, TOGGLE};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Kind {
+    Text,
     Boolean,
     Float,
     Integer,
 }
 impl Kind {
-    pub(crate) fn validate(self, value: Value) -> Result<(), Error> {
+    pub(crate) fn validate(self, value: &Value) -> Result<(), Error> {
         self.property_kind().validate(value)
     }
     pub fn property_kind(self) -> properties::Kind {
         match self {
+            Self::Text => properties::Kind::Text,
             Self::Boolean => properties::Kind::Boolean,
             Self::Float => properties::Kind::Float,
             Self::Integer => properties::Kind::Integer,

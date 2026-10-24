@@ -765,9 +765,12 @@ async fn run(args: Args) -> Result<(), Failure> {
         .map(Arc::new);
     // Free-roam scoring compiles the installed driving participants directly
     // from the installation; without it (or without garage logic) scoring stays off.
+    let mut events = None;
     let scoring = match (&args.game_dir, garage_logic.is_some()) {
         (Some(game_dir), true) => {
             let game_dir = game_dir.clone();
+            let event_vehicles = vehicles.as_ref().map(|v| v.vehicles.clone());
+            let event_items = args.item_content.as_ref().map(|p| args.root.join(p));
             let content = tokio::task::spawn_blocking(move || {
                 let mut index = nfs_content::assets::AssetIndex::open(
                     &game_dir,
@@ -776,12 +779,30 @@ async fn run(args: Args) -> Result<(), Failure> {
                 let scoring = index.scoring_content("levels/genesis01/gameplay")?;
                 let road = index.road_network();
                 let nitrous = index.nitrous_configurations()?;
-                Ok::<_, nfs_content::Error>((scoring, road, nitrous))
+                // The owned race event resolves from the same installation; its
+                // failure leaves scoring on and the event off.
+                let event = (|| -> Result<_, nfs_content::Error> {
+                    let items = event_items
+                        .as_ref()
+                        .map(|path| {
+                            nfs_services::item_content::ItemContent::load(path).map_err(|e| {
+                                nfs_content::Error::Content(format!("event AI items: {e:?}"))
+                            })
+                        })
+                        .transpose()?;
+                    nfs_server::event_logic::catalog::prepare::sprints(
+                        &mut index,
+                        &scoring.categories,
+                        event_vehicles.as_ref(),
+                        items.as_ref(),
+                    )
+                })();
+                Ok::<_, nfs_content::Error>((scoring, road, nitrous, event))
             })
             .await
             .map_err(|_| Failure::Output)?;
             match content {
-                Ok((content, road, nitrous)) => {
+                Ok((content, road, nitrous, event)) => {
                     let mut content = nfs_server::scoring::Content::new(Arc::new(content))
                         .map_err(|_| Failure::ProfileConfig)?
                         .with_items(
@@ -791,6 +812,22 @@ async fn run(args: Args) -> Result<(), Failure> {
                                 .item_catalog(),
                         )
                         .with_nitrous(nitrous);
+                    match event {
+                        Ok(prepared) => {
+                            let (catalog, attached) = prepared
+                                .attach(content)
+                                .map_err(|_| Failure::ProfileConfig)?;
+                            content = attached;
+                            tracing::info!(
+                                playable = catalog.iter().count(),
+                                "normal sprint catalog compiled; progression gating disabled"
+                            );
+                            events = Some(Arc::new(catalog));
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error,"sprint catalog unavailable; events stay off")
+                        }
+                    }
                     match road {
                         Ok(network) => {
                             tracing::info!(
@@ -990,6 +1027,7 @@ async fn run(args: Args) -> Result<(), Failure> {
         rivals,
         garage_logic,
         scoring,
+        events,
         catalogs,
         entitlements,
         user_settings,

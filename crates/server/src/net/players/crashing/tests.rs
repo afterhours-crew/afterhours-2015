@@ -656,6 +656,7 @@ fn movement_pulse_between_echoes_survives_and_only_owned_ready_cars_trigger() {
         &BTreeMap::new(),
         owner.persona,
         &movement,
+        (&fresh.event_state, None),
     )
     .unwrap();
     assert!(fresh.crashes.as_ref().unwrap().pending().is_empty());
@@ -666,6 +667,7 @@ fn movement_pulse_between_echoes_survives_and_only_owned_ready_cars_trigger() {
         &BTreeMap::from([(id, (owner.participant, false))]),
         owner.persona,
         &movement,
+        (&fresh.event_state, None),
     )
     .unwrap();
     assert!(fresh.crashes.as_ref().unwrap().pending().is_empty());
@@ -676,7 +678,8 @@ fn movement_pulse_between_echoes_survives_and_only_owned_ready_cars_trigger() {
             &fresh.participants,
             &BTreeMap::from([(id, (owner.participant, true))]),
             owner.persona + 1,
-            &movement
+            &movement,
+            (&fresh.event_state, None),
         )
         .is_err()
     );
@@ -722,7 +725,7 @@ fn rollover_relocation_waits_for_publication_and_acknowledgement_then_repeats() 
                 .crashes
                 .as_mut()
                 .unwrap()
-                .observe_vehicle(&listener.players, owner, car_id, &sample, true)
+                .observe_vehicle(&listener.players, owner, car_id, &sample, true, None)
                 .unwrap();
         }
         listener.world_ms = (offset * 1000.0) as u64 + 10_000;
@@ -848,6 +851,7 @@ fn rollover_relocation_waits_for_publication_and_acknowledgement_then_repeats() 
                 &mut foreign_ghosts,
                 owner.persona,
                 None,
+                &listener.event_state,
             )
             .is_err()
         );
@@ -934,13 +938,13 @@ fn crash_without_history_uses_installed_road_spawn_and_rejects_invalid_clock() {
     let crashes = listener.crashes.as_mut().unwrap();
     assert!(
         crashes
-            .observe_vehicle(&listener.players, owner, id, &sample, true)
+            .observe_vehicle(&listener.players, owner, id, &sample, true, None)
             .is_err()
     );
     assert!(crashes.pending().is_empty());
     sample.physics.identity_words = [0, 0, 1];
     crashes
-        .observe_vehicle(&listener.players, owner, id, &sample, true)
+        .observe_vehicle(&listener.players, owner, id, &sample, true, None)
         .unwrap();
     listener.advance_crashes(1).unwrap();
     let (creation, _) = listener.pending_entries.pop_front().unwrap();
@@ -963,6 +967,7 @@ fn crash_without_history_uses_installed_road_spawn_and_rejects_invalid_clock() {
         &mut listener.logic_ghosts,
         owner.persona,
         Some(&layout),
+        &listener.event_state,
     )
     .unwrap()
     .unwrap()

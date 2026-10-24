@@ -43,8 +43,127 @@ pub struct Keeper {
 /// unready, so consumers fall back to authored values; they are logged.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Behavior {
+    /// Authored node implemented by the enclosing native event host. Executing
+    /// it without that host fails; it is never treated as inert/unsupported.
+    Native,
+    Ai(super::ai_commands::Definition<u16>),
+    /// Constructor-owned property. StringEntity uses field c5e4e950 (037ac250).
+    Constant {
+        field: u32,
+        value: Value,
+    },
+    FloatSelect,
+    ScaleClamp,
+    RandomFloat {
+        true_random: bool,
+    },
+    Burnout(super::burnout::Configuration),
+    VehicleInfo,
+    ItemInfo {
+        source: super::participant_properties::Property,
+        provider: u16,
+    },
+    /// Source is verified as this logic's own controllable provider by content.
+    BurnoutOverride,
+    /// Activation-time GameId output (04620700); absent host game publishes nothing.
+    GameId,
+    EventDetails {
+        source: Option<super::participant_properties::Property>,
+    },
+    /// Native participant-name RPC. Server CString dataflow remains unmodeled.
+    ParticipantName,
+    ContextReporter {
+        source: super::participant_properties::Property,
+        provider: u16,
+        categories: Vec<u32>,
+    },
+    VehicleTuning {
+        source: super::participant_properties::Property,
+        provider: u16,
+    },
+    TeleportLocation {
+        provider: u16,
+        location: super::participant_properties::Property,
+        manager: super::participant_properties::Property,
+    },
+    ParticipantEventChannel,
+    ParticipantTransition {
+        provider: u16,
+        sources: Vec<super::participant_properties::Property>,
+        target: Option<super::participant_properties::Property>,
+    },
+    TriggeredTransition {
+        sources: Vec<super::participant_properties::Property>,
+        target: Option<super::participant_properties::Property>,
+    },
+    ParticipantRankQuery {
+        sorter: super::participant_properties::Property,
+    },
+    Bank {
+        bank: super::participant_properties::Property,
+        provider: u16,
+        kind: super::bank::Kind,
+    },
     Inert,
     Unsupported,
+    /// Server EventSync has no local input behavior; its validated registry-82
+    /// receiver emits Out through Session::event_sync.
+    EventSync,
+    ParticipantSetAccessor {
+        set: Option<super::participant_sets::Key>,
+        provider: Option<u16>,
+    },
+    ParticipantSetAdapter {
+        source: Option<super::participant_sets::Key>,
+        provider: Option<u16>,
+    },
+    ParticipantSetPredicate {
+        operation: super::participant_sets::Operation,
+        operands: Vec<super::participant_sets::Source>,
+    },
+    ParticipantSetCounter {
+        source: Option<super::participant_sets::Source>,
+    },
+    ParticipantProvider,
+    ParticipantEvent {
+        provider: Option<u16>,
+        filter: bool,
+    },
+    /// An owned snapshot of external property values, supplied by the enclosing
+    /// session before construction. Published at binding in native node order.
+    Snapshot(Vec<(u32, Value)>),
+    /// Live accessor to this session's participant store. A connected Value
+    /// writes at activation and on change; an unconnected Value only reads.
+    ParticipantProperty {
+        property: super::participant_properties::Property,
+        kind: super::properties::Kind,
+        write: bool,
+    },
+    ParticipantRank {
+        property: super::participant_properties::Property,
+        descending: bool,
+    },
+    IntegerSum {
+        count: u16,
+    },
+    IntegerArithmetic {
+        operations: Vec<super::integers::Operation>,
+    },
+    VectorDot,
+    /// Absolute monotonic race clock, rounded to f32, sampled every frame.
+    RaceTime,
+    TransformSplitter,
+    IntegerHub {
+        count: u16,
+    },
+    FloatHub {
+        count: u16,
+    },
+    FloatSwitch(super::float_switch::Definition),
+    RankIntegers {
+        count: u16,
+        on_change: bool,
+    },
     Scalar(nodes::Definition),
     Math {
         program: math::Program,
@@ -54,6 +173,11 @@ pub enum Behavior {
         curve: super::curve::Curve,
         apply: bool,
         default_input: f32,
+    },
+    /// Native 04032540 binds the linked curve; only an input property callback
+    /// evaluates it (04032f80). Binding and activation do not publish a value.
+    LinkedCurve {
+        source: super::participant_properties::Property,
     },
     Arithmetic {
         operations: Vec<arithmetic::Operation>,
@@ -162,6 +286,37 @@ pub struct Program {
 }
 
 impl Program {
+    fn validate_set_source(
+        &self,
+        source: &super::participant_sets::Source,
+        path: &mut Vec<u16>,
+    ) -> Result<(), Error> {
+        use super::participant_sets::Source;
+        match source {
+            Source::Channel(key) => key.validate(),
+            Source::Node(id) => {
+                if path.len() >= 32 || path.contains(id) {
+                    return Err(Error::InvalidGraph);
+                }
+                path.push(*id);
+                let n = self.node(*id)?;
+                if !n.created {
+                    return Err(Error::InvalidGraph);
+                }
+                match &n.behavior {
+                    Behavior::ParticipantSetAdapter { .. } => (),
+                    Behavior::ParticipantSetPredicate { operands, .. } => {
+                        for source in operands {
+                            self.validate_set_source(source, path)?;
+                        }
+                    }
+                    _ => return Err(Error::InvalidGraph),
+                }
+                path.pop();
+                Ok(())
+            }
+        }
+    }
     /// Validate bounds and internal references. This does not prove native
     /// equivalence; it rejects programs the interpreter cannot execute safely.
     pub fn validate(&self) -> Result<(), Error> {
@@ -188,6 +343,211 @@ impl Program {
                 return Err(Error::Bound);
             }
             match &n.behavior {
+                Behavior::Burnout(config) => config.validate()?,
+                Behavior::TeleportLocation {
+                    provider,
+                    location,
+                    manager,
+                } => {
+                    location.validate()?;
+                    manager.validate()?;
+                    if node(*provider)?.behavior != Behavior::ParticipantProvider {
+                        return Err(Error::InvalidGraph);
+                    }
+                }
+                Behavior::VehicleTuning { source, provider }
+                | Behavior::ItemInfo { source, provider } => {
+                    source.validate()?;
+                    if node(*provider)?.behavior != Behavior::ParticipantProvider {
+                        return Err(Error::InvalidGraph);
+                    }
+                }
+                Behavior::ContextReporter {
+                    source,
+                    provider,
+                    categories,
+                } => {
+                    source.validate()?;
+                    if node(*provider)?.behavior != Behavior::ParticipantProvider {
+                        return Err(Error::InvalidGraph);
+                    }
+                    if categories.len() > 128 {
+                        return Err(Error::Bound);
+                    }
+                }
+                Behavior::ParticipantTransition {
+                    provider,
+                    sources,
+                    target,
+                } => {
+                    if node(*provider)?.behavior != Behavior::ParticipantProvider {
+                        return Err(Error::InvalidGraph);
+                    }
+                    if sources.len() > crate::participant_states::MAX_STATES {
+                        return Err(Error::Bound);
+                    }
+                    for key in sources.iter().chain(target.iter()) {
+                        key.validate()?;
+                    }
+                }
+                Behavior::TriggeredTransition { sources, target } => {
+                    if sources.len() > crate::participant_states::MAX_STATES {
+                        return Err(Error::Bound);
+                    }
+                    for key in sources.iter().chain(target.iter()) {
+                        key.validate()?;
+                    }
+                }
+                Behavior::LinkedCurve { source } => source.validate()?,
+                Behavior::EventDetails {
+                    source: Some(source),
+                } => source.validate()?,
+                Behavior::ParticipantRankQuery { sorter } => sorter.validate()?,
+                Behavior::Bank { bank, provider, .. } => {
+                    bank.validate()?;
+                    if node(*provider)?.behavior != Behavior::ParticipantProvider {
+                        return Err(Error::InvalidGraph);
+                    }
+                }
+                Behavior::ParticipantSetPredicate {
+                    operation,
+                    operands,
+                } => {
+                    use super::participant_sets::{MAX_OPERANDS, Operation};
+                    if operands.len() > MAX_OPERANDS
+                        || (*operation == Operation::Difference && operands.len() != 2)
+                    {
+                        return Err(Error::Bound);
+                    }
+                    for source in operands {
+                        self.validate_set_source(source, &mut vec![index as u16])?;
+                    }
+                }
+                Behavior::ParticipantSetCounter {
+                    source: Some(source),
+                } => self.validate_set_source(source, &mut vec![index as u16])?,
+                Behavior::ParticipantSetAccessor { set, provider }
+                | Behavior::ParticipantSetAdapter {
+                    source: set,
+                    provider,
+                } => {
+                    if let Some(set) = set {
+                        set.validate()?;
+                    }
+                    if let Some(provider) = provider
+                        && node(*provider)?.behavior != Behavior::ParticipantProvider
+                    {
+                        return Err(Error::InvalidGraph);
+                    }
+                }
+                Behavior::ParticipantEvent {
+                    provider: Some(id), ..
+                } => {
+                    if node(*id)?.behavior != Behavior::ParticipantProvider {
+                        return Err(Error::InvalidGraph);
+                    }
+                }
+                Behavior::ParticipantRank { property, .. } => property.validate()?,
+                Behavior::FloatSwitch(definition) => definition.validate()?,
+                Behavior::IntegerHub { count } | Behavior::FloatHub { count }
+                    if *count == 0 || *count > super::integer_hub::MAX_INPUTS =>
+                {
+                    return Err(Error::Bound);
+                }
+                Behavior::ParticipantProperty { property, kind, .. } => {
+                    property.validate()?;
+                    if !matches!(
+                        kind,
+                        super::properties::Kind::Integer
+                            | super::properties::Kind::Boolean
+                            | super::properties::Kind::Float
+                    ) {
+                        return Err(Error::InvalidGraph);
+                    }
+                }
+                Behavior::IntegerArithmetic { operations }
+                    if operations.len() > arithmetic::MAX_OPERATIONS =>
+                {
+                    return Err(Error::Bound);
+                }
+                Behavior::Ai(definition) => {
+                    use super::ai_commands::Definition as Ai;
+                    let state = |id| match &node(id)?.behavior {
+                        Behavior::Ai(Ai::State { .. }) => Ok(()),
+                        _ => Err(Error::InvalidGraph),
+                    };
+                    match definition {
+                        Ai::Enable(v) => {
+                            v.actor_manager.validate()?;
+                            v.ai_manager.validate()?;
+                            if let Some(id) = v.state {
+                                state(id)?;
+                            }
+                        }
+                        Ai::Control(v) => {
+                            if v.states.len() > super::ai_commands::MAX_COMMANDS
+                                || v.commands.len() > super::ai_commands::MAX_COMMANDS
+                            {
+                                return Err(Error::Bound);
+                            }
+                            for &id in &v.states {
+                                state(id)?;
+                            }
+                            for &id in &v.commands {
+                                if !matches!(
+                                    node(id)?.behavior,
+                                    Behavior::Ai(Ai::Goto(_) | Ai::Scripted(_))
+                                ) {
+                                    return Err(Error::InvalidGraph);
+                                }
+                            }
+                            v.command_manager.validate()?;
+                            v.actor_manager.validate()?;
+                            v.context_manager.validate()?;
+                        }
+                        Ai::Goto(v) => {
+                            for &value in v.transform.iter().flatten() {
+                                super::finite(value)?;
+                            }
+                            super::finite(v.radius)?;
+                            if let Some(location) = &v.location {
+                                location.validate()?;
+                            }
+                        }
+                        Ai::Scripted(v) => v.validate()?,
+                        Ai::State { .. } => {}
+                    }
+                }
+                Behavior::Snapshot(values) => {
+                    let mut fields = std::collections::BTreeSet::new();
+                    if values.len() > MAX_PROPERTIES {
+                        return Err(Error::Bound);
+                    }
+                    for (field, value) in values {
+                        if !fields.insert(field) {
+                            return Err(Error::InvalidGraph);
+                        }
+                        if let Value::Float(v) = value {
+                            super::finite(*v)?;
+                        }
+                    }
+                }
+                Behavior::Constant {
+                    value: Value::Float(value),
+                    ..
+                } => {
+                    super::finite(*value)?;
+                }
+                Behavior::IntegerSum { count }
+                    if *count == 0 || usize::from(*count) > arithmetic::MAX_OPERATIONS + 1 =>
+                {
+                    return Err(Error::Bound);
+                }
+                Behavior::RankIntegers { count, .. }
+                    if *count == 0 || *count > super::integers::MAX_RANK_INPUTS =>
+                {
+                    return Err(Error::Bound);
+                }
                 Behavior::Score { context, .. } => {
                     if !matches!(node(*context)?.behavior, Behavior::ScoreContext { .. }) {
                         return Err(Error::InvalidGraph);
@@ -268,7 +628,7 @@ impl Program {
             .defaults
             .iter()
             .find(|(field, _)| *field == port.field)
-            .map(|(_, value)| *value))
+            .map(|(_, value)| value.clone()))
     }
 }
 

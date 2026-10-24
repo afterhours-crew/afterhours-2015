@@ -56,7 +56,8 @@ impl PropertyHandler for State {
         }
         assert_eq!(target, OBSERVER);
         let value = self.properties.read(OUTPUT)?.ok_or(Error::MissingInput)?;
-        self.log.push(Entry::Value(value, self.node.dirty()));
+        self.log
+            .push(Entry::Value(value.clone(), self.node.dirty()));
         let feedback = if self.loop_feedback {
             let Value::Boolean(value) = value else {
                 return Err(Error::InvalidGraph);
@@ -133,6 +134,40 @@ fn graph() -> Graph {
     )
     .unwrap()
 }
+
+#[test]
+fn strings_preserve_unready_empty_and_content_equality_without_boolean_events() {
+    use crate::scoring::value::Text;
+    let text = |v| Value::Text(Text::new(v).unwrap());
+    let fresh = state(Kind::Text, None);
+    assert_eq!(apply(&fresh, Action::Bind).unwrap(), fresh);
+    let (mut empty, _) = graph().publish(&fresh, INPUT, text("")).unwrap();
+    assert_eq!(empty.log, [Entry::Value(text(""), false)]);
+    assert_eq!(empty.properties.read(OUTPUT).unwrap(), Some(text("")));
+    assert!(empty.node.take_dirty());
+    empty.log.clear();
+    let (equal, _) = graph().publish(&empty, INPUT, text("")).unwrap();
+    assert_eq!(equal, empty);
+    let (mut named, _) = graph()
+        .publish(&empty, INPUT, text("In The Driver's Seat"))
+        .unwrap();
+    assert_eq!(
+        named.log,
+        [Entry::Value(text("In The Driver's Seat"), false)]
+    );
+    assert!(named.node.take_dirty());
+    named.log.clear();
+    let independently_owned = String::from("In The Driver's Seat");
+    let (equal, _) = graph()
+        .publish(&named, INPUT, text(&independently_owned))
+        .unwrap();
+    assert_eq!(equal, named);
+    assert_eq!(
+        apply(&named, Action::Event(synced::SET_TRUE)).unwrap(),
+        named
+    );
+    assert!(graph().publish(&named, INPUT, Value::Integer(0)).is_err());
+}
 fn apply(state: &State, action: Action) -> Result<State, Error> {
     graph()
         .transaction(state, |s, d| d.synchronized(s, 0, action).map(|_| ()))
@@ -203,7 +238,7 @@ fn numeric_zeros_extremes_and_signed_zero_deduplication_keep_exact_output_bits()
         (Kind::Integer, Value::Integer(i32::MIN)),
         (Kind::Integer, Value::Integer(i32::MAX)),
     ] {
-        let mut bound = apply(&state(kind, Some(value)), Action::Bind).unwrap();
+        let mut bound = apply(&state(kind, Some(value.clone())), Action::Bind).unwrap();
         assert_eq!(bound.log, [Entry::Value(value, false)]);
         bound.node.take_dirty();
         bound.log.clear();

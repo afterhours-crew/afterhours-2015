@@ -77,7 +77,7 @@ impl Handler for State {
         Ok(&mut self.node)
     }
     fn vector_length_input(&self, _: u16) -> Result<Option<Value>, Error> {
-        Ok(self.input)
+        Ok(self.input.clone())
     }
 }
 fn apply(s: &State, g: &Graph, action: Action) -> State {
@@ -108,7 +108,7 @@ fn activation_readiness_equal_writes_and_bound_outputs() {
         let first = apply(&active, &g, Action::PropertyChanged(INPUT));
         assert_eq!(first.output, expected);
         let second = apply(&first, &g, Action::PropertyChanged(INPUT));
-        assert_eq!(second.output, expected.repeat(2));
+        assert_eq!(second.output, [expected.clone(), expected].concat());
         assert_eq!(apply(&second, &g, Action::Event(42)), second);
     }
 }

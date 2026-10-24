@@ -12,30 +12,45 @@ use crate::{
 use nfs_frostbite::ebx::{Fields, Object, Value};
 use nfs_world::scoring::{
     curve::{Curve, Interpolation, Knot, MAX_KNOTS},
-    math::{self, FloatOp, Instruction, Operation, Program, Register},
+    math::{self, Comparison, FloatOp, Instruction, IntegerOp, Operation, Program, Register},
 };
 
+pub mod ai;
 pub mod arithmetic;
 pub mod awards;
+pub mod bank;
 pub mod bindings;
 pub mod boolean_fold;
 pub mod buildup;
+pub mod burnout;
+pub mod burnout_override;
 pub mod content;
+pub mod context_reporter;
 pub mod creation;
 pub mod delay;
 pub mod donut;
 pub mod draft;
+pub mod event_details;
+pub mod event_sync;
 pub mod events;
 pub mod interfaces;
+pub mod linked_curve;
 pub mod nodes;
+pub mod participant_properties;
 pub mod program;
 pub mod property_gate;
 pub mod property_types;
 pub mod proximity;
+pub mod rank_query;
 pub mod realms;
 pub mod road;
+pub mod sets;
 pub mod stopwatch;
 pub mod synced;
+pub mod teleport_location;
+pub mod transitions;
+pub mod vehicle_info;
+pub mod vehicle_tuning;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Calculation {
@@ -116,17 +131,33 @@ fn compile_math(fields: &Fields) -> Result<Calculation, Error> {
         let p1 = bits(field(fields, "Param1")?)?;
         let p2 = bits(field(fields, "Param2")?)?;
         let operation = match (code, name) {
+            (0, "MathOpCode_ConstB") if p2 == 0 => Operation::Boolean(p1 != 0),
             (1, "MathOpCode_ConstI") if p2 == 0 => Operation::Integer(p1 as i32),
             (2, "MathOpCode_ConstF") if p2 == 0 => Operation::Float(f32::from_bits(p1)),
             (4, "MathOpCode_InputI") if p2 == 0 => Operation::InputInteger(p1),
             (5, "MathOpCode_InputF") if p2 == 0 => Operation::InputFloat(p1),
+            (7, "MathOpCode_InputV3") if p2 == 0 => Operation::InputVec3(p1),
+            (11, "MathOpCode_AndB") => Operation::AndBoolean(register(p1)?, register(p2)?),
+            (13, "MathOpCode_GreaterF") => {
+                Operation::CompareFloat(Comparison::Greater, register(p1)?, register(p2)?)
+            }
+            (15, "MathOpCode_GreaterEqF") => {
+                Operation::CompareFloat(Comparison::GreaterEqual, register(p1)?, register(p2)?)
+            }
             (17, "MathOpCode_LessF") => Operation::LessFloat(register(p1)?, register(p2)?),
+            (19, "MathOpCode_LessEqF") => {
+                Operation::CompareFloat(Comparison::LessEqual, register(p1)?, register(p2)?)
+            }
+            (23, "MathOpCode_EqI") => Operation::EqualInteger(register(p1)?, register(p2)?),
             (26, "MathOpCode_AddI") => Operation::AddInteger(register(p1)?, register(p2)?),
             (27, "MathOpCode_AddF") => {
                 Operation::BinaryFloat(FloatOp::Add, register(p1)?, register(p2)?)
             }
             (32, "MathOpCode_SubF") => {
                 Operation::BinaryFloat(FloatOp::Subtract, register(p1)?, register(p2)?)
+            }
+            (31, "MathOpCode_SubI") => {
+                Operation::BinaryInteger(IntegerOp::Subtract, register(p1)?, register(p2)?)
             }
             (36, "MathOpCode_MulF") => {
                 Operation::BinaryFloat(FloatOp::Multiply, register(p1)?, register(p2)?)
@@ -151,11 +182,24 @@ fn compile_math(fields: &Fields) -> Result<Calculation, Error> {
                     .map(|p| register(bits(p)?))
                     .collect::<Result<Vec<_>, _>>()?;
                 match (p1, args.as_slice()) {
+                    (193_418_248, &[condition, yes, no]) => {
+                        Operation::SelectBoolean { condition, yes, no }
+                    }
                     (1_358_875_324, &[a]) => Operation::FloatFromInteger(a),
                     (193_418_252, &[condition, yes, no]) => {
                         Operation::SelectFloat { condition, yes, no }
                     }
                     (194_586_087, &[a]) => Operation::RoundFloat(a),
+                    (2_087_826_864, &[a]) => Operation::IntegerFromFloat(a),
+                    (2_087_688_422, &[a, b]) => Operation::BinaryInteger(IntegerOp::Min, a, b),
+                    (2_087_696_824, &[a, b]) => Operation::BinaryInteger(IntegerOp::Max, a, b),
+                    (2_087_688_425, &[a, b]) => Operation::BinaryFloat(FloatOp::Min, a, b),
+                    (1_543_335_391, &[value, min, max]) => {
+                        Operation::ClampInteger { value, min, max }
+                    }
+                    (2_087_559_195, &[a]) => Operation::ArcCos(a),
+                    (1_648_243_358, &[a]) => Operation::NormVec3(a),
+                    (3_975_427_555, &[a, b]) => Operation::DistanceVec3(a, b),
                     _ => return Err(bad("unsupported math function or signature")),
                 }
             }
@@ -165,7 +209,11 @@ fn compile_math(fields: &Fields) -> Result<Calculation, Error> {
                 4 => Register::Float(register(p2)?),
                 _ => return Err(bad("unsupported math return type")),
             }),
-            _ => return Err(bad("unsupported math instruction")),
+            _ => {
+                return Err(bad(&format!(
+                    "unsupported math instruction {code}:{name} ({p1}, {p2})"
+                )));
+            }
         };
         instructions.push(Instruction { result, operation });
     }
@@ -219,7 +267,7 @@ pub(crate) fn compile_curve_rows(
     } else {
         Interpolation::Cubic
     };
-    let curve = Curve::new(
+    let curve = Curve::from_authored(
         [vectors[0][0], vectors[1][0]],
         [vectors[0][1], vectors[1][1]],
         input_scale,

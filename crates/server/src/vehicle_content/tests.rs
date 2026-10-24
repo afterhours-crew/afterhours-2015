@@ -239,6 +239,27 @@ fn equipment_presentation_matches_fresh_inventory_components_and_registers_new_m
 }
 
 #[test]
+fn installed_vehicle_identity_is_retained_and_older_profiles_stay_readable() {
+    let (mut document, classes, _) = fixture();
+    assert!(
+        Content::from_json(&document, &classes)
+            .unwrap()
+            .definition(&[1; 16])
+            .unwrap()
+            .info
+            .is_none()
+    );
+    document["vehicles"][0]["vehicle_info"] =
+        json!({"bundle":0xf1234567u32,"short_name":"ID_CAR_CONSTRUCTED_SHORT_NAME"});
+    let content = Content::from_json(&document, &classes).unwrap();
+    let info = content.definition(&[1; 16]).unwrap().info.as_ref().unwrap();
+    assert_eq!(info.bundle, 0xf1234567);
+    assert_eq!(info.short_name.as_str(), "ID_CAR_CONSTRUCTED_SHORT_NAME");
+    document["vehicles"][0]["vehicle_info"]["short_name"] = json!("invalid\0token");
+    assert!(Content::from_json(&document, &classes).is_err());
+}
+
+#[test]
 fn separate_parts_construct_identical_bodies_and_reject_mixed_or_foreign_inputs() {
     let (legacy, classes, items) = fixture();
     let expected = Content::from_json(&legacy, &classes)

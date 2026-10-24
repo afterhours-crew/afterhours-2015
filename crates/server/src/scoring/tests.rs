@@ -115,6 +115,51 @@ fn content() -> Content {
 }
 
 #[test]
+fn authored_event_updates_keep_their_own_binding_and_unknown_ids_fail() {
+    let mut content = content();
+    for (id, local_index) in [(11, 0), (22, 1)] {
+        let participant = participant(local_index);
+        let scoring = EventScoring {
+            blueprint: format!("constructed/event_{id}"),
+            program: participant.program,
+            fields: participant.fields,
+            bus_entities: participant.bus_entities,
+            categories: content.installed.categories.clone(),
+            properties: vec![],
+        };
+        let creation = content.creation.clone();
+        content = content
+            .with_authored_event(id, scoring, &creation, participant.layout.asset)
+            .unwrap();
+    }
+    for (id, index) in [(11, 0), (22, 1)] {
+        let which = content.event_kind(id).unwrap();
+        assert_eq!(which, Which::EventFor(id));
+        let RecordUpdate::Entity { binding, .. } = content
+            .update(which, &[(1, Value::Float(123.))])
+            .unwrap()
+            .unwrap()
+        else {
+            panic!("entity update")
+        };
+        assert_eq!(binding.asset().local_index, index);
+    }
+    assert!(content.event_kind(33).is_none());
+    assert!(content.program(Which::EventFor(33)).is_err());
+    assert!(content.binding(Which::Event).is_err());
+    let original = content.events[&11].scoring.clone();
+    let creation = content.creation.clone();
+    let asset = content.binding(Which::EventFor(11)).unwrap().asset();
+    assert!(
+        content
+            .clone()
+            .with_authored_event(11, original, &creation, asset)
+            .is_err()
+    );
+    assert_eq!(content.event_kind(11), Some(Which::EventFor(11)));
+}
+
+#[test]
 fn credit_sums_per_category_and_rejects_unknown_or_negative_keepers() {
     let content = content();
     let award = |keeper, amount| Award {
@@ -194,5 +239,44 @@ fn content_requires_one_shared_catalog() {
             categories: BTreeMap::new(),
         }))
         .is_err()
+    );
+}
+
+#[test]
+fn synchronized_string_replication_preserves_empty_and_utf8_bytes() {
+    use nfs_world::scoring::value::Text;
+    let mut part = participant(1);
+    part.fields[1].kind = Kind::StringProperty;
+    part.layout.fields[1].kind = Kind::StringProperty;
+    let content = Content::new(Arc::new(ScoringContent {
+        acquisition: participant(0),
+        scoring: part,
+        categories: BTreeMap::new(),
+    }))
+    .unwrap();
+    for text in ["", "event/ö", "In The Driver's Seat"] {
+        let value = Value::Text(Text::new(text).unwrap());
+        let update = content
+            .update(Which::Scoring, &[(1, value)])
+            .unwrap()
+            .unwrap();
+        let RecordUpdate::Entity { fields, .. } = update else {
+            panic!("entity update")
+        };
+        assert_eq!(
+            fields[1],
+            Some(EntityUpdate::StringProperty(Some(text.as_bytes().to_vec())))
+        );
+        assert!(
+            fields
+                .iter()
+                .enumerate()
+                .all(|(i, field)| i == 1 || field.is_none())
+        );
+    }
+    assert!(
+        content
+            .update(Which::Scoring, &[(1, Value::Integer(0))])
+            .is_err()
     );
 }

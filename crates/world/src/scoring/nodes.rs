@@ -44,8 +44,13 @@ pub const TOGGLE: u32 = 3_236_481_175;
 pub const CONDITION: u32 = 1_800_624_758;
 pub const VALUE_IF_TRUE: u32 = 88_991_863;
 pub const VALUE_IF_FALSE: u32 = 2_915_912_540;
+pub const RANGE_MIN: u32 = 0x0b87_c2cf;
+pub const RANGE_MAX: u32 = 0x0b87_c3d1;
+pub const RANGE_ABOVE: u32 = 0xc4b2_e5b7;
+pub const RANGE_BELOW: u32 = 0x7c83_f40c;
+pub const RANGE_WITHIN: u32 = 0x6291_dadd;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
     Publish(u32, Value),
     Emit(u32),
@@ -60,6 +65,9 @@ pub enum Action {
 pub enum Comparison {
     Float,
     Integer,
+    /// RVA 04549de0 uses unsigned qword comparisons; authored Int64 defaults
+    /// retain their bit pattern. Explicit events forward their input context.
+    Unsigned64,
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Definition {
@@ -72,12 +80,33 @@ pub enum Definition {
     ParticipantProperty {
         value: bool,
     },
+    /// An integer participant property written through an accessor whose
+    /// `Value` is connected. The native server accessor stores the bound
+    /// Value for its participant and every later change (thunk `0x1446dcc80`
+    /// into `0x144055d20`), and mirrors the stored value in `OutputValue`
+    /// (`0x1446dcbb0`; E1000). The output is therefore the last written
+    /// value; accessors that only read the store are not modeled.
+    IntegerParticipantProperty,
+    /// Requires a participant-store binding in the program compiler.
+    FloatParticipantProperty,
+    Not,
+    /// Native order is min(input, max), then max(result, min). Reversed
+    /// authored limits therefore return min; equality selects the limit.
+    Clamp {
+        min: f32,
+        max: f32,
+    },
     Float {
         default: f32,
         step: f32,
     },
     Gate {
         open: bool,
+    },
+    /// EventAndGate latches each In1..InN once, emits Out on the last, and
+    /// remains latched until Reset. Native handler RVA 0375b760.
+    AllEvents {
+        count: u8,
     },
     Splitter {
         run_once: bool,
@@ -95,7 +124,9 @@ pub enum Definition {
         step: i32,
     },
     /// The supported LoadOnCreate=true mode; bind the input before seeding.
-    IntegerCache,
+    IntegerCache {
+        load_on_create: bool,
+    },
     /// Fresh Boolean cache. Resolve InValue through its authored fallback when
     /// unbound or unready; LoadOnCreate=false does not seed OutValue at bind.
     BooleanCache {
@@ -106,7 +137,14 @@ pub enum Definition {
         on_start: bool,
         always_send: bool,
     },
+    /// Signed inclusive range. Explicit events do not change the automatic
+    /// comparison's last result (RVAs 037a20e0 and 037a19a0).
+    CompareIntegerRange {
+        on_change: bool,
+        on_start: bool,
+    },
     ConditionalFloat,
+    ConditionalInteger,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct Node {
@@ -118,6 +156,8 @@ pub struct Node {
     pending: bool,
     relation: Option<Ordering>,
     boolean_relation: Option<bool>,
+    range_previous: u8,
+    seen_events: u16,
 }
 
 fn float(read: &mut impl FnMut(u32) -> Option<Value>, port: u32) -> Result<f32, Error> {
@@ -144,17 +184,20 @@ fn boolean_event(value: bool) -> Effect {
 fn conditional(
     read: &mut impl FnMut(u32) -> Option<Value>,
     condition: bool,
+    integer_output: bool,
 ) -> Result<Effect, Error> {
+    let port = if condition {
+        VALUE_IF_TRUE
+    } else {
+        VALUE_IF_FALSE
+    };
     Ok(Effect::Publish(
         OUTPUT,
-        Value::Float(float(
-            read,
-            if condition {
-                VALUE_IF_TRUE
-            } else {
-                VALUE_IF_FALSE
-            },
-        )?),
+        if integer_output {
+            Value::Integer(integer(read, port)?)
+        } else {
+            Value::Float(float(read, port)?)
+        },
     ))
 }
 fn relation(
@@ -170,6 +213,11 @@ fn relation(
             (None, _) | (_, None) => Err(Error::MissingInput),
             _ => Err(Error::InvalidGraph),
         },
+        Comparison::Unsigned64 => match (read(A), read(B)) {
+            (Some(Value::Unsigned64(a)), Some(Value::Unsigned64(b))) => Ok(a.cmp(&b)),
+            (None, _) | (_, None) => Err(Error::MissingInput),
+            _ => Err(Error::InvalidGraph),
+        },
     }
 }
 fn predicates(kind: Comparison, relation: Ordering) -> Vec<u32> {
@@ -181,7 +229,7 @@ fn predicates(kind: Comparison, relation: Ordering) -> Vec<u32> {
     if relation != Less {
         events.push(GREATER_EQUAL);
     }
-    if kind == Comparison::Integer {
+    if kind != Comparison::Float {
         events.push(if relation == Equal { EQUAL } else { NOT_EQUAL });
     }
     if relation != Greater {
@@ -197,9 +245,16 @@ impl Node {
     /// Fresh composition state, without an engine save-state restore. Binding
     /// and activation are separate: startup comparisons run after inputs bind.
     pub fn new(definition: Definition) -> Result<Self, Error> {
+        if matches!(definition, Definition::AllEvents { count } if !(1..=16).contains(&count)) {
+            return Err(Error::Bound);
+        }
         if let Definition::Float { default, step } = definition {
             finite(default)?;
             finite(step)?;
+        }
+        if let Definition::Clamp { min, max } = definition {
+            finite(min)?;
+            finite(max)?;
         }
         Ok(Self {
             definition,
@@ -211,9 +266,12 @@ impl Node {
                 definition,
                 Definition::Compare { on_start: true, .. }
                     | Definition::CompareBoolean { on_start: true, .. }
+                    | Definition::CompareIntegerRange { on_start: true, .. }
             ),
             relation: None,
             boolean_relation: None,
+            range_previous: 0,
+            seen_events: 0,
         })
     }
 
@@ -235,6 +293,11 @@ impl Node {
             Definition::ParticipantProperty { value } => {
                 vec![Effect::Publish(OUTPUT_VALUE, Value::Boolean(value))]
             }
+            Definition::FloatParticipantProperty => return Err(Error::InvalidGraph),
+            Definition::IntegerParticipantProperty => vec![Effect::Publish(
+                OUTPUT_VALUE,
+                Value::Integer(integer(&mut read, FLOAT_VALUE)?),
+            )],
             Definition::Float { default, .. } => {
                 vec![Effect::Publish(FLOAT_VALUE, Value::Float(default))]
             }
@@ -244,7 +307,9 @@ impl Node {
             Definition::Integer { default, .. } => {
                 vec![Effect::Publish(FLOAT_VALUE, Value::Integer(default))]
             }
-            Definition::IntegerCache => vec![Effect::Publish(
+            Definition::IntegerCache {
+                load_on_create: true,
+            } => vec![Effect::Publish(
                 CACHE_OUTPUT,
                 Value::Integer(integer(&mut read, CACHE_INPUT)?),
             )],
@@ -255,6 +320,8 @@ impl Node {
                 Value::Boolean(boolean(&mut read, CACHE_INPUT)?),
             )],
             Definition::ConditionalFloat => vec![Effect::Publish(OUTPUT, Value::Float(0.0))],
+            Definition::ConditionalInteger => vec![Effect::Publish(OUTPUT, Value::Integer(0))],
+            Definition::Clamp { .. } => vec![Effect::Publish(OUT, Value::Float(0.0))],
             _ => vec![],
         })
     }
@@ -283,6 +350,36 @@ impl Node {
         use Definition::*;
         use Effect::*;
         match (self.definition, action) {
+            (Not, PropertyChanged(IN)) => {
+                Ok(vec![Publish(OUT, Value::Boolean(!boolean(read, IN)?))])
+            }
+            (Clamp { min, max }, PropertyChanged(IN)) => {
+                let input = float(read, IN)?;
+                let upper = if input < max { input } else { max };
+                let result = if upper > min { upper } else { min };
+                Ok(vec![Publish(OUT, Value::Float(result))])
+            }
+            (AllEvents { .. }, Event(RESET)) => {
+                self.seen_events = 0;
+                Ok(vec![])
+            }
+            (AllEvents { count }, Event(event)) => {
+                let Some(slot) =
+                    (1..=u16::from(count)).find(|i| super::integers::port("In", *i) == event)
+                else {
+                    return Ok(vec![]);
+                };
+                let bit = 1 << (slot - 1);
+                if self.seen_events & bit != 0 {
+                    return Ok(vec![]);
+                }
+                self.seen_events |= bit;
+                Ok(if self.seen_events.count_ones() == u32::from(count) {
+                    vec![Emit(OUT)]
+                } else {
+                    vec![]
+                })
+            }
             (Cache, Event(LOAD)) => Ok(vec![
                 Publish(CACHE_OUTPUT, Value::Float(float(read, CACHE_INPUT)?)),
                 Emit(CACHE_LOADED),
@@ -377,7 +474,11 @@ impl Node {
                 };
                 Ok(vec![Publish(FLOAT_VALUE, Value::Integer(value))])
             }
-            (IntegerCache, Event(LOAD)) => Ok(vec![
+            (IntegerParticipantProperty, PropertyChanged(FLOAT_VALUE)) => Ok(vec![Publish(
+                OUTPUT_VALUE,
+                Value::Integer(integer(read, FLOAT_VALUE)?),
+            )]),
+            (IntegerCache { .. }, Event(LOAD)) => Ok(vec![
                 Publish(CACHE_OUTPUT, Value::Integer(integer(read, CACHE_INPUT)?)),
                 Emit(CACHE_LOADED),
             ]),
@@ -412,20 +513,86 @@ impl Node {
                 self.boolean_relation = Some(current);
                 Ok(vec![boolean_event(current)])
             }
-            (ConditionalFloat, Activate | PropertyChanged(CONDITION)) => {
-                let condition = boolean(read, CONDITION)?;
-                Ok(vec![conditional(read, condition)?])
+            (CompareIntegerRange { .. }, Event(_)) => self.range(read, true),
+            (
+                CompareIntegerRange {
+                    on_change: true, ..
+                },
+                PropertyChanged(_),
+            ) => {
+                if !self.active {
+                    self.pending = true;
+                    return Ok(vec![]);
+                }
+                self.range(read, false)
             }
-            (ConditionalFloat, PropertyChanged(port @ (VALUE_IF_TRUE | VALUE_IF_FALSE))) => {
+            (CompareIntegerRange { .. }, Activate) => {
+                self.active = true;
+                if !self.pending {
+                    return Ok(vec![]);
+                }
+                self.pending = false;
+                self.range(read, false)
+            }
+            (ConditionalFloat | ConditionalInteger, Activate | PropertyChanged(CONDITION)) => {
+                let condition = boolean(read, CONDITION)?;
+                Ok(vec![conditional(
+                    read,
+                    condition,
+                    self.definition == ConditionalInteger,
+                )?])
+            }
+            (
+                ConditionalFloat | ConditionalInteger,
+                PropertyChanged(port @ (VALUE_IF_TRUE | VALUE_IF_FALSE)),
+            ) => {
                 let condition = boolean(read, CONDITION)?;
                 Ok(if condition == (port == VALUE_IF_TRUE) {
-                    vec![conditional(read, condition)?]
+                    vec![conditional(
+                        read,
+                        condition,
+                        self.definition == ConditionalInteger,
+                    )?]
                 } else {
                     vec![]
                 })
             }
             _ => Ok(vec![]),
         }
+    }
+
+    fn range(
+        &mut self,
+        read: &mut impl FnMut(u32) -> Option<Value>,
+        explicit: bool,
+    ) -> Result<Vec<Effect>, Error> {
+        let min = integer(read, RANGE_MIN)?;
+        let max = integer(read, RANGE_MAX)?;
+        let value = integer(read, FLOAT_VALUE)?;
+        let previous = self.range_previous;
+        if !explicit {
+            self.range_previous = if value < min {
+                1
+            } else if value > max {
+                3
+            } else {
+                2
+            };
+        }
+        let mut effects = Vec::with_capacity(2);
+        // Native code tests Above independently, then Below/Within. Reversed
+        // limits can emit Above followed by Below; do not normalize them.
+        if value > max && (explicit || previous != 3) {
+            effects.push(Effect::Emit(RANGE_ABOVE));
+        }
+        if value < min {
+            if explicit || previous != 1 {
+                effects.push(Effect::Emit(RANGE_BELOW));
+            }
+        } else if value <= max && (explicit || previous != 2) {
+            effects.push(Effect::Emit(RANGE_WITHIN));
+        }
+        Ok(effects)
     }
 
     fn transition(&mut self, kind: Comparison, current: Ordering) -> Vec<Effect> {
@@ -483,7 +650,14 @@ pub fn cast_numeric(input: Value) -> Result<[Effect; 3], Error> {
             }
             (value, value as i32, value != 0.0)
         }
-        Value::Vec3(_) | Value::Vec4(_) | Value::Transform(_) => return Err(Error::InvalidGraph),
+        Value::Text(_)
+        | Value::Unsigned32(_)
+        | Value::Unsigned64(_)
+        | Value::Vec3(_)
+        | Value::Vec4(_)
+        | Value::Transform(_) => {
+            return Err(Error::InvalidGraph);
+        }
     };
     Ok([
         Effect::Publish(936_870_923, Value::Float(float)),

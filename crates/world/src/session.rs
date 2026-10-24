@@ -33,6 +33,7 @@ fn rpc_message(rpc: crate::participants::HostRpc) -> frame::Message<'static> {
         HostRpc::Event(v) => frame::Message::LogicEvent(v),
         HostRpc::WorldActivation(v) => frame::Message::WorldActivation(v),
         HostRpc::Query(v) => frame::Message::QueryControl(v),
+        HostRpc::GameMode(v) => frame::Message::GameModeCall(v),
     }
 }
 
@@ -190,11 +191,29 @@ struct Seen {
 struct Observing<'a> {
     inner: &'a mut dyn Listener,
     seen: Seen,
+    waiting_level: Option<u16>,
 }
 
 impl Listener for Observing<'_> {
     fn frame(&mut self, queued: application::Queued<'_>) -> bool {
         if !self.inner.frame(queued) {
+            // Output may be blocked on this exact resource while gameplay
+            // needs output capacity to commit. Its load proof is monotonic and
+            // independent of those mutations. Learn only that prerequisite;
+            // keep the frame unaccepted so every gameplay message is retried.
+            if let Some(level) = self.waiting_level
+                && let Ok(parsed) = frame::parse_prefix(queued.data, frame::Direction::FromClient)
+                && parsed.messages.iter().flat_map(|m| &m.groups).any(|group| {
+                    group.messages.iter().any(|message| {
+                        matches!(message, frame::Message::Opaque {
+                            index: frame::EX_SUBLEVEL_REPORT, body,
+                        } if frame::sublevel_report_ids(*body).contains(&level))
+                    })
+                })
+            {
+                self.seen.reports += 1;
+                self.seen.reported.push(level);
+            }
             return false;
         }
         if let Ok(parsed) = frame::parse_prefix(queued.data, frame::Direction::FromClient) {
@@ -250,6 +269,17 @@ pub const MOVEMENT_INTERVAL_MS: u64 = 100;
 pub const MAX_REPLICATION_QUEUE: usize = 32;
 pub const MAX_REPLICATION_QUEUE_BITS: usize = 1024 * 1024;
 pub const MAX_RPC_QUEUE: usize = 2048;
+
+/// Combine adjacent absolute motion snapshots without crossing a lifecycle,
+/// relative-origin, binding or revision boundary. Callers must keep callback
+/// boundaries outside the pair. The budget includes the host's timestamp.
+pub fn coalesce_motion(previous: &Section, next: &Section, max_bits: usize) -> Option<Section> {
+    let combined = motion::combine(previous, next)?;
+    let mut timed = combined.clone();
+    timed.float_bits = Some(0);
+    timed.flag = true;
+    (replication_frame(&timed, &[], 0).ok()?.len() <= max_bits).then_some(combined)
+}
 /// Notifications carried ahead of one replication frame's records; the
 /// RPC-only frame sends 15 per frame.
 pub const MAX_EAGER_NOTIFICATIONS: usize = 15;
@@ -291,9 +321,22 @@ enum Stage {
     Closed(Option<Application>),
 }
 
+#[derive(Clone)]
+struct QueuedContent {
+    message: frame::Message<'static>,
+    // Counts of preceding publications, independent of wall time and retries.
+    after_replication: usize,
+    after_rpc: usize,
+}
+impl QueuedContent {
+    fn ready(&self, replication_sent: usize, rpc_sent: usize) -> bool {
+        self.after_replication <= replication_sent && self.after_rpc <= rpc_sent
+    }
+}
+
 pub struct Host {
     stage: Stage,
-    content: std::collections::VecDeque<frame::Message<'static>>,
+    content: std::collections::VecDeque<QueuedContent>,
     content_sent: usize,
     registered_handles: usize,
     replication_queue:
@@ -306,6 +349,7 @@ pub struct Host {
     motion_tail_open: bool,
     max_replication_frame_bits: usize,
     rpc_queue: std::collections::VecDeque<crate::participants::HostRpc>,
+    rpc_sent: usize,
     files: [Option<files::Outgoing>; 2],
     /// Objects the client is told to report movement for (selector 0).
     movement: std::collections::BTreeSet<u16>,
@@ -343,6 +387,7 @@ impl Host {
             replication_sent: 0,
             motion_tail_open: false,
             rpc_queue: std::collections::VecDeque::new(),
+            rpc_sent: 0,
             files: [None, None],
             movement: std::collections::BTreeSet::new(),
             movement_sent_ms: None,
@@ -468,6 +513,15 @@ impl Host {
             crate::participants::HostRpc::Query(v) => {
                 self.replication_bindings.get(v.entity) == Some(crate::replication::Kind::Entity)
             }
+            // Every reference of an event call must already be replicated.
+            crate::participants::HostRpc::GameMode(v) => {
+                matches!(
+                    self.replication_bindings.get(v.target),
+                    Some(crate::replication::Kind::Entity | crate::replication::Kind::SubLevel)
+                ) && v
+                    .reference
+                    .is_none_or(|id| self.replication_bindings.get(id).is_some())
+            }
             _ => {
                 self.replication_bindings.get(reply.scene())
                     == Some(crate::replication::Kind::SubLevel)
@@ -489,7 +543,8 @@ impl Host {
             | crate::participants::HostRpc::LevelPoll(_)
             | crate::participants::HostRpc::SequenceStop(_)
             | crate::participants::HostRpc::Event(_)
-            | crate::participants::HostRpc::Query(_) => None,
+            | crate::participants::HostRpc::Query(_)
+            | crate::participants::HostRpc::GameMode(_) => None,
         };
         if participant.is_some_and(|id| {
             self.replication_bindings.get(id) != Some(crate::replication::Kind::Participant)
@@ -510,6 +565,34 @@ impl Host {
     }
 
     pub fn queue_content(&mut self, target: u8, bytes: &[u8]) -> Result<usize, Error> {
+        self.queue_content_at(target, bytes, 0, 0)
+    }
+
+    /// Send after all replication and notifications already queued. A blocked
+    /// transport retains this boundary; later motion cannot postpone it. Both
+    /// the notifications and chunks use the same reliable MessageEX sequence.
+    pub fn queue_content_after_replication(
+        &mut self,
+        target: u8,
+        bytes: &[u8],
+    ) -> Result<usize, Error> {
+        let n = self.queue_content_at(
+            target,
+            bytes,
+            self.replication_sent + self.replication_queue.len(),
+            self.rpc_sent + self.rpc_queue.len(),
+        )?;
+        self.motion_tail_open = false;
+        Ok(n)
+    }
+
+    fn queue_content_at(
+        &mut self,
+        target: u8,
+        bytes: &[u8],
+        after_replication: usize,
+        after_rpc: usize,
+    ) -> Result<usize, Error> {
         if self.stage() == StageName::Closed {
             return Err(Error::Stage);
         }
@@ -530,7 +613,12 @@ impl Host {
             .registered_handles
             .checked_add(added)
             .ok_or(Error::Application(application::Error::Bound))?;
-        self.content.extend(chunks);
+        self.content
+            .extend(chunks.into_iter().map(|message| QueuedContent {
+                message,
+                after_replication,
+                after_rpc,
+            }));
         Ok(n)
     }
 
@@ -619,6 +707,9 @@ impl Host {
                     let mut observing = Observing {
                         inner: listener,
                         seen: Seen::default(),
+                        waiting_level: self.replication_queue.front().and_then(
+                            |(section, _, _)| missing_scene_level(section, &world.reported),
+                        ),
                     };
                     for body in &delivery.applications {
                         match application.receive(body, now_ms, &mut observing) {
@@ -761,25 +852,31 @@ impl Host {
             None => world.client_state_reported && now_ms >= initialized_ms + CONTENT_DELAY_MS,
             Some(_) => world.client_level_ready,
         };
-        if !self.content.is_empty() && due {
+        let ready = self
+            .content
+            .iter()
+            .take_while(|c| c.ready(self.replication_sent, self.rpc_sent))
+            .count();
+        if ready != 0 && due {
             let (take, state) = match world.descriptor_sent {
                 None => {
                     let first_message = self
                         .content
                         .iter()
-                        .position(|m| matches!(m, frame::Message::Chunk { last: true, .. }))
-                        .map_or(self.content.len(), |i| i + 1);
+                        .take(ready)
+                        .position(|m| matches!(m.message, frame::Message::Chunk { last: true, .. }))
+                        .map_or(ready, |i| i + 1);
                     (first_message.min(frame::CHUNKS_PER_FRAME), Some(0))
                 }
-                Some(_) => (self.content.len().min(frame::CHUNKS_PER_FRAME), None),
+                Some(_) => (ready.min(frame::CHUNKS_PER_FRAME), None),
             };
-            let messages: Vec<frame::Message<'static>> = self.content.drain(..take).collect();
+            let messages: Vec<QueuedContent> = self.content.drain(..take).collect();
             let builder = frame::Builder::new().messages(
                 state,
                 vec![frame::Group {
                     channel: 0,
                     sequence: Some(world.next_ex_sequence),
-                    messages: messages.clone(),
+                    messages: messages.iter().map(|c| c.message.clone()).collect(),
                 }],
             );
             match Self::send_built(link, application, &builder, now_ms) {
@@ -789,7 +886,11 @@ impl Host {
                     world.acked_inputs = application.stats().inputs;
                     world.descriptor_sent.get_or_insert(now_ms);
                     self.content_sent += take;
-                    if self.content.is_empty() {
+                    if self
+                        .content
+                        .front()
+                        .is_none_or(|c| !c.ready(self.replication_sent, self.rpc_sent))
+                    {
                         world.content_done_ms = Some(now_ms);
                     }
                     out.events.push(Event::Content {
@@ -874,7 +975,11 @@ impl Host {
         let Some(content_done) = world.content_done_ms else {
             return;
         };
-        if !self.content.is_empty() {
+        if self
+            .content
+            .front()
+            .is_some_and(|c| c.ready(self.replication_sent, self.rpc_sent))
+        {
             return;
         }
         let reliable = |messages: Vec<frame::Message<'static>>, sequence: u8| {
@@ -1033,6 +1138,7 @@ impl Host {
             self.replication_bits -= size;
             self.replication_queue.pop_front();
             self.rpc_queue.drain(..eager);
+            self.rpc_sent += eager;
             self.replication_sent += 1;
             self.replication_clock_ms = Some(now_ms);
             world.next_ex_sequence = (world.next_ex_sequence + notifications as u8) & 0x7f;
@@ -1092,6 +1198,7 @@ impl Host {
                 Ok(wire) => {
                     out.send.push(wire);
                     self.rpc_queue.drain(..count);
+                    self.rpc_sent += count;
                     world.next_ex_sequence = (world.next_ex_sequence + count as u8) & 0x7f;
                     world.acked_inputs = application.stats().inputs;
                     world.last_replication_ms = Some(motion::slot(

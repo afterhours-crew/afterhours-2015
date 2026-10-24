@@ -13,6 +13,9 @@ use nfs_server::{
 };
 use nfs_services::{authentication as auth, bootstrap};
 
+#[path = "owned_control/speedwall.rs"]
+mod speedwall;
+
 fn profiles(id: u8) -> SessionProfiles {
     let bootstrap = bootstrap::Config::from_json(
         &serde_json::from_slice(include_bytes!("support/bootstrap.json")).unwrap(),

@@ -268,6 +268,8 @@ pub enum Stage {
     ReturnPrompted,
     /// The garage-entry sequence is running while the garage is prepared.
     ReturningToGarage,
+    /// An owned in-world relocation; its caller drives the teleport handshake.
+    Relocating,
 }
 /// Garage-exit endpoints of the startup and garage sublevels, by field index:
 /// startup 97 and garage 9 are the client's exit requests, startup 81 its
@@ -432,6 +434,32 @@ pub enum Outcome {
     Advanced(Vec<Notification>),
 }
 impl Lifecycle {
+    /// Reserve an in-world relocation only for a participant already in free roam.
+    /// The caller publishes its protocol transitions atomically with this change.
+    pub fn begin_relocation(&mut self, participant: u16) -> Result<(), Error> {
+        let stage = self
+            .stages
+            .get_mut(&participant)
+            .ok_or(Error::UnknownObject)?;
+        if !matches!(stage, Stage::FreeRoam | Stage::ReturnPrompted) {
+            return Err(Error::Shape);
+        }
+        *stage = Stage::Relocating;
+        self.arrival_prompts.remove(&participant);
+        self.prompted_requests.retain(|&p| p != participant);
+        Ok(())
+    }
+    pub fn finish_relocation(&mut self, participant: u16) -> Result<(), Error> {
+        let stage = self
+            .stages
+            .get_mut(&participant)
+            .ok_or(Error::UnknownObject)?;
+        if *stage != Stage::Relocating {
+            return Err(Error::Shape);
+        }
+        *stage = Stage::FreeRoam;
+        Ok(())
+    }
     pub fn bind_return(&mut self, records: &[Record], startup_key: u32) -> Result<bool, Error> {
         if self.returning.is_some() {
             return Err(Error::DuplicateObject);
@@ -1163,6 +1191,8 @@ pub enum HostRpc {
     WorldActivation(crate::world_activation::Notification),
     /// Scoring query control on a participant-owned entity serializer.
     Query(EntityCall),
+    /// An owned event's call on a game-mode, logic or scene serializer.
+    GameMode(crate::game_mode::Call),
 }
 impl HostRpc {
     /// Every object the notification names; the client must hold each one
@@ -1186,6 +1216,7 @@ impl HostRpc {
                 ids
             }
             Self::Query(v) => vec![v.entity],
+            Self::GameMode(v) => v.objects(),
         }
     }
     pub fn scene(self) -> u16 {
@@ -1203,6 +1234,7 @@ impl HostRpc {
             Self::Event(v) => v.target.ghost,
             Self::WorldActivation(v) => v.endpoint.scene,
             Self::Query(v) => v.entity,
+            Self::GameMode(v) => v.target,
         }
     }
     pub fn encode(self) -> Result<BitWriter, Error> {
@@ -1218,6 +1250,10 @@ impl HostRpc {
             Self::Event(v) => v.encode().map_err(|_| Error::Shape),
             Self::WorldActivation(v) => v.encode(),
             Self::Query(v) => v.encode(),
+            Self::GameMode(v) => v.encode().map_err(|e| match e {
+                crate::game_mode::Error::Bound => Error::Bound,
+                crate::game_mode::Error::Shape => Error::Shape,
+            }),
         }
     }
 }

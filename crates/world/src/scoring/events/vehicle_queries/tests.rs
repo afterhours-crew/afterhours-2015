@@ -78,7 +78,7 @@ impl QueryHandler for State {
         self.physics
             .iter()
             .find(|p| p.0 == field)
-            .map(|p| Some(p.1))
+            .map(|p| Some(p.1.clone()))
             .ok_or(Error::MissingInput)
     }
     fn drift_measurement(&mut self, vehicle: u16) -> Result<DriftSample, Error> {
@@ -145,7 +145,7 @@ fn state(query: Query, suppression: bool, seeded: bool) -> State {
             let listener = port(1, o.field);
             Definition {
                 kind: o.kind,
-                initial: if seeded { o.initial } else { None },
+                initial: if seeded { o.initial.clone() } else { None },
                 ports: vec![p, listener],
                 listeners: vec![listener],
             }
@@ -166,7 +166,7 @@ fn state(query: Query, suppression: bool, seeded: bool) -> State {
         physics: Query::Physics
             .outputs()
             .iter()
-            .map(|o| (o.field, o.initial.unwrap_or(Value::Float(0.))))
+            .map(|o| (o.field, o.initial.clone().unwrap_or(Value::Float(0.))))
             .collect(),
         drift: DriftSample {
             transform: IDENTITY,

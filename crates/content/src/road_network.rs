@@ -15,6 +15,9 @@ use nfs_world::road_graph::{Graph, LaneInput};
 use nfs_world::scoring::road_network::{Direction, MAX_SEGMENTS, Network, Segment};
 use std::collections::BTreeMap;
 
+mod distance;
+pub use distance::parse as parse_distance;
+
 pub const PARTITION: &str =
     "levels/genesis01/roadnetwork_centersplines/layer6_roadnetwork_schematic";
 
@@ -183,6 +186,12 @@ impl AssetIndex {
     pub fn road_graph(&mut self) -> Result<Graph, Error> {
         let objects = self.assets.objects(PARTITION)?;
         parse_graph(objects)
+    }
+
+    /// Direction-independent authored road distances for race pacing and ranks.
+    pub fn road_distance(&mut self) -> Result<nfs_world::road_distance::Network, Error> {
+        let objects = self.assets.objects(PARTITION)?;
+        parse_distance(objects)
     }
 }
 
@@ -377,5 +386,104 @@ mod tests {
         let mut bad_direction = objects;
         bad_direction[5] = lane(1, 2, "LaneDirection_Up", &[3]);
         assert!(parse_graph(&bad_direction).is_err());
+    }
+
+    #[test]
+    fn distance_query_reads_authored_tables_grid_and_parent_links() {
+        let pointer = |i| Value::Pointer(Pointer::Internal(i));
+        let mut objects = vec![
+            network_entity(),
+            road_node(0., 0.),
+            road_node(0., 60.),
+            lane_segment(
+                30,
+                "LaneDirection_Forward",
+                vec![value_point(0., 0., 0.), value_point(0., 0., 60.)],
+            ),
+            lane(1, 2, "LaneDirection_Forward", &[3]),
+        ];
+        let matrix = Value::Struct(Fields(
+            (1..=4)
+                .flat_map(|row| {
+                    (1..=4).map(move |column| {
+                        (
+                            format!("m{row}{column}"),
+                            Value::Float32(if row == 2 && column == 3 { 60. } else { 0. }),
+                        )
+                    })
+                })
+                .collect(),
+        ));
+        let Value::Struct(spline) = &mut objects[3].fields.0[2].1 else {
+            unreachable!()
+        };
+        spline.0.extend([
+            (
+                "MatrixFormData".into(),
+                Value::Struct(Fields(vec![
+                    ("Matrix".into(), matrix),
+                    (
+                        "BaseData".into(),
+                        Value::Struct(Fields(
+                            [0., 0., 60., 60.]
+                                .into_iter()
+                                .enumerate()
+                                .map(|(i, z)| (format!("P{i}"), value_point(0., 0., z)))
+                                .collect(),
+                        )),
+                    ),
+                ])),
+            ),
+            (
+                "SegmentEndTime".into(),
+                Value::Array(vec![Value::Float32(1.)]),
+            ),
+            (
+                "SegmentEndDistance".into(),
+                Value::Array(vec![Value::Float32(60.)]),
+            ),
+        ]);
+        objects[3].fields.0.push(("Lane".into(), pointer(4)));
+        objects[4].fields.0.push((
+            "LaneLayer".into(),
+            Value::Enum {
+                value: 1,
+                name: Some("LaneLayer_Roads".into()),
+            },
+        ));
+        let cell = |refs| Value::Struct(Fields(vec![("LaneSegments".into(), Value::Array(refs))]));
+        let mut grid = vec![vec![cell(vec![]); 200]; 200];
+        grid[100][100] = cell(vec![pointer(3)]);
+        objects[0].fields.0.extend([
+            (
+                "RoadNodes".into(),
+                Value::Array(vec![pointer(1), pointer(2)]),
+            ),
+            ("RoadLanes".into(), Value::Array(vec![pointer(4)])),
+            (
+                "Grid".into(),
+                Value::Struct(Fields(vec![(
+                    "X".into(),
+                    Value::Array(
+                        grid.into_iter()
+                            .map(|column| {
+                                Value::Struct(Fields(vec![("Z".into(), Value::Array(column))]))
+                            })
+                            .collect(),
+                    ),
+                )])),
+            ),
+        ]);
+        let query = parse_distance(&objects).unwrap();
+        let a = query.locate([0., 0., 5.]).unwrap().unwrap();
+        let b = query.locate([0., 0., 50.]).unwrap().unwrap();
+        let target = query.prepare_target(a).unwrap();
+        // Distances may run backwards on an authored forward-only driving lane.
+        assert_eq!(query.distance(b, &target).unwrap(), Some(45.));
+        objects[3].fields.0.last_mut().unwrap().1 = pointer(1);
+        assert!(parse_distance(&objects).is_err());
+        objects[3].fields.0.last_mut().unwrap().1 = pointer(4);
+        objects[0].fields.0[1].1 = Value::Array(vec![pointer(3)]);
+        assert!(parse_distance(&objects).is_err());
     }
 }

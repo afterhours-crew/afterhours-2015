@@ -34,8 +34,8 @@ pub struct Vehicle {
 }
 impl Vehicle {
     fn validate(self) -> Result<(), Error> {
-        Kind::Vec3.validate(Value::Vec3(self.position))?;
-        Kind::Vec3.validate(Value::Vec3(self.velocity))
+        Kind::Vec3.validate(&Value::Vec3(self.position))?;
+        Kind::Vec3.validate(&Value::Vec3(self.velocity))
     }
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq)]

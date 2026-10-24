@@ -192,6 +192,14 @@ impl<'p> ControlSession<'p> {
     pub fn needs_awards_view(&self, wire: &[u8]) -> bool {
         matches!(&self.phase, Phase::Startup { services, pending: false } if services.needs_awards_view(wire))
     }
+    pub fn needs_speedwall_view(&self, wire: &[u8]) -> bool {
+        matches!(&self.phase, Phase::Startup { services, pending: false } if services.needs_speedwall_view(wire))
+    }
+    pub fn speedwall_view(&mut self, current: nfs_services::speedwall::Current) {
+        if let Phase::Startup { services, .. } = &mut self.phase {
+            services.speedwall_view(current);
+        }
+    }
     pub fn awards_view(&mut self, current: nfs_services::awards::Current) {
         if let Phase::Startup { services, .. } = &mut self.phase {
             services.awards_view(current);

@@ -11,8 +11,12 @@ use super::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+pub mod native;
+
 pub const MAX_NODES: usize = 4096;
 pub const MAX_CONNECTIONS: usize = 16384;
+/// Non-executable scene inventories include several independently owned graphs.
+pub const MAX_TOPOLOGY_CONNECTIONS: usize = 262_144;
 pub const MAX_STEPS: usize = 262_144;
 pub const MAX_DEPTH: usize = 256;
 pub const MAX_REMOTE: usize = 4096;
@@ -33,6 +37,9 @@ pub struct EntityContext {
 pub enum Context {
     Entity(EntityContext),
     Integer(i32),
+    /// Native ParticipantEvent, distinct from PlayerEvent and entity collision
+    /// contexts. The ID belongs to the host's owned participant model.
+    Participant(u64),
 }
 impl From<EntityContext> for Context {
     fn from(value: EntityContext) -> Self {
@@ -70,6 +77,34 @@ pub struct Graph {
     nodes: usize,
     edges: BTreeMap<Endpoint, Vec<Connection>>,
 }
+
+/// Check topology without constructing an executable graph. Scene inventories
+/// can be larger than a single execution context; callers enforce their own
+/// inventory limit, while endpoint width and connection bounds apply here.
+pub fn validate_connections(nodes: usize, connections: &[Connection]) -> Result<(), Error> {
+    if nodes == 0
+        || nodes > usize::from(u16::MAX) + 1
+        || connections.len() > MAX_TOPOLOGY_CONNECTIONS
+    {
+        return Err(Error::Bound);
+    }
+    let mut remote = BTreeSet::new();
+    for connection in connections {
+        if [connection.source, connection.target]
+            .iter()
+            .any(|e| usize::from(e.node) >= nodes)
+        {
+            return Err(Error::UnknownNode);
+        }
+        if let Delivery::NetworkedClient(row) | Delivery::NetworkedClientAndServer(row) =
+            connection.delivery
+            && !remote.insert(row)
+        {
+            return Err(Error::InvalidGraph);
+        }
+    }
+    Ok(())
+}
 impl Graph {
     /// Connections must be in authored order, with client-only edges excluded.
     /// Duplicate local edges are significant; remote row identities are unique.
@@ -77,21 +112,9 @@ impl Graph {
         if nodes == 0 || nodes > MAX_NODES || connections.len() > MAX_CONNECTIONS {
             return Err(Error::Bound);
         }
+        validate_connections(nodes, &connections)?;
         let mut edges: BTreeMap<Endpoint, Vec<Connection>> = BTreeMap::new();
-        let mut remote = BTreeSet::new();
         for connection in connections {
-            if [connection.source, connection.target]
-                .iter()
-                .any(|e| usize::from(e.node) >= nodes)
-            {
-                return Err(Error::UnknownNode);
-            }
-            if let Delivery::NetworkedClient(row) | Delivery::NetworkedClientAndServer(row) =
-                connection.delivery
-                && !remote.insert(row)
-            {
-                return Err(Error::InvalidGraph);
-            }
             edges.entry(connection.source).or_default().push(connection);
         }
         Ok(Self { nodes, edges })
@@ -146,6 +169,11 @@ impl Graph {
 /// network output or share mutable state through Clone. Property changes and
 /// subsequent emissions must happen in their native order inside this callback.
 pub trait Handler {
+    /// A deactivated entity has no live event/property binding. Already-entered
+    /// handlers may still unwind while its storage remains allocated.
+    fn enabled(&self, _node: u16) -> bool {
+        true
+    }
     fn handle(&mut self, target: Endpoint, dispatch: &mut Dispatch<'_>) -> Result<(), Error>;
 
     /// Explicit opt-in for contextual events. Existing interpreters reject
@@ -169,6 +197,14 @@ pub trait Handler {
     ) -> Result<(), Error> {
         Err(Error::UnsupportedEvent)
     }
+    fn handle_participant(
+        &mut self,
+        _target: Endpoint,
+        _participant: u64,
+        _dispatch: &mut Dispatch<'_>,
+    ) -> Result<(), Error> {
+        Err(Error::UnsupportedEvent)
+    }
 }
 
 /// Typed property interpreter for the ordinary synchronous publication path.
@@ -178,6 +214,21 @@ pub trait Handler {
 /// even when explicitly replacing a ready value. Never commit external effects.
 pub trait PropertyHandler: Handler {
     fn properties(&mut self) -> &mut Store;
+    fn native_update(&mut self, _node: u16, _dispatch: &mut Dispatch<'_>) -> Result<(), Error> {
+        Err(Error::UnsupportedEvent)
+    }
+    fn retire(&mut self, _dispatch: &mut Dispatch<'_>) -> Result<(), Error> {
+        Err(Error::UnsupportedEvent)
+    }
+    /// A synchronous notification from an enclosing owner. Graphs that do not
+    /// model these stores reject imports instead of inventing local values.
+    fn import(
+        &mut self,
+        _value: native::Import,
+        _dispatch: &mut Dispatch<'_>,
+    ) -> Result<(), Error> {
+        Err(Error::UnsupportedEvent)
+    }
     fn property_changed(
         &mut self,
         target: Port,
@@ -187,6 +238,7 @@ pub trait PropertyHandler: Handler {
 }
 
 pub struct Dispatch<'a> {
+    native: Option<native::Scope<'a>>,
     graph: &'a Graph,
     steps: usize,
     depth: usize,
@@ -197,6 +249,7 @@ pub struct Dispatch<'a> {
 impl<'a> Dispatch<'a> {
     fn new(graph: &'a Graph) -> Self {
         Self {
+            native: None,
             graph,
             steps: 0,
             depth: 0,
@@ -237,6 +290,14 @@ impl<'a> Dispatch<'a> {
     ) -> Result<(), Error> {
         self.emit_optional_context(state, source, Some(Context::Integer(value)))
     }
+    pub fn emit_participant<H: Handler>(
+        &mut self,
+        state: &mut H,
+        source: Endpoint,
+        participant: u64,
+    ) -> Result<(), Error> {
+        self.emit_optional_context(state, source, Some(Context::Participant(participant)))
+    }
 
     fn emit_optional_context<H: Handler>(
         &mut self,
@@ -272,6 +333,53 @@ impl<'a> Dispatch<'a> {
             return Err(error);
         }
         let result = self.publish_inner(state, source, value, false);
+        if let Err(error) = result {
+            self.fault = Some(error);
+        }
+        result
+    }
+
+    /// Retain all outputs before notifying any listener, in the supplied order.
+    /// TransformSplitter uses this contract: a callback observing translation
+    /// must already see the new basis. This shares normal transaction budgets.
+    pub fn publish_together<H: PropertyHandler>(
+        &mut self,
+        state: &mut H,
+        values: &[(Port, Value)],
+    ) -> Result<(), Error> {
+        if let Some(error) = self.fault {
+            return Err(error);
+        }
+        let result = (|| {
+            if values.len() > super::properties::MAX_PROPERTIES {
+                return Err(Error::Bound);
+            }
+            if state.properties().nodes() != self.graph.nodes {
+                return Err(Error::InvalidGraph);
+            }
+            let mut ports = BTreeSet::new();
+            let mut changes = Vec::with_capacity(values.len());
+            for (source, value) in values {
+                self.step()?;
+                if !ports.insert(*source) {
+                    return Err(Error::InvalidGraph);
+                }
+                if !state.enabled(source.node) {
+                    continue;
+                }
+                changes.push((*source, state.properties().write(*source, value.clone())?));
+            }
+            for (source, mut change) in changes {
+                if !state.enabled(source.node) {
+                    continue;
+                }
+                // Each native notify takes its own listener snapshot. A prior
+                // output's callback may have registered a later output's listener.
+                change.listeners = state.properties().listeners(source)?;
+                self.notify_change(state, change, false)?;
+            }
+            Ok(())
+        })();
         if let Err(error) = result {
             self.fault = Some(error);
         }
@@ -347,18 +455,35 @@ impl<'a> Dispatch<'a> {
         if state.properties().nodes() != self.graph.nodes {
             return Err(Error::InvalidGraph);
         }
+        if !state.enabled(source.node) {
+            return Ok(());
+        }
         self.step()?;
         if self.depth >= MAX_DEPTH {
             return Err(Error::Bound);
         }
         let change = state.properties().write(source, value)?;
+        self.notify_change(state, change, initialization)
+    }
+
+    fn notify_change<H: PropertyHandler>(
+        &mut self,
+        state: &mut H,
+        change: super::properties::Change,
+        initialization: bool,
+    ) -> Result<(), Error> {
+        if self.depth >= MAX_DEPTH {
+            return Err(Error::Bound);
+        }
         self.depth += 1;
         let result = (|| {
             for listener in change.listeners {
                 self.step()?;
                 match listener {
                     super::properties::Registration::Notify(target) => {
-                        state.property_changed(target, initialization || change.first, self)?
+                        if state.enabled(target.node) {
+                            state.property_changed(target, initialization || change.first, self)?;
+                        }
                     }
                     super::properties::Registration::Forward { source, target } => {
                         // Native callbacks receive a pointer into the current
@@ -389,6 +514,9 @@ impl<'a> Dispatch<'a> {
         if usize::from(source.node) >= self.graph.nodes {
             return Err(Error::UnknownNode);
         }
+        if !state.enabled(source.node) {
+            return Ok(());
+        }
         self.step()?;
         if self.depth >= MAX_DEPTH {
             return Err(Error::Bound);
@@ -418,13 +546,18 @@ impl<'a> Dispatch<'a> {
                 }
                 remote.push(row);
             }
-            if !matches!(connection.delivery, Delivery::NetworkedClient(_)) {
+            if !matches!(connection.delivery, Delivery::NetworkedClient(_))
+                && state.enabled(connection.target.node)
+            {
                 match context {
                     Some(Context::Entity(context)) => {
                         state.handle_context(connection.target, context, self)?
                     }
                     Some(Context::Integer(value)) => {
                         state.handle_integer(connection.target, value, self)?
+                    }
+                    Some(Context::Participant(value)) => {
+                        state.handle_participant(connection.target, value, self)?
                     }
                     None => state.handle(connection.target, self)?,
                 }

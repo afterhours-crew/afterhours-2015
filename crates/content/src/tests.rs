@@ -479,6 +479,9 @@ fn vehicle_profiles_follow_components_links_and_installed_defaults() {
     let row = &rows[0];
     let definition = vehicle_profiles::Definition::from_json(row).unwrap();
     assert_eq!(definition.blueprint, synthetic::vehicles::BLUEPRINT);
+    let info = definition.info.as_ref().unwrap();
+    assert_eq!(info.bundle, 0xf123_4567);
+    assert_eq!(info.short_name.as_str(), "ID_CAR_SYNTHETIC_SHORT_NAME");
     assert_eq!(definition.asset_type, 20);
     assert_eq!(definition.asset_index, 0);
     assert_eq!(

@@ -66,6 +66,13 @@ fn declarations_preserve_order_signed_ids_empty_and_typed_defaults() {
         Some(Scalar::Float(0.25))
     );
     assert!(compile(&object(vec![])).unwrap().is_empty());
+    for value in [i32::MIN, -1, 0, 1, i32::MAX] {
+        assert_eq!(
+            default(&format!("Int32 {value}")).unwrap(),
+            Some(Scalar::Integer(value))
+        );
+    }
+    assert_eq!(default("Int32 +17").unwrap(), Some(Scalar::Integer(17)));
 }
 
 #[test]
@@ -85,7 +92,12 @@ fn unknown_malformed_nonfinite_and_reference_defaults_fail_closed() {
         "Float64 1",
         "Boolean false",
         "Boolean 0",
-        "Int32 4",
+        "Int32 2147483648",
+        "Int32 -2147483649",
+        "Int32 4.0",
+        "Int32 --4",
+        "Int32  4",
+        "Int32 4\n",
     ] {
         assert!(
             compile(&object(vec![row(1, Access::Target, text)])).is_err(),

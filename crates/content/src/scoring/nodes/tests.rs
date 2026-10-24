@@ -16,6 +16,98 @@ fn object(class: &str, rows: &[(&str, Value)]) -> Object {
 }
 
 #[test]
+fn integer_range_compiles_signed_inputs_and_activation_flags() {
+    let data = object(
+        "CompareIntRangeEntityData",
+        &[
+            ("Value", Value::Int32(-5)),
+            ("Min", Value::Int32(3)),
+            ("Max", Value::Int32(4)),
+            ("TriggerOnPropertyChange", Value::Bool(true)),
+            ("TriggerOnStart", Value::Bool(false)),
+        ],
+    );
+    let config = compile(&data).unwrap();
+    assert_eq!(
+        config.definition,
+        Definition::CompareIntegerRange {
+            on_change: true,
+            on_start: false
+        }
+    );
+    assert_eq!(
+        config.defaults,
+        [
+            (nodes::FLOAT_VALUE, Scalar::Integer(-5)),
+            (nodes::RANGE_MIN, Scalar::Integer(3)),
+            (nodes::RANGE_MAX, Scalar::Integer(4))
+        ]
+    );
+    let declaration = crate::scoring::property_types::compile(&data)
+        .unwrap()
+        .unwrap();
+    assert_eq!(declaration.inputs.len(), 3);
+    assert!(
+        declaration
+            .inputs
+            .iter()
+            .all(|(_, k)| *k == nfs_world::scoring::properties::Kind::Integer)
+    );
+    assert!(declaration.outputs.is_empty());
+    for name in [
+        "Value",
+        "Min",
+        "Max",
+        "TriggerOnStart",
+        "TriggerOnPropertyChange",
+    ] {
+        let mut invalid = data.clone();
+        invalid
+            .fields
+            .0
+            .iter_mut()
+            .find(|(key, _)| key == name)
+            .unwrap()
+            .1 = Value::UInt32(0);
+        assert!(compile(&invalid).is_err());
+    }
+}
+
+#[test]
+fn uint64_comparison_defaults_preserve_the_authored_int64_bits() {
+    let data = object(
+        "CompareUInt64EntityData",
+        &[
+            ("A", Value::Int64(-1)),
+            ("B", Value::Int64(i64::MIN)),
+            ("TriggerOnPropertyChange", Value::Bool(true)),
+            ("TriggerOnStart", Value::Bool(false)),
+        ],
+    );
+    let config = compile(&data).unwrap();
+    assert_eq!(
+        config.defaults,
+        [
+            (nodes::A, Scalar::Unsigned64(u64::MAX)),
+            (nodes::B, Scalar::Unsigned64(1 << 63))
+        ]
+    );
+    let declarations = crate::scoring::property_types::compile(&data)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        declarations.inputs,
+        [
+            (nodes::A, nfs_world::scoring::properties::Kind::Unsigned64),
+            (nodes::B, nfs_world::scoring::properties::Kind::Unsigned64)
+        ]
+    );
+    let mut broken = data;
+    broken.fields.0[0].1 = Value::Int32(-1);
+    assert!(compile(&broken).is_err());
+}
+
+#[test]
 fn boolean_cache_load_flag_and_fallback_are_typed_and_kept_separate() {
     for load_on_create in [false, true] {
         let config = compile(&object(
@@ -239,8 +331,27 @@ fn boolean_integer_and_conditional_configuration_preserves_types() {
         ],
     ))
     .unwrap();
-    assert_eq!(cache.definition, Definition::IntegerCache);
+    assert_eq!(
+        cache.definition,
+        Definition::IntegerCache {
+            load_on_create: true
+        }
+    );
     assert_eq!(cache.defaults, [(nodes::CACHE_INPUT, Scalar::Integer(-7))]);
+    let empty = compile(&object(
+        "IntCacheEntityData",
+        &[
+            ("InValue", Value::Int32(3)),
+            ("LoadOnCreate", Value::Bool(false)),
+        ],
+    ))
+    .unwrap();
+    assert_eq!(
+        empty.definition,
+        Definition::IntegerCache {
+            load_on_create: false
+        }
+    );
     let compare = compile(&object(
         "CompareBoolEntityData",
         &[
@@ -295,7 +406,7 @@ fn new_nodes_reject_unknown_initialization_and_wrong_scalar_types() {
             "IntCacheEntityData",
             &[
                 ("InValue", Value::Int32(0)),
-                ("LoadOnCreate", Value::Bool(false)),
+                ("LoadOnCreate", Value::UInt32(0)),
             ],
         ),
         object(
@@ -324,4 +435,34 @@ fn new_nodes_reject_unknown_initialization_and_wrong_scalar_types() {
     ] {
         assert!(compile(&obj).is_err(), "{}", obj.class);
     }
+}
+
+#[test]
+fn integer_participant_property_accessor_reads_its_authored_value() {
+    let config = compile(&object(
+        "IntParticipantPropertyAccessorEntityData",
+        &[("Value", Value::Int32(7))],
+    ))
+    .unwrap();
+    assert_eq!(config.definition, Definition::IntegerParticipantProperty);
+    assert_eq!(config.defaults, [(nodes::FLOAT_VALUE, Scalar::Integer(7))]);
+    let d = crate::scoring::property_types::compile(&object(
+        "IntParticipantPropertyAccessorEntityData",
+        &[("Value", Value::Int32(7))],
+    ))
+    .unwrap()
+    .unwrap();
+    let integer = nfs_world::scoring::properties::Kind::Integer;
+    assert_eq!(d.inputs, [(nodes::FLOAT_VALUE, integer)]);
+    assert_eq!(d.outputs, [(nodes::OUTPUT_VALUE, integer)]);
+    for invalid in [Value::Float32(7.0), Value::Bool(true)] {
+        assert!(
+            compile(&object(
+                "IntParticipantPropertyAccessorEntityData",
+                &[("Value", invalid)],
+            ))
+            .is_err()
+        );
+    }
+    assert!(compile(&object("IntParticipantPropertyAccessorEntityData", &[])).is_err());
 }

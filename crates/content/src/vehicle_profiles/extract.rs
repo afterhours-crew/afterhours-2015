@@ -107,6 +107,8 @@ fn profile(
         .extend(fixed.as_object().expect("profile object").clone());
     row["definitions"] = json!(aliases);
     row["meshes"] = json!(meshes);
+    let info = super::info::read(&graph::unique(&nodes, "RaceVehicleEntityData")?.object)?;
+    row["vehicle_info"] = json!({"bundle": info.bundle, "short_name": info.short_name.as_str()});
     Definition::from_json(&row)
         .map_err(|e| bad(&format!("invalid derived profile {bundle}: {e:?}")))?;
     Ok(row)

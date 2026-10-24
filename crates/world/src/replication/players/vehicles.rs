@@ -5,6 +5,82 @@
 use super::*;
 
 impl Players {
+    /// Set or clear only the owned car's burnout tendency override. None resets
+    /// the native mask-8 pair to (0, false); finite values are not clamped.
+    pub fn set_vehicle_burnout_tendency(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        id: u16,
+        value: Option<f32>,
+    ) -> Result<Option<Record>, Error> {
+        if !self.owned_vehicles(connection, persona).contains(&id) {
+            return Err(Error::UnknownObject);
+        }
+        self.change_vehicle_burnout_tendency(id, value)
+    }
+
+    /// Resolve an AI car through the host-issued lifetime key before applying
+    /// an event's burnout override. This grants no inventory authority.
+    pub fn set_ai_vehicle_burnout_tendency(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        key: u64,
+        value: Option<f32>,
+    ) -> Result<Option<Record>, Error> {
+        let id = self
+            .ai_ids(connection, persona, key)
+            .ok_or(Error::UnknownObject)?
+            .vehicle;
+        self.change_vehicle_burnout_tendency(id, value)
+    }
+
+    fn change_vehicle_burnout_tendency(
+        &mut self,
+        id: u16,
+        value: Option<f32>,
+    ) -> Result<Option<Record>, Error> {
+        if value.is_some_and(|v| !v.is_finite()) {
+            return Err(Error::Bound);
+        }
+        let Some(state::Object {
+            current: Update::Vehicle { binding, fields },
+            ..
+        }) = self.objects.get(id)
+        else {
+            return Err(Error::TypeMismatch);
+        };
+        if fields
+            .iter()
+            .filter(|f| matches!(f, Some(vehicle::Update::Chassis(_))))
+            .count()
+            != 1
+        {
+            return Err(Error::Shape);
+        }
+        let updates = fields
+            .iter()
+            .map(|field| {
+                matches!(field, Some(vehicle::Update::Chassis(_))).then(|| {
+                    vehicle::Update::Chassis(Box::new(vehicle::ChassisUpdate {
+                        physics: None,
+                        flag: None,
+                        custom: None,
+                        pair: Some((value.unwrap_or(0.).to_bits(), value.is_some())),
+                    }))
+                })
+            })
+            .collect();
+        self.objects.change(
+            id,
+            Update::Vehicle {
+                binding: binding.clone(),
+                fields: updates,
+            },
+        )
+    }
+
     /// Publish the owned nitrous runtime's mode and/or level (0–255) on the car's
     /// nitrous field. `None` leaves that part of the field unchanged.
     pub fn set_vehicle_nitrous(

@@ -63,6 +63,49 @@ fn collection(parts: Vec<Derived>) -> Collection {
         items,
     }
 }
+
+#[test]
+fn drift_grip_uses_native_weights_first_items_and_neutral_missing_parts() {
+    let c = collection(vec![]);
+    assert_eq!(drift_grip(&c, &definitions(&c).classes, 1).unwrap(), 5.0);
+    let c = collection(vec![
+        Derived::Spoiler {
+            downforce_setting: 9,
+        },
+        Derived::BrakeDiscs {
+            brake_strength_setting: 7,
+            brake_bias_setting: 6,
+        },
+        Derived::HandbrakeTuning {
+            handbrake_strength_setting: 4,
+        },
+        Derived::DifferentialTuning {
+            differential_setting: 8,
+        },
+        Derived::PersistantTuning {
+            abs_setting: 0,
+            stability_control_setting: 10,
+            traction_control_setting: 0,
+            air_pressure_front_setting: 2,
+            air_pressure_rear_setting: 3,
+        },
+        Derived::SteeringTuning {
+            steer_rate_setting: 1,
+            steer_range_setting: 2,
+        },
+        Derived::TireComposition { tire_setting: 3 },
+        Derived::TireComposition { tire_setting: 15 },
+        Derived::NosTuning { nos_setting: 0 },
+    ]);
+    let d = definitions(&c);
+    assert_eq!(drift_grip(&c, &d.classes, 1).unwrap(), 74.0 / 18.0);
+    assert!(drift_grip(&c, &d.classes, 99).is_err());
+    let mut bad = c.clone();
+    bad.items.get_mut(&2).unwrap().derived = Derived::Spoiler {
+        downforce_setting: 16,
+    };
+    assert!(drift_grip(&bad, &d.classes, 1).is_err());
+}
 #[test]
 fn tuning_uses_current_children_and_keeps_constructor_values_for_absent_fields() {
     let mut c = collection(vec![

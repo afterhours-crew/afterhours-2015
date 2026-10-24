@@ -111,7 +111,10 @@ fn bounds_nonfinite_and_type_failures_are_atomic() {
         Value::Integer(1),
     ] {
         let before = node.clone();
-        assert!(node.apply(Action::Activate, |_| Ok(Some(value))).is_err());
+        assert!(
+            node.apply(Action::Activate, |_| Ok(Some(value.clone())))
+                .is_err()
+        );
         assert_eq!(node, before);
     }
     let mut maximum = Node::new(vec![Operation::Add; MAX_OPERATIONS], &[256]).unwrap();

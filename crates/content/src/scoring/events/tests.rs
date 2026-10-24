@@ -7,6 +7,243 @@ use crate::graph::tests::{Memory, local, ptr};
 use nfs_frostbite::ebx::Pointer;
 use nfs_world::scoring::events::{Dispatch, Handler};
 
+#[test]
+fn scene_connection_inventory_preserves_executable_and_wire_index_bounds() {
+    let mut memory = setup();
+    memory
+        .0
+        .get_mut(&("a".into(), 0))
+        .unwrap()
+        .fields
+        .0
+        .iter_mut()
+        .find(|(name, _)| name == "EventConnections")
+        .unwrap()
+        .1 = Value::Array(vec![edge(3, 10, 4, 12, 3); events::MAX_CONNECTIONS + 1]);
+    assert!(read(&mut memory, "a").is_err());
+    let inventory = read_scene(&mut memory, Site::root("a")).unwrap();
+    assert!(inventory.connections.len() > events::MAX_CONNECTIONS);
+    assert!(inventory.dispatcher().is_err());
+    let mut budget = ConnectionBudget {
+        visited: 0,
+        limit: events::MAX_TOPOLOGY_CONNECTIONS,
+    };
+    for _ in 0..4 {
+        budget.visit(65_536).unwrap();
+    }
+    assert!(budget.visit(1).is_err());
+    assert!(
+        ConnectionBudget {
+            visited: 0,
+            limit: events::MAX_TOPOLOGY_CONNECTIONS
+        }
+        .visit(65_537)
+        .is_err()
+    );
+}
+
+#[test]
+fn scene_topology_inventory_has_a_separate_finite_bound_from_executable_graphs() {
+    let mut memory = Memory::default();
+    for index in 1..=MAX_SCENE_NODES {
+        memory.put("scene", index, "OBBData", &[]);
+    }
+    let mut root = |count| {
+        memory.put(
+            "scene",
+            0,
+            "SubWorldData",
+            &[
+                ("Objects", Value::Array((1..count).map(local).collect())),
+                ("Interface", Value::Pointer(Pointer::Null)),
+                ("EventConnections", Value::Array(vec![])),
+                ("PropertyConnections", Value::Array(vec![])),
+                ("LinkConnections", Value::Array(vec![])),
+                ("Flags", Value::UInt16(0)),
+            ],
+        );
+    };
+    root(MAX_SCENE_NODES);
+    assert!(
+        read(&mut memory, "scene")
+            .unwrap_err()
+            .to_string()
+            .contains("event node bound")
+    );
+    let inventory = read_scene(&mut memory, Site::root("scene")).unwrap();
+    assert_eq!(inventory.nodes.len(), MAX_SCENE_NODES);
+    assert!(inventory.dispatcher().is_err());
+    memory
+        .0
+        .get_mut(&("scene".into(), 0))
+        .unwrap()
+        .fields
+        .0
+        .iter_mut()
+        .find(|(name, _)| name == "Objects")
+        .unwrap()
+        .1 = Value::Array((1..=MAX_SCENE_NODES).map(local).collect());
+    assert!(
+        read_scene(&mut memory, Site::root("scene"))
+            .unwrap_err()
+            .to_string()
+            .contains("bound")
+    );
+}
+
+#[test]
+fn client_widget_children_do_not_enter_the_server_scene_graph() {
+    let mut memory = setup();
+    // Two client references share a widget asset. Its authored Object graph
+    // belongs to each client widget; neither copy belongs to the server scene.
+    for index in [1, 2] {
+        memory.put(
+            "a",
+            index,
+            "UIElementWidgetReferenceEntityData",
+            &[("Blueprint", ptr("w", 0))],
+        );
+    }
+    memory.put("w", 0, "UIWidgetBlueprint", &[("Object", local(1))]);
+    memory.put(
+        "w",
+        1,
+        "ProgressionTrackStageButtonWidgetData",
+        &[("Components", Value::Array(vec![local(2)]))],
+    );
+    memory.put(
+        "w",
+        2,
+        "LogicPrefabReferenceObjectData",
+        &[("Blueprint", ptr("b", 0))],
+    );
+    let graph = read_scene(&mut memory, Site::root("a")).unwrap();
+    assert_eq!(graph.nodes.len(), 5);
+    assert_eq!(graph.buses.len(), 1);
+    assert_eq!(graph.connections.len(), 4);
+    assert!(graph.nodes.iter().all(|n| n.identity.asset == "a"));
+    // The raw constructor census remains available and is not pruned globally.
+    assert!(
+        Graph::new(&mut memory)
+            .read(Site::root("a"))
+            .unwrap()
+            .iter()
+            .any(|row| row.site.key.0 == "w")
+    );
+}
+
+#[test]
+fn scene_linked_shape_keeps_each_prefab_occurrence_without_inventing_a_constructor() {
+    let mut memory = setup();
+    memory.put("b", 4, "OBBData", &[]);
+    let fields = &mut memory.0.get_mut(&("b".into(), 0)).unwrap().fields.0;
+    fields
+        .iter_mut()
+        .find(|(name, _)| name == "LinkConnections")
+        .unwrap()
+        .1 = Value::Array(vec![crate::graph::tests::edge(local(1), 17, local(4), 0)]);
+    assert!(read(&mut memory, "a").is_err());
+    let graph = read_scene(&mut memory, Site::root("a")).unwrap();
+    let shapes: Vec<_> = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| n.class == "OBBData")
+        .collect();
+    assert_eq!(shapes.len(), 2);
+    assert_ne!(shapes[0].1.identity, shapes[1].1.identity);
+    for (index, shape) in shapes {
+        assert_eq!(shape.forward, None);
+        assert!(
+            graph
+                .links
+                .iter()
+                .any(|link| usize::from(link.target.node) == index && link.target.field == 0)
+        );
+    }
+    let constructor_rows = Graph::new(&mut memory).read(Site::root("a")).unwrap();
+    assert!(
+        constructor_rows
+            .iter()
+            .all(|row| row.object.class != "OBBData")
+    );
+}
+
+#[test]
+fn prefab_without_an_interface_keeps_internal_wiring_and_rejects_dangling_rows() {
+    let mut memory = setup();
+    let fields = &mut memory.0.get_mut(&("b".into(), 0)).unwrap().fields.0;
+    fields
+        .iter_mut()
+        .find(|(name, _)| name == "Interface")
+        .unwrap()
+        .1 = Value::Pointer(Pointer::Null);
+    // Existing rows reference the interface that was removed.
+    assert!(read(&mut memory, "a").is_err());
+    let fields = &mut memory.0.get_mut(&("b".into(), 0)).unwrap().fields.0;
+    fields
+        .iter_mut()
+        .find(|(name, _)| name == "EventConnections")
+        .unwrap()
+        .1 = Value::Array(vec![edge(1, 13, 3, 14, 3)]);
+    let graph = read(&mut memory, "a").unwrap();
+    assert_eq!(graph.connections.len(), 6);
+    assert!(
+        graph
+            .nodes
+            .iter()
+            .filter(|n| n.class == "LogicPrefabReferenceObjectData")
+            .all(|n| n.forward.is_none())
+    );
+}
+
+#[test]
+fn separately_owned_scene_preserves_ancestor_identity_without_a_local_parent() {
+    let mut memory = setup();
+    let original = read(&mut memory, "a").unwrap();
+    let mut root = Site::root("a");
+    root.parents.push(Frame {
+        bus: ("level".into(), 0),
+        reference: ("level".into(), 7),
+    });
+    let scoped = read_at(&mut memory, root).unwrap();
+    assert_eq!(scoped.connections, original.connections);
+    assert_eq!(scoped.properties, original.properties);
+    assert_eq!(scoped.links, original.links);
+    assert_eq!(scoped.bus_entities, original.bus_entities);
+    for (actual, expected) in scoped.nodes.iter().zip(&original.nodes) {
+        let mut identity = expected.identity.clone();
+        identity.instances.insert(0, ("level".into(), 7));
+        assert_eq!(actual.identity, identity);
+        assert_eq!(actual.forward, expected.forward);
+    }
+    // A real root interface remains an endpoint of this separately owned
+    // scene; it must not forward to an unrelated local node with the same ID.
+    memory.put("a", 8, "InterfaceDescriptorData", &[]);
+    memory
+        .0
+        .get_mut(&("a".into(), 0))
+        .unwrap()
+        .fields
+        .0
+        .iter_mut()
+        .find(|(name, _)| name == "Interface")
+        .unwrap()
+        .1 = local(8);
+    let mut root = Site::root("a");
+    root.parents.push(Frame {
+        bus: ("level".into(), 0),
+        reference: ("level".into(), 7),
+    });
+    let scoped = read_at(&mut memory, root).unwrap();
+    let interface = scoped
+        .nodes
+        .iter()
+        .find(|n| n.identity.asset == "a" && n.identity.index == 8)
+        .unwrap();
+    assert_eq!(interface.forward, None);
+}
+
 fn structure(fields: &[(&str, Value)]) -> Value {
     Value::Struct(Fields(
         fields

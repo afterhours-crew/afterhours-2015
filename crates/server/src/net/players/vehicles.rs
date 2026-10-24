@@ -210,6 +210,7 @@ impl PlayerListener {
             vehicle,
             position: destination.locator(),
             basis: destination.basis(),
+            speed: 0.,
         })
     }
     /// Assignments due by `world_ms`, oldest first. Official hosts send the
