@@ -197,6 +197,7 @@ pub(crate) fn content(parent: Asset, manager: Component) -> (Mode, Mode) {
     )
     .unwrap();
     let data = intro::Mode {
+        completion: None,
         game_mode: GameMode {
             layout,
             lifecycle,
@@ -487,6 +488,106 @@ fn final_dependency_publications_wait_for_the_owned_leave_acknowledgement() {
         .unwrap();
     assert!(
         repeated.calls.is_empty() && repeated.departures.is_empty() && repeated.deleted.is_empty()
+    );
+}
+
+pub(crate) fn result_fixture() -> (Players, Owner, Mode, Active) {
+    let (mut players, owner, mut mode) = clock_fixture(false);
+    let source = Identity {
+        asset: "test/result".into(),
+        index: 1,
+        instances: vec![],
+    };
+    let collector = data::bindings::Link {
+        identity: Identity {
+            asset: "test/collector".into(),
+            index: 2,
+            instances: vec![],
+        },
+        port: 0,
+        class: "ResultCollectorEntityData".into(),
+        channel: None,
+    };
+    mode.data.completion = Some(intro::results::Completion {
+        source: source.clone(),
+        collector: collector.clone(),
+        objective: 10,
+    });
+    let (mut active, _) = Active::start(&mode, &mut players, owner, 12.).unwrap();
+    active.results.insert(
+        owner.participant,
+        event_logic::lifecycle::results::Snapshot {
+            identity: source,
+            collector,
+            triggering_participant: u64::from(owner.participant),
+            values: BTreeMap::new(),
+        },
+    );
+    active.result_barrier = true;
+    let mut out = Output::default();
+    active.begin_finish(&players, &mut out).unwrap();
+    assert!(out.calls.is_empty());
+    (players, owner, mode, active)
+}
+
+#[test]
+fn story_completion_belongs_to_the_human_and_exact_bound_result() {
+    let (_, owner, mode, mut active) = result_fixture();
+    let result = active.results.remove(&owner.participant).unwrap();
+    active.results.insert(owner.participant + 1, result.clone());
+    assert_eq!(
+        active.pending_completion(&mode, owner.participant).unwrap(),
+        None
+    );
+    assert!(
+        active
+            .pending_completion(&mode, owner.participant + 1)
+            .is_err()
+    );
+    active.results.insert(owner.participant, result.clone());
+    assert_eq!(
+        active.pending_completion(&mode, owner.participant).unwrap(),
+        Some(10)
+    );
+    active
+        .results
+        .get_mut(&owner.participant)
+        .unwrap()
+        .collector
+        .identity
+        .instances
+        .push(("other/capability".into(), 9));
+    assert!(active.pending_completion(&mode, owner.participant).is_err());
+    active.results.insert(owner.participant, result);
+    assert!(
+        active
+            .completion_committed(&mode, owner.participant + 1, 10)
+            .is_err()
+    );
+    assert!(
+        active
+            .completion_committed(&mode, owner.participant, 20)
+            .is_err()
+    );
+    assert!(active.result_barrier);
+    assert_eq!(
+        active
+            .completion_committed(&mode, owner.participant, 10)
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(!active.result_barrier);
+    assert!(
+        active
+            .completion_committed(&mode, owner.participant, 10)
+            .unwrap()
+            .is_empty()
+    );
+    active.mark_completion_queued();
+    assert_eq!(
+        active.pending_completion(&mode, owner.participant).unwrap(),
+        None
     );
 }
 

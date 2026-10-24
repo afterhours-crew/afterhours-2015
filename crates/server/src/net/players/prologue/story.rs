@@ -7,6 +7,67 @@ use crate::progression::{Branch, entities::Role};
 use nfs_world::replication::entity;
 
 impl PlayerListener {
+    pub(super) fn stage_story_results(
+        &self,
+        content: &crate::prologue::Content,
+        players: &Players,
+        modes: &mut Modes,
+        pending: &mut VecDeque<Request>,
+    ) -> Result<(), replication::Error> {
+        let mut completed = vec![];
+        let mut jobs = vec![];
+        for (&participant, (active, _, chapter)) in modes.iter() {
+            let Some(objective) =
+                active.pending_completion(content.mode(*chapter)?, participant)?
+            else {
+                continue;
+            };
+            let progression = self
+                .progression
+                .as_ref()
+                .ok_or(replication::Error::Unsupported)?;
+            let loaded = self
+                .persistent
+                .as_deref()
+                .ok_or(replication::Error::Unsupported)?;
+            let restored = progression
+                .catalog
+                .restore(loaded, progression.settings)
+                .map_err(|_| replication::Error::Shape)?;
+            let state = restored
+                .branch(Branch::Intro)
+                .objectives()
+                .get(&objective)
+                .ok_or(replication::Error::Shape)?;
+            let player_index = players
+                .runtime_index(HOST_SELECTOR as u8, self.persona, participant)
+                .ok_or(replication::Error::UnknownObject)?;
+            if !state.active && !state.completed {
+                return Err(replication::Error::Shape);
+            }
+            // An already-completed objective still needs the worker's verified
+            // replay callback to release this mode's publication barrier.
+            jobs.push(Request {
+                participant,
+                player_index: u32::from(player_index),
+                progression: progression.clone(),
+                action: crate::net::items::story::Action::Complete { objective },
+            });
+            completed.push(participant);
+        }
+        if jobs.len() > MAX_PENDING.saturating_sub(pending.len()) {
+            return Err(replication::Error::Bound);
+        }
+        for participant in completed {
+            modes
+                .get_mut(&participant)
+                .expect("validated mode")
+                .0
+                .mark_completion_queued();
+        }
+        pending.extend(jobs);
+        Ok(())
+    }
     pub(in crate::net) fn take_story(&mut self) -> Option<Request> {
         // Entry notifications and their referenced creations are ordering
         // barriers. Publish them before accepting the resulting durable step.
@@ -40,6 +101,34 @@ impl PlayerListener {
             &self.players,
             request.participant,
         )?;
+        let mut modes = self.intro_modes.clone();
+        if let crate::net::items::story::Action::Complete { objective } = request.action
+            && let Some((active, _, chapter)) = modes.get_mut(&request.participant)
+            && let Some(content) = self.prologue.as_deref()
+        {
+            let mode = content.mode(*chapter)?;
+            if mode
+                .data
+                .completion
+                .as_ref()
+                .is_some_and(|c| c.objective == objective)
+            {
+                let restored = request
+                    .progression
+                    .catalog
+                    .restore(&committed.loaded, request.progression.settings)
+                    .map_err(|_| replication::Error::Shape)?;
+                if !restored
+                    .branch(Branch::Intro)
+                    .objectives()
+                    .get(&objective)
+                    .is_some_and(|s| s.completed)
+                {
+                    return Err(replication::Error::Shape);
+                }
+                calls.extend(active.completion_committed(mode, request.participant, objective)?);
+            }
+        }
         if calls.len() > nfs_world::session::MAX_RPC_QUEUE.saturating_sub(self.pending_rpcs.len()) {
             return Err(replication::Error::Bound);
         }
@@ -190,6 +279,7 @@ impl PlayerListener {
             return Err(replication::Error::Bound);
         }
         self.players = players;
+        self.intro_modes = modes;
         self.participants = participants;
         self.selection = selection;
         self.selection_execution = states;
@@ -276,8 +366,100 @@ mod tests {
     use nfs_storage::{InventoryRepository, Timestamp};
     use std::sync::Arc;
     #[test]
+    fn race_result_job_respects_activation_ownership_backpressure_and_repeats() {
+        let (players, owner, mode, active) = crate::prologue::driving::tests::result_fixture();
+        let (template, _, _) = super::super::tests::setup();
+        let mut content = (**template.prologue.as_ref().unwrap()).clone();
+        content.driving = Some((mode.clone(), mode.clone()));
+        let mut listener = PlayerListener::new(owner.persona);
+        let (_, _, snapshot) = crate::progression::tests::local();
+        listener.persistent = Some(Arc::new(
+            crate::progression::tests::tables().view(&snapshot).unwrap(),
+        ));
+        let progression = Arc::new(
+            crate::progression::Content::from_json(&crate::progression::tests::combined()).unwrap(),
+        );
+        listener.progression = Some(progression.clone());
+        let mut modes = Modes::from([(
+            owner.participant,
+            (active.clone(), active, Chapter::FirstDrive),
+        )]);
+        let filler = Request {
+            participant: owner.participant,
+            player_index: 0,
+            progression,
+            action: crate::net::items::story::Action::Complete { objective: 10 },
+        };
+        let mut pending = VecDeque::from(vec![filler; MAX_PENDING]);
+        assert_eq!(
+            listener.stage_story_results(&content, &players, &mut modes, &mut pending),
+            Err(replication::Error::Bound)
+        );
+        assert_eq!(
+            modes[&owner.participant]
+                .0
+                .pending_completion(&mode, owner.participant)
+                .unwrap(),
+            Some(10)
+        );
+        pending.clear();
+        listener.persona += 1;
+        assert_eq!(
+            listener.stage_story_results(&content, &players, &mut modes, &mut pending),
+            Err(replication::Error::UnknownObject)
+        );
+        listener.persona -= 1;
+        assert!(pending.is_empty());
+        let mut inactive = content.clone();
+        inactive
+            .driving
+            .as_mut()
+            .unwrap()
+            .0
+            .data
+            .completion
+            .as_mut()
+            .unwrap()
+            .objective = 20;
+        assert_eq!(
+            listener.stage_story_results(&inactive, &players, &mut modes, &mut pending),
+            Err(replication::Error::Shape)
+        );
+        listener
+            .stage_story_results(&content, &players, &mut modes, &mut pending)
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].participant, owner.participant);
+        assert_eq!(
+            pending[0].player_index,
+            u32::from(
+                players
+                    .runtime_index(owner.connection, owner.persona, owner.participant)
+                    .unwrap()
+            )
+        );
+        assert!(matches!(
+            pending[0].action,
+            crate::net::items::story::Action::Complete { objective: 10 }
+        ));
+        listener
+            .stage_story_results(&content, &players, &mut modes, &mut pending)
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+    }
+    #[test]
     fn committed_objectives_publish_in_order_once_and_roll_back_under_pressure() {
-        let (mut listener, participant, items) = super::super::tests::setup();
+        let (template, _, items) = super::super::tests::setup();
+        let (players, owner, mode, active) = crate::prologue::driving::tests::result_fixture();
+        let participant = owner.participant;
+        let mut content = (**template.prologue.as_ref().unwrap()).clone();
+        content.driving = Some((mode.clone(), mode));
+        let mut listener =
+            PlayerListener::new(owner.persona).with_prologue(Some(Arc::new(content)));
+        listener.players = players;
+        listener
+            .intro_modes
+            .insert(participant, (active.clone(), active, Chapter::FirstDrive));
         let (repo, account, snapshot) = crate::progression::tests::local();
         let tables = crate::progression::tests::tables();
         let progression = Arc::new(
@@ -288,7 +470,7 @@ mod tests {
             .catalog
             .restore(&loaded, progression.settings)
             .unwrap();
-        let blueprint_scene = listener.players.objects().scene(909).unwrap();
+        let blueprint_scene = listener.players.objects().scene(7).unwrap();
         for branch in [Branch::Intro, Branch::Main] {
             let creation = progression
                 .construction
@@ -365,10 +547,11 @@ mod tests {
                 .iter()
                 .map(|r| match r {
                     HostRpc::Query(c) => (c.selector, c.method),
+                    HostRpc::GameMode(c) => (c.selector, c.method),
                     _ => panic!(),
                 })
                 .collect::<Vec<_>>(),
-            [(1, 0), (2, 2)]
+            [(1, 0), (2, 2), (0, 1), (0, 7)]
         );
         listener.pending_rpcs.clear();
         listener.story_committed(&request, committed).unwrap();

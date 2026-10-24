@@ -70,6 +70,7 @@ impl PlayerListener {
         let mut selection = self.selection.clone();
         let mut selection_execution = self.selection_execution.clone();
         let mut modes = self.intro_modes.clone();
+        let mut story_pending = self.story_pending.clone();
         let mut ai_cursor = self.event_state.ai_cursor.clone();
         let mut participants = self.participants.clone();
         let mut cars = self.world_cars.clone();
@@ -346,6 +347,11 @@ impl PlayerListener {
         {
             return Ok(());
         }
+        match self.stage_story_results(content, &players, &mut modes, &mut story_pending) {
+            Err(replication::Error::Bound) => return Ok(()),
+            value => value?,
+        }
+        self.story_pending = story_pending;
         self.players = players;
         self.population = Some(population);
         self.opening = opening;

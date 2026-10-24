@@ -289,5 +289,18 @@ mod tests {
         let repeated = profile.story(&request, Timestamp(10)).await.unwrap();
         assert_eq!(saved, repository.snapshot(account).unwrap());
         assert_eq!(repeated.loaded.generation(), committed.loaded.generation());
+        // A later objective is its own durable operation. Retrying the earlier
+        // result after advancing must neither rewind progress nor pay twice.
+        let next = Request {
+            action: Action::Complete { objective: 20 },
+            ..request.clone()
+        };
+        let later = profile.story(&next, Timestamp(11)).await.unwrap();
+        assert!(later.loaded.generation() > committed.loaded.generation());
+        let saved = repository.snapshot(account).unwrap();
+        let rebound = service.bind(account);
+        rebound.story(&request, Timestamp(12)).await.unwrap();
+        rebound.story(&next, Timestamp(13)).await.unwrap();
+        assert_eq!(repository.snapshot(account).unwrap(), saved);
     }
 }

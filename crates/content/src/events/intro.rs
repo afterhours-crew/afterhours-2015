@@ -5,6 +5,7 @@
 //! Modes launched by the intro participant. Reuse event topology and serializer
 //! rules without inventing a free-roam start area, rewards or DNF controller.
 use super::*;
+pub mod results;
 mod spawned;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -14,6 +15,7 @@ pub struct Mode {
     pub logics: Vec<Layout>,
     /// Serializer of the launcher in the owning intro participant logic.
     pub launcher: usize,
+    pub completion: Option<results::Completion>,
 }
 
 fn unique<'a>(nodes: &'a [Node], class: &str) -> Result<&'a Site, Error> {
@@ -353,6 +355,13 @@ fn extract_inner(
     let drift = route::drift(&nodes)?;
     let pacing = pacing::extract(&mut graph, &nodes, &logical)?;
     let standings_interval = standings::interval(&mut graph, &nodes)?;
+    let completion = results::read(
+        &mut graph,
+        &branch,
+        &aliases,
+        &lifecycle,
+        progression.ports["stable_id"],
+    )?;
     let fields = field_sites
         .iter()
         .map(|(s, c, k)| {
@@ -397,6 +406,7 @@ fn extract_inner(
     layout.profile()?;
     Ok((
         Mode {
+            completion,
             sequences,
             logics,
             launcher: *parent_fields

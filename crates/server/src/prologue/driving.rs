@@ -306,6 +306,9 @@ pub struct Active {
     reporters: BTreeMap<Identity, i32>,
     callbacks: Option<reporters::Reporters>,
     results: BTreeMap<u16, event_logic::lifecycle::results::Snapshot>,
+    completion_queued: bool,
+    result_barrier: bool,
+    result_calls: Vec<HostRpc>,
 }
 impl Active {
     fn dispatch(&mut self, commands: Vec<Command>) -> Result<Vec<Effect>, Error> {
@@ -321,6 +324,57 @@ impl Active {
     /// This snapshot alone does not grant rewards or complete an objective.
     pub fn result(&self, participant: u16) -> Option<&event_logic::lifecycle::results::Snapshot> {
         self.results.get(&participant)
+    }
+    /// Only the linked human reporter can advance this mode's story capability.
+    pub fn pending_completion(
+        &self,
+        content: &Mode,
+        participant: u16,
+    ) -> Result<Option<u64>, Error> {
+        if participant != self.owner.participant {
+            return Err(Error::UnknownObject);
+        }
+        if self.completion_queued {
+            return Ok(None);
+        }
+        let Some(binding) = &content.data.completion else {
+            return Ok(None);
+        };
+        let Some(result) = self.results.get(&participant) else {
+            return Ok(None);
+        };
+        if result.triggering_participant != u64::from(participant)
+            || result.identity != binding.source
+            || result.collector != binding.collector
+        {
+            return Err(Error::Shape);
+        }
+        Ok(Some(binding.objective))
+    }
+    pub(crate) fn mark_completion_queued(&mut self) {
+        self.completion_queued = true;
+    }
+    /// The account owner calls this only after durable objective completion.
+    pub fn completion_committed(
+        &mut self,
+        content: &Mode,
+        participant: u16,
+        objective: u64,
+    ) -> Result<Vec<HostRpc>, Error> {
+        if participant != self.owner.participant {
+            return Err(Error::UnknownObject);
+        }
+        let binding = content.data.completion.as_ref().ok_or(Error::Unsupported)?;
+        let result = self.results.get(&participant).ok_or(Error::Shape)?;
+        if objective != binding.objective
+            || result.identity != binding.source
+            || result.collector != binding.collector
+            || result.triggering_participant != u64::from(participant)
+        {
+            return Err(Error::Shape);
+        }
+        self.result_barrier = false;
+        Ok(std::mem::take(&mut self.result_calls))
     }
     /// Bootstrap before publication: initial membership is included in creation.
     /// No transient entry/exit RPC is sent for a root the client does not own yet.
@@ -402,6 +456,9 @@ impl Active {
             reporters: BTreeMap::new(),
             callbacks,
             results: BTreeMap::new(),
+            completion_queued: false,
+            result_barrier: false,
+            result_calls: vec![],
         };
         active.effects(content, &mut staged, &effects, true, &mut out)?;
         let (target, selector) = field(staged.objects(), parent, content.data.launcher)?;
@@ -747,6 +804,12 @@ impl Active {
                 }
                 Effect::Results(result) => {
                     let participant = self.member(players, result.triggering_participant)?;
+                    if participant == self.owner.participant
+                        && content.data.completion.is_some()
+                        && !self.results.contains_key(&participant)
+                    {
+                        self.result_barrier = true;
+                    }
                     if let Some(previous) = self.results.insert(participant, result.clone())
                         && previous != *result
                     {

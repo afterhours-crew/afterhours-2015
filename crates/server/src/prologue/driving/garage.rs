@@ -18,6 +18,11 @@ impl Active {
                 return Err(Error::Bound);
             }
             self.shutdown_calls.push(call);
+        } else if human && self.result_barrier {
+            if self.result_calls.len() >= 512 {
+                return Err(Error::Bound);
+            }
+            self.result_calls.push(call);
         } else {
             out.calls.push(call);
         }
@@ -29,24 +34,32 @@ impl Active {
         out: &mut Output,
     ) -> Result<(), Error> {
         if !self.ending {
-            out.calls.push(HostRpc::GameMode(event_logic::call(
-                players.objects(),
-                self.ghost,
-                0,
-                1,
-                None,
-                Arguments::None,
-            )?));
-            self.ending = true;
-            if !self.shutdown_barrier {
-                out.calls.push(HostRpc::GameMode(event_logic::call(
+            self.state_call(
+                HostRpc::GameMode(event_logic::call(
                     players.objects(),
                     self.ghost,
                     0,
-                    7,
+                    1,
                     None,
                     Arguments::None,
-                )?));
+                )?),
+                true,
+                out,
+            )?;
+            self.ending = true;
+            if !self.shutdown_barrier {
+                self.state_call(
+                    HostRpc::GameMode(event_logic::call(
+                        players.objects(),
+                        self.ghost,
+                        0,
+                        7,
+                        None,
+                        Arguments::None,
+                    )?),
+                    true,
+                    out,
+                )?;
             }
         }
         Ok(())
@@ -179,6 +192,7 @@ impl Active {
             return Ok(out);
         }
         if !self.ending
+            || self.result_barrier
             || !self.goals.is_empty()
             || self
                 .logics
