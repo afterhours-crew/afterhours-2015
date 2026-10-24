@@ -16,4 +16,4 @@ workspace = true
 # SQLite and runtime limits only. No extension loading, encryption or remote
 # database features. The native FFI lives in this dependency; this crate
 # forbids unsafe Rust.
-rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled", "limits"] }
+rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled", "limits", "backup"] }

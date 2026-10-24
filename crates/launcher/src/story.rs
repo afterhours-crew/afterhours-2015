@@ -61,20 +61,8 @@ fn rules(directory: &Path) -> Result<(Catalog, Settings)> {
         return Err(Failure::refused("Oversized progression content."));
     }
     let value: serde_json::Value = serde_json::from_slice(&bytes)?;
-    if value["format"] != "nfs-progression-entities"
-        || value["version"] != 1
-        || value["build_sha256"] != nfs_services::SUPPORTED_BUILD_SHA256
-    {
-        return Err(Failure::refused(
-            "Unsupported progression content format or game build.",
-        ));
-    }
-    let catalog = Catalog::from_json(&value["restoration"])
-        .map_err(|_| Failure::refused("Invalid progression rules."))?;
-    let consumer_beta = value["settings"]["consumer_beta"]
-        .as_bool()
-        .ok_or_else(|| Failure::refused("Invalid progression settings."))?;
-    Ok((catalog, Settings { consumer_beta }))
+    nfs_services::progression::checkpoint_rules(&value)
+        .map_err(|_| Failure::refused("Unsupported or invalid progression checkpoint rules."))
 }
 
 pub fn report(data: &Path, id: Option<&str>, content_dir: Option<&Path>) -> Result<StoryReport> {
@@ -92,7 +80,8 @@ pub fn report(data: &Path, id: Option<&str>, content_dir: Option<&Path>) -> Resu
     }
     .inspect(&inspection.snapshot)
     .map_err(|_| Failure::refused("Saved story objectives are incomplete or inconsistent."))?;
-    let running = session::lock_is_held(saves.data())? == Some(true);
+    let running =
+        session::lock_is_held(saves.data())? == Some(true) || saves.writer_is_leased(id)?;
     Ok(build(id, &catalog, state, running))
 }
 

@@ -16,6 +16,31 @@ the complete prologue and several garage mutations are still incomplete.
 
 ## Build and start
 
+`story --root <data-directory> --local-account <id> --progression-content <file>
+--preview <checkpoint>` inspects an existing account and returns a JSON preview.
+Checkpoint names are native objective IDs written as exact decimal strings, or
+`after-intro`. The preview binds the account, generation, target and prepared
+rules to a plan hash. Restart points remain disabled until their gameplay path
+is implemented and validated; this development build refuses every apply.
+
+The edit transaction is implemented and tested with constructed supported points.
+`--apply <checkpoint> --expected-generation <generation> --plan-id <hash>` takes
+the launcher's data lock and an exclusive per-account process lease. Running
+servers and offline bank/REP writers share that lease; read-only views remain
+available. An active owner, stale preview or changed rules refuse the edit.
+Before one atomic objective/provenance/receipt commit, the server copies the full
+SQLite account, including committed WAL pages, into a standalone database under
+`artifacts/story-backups/<backup-id>/`. The synced manifest records its account,
+generation, plan and SHA-256. Existing backups are never replaced. Failed commits
+leave the original save and completed backup intact; retries create a fresh backup.
+An exact retry after success verifies the durable receipt and backup without
+applying effects again. Story skips award no cash, REP or items.
+
+The launcher exposes this interface through `story --preview` and `story --apply`;
+the graphical launcher never writes the account database itself. Backup retention
+and restoration are operator-managed while the game/server are stopped. Backup
+and failure tests establish transaction behavior, not playable prologue support.
+
 For ordinary startup, follow the [launcher instructions](../../docs/LOCAL-LAUNCHER.md).
 The options below document the server interface for developers and custom hosts.
 `prepare-local --game-dir <installation> --root <data-directory>` generates the

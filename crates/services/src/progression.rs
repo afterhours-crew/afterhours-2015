@@ -48,6 +48,25 @@ pub struct Catalog {
 pub struct Settings {
     pub consumer_beta: bool,
 }
+
+/// The subset of prepared progression content used for checkpoint inspection
+/// and editing. Runtime entity construction remains the content crate's job.
+pub fn checkpoint_rules(value: &Json) -> Result<(Catalog, Settings), ParseError> {
+    if value["format"] != "nfs-progression-entities"
+        || value["version"] != 1
+        || value["build_sha256"] != BUILD
+    {
+        return Err(ParseError::Invalid);
+    }
+    Ok((
+        Catalog::from_json(&value["restoration"])?,
+        Settings {
+            consumer_beta: value["settings"]["consumer_beta"]
+                .as_bool()
+                .ok_or(ParseError::Invalid)?,
+        },
+    ))
+}
 fn fields(v: &Json, names: &[&str]) -> Result<(), ParseError> {
     let o = v.as_object().ok_or(ParseError::Invalid)?;
     if o.len() != names.len() || !names.iter().all(|n| o.contains_key(*n)) {

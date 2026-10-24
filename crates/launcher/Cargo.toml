@@ -28,7 +28,7 @@ anstyle = "=1.0.14"
 nfs-afterhours-sys = { path = "../launcher-sys" }
 # Read-only `profile`: the account store and its domain decoders. The
 # launcher never opens a store for writing; the server owns all writes.
-nfs-services = { path = "../services" }
+nfs-services = { path = "../services", features = ["story-schema"] }
 nfs-storage = { path = "../storage" }
 # Item classes and states, to recognize owned cars by the server's own rule.
 nfs-world-core = { path = "../world-core" }

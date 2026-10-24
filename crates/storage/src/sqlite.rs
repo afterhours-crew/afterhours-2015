@@ -49,6 +49,9 @@ const MAX_VALUE_BYTES: i32 = 512 * 1024 + 1024;
 const MAX_SQL_BYTES: i32 = 16 * 1024;
 const MAX_LIST_BYTES: usize = MAX_NESTED * 8;
 
+mod maintenance;
+pub use maintenance::WriterLease;
+
 #[cfg(windows)]
 fn windows_local_root(canonical: PathBuf) -> Result<PathBuf, Error> {
     use std::path::{Component, Prefix};

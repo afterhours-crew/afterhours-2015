@@ -427,13 +427,21 @@ fn account(text: &str) -> Result<nfs_storage::AccountId, String> {
     nfs_storage::AccountId::from_owned_config(bytes).map_err(|_| "zero local account".into())
 }
 
-fn inventory_config(args: &Args) -> Result<Option<net::InventoryProfile>, Failure> {
+fn inventory_config(
+    args: &Args,
+) -> Result<
+    (
+        Option<net::InventoryProfile>,
+        Option<nfs_storage::sqlite::WriterLease>,
+    ),
+    Failure,
+> {
     let (Some(content), Some(directory), Some(account)) = (
         &args.item_content,
         &args.state_directory,
         args.local_account,
     ) else {
-        return Ok(None);
+        return Ok((None, None));
     };
     let mut components = directory.components();
     if components.next() != Some(std::path::Component::Normal("artifacts".as_ref()))
@@ -474,6 +482,9 @@ fn inventory_config(args: &Args) -> Result<Option<net::InventoryProfile>, Failur
         .transpose()?;
     let repository = nfs_storage::SqliteRepository::open_owned_directory(&directory)
         .map_err(|_| Failure::Output)?;
+    let lease = repository
+        .writer_lease(account)
+        .map_err(|_| Failure::ProfileConfig)?;
     let records = nfs_storage::records::SqliteRecords(repository.clone());
     let mut service = net::InventoryService::new(Arc::new(repository), Arc::new(catalog))
         .with_records(Arc::new(records));
@@ -489,7 +500,7 @@ fn inventory_config(args: &Args) -> Result<Option<net::InventoryProfile>, Failur
     if let Some(persistent) = persistent {
         service = service.with_persistent(Arc::new(persistent));
     }
-    Ok(Some(service.bind(account)))
+    Ok((Some(service.bind(account)), Some(lease)))
 }
 
 pub fn main() -> std::process::ExitCode {
@@ -501,6 +512,10 @@ pub fn main() -> std::process::ExitCode {
 pub fn main_from(args: impl Iterator<Item = std::ffi::OsString>) -> std::process::ExitCode {
     let mut args = args.peekable();
     match args.peek().and_then(|arg| arg.to_str()) {
+        Some("story") => {
+            args.next();
+            return nfs_server::story_account::main(args);
+        }
         Some("bank") => {
             args.next();
             return nfs_server::bank_account::main(args);
@@ -567,7 +582,7 @@ pub fn main_from(args: impl Iterator<Item = std::ffi::OsString>) -> std::process
 }
 
 async fn run(args: Args) -> Result<(), Failure> {
-    let inventory = inventory_config(&args)?;
+    let (inventory, _account_lease) = inventory_config(&args)?;
     let account = args.local_account.ok_or(Failure::ProfileConfig)?;
     let root = args.root.join(
         args.state_directory

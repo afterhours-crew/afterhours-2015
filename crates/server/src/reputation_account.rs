@@ -132,6 +132,11 @@ fn run(args: &Args, now: Timestamp) -> Result<serde_json::Value, Box<dyn std::er
     let catalog = Catalog::load(&args.tables)?;
     let thresholds = Thresholds::load(&args.thresholds)?;
     let repository = SqliteRepository::open_owned_directory(&args.directory)?;
+    let _lease = args
+        .set
+        .as_ref()
+        .map(|_| repository.writer_lease(args.account))
+        .transpose()?;
     let before = repository.snapshot(args.account)?;
     let previous = thresholds.evaluate(Scores::load(&catalog.view(&before)?)?);
     let saved = match args.set {

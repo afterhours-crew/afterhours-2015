@@ -75,6 +75,28 @@ fn intro_order_follows_dependencies_not_id_or_catalog_order() {
 }
 
 #[test]
+fn operation_ids_advance_past_both_generation_and_previous_receipt() {
+    let repo = MemoryRepository::default();
+    let who = account(1);
+    let c = catalog();
+    let p = policy(&c);
+    let before = init(&repo, who);
+    assert_eq!(p.next_operation(&before).unwrap(), before.generation + 1);
+    let saved = apply(
+        &repo,
+        who,
+        p.jump(&before, before.generation, 100, Checkpoint::Objective(7))
+            .unwrap(),
+    );
+    assert_eq!(p.next_operation(&saved).unwrap(), 101);
+    let mut later = saved.clone();
+    later.generation = 200;
+    assert_eq!(p.next_operation(&later).unwrap(), 201);
+    later.generation = OPERATION_MASK;
+    assert_eq!(p.next_operation(&later), Err(Error::Bounds));
+}
+
+#[test]
 fn catalog_refuses_ambiguous_and_cyclic_slider_order() {
     for cyclic in [false, true] {
         let first = if cyclic {

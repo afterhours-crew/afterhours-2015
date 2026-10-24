@@ -45,6 +45,11 @@
           "type": "string"
         },
         {
+          "const": "story-preview",
+          "description": "`story --preview` and exact preview proofs for server-owned edits.\nEach checkpoint's `can_apply` still gates unsupported restart paths.",
+          "type": "string"
+        },
+        {
           "const": "map-feed",
           "description": "`map-feed` events with `--events` on `serve` and `start`: live\npositions of the players' cars, traffic and roaming rivals.",
           "type": "string"

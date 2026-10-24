@@ -65,6 +65,10 @@ fn report_reads_saved_rules_and_exact_ids_without_writing_and_while_session_runs
     assert_eq!(repo.snapshot(account).unwrap(), before);
     crate::contract::testing::validate("story", &view);
     drop(lock);
+    let lease = repo.writer_lease(account).unwrap();
+    assert!(report(&data, None, Some(&content)).unwrap().session_running);
+    assert_eq!(repo.snapshot(account).unwrap(), before);
+    drop(lease);
     drop(repo);
     std::fs::remove_dir_all(data).unwrap();
 }

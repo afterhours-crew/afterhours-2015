@@ -846,6 +846,16 @@ impl Saves {
         self.active.as_deref()
     }
 
+    pub(crate) fn writer_is_leased(&self, id: &str) -> Result<bool> {
+        let account = parse_account(id)?;
+        self.repository
+            .as_ref()
+            .ok_or_else(|| Failure::no_session("No saved accounts."))?
+            .1
+            .writer_is_leased(account)
+            .map_err(storage_failure)
+    }
+
     pub(crate) fn inspect(&self, id: &str) -> Result<(AccountId, PathBuf, Inspection)> {
         let account = parse_account(id)?;
         let (_, repository) = self.repository.as_ref().ok_or_else(|| {

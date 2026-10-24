@@ -33,4 +33,5 @@ tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt", "std"] }
 
 [dev-dependencies]
+rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled", "limits"] }
 nfs-content = { path = "../content", features = ["synthetic"] }

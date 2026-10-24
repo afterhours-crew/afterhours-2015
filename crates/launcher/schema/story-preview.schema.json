@@ -1,0 +1,85 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "Milestone": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "label"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "account_id": {
+      "type": "string"
+    },
+    "can_apply": {
+      "type": "boolean"
+    },
+    "completes": {
+      "items": {
+        "$ref": "#/definitions/Milestone"
+      },
+      "type": "array"
+    },
+    "generation": {
+      "type": "string"
+    },
+    "operation_id": {
+      "type": "string"
+    },
+    "plan_id": {
+      "description": "Binds this account, generation, target and exact prepared rules.",
+      "type": "string"
+    },
+    "reasons": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "reopens": {
+      "items": {
+        "$ref": "#/definitions/Milestone"
+      },
+      "type": "array"
+    },
+    "source_checkpoint": {
+      "type": "string"
+    },
+    "target_checkpoint": {
+      "type": "string"
+    },
+    "version": {
+      "const": 1,
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version",
+    "account_id",
+    "generation",
+    "source_checkpoint",
+    "target_checkpoint",
+    "operation_id",
+    "plan_id",
+    "completes",
+    "reopens",
+    "can_apply",
+    "reasons"
+  ],
+  "title": "Preview",
+  "type": "object"
+}

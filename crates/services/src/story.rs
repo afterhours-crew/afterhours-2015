@@ -31,6 +31,8 @@ const EXISTING: u32 = 3;
 const BATCH_NAMESPACE: u64 = 3 << 60;
 const OPERATION_MASK: u64 = (1 << 60) - 1;
 
+pub mod editing;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Checkpoint {
     Objective(u64),
@@ -104,6 +106,21 @@ fn decimal(row: &Row, column: u32) -> Result<u64, Error> {
 }
 
 impl Policy<'_> {
+    /// One monotonic operation identifier for an editor or natural completion.
+    /// A preview retains this value so its exact retry has the same identity.
+    pub fn next_operation(&self, snapshot: &Snapshot) -> Result<u64, Error> {
+        let table = self.ledger(snapshot)?;
+        let last = table
+            .rows
+            .get(&HEADER)
+            .map(|row| decimal(row, OPERATION))
+            .transpose()?
+            .unwrap_or(0);
+        last.max(snapshot.generation)
+            .checked_add(1)
+            .filter(|n| *n <= OPERATION_MASK)
+            .ok_or(Error::Bounds)
+    }
     fn ledger(&self, snapshot: &Snapshot) -> Result<Table, Error> {
         let Some(table) = snapshot.tables.get(&key("AfterhoursStory")) else {
             return Ok(Table::default());

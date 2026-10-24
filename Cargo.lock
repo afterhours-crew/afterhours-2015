@@ -449,6 +449,7 @@ dependencies = [
  "nfs-storage",
  "nfs-world",
  "openssl",
+ "rusqlite",
  "serde_json",
  "tokio",
  "tracing",
@@ -473,6 +474,8 @@ dependencies = [
  "nfs-protocol",
  "nfs-storage",
  "nfs-world-core",
+ "schemars",
+ "serde",
  "serde_json",
 ]
 

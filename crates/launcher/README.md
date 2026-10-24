@@ -28,6 +28,7 @@ nfs-afterhours profile [--account-id <ID>]  show a saved driver's profile; chang
                        [--language <LOCALE>] read-only, in the game's locale)
 nfs-afterhours profile --list               list every saved driver in the data directory
 nfs-afterhours story [--account-id <ID>]    show saved intro objectives and completion provenance
+nfs-afterhours story --preview <CHECKPOINT>  preview the server-owned edit, without changing the save
 nfs-afterhours car-images [--game-dir <DIR>]  decode car pictures from the game into the data folder
 nfs-afterhours map-images [--game-dir <DIR>]  decode the world map from the game into the data folder
 nfs-afterhours sessions [--limit N] [--id <ID>]  summarize session folders and logs; change nothing
@@ -70,6 +71,8 @@ field and a JSON Schema (draft 7) generated from the Rust type that prints it:
 | `game-endpoints` | the session API's `/v1/game`: where a game reaches the server |
 | `profile`, `profile-list` | `profile --json` (also the session API's `/v1/profile`), `profile --list --json` |
 | `story` | `story --json` and `GET /v1/story`: saved intro position, authored checkpoint order and played, edited or inherited completion |
+| `story-preview` | `story --preview <checkpoint> --json`: exact account, save generation, target, plan hash, objective changes and availability |
+| `story-apply` | `story --apply <checkpoint> --expected-generation <generation> --plan-id <hash> --json`: committed generation and verified backup receipt |
 | `car-images` | `car-images --json`: the image set, counts per size, formats and unresolved images |
 | `map-images` | `map-images --json`: the tile set, its detail levels, file naming, the world box it covers and any missing tiles |
 | `sessions` | `sessions --json` |
