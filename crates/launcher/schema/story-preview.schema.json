@@ -39,7 +39,7 @@
       "type": "string"
     },
     "plan_id": {
-      "description": "Binds this account, generation, target and exact prepared rules.",
+      "description": "Binds the exact save file, account, generation, target and prepared rules.",
       "type": "string"
     },
     "reasons": {

@@ -19,7 +19,7 @@ the complete prologue and several garage mutations are still incomplete.
 `story --root <data-directory> --local-account <id> --progression-content <file>
 --preview <checkpoint>` inspects an existing account and returns a JSON preview.
 Checkpoint names are native objective IDs written as exact decimal strings, or
-`after-intro`. The preview binds the account, generation, target and prepared
+`after-intro`. The preview binds the exact save file, account, generation, target and prepared
 rules to a plan hash. Restart points remain disabled until their gameplay path
 is implemented and validated; this development build refuses every apply.
 

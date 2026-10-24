@@ -23,7 +23,7 @@ pub struct Preview {
     pub source_checkpoint: String,
     pub target_checkpoint: String,
     pub operation_id: String,
-    /// Binds this account, generation, target and exact prepared rules.
+    /// Binds the exact save file, account, generation, target and prepared rules.
     pub plan_id: String,
     pub completes: Vec<Milestone>,
     pub reopens: Vec<Milestone>,

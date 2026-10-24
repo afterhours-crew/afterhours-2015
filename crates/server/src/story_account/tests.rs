@@ -369,6 +369,24 @@ fn invalid_lock_files_are_errors_rather_than_busy_previews() {
 }
 
 #[test]
+fn a_preview_cannot_be_applied_to_a_different_copy_of_the_same_account() {
+    let first = Fixture::new();
+    let other = Fixture::new();
+    let proof = first.proof(Checkpoint::AfterIntro);
+    let before = other.repo.inspect(account(1)).unwrap();
+    assert_eq!(first.repo.inspect(account(1)).unwrap(), before);
+    assert_ne!(proof.plan_id, other.proof(Checkpoint::AfterIntro).plan_id);
+    assert!(
+        other
+            .editor(true)
+            .apply(&proof, "different-save", Timestamp(2))
+            .is_err()
+    );
+    assert_eq!(other.repo.inspect(account(1)).unwrap(), before);
+    assert_eq!(other.backups(), 0);
+}
+
+#[test]
 fn command_options_require_one_action_and_complete_canonical_proof() {
     let base = [
         "--root",

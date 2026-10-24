@@ -186,7 +186,7 @@ impl Editor<'_> {
         Ok(digest(&serde_json::to_vec(
             &json!({"domain":"afterhours-story-plan-v1","account":self.account.hex(),
             "generation":generation.to_string(),"operation":operation.to_string(),"target":name(target),
-            "rules":self.rules.digest,"supported":self.supported}),
+                "rules":self.rules.digest,"supported":self.supported,"save":self.repository()?.path(self.account)}),
         )?))
     }
     fn project(&self, snapshot: &Snapshot, target: Checkpoint, busy: bool) -> Result<Preview> {
