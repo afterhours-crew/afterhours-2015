@@ -478,6 +478,19 @@ fn temporary_story_car_prepares_its_bundle_without_a_garage_or_item_grant() {
         panic!()
     };
     assert_eq!(prefix.sub_id, WORLD_SUB_ID);
+    let nfs_world::replication::Update::Vehicle { fields, .. } =
+        &result.records.last().unwrap().update
+    else {
+        panic!()
+    };
+    assert!(fields.iter().any(|u| matches!(
+        u,
+        Some(vehicle::Update::Index {
+            index: Some(0),
+            value: Some(0)
+        })
+    )));
+    assert!(fields.iter().any(|u|matches!(u,Some(vehicle::Update::NibblesGuid(Some(v))) if v.tail==super::super::INTRO_AUDIO_TAIL)));
     assert!(prefix.parent.as_ref().unwrap().reference.is_some());
     assert_eq!(
         prefix.blueprint,

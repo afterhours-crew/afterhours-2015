@@ -14,6 +14,11 @@ profile. The [`nfs-afterhours` launcher](../../docs/LOCAL-LAUNCHER.md) derives c
 the owner's supported installation and creates a separate local account;
 the complete prologue and several garage mutations are still incomplete.
 
+Temporary opening cars use the shared world-car constructor with an empty
+nitrous meter and their native initial audio flags. These initial states remain
+separate from owned cars and roaming rivals. Their construction does not grant
+inventory or activate a prologue session.
+
 ## Build and start
 
 `story --root <data-directory> --local-account <id> --progression-content <file>

@@ -726,7 +726,11 @@ impl Population {
                 connection: Some(owner.connection),
                 owner: resource,
                 customization_attached: false,
-                placement: super::Placement::PlayerWorld,
+                placement: if source.temporary {
+                    super::Placement::IntroWorld
+                } else {
+                    super::Placement::PlayerWorld
+                },
                 authority_group: group,
                 authority_components: &components,
             },

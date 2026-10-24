@@ -117,6 +117,57 @@ fn request(items: &Collection) -> Request<'_> {
 }
 
 #[test]
+fn opening_car_uses_world_motion_with_separate_nitrous_and_audio_state() {
+    let (document, classes, items) = fixture();
+    let content = Content::from_json(&document, &classes).unwrap();
+    let before = items.clone();
+    let construct = |placement| {
+        let mut input = request(&items);
+        input.placement = placement;
+        content
+            .construct(input, &mut authority::Registry::default(), |_| Some(12))
+            .unwrap()
+    };
+    let normal = construct(Placement::PlayerWorld);
+    let opening = construct(Placement::IntroWorld);
+    assert_eq!(normal.creation, opening.creation);
+    let profile = &content.definition(&[1; 16]).unwrap().profile;
+    for (kind, (normal, opening)) in profile
+        .kinds()
+        .iter()
+        .zip(normal.updates.iter().zip(&opening.updates))
+    {
+        match kind {
+            Kind::Index => {
+                assert_eq!(
+                    normal,
+                    &Some(Update::Index {
+                        index: Some(0),
+                        value: Some(255)
+                    })
+                );
+                assert_eq!(
+                    opening,
+                    &Some(Update::Index {
+                        index: Some(0),
+                        value: Some(0)
+                    })
+                );
+            }
+            Kind::NibblesGuid => {
+                assert!(matches!(normal, Some(Update::NibblesGuid(Some(v))) if v.tail==[0;6]));
+                assert!(
+                    matches!(opening, Some(Update::NibblesGuid(Some(v))) if v.tail==INTRO_AUDIO_TAIL)
+                );
+            }
+            _ => assert_eq!(normal, opening),
+        }
+    }
+    assert_eq!(items, before);
+    assert_eq!(normal, construct(Placement::PlayerWorld));
+}
+
+#[test]
 fn equipment_presentation_matches_fresh_inventory_components_and_registers_new_meshes() {
     let (document, classes, mut items) = fixture();
     let content = Content::from_json(&document, &classes).unwrap();
