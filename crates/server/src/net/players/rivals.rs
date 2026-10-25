@@ -139,7 +139,7 @@ impl PlayerListener {
         // The edge drains content before these creation sections, so the client
         // knows every selected part's mesh identity before it constructs the car.
         self.pending_content.extend(changes.messages);
-        self.pending_entries.extend(entries);
+        self.queue_entries(entries);
         Ok(())
     }
     pub(in crate::net) fn disable_rivals(&mut self) -> bool {

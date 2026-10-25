@@ -36,6 +36,8 @@ pub(super) fn retirement(
     out: crate::prologue::driving::Output,
 ) -> Result<Vec<Finished>, replication::Error> {
     let mut entries = super::traffic::ai_departures(&out.departures);
+    // The RawEscape setup costs ~100 bits more than the Packed one the
+    // splitter budgets for.
     for mut section in split_scenes(
         out.records,
         nfs_world::application::OUTBOUND_FRAME_BITS - 96,
@@ -90,8 +92,11 @@ impl PlayerListener {
         deleted: Vec<u16>,
         calls: Vec<HostRpc>,
     ) -> Result<Vec<Finished>, replication::Error> {
-        // RawEscape setups cost ~100 bits more than the Packed ones the
-        // splitter budgets for; deletions add a flag and a 13-bit id each.
+        // The timed splitter budgets Packed setups with the session's
+        // timestamp included; RawEscape setups cost 96 bits more and each
+        // deletion a flag and a 13-bit id. Every fit below is measured as the
+        // session admits it, so an untimed fallback section is counted with
+        // the timestamp the session adds to it.
         let budget = (nfs_world::application::OUTBOUND_FRAME_BITS - 110)
             .checked_sub(14 * deleted.len())
             .ok_or(replication::Error::Bound)?;
@@ -105,14 +110,13 @@ impl PlayerListener {
         if let Some(first) = sections.first_mut() {
             first.deleted = deleted;
         }
-        let Some(first) = sections.first() else {
+        if sections.is_empty() {
             return Ok(Vec::new());
-        };
-        let fits = |section: &Section, chunk: &[HostRpc]| {
-            nfs_world::session::replication_frame(section, chunk, 0)
-                .is_ok_and(|wire| wire.len() <= nfs_world::application::OUTBOUND_FRAME_BITS)
-        };
-        debug_assert!(fits(first, &[]), "the split budget must leave headroom");
+        }
+        let fits = |section: &Section, chunk: &[HostRpc]| entry_admitted(section, chunk);
+        if !sections.iter().all(|section| fits(section, &[])) {
+            return Err(replication::Error::Bound);
+        }
         let mut rest = sections.into_iter();
         let mut current = rest.next().expect("non-empty section");
         let mut is_fallback = false;

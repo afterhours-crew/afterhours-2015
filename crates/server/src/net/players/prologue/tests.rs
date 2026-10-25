@@ -1377,12 +1377,9 @@ fn garage_completion_entries_split_to_frame_size_and_carry_every_call() {
             call: nfs_world::participants::Call::Enter,
         })
     };
-    let fits = |section: &Section, calls: &[HostRpc]| {
-        nfs_world::session::replication_frame(section, calls, 0)
-            .unwrap()
-            .len()
-            <= nfs_world::application::OUTBOUND_FRAME_BITS
-    };
+    // The session's own admission measurement, timestamp included, not a
+    // copy of it.
+    let fits = crate::net::players::entry_admitted;
     // Empty output produces no entries at all.
     assert!(
         PlayerListener::garage_entries(Vec::new(), Vec::new(), Vec::new())
@@ -1444,4 +1441,65 @@ fn garage_completion_entries_split_to_frame_size_and_carry_every_call() {
             .any(|(s, _)| !s.records.is_empty()),
         "records precede any call-only fallback entry"
     );
+    // The same records go through the world loop's flush into a real
+    // session: every entry is admitted. The session also checks bindings, so
+    // calls (unbound scenes) and deletions (objects it never created) stay out
+    // of this part; their fit is measured above.
+    let mut listener = PlayerListener::new(0x100000002);
+    listener
+        .queue_entries(PlayerListener::garage_entries(records, Vec::new(), Vec::new()).unwrap());
+    let queued = listener.pending_entries.len();
+    let mut host = crate::net::players::test_wire::session_host();
+    crate::net::players::test_wire::flush(&mut listener, &mut host).unwrap();
+    assert!(listener.pending_entries.is_empty());
+    assert_eq!(host.replication_progress(), (0, queued));
+}
+
+/// An entry the session does not admit stops the world loudly instead of
+/// queueing: test builds fail at its producer, and the flush reports which
+/// queue refused it and keeps the entry (E1186, E1188).
+#[test]
+fn unadmitted_entries_fail_at_the_producer_and_stop_the_flush() {
+    let record = |id: u16| replication::Record {
+        id,
+        initial: Some(replication::Initial::Actor(replication::ActorInit {
+            participant: 7,
+            flag_a: true,
+            flag_b: true,
+            word_a: 4,
+            word_b: 65535,
+        })),
+        update: replication::Update::Actor(replication::ActorUpdate::default()),
+    };
+    let mut oversized = returning::empty_section();
+    oversized.setup = Some(Setup::RawEscape([0; 3]));
+    oversized.records = (1..=600u16).map(record).collect();
+    assert!(!crate::net::players::entry_admitted(&oversized, &[]));
+    let mut listener = PlayerListener::new(0x100000002);
+    let entry = oversized.clone();
+    let producer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        listener.queue_entries([(entry, Vec::new())]);
+    }))
+    .unwrap_err();
+    let message = producer.downcast_ref::<String>().expect("panic message");
+    assert!(
+        message.contains("prologue") && message.contains("tests.rs"),
+        "{message}"
+    );
+    assert!(message.contains("not admitted"), "{message}");
+    // A release build queues it with an error log; the flush then refuses it.
+    let mut listener = PlayerListener::new(0x100000002);
+    listener.pending_entries.push_back((oversized, Vec::new()));
+    let mut host = crate::net::players::test_wire::session_host();
+    let (queue, error) =
+        crate::net::players::test_wire::flush(&mut listener, &mut host).unwrap_err();
+    assert_eq!(queue, "entry transition");
+    assert!(matches!(
+        error,
+        Some(nfs_world::session::Error::Application(
+            nfs_world::application::Error::Bound
+        ))
+    ));
+    assert_eq!(listener.pending_entries.len(), 1);
+    assert_eq!(host.replication_progress(), (0, 0));
 }

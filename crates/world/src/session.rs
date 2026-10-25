@@ -70,6 +70,37 @@ pub fn replication_frame(
     Ok(wire)
 }
 
+/// The largest replication frame any host admits; a host's policy can only
+/// lower it.
+pub const MAX_REPLICATION_FRAME_BITS: usize = {
+    let window = (application::WINDOW as usize - 1) * DEFAULT_FRAGMENT_BITS;
+    if application::OUTBOUND_FRAME_BITS < window {
+        application::OUTBOUND_FRAME_BITS
+    } else {
+        window
+    }
+};
+
+/// The host owns the timestamp of every queued section.
+fn stamp_queued(section: &mut Section) {
+    section.float_bits = Some(0);
+    section.flag = true;
+}
+
+/// Bits `section` occupies once [`Host::queue_replication_after`] has stamped
+/// it, measured exactly as the host measures it. Code that sizes entries
+/// before queueing them checks this against [`MAX_REPLICATION_FRAME_BITS`]
+/// instead of keeping its own margin for the stamp: a refused entry closes
+/// the world (E1188).
+pub fn queued_replication_bits(
+    section: &Section,
+    before: &[crate::participants::HostRpc],
+) -> Result<usize, Error> {
+    let mut section = section.clone();
+    stamp_queued(&mut section);
+    Ok(replication_frame(&section, before, 0)?.len())
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Ids {
     pub client: u32,
@@ -394,10 +425,7 @@ impl Host {
             movement_sent_ms: None,
             replication_clock_ms: None,
             sent_objects: std::collections::BTreeSet::new(),
-            max_replication_frame_bits: policy
-                .max_frame_bits
-                .min(application::OUTBOUND_FRAME_BITS)
-                .min((application::WINDOW as usize - 1) * DEFAULT_FRAGMENT_BITS),
+            max_replication_frame_bits: policy.max_frame_bits.min(MAX_REPLICATION_FRAME_BITS),
         })
     }
 
@@ -429,8 +457,7 @@ impl Host {
             return Err(Error::Application(application::Error::Window));
         }
         // Reserve the host-owned timestamp before checking frame/queue bounds.
-        section.float_bits = Some(0);
-        section.flag = true;
+        stamp_queued(&mut section);
         let bits = replication_frame(&section, &before, 0)?.len();
         if bits > self.max_replication_frame_bits {
             return Err(Error::Application(application::Error::Bound));

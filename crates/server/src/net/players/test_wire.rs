@@ -10,9 +10,41 @@ pub(super) fn client_padding() -> u64 {
     CLIENT_PADDING.get()
 }
 
+/// A real world session for queue tests: the flush and its admission run on
+/// it exactly as in the world loop (synthetic key and MAC template).
+pub(super) fn session_host() -> nfs_world::session::Host {
+    let key = nfs_world::crypto::session_key(
+        "11111111-2222-3333-4444-555555555555",
+        "66666666-7777-8888-9999-aaaaaaaaaaaa",
+    )
+    .unwrap();
+    let codec =
+        nfs_world::transport::Codec::new(key, std::array::from_fn(|i| (i * 5) as u8)).unwrap();
+    nfs_world::session::Host::new(
+        codec,
+        nfs_world::session::Ids {
+            client: 0x0102_0304,
+            host: 0x0a0b_0c0d,
+            host_index: 0,
+        },
+        nfs_world::application::Policy::default(),
+        Box::new(nfs_world::application::Fixed::new([1, 2, 3])),
+    )
+    .unwrap()
+}
+
+/// Flush the listener's owned output into `host` with the world loop's code.
+pub(super) fn flush(
+    listener: &mut super::PlayerListener,
+    host: &mut nfs_world::session::Host,
+) -> Result<(), (&'static str, Option<nfs_world::session::Error>)> {
+    crate::net::flush_owned(listener, host, 1).map_err(|refused| (refused.queue, refused.error))
+}
+
 /// Everything a scenario left for the world host must be sendable: the host
-/// closes the session on a section or call it cannot encode (E1180), and on a
-/// call naming an object the client was never given.
+/// closes the session on a section or call it cannot encode (E1180), on a
+/// section or entry the session does not admit once stamped (E1186, E1188),
+/// and on a call naming an object the client was never given.
 /// Queue lengths before a step, so only that step's own output is checked
 /// (scenarios fill the queues with placeholders to simulate backpressure).
 pub(super) fn queued(listener: &super::PlayerListener) -> [usize; 3] {
@@ -36,6 +68,21 @@ pub(super) fn assert_wire_ready(listener: &super::PlayerListener, before: [usize
             panic!("unsendable section {error:?}: {section:?}");
         }
         deleted_now.extend(section.deleted.iter().copied());
+    }
+    let admitted = listener
+        .pending
+        .iter()
+        .skip(before[0])
+        .map(|section| (section, &[][..]))
+        .chain(entries().map(|(section, calls)| (section, calls.as_slice())));
+    for (section, calls) in admitted {
+        assert!(
+            super::entry_admitted(section, calls),
+            "the session refuses this {:?}-bit entry ({} records, {} calls)",
+            nfs_world::session::queued_replication_bits(section, calls),
+            section.records.len(),
+            calls.len()
+        );
     }
     let calls = listener
         .pending_rpcs

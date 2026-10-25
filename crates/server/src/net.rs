@@ -35,7 +35,7 @@ use tokio::{
     task::JoinSet,
     time::timeout,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 pub const READ_CHUNK: usize = 8192;
 pub const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -886,6 +886,118 @@ pub async fn serve(
     qos.await.map_err(|_| Failure::Io)??;
     Ok(())
 }
+
+/// An owned queue the session refused, for the world loop's log.
+#[derive(Debug)]
+struct Refused {
+    queue: &'static str,
+    error: Option<nfs_world::session::Error>,
+}
+
+/// Move the listener's owned output into the session in client order:
+/// content, replication, notifications, then entries. A full session window
+/// pauses a queue until a later pass; any other refusal is final, because the
+/// client cannot continue without the refused output. The world loop and the
+/// listener tests share this code.
+fn flush_owned(
+    listener: &mut players::PlayerListener,
+    host: &mut Host,
+    connection: u32,
+) -> Result<(), Refused> {
+    while let Some(message) = listener.pending_content.front() {
+        let Ok(bytes) = message.encode() else {
+            return Err(Refused {
+                queue: "content",
+                error: None,
+            });
+        };
+        match host.queue_content(message.target(), &bytes) {
+            Ok(chunks) => {
+                info!(connection, chunks, "owned content queued");
+                listener.pending_content.pop_front();
+            }
+            Err(nfs_world::session::Error::Application(application::Error::Window)) => break,
+            Err(error) => {
+                return Err(Refused {
+                    queue: "content",
+                    error: Some(error),
+                });
+            }
+        }
+    }
+    while listener.pending_content.is_empty() {
+        let Some(section) = listener.pending.front() else {
+            break;
+        };
+        match host.queue_replication(section.clone()) {
+            Ok(()) => {
+                info!(
+                    connection,
+                    records = section.records.len(),
+                    "owned replication queued"
+                );
+                listener.pending.pop_front();
+            }
+            Err(nfs_world::session::Error::Application(application::Error::Window)) => break,
+            Err(error) => {
+                return Err(Refused {
+                    queue: "replication",
+                    error: Some(error),
+                });
+            }
+        }
+    }
+    while listener.pending_content.is_empty() && listener.pending.is_empty() {
+        let Some(&reply) = listener.pending_rpcs.front() else {
+            break;
+        };
+        match host.queue_rpc(reply) {
+            Ok(()) => {
+                listener.pending_rpcs.pop_front();
+            }
+            Err(nfs_world::session::Error::Application(application::Error::Window)) => break,
+            Err(error) => {
+                return Err(Refused {
+                    queue: "RPC notification",
+                    error: Some(error),
+                });
+            }
+        }
+    }
+    while listener.pending_content.is_empty()
+        && listener.pending.is_empty()
+        && listener.pending_rpcs.is_empty()
+    {
+        let Some((section, before)) = listener.pending_entries.front() else {
+            break;
+        };
+        match host.queue_replication_after(section.clone(), before.clone()) {
+            Ok(()) => {
+                info!(
+                    connection,
+                    notifications = before.len(),
+                    records = section.records.len(),
+                    deleted = section.deleted.len(),
+                    calls = ?before
+                        .iter()
+                        .map(players::describe_host_rpc)
+                        .collect::<Vec<_>>(),
+                    "owned entry notifications and replication queued together"
+                );
+                listener.pending_entries.pop_front();
+            }
+            Err(nfs_world::session::Error::Application(application::Error::Window)) => break,
+            Err(error) => {
+                return Err(Refused {
+                    queue: "entry transition",
+                    error: Some(error),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 pub async fn world_host(
     socket: UdpSocket,
     mut start: mpsc::Receiver<world_handshake::Binding>,
@@ -1187,86 +1299,16 @@ pub async fn world_host(
             now_ms(),
             nfs_storage::Timestamp(unix_micros().max(0) as u64 / 1_000),
         );
-        while let Some(message) = listener.pending_content.front() {
-            let Ok(bytes) = message.encode() else {
-                warn!(connection, "owned content invalid");
-                return;
-            };
-            match host.queue_content(message.target(), &bytes) {
-                Ok(chunks) => {
-                    info!(connection, chunks, "owned content queued");
-                    listener.pending_content.pop_front();
-                }
-                Err(nfs_world::session::Error::Application(application::Error::Window)) => break,
-                Err(error) => {
-                    warn!(connection, ?error, "owned content rejected");
-                    return;
-                }
-            }
-        }
-        while listener.pending_content.is_empty() {
-            let Some(section) = listener.pending.front() else {
-                break;
-            };
-            match host.queue_replication(section.clone()) {
-                Ok(()) => {
-                    info!(
-                        connection,
-                        records = section.records.len(),
-                        "owned replication queued"
-                    );
-                    listener.pending.pop_front();
-                }
-                Err(nfs_world::session::Error::Application(application::Error::Window)) => break,
-                Err(error) => {
-                    warn!(connection, ?error, "owned replication rejected");
-                    return;
-                }
-            }
-        }
-        while listener.pending_content.is_empty() && listener.pending.is_empty() {
-            let Some(&reply) = listener.pending_rpcs.front() else {
-                break;
-            };
-            match host.queue_rpc(reply) {
-                Ok(()) => {
-                    listener.pending_rpcs.pop_front();
-                }
-                Err(nfs_world::session::Error::Application(application::Error::Window)) => break,
-                Err(error) => {
-                    warn!(connection, ?error, "owned RPC notification rejected");
-                    return;
-                }
-            }
-        }
-        while listener.pending_content.is_empty()
-            && listener.pending.is_empty()
-            && listener.pending_rpcs.is_empty()
-        {
-            let Some((section, before)) = listener.pending_entries.front() else {
-                break;
-            };
-            match host.queue_replication_after(section.clone(), before.clone()) {
-                Ok(()) => {
-                    info!(
-                        connection,
-                        notifications = before.len(),
-                        records = section.records.len(),
-                        deleted = section.deleted.len(),
-                        calls = ?before
-                            .iter()
-                            .map(players::describe_host_rpc)
-                            .collect::<Vec<_>>(),
-                        "owned entry notifications and replication queued together"
-                    );
-                    listener.pending_entries.pop_front();
-                }
-                Err(nfs_world::session::Error::Application(application::Error::Window)) => break,
-                Err(error) => {
-                    warn!(connection, ?error, "owned entry transition rejected");
-                    return;
-                }
-            }
+        if let Err(refused) = flush_owned(&mut listener, &mut host, connection) {
+            // Loud on purpose: the client never receives the refused output
+            // and loses its connection without a reason (E1188).
+            error!(
+                connection,
+                queue = refused.queue,
+                error = ?refused.error,
+                "owned output rejected; world host stopped, the client will lose its connection"
+            );
+            return;
         }
         while let Some(command) = listener.due_teleport(now_ms()) {
             let bytes = match command.encode() {

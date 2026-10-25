@@ -200,7 +200,51 @@ impl std::fmt::Debug for PlayerListener {
             .finish()
     }
 }
+/// Whether the session admits this entry once queued, measured as the
+/// session measures it (timestamp included).
+pub(super) fn entry_admitted(
+    section: &Section,
+    calls: &[nfs_world::participants::HostRpc],
+) -> bool {
+    nfs_world::session::queued_replication_bits(section, calls)
+        .is_ok_and(|bits| bits <= nfs_world::session::MAX_REPLICATION_FRAME_BITS)
+}
 impl PlayerListener {
+    /// Queue entries for the world flush. The flush refuses an entry the
+    /// session does not admit and closes the world (E1186, E1188), so each
+    /// entry is measured here, where its producer is still known: test builds
+    /// fail at the producer, release builds log it before the flush refuses it.
+    #[track_caller]
+    pub(super) fn queue_entries(
+        &mut self,
+        entries: impl IntoIterator<Item = (Section, Vec<nfs_world::participants::HostRpc>)>,
+    ) {
+        for (section, calls) in entries {
+            if !entry_admitted(&section, &calls) {
+                let producer = std::panic::Location::caller();
+                let bits = nfs_world::session::queued_replication_bits(&section, &calls);
+                if cfg!(debug_assertions) {
+                    panic!(
+                        "entry from {producer} is not admitted by the session \
+                         ({bits:?} bits, {} records, {} calls)",
+                        section.records.len(),
+                        calls.len()
+                    );
+                }
+                tracing::error!(
+                    connection = self.unsupported.connection(),
+                    %producer,
+                    ?bits,
+                    limit = nfs_world::session::MAX_REPLICATION_FRAME_BITS,
+                    records = section.records.len(),
+                    calls = calls.len(),
+                    "owned entry exceeds the session frame; the flush will refuse it and close the world"
+                );
+            }
+            self.pending_entries.push_back((section, calls));
+        }
+    }
+
     pub(super) fn purchase_ready(&self) -> bool {
         self.inventory.is_some()
             && self.persistent.is_some()
@@ -2574,17 +2618,7 @@ impl Listener for PlayerListener {
                                             .map(nfs_world::participants::HostRpc::Event),
                                     );
                                     if section.len() != 1
-                                        || !nfs_world::session::replication_frame(
-                                            &section[0],
-                                            &entry_replies,
-                                            0,
-                                        )
-                                        .is_ok_and(
-                                            |wire| {
-                                                wire.len()
-                                                    <= nfs_world::application::OUTBOUND_FRAME_BITS
-                                            },
-                                        )
+                                        || !entry_admitted(&section[0], &entry_replies)
                                     {
                                         return self.refuse(replication::Error::Bound);
                                     }
@@ -2604,9 +2638,7 @@ impl Listener for PlayerListener {
             }
         }
         for (section, replies) in &exit_entries {
-            if !nfs_world::session::replication_frame(section, replies, 0)
-                .is_ok_and(|wire| wire.len() <= nfs_world::application::OUTBOUND_FRAME_BITS)
-            {
+            if !entry_admitted(section, replies) {
                 return self.refuse(replication::Error::Bound);
             }
         }
@@ -2649,9 +2681,7 @@ impl Listener for PlayerListener {
                     if let Some(section) = &mut movement_section {
                         let original_len = section.records.len();
                         section.records.append(&mut batch);
-                        if !nfs_world::session::replication_frame(section, &[], 0).is_ok_and(
-                            |wire| wire.len() <= nfs_world::application::OUTBOUND_FRAME_BITS,
-                        ) {
+                        if !entry_admitted(section, &[]) {
                             batch = section.records.split_off(original_len);
                         }
                     }
@@ -2915,7 +2945,7 @@ impl Listener for PlayerListener {
         }
         self.pending.extend(sections);
         self.pending.extend(deferred_sections);
-        self.pending_entries.extend(entries);
+        self.queue_entries(entries);
         self.messages = messages;
         self.stats.record(&parsed, files)
     }

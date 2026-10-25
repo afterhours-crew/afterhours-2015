@@ -198,7 +198,7 @@ impl PlayerListener {
         self.players = players;
         self.participants = participants;
         self.logic_ghosts = ghosts;
-        self.pending_entries.extend(entries);
+        self.queue_entries(entries);
         self.pending_rpcs
             .extend(stops.into_iter().map(HostRpc::SequenceStop));
         Ok(())

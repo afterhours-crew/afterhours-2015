@@ -858,7 +858,7 @@ impl PlayerListener {
         self.pending_speedwalls.extend(out.speedwalls);
         self.pending.extend(sections);
         self.pending_rpcs.extend(out.rpcs);
-        self.pending_entries.extend(out.entries);
+        self.queue_entries(out.entries);
         self.pending_teleports
             .extend(out.teleports.into_iter().map(|c| (now_ms, c)));
         for request in completions {

@@ -254,7 +254,7 @@ impl PlayerListener {
         self.players = players;
         self.returns = Some(returns);
         self.logic_ghosts = ghosts;
-        self.pending_entries.extend(entries);
+        self.queue_entries(entries);
         tracing::info!(
             participant = pending.participant,
             "owned garage return teardown queued; the entry sequence starts"
@@ -291,7 +291,7 @@ impl PlayerListener {
         self.population = Some(population);
         self.logic_ghosts = ghosts;
         self.pending_content.extend(messages);
-        self.pending_entries.extend(entries);
+        self.queue_entries(entries);
         tracing::info!(
             participant = pending.participant,
             content_messages,

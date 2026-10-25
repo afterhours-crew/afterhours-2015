@@ -133,7 +133,7 @@ impl PlayerListener {
         }
         self.players = players;
         self.traffic_population = Some(population);
-        self.pending_entries.extend(entries);
+        self.queue_entries(entries);
         Ok(())
     }
 

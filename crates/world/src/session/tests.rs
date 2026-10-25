@@ -2938,3 +2938,24 @@ fn ordered_content_barrier(target: u8, payload: &[u8]) {
         Some((target, payload.to_vec()))
     );
 }
+
+#[test]
+fn queued_replication_bits_measure_what_the_host_admits() {
+    // Sized without the host's timestamp, a section can fit the frame and
+    // still be refused once queued.
+    let section = owned_section(2);
+    let raw = replication_frame(&section, &[], 0).unwrap().len();
+    let queued = queued_replication_bits(&section, &[]).unwrap();
+    assert!(queued > raw, "{queued} <= {raw}");
+    let mut host = host();
+    host.max_replication_frame_bits = queued - 1;
+    assert!(matches!(
+        host.queue_replication(section.clone()),
+        Err(Error::Application(application::Error::Bound))
+    ));
+    assert_eq!(host.replication_progress(), (0, 0));
+    host.max_replication_frame_bits = queued;
+    host.queue_replication(section).unwrap();
+    assert_eq!(host.replication_bits, queued);
+    const { assert!(MAX_REPLICATION_FRAME_BITS <= application::OUTBOUND_FRAME_BITS) };
+}
