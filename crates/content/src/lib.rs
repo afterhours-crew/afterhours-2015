@@ -40,6 +40,7 @@ mod scan;
 pub mod scenes;
 pub mod scoring;
 pub mod sequences;
+mod serializers;
 mod startup;
 mod stats;
 #[cfg(any(test, feature = "synthetic"))]

@@ -9,7 +9,10 @@ use nfs_protocol::world::BitSpan;
 use std::collections::BTreeMap;
 
 pub const MAX_CATALOGS: usize = 256;
-pub const MAX_PROFILES: usize = 512;
+/// Profiles of one table. A whole-session official decode installs every
+/// registered bundle's participant logic at once (E1198: 1,466 over 112
+/// bundles), so the bound matches the per-catalog type bound.
+pub const MAX_PROFILES: usize = MAX_TYPES;
 pub const MAX_TYPES: usize = 4096;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]

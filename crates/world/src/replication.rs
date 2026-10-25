@@ -27,10 +27,12 @@ pub enum Kind {
     PlayerView,
     Actor,
     AiPacingGroup,
+    DebrisManager,
     Entity,
     Participant,
     ParticipantLocationMap,
     Player,
+    PursuitInfo,
     SubLevel,
     ScriptedSplineGoal,
     TrafficGoal,
@@ -46,10 +48,12 @@ impl Kind {
             Self::PlayerView => 16,
             Self::Actor => 0,
             Self::AiPacingGroup => 1,
+            Self::DebrisManager => 5,
             Self::Entity => 6,
             Self::Participant => 11,
             Self::ParticipantLocationMap => 12,
             Self::Player => 14,
+            Self::PursuitInfo => 17,
             Self::SubLevel => 24,
             Self::ScriptedSplineGoal => 20,
             Self::TrafficGoal => 26,
@@ -65,10 +69,12 @@ impl Kind {
             16 => Ok(Self::PlayerView),
             0 => Ok(Self::Actor),
             1 => Ok(Self::AiPacingGroup),
+            5 => Ok(Self::DebrisManager),
             6 => Ok(Self::Entity),
             11 => Ok(Self::Participant),
             12 => Ok(Self::ParticipantLocationMap),
             14 => Ok(Self::Player),
+            17 => Ok(Self::PursuitInfo),
             24 => Ok(Self::SubLevel),
             20 => Ok(Self::ScriptedSplineGoal),
             26 => Ok(Self::TrafficGoal),
@@ -184,6 +190,8 @@ pub struct PlayerUpdate {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Initial {
     AiPacingGroup,
+    DebrisManager(debris::Initial),
+    PursuitInfo,
     PlayerView(player_view::Initial),
     PlayerManager,
     ScriptedSplineGoal(spline::Initial),
@@ -213,6 +221,8 @@ impl Initial {
     pub fn kind(&self) -> Kind {
         match self {
             Self::AiPacingGroup => Kind::AiPacingGroup,
+            Self::DebrisManager(_) => Kind::DebrisManager,
+            Self::PursuitInfo => Kind::PursuitInfo,
             Self::Actor(_) => Kind::Actor,
             Self::PlayerManager => Kind::PlayerManager,
             Self::ScriptedSplineGoal(_) => Kind::ScriptedSplineGoal,
@@ -233,6 +243,8 @@ impl Initial {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Update {
     AiPacingGroup(pacing::Update),
+    DebrisManager(debris::Update),
+    PursuitInfo(pursuit::Update),
     PlayerView(player_view::Update),
     PlayerManager(player_manager::Update),
     ScriptedSplineGoal,
@@ -262,6 +274,8 @@ impl Update {
     pub fn kind(&self) -> Kind {
         match self {
             Self::AiPacingGroup(_) => Kind::AiPacingGroup,
+            Self::DebrisManager(_) => Kind::DebrisManager,
+            Self::PursuitInfo(_) => Kind::PursuitInfo,
             Self::PlayerManager(_) => Kind::PlayerManager,
             Self::ScriptedSplineGoal => Kind::ScriptedSplineGoal,
             Self::TrafficGoal => Kind::TrafficGoal,
@@ -388,6 +402,8 @@ impl Reader<'_> {
                 Initial::ScriptedInputGoal(scripted_input::Initial::read(self)?)
             }
             Kind::AiPacingGroup => Initial::AiPacingGroup,
+            Kind::DebrisManager => Initial::DebrisManager(debris::Initial::read(self)?),
+            Kind::PursuitInfo => Initial::PursuitInfo,
             Kind::ParticipantLocationMap => Initial::ParticipantLocationMap,
             Kind::PlayerView => Initial::PlayerView(player_view::Initial::read(self)?),
             Kind::Actor => Initial::Actor(ActorInit {
@@ -428,6 +444,8 @@ impl Reader<'_> {
             Kind::SpeedLimitGoal => Update::SpeedLimitGoal,
             Kind::ScriptedInputGoal => Update::ScriptedInputGoal,
             Kind::AiPacingGroup => Update::AiPacingGroup(pacing::Update::read(self)?),
+            Kind::DebrisManager => Update::DebrisManager(debris::Update::read(self)?),
+            Kind::PursuitInfo => Update::PursuitInfo(pursuit::Update::read(self)?),
             Kind::SubLevel | Kind::Entity => return Err(Error::Unsupported),
             Kind::Participant => Update::Participant(ParticipantUpdate {
                 player: self.optional(Self::reference)?,
@@ -553,7 +571,8 @@ impl Writer {
             Initial::GotoWaypointGoal(v) => v.write(self)?,
             Initial::SpeedLimitGoal(v) => v.write(self)?,
             Initial::ScriptedInputGoal(v) => v.write(self)?,
-            Initial::AiPacingGroup => {}
+            Initial::AiPacingGroup | Initial::PursuitInfo => {}
+            Initial::DebrisManager(v) => v.write(self)?,
             Initial::Actor(v) => {
                 self.reference(&v.participant)?;
                 self.bit(v.flag_a)?;
@@ -594,6 +613,8 @@ impl Writer {
             Update::SpeedLimitGoal => {}
             Update::ScriptedInputGoal => {}
             Update::AiPacingGroup(v) => v.write(self)?,
+            Update::DebrisManager(v) => v.write(self)?,
+            Update::PursuitInfo(v) => v.write(self)?,
             Update::Participant(v) => {
                 self.optional(&v.player, Self::reference)?;
                 self.optional(&v.entity, Self::reference)?;
@@ -749,6 +770,7 @@ impl Record {
     }
 }
 
+pub mod debris;
 pub mod entity;
 mod entity_record;
 pub mod goto_waypoint;
@@ -763,6 +785,7 @@ pub mod location_map;
 pub mod player_manager;
 pub mod player_view;
 pub mod players;
+pub mod pursuit;
 mod scene_record;
 
 pub mod section;

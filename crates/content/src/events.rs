@@ -371,7 +371,11 @@ type Registry<'a> = (u16, &'a [(u32, u32)], crate::assets::AssetReference);
 
 /// Fields of a blueprint composition under the class rules, with the composition
 /// sites of serializing nodes and the bus count.
-fn fields(nodes: &[Node], rules: &Rules, root_class: &str) -> Result<(u16, Vec<FieldSite>), Error> {
+pub(crate) fn fields(
+    nodes: &[Node],
+    rules: &Rules,
+    root_class: &str,
+) -> Result<(u16, Vec<FieldSite>), Error> {
     let mut buses = 0u16;
     let mut out = Vec::new();
     for node in nodes {
