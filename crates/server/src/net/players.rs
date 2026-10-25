@@ -1817,14 +1817,12 @@ impl Listener for PlayerListener {
                             }
                             continue;
                         }
-                        if !out.records.is_empty() || !out.deleted.is_empty() {
-                            deferred_sections.push(Section {
-                                float_bits: None,
-                                flag: false,
-                                setup: None,
-                                records: out.records,
-                                deleted: out.deleted,
-                            });
+                        // Records need a setup (E1180: a completion without one
+                        // closed the world). Deletions travel with the first
+                        // records, as in the official completion frame.
+                        match Self::driving_sections(out.records, out.deleted) {
+                            Ok(sections) => deferred_sections.extend(sections),
+                            Err(error) => return self.refuse_rpc(error, body),
                         }
                         responses.extend(out.calls);
                         continue;
@@ -2678,6 +2676,22 @@ impl Listener for PlayerListener {
                 > MAX_PENDING.saturating_sub(self.pending_binding_refreshes.len())
         {
             return self.refuse(replication::Error::Bound);
+        }
+        // The world host closes the session on a section or call it cannot
+        // send (E1180), so check them here, before anything is committed.
+        if let Some(error) = sections
+            .iter()
+            .chain(&deferred_sections)
+            .chain(entries.iter().map(|(section, _)| section))
+            .find_map(|section| section.encode().err())
+            .or_else(|| {
+                responses
+                    .iter()
+                    .chain(entries.iter().flat_map(|(_, calls)| calls))
+                    .find_map(|call| call.encode().err())
+            })
+        {
+            return self.refuse(error);
         }
         for participant in participants.in_free_roam() {
             if self.participants.stage(participant)

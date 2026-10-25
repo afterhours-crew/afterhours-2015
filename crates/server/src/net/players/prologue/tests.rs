@@ -157,11 +157,22 @@ pub(super) fn send(
     body: BitSpan<'_>,
 ) -> bool {
     let wire = packet(sequence, index, body);
-    listener.frame(Queued {
+    let before = crate::net::players::test_wire::queued(listener);
+    let accepted = listener.frame(Queued {
         advertised: None,
         frame: sequence.into(),
         data: wire.span(),
-    })
+    });
+    crate::net::players::test_wire::assert_wire_ready(listener, before);
+    accepted
+}
+/// One sequence-clock update `after_ms` past the listener's world time, with
+/// its output checked like a frame's.
+fn sequences_checked(listener: &mut PlayerListener, after_ms: u64) {
+    let before = crate::net::players::test_wire::queued(listener);
+    let now = listener.world_ms + after_ms;
+    listener.advance_sequences(now).unwrap();
+    crate::net::players::test_wire::assert_wire_ready(listener, before);
 }
 pub(super) fn drain(listener: &mut PlayerListener) {
     listener.pending.clear();
@@ -175,6 +186,7 @@ pub(in crate::net::players) fn tick_with_normal_presentation(
     listener: &mut PlayerListener,
 ) -> Result<(), replication::Error> {
     assert!(listener.logic.is_some());
+    let before = crate::net::players::test_wire::queued(listener);
     let now = listener.world_ms;
     listener.advance_sequences(now)?;
     listener.advance_level_poll(now)?;
@@ -183,6 +195,7 @@ pub(in crate::net::players) fn tick_with_normal_presentation(
     listener.advance_rivals(now)?;
     listener.advance_scoring(now)?;
     listener.advance_events(now)?;
+    crate::net::players::test_wire::assert_wire_ready(listener, before);
     Ok(())
 }
 pub(super) fn setup() -> (PlayerListener, u16, Arc<nfs_world::items::Collection>) {
@@ -728,6 +741,22 @@ pub(super) fn ready_for_selection(
             .all(|g| listener.players.objects().get(*g).is_none())
     );
     assert!(listener.players.objects().get(drive_sequence).is_none());
+    // E1180: this frame closed the world when its records had no setup. As in
+    // the official completion frame, the sequence and goal deletions travel
+    // with the solo-route creation in one sendable section.
+    let completion = listener
+        .pending
+        .iter()
+        .find(|s| s.deleted.contains(&drive_sequence))
+        .unwrap();
+    assert!(completion.setup.is_some() && !completion.records.is_empty());
+    assert!(goals.iter().all(|g| completion.deleted.contains(g)));
+    assert!(
+        completion
+            .records
+            .iter()
+            .any(|r| matches!(r.initial, Some(replication::Initial::GotoWaypointGoal(_))))
+    );
     let methods = listener
         .pending_rpcs
         .iter()
@@ -1011,7 +1040,7 @@ pub(super) fn ready_for_selection(
         .ghost(participant)
         .unwrap();
     drain(&mut listener);
-    listener.advance_sequences(listener.world_ms).unwrap();
+    sequences_checked(&mut listener, 0);
     let complete = native_completion(Completed {
         sequence: waiting,
         participant,
@@ -1021,16 +1050,14 @@ pub(super) fn ready_for_selection(
         let ack = b.expected().encode().unwrap();
         assert!(send(&mut listener, 16 + i as u8, 47, ack.span()));
     }
-    listener.advance_sequences(listener.world_ms).unwrap();
+    sequences_checked(&mut listener, 0);
     assert!(
         listener
             .pending_rpcs
             .iter()
             .all(|r| !matches!(r, HostRpc::SequenceStop(_)))
     );
-    listener
-        .advance_sequences(listener.world_ms + nfs_world::sequences::FIRST_READY_MS)
-        .unwrap();
+    sequences_checked(&mut listener, nfs_world::sequences::FIRST_READY_MS);
     assert!(
         listener
             .pending_rpcs

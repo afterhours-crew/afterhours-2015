@@ -50,6 +50,33 @@ pub(super) fn retirement(
 }
 
 impl PlayerListener {
+    /// Driving output as wire sections: records split to frame size, each
+    /// with a setup; deletions ride with the first one, or alone.
+    pub(super) fn driving_sections(
+        records: Vec<replication::Record>,
+        deleted: Vec<u16>,
+    ) -> Result<Vec<Section>, replication::Error> {
+        // Each deletion costs a flag and a 13-bit id in the first section.
+        let budget = (nfs_world::application::OUTBOUND_FRAME_BITS - 96)
+            .checked_sub(14 * deleted.len())
+            .ok_or(replication::Error::Bound)?;
+        let mut sections = split_scenes(records, budget)?;
+        match sections.first_mut() {
+            Some(first) => first.deleted = deleted,
+            None if !deleted.is_empty() => {
+                let mut section = returning::empty_section();
+                section.deleted = deleted;
+                sections.push(section);
+            }
+            None => {}
+        }
+        for section in &sections {
+            if section.frame()?.len() > nfs_world::application::OUTBOUND_FRAME_BITS {
+                return Err(replication::Error::Bound);
+            }
+        }
+        Ok(sections)
+    }
     pub(super) fn advance_prologue(&mut self) -> Result<(), replication::Error> {
         self.advance_story_movies()?;
         let Some(content) = self.prologue.as_deref() else {
