@@ -6,18 +6,27 @@
 //! starts, derived from the level's data.
 //!
 //! - Sub-levels: `SubWorldReferenceObjectData` entries with `AutoLoad` and
-//!   `IsWin32SubLevel`, walked breadth-first from the level, siblings in object
-//!   order, each with its parent (`None` for the level root).
+//!   `IsWin32SubLevel`, walked breadth-first from the level, siblings in the
+//!   order the parent scene's root lists them in its `Objects` array, each
+//!   with its parent (`None` for the level root).
 //! - Then bundle preloads (`BundlePreLoadEntityData.BundlesToLoad`) and
 //!   blueprint bundles (`BlueprintBundleEntityData.Bundle`) found in the layers
 //!   (`WorldPartReferenceObjectData`) of those scenes, in the same scene order;
 //!   both are children of the root.
 //!
-//! The client accepts any sibling order that is used consistently, so this
-//! order is a choice, not a reproduction of another host's order.
+//! The sibling order is not a free choice. The client builds the auto-loaded
+//! sub-levels in registration order, and entities resolve their cross-scene
+//! links once, when their own scene is built: the music director in
+//! `levels/Genesis01/Audio` attaches to garage states in
+//! `Levels/Genesis01/ParticipantStateMachine` through a link declared in their
+//! parent, `levels/Genesis01/Gameplay`, and finds nothing when Audio is built
+//! first. The official host registers siblings in the parent root's `Objects`
+//! order with the non-auto-loaded references skipped (the eight Genesis01 root
+//! children and the twenty Gameplay children both match it), which puts the
+//! state machine before Audio; the partition's object order does not.
 use crate::Error;
 use crate::assets::AssetIndex;
-use nfs_frostbite::ebx::{Object, Value};
+use nfs_frostbite::ebx::{Object, Pointer, Value};
 use std::collections::{BTreeSet, VecDeque};
 
 /// Most startup entries a level may produce.
@@ -40,6 +49,46 @@ pub struct StartupEntry {
 
 fn flag(object: &Object, field: &str) -> bool {
     object.fields.get(field).and_then(Value::as_bool) == Some(true)
+}
+
+fn is_sub_level(object: &Object) -> bool {
+    object.class == "SubWorldReferenceObjectData"
+        && flag(object, "AutoLoad")
+        && flag(object, "IsWin32SubLevel")
+}
+
+/// Indexes of a scene's auto-loaded sub-world references in the order the
+/// scene's root object lists them (`Objects`), which is the order the official
+/// host registers them in. A qualifying reference the root does not list is a
+/// content shape this builder does not understand.
+fn sub_level_order(asset: &str, objects: &[Object]) -> Result<Vec<usize>, Error> {
+    let root = objects
+        .first()
+        .ok_or_else(|| Error::Content(format!("{asset}: empty scene")))?;
+    let listed = root
+        .fields
+        .get("Objects")
+        .and_then(Value::as_array)
+        .ok_or_else(|| Error::Content(format!("{asset}: scene root lists no objects")))?;
+    let mut order = Vec::new();
+    for value in listed {
+        if let Value::Pointer(Pointer::Internal(index)) = value
+            && objects.get(*index).is_some_and(is_sub_level)
+            && !order.contains(index)
+        {
+            order.push(*index);
+        }
+    }
+    if objects
+        .iter()
+        .enumerate()
+        .any(|(index, object)| is_sub_level(object) && !order.contains(&index))
+    {
+        return Err(Error::Content(format!(
+            "{asset}: a sub-level reference is outside the scene's object list"
+        )));
+    }
+    Ok(order)
 }
 
 fn names_of(value: Option<&Value>) -> Vec<String> {
@@ -81,13 +130,9 @@ pub(crate) fn startup_entries(
     let mut queue = VecDeque::from([(root, None)]);
     while let Some((asset, me)) = queue.pop_front() {
         scenes.push(asset.clone());
-        for object in assets.objects(&asset)?.to_vec() {
-            if object.class != "SubWorldReferenceObjectData"
-                || !flag(&object, "AutoLoad")
-                || !flag(&object, "IsWin32SubLevel")
-            {
-                continue;
-            }
+        let objects = assets.objects(&asset)?.to_vec();
+        for index in sub_level_order(&asset, &objects)? {
+            let object = &objects[index];
             let name = object
                 .fields
                 .get("BundleName")
@@ -193,6 +238,61 @@ mod tests {
         );
         assert!(index.startup_entries("levels/synth/alpha").is_err());
         assert!(index.startup_entries("levels/absent").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn siblings_follow_the_parent_root_object_list_not_the_partition_order() {
+        let dir =
+            std::env::temp_dir().join(format!("nfs-content-world-listed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut assets = synthetic::assets();
+        assets.retain(|a| a.name != synthetic::LEVEL.to_lowercase());
+        assets.extend(
+            synthetic::level_listed_out_of_object_order()
+                .into_iter()
+                .filter(|a| a.name == synthetic::LEVEL.to_lowercase()),
+        );
+        let (options, _) = synthetic::write(&dir, &assets).unwrap();
+        let mut index = AssetIndex::open(&dir, &options).unwrap();
+        let entries = index.startup_entries(synthetic::LEVEL).unwrap();
+        let sub_levels: Vec<(&str, Option<usize>)> = entries
+            .iter()
+            .filter(|e| e.kind == StartupKind::SubLevel)
+            .map(|e| (e.name.as_str(), e.parent))
+            .collect();
+        assert_eq!(
+            sub_levels,
+            [
+                ("levels/Synth/Beta", None),
+                ("Levels/Synth/Alpha", None),
+                ("Levels/Synth/Gamma", Some(1)),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_auto_loaded_sub_level_outside_the_object_list_is_refused() {
+        let dir =
+            std::env::temp_dir().join(format!("nfs-content-world-unlisted-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut assets = synthetic::assets();
+        assets.retain(|a| a.name != synthetic::LEVEL.to_lowercase());
+        assets.extend(
+            synthetic::level_with_unlisted_sub_level()
+                .into_iter()
+                .filter(|a| a.name == synthetic::LEVEL.to_lowercase()),
+        );
+        let (options, _) = synthetic::write(&dir, &assets).unwrap();
+        let mut index = AssetIndex::open(&dir, &options).unwrap();
+        let error = index.startup_entries(synthetic::LEVEL).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("outside the scene's object list"),
+            "{error}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

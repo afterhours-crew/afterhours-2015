@@ -922,13 +922,9 @@ impl PlayerListener {
             .scene_profiles
             .as_ref()
             .ok_or(replication::Error::Unsupported)?;
-        let creations = genesis::hierarchy(rpc, &bindings, profiles, &roles.traffic)?;
-        let levels = creations
-            .iter()
-            .map(|c| c.prefix.level_id)
-            .collect::<Vec<_>>();
+        let scenes = genesis::tree(rpc, &bindings, profiles, &roles.traffic)?;
         let mut players = self.players.clone();
-        let mut records = players.create_scenes(&levels, creations, profiles)?;
+        let mut records = players.create_scene_tree(scenes, profiles)?;
         records.extend(players.enable_player_manager()?);
         let mut launchers = self.launchers.clone();
         if let Some(catalog) = &content.launchers {
