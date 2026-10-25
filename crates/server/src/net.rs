@@ -957,9 +957,7 @@ fn flush_owned(
             break;
         };
         match host.queue_rpc(reply) {
-            Ok(()) => {
-                listener.pending_rpcs.pop_front();
-            }
+            Ok(()) => listener.rpc_sent(),
             Err(nfs_world::session::Error::Application(application::Error::Window)) => break,
             Err(error) => {
                 return Err(Refused {
@@ -990,7 +988,7 @@ fn flush_owned(
                         .collect::<Vec<_>>(),
                     "owned entry notifications and replication queued together"
                 );
-                listener.pending_entries.pop_front();
+                listener.entry_sent();
             }
             Err(nfs_world::session::Error::Application(application::Error::Window)) => break,
             Err(error) => {

@@ -2920,18 +2920,6 @@ impl Listener for PlayerListener {
         self.intro_modes = intro_modes;
         self.intro_movies = intro_movies;
         self.intro_composites = intro_composites;
-        // The committed intro notifications decide the world volume memberships.
-        let ctx = prologue::presentation::Context {
-            logic: self.logic.as_deref(),
-            ghosts: &self.logic_ghosts,
-            players: &self.players,
-            participants: &self.participants,
-            content: self.prologue.as_deref(),
-        };
-        self.world_volumes.observe(&ctx, &responses);
-        for (_, calls) in &entries {
-            self.world_volumes.observe(&ctx, calls);
-        }
         self.pending_rpcs.extend(responses);
         for input in event_inputs {
             if self.event_state.inputs.len() >= events::MAX_INPUTS {

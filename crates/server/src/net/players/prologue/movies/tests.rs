@@ -1,7 +1,9 @@
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
-use super::super::tests::{drain, native_completion, send, tick_with_normal_presentation};
+use super::super::tests::{
+    drain, native_completion, send, send_all, tick_with_normal_presentation,
+};
 use super::*;
 use nfs_world::{bits::BitWriter, participants::Endpoint};
 use std::sync::Arc;
@@ -764,4 +766,56 @@ fn finished_diner() -> (PlayerListener, u16) {
     assert!(listener.pending.is_empty());
     assert!(listener.pending_rpcs.is_empty());
     (listener, participant)
+}
+
+/// The movie start's `alive` leave reaches the world volumes through the same
+/// send path as every notification, so the activity memberships leave with it.
+#[test]
+fn movie_start_leaves_the_activity_volumes_once_sent() {
+    crate::net::players::test_wire::with_native_padding(|| {
+        let (mut listener, participant, _) = fixture();
+        let content = Arc::make_mut(listener.prologue.as_mut().unwrap());
+        content.volumes.activities = (21..=23)
+            .map(|serializer| nfs_content::events::discovery::Endpoint {
+                scene_key: 909,
+                serializer,
+            })
+            .collect();
+        let alive = listener.participants.intro_bindings().unwrap().alive;
+        let memberships = |sent: &[HostRpc], method: u32| {
+            sent.iter()
+                .filter(|rpc| matches!(rpc, HostRpc::GameMode(c) if c.method == method))
+                .count()
+        };
+        listener.pending_rpcs.push_back(HostRpc::Participant(
+            nfs_world::participants::Notification {
+                endpoint: alive,
+                participant,
+                call: nfs_world::participants::Call::Enter,
+            },
+        ));
+        send_all(&mut listener);
+        listener.advance_world_volumes(0).unwrap();
+        assert_eq!(memberships(&send_all(&mut listener), 0), 3);
+        let (_, _, snapshot) = crate::progression::tests::local();
+        listener.persistent = Some(Arc::new(
+            crate::progression::tests::tables().view(&snapshot).unwrap(),
+        ));
+        tick_with_normal_presentation(&mut listener).unwrap();
+        assert_eq!(
+            listener.participants.stage(participant),
+            Some(Stage::IntroMovie)
+        );
+        // Queued but not yet accepted by the session: nothing changes.
+        listener.advance_world_volumes(0).unwrap();
+        let sent = send_all(&mut listener);
+        assert_eq!(memberships(&sent, 1), 0);
+        assert!(sent.iter().any(|rpc| matches!(rpc,
+            HostRpc::Participant(n) if n.endpoint == alive
+                && n.participant == participant
+                && n.call == nfs_world::participants::Call::Leave)));
+        // That sent the movie start; the next tick leaves the activities.
+        listener.advance_world_volumes(0).unwrap();
+        assert_eq!(memberships(&send_all(&mut listener), 1), 3);
+    });
 }

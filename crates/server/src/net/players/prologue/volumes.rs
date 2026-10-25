@@ -12,9 +12,11 @@
 //! all 30 at every one of its nine transitions, from the first drive
 //! (123619 ms) through the garage request (290318 ms) and the movies to the
 //! final return (1119119 ms). Spot volumes are joined and left in the first
-//! drive's burst only. Rules record what the participant should be in; the world loop
-//! publishes the difference in reply-sized batches once the transition's own
-//! entries are queued, as the official host spreads it over full frames.
+//! drive's burst only. The rules see each notification when the session
+//! accepts it (`rpc_sent`, `entry_sent`), whichever producer queued it, and
+//! record what the participant should be in; the world loop publishes the
+//! difference in reply-sized batches once the transition's own entries are
+//! out, as the official host spreads it over full frames.
 use super::*;
 use crate::prologue::volumes::WorldVolumes;
 use nfs_content::events::discovery::Endpoint as Site;
@@ -60,12 +62,18 @@ pub(in crate::net::players) struct State {
 }
 
 impl State {
-    /// Update what intro participants should be in from the notifications this
-    /// committed transition sends. Other participants are not affected.
-    pub fn observe(&mut self, ctx: &presentation::Context<'_>, calls: &[HostRpc]) {
+    /// Update what intro participants should be in from notifications the
+    /// session has just accepted, in send order; `following` are the calls
+    /// queued after `calls`. Other participants are not affected.
+    pub fn observe<'a>(
+        &mut self,
+        participants: &Lifecycle,
+        calls: &'a [HostRpc],
+        following: impl Iterator<Item = &'a HostRpc> + Clone,
+    ) {
         let (Some(intro), Some(lifecycle)) = (
-            ctx.participants.intro_bindings(),
-            ctx.participants.lifecycle_bindings(),
+            participants.intro_bindings(),
+            participants.lifecycle_bindings(),
         ) else {
             return;
         };
@@ -78,7 +86,7 @@ impl State {
             else {
                 continue;
             };
-            if ctx.participants.intro_chapter(participant).is_none() {
+            if participants.intro_chapter(participant).is_none() {
                 continue;
             }
             let enter = matches!(kind, Call::Enter);
@@ -99,14 +107,18 @@ impl State {
                 wanted.notifications = false;
             } else if endpoint == lifecycle.composite && leave {
                 // Toward the first race, not into customization (1247625 ms).
-                let next = calls[index + 1..].iter().find_map(|c| match c {
-                    HostRpc::Participant(n)
-                        if n.participant == participant && n.call == Call::Enter =>
-                    {
-                        Some(n.endpoint)
-                    }
-                    _ => None,
-                });
+                let next =
+                    calls[index + 1..]
+                        .iter()
+                        .chain(following.clone())
+                        .find_map(|c| match c {
+                            HostRpc::Participant(n)
+                                if n.participant == participant && n.call == Call::Enter =>
+                            {
+                                Some(n.endpoint)
+                            }
+                            _ => None,
+                        });
                 if next != Some(lifecycle.customization) {
                     wanted.notifications = false;
                 }
@@ -114,12 +126,13 @@ impl State {
         }
     }
 
-    /// Drop participants that left the world: their memberships went with
-    /// their objects, so nothing is published for them.
-    pub fn forget(&mut self, gone: impl Fn(u16) -> bool) {
+    /// Drop memberships the world no longer holds, without removal calls:
+    /// participants that left (their memberships went with their objects) and
+    /// endpoints whose scene is gone.
+    pub fn forget(&mut self, gone: impl Fn(u16) -> bool, resolvable: impl Fn(Site) -> bool) {
         self.wanted.retain(|&participant, _| !gone(participant));
         self.published
-            .retain(|&(participant, _)| !participant.is_some_and(&gone));
+            .retain(|&(participant, site)| !participant.is_some_and(&gone) && resolvable(site));
     }
 
     fn desired(&self, volumes: &WorldVolumes) -> BTreeSet<(Option<u16>, Site)> {
@@ -207,6 +220,25 @@ impl State {
 }
 
 impl PlayerListener {
+    /// The session accepted the front queued RPC. Every notification passes
+    /// here once, whichever producer queued it.
+    pub(in crate::net) fn rpc_sent(&mut self) {
+        let Some(sent) = self.pending_rpcs.pop_front() else {
+            return;
+        };
+        self.world_volumes
+            .observe(&self.participants, &[sent], self.pending_rpcs.iter());
+    }
+
+    /// The session accepted the front transition entry with its calls.
+    pub(in crate::net) fn entry_sent(&mut self) {
+        let Some((_, calls)) = self.pending_entries.pop_front() else {
+            return;
+        };
+        self.world_volumes
+            .observe(&self.participants, &calls, std::iter::empty());
+    }
+
     /// Publish the next batch of intro world volume changes. Transition
     /// entries go first; a full RPC queue defers the batch.
     pub(in crate::net::players) fn advance_world_volumes(
@@ -220,12 +252,17 @@ impl PlayerListener {
             return Ok(());
         };
         let world = self.players.objects();
-        self.world_volumes
-            .forget(|participant| world.get(participant).is_none());
+        self.world_volumes.forget(
+            |participant| world.get(participant).is_none(),
+            |site| {
+                world
+                    .scene_endpoint(site.scene_key, site.serializer)
+                    .is_some()
+            },
+        );
         let budget = nfs_world::session::MAX_RPC_QUEUE
             .saturating_sub(self.pending_rpcs.len())
             .saturating_sub(BATCH);
-        let world = self.players.objects();
         let resolvable = |site: Site| {
             world
                 .scene_endpoint(site.scene_key, site.serializer)
@@ -294,17 +331,12 @@ mod tests {
         }
     }
 
+    /// Queue the notifications and send them the way the world loop does.
     fn observe(listener: &mut PlayerListener, calls: Vec<HostRpc>) {
-        let mut state = std::mem::take(&mut listener.world_volumes);
-        let ctx = presentation::Context {
-            logic: None,
-            ghosts: &listener.logic_ghosts,
-            players: &listener.players,
-            participants: &listener.participants,
-            content: listener.prologue.as_deref(),
-        };
-        state.observe(&ctx, &calls);
-        listener.world_volumes = state;
+        listener.pending_rpcs.extend(calls);
+        while !listener.pending_rpcs.is_empty() {
+            listener.rpc_sent();
+        }
     }
 
     /// Every batch the world loop would publish until nothing changes.
@@ -471,9 +503,9 @@ mod tests {
         state.commit(&volumes, &changes, |_| true);
         assert_eq!(state.published.len(), 3);
         // Nothing is sent for the departed participant; the map stays on.
-        state.forget(|participant| participant == 5);
+        state.forget(|participant| participant == 5, |_| true);
         assert!(state.plan(&volumes, BATCH, |_| true).is_empty());
-        state.forget(|participant| participant == 6);
+        state.forget(|participant| participant == 6, |_| true);
         assert_eq!(
             state.plan(&volumes, BATCH, |_| true),
             vec![Change {
@@ -482,5 +514,41 @@ mod tests {
                 join: false,
             }]
         );
+    }
+
+    #[test]
+    fn memberships_of_a_vanished_scene_are_forgotten_without_removal_calls() {
+        let volumes = WorldVolumes {
+            events: BTreeSet::from([site(1), site(2)]),
+            ..WorldVolumes::default()
+        };
+        let mut state = State::default();
+        state.wanted.insert(
+            5,
+            Wanted {
+                events: true,
+                ..Wanted::default()
+            },
+        );
+        let changes = state.plan(&volumes, BATCH, |_| true);
+        state.commit(&volumes, &changes, |_| true);
+        assert_eq!(state.published.len(), 2);
+        // Serializer 1's scene is gone: no call can name it, so none is planned.
+        let resolvable = |s: Site| s != site(1);
+        state.forget(|_| false, resolvable);
+        assert_eq!(state.published, BTreeSet::from([(Some(5), site(2))]));
+        assert!(state.plan(&volumes, BATCH, resolvable).is_empty());
+    }
+
+    #[test]
+    fn the_world_tick_drops_an_unresolvable_membership_instead_of_failing() {
+        let (mut listener, participant, _) = super::super::tests::setup();
+        listener
+            .world_volumes
+            .published
+            .insert((Some(participant), site(500)));
+        listener.advance_world_volumes(0).unwrap();
+        assert!(listener.pending_rpcs.is_empty());
+        assert!(listener.world_volumes.published.is_empty());
     }
 }

@@ -705,14 +705,6 @@ impl PlayerListener {
         self.world_cars = cars;
         self.pending.extend(sections);
         self.pending_content.extend(messages);
-        let ctx = presentation::Context {
-            logic: self.logic.as_deref(),
-            ghosts: &self.logic_ghosts,
-            players: &self.players,
-            participants: &self.participants,
-            content: Some(content),
-        };
-        self.world_volumes.observe(&ctx, &calls);
         self.pending_rpcs.extend(calls);
         self.pending_teleports.extend(teleports);
         Ok(())

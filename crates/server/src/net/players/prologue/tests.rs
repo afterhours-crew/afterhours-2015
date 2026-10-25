@@ -174,6 +174,22 @@ fn sequences_checked(listener: &mut PlayerListener, after_ms: u64) {
     listener.advance_sequences(now).unwrap();
     crate::net::players::test_wire::assert_wire_ready(listener, before);
 }
+/// Hand every queued notification and entry to the session the way the world
+/// loop does (replication first, then RPCs, then entries); returns the calls.
+pub(in crate::net::players) fn send_all(listener: &mut PlayerListener) -> Vec<HostRpc> {
+    listener.pending_content.clear();
+    listener.pending.clear();
+    let mut sent = Vec::new();
+    while let Some(&rpc) = listener.pending_rpcs.front() {
+        listener.rpc_sent();
+        sent.push(rpc);
+    }
+    while let Some((_, calls)) = listener.pending_entries.front() {
+        sent.extend(calls.iter().copied());
+        listener.entry_sent();
+    }
+    sent
+}
 pub(super) fn drain(listener: &mut PlayerListener) {
     listener.pending.clear();
     listener.pending_rpcs.clear();
