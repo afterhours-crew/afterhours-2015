@@ -1589,6 +1589,155 @@ fn entries_past_a_reply_group_are_resplit_in_order() {
     assert_eq!(small, vec![(section, calls[..15].to_vec())]);
 }
 
+/// What the session enforces when it applies entries in order: an entry's
+/// calls run before its deletions, so no call may name an object an earlier
+/// entry deleted (UnknownObject); nothing is deleted twice.
+fn assert_no_call_after_its_deletion(entries: &[(Section, Vec<HostRpc>)]) {
+    let mut deleted = std::collections::BTreeSet::new();
+    for (index, (section, calls)) in entries.iter().enumerate() {
+        for call in calls {
+            for object in call.objects() {
+                assert!(
+                    !deleted.contains(&object),
+                    "entry {index} calls {call:?} on object {object} deleted by an earlier entry"
+                );
+            }
+        }
+        for &id in &section.deleted {
+            assert!(deleted.insert(id), "object {id} deleted twice");
+        }
+    }
+}
+
+/// A split that carries calls past the first entry keeps the first entry's
+/// deletions only when no later call names them; the rest move to the end.
+#[test]
+fn split_entries_never_call_an_object_an_earlier_entry_deleted() {
+    let record = |id: u16| replication::Record {
+        id,
+        initial: Some(replication::Initial::Actor(replication::ActorInit {
+            participant: 7,
+            flag_a: true,
+            flag_b: true,
+            word_a: 4,
+            word_b: 65535,
+        })),
+        update: replication::Update::Actor(replication::ActorUpdate::default()),
+    };
+    let notify = |i: u16| {
+        HostRpc::Participant(nfs_world::participants::Notification {
+            endpoint: Endpoint {
+                scene: 10,
+                selector: i,
+                serial: Serial::new(1).unwrap(),
+            },
+            participant: 179,
+            call: nfs_world::participants::Call::Enter,
+        })
+    };
+    let fire = |ghost: u16| {
+        HostRpc::Event(nfs_world::logic::Fire {
+            event: 2,
+            player: None,
+            target: nfs_world::logic::EntityRef { ghost, entity: 1 },
+        })
+    };
+    // Presentation pushed three fires on ghost 184 past fifteen calls; the
+    // section deletes 184 and 202.
+    let mut section = returning::empty_section();
+    section.setup = Some(Setup::RawEscape([0; 3]));
+    section.records = vec![record(181), record(177)];
+    section.deleted = vec![202, 184];
+    let mut calls = (0..15u16).map(notify).collect::<Vec<_>>();
+    calls.extend([fire(184), fire(184), fire(184)]);
+    let entries = crate::net::players::admitted_entries(section, calls.clone()).unwrap();
+    assert_no_call_after_its_deletion(&entries);
+    assert_eq!(
+        entries[0].0.deleted,
+        [202],
+        "unreferenced deletions keep their place"
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .flat_map(|(s, _)| s.deleted.iter().copied())
+            .collect::<Vec<_>>(),
+        [202, 184]
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .flat_map(|(_, c)| c.iter().copied())
+            .collect::<Vec<_>>(),
+        calls
+    );
+    for (section, chunk) in &entries {
+        assert!(crate::net::players::entry_admitted(section, chunk));
+    }
+    // The garage completion split: a call carried to a later entry names a
+    // deleted object.
+    let records = (1..=300u16).map(record).collect::<Vec<_>>();
+    let mut calls = (0..20u16).map(notify).collect::<Vec<_>>();
+    calls.push(fire(900));
+    let entries = PlayerListener::garage_entries(records, vec![900, 901], calls).unwrap();
+    assert!(entries.len() > 1);
+    assert_no_call_after_its_deletion(&entries);
+    assert_eq!(entries[0].0.deleted, [901]);
+}
+
+/// The intro garage entry's presence goes after entering `begin_garage` and
+/// before the mode's reactions, as in the official frame (E1193), so the
+/// fifteen-message walk frame matches and presentation spills after it.
+#[test]
+fn intro_garage_presence_precedes_the_mode_reactions() {
+    let endpoint = |scene: u16, selector: u16| Endpoint {
+        scene,
+        selector,
+        serial: Serial::new(1).unwrap(),
+    };
+    let state = |selector: u16, call| {
+        HostRpc::Participant(nfs_world::participants::Notification {
+            endpoint: endpoint(10, selector),
+            participant: 179,
+            call,
+        })
+    };
+    let mode = |selector: u16, method: u32| {
+        HostRpc::GameMode(nfs_world::game_mode::Call {
+            target: 194,
+            selector,
+            serial: Serial::new(1).unwrap(),
+            method,
+            reference: None,
+            arguments: nfs_world::game_mode::Arguments::None,
+        })
+    };
+    use nfs_world::participants::Call::{Enter, Leave};
+    let presence = nfs_world::garage::presence::Notification {
+        endpoint: endpoint(17, 23),
+        enabled: true,
+    };
+    let mut calls = vec![
+        state(60, Leave),
+        state(94, Enter),
+        mode(1, 1),
+        mode(0, 7),
+        state(94, Leave),
+        state(89, Enter),
+    ];
+    garage::insert_presence(&mut calls, presence);
+    assert_eq!(calls[2], HostRpc::GaragePresence(presence));
+    assert_eq!(calls[1], state(94, Enter));
+    assert_eq!(calls[3], mode(1, 1));
+    assert_eq!(calls.len(), 7);
+    let mut without_mode = vec![state(94, Enter)];
+    garage::insert_presence(&mut without_mode, presence);
+    assert_eq!(
+        without_mode.last(),
+        Some(&HostRpc::GaragePresence(presence))
+    );
+}
+
 /// An entry the session does not admit stops the world loudly instead of
 /// queueing: test builds fail at its producer, and the flush reports which
 /// queue refused it and keeps the entry (E1186, E1188).

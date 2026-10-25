@@ -135,6 +135,7 @@ impl PlayerListener {
             }
             entries.push((section, chunk));
         }
+        defer_deletions(&mut entries);
         Ok(entries)
     }
     pub(super) fn advance_prologue(&mut self) -> Result<(), replication::Error> {

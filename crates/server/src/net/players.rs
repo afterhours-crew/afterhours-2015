@@ -255,7 +255,45 @@ pub(super) fn admitted_entries(
         }
         entries.push((section, chunk));
     }
+    defer_deletions(&mut entries);
     Ok(entries)
+}
+
+/// An entry's calls run before its section's deletions, but a later entry's
+/// calls run after them: the session refuses a call naming an object an
+/// earlier entry deleted (UnknownObject). Deletions a later call names move
+/// to the last entry, or to a deletion-only entry after it when the last one
+/// would no longer be admitted.
+pub(super) fn defer_deletions(entries: &mut Vec<(Section, Vec<nfs_world::participants::HostRpc>)>) {
+    let Some(last) = entries.len().checked_sub(1) else {
+        return;
+    };
+    let mut moved = Vec::new();
+    for index in 0..last {
+        let later: BTreeSet<u16> = entries[index + 1..]
+            .iter()
+            .flat_map(|(_, calls)| calls.iter().flat_map(|call| call.objects()))
+            .collect();
+        let (keep, defer): (Vec<u16>, Vec<u16>) = entries[index]
+            .0
+            .deleted
+            .iter()
+            .partition(|id| !later.contains(id));
+        entries[index].0.deleted = keep;
+        moved.extend(defer);
+    }
+    if moved.is_empty() {
+        return;
+    }
+    let (section, calls) = &mut entries[last];
+    let before = section.deleted.len();
+    section.deleted.extend(&moved);
+    if !entry_admitted(section, calls) {
+        section.deleted.truncate(before);
+        let mut deletions = returning::empty_section();
+        deletions.deleted = moved;
+        entries.push((deletions, Vec::new()));
+    }
 }
 impl PlayerListener {
     /// Queue entries for the world flush. The flush refuses an entry the
@@ -2002,10 +2040,9 @@ impl Listener for PlayerListener {
                                 })
                             })();
                             match presence {
-                                Ok(Some(value)) => out
-                                    .output
-                                    .calls
-                                    .push(nfs_world::participants::HostRpc::GaragePresence(value)),
+                                Ok(Some(value)) => {
+                                    prologue::garage::insert_presence(&mut out.output.calls, value)
+                                }
                                 Ok(None) => {}
                                 Err(error) => return self.refuse_rpc(error, body),
                             }

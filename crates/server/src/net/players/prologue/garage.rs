@@ -15,6 +15,22 @@ pub(in crate::net::players) struct OwnedGarage<'a> {
     pub content: &'a GarageContent,
 }
 
+/// Place the garage presence of an intro garage entry where the official host
+/// sends it: right after the participant enters `begin_garage`, before the
+/// intro mode's reactions to that state (career start 298018 ms: the walk,
+/// presence, four mode calls, leave `begin_garage`, enter `loading_garage`,
+/// fifteen messages in one frame). Without mode calls it goes last.
+pub(in crate::net::players) fn insert_presence(
+    calls: &mut Vec<HostRpc>,
+    presence: nfs_world::garage::presence::Notification,
+) {
+    let at = calls
+        .iter()
+        .position(|call| matches!(call, HostRpc::GameMode(_)))
+        .unwrap_or(calls.len());
+    calls.insert(at, HostRpc::GaragePresence(presence));
+}
+
 pub(in crate::net::players) fn notify(
     content: &crate::prologue::Content,
     modes: &mut Modes,
