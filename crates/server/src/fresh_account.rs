@@ -30,7 +30,7 @@ enum Content {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Progression {
     /// Asset-default tables: the wired initial objectives, i.e. the start of
-    /// the official prologue, whose scripted events an owned host does not run.
+    /// the official prologue. The starter car is granted by story selection.
     Fresh,
     /// The intro branch complete and the main objectives it activates active:
     /// the official fresh career after its prologue (E742), where the garage
@@ -154,6 +154,12 @@ fn run(
     let items = items
         .inventory()
         .ok_or("item content must contain an initialization policy")?;
+    let fresh_items = if args.progression == Progression::Fresh {
+        Some(prologue_inventory(items)?)
+    } else {
+        None
+    };
+    let items = fresh_items.as_ref().unwrap_or(items);
     let tables = persistent::Catalog::load(&tables)?;
     let objectives = match args.progression {
         Progression::Fresh => Vec::new(),
@@ -206,6 +212,25 @@ fn run(
     Ok(prepared.identity().storage_account())
 }
 const TESTER_CASH: u32 = 10_000_000;
+
+fn prologue_inventory(
+    items: &nfs_world::items::InventoryCatalog,
+) -> Result<nfs_world::items::InventoryCatalog, Box<dyn std::error::Error>> {
+    use nfs_world::items::{DefinitionClass, InventoryCatalog};
+    let initial = items
+        .initial_definitions()
+        .iter()
+        .copied()
+        .filter(|id| {
+            items
+                .bindings()
+                .class(id)
+                .is_ok_and(|c| c != DefinitionClass::RaceVehicleItemData)
+        })
+        .collect();
+    InventoryCatalog::new(items.definitions().map(|(id, d)| (*id, d.clone())), initial)
+        .map_err(|e| format!("prologue inventory: {e:?}").into())
+}
 
 fn tester_level(thresholds: &nfs_services::reputation::Thresholds) -> Result<u32, &'static str> {
     thresholds
@@ -380,8 +405,16 @@ mod tests {
             progression_content: None,
             tester_resources: false,
         };
-        run(args, &options).unwrap();
+        let fresh = run(args, &options).unwrap();
         assert!(dir.join("account").is_dir());
+        let fresh_repo =
+            nfs_storage::SqliteRepository::open_owned_directory(&dir.join("account")).unwrap();
+        let fresh_snapshot =
+            nfs_storage::InventoryRepository::snapshot(&fresh_repo, fresh).unwrap();
+        assert_eq!(
+            fresh_snapshot.garage,
+            Some(nfs_storage::GarageSlots::default())
+        );
         assert_eq!(std::fs::read_dir(dir.join("cache")).unwrap().count(), 1);
         // A post-intro account from the same installation stores the intro
         // objectives completed, read back through the generated catalogs.
@@ -411,6 +444,22 @@ mod tests {
         let repository =
             nfs_storage::SqliteRepository::open_owned_directory(&dir.join("post-intro")).unwrap();
         let snapshot = nfs_storage::InventoryRepository::snapshot(&repository, account).unwrap();
+        let item_content = ItemContent::load(&generated.item_content).unwrap();
+        let catalog = item_content.inventory().unwrap();
+        assert!(
+            fresh_snapshot.items.values().all(|item| catalog
+                .bindings()
+                .class(&item.definition.0)
+                .unwrap()
+                != nfs_world::items::DefinitionClass::RaceVehicleItemData)
+        );
+        assert!(
+            snapshot.items.values().any(|item| catalog
+                .bindings()
+                .class(&item.definition.0)
+                .unwrap()
+                == nfs_world::items::DefinitionClass::RaceVehicleItemData)
+        );
         let restored = progression
             .catalog
             .restore(&tables.view(&snapshot).unwrap(), progression.settings)

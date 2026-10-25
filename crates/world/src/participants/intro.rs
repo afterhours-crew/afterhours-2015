@@ -82,6 +82,20 @@ fn notifications(participant: u16, chain: &[(Endpoint, Call)]) -> Vec<Notificati
         .collect()
 }
 impl Lifecycle {
+    /// The server owner verified durable completion and retired both modes.
+    /// Ordinary garage exit now owns subsequent world entry.
+    pub fn finish_intro(&mut self, participant: u16) -> Outcome {
+        if !self.intro_started.contains_key(&participant) {
+            return Outcome::Repeated;
+        }
+        if self.intro_started.get(&participant) != Some(&Chapter::ReturnDrive)
+            || self.stages.get(&participant) != Some(&Stage::Customization)
+        {
+            return Outcome::Unsupported;
+        }
+        self.intro_started.remove(&participant);
+        Outcome::Advanced(vec![])
+    }
     pub fn intro_final_garage_ready(&mut self, participant: u16, composite: Endpoint) -> Outcome {
         let Some(b) = self.bindings else {
             return Outcome::Unsupported;

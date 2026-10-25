@@ -86,6 +86,10 @@ fn final_composite_requires_return_chapter_exact_endpoint_and_native_completion(
         ]
     );
     assert_eq!(model.intro_final_composite_complete(8), Outcome::Repeated);
+    assert_eq!(model.finish_intro(8), Outcome::Advanced(vec![]));
+    assert_eq!(model.intro_chapter(8), None);
+    assert_eq!(model.stage(8), Some(Stage::Customization));
+    assert_eq!(model.finish_intro(8), Outcome::Repeated);
     assert_eq!(
         model.intro_final_composite_complete(9),
         Outcome::Unsupported

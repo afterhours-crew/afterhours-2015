@@ -6,6 +6,7 @@
 //! rules without inventing a free-roam start area, rewards or DNF controller.
 use super::*;
 pub mod results;
+pub mod shutdown;
 mod spawned;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -18,6 +19,7 @@ pub struct Mode {
     pub completion: Option<results::Completion>,
     /// Filters whose exact channel links resolve to this intro's participant provider.
     pub owned_filters: Vec<crate::scoring::events::Identity>,
+    pub shutdown: Option<shutdown::Binding>,
 }
 
 fn owned_filters<S: Source>(
@@ -286,6 +288,14 @@ fn extract_inner(
         );
     }
     let mut lifecycle = lifecycle::extract(&mut graph, &field_sites)?;
+    let shutdown = shutdown::read(
+        &mut graph,
+        &nodes,
+        &logical,
+        &lifecycle,
+        &field_sites,
+        progression.ports["stable_id"],
+    )?;
     let owned_filters = owned_filters(
         &mut graph,
         &nodes,
@@ -444,6 +454,7 @@ fn extract_inner(
     layout.profile()?;
     Ok((
         Mode {
+            shutdown,
             owned_filters,
             completion,
             sequences,

@@ -7,6 +7,45 @@
 use super::*;
 
 impl Active {
+    /// Invoke the authored channel only after the account owner has committed
+    /// its linked objective. Native retirement remains a separate gate.
+    pub fn shutdown_committed(
+        &mut self,
+        content: &Mode,
+        players: &mut Players,
+        participant: u16,
+        objective: u64,
+    ) -> Result<Output, Error> {
+        let binding = content.data.shutdown.as_ref().ok_or(Error::Unsupported)?;
+        if participant != self.owner.participant
+            || !players.owns_participant(self.owner.connection, self.owner.persona, participant)
+        {
+            return Err(Error::UnknownObject);
+        }
+        if objective != binding.objective {
+            return Err(Error::Shape);
+        }
+        if self.ending || self.left {
+            return Ok(Output::default());
+        }
+        let mut next = self.clone();
+        let mut staged = players.clone();
+        let commands = next
+            .callbacks
+            .as_mut()
+            .ok_or(Error::Unsupported)?
+            .external(&binding.source, binding.event, participant)
+            .map_err(invalid)?;
+        let effects = next.dispatch(commands)?;
+        let mut out = Output::default();
+        next.effects(content, &mut staged, &effects, false, &mut out)?;
+        if !next.ending {
+            return Err(Error::Shape);
+        }
+        *self = next;
+        *players = staged;
+        Ok(out)
+    }
     pub(super) fn state_call(
         &mut self,
         call: HostRpc,

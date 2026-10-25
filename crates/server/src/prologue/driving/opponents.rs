@@ -51,12 +51,13 @@ impl Mode {
 }
 impl Active {
     pub(crate) fn owns_vehicle(&self, players: &Players, vehicle: u16) -> bool {
-        players.owns_participant_vehicle(
-            self.owner.connection,
-            self.owner.persona,
-            self.owner.participant,
-            vehicle,
-        ) || self.delegated(players).contains_key(&vehicle)
+        !self.left
+            && (players.owns_participant_vehicle(
+                self.owner.connection,
+                self.owner.persona,
+                self.owner.participant,
+                vehicle,
+            ) || self.delegated(players).contains_key(&vehicle))
     }
     pub(crate) fn delegated(&self, players: &Players) -> BTreeMap<u16, u64> {
         self.opponents

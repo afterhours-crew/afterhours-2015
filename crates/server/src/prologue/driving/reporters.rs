@@ -380,10 +380,27 @@ impl Reporters {
         self.state = next;
         Ok(actions)
     }
+    pub(super) fn external(
+        &mut self,
+        source: &Identity,
+        event: u32,
+        participant: u16,
+    ) -> Result<Vec<Command>, nfs_world::participant_states::Error> {
+        if self.state.human != Some(participant.into()) {
+            return Err(nfs_world::participant_states::Error::Invalid);
+        }
+        self.effect(&Effect::Reporter(
+            event_logic::lifecycle::reporters::Effect::Event {
+                identity: source.clone(),
+                event,
+                participant: participant.into(),
+            },
+        ))
+    }
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     pub(super) fn fixture(fail: bool) -> Reporters {
         let id = Identity {
@@ -448,6 +465,28 @@ mod tests {
             event: 41,
             participant: 19,
         })
+    }
+    pub(in crate::prologue::driving) fn shutdown_fixture(
+        participant: u16,
+        initial: u16,
+        final_state: u16,
+    ) -> Reporters {
+        let mut r = fixture(false);
+        r.bind_human(participant);
+        r.graph = events::Graph::new(
+            3,
+            vec![events::Connection {
+                source: Endpoint { node: 0, event: 41 },
+                target: Endpoint {
+                    node: 2,
+                    event: transitions::TRIGGER_ALL,
+                },
+                delivery: events::Delivery::Local,
+            }],
+        )
+        .unwrap();
+        r.state.transitions = BTreeMap::from([(2, (vec![initial], Some(final_state)))]);
+        r
     }
     #[test]
     fn reporter_gate_preserves_participant_and_closes_before_the_next_event() {

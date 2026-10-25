@@ -478,7 +478,76 @@ fn final_composite_is_owned_and_completion_survives_frame_ordering_and_queue_pre
         notifications: vec![],
         reward: None,
     };
+    let canceller = listener.intro_modes[&participant].1.ghost;
+    crate::prologue::driving::tests::configure_shutdown(
+        &mut Arc::make_mut(listener.prologue.as_mut().unwrap())
+            .driving
+            .as_mut()
+            .unwrap()
+            .1,
+        &mut listener.intro_modes.get_mut(&participant).unwrap().1,
+        20,
+    );
+    let leave = request_zero(
+        Endpoint {
+            scene: canceller,
+            selector: 0,
+            serial: nfs_protocol::world::rpc::Serial::new(0).unwrap(),
+        },
+        participant,
+    );
+    assert!(!send(&mut listener, 47, 47, leave.span()));
+    let placeholder = HostRpc::Participant(nfs_world::participants::Notification {
+        endpoint: Endpoint {
+            scene: 1,
+            selector: 1,
+            serial: nfs_protocol::world::rpc::Serial::new(0).unwrap(),
+        },
+        participant,
+        call: nfs_world::participants::Call::Enter,
+    });
+    listener
+        .pending_rpcs
+        .resize(nfs_world::session::MAX_RPC_QUEUE, placeholder);
+    let before = listener.players.objects().snapshot();
+    assert_eq!(
+        listener.story_committed(&job, committed.clone()),
+        Err(replication::Error::Bound)
+    );
+    assert_eq!(listener.players.objects().snapshot(), before);
+    drain(&mut listener);
+    listener.story_committed(&job, committed.clone()).unwrap();
+    assert!(
+        listener
+            .pending_rpcs
+            .iter()
+            .any(|r| matches!(r,HostRpc::GameMode(c) if c.target==canceller && c.method==1))
+    );
+    drain(&mut listener);
     listener.story_committed(&job, committed).unwrap();
+    assert!(listener.pending_rpcs.is_empty());
+    listener.advance_prologue().unwrap();
+    assert_eq!(
+        listener.participants.intro_chapter(participant),
+        Some(Chapter::ReturnDrive)
+    );
+    listener.pending.resize(
+        MAX_PENDING,
+        super::super::super::super::returning::empty_section(),
+    );
+    assert!(!send(&mut listener, 47, 47, leave.span()));
+    assert!(!listener.intro_modes[&participant].1.has_left());
+    drain(&mut listener);
+    assert!(send(&mut listener, 47, 47, leave.span()));
+    assert!(listener.intro_modes[&participant].1.has_left());
+    assert!(send(&mut listener, 48, 47, leave.span()));
+    drain(&mut listener);
+    listener.advance_prologue().unwrap();
+    assert_eq!(listener.participants.intro_chapter(participant), None);
+    assert_eq!(
+        listener.participants.stage(participant),
+        Some(Stage::Customization)
+    );
     assert!(
         job.progression
             .catalog

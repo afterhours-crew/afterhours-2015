@@ -2,6 +2,22 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 use super::*;
+pub(crate) fn configure_shutdown(mode: &mut Mode, active: &mut Active, objective: u64) {
+    mode.data.shutdown = Some(intro::shutdown::Binding {
+        objective,
+        source: Identity {
+            asset: "test".into(),
+            index: 0,
+            instances: vec![],
+        },
+        event: 41,
+    });
+    active.callbacks = Some(super::reporters::tests::shutdown_fixture(
+        active.owner.participant,
+        mode.data.game_mode.lifecycle.initial as u16,
+        mode.data.game_mode.lifecycle.final_state as u16,
+    ));
+}
 use nfs_content::events::{
     Field, GameMode, Goto, Layout, Sequence,
     lifecycle::{self as data, StateConfiguration, bindings::Observer},
@@ -197,6 +213,7 @@ pub(crate) fn content(parent: Asset, manager: Component) -> (Mode, Mode) {
     )
     .unwrap();
     let data = intro::Mode {
+        shutdown: None,
         owned_filters: vec![],
         completion: None,
         game_mode: GameMode {

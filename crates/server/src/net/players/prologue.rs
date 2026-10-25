@@ -560,6 +560,39 @@ impl PlayerListener {
             Err(replication::Error::Bound) => return Ok(()),
             value => value?,
         }
+        if let (Some(binding), Some(progression), Some(loaded)) = (
+            &content
+                .driving
+                .as_ref()
+                .ok_or(replication::Error::Unsupported)?
+                .1
+                .data
+                .shutdown,
+            &self.progression,
+            &self.persistent,
+        ) {
+            let restored = progression
+                .catalog
+                .restore(loaded, progression.settings)
+                .map_err(|_| replication::Error::Shape)?;
+            if restored
+                .branch(crate::progression::Branch::Intro)
+                .objectives()
+                .get(&binding.objective)
+                .is_some_and(|s| s.completed)
+            {
+                for (&participant, (drive, canceller, chapter)) in &modes {
+                    if *chapter == Chapter::ReturnDrive
+                        && drive.has_left()
+                        && canceller.has_left()
+                        && composites.get(&participant).is_some_and(|c| c.finished())
+                        && participants.finish_intro(participant) == Outcome::Unsupported
+                    {
+                        return Err(replication::Error::Shape);
+                    }
+                }
+            }
+        }
         self.story_pending = story_pending;
         self.intro_composites = composites;
         self.players = players;
@@ -620,6 +653,26 @@ impl PlayerListener {
         let Some(&ghost) = envelope.references().first() else {
             return Ok(None);
         };
+        if route.selector() == 0
+            && route.method_index() == 0
+            && !modes.values().any(|(a, _, _)| a.ghost == ghost)
+            && let Some((_, canceller, _)) = modes.values_mut().find(|(_, c, _)| c.ghost == ghost)
+        {
+            let leave = nfs_world::game_mode::Leave::decode(body)
+                .map_err(|_| replication::Error::Shape)?
+                .ok_or(replication::Error::Shape)?;
+            return Ok(Some(
+                canceller.leave(
+                    &content
+                        .driving
+                        .as_ref()
+                        .ok_or(replication::Error::Unsupported)?
+                        .1,
+                    players,
+                    leave.participant,
+                )?,
+            ));
+        }
         if route.selector() == 0
             && route.method_index() == 0
             && let Some((active, _, chapter)) =

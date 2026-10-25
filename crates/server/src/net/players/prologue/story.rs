@@ -144,6 +144,54 @@ impl PlayerListener {
         let mut selection = self.selection.clone();
         let mut states = self.selection_execution.clone();
         let mut output = crate::vehicle_content::population::Output::default();
+        if let crate::net::items::story::Action::Complete { objective } = request.action
+            && let Some(content) = self.prologue.as_deref()
+            && content
+                .driving
+                .as_ref()
+                .ok_or(replication::Error::Unsupported)?
+                .1
+                .data
+                .shutdown
+                .as_ref()
+                .is_some_and(|b| b.objective == objective)
+            && let Some((_, canceller, chapter)) = modes.get_mut(&request.participant)
+        {
+            let restored = request
+                .progression
+                .catalog
+                .restore(&committed.loaded, request.progression.settings)
+                .map_err(|_| replication::Error::Shape)?;
+            if *chapter != Chapter::ReturnDrive
+                || !self
+                    .intro_composites
+                    .get(&request.participant)
+                    .is_some_and(|c| c.finished())
+                || !restored
+                    .branch(Branch::Intro)
+                    .objectives()
+                    .get(&objective)
+                    .is_some_and(|s| s.completed)
+            {
+                return Err(replication::Error::Shape);
+            }
+            let shutdown = canceller.shutdown_committed(
+                &content
+                    .driving
+                    .as_ref()
+                    .ok_or(replication::Error::Unsupported)?
+                    .1,
+                &mut players,
+                request.participant,
+                objective,
+            )?;
+            if !shutdown.departures.is_empty() {
+                return Err(replication::Error::Shape);
+            }
+            output.records.extend(shutdown.records);
+            output.deleted.extend(shutdown.deleted);
+            calls.extend(shutdown.calls);
+        }
         if let (Some(population), Some(old), Some(next)) =
             (&mut population, &self.inventory, &inventory)
         {
