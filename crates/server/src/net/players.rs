@@ -1656,8 +1656,11 @@ impl Listener for PlayerListener {
                     &mut intro_movies,
                     &mut players,
                     &mut participants,
-                    self.persona,
-                    self.roles.as_ref().map(|r| r.gameplay),
+                    prologue::movies::Input {
+                        persona: self.persona,
+                        gameplay: self.roles.as_ref().map(|r| r.gameplay),
+                        seconds: self.world_ms as f64 / 1000.,
+                    },
                     body,
                 ) {
                     Ok(Some(out)) => {

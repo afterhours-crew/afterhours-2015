@@ -12,6 +12,7 @@ use nfs_world::{
 use std::collections::{BTreeMap, BTreeSet};
 mod parent;
 pub mod program;
+mod scope;
 pub mod timing;
 pub use parent::Relay;
 
@@ -165,20 +166,6 @@ fn extract_bound(
     let sequence_rules = index.identity.sequences.clone();
     let scene_rules = index.identity.scenes.clone();
     let startup = index.startup_entries(&scene_rules.level)?;
-    let bundle = startup
-        .iter()
-        .position(|e| {
-            e.kind == StartupKind::SubLevel && e.name.eq_ignore_ascii_case(&progression.scene)
-        })
-        .and_then(|i| u16::try_from(i + 1).ok())
-        .ok_or_else(|| bad("sequence bundle"))?;
-    let reference = index.reference(&progression.scene, &name)?;
-    let asset = Asset {
-        bundle,
-        type_id: u16::try_from(reference.class_id).map_err(|_| bad("sequence class ID"))?,
-        local_index: u16::try_from(reference.local_index).map_err(|_| bad("sequence ordinal"))?,
-    };
-    let catalog = index.catalog(&progression.scene)?;
     let mut graph = Graph::new(&mut index.assets);
     let mut scenes = SceneLookup {
         roots: scene_roots(&mut graph, &scene_rules.level, &startup)?,
@@ -225,9 +212,16 @@ fn extract_bound(
     }
     let sequence_nodes = graph.read(Site::root(&name))?;
     let (bus_count, fields) = crate::sequences::authored::shape(&sequence_nodes, &sequence_rules)?;
-    let bound = bindings(
+    let (reference_nodes, registry) = scope::resolve(
         &mut graph,
         &branch,
+        &scenes.roots,
+        selected,
+        &progression.scene,
+    )?;
+    let bound = bindings(
+        &mut graph,
+        &reference_nodes,
         &sequence_nodes,
         &name,
         &sequence_rules,
@@ -395,12 +389,27 @@ fn extract_bound(
     )?;
     let manager = unique(&manager_nodes, "StateSequenceManagerEntityData")?;
     let embedded_bus = scenes.embedded_bus(&mut graph, manager)?;
-    let (scene_key, index) = scenes.endpoint(&mut graph, manager)?;
+    let (scene_key, manager_index) = scenes.endpoint(&mut graph, manager)?;
+    let bundle = startup
+        .iter()
+        .position(|e| e.kind == StartupKind::SubLevel && e.name.eq_ignore_ascii_case(&registry))
+        .and_then(|i| u16::try_from(i + 1).ok())
+        .ok_or_else(|| bad("sequence bundle"))?;
+    let reference = index.reference(&registry, &name)?;
+    let asset = Asset {
+        bundle,
+        type_id: u16::try_from(reference.class_id).map_err(|_| bad("sequence class ID"))?,
+        local_index: u16::try_from(reference.local_index).map_err(|_| bad("sequence ordinal"))?,
+    };
+    let catalog = index.catalog(&registry)?;
     let sequence = Sequence {
         blueprint: name,
         asset,
         catalog,
-        manager: Component { scene_key, index },
+        manager: Component {
+            scene_key,
+            index: manager_index,
+        },
         embedded_bus,
         bus_count,
         fields: fields.into_iter().map(|(_, _, kind)| kind).collect(),

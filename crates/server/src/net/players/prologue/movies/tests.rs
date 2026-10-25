@@ -84,6 +84,7 @@ fn fixture() -> (PlayerListener, u16, Endpoint) {
             after: sequence(57),
         },
         content.opening.clone(),
+        0.,
     ));
     let scene = listener.players.objects().scene(909).unwrap();
     let endpoint = Endpoint {
@@ -436,4 +437,158 @@ fn second_race_reuses_the_selected_car_and_rolls_back_relocation_under_pressure(
         ),
         Some(car)
     );
+}
+
+#[test]
+fn diner_replaces_finished_movie_and_timer_waits_for_capacity_and_native_ack() {
+    let (mut listener, participant) = finished_movie();
+    let b = listener.participants.intro_bindings().unwrap();
+    assert!(matches!(
+        listener.participants.intro_second_race_begin(participant),
+        Outcome::Advanced(_)
+    ));
+    listener.participants.intro_relocation_ready(participant);
+    for (endpoint, method) in [(b.teleport, 3), (b.render_ready, 0)] {
+        let mut p = BitWriter::new();
+        p.put(endpoint.selector.into(), 9).put(method, 32).put(0, 7);
+        let mut wire = BitWriter::new();
+        wire.put(0, 32)
+            .put(0, 32)
+            .put(2, 8)
+            .put(endpoint.scene.into(), 13)
+            .put(participant.into(), 13)
+            .put(p.bytes().len() as u64, 9)
+            .put_span(p.span());
+        listener
+            .participants
+            .receive_intro(wire.span(), |_| true)
+            .unwrap();
+    }
+    listener.participants.intro_opening_complete(participant);
+    listener.participants.intro_drive_ready(participant);
+    assert_eq!(
+        listener.participants.intro_chapter(participant),
+        Some(Chapter::SecondRace)
+    );
+    let c = Arc::make_mut(listener.prologue.as_mut().unwrap());
+    let mut data = c.manu_movie.as_ref().unwrap().data.clone();
+    data.objective = 20;
+    data.video.index = 0;
+    c.diner_movie = Some(crate::prologue::movies::Content::for_test(
+        data,
+        c.opening.clone(),
+        2.,
+    ));
+    // The next objective is not active until the prior result is committed.
+    let started = listener.world_ms + 1000;
+    listener.world_ms = started;
+    listener.advance_story_movies().unwrap();
+    assert_eq!(listener.intro_movies[&participant].objective(), 10);
+    use nfs_storage::InventoryRepository;
+    let (repo, account, saved) = crate::progression::tests::local();
+    let progression = listener.progression.as_ref().unwrap();
+    let policy = progression.catalog.story_policy(progression.settings);
+    let nfs_services::story::Prepared::Mutation(batch) = policy
+        .complete(
+            &saved,
+            saved.generation,
+            policy.next_operation(&saved).unwrap(),
+            10,
+            vec![],
+        )
+        .unwrap()
+    else {
+        panic!()
+    };
+    repo.apply(account, &batch, nfs_storage::Timestamp(3))
+        .unwrap();
+    let saved = repo.snapshot(account).unwrap();
+    listener.persistent = Some(Arc::new(
+        crate::progression::tests::tables().view(&saved).unwrap(),
+    ));
+    listener.advance_story_movies().unwrap();
+    assert_eq!(listener.intro_movies.len(), 1);
+    assert_eq!(listener.intro_movies[&participant].objective(), 20);
+    let before = listener.intro_movies[&participant].sequence().unwrap();
+    drain(&mut listener);
+    let done = Completed {
+        sequence: before,
+        participant,
+    }
+    .encode()
+    .unwrap();
+    assert!(send(&mut listener, 34, 47, done.span()));
+    drain(&mut listener);
+    let endpoint = Endpoint {
+        scene: b.alive.scene,
+        selector: 55,
+        serial: b.alive.serial,
+    };
+    listener.world_ms = started + 2000;
+    assert!(send(
+        &mut listener,
+        35,
+        47,
+        request(endpoint, participant, 3).span()
+    ));
+    assert!(matches!(
+        listener.pending_rpcs.back(),
+        Some(HostRpc::Actor(_))
+    ));
+    let after = listener.intro_movies[&participant].sequence().unwrap();
+    drain(&mut listener);
+    let done = Completed {
+        sequence: after,
+        participant,
+    }
+    .encode()
+    .unwrap();
+    let snapshot = listener.players.objects().snapshot();
+    assert!(!send(&mut listener, 36, 47, done.span()));
+    assert_eq!(listener.players.objects().snapshot(), snapshot);
+    listener.world_ms = started + 3999;
+    listener.advance_story_movies().unwrap();
+    assert!(listener.pending_rpcs.is_empty());
+    listener.world_ms = started + 4000;
+    listener.pending_rpcs.resize(
+        nfs_world::session::MAX_RPC_QUEUE,
+        HostRpc::Participant(nfs_world::participants::Notification {
+            endpoint,
+            participant,
+            call: nfs_world::participants::Call::Enter,
+        }),
+    );
+    listener.advance_story_movies().unwrap();
+    assert_eq!(listener.players.objects().snapshot(), snapshot);
+    drain(&mut listener);
+    listener.advance_story_movies().unwrap();
+    assert!(
+        matches!(listener.pending_rpcs.front(), Some(HostRpc::SequenceStop(stop)) if stop.sequence == after)
+    );
+    assert_eq!(
+        listener.participants.stage(participant),
+        Some(Stage::IntroMovie)
+    );
+    drain(&mut listener);
+    listener.advance_story_movies().unwrap();
+    assert!(listener.pending_rpcs.is_empty());
+    assert!(send(&mut listener, 36, 47, done.span()));
+    assert!(
+        !listener
+            .pending_rpcs
+            .iter()
+            .any(|c| matches!(c, HostRpc::Actor(_)))
+    );
+    assert_eq!(
+        listener.participants.stage(participant),
+        Some(Stage::FreeRoam)
+    );
+    assert_eq!(
+        listener.intro_movies[&participant].phase(),
+        nfs_world::fmv::Phase::Finished
+    );
+    drain(&mut listener);
+    listener.advance_story_movies().unwrap();
+    assert!(listener.pending.is_empty());
+    assert!(listener.pending_rpcs.is_empty());
 }

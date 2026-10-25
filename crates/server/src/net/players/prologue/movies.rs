@@ -6,6 +6,21 @@ use crate::prologue::movies::{Active, Output};
 
 pub(in crate::net::players) type Movies = BTreeMap<u16, Active>;
 
+fn content_for(
+    content: &crate::prologue::Content,
+    objective: u64,
+) -> Result<&crate::prologue::movies::Content, replication::Error> {
+    let mut matches = [&content.manu_movie, &content.diner_movie]
+        .into_iter()
+        .flatten()
+        .filter(|c| c.data.objective == objective);
+    let found = matches.next().ok_or(replication::Error::Shape)?;
+    if matches.next().is_some() {
+        return Err(replication::Error::Shape);
+    }
+    Ok(found)
+}
+
 pub(in crate::net::players) fn sections(
     records: Vec<replication::Record>,
     deleted: Vec<u16>,
@@ -32,7 +47,7 @@ impl PlayerListener {
     pub(in crate::net::players) fn advance_story_movies(
         &mut self,
     ) -> Result<(), replication::Error> {
-        let Some(movie) = self.prologue.as_deref().and_then(|c| c.manu_movie.as_ref()) else {
+        let Some(content) = self.prologue.as_deref() else {
             return Ok(());
         };
         if self.session_backlog >= MAX_PENDING
@@ -42,6 +57,30 @@ impl PlayerListener {
         {
             return Ok(());
         }
+        // Timer changes share the same backpressure/commit boundary as input.
+        // Advance existing owners even when their durable objective has changed.
+        let seconds = self.world_ms as f64 / 1000.;
+        let mut movies = self.intro_movies.clone();
+        let mut calls = Vec::new();
+        for active in movies.values_mut() {
+            calls.extend(
+                active
+                    .advance(
+                        content_for(content, active.objective())?,
+                        &self.players,
+                        seconds,
+                    )?
+                    .calls,
+            );
+        }
+        if calls.len() > nfs_world::session::MAX_RPC_QUEUE.saturating_sub(self.pending_rpcs.len()) {
+            return Ok(());
+        }
+        self.intro_movies = movies;
+        if !calls.is_empty() {
+            self.pending_rpcs.extend(calls);
+            return Ok(());
+        }
         let (Some(progression), Some(loaded)) = (&self.progression, &self.persistent) else {
             return Ok(());
         };
@@ -49,23 +88,31 @@ impl PlayerListener {
             .catalog
             .restore(loaded, progression.settings)
             .map_err(|_| replication::Error::Shape)?;
-        if !restored
-            .branch(crate::progression::Branch::Intro)
-            .objectives()
-            .get(&movie.data.objective)
-            .is_some_and(|o| o.active && !o.completed)
-        {
-            return Ok(());
-        }
-        let participant = self.participants.intro_participants().find(|&p| {
-            self.participants.intro_chapter(p) == Some(Chapter::FirstRace)
-                && self.participants.stage(p) == Some(Stage::FreeRoam)
-                && !self.intro_movies.contains_key(&p)
+        let selected = self.participants.intro_participants().find_map(|p| {
+            let movie = match self.participants.intro_chapter(p)? {
+                Chapter::FirstRace => content.manu_movie.as_ref()?,
+                Chapter::SecondRace => content.diner_movie.as_ref()?,
+                Chapter::FirstDrive => return None,
+            };
+            let available = self.intro_movies.get(&p).is_none_or(|old| {
+                old.phase() == nfs_world::fmv::Phase::Finished
+                    && old.objective() != movie.data.objective
+            });
+            (self.participants.stage(p) == Some(Stage::FreeRoam)
+                && available
+                && restored
+                    .branch(crate::progression::Branch::Intro)
+                    .objectives()
+                    .get(&movie.data.objective)
+                    .is_some_and(|o| o.active && !o.completed))
+            .then_some((p, movie))
         });
-        let Some(participant) = participant else {
+        let Some((participant, movie)) = selected else {
             return Ok(());
         };
-        if self.intro_movies.len() >= nfs_world::sequences::MAX_INSTANCES {
+        if !self.intro_movies.contains_key(&participant)
+            && self.intro_movies.len() >= nfs_world::sequences::MAX_INSTANCES
+        {
             return Err(replication::Error::Bound);
         }
         let owner = Owner {
@@ -78,7 +125,7 @@ impl PlayerListener {
         let Outcome::Advanced(chain) = participants.intro_movie_begin(participant) else {
             return Err(replication::Error::Shape);
         };
-        let (active, output) = Active::start(movie, &mut players, owner)?;
+        let (active, output) = Active::start_at(movie, &mut players, owner, seconds)?;
         let mut calls = chain
             .into_iter()
             .map(HostRpc::Participant)
@@ -107,10 +154,14 @@ pub(in crate::net::players) fn input(
     movies: &mut Movies,
     players: &mut Players,
     participants: &mut Lifecycle,
-    persona: u64,
-    gameplay: Option<u32>,
+    context: Input,
     body: BitSpan<'_>,
 ) -> Result<Option<Output>, replication::Error> {
+    let Input {
+        persona,
+        gameplay,
+        seconds,
+    } = context;
     if movies.is_empty() {
         return Ok(None);
     }
@@ -156,15 +207,14 @@ pub(in crate::net::players) fn input(
             );
         }
         if output.finished {
-            let binding = players
-                .bind_actor(
-                    gameplay.ok_or(replication::Error::Shape)?,
-                    owner.connection,
-                    owner.persona,
-                    owner.participant,
-                )?
-                .ok_or(replication::Error::Shape)?;
-            output.calls.insert(0, HostRpc::Actor(binding));
+            if let Some(binding) = players.bind_actor(
+                gameplay.ok_or(replication::Error::Shape)?,
+                owner.connection,
+                owner.persona,
+                owner.participant,
+            )? {
+                output.calls.insert(0, HostRpc::Actor(binding));
+            }
             let Outcome::Advanced(chain) = participants.intro_movie_complete(owner.participant)
             else {
                 return Err(replication::Error::Shape);
@@ -175,15 +225,19 @@ pub(in crate::net::players) fn input(
         }
         return Ok(Some(output));
     }
-    let Some(content) = &content.manu_movie else {
+    if route.method_index() != 3 {
         return Ok(None);
-    };
-    if route.method_index() != 3
-        || players
-            .objects()
-            .scene_endpoint(content.data.state.0, content.data.state.1)
-            != Some((ghost, route.selector()))
-    {
+    }
+    let known_endpoint = [&content.manu_movie, &content.diner_movie]
+        .into_iter()
+        .flatten()
+        .any(|c| {
+            players
+                .objects()
+                .scene_endpoint(c.data.state.0, c.data.state.1)
+                == Some((ghost, route.selector()))
+        });
+    if !known_endpoint {
         return Ok(None);
     }
     let &[_, participant] = envelope.references() else {
@@ -192,18 +246,50 @@ pub(in crate::net::players) fn input(
     let active = movies
         .get_mut(&participant)
         .ok_or(replication::Error::UnknownObject)?;
+    let content = content_for(content, active.objective())?;
+    if players
+        .objects()
+        .scene_endpoint(content.data.state.0, content.data.state.1)
+        != Some((ghost, route.selector()))
+    {
+        return Err(replication::Error::Shape);
+    }
     let owner = Owner {
         connection: HOST_SELECTOR as u8,
         persona,
         participant,
     };
-    active.receive_with(content, players, owner, body, |staged| {
+    active.clock(seconds)?;
+    let mut output = active.receive_with(content, players, owner, body, |staged| {
         Ok(vec![
             staged
                 .create_actor(owner.connection, owner.persona, owner.participant)?
                 .ok_or(replication::Error::Shape)?,
         ])
-    })
+    })?;
+    // Timed narrative outros need their replacement actor while the sequence
+    // is running. The immediate outro binds at its completion boundary.
+    if let Some(out) = output.as_mut()
+        && content.timed_outro()
+        && !out.records.is_empty()
+    {
+        let binding = players
+            .bind_actor(
+                gameplay.ok_or(replication::Error::Shape)?,
+                owner.connection,
+                owner.persona,
+                owner.participant,
+            )?
+            .ok_or(replication::Error::Shape)?;
+        out.calls.push(HostRpc::Actor(binding));
+    }
+    Ok(output)
+}
+
+pub(in crate::net::players) struct Input {
+    pub persona: u64,
+    pub gameplay: Option<u32>,
+    pub seconds: f64,
 }
 
 #[cfg(test)]

@@ -135,7 +135,10 @@ impl Lifecycle {
         let Some(i) = self.intro else {
             return Outcome::Unsupported;
         };
-        if self.intro_started.get(&participant) != Some(&Chapter::FirstRace) {
+        if !matches!(
+            self.intro_started.get(&participant),
+            Some(Chapter::FirstRace | Chapter::SecondRace)
+        ) {
             return Outcome::Unsupported;
         }
         match self.stages.get_mut(&participant) {
@@ -152,7 +155,10 @@ impl Lifecycle {
         let Some(i) = self.intro else {
             return Outcome::Unsupported;
         };
-        if self.intro_started.get(&participant) != Some(&Chapter::FirstRace) {
+        if !matches!(
+            self.intro_started.get(&participant),
+            Some(Chapter::FirstRace | Chapter::SecondRace)
+        ) {
             return Outcome::Unsupported;
         }
         match self.stages.get_mut(&participant) {

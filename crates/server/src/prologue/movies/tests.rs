@@ -57,6 +57,8 @@ fn fixture() -> (Players, Content, Owner, Owner) {
             data,
             before: authored.clone(),
             after: authored,
+            before_seconds: 0.,
+            after_seconds: 0.,
         },
         a,
         b,
@@ -183,4 +185,82 @@ fn failed_after_sequence_construction_preserves_playing_state_and_allocations() 
     );
     assert_eq!(movie.phase(), fmv::Phase::Playing);
     assert_eq!(players.objects().snapshot(), snapshot);
+}
+
+#[test]
+fn timed_sequences_stop_once_at_the_deadline_and_still_require_native_completion() {
+    let (mut players, mut content, a, b) = fixture();
+    content.before_seconds = 1.;
+    content.after_seconds = 2.;
+    let scene = players.objects().scene(88).unwrap();
+    for invalid in [-1., f64::NAN, f64::INFINITY] {
+        assert!(Active::start_at(&content, &mut players, a, invalid).is_err());
+    }
+    let (mut movie, _) = Active::start_at(&content, &mut players, a, 100.).unwrap();
+    let before = Completed {
+        sequence: movie.sequence().unwrap(),
+        participant: a.participant,
+    };
+    let snapshot = players.objects().snapshot();
+    assert!(movie.completed(&mut players, a, before).is_err());
+    assert_eq!(players.objects().snapshot(), snapshot);
+    assert!(
+        movie
+            .advance(&content, &players, 100.999)
+            .unwrap()
+            .calls
+            .is_empty()
+    );
+    assert!(movie.advance(&content, &players, 100.).is_err());
+    assert!(movie.advance(&content, &players, f64::NAN).is_err());
+    let out = movie.advance(&content, &players, 101.).unwrap();
+    assert!(
+        matches!(&out.calls[..], [HostRpc::SequenceStop(stop)] if stop.sequence == before.sequence)
+    );
+    assert!(!out.finished);
+    assert!(
+        movie
+            .advance(&content, &players, 101.)
+            .unwrap()
+            .calls
+            .is_empty()
+    );
+    assert!(movie.completed(&mut players, b, before).is_err());
+    movie.completed(&mut players, a, before).unwrap();
+    movie.clock(110.).unwrap();
+    movie
+        .receive(
+            &content,
+            &mut players,
+            a,
+            request(scene, a.participant).span(),
+        )
+        .unwrap()
+        .unwrap();
+    let after = Completed {
+        sequence: movie.sequence().unwrap(),
+        participant: a.participant,
+    };
+    assert!(movie.completed(&mut players, a, after).is_err());
+    assert!(
+        movie
+            .advance(&content, &players, 111.999)
+            .unwrap()
+            .calls
+            .is_empty()
+    );
+    let out = movie.advance(&content, &players, 112.).unwrap();
+    assert!(
+        matches!(&out.calls[..], [HostRpc::SequenceStop(stop)] if stop.sequence == after.sequence)
+    );
+    assert_eq!(movie.phase(), fmv::Phase::After);
+    assert!(movie.completed(&mut players, a, after).unwrap().finished);
+    assert!(
+        movie
+            .advance(&content, &players, 115.)
+            .unwrap()
+            .calls
+            .is_empty()
+    );
+    assert!(!movie.completed(&mut players, a, after).unwrap().finished);
 }

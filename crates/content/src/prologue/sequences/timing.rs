@@ -13,6 +13,7 @@ const PLAY: u32 = 230_748_069;
 const FINISHED: u32 = 650_265_526;
 const IN: u32 = 5_862_146;
 const OUT: u32 = 193_453_899;
+mod tracks;
 
 fn server(delivery: Delivery) -> bool {
     matches!(
@@ -111,13 +112,9 @@ fn read<S: Source>(
                 || number("ExternalTime") != Some(0.)
                 || number("PlaybackSpeed") != Some(1.)
                 || f.get("SequenceStartTime").and_then(Value::bits32) != Some(0)
-                || ["PropertyTracks", "CustomSequenceTracks"]
-                    .iter()
-                    .any(|name| {
-                        f.get(name)
-                            .and_then(Value::as_array)
-                            .is_none_or(|a| !a.is_empty())
-                    })
+                || f.get("CustomSequenceTracks")
+                    .and_then(Value::as_array)
+                    .is_none_or(|a| !a.is_empty())
                 || c.connections.iter().any(|e| {
                     e.source.node == edge.source.node
                         && server(e.delivery)
@@ -131,6 +128,7 @@ fn read<S: Source>(
                 .and_then(Value::bits32)
                 .filter(|n| *n <= 600_000)
                 .ok_or_else(|| bad("sequence length"))?;
+            tracks::client_only(graph, source, c, edge.source.node, millis)?;
             f64::from(millis as f32 * 0.001)
         };
         if !seconds.is_finite() || !(0. ..=600.).contains(&seconds) {

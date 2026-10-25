@@ -21,14 +21,21 @@ pub struct Content {
     pub data: movies::Movie,
     before: Authored,
     after: Authored,
+    before_seconds: f64,
+    after_seconds: f64,
 }
 impl Content {
+    pub(crate) fn timed_outro(&self) -> bool {
+        self.after_seconds > 0.
+    }
     #[cfg(test)]
-    pub(crate) fn for_test(data: movies::Movie, sequence: Authored) -> Self {
+    pub(crate) fn for_test(data: movies::Movie, sequence: Authored, after_seconds: f64) -> Self {
         Self {
             data,
             before: sequence.clone(),
             after: sequence,
+            before_seconds: 0.,
+            after_seconds,
         }
     }
     pub fn prepare(
@@ -37,25 +44,27 @@ impl Content {
         capability: &str,
     ) -> Result<Self, nfs_content::Error> {
         let data = movies::extract(index, capability)?;
-        let mut prepare = |sequence: &movies::Sequence| -> Result<Authored, nfs_content::Error> {
-            if sequences::timing::extract(index, &sequence.blueprint)? != Some(0.) {
-                return Err(nfs_content::Error::Content(
-                    "movie sequence requires an owned timer".into(),
-                ));
-            }
-            Authored::new(
-                sequences::extract_referenced(index, &sequence.blueprint, &sequence.reference)?,
-                parent,
-                vec![],
-            )
-            .map_err(|e| nfs_content::Error::Content(format!("movie sequence: {e:?}")))
-        };
-        let before = prepare(&data.before)?;
-        let after = prepare(&data.after)?;
+        let mut prepare =
+            |sequence: &movies::Sequence| -> Result<(Authored, f64), nfs_content::Error> {
+                let seconds = sequences::timing::extract(index, &sequence.blueprint)?
+                    .filter(|s| s.is_finite() && *s >= 0. && *s <= 300.)
+                    .ok_or_else(|| nfs_content::Error::Content("movie sequence timer".into()))?;
+                let authored = Authored::new(
+                    sequences::extract_referenced(index, &sequence.blueprint, &sequence.reference)?,
+                    parent,
+                    vec![],
+                )
+                .map_err(|e| nfs_content::Error::Content(format!("movie sequence: {e:?}")))?;
+                Ok((authored, seconds))
+            };
+        let (before, before_seconds) = prepare(&data.before)?;
+        let (after, after_seconds) = prepare(&data.after)?;
         Ok(Self {
             data,
             before,
             after,
+            before_seconds,
+            after_seconds,
         })
     }
 }
@@ -71,10 +80,52 @@ pub struct Active {
     definition: movies::Movie,
     flow: fmv::Active,
     sequences: Instances,
+    seconds: f64,
+    deadline: Option<f64>,
 }
 impl Active {
     pub fn owner(&self) -> Owner {
         self.flow.owner()
+    }
+    pub fn objective(&self) -> u64 {
+        self.definition.objective
+    }
+    /// Inject a finite monotonic session clock before input or timer advancement.
+    pub fn clock(&mut self, seconds: f64) -> Result<(), Error> {
+        if !seconds.is_finite() || seconds < self.seconds {
+            return Err(Error::Shape);
+        }
+        self.seconds = seconds;
+        Ok(())
+    }
+    pub fn advance(
+        &mut self,
+        content: &Content,
+        players: &Players,
+        seconds: f64,
+    ) -> Result<Output, Error> {
+        if content.data != self.definition {
+            return Err(Error::Shape);
+        }
+        let mut staged = self.clone();
+        staged.clock(seconds)?;
+        let mut out = Output::default();
+        if staged.deadline.is_some_and(|at| seconds >= at) {
+            let sequence = match staged.phase() {
+                fmv::Phase::Before => &content.before,
+                fmv::Phase::After => &content.after,
+                _ => return Err(Error::Shape),
+            };
+            let owner = staged.owner();
+            let stop = staged
+                .sequences
+                .stop(sequence, players, owner)?
+                .ok_or(Error::Shape)?;
+            out.calls.push(HostRpc::SequenceStop(stop));
+            staged.deadline = None;
+        }
+        *self = staged;
+        Ok(out)
     }
     pub fn phase(&self) -> fmv::Phase {
         self.flow.phase()
@@ -87,6 +138,17 @@ impl Active {
         players: &mut Players,
         owner: Owner,
     ) -> Result<(Self, Output), Error> {
+        Self::start_at(content, players, owner, 0.)
+    }
+    pub fn start_at(
+        content: &Content,
+        players: &mut Players,
+        owner: Owner,
+        seconds: f64,
+    ) -> Result<(Self, Output), Error> {
+        if !seconds.is_finite() || seconds < 0. {
+            return Err(Error::Shape);
+        }
         if !players.owns_participant(owner.connection, owner.persona, owner.participant) {
             return Err(Error::UnknownObject);
         }
@@ -120,15 +182,22 @@ impl Active {
         )?;
         let mut staged = players.clone();
         let mut sequences = Instances::default();
-        let record = sequences
-            .start_stopped(&content.before, &mut staged, owner)?
-            .ok_or(Error::Shape)?;
+        let (record, deadline) = start_sequence(
+            &mut sequences,
+            &content.before,
+            &mut staged,
+            owner,
+            seconds,
+            content.before_seconds,
+        )?;
         *players = staged;
         Ok((
             Self {
                 definition: content.data.clone(),
                 flow,
                 sequences,
+                seconds,
+                deadline,
             },
             Output {
                 records: vec![record],
@@ -177,12 +246,16 @@ impl Active {
         if before == fmv::Phase::Playing && active.flow.phase() == fmv::Phase::After {
             out.records.extend(restore(&mut staged)?);
             active.sequences.retire_completed(&staged, owner)?;
-            out.records.push(
-                active
-                    .sequences
-                    .start_stopped(&content.after, &mut staged, owner)?
-                    .ok_or(Error::Shape)?,
-            );
+            let (record, deadline) = start_sequence(
+                &mut active.sequences,
+                &content.after,
+                &mut staged,
+                owner,
+                active.seconds,
+                content.after_seconds,
+            )?;
+            active.deadline = deadline;
+            out.records.push(record);
         }
         *players = staged;
         *self = active;
@@ -212,6 +285,29 @@ impl Active {
         *self = active;
         Ok(out)
     }
+}
+
+fn start_sequence(
+    instances: &mut Instances,
+    content: &Authored,
+    players: &mut Players,
+    owner: Owner,
+    seconds: f64,
+    duration: f64,
+) -> Result<(Record, Option<f64>), Error> {
+    if !duration.is_finite()
+        || !(0. ..=300.).contains(&duration)
+        || !(seconds + duration).is_finite()
+    {
+        return Err(Error::Shape);
+    }
+    let record = if duration == 0. {
+        instances.start_stopped(content, players, owner)?
+    } else {
+        instances.start(content, players, owner)?
+    }
+    .ok_or(Error::Shape)?;
+    Ok((record, (duration > 0.).then_some(seconds + duration)))
 }
 
 #[cfg(test)]

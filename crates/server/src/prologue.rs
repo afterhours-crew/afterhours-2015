@@ -37,6 +37,7 @@ pub struct Content {
     pub first_race: Option<Race>,
     pub second_race: Option<Race>,
     pub manu_movie: Option<movies::Content>,
+    pub diner_movie: Option<movies::Content>,
     items: Arc<Collection>,
 }
 #[derive(Clone, Debug)]
@@ -204,6 +205,7 @@ impl Content {
             first_race: None,
             second_race: None,
             manu_movie: None,
+            diner_movie: None,
         }
     }
     pub fn prepare(
@@ -280,6 +282,11 @@ impl Content {
             first_race,
             second_race,
             manu_movie,
+            diner_movie: Some(movies::Content::prepare(
+                index,
+                parent,
+                "gameplay/progression/intro/introreturntogarage",
+            )?),
             items: Arc::new(built.collection),
             previews: Some(Arc::new(PreviewCars {
                 garage,
