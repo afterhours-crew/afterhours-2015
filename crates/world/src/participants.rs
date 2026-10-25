@@ -1187,6 +1187,7 @@ impl Lifecycle {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HostRpc {
+    Movie(crate::fmv::Play),
     Bank(crate::bank::Balance),
     Launcher(crate::launchers::Enabled),
     Participant(Notification),
@@ -1211,6 +1212,7 @@ impl HostRpc {
     /// before the notification is sent.
     pub fn objects(self) -> Vec<u16> {
         match self {
+            Self::Movie(v) => vec![v.endpoint.scene, v.participant],
             Self::Bank(v) => vec![v.endpoint.scene],
             Self::Launcher(v) => vec![v.scene],
             Self::Participant(v) => vec![v.endpoint.scene, v.participant],
@@ -1233,6 +1235,7 @@ impl HostRpc {
     }
     pub fn scene(self) -> u16 {
         match self {
+            Self::Movie(v) => v.endpoint.scene,
             Self::Bank(v) => v.endpoint.scene,
             Self::Launcher(v) => v.scene,
             Self::Participant(v) => v.endpoint.scene,
@@ -1251,6 +1254,7 @@ impl HostRpc {
     }
     pub fn encode(self) -> Result<BitWriter, Error> {
         match self {
+            Self::Movie(v) => v.encode(),
             Self::Bank(v) => v.encode(),
             Self::Launcher(v) => v.encode(),
             Self::Participant(v) => v.encode(),

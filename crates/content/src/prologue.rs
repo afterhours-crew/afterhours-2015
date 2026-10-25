@@ -11,6 +11,7 @@ use crate::{
 };
 use nfs_frostbite::ebx::Value;
 use serde_json::{Value as Json, json};
+pub mod movies;
 pub mod sequences;
 
 #[derive(Clone, Debug, Eq, PartialEq)]

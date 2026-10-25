@@ -127,6 +127,7 @@ pub enum Message<'a> {
     QueryControl(crate::participants::EntityCall),
     /// An owned event's game-mode, logic or scene call.
     GameModeCall(crate::game_mode::Call),
+    Movie(crate::fmv::Play),
     Opaque {
         index: u8,
         body: BitSpan<'a>,
@@ -152,7 +153,8 @@ impl Message<'_> {
             | Self::SequenceStop(_)
             | Self::WorldActivation(_)
             | Self::QueryControl(_)
-            | Self::GameModeCall(_) => 47,
+            | Self::GameModeCall(_)
+            | Self::Movie(_) => 47,
             Self::LogicEvent(v) => v.index(),
             Self::Opaque { index, .. } => *index,
         }
@@ -817,6 +819,9 @@ impl<'a> Builder<'a> {
                 w.put_span(value.encode().map_err(|_| Error::Shape)?.span());
             }
             Message::GameModeCall(value) => {
+                w.put_span(value.encode().map_err(|_| Error::Shape)?.span());
+            }
+            Message::Movie(value) => {
                 w.put_span(value.encode().map_err(|_| Error::Shape)?.span());
             }
             Message::SequenceStop(value) => {

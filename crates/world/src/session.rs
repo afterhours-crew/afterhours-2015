@@ -20,6 +20,7 @@ mod motion;
 fn rpc_message(rpc: crate::participants::HostRpc) -> frame::Message<'static> {
     use crate::participants::HostRpc;
     match rpc {
+        HostRpc::Movie(v) => frame::Message::Movie(v),
         HostRpc::Bank(v) => frame::Message::BankBalance(v),
         HostRpc::Launcher(v) => frame::Message::LauncherEnabled(v),
         HostRpc::Participant(v) => frame::Message::ParticipantNotification(v),
@@ -531,6 +532,7 @@ impl Host {
             return Err(Error::Replication(crate::replication::Error::UnknownObject));
         }
         let participant = match reply {
+            crate::participants::HostRpc::Movie(v) => Some(v.participant),
             crate::participants::HostRpc::WorldActivation(v) => v.participant,
             crate::participants::HostRpc::Participant(v) => Some(v.participant),
             crate::participants::HostRpc::Garage(v) => Some(v.participant),

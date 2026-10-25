@@ -23,6 +23,7 @@ use nfs_world::{
 use std::sync::Arc;
 pub mod driving;
 pub mod loading;
+pub mod movies;
 
 #[derive(Clone, Debug)]
 pub struct Content {

@@ -16,7 +16,7 @@ use nfs_world::{
     sequences::Component,
 };
 
-fn fixture() -> (Players, Authored, Owner, Owner) {
+pub(crate) fn fixture() -> (Players, Authored, Owner, Owner) {
     let mut players = Players::default();
     let scene_content = sublevel::Content::new(vec![(
         7,
