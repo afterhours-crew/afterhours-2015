@@ -477,10 +477,10 @@ pub(super) fn extract<S: Source>(
     let ([initial], [final_state]) = (initial.as_slice(), final_state.as_slice()) else {
         return Err(bad("initial/final state count"));
     };
-    if root_state.len() > 1
-        || !registered_states.contains(initial)
-        || !registered_states.contains(final_state)
-    {
+    // InitialState is an independent native link. An authored setup state can
+    // belong to this mode's components without appearing in its States list.
+    // Keep registration order intact; do not synthesize a States entry for it.
+    if root_state.len() > 1 || !registered_states.contains(final_state) {
         return Err(bad("lifecycle root membership"));
     }
     Ok(Lifecycle {

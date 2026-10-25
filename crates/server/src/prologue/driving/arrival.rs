@@ -168,6 +168,11 @@ impl Active {
         let mut staged = players.clone();
         let mut out = Output::default();
         next.clock(seconds)?;
+        if let Some(callbacks) = &mut next.callbacks {
+            let actions = callbacks.tick(seconds).map_err(invalid)?;
+            let effects = next.dispatch(actions)?;
+            next.effects(content, &mut staged, &effects, false, &mut out)?;
+        }
         let elapsed = next
             .opponent_deadlines
             .iter()

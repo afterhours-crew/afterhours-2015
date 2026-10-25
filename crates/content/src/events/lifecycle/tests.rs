@@ -368,6 +368,58 @@ fn rejects_missing_duplicate_wrong_class_and_foreign_lifecycle_bindings() {
 }
 
 #[test]
+fn initial_setup_state_is_independent_of_registered_states() {
+    let (mut m, mut fields) = fixture();
+    fields.truncate(4);
+    m.put(
+        "mode",
+        0,
+        "GameModeEntityData",
+        &[(
+            "LinkConnections",
+            Value::Array(vec![
+                edge(local(0), INITIAL, local(1), 0),
+                edge(local(0), FINAL, local(2), 0),
+                edge(local(0), STATES, local(2), 0),
+                edge(local(0), TRANSITIONS, local(3), 0),
+                edge(local(3), SOURCE, local(1), 0),
+                edge(local(3), TARGET, local(2), 0),
+            ]),
+        )],
+    );
+    let lifecycle = extract(&mut Graph::new(&mut m), &fields).unwrap();
+    assert_eq!(lifecycle.initial, 1);
+    assert_eq!(lifecycle.registered_states, [2]);
+    assert!(lifecycle.states.iter().any(|s| s.serializer == 1));
+    assert_eq!(
+        lifecycle.transitions[0].sources,
+        [Endpoint {
+            serializer: 1,
+            port: 0
+        }]
+    );
+    // The initial target must still be a real local state, never a channel or
+    // a transition masquerading as one merely because registration is absent.
+    for wrong in [3, 4, 99] {
+        let (mut invalid, _) = fixture();
+        invalid.put(
+            "mode",
+            0,
+            "GameModeEntityData",
+            &[(
+                "LinkConnections",
+                Value::Array(vec![
+                    edge(local(0), INITIAL, local(wrong), 0),
+                    edge(local(0), FINAL, local(2), 0),
+                    edge(local(0), STATES, local(2), 0),
+                ]),
+            )],
+        );
+        assert!(extract(&mut Graph::new(&mut invalid), &fields).is_err());
+    }
+}
+
+#[test]
 fn repeated_prefabs_resolve_to_distinct_state_serializers() {
     let mut m = Memory::default();
     m.put(

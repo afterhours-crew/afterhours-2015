@@ -2,16 +2,17 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! The first-drive reporter paths use prefab forwarding, event gates and typed
-//! participant transitions. Reuse their core models; any other reached class
+//! Intro reporter paths use prefab forwarding, startup delays, event gates and
+//! typed participant transitions. Reuse their core models; any other reached class
 //! or remote contextual emission is an error, rather than a dropped callback.
 use super::*;
 use event_logic::lifecycle::commands::Command;
 use nfs_world::scoring::{
-    self, ai_control,
+    self, ai_control, delay,
     events::{self, Dispatch, Endpoint, Handler},
     nodes, transitions,
 };
+mod delays;
 
 #[derive(Clone, Debug)]
 struct HandlerState {
@@ -24,6 +25,9 @@ struct HandlerState {
     ai_controls: BTreeSet<u16>,
     controls: BTreeMap<u64, ai_control::Stack>,
     human: Option<u64>,
+    delay_values: BTreeMap<u16, f32>,
+    delay_manager: delay::Manager<Option<u64>>,
+    diagnostics: BTreeSet<u16>,
 }
 impl HandlerState {
     fn receive(
@@ -32,6 +36,12 @@ impl HandlerState {
         participant: Option<u64>,
         d: &mut Dispatch<'_>,
     ) -> Result<(), scoring::Error> {
+        if self.delay_values.contains_key(&target.node) {
+            return d.delay_event(self, target.node, target.event, participant);
+        }
+        if self.diagnostics.contains(&target.node) && target.event == 231_942_004 {
+            return Ok(());
+        }
         // The mode's human membership callbacks do not enable/disable AI-only
         // racers. Their population owner supplies their separate callbacks.
         if self.ai_only.contains(&target.node) && participant.is_some() && participant == self.human
@@ -176,6 +186,9 @@ pub(super) struct Reporters {
     identities: BTreeMap<Identity, u16>,
     countdowns: BTreeMap<u16, u16>,
     state: HandlerState,
+    root: u16,
+    started: bool,
+    delay_clock: Option<f64>,
 }
 impl Reporters {
     pub(super) fn prepare(
@@ -192,6 +205,18 @@ impl Reporters {
             .enumerate()
             .map(|(i, n)| (n.identity.clone(), i as u16))
             .collect::<BTreeMap<_, _>>();
+        let (delay_values, delay_manager) =
+            delays::prepare(index, &composition, &data.game_mode.layout.blueprint, &ids)?;
+        let roots = composition
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.class == "GameModeEntityData")
+            .map(|(i, _)| i as u16)
+            .collect::<Vec<_>>();
+        let [root] = roots.as_slice() else {
+            return Err(nfs_content::Error::Content("intro reporter root".into()));
+        };
         let mut gates = BTreeMap::new();
         let ai_only: BTreeSet<_> = index
             .scoring_ai_inclusions(&data.game_mode.layout.blueprint)?
@@ -228,6 +253,9 @@ impl Reporters {
             })
             .collect();
         Ok(Self {
+            root: *root,
+            started: false,
+            delay_clock: None,
             graph: composition.dispatcher()?,
             countdowns: data
                 .game_mode
@@ -258,6 +286,15 @@ impl Reporters {
                 ai_only,
                 controls: BTreeMap::new(),
                 human: None,
+                delay_values,
+                delay_manager,
+                diagnostics: composition
+                    .nodes
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, n)| n.class == "PrintDebugTextEntityData")
+                    .map(|(i, _)| i as u16)
+                    .collect(),
             },
             identities: ids,
         })
@@ -325,7 +362,7 @@ impl Reporters {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn fixture(fail: bool) -> Reporters {
+    pub(super) fn fixture(fail: bool) -> Reporters {
         let id = Identity {
             asset: "test".into(),
             index: 0,
@@ -352,6 +389,9 @@ mod tests {
             edge(1, nodes::OUT, 3, nodes::IN)
         };
         Reporters {
+            root: 0,
+            started: false,
+            delay_clock: None,
             graph: events::Graph::new(4, connections).unwrap(),
             identities: BTreeMap::from([(id, 0)]),
             countdowns: BTreeMap::new(),
@@ -368,6 +408,9 @@ mod tests {
                 ai_controls: BTreeSet::new(),
                 controls: BTreeMap::new(),
                 human: None,
+                delay_values: BTreeMap::new(),
+                delay_manager: delay::Manager::new(4, &[]).unwrap(),
+                diagnostics: BTreeSet::new(),
             },
         }
     }

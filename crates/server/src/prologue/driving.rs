@@ -384,6 +384,26 @@ impl Active {
         owner: Owner,
         seconds: f64,
     ) -> Result<(Self, Output), Error> {
+        Self::start_bound(content, players, owner, seconds, None)
+    }
+    /// Modes without an arrival-sequence acknowledgement receive their selected
+    /// vehicle identity from the participant's already validated inventory.
+    pub fn start_with_car(
+        content: &Mode,
+        players: &mut Players,
+        owner: Owner,
+        seconds: f64,
+        car_id: u32,
+    ) -> Result<(Self, Output), Error> {
+        Self::start_bound(content, players, owner, seconds, Some(car_id))
+    }
+    fn start_bound(
+        content: &Mode,
+        players: &mut Players,
+        owner: Owner,
+        seconds: f64,
+        car_id: Option<u32>,
+    ) -> Result<(Self, Output), Error> {
         if !players.owns_participant(owner.connection, owner.persona, owner.participant) {
             return Err(Error::UnknownObject);
         };
@@ -409,18 +429,19 @@ impl Active {
         if let Some(callbacks) = &mut callbacks {
             callbacks.bind_human(owner.participant);
         }
+        let mut actions = vec![Command::State(Action::Enter {
+            state: content.data.game_mode.lifecycle.initial as u16,
+            participant: owner.participant.into(),
+        })];
+        if let Some(callbacks) = &mut callbacks {
+            actions.extend(callbacks.start(seconds).map_err(invalid)?);
+        }
         let effects = host
-            .dispatch(
-                vec![Command::State(Action::Enter {
-                    state: content.data.game_mode.lifecycle.initial as u16,
-                    participant: owner.participant.into(),
-                })],
-                &mut |_, e| {
-                    callbacks
-                        .as_mut()
-                        .map_or_else(|| Ok(vec![]), |r| r.effect(e))
-                },
-            )
+            .dispatch(actions, &mut |_, e| {
+                callbacks
+                    .as_mut()
+                    .map_or_else(|| Ok(vec![]), |r| r.effect(e))
+            })
             .map_err(invalid)?;
         let creation = content.creation(staged.objects(), owner, parent, &host, seconds)?;
         let root = staged
@@ -445,7 +466,7 @@ impl Active {
             opponent_deadlines: BTreeMap::new(),
             seconds,
             progress: None,
-            car_id: None,
+            car_id,
             arrived: false,
             ending: false,
             left: false,
