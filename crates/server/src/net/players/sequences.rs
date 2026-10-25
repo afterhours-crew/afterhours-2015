@@ -21,10 +21,19 @@ impl PlayerListener {
         if world_ms < self.world_ms {
             return Err(replication::Error::Shape);
         }
-        self.advance_binding_refreshes(world_ms)?;
-        self.advance_prologue()?;
-        self.advance_crashes(world_ms)?;
-        self.advance_world_activation()?;
+        self.advance_binding_refreshes(world_ms)
+            .inspect_err(|error| {
+                tracing::warn!(?error, world_ms, "binding refresh update rejected");
+            })?;
+        self.advance_prologue().inspect_err(|error| {
+            tracing::warn!(?error, world_ms, "prologue update rejected");
+        })?;
+        self.advance_crashes(world_ms).inspect_err(|error| {
+            tracing::warn!(?error, world_ms, "crash recovery update rejected");
+        })?;
+        self.advance_world_activation().inspect_err(|error| {
+            tracing::warn!(?error, world_ms, "world activation update rejected");
+        })?;
         self.advance_returns(world_ms);
         if let Some(returns) = &mut self.returns {
             let capacity =

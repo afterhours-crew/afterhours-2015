@@ -1,7 +1,7 @@
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
-use super::super::tests::{drain, send};
+use super::super::tests::{drain, send, tick_with_normal_presentation};
 use super::*;
 use nfs_world::{bits::BitWriter, participants::Endpoint};
 use std::sync::Arc;
@@ -108,7 +108,7 @@ fn finished_movie() -> (PlayerListener, u16) {
         .owned_actor(HOST_SELECTOR as u8, listener.persona, participant)
         .unwrap();
     // The selected fixture has already completed objective10; no movie replay.
-    listener.advance_story_movies().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert!(listener.intro_movies.is_empty());
     let (_, _, snapshot) = crate::progression::tests::local();
     listener.persistent = Some(Arc::new(
@@ -118,11 +118,11 @@ fn finished_movie() -> (PlayerListener, u16) {
     listener
         .pending
         .resize(MAX_PENDING, super::super::super::returning::empty_section());
-    listener.advance_story_movies().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert!(listener.intro_movies.is_empty());
     assert_eq!(listener.players.objects().snapshot(), world);
     drain(&mut listener);
-    listener.advance_story_movies().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert_eq!(
         listener.participants.stage(participant),
         Some(Stage::IntroMovie)
@@ -131,7 +131,7 @@ fn finished_movie() -> (PlayerListener, u16) {
     let before = listener.intro_movies[&participant].sequence().unwrap();
     assert_eq!(listener.pending.iter().flat_map(|s| &s.records).count(), 1);
     drain(&mut listener);
-    listener.advance_story_movies().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert!(listener.pending.is_empty());
     let done = Completed {
         sequence: before,
@@ -246,7 +246,7 @@ fn finished_movie() -> (PlayerListener, u16) {
     );
     drain(&mut listener);
     assert!(send(&mut listener, 33, 47, done.span()));
-    listener.advance_story_movies().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert!(listener.pending.is_empty());
     assert!(listener.pending_rpcs.is_empty());
     assert_eq!(
@@ -351,7 +351,7 @@ fn second_race_reuses_the_selected_car_and_rolls_back_relocation_under_pressure(
     // first-race occurrence after exercising the same native retirement path.
     listener.intro_modes.get_mut(&participant).unwrap().2 = Chapter::FirstRace;
     drain(&mut listener);
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert_eq!(
         listener.participants.stage(participant),
         Some(Stage::IntroRelocating)
@@ -372,21 +372,21 @@ fn second_race_reuses_the_selected_car_and_rolls_back_relocation_under_pressure(
     };
     listener.pending_teleports.resize(MAX_PENDING, (0, dummy));
     let before = listener.players.objects().snapshot();
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert_eq!(
         listener.participants.stage(participant),
         Some(Stage::IntroRelocating)
     );
     assert_eq!(listener.players.objects().snapshot(), before);
     listener.pending_teleports.clear();
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert_eq!(listener.pending_teleports.len(), 1);
     let teleport = listener.pending_teleports[0].1;
     assert_eq!(teleport.vehicle, car);
     assert_eq!(teleport.position, [200., 30., 400.]);
     assert_eq!(listener.world_cars.len(), 1);
     drain(&mut listener);
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert_eq!(listener.pending_teleports.len(), 1);
     let startup = |endpoint: Endpoint, method: u32| {
         let mut payload = BitWriter::new();
@@ -412,7 +412,7 @@ fn second_race_reuses_the_selected_car_and_rolls_back_relocation_under_pressure(
         startup(b.render_ready, 0).span()
     ));
     drain(&mut listener);
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     let arrival = listener.opening.ghost(participant).unwrap();
     let done = Completed {
         sequence: arrival,
@@ -422,7 +422,7 @@ fn second_race_reuses_the_selected_car_and_rolls_back_relocation_under_pressure(
     .unwrap();
     assert!(send(&mut listener, 37, 47, done.span()));
     drain(&mut listener);
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert_eq!(
         listener.participants.stage(participant),
         Some(Stage::FreeRoam)
@@ -546,7 +546,7 @@ fn return_drive_started() -> (PlayerListener, u16, u16) {
         .unwrap();
     let old = listener.intro_modes[&participant].0.ghost;
     let canceller = listener.intro_modes[&participant].1.ghost;
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert_eq!(
         listener.participants.intro_chapter(participant),
         Some(Chapter::SecondRace)
@@ -574,7 +574,7 @@ fn return_drive_started() -> (PlayerListener, u16, u16) {
     listener
         .pending
         .resize(MAX_PENDING, super::super::super::returning::empty_section());
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert_eq!(listener.players.objects().snapshot(), snapshot);
     assert_eq!(
         listener.participants.intro_chapter(participant),
@@ -582,11 +582,11 @@ fn return_drive_started() -> (PlayerListener, u16, u16) {
     );
     drain(&mut listener);
     listener.world_cars.insert(car, (participant, false));
-    assert!(listener.advance_prologue().is_err());
+    assert!(tick_with_normal_presentation(&mut listener).is_err());
     assert_eq!(listener.players.objects().snapshot(), snapshot);
     assert_eq!(listener.intro_modes[&participant].0.ghost, old);
     listener.world_cars.insert(car, (participant, true));
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert_eq!(
         listener.participants.intro_chapter(participant),
         Some(Chapter::ReturnDrive)
@@ -607,7 +607,7 @@ fn return_drive_started() -> (PlayerListener, u16, u16) {
     );
     let snapshot = listener.players.objects().snapshot();
     drain(&mut listener);
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert_eq!(listener.players.objects().snapshot(), snapshot);
     assert!(listener.pending.is_empty());
     assert!(listener.pending_rpcs.is_empty());
@@ -655,7 +655,7 @@ fn finished_diner() -> (PlayerListener, u16) {
     // The next objective is not active until the prior result is committed.
     let started = listener.world_ms + 1000;
     listener.world_ms = started;
-    listener.advance_story_movies().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert_eq!(listener.intro_movies[&participant].objective(), 10);
     use nfs_storage::InventoryRepository;
     let (repo, account, saved) = crate::progression::tests::local();
@@ -679,7 +679,7 @@ fn finished_diner() -> (PlayerListener, u16) {
     listener.persistent = Some(Arc::new(
         crate::progression::tests::tables().view(&saved).unwrap(),
     ));
-    listener.advance_story_movies().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert_eq!(listener.intro_movies.len(), 1);
     assert_eq!(listener.intro_movies[&participant].objective(), 20);
     let before = listener.intro_movies[&participant].sequence().unwrap();
@@ -720,7 +720,7 @@ fn finished_diner() -> (PlayerListener, u16) {
     assert!(!send(&mut listener, 36, 47, done.span()));
     assert_eq!(listener.players.objects().snapshot(), snapshot);
     listener.world_ms = started + 3999;
-    listener.advance_story_movies().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert!(listener.pending_rpcs.is_empty());
     listener.world_ms = started + 4000;
     listener.pending_rpcs.resize(
@@ -731,10 +731,10 @@ fn finished_diner() -> (PlayerListener, u16) {
             call: nfs_world::participants::Call::Enter,
         }),
     );
-    listener.advance_story_movies().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert_eq!(listener.players.objects().snapshot(), snapshot);
     drain(&mut listener);
-    listener.advance_story_movies().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert!(
         matches!(listener.pending_rpcs.front(), Some(HostRpc::SequenceStop(stop)) if stop.sequence == after)
     );
@@ -743,7 +743,7 @@ fn finished_diner() -> (PlayerListener, u16) {
         Some(Stage::IntroMovie)
     );
     drain(&mut listener);
-    listener.advance_story_movies().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert!(listener.pending_rpcs.is_empty());
     assert!(send(&mut listener, 36, 47, done.span()));
     assert!(
@@ -761,7 +761,7 @@ fn finished_diner() -> (PlayerListener, u16) {
         nfs_world::fmv::Phase::Finished
     );
     drain(&mut listener);
-    listener.advance_story_movies().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert!(listener.pending.is_empty());
     assert!(listener.pending_rpcs.is_empty());
     (listener, participant)

@@ -156,6 +156,22 @@ pub(super) fn drain(listener: &mut PlayerListener) {
     listener.pending_content.clear();
     listener.pending_entries.clear();
 }
+/// Exercise the same update entry point as the live world connection, with
+/// ordinary garage presentation configured but never spawned by the intro.
+pub(in crate::net::players) fn tick_with_normal_presentation(
+    listener: &mut PlayerListener,
+) -> Result<(), replication::Error> {
+    assert!(listener.logic.is_some());
+    let now = listener.world_ms;
+    listener.advance_sequences(now)?;
+    listener.advance_level_poll(now)?;
+    listener.advance_settled(now)?;
+    listener.advance_traffic(now)?;
+    listener.advance_rivals(now)?;
+    listener.advance_scoring(now)?;
+    listener.advance_events(now)?;
+    Ok(())
+}
 pub(super) fn setup() -> (PlayerListener, u16, Arc<nfs_world::items::Collection>) {
     let _ = tracing_subscriber::fmt()
         .with_test_writer()
@@ -297,6 +313,12 @@ pub(super) fn setup() -> (PlayerListener, u16, Arc<nfs_world::items::Collection>
     listener.world_ms = 100_000;
     listener.population = Some(population);
     listener.participants = participants;
+    listener.logic = Some(Arc::new(
+        crate::garage_logic::GarageLogic::from_json(
+            &crate::garage_logic::tests::presentation_json(),
+        )
+        .unwrap(),
+    ));
     let definition = |layout, local_index| nfs_world::sequences::Definition {
         layout,
         asset: Asset {
@@ -402,7 +424,7 @@ pub(super) fn ready_for_selection(
         bank: None,
     });
     let before = (*items).clone();
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     let vehicle = listener
         .players
         .temporary_vehicle(HOST_SELECTOR as u8, listener.persona, participant)
@@ -485,7 +507,7 @@ pub(super) fn ready_for_selection(
         listener.participants.stage(participant),
         Some(Stage::IntroRendering)
     );
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert!(listener.opening.ghost(participant).is_none());
     drain(&mut listener);
     assert!(send(
@@ -499,10 +521,10 @@ pub(super) fn ready_for_selection(
         Some(Stage::IntroOpening)
     );
     drain(&mut listener);
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     let ghost = listener.opening.ghost(participant).unwrap();
     drain(&mut listener);
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert!(listener.pending.is_empty());
     let signal = nfs_world::logic::Message::Reached {
         event: 37,
@@ -556,11 +578,11 @@ pub(super) fn ready_for_selection(
     listener
         .pending
         .resize(MAX_PENDING, super::super::returning::empty_section());
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert_eq!(listener.players.objects().snapshot(), before_mode);
     assert!(listener.intro_modes.is_empty());
     drain(&mut listener);
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert_eq!(
         listener.participants.stage(participant),
         Some(Stage::FreeRoam)
@@ -585,8 +607,65 @@ pub(super) fn ready_for_selection(
     assert_eq!(goals.len(), 2);
     let drive_sequence = roots[0];
     drain(&mut listener);
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert!(listener.pending.is_empty());
+    assert!(!listener.free_roam_presented.contains(&participant));
+    assert!(listener.desired_scoring(false).is_empty());
+    // Normal crash recovery must not take over the story's temporary car when
+    // the opening hands off to driving. Exercise a real movement crash pulse.
+    let asset = Asset {
+        bundle: 61,
+        type_id: 700,
+        local_index: 0,
+    };
+    let mut crashes = nfs_world::crash::Crashes::new(
+        nfs_world::crash::Definition {
+            asset,
+            manager: Component {
+                scene_key: listener.vehicles.as_ref().unwrap().layout.item_scene_key,
+                index: 3,
+            },
+            embedded_bus: 2,
+        },
+        Content::new(
+            vec![Catalog::new(61, &[(700, 1)]).unwrap()],
+            vec![(asset, nfs_world::crash::profile())],
+        )
+        .unwrap(),
+        4500,
+    )
+    .unwrap();
+    let physics = listener
+        .players
+        .vehicle_physics(HOST_SELECTOR as u8, listener.persona, vehicle)
+        .unwrap();
+    for revision in [1, 2] {
+        let mut sample = replication::vehicle::movement::Sample {
+            physics: physics.clone(),
+            flag: true,
+        };
+        sample.physics.identity_words[2] = revision;
+        sample.physics.controls.flags[0] = revision == 2;
+        let (header, body) = sample.encode().unwrap();
+        PlayerListener::observe_crashes(
+            &mut crashes,
+            &listener.players,
+            &listener.participants,
+            &listener.world_cars,
+            listener.persona,
+            &frame::Movement {
+                header: Some(header.span()),
+                records: vec![frame::MovementRecord {
+                    id: vehicle,
+                    component: 0,
+                    data: body.span(),
+                }],
+            },
+            (&listener.event_state, None),
+        )
+        .unwrap();
+    }
+    assert!(crashes.pending().is_empty());
     let completed = Completed {
         sequence: drive_sequence,
         participant,
@@ -730,7 +809,7 @@ pub(super) fn ready_for_selection(
     assert!(listener.pending_rpcs.is_empty());
     assert_eq!(listener.players.objects().snapshot(), finished_world);
     listener.world_ms = 107_499;
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert!(!listener.intro_modes[&participant].0.arrived());
     assert!(listener.pending_rpcs.is_empty());
     listener.world_ms = 107_500;
@@ -741,10 +820,10 @@ pub(super) fn ready_for_selection(
             serial: Serial::new(1).unwrap(),
         }),
     );
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert!(!listener.intro_modes[&participant].0.arrived());
     drain(&mut listener);
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert!(listener.intro_modes[&participant].0.arrived());
     assert_eq!(
         listener
@@ -758,7 +837,7 @@ pub(super) fn ready_for_selection(
         vec![(2, 1), (3, 0), (0, 1), (0, 7)]
     );
     drain(&mut listener);
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert!(listener.pending_rpcs.is_empty());
     let returning = listener.participants.return_bindings().unwrap();
     let mut preview_source = crate::vehicle_content::population::tests::previews(
@@ -822,16 +901,16 @@ pub(super) fn ready_for_selection(
         .unwrap();
     let before_previews = listener.players.objects().snapshot();
     // The entry notification is an ordering barrier for later preview cars.
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert_eq!(listener.players.objects().snapshot(), before_previews);
     drain(&mut listener);
     listener
         .pending
         .resize(MAX_PENDING, super::super::returning::empty_section());
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert_eq!(listener.players.objects().snapshot(), before_previews);
     drain(&mut listener);
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert_eq!(
         listener
             .pending_rpcs
@@ -957,14 +1036,14 @@ pub(super) fn ready_for_selection(
         .pending
         .resize(MAX_PENDING, super::super::returning::empty_section());
     let before_selection = listener.players.objects().snapshot();
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert_eq!(listener.players.objects().snapshot(), before_selection);
     assert_eq!(
         listener.participants.stage(participant),
         Some(Stage::IntroLoadingGarage)
     );
     drain(&mut listener);
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert_eq!(
         listener.participants.stage(participant),
         Some(Stage::IntroCarSelection)
@@ -975,7 +1054,7 @@ pub(super) fn ready_for_selection(
     assert_eq!(listener.pending_rpcs.iter().filter(|r| matches!(r, HostRpc::Event(f) if f.event == 7 && Some(f.target.ghost) == listener.selection.ghost(participant))).count(), 1);
     let selected = listener.players.objects().snapshot();
     drain(&mut listener);
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert_eq!(listener.players.objects().snapshot(), selected);
     assert!(listener.pending_rpcs.is_empty());
     (listener, participant, items)
@@ -988,7 +1067,7 @@ fn full_output_queue_preserves_the_car_allocation_and_readiness_gate() {
     listener
         .pending
         .resize(MAX_PENDING, super::super::returning::empty_section());
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert_eq!(listener.players.objects().snapshot(), before);
     assert!(
         listener
@@ -997,7 +1076,7 @@ fn full_output_queue_preserves_the_car_allocation_and_readiness_gate() {
             .is_none()
     );
     drain(&mut listener);
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     let vehicle = listener
         .players
         .temporary_vehicle(HOST_SELECTOR as u8, listener.persona, participant)
@@ -1051,10 +1130,10 @@ fn selected_car_reuses_native_startup_and_waits_for_previous_mode_retirement() {
     listener
         .pending
         .resize(MAX_PENDING, super::super::returning::empty_section());
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert_eq!(listener.players.objects().snapshot(), before);
     drain(&mut listener);
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     let car = listener
         .players
         .owned_vehicle(HOST_SELECTOR as u8, persona, participant, item)
@@ -1082,7 +1161,7 @@ fn selected_car_reuses_native_startup_and_waits_for_previous_mode_retirement() {
     );
     drain(&mut listener);
     let world = listener.players.objects().snapshot();
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert_eq!(listener.players.objects().snapshot(), world);
     let glass = nfs_world::logic::Message::Reached {
         event: 21_578_436,
@@ -1134,7 +1213,7 @@ fn selected_car_reuses_native_startup_and_waits_for_previous_mode_retirement() {
         request(bindings.render_ready, participant, 0).span()
     ));
     drain(&mut listener);
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     let arrival = listener.opening.ghost(participant).unwrap();
     let replication::Initial::Entity { fields, .. } =
         &listener.players.objects().get(arrival).unwrap().initial
@@ -1158,7 +1237,7 @@ fn selected_car_reuses_native_startup_and_waits_for_previous_mode_retirement() {
         Some(Stage::IntroOpening)
     );
     drain(&mut listener);
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert!(listener.pending.is_empty());
     assert!(listener.pending_rpcs.is_empty());
     let complete = Completed {
@@ -1169,7 +1248,7 @@ fn selected_car_reuses_native_startup_and_waits_for_previous_mode_retirement() {
     .unwrap();
     assert!(send(&mut listener, 32, 47, complete.span()));
     drain(&mut listener);
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert_eq!(listener.intro_modes[&participant].0.ghost, previous);
     assert_eq!(
         listener.participants.stage(participant),
@@ -1190,10 +1269,10 @@ fn selected_car_reuses_native_startup_and_waits_for_previous_mode_retirement() {
     listener
         .pending
         .resize(MAX_PENDING, super::super::returning::empty_section());
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert_eq!(listener.intro_modes[&participant].0.ghost, previous);
     drain(&mut listener);
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert_ne!(listener.intro_modes[&participant].0.ghost, previous);
     assert_eq!(listener.intro_modes[&participant].1.ghost, canceller);
     assert_eq!(listener.intro_modes[&participant].2, Chapter::FirstRace);

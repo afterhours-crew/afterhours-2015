@@ -132,10 +132,10 @@ fn final_garage_loaded() -> (PlayerListener, u16) {
         MAX_PENDING,
         super::super::super::super::returning::empty_section(),
     );
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert_eq!(listener.players.objects().snapshot(), before);
     drain(&mut listener);
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     let owner = Owner {
         connection: HOST_SELECTOR as u8,
         persona: listener.persona,
@@ -166,7 +166,7 @@ fn final_garage_loaded() -> (PlayerListener, u16) {
     let staged_world = listener.players.objects().snapshot();
     drain(&mut listener);
     assert!(send(&mut listener, 39, 47, enter.span()));
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert_eq!(listener.players.objects().snapshot(), staged_world);
     assert!(listener.pending_rpcs.is_empty());
     assert!(send(&mut listener, 40, 47, loaded.span()));
@@ -217,7 +217,7 @@ fn final_garage_loaded() -> (PlayerListener, u16) {
     assert!(listener.story_pending.is_empty());
     drain(&mut listener);
     let after = listener.players.objects().snapshot();
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert_eq!(listener.players.objects().snapshot(), after);
     assert_eq!(
         listener.participants.stage(participant),
@@ -314,11 +314,11 @@ fn final_composite_is_owned_and_completion_survives_frame_ordering_and_queue_pre
         MAX_PENDING,
         super::super::super::super::returning::empty_section(),
     );
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert_eq!(listener.players.objects().snapshot(), before);
     assert!(listener.intro_composites.is_empty());
     drain(&mut listener);
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert_eq!(
         listener.participants.stage(participant),
         Some(Stage::IntroComposite)
@@ -341,7 +341,7 @@ fn final_composite_is_owned_and_completion_survives_frame_ordering_and_queue_pre
     // The parent signal may be in a frame before the native completion RPC.
     let final_signal = signal(parent, 9, 71);
     assert!(send(&mut listener, 42, 82, final_signal.span()));
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert!(listener.story_pending.is_empty());
     let ack = Completed {
         sequence,
@@ -401,14 +401,14 @@ fn final_composite_is_owned_and_completion_survives_frame_ordering_and_queue_pre
         action: crate::net::items::story::Action::Complete { objective: 20 },
     };
     listener.story_pending.resize(MAX_PENDING, job);
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert_eq!(listener.story_pending.len(), MAX_PENDING);
     listener.story_pending.clear();
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert_eq!(listener.story_pending.len(), 1);
     assert!(send(&mut listener, 45, 47, ack.span()));
     assert!(send(&mut listener, 46, 82, final_signal.span()));
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert_eq!(listener.story_pending.len(), 1);
     let job = listener.take_story().unwrap();
     assert_eq!(
@@ -526,7 +526,7 @@ fn final_composite_is_owned_and_completion_survives_frame_ordering_and_queue_pre
     drain(&mut listener);
     listener.story_committed(&job, committed).unwrap();
     assert!(listener.pending_rpcs.is_empty());
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert_eq!(
         listener.participants.intro_chapter(participant),
         Some(Chapter::ReturnDrive)
@@ -542,7 +542,7 @@ fn final_composite_is_owned_and_completion_survives_frame_ordering_and_queue_pre
     assert!(listener.intro_modes[&participant].1.has_left());
     assert!(send(&mut listener, 48, 47, leave.span()));
     drain(&mut listener);
-    listener.advance_prologue().unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
     assert_eq!(listener.participants.intro_chapter(participant), None);
     assert_eq!(
         listener.participants.stage(participant),

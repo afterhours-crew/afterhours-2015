@@ -16,10 +16,12 @@ use nfs_world::{
 mod tests;
 
 fn eligible(participants: &Lifecycle, events: &events::State, participant: u16) -> bool {
-    matches!(
-        participants.stage(participant),
-        Some(Stage::FreeRoam | Stage::ReturnPrompted)
-    ) && events.crash_allowed(participant)
+    participants.intro_chapter(participant).is_none()
+        && matches!(
+            participants.stage(participant),
+            Some(Stage::FreeRoam | Stage::ReturnPrompted)
+        )
+        && events.crash_allowed(participant)
 }
 
 impl PlayerListener {
@@ -41,8 +43,9 @@ impl PlayerListener {
                 continue;
             };
             let connection = HOST_SELECTOR as u8;
-            // The opening's staged car has no durable inventory identity and
-            // is not yet in a state that can enter crash recovery.
+            // The intro's temporary car has no durable inventory identity.
+            // Its scripted driving also owns presentation/recovery, even when
+            // the participant shares the FreeRoam movement state.
             if players.temporary_vehicle(connection, persona, participant) == Some(record.id)
                 && !eligible(participants, event.0, participant)
             {

@@ -34,8 +34,12 @@ impl PlayerListener {
             let capacity = nfs_world::session::MAX_RPC_QUEUE
                 .saturating_sub(self.pending_rpcs.len())
                 .saturating_sub(if clearing { 2 } else { 0 });
-            let presenting =
-                active.contains(&participant) && !self.free_roam_presented.contains(&participant);
+            // Scripted intro driving shares world membership, but owns its
+            // presentation through the authored story sequences. Its objects
+            // are not the ordinary garage-exit presentation retained here.
+            let presenting = active.contains(&participant)
+                && self.participants.intro_chapter(participant).is_none()
+                && !self.free_roam_presented.contains(&participant);
             // AliveState and the driving context must have reached the client
             // before the garage-zone notification can trigger its prompt.
             // Prepare this on a clone so queue pressure retains the gate.
