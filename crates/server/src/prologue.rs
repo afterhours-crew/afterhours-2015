@@ -25,6 +25,7 @@ pub mod composite;
 pub mod driving;
 pub mod loading;
 pub mod movies;
+pub mod volumes;
 
 #[derive(Clone, Debug)]
 pub struct Content {
@@ -41,6 +42,8 @@ pub struct Content {
     pub diner_movie: Option<movies::Content>,
     pub return_drive: Option<driving::Mode>,
     pub final_composite: Option<composite::Content>,
+    /// The world volumes the participant joins while it drives (E1194).
+    pub volumes: volumes::WorldVolumes,
     items: Arc<Collection>,
 }
 #[derive(Clone, Debug)]
@@ -213,6 +216,7 @@ impl Content {
             diner_movie: None,
             return_drive: None,
             final_composite: None,
+            volumes: volumes::WorldVolumes::default(),
         }
     }
     pub fn prepare(
@@ -304,6 +308,23 @@ impl Content {
                 parent,
                 "gameplay/progression/intro/introreturntogarage",
             )?),
+            // The intro plays without them; their absence is only logged.
+            volumes: match volumes::WorldVolumes::prepare(index) {
+                Ok(found) => {
+                    tracing::info!(
+                        events = found.events.len(),
+                        activities = found.activities.len(),
+                        spots = found.spots.len(),
+                        notifications = found.notifications.len(),
+                        "world volumes prepared"
+                    );
+                    found
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "world volumes unavailable; the intro joins none");
+                    volumes::WorldVolumes::default()
+                }
+            },
             items: Arc::new(built.collection),
             previews: Some(Arc::new(PreviewCars {
                 garage,

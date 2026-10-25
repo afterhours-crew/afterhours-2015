@@ -562,6 +562,7 @@ impl PlayerListener {
     /// steps, cooldowns and DNF deadlines. Runs between frames on the committed world.
     pub(in crate::net) fn advance_events(&mut self, now_ms: u64) -> Result<(), replication::Error> {
         self.advance_event_discovery()?;
+        self.advance_world_volumes(now_ms)?;
         let Some(catalog) = self.events.clone() else {
             return Ok(());
         };

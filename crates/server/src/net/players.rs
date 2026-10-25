@@ -168,6 +168,8 @@ pub(super) struct PlayerListener {
     events: Option<std::sync::Arc<crate::event_logic::catalog::Catalog>>,
     event_state: events::State,
     event_discovery: events::discovery::State,
+    /// The intro participant's world volume memberships (E1194).
+    world_volumes: prologue::volumes::State,
     /// Participants in an owned event: free-roam scoring is retired meanwhile.
     event_suspended: BTreeSet<u16>,
     /// The session's replication clock origin, set by the world loop each pass.
@@ -918,6 +920,7 @@ impl PlayerListener {
             events: None,
             event_state: events::State::default(),
             event_discovery: events::discovery::State::default(),
+            world_volumes: prologue::volumes::State::default(),
             event_suspended: BTreeSet::new(),
             replication_origin_ms: None,
             pending_content: VecDeque::new(),
@@ -2917,6 +2920,18 @@ impl Listener for PlayerListener {
         self.intro_modes = intro_modes;
         self.intro_movies = intro_movies;
         self.intro_composites = intro_composites;
+        // The committed intro notifications decide the world volume memberships.
+        let ctx = prologue::presentation::Context {
+            logic: self.logic.as_deref(),
+            ghosts: &self.logic_ghosts,
+            players: &self.players,
+            participants: &self.participants,
+            content: self.prologue.as_deref(),
+        };
+        self.world_volumes.observe(&ctx, &responses);
+        for (_, calls) in &entries {
+            self.world_volumes.observe(&ctx, calls);
+        }
         self.pending_rpcs.extend(responses);
         for input in event_inputs {
             if self.event_state.inputs.len() >= events::MAX_INPUTS {
