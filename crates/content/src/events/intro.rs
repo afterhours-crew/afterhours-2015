@@ -79,7 +79,7 @@ fn launcher<S: Source>(
     }
 }
 
-fn participant_context<S: Source>(
+pub(crate) fn participant_context<S: Source>(
     graph: &mut Graph<S>,
     scene: Site,
     progression: &crate::progression::Rules,

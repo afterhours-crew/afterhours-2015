@@ -1130,6 +1130,8 @@
       "SequenceEntityData": null,
       "SimpleLocalizationEntityData": null,
       "StateSequenceParticipantProviderEntityData": "provider",
+      "StringEntityData": null,
+      "TelemetryHookEntityData": null,
       "TonemapComponentData": null,
       "TransformMultiplierEntityData": null,
       "TransformSplitterEntityData": null,

@@ -95,6 +95,12 @@ mod tests {
             assert_eq!(buses, 1);
             assert_eq!(fields.len(), 1);
             assert_eq!(fields[0].2, Kind::SequenceRoot);
+            for class in ["StringEntityData", "TelemetryHookEntityData"] {
+                let mut node = nodes[1].clone();
+                node.object.class = class.into();
+                nodes.push(node);
+            }
+            assert_eq!(shape(&nodes, &rules).unwrap(), (buses, fields));
             nodes[0].object.class = "OtherBlueprint".into();
             assert!(shape(&nodes, &rules).is_err());
         }

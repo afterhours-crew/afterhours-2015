@@ -21,6 +21,7 @@ use nfs_world::{
     replication::{Error, entity::creation::Asset},
 };
 use std::sync::Arc;
+pub mod composite;
 pub mod driving;
 pub mod loading;
 pub mod movies;

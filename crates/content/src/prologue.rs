@@ -12,6 +12,7 @@ use crate::{
 use nfs_frostbite::ebx::Value;
 use serde_json::{Value as Json, json};
 mod arrival;
+pub mod composite;
 pub mod movies;
 pub mod sequences;
 

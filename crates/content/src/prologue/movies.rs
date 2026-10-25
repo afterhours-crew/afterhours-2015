@@ -29,7 +29,10 @@ struct Raw {
     state: Site,
     sequences: [(String, Site, Site); 2],
 }
-fn sequence_state<S: Source>(graph: &mut Graph<S>, provider: &Site) -> Result<Site, Error> {
+pub(super) fn sequence_state<S: Source>(
+    graph: &mut Graph<S>,
+    provider: &Site,
+) -> Result<Site, Error> {
     let nodes = graph.read(Site {
         key: provider.bus.clone(),
         ..provider.clone()
@@ -49,7 +52,7 @@ fn sequence_state<S: Source>(graph: &mut Graph<S>, provider: &Site) -> Result<Si
     };
     Ok(state.clone())
 }
-fn bound<S: Source>(
+pub(super) fn bound<S: Source>(
     graph: &mut Graph<S>,
     site: &Site,
     port: u32,
