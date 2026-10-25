@@ -14,6 +14,7 @@ pub enum Chapter {
     FirstDrive,
     FirstRace,
     SecondRace,
+    ReturnDrive,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -81,6 +82,21 @@ fn notifications(participant: u16, chain: &[(Endpoint, Call)]) -> Vec<Notificati
         .collect()
 }
 impl Lifecycle {
+    /// The owner has completed the diner movie, retired the race and verified
+    /// the selected world car. This mode starts in place without relocation.
+    pub fn intro_return_drive_begin(&mut self, participant: u16) -> Outcome {
+        if self.intro_started.get(&participant) == Some(&Chapter::ReturnDrive) {
+            return Outcome::Repeated;
+        }
+        if self.intro.is_none()
+            || self.intro_started.get(&participant) != Some(&Chapter::SecondRace)
+            || self.stages.get(&participant) != Some(&Stage::FreeRoam)
+        {
+            return Outcome::Unsupported;
+        }
+        self.intro_started.insert(participant, Chapter::ReturnDrive);
+        Outcome::Advanced(vec![])
+    }
     /// The story owner validated the completed movie, retired previous mode
     /// and existing selected car. This path retains that car during relocation.
     pub fn intro_second_race_begin(&mut self, participant: u16) -> Outcome {

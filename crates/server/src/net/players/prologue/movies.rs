@@ -92,7 +92,7 @@ impl PlayerListener {
             let movie = match self.participants.intro_chapter(p)? {
                 Chapter::FirstRace => content.manu_movie.as_ref()?,
                 Chapter::SecondRace => content.diner_movie.as_ref()?,
-                Chapter::FirstDrive => return None,
+                Chapter::FirstDrive | Chapter::ReturnDrive => return None,
             };
             let available = self.intro_movies.get(&p).is_none_or(|old| {
                 old.phase() == nfs_world::fmv::Phase::Finished

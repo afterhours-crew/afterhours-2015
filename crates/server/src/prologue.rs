@@ -38,6 +38,7 @@ pub struct Content {
     pub second_race: Option<Race>,
     pub manu_movie: Option<movies::Content>,
     pub diner_movie: Option<movies::Content>,
+    pub return_drive: Option<driving::Mode>,
     items: Arc<Collection>,
 }
 #[derive(Clone, Debug)]
@@ -129,6 +130,7 @@ impl Content {
             Chapter::FirstDrive => self.driving.as_ref().map(|pair| &pair.0),
             Chapter::FirstRace => self.first_race.as_ref().map(|race| &race.mode),
             Chapter::SecondRace => self.second_race.as_ref().map(|race| &race.mode),
+            Chapter::ReturnDrive => self.return_drive.as_ref(),
         }
         .ok_or(Error::Unsupported)
     }
@@ -138,6 +140,7 @@ impl Content {
     ) -> Result<&Authored, Error> {
         use nfs_world::participants::intro::Chapter;
         match chapter {
+            Chapter::ReturnDrive => Err(Error::Unsupported),
             Chapter::FirstDrive => Ok(&self.opening),
             Chapter::FirstRace => self
                 .first_race
@@ -206,6 +209,7 @@ impl Content {
             second_race: None,
             manu_movie: None,
             diner_movie: None,
+            return_drive: None,
         }
     }
     pub fn prepare(
@@ -286,6 +290,11 @@ impl Content {
                 index,
                 parent,
                 "gameplay/progression/intro/introreturntogarage",
+            )?),
+            return_drive: Some(driving::Mode::prepare(
+                index,
+                parent,
+                "gameplay/progression/intro/introreturntogaragegamemode",
             )?),
             items: Arc::new(built.collection),
             previews: Some(Arc::new(PreviewCars {

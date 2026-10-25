@@ -441,6 +441,140 @@ fn second_race_reuses_the_selected_car_and_rolls_back_relocation_under_pressure(
 
 #[test]
 fn diner_replaces_finished_movie_and_timer_waits_for_capacity_and_native_ack() {
+    finished_diner();
+}
+#[test]
+fn return_drive_waits_for_retirement_and_keeps_the_owned_car_and_canceller() {
+    let (mut listener, participant) = finished_diner();
+    let owner = Owner {
+        connection: HOST_SELECTOR as u8,
+        persona: listener.persona,
+        participant,
+    };
+    let vehicles = Arc::make_mut(listener.vehicles.as_mut().unwrap());
+    vehicles.layout = crate::vehicle_content::population::tests::world_layout(&vehicles.layout);
+    let inventory = listener.inventory.clone().unwrap();
+    listener
+        .population
+        .as_mut()
+        .unwrap()
+        .spawn_world(
+            &mut listener.players,
+            crate::vehicle_content::population::Owner {
+                connection: owner.connection,
+                persona: owner.persona,
+                participant,
+            },
+            &inventory,
+            &vehicles.vehicles,
+            &vehicles.layout,
+        )
+        .unwrap();
+    let item = inventory.slots.values()[0].unwrap();
+    let car = listener
+        .players
+        .owned_vehicle(owner.connection, owner.persona, participant, item)
+        .unwrap();
+    listener
+        .players
+        .bind_player_vehicle(owner.connection, owner.persona, participant, Some(car))
+        .unwrap();
+    listener.world_cars.insert(car, (participant, true));
+    let content = Arc::make_mut(listener.prologue.as_mut().unwrap());
+    content.second_race = content.first_race.clone();
+    // A self-contained mode exercises listener ownership/ordering; installed
+    // return-mode timer and wire checks live in the private reference harness.
+    content.return_drive = Some(content.first_race.as_ref().unwrap().mode.clone());
+    let arrival = listener
+        .opening
+        .start_stopped(
+            &content.second_race.as_ref().unwrap().arrival,
+            &mut listener.players,
+            owner,
+        )
+        .unwrap()
+        .unwrap()
+        .id;
+    listener
+        .opening
+        .complete(
+            &mut listener.players,
+            owner,
+            Completed {
+                sequence: arrival,
+                participant,
+            },
+        )
+        .unwrap();
+    let old = listener.intro_modes[&participant].0.ghost;
+    let canceller = listener.intro_modes[&participant].1.ghost;
+    listener.advance_prologue().unwrap();
+    assert_eq!(
+        listener.participants.intro_chapter(participant),
+        Some(Chapter::SecondRace)
+    );
+    assert_eq!(listener.intro_modes[&participant].0.ghost, old);
+    assert!(send(
+        &mut listener,
+        37,
+        47,
+        request(
+            Endpoint {
+                scene: old,
+                selector: 0,
+                serial: nfs_protocol::world::rpc::Serial::new(1).unwrap(),
+            },
+            participant,
+            0
+        )
+        .span()
+    ));
+    assert!(listener.intro_modes[&participant].0.has_left());
+    listener.intro_modes.get_mut(&participant).unwrap().2 = Chapter::SecondRace;
+    drain(&mut listener);
+    let snapshot = listener.players.objects().snapshot();
+    listener
+        .pending
+        .resize(MAX_PENDING, super::super::super::returning::empty_section());
+    listener.advance_prologue().unwrap();
+    assert_eq!(listener.players.objects().snapshot(), snapshot);
+    assert_eq!(
+        listener.participants.intro_chapter(participant),
+        Some(Chapter::SecondRace)
+    );
+    drain(&mut listener);
+    listener.world_cars.insert(car, (participant, false));
+    assert!(listener.advance_prologue().is_err());
+    assert_eq!(listener.players.objects().snapshot(), snapshot);
+    assert_eq!(listener.intro_modes[&participant].0.ghost, old);
+    listener.world_cars.insert(car, (participant, true));
+    listener.advance_prologue().unwrap();
+    assert_eq!(
+        listener.participants.intro_chapter(participant),
+        Some(Chapter::ReturnDrive)
+    );
+    assert_eq!(
+        listener.participants.stage(participant),
+        Some(Stage::FreeRoam)
+    );
+    assert_eq!(listener.intro_modes[&participant].2, Chapter::ReturnDrive);
+    assert_ne!(listener.intro_modes[&participant].0.ghost, old);
+    assert_eq!(listener.intro_modes[&participant].1.ghost, canceller);
+    assert!(listener.pending_teleports.is_empty());
+    assert_eq!(
+        listener
+            .players
+            .owned_vehicle(owner.connection, owner.persona, participant, item),
+        Some(car)
+    );
+    let snapshot = listener.players.objects().snapshot();
+    drain(&mut listener);
+    listener.advance_prologue().unwrap();
+    assert_eq!(listener.players.objects().snapshot(), snapshot);
+    assert!(listener.pending.is_empty());
+    assert!(listener.pending_rpcs.is_empty());
+}
+fn finished_diner() -> (PlayerListener, u16) {
     let (mut listener, participant) = finished_movie();
     let b = listener.participants.intro_bindings().unwrap();
     assert!(matches!(
@@ -591,4 +725,5 @@ fn diner_replaces_finished_movie_and_timer_waits_for_capacity_and_native_ack() {
     listener.advance_story_movies().unwrap();
     assert!(listener.pending.is_empty());
     assert!(listener.pending_rpcs.is_empty());
+    (listener, participant)
 }

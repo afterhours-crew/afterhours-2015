@@ -105,6 +105,65 @@ impl PlayerListener {
             let chapter = participants.intro_chapter(participant);
             match self.participants.stage(participant) {
                 Some(Stage::FreeRoam)
+                    if chapter == Some(Chapter::SecondRace)
+                        && content.return_drive.is_some()
+                        && content.diner_movie.as_ref().is_some_and(|movie| {
+                            self.intro_movies.get(&participant).is_some_and(|active| {
+                                active.objective() == movie.data.objective
+                                    && active.phase() == nfs_world::fmv::Phase::Finished
+                            })
+                        })
+                        && modes
+                            .get(&participant)
+                            .is_some_and(|m| m.2 == Chapter::SecondRace && m.0.has_left())
+                        && self.pending.is_empty()
+                        && self.pending_rpcs.is_empty() =>
+                {
+                    let inventory = self
+                        .inventory
+                        .as_ref()
+                        .ok_or(replication::Error::Unsupported)?;
+                    let item =
+                        inventory.slots.values()[0].ok_or(replication::Error::UnknownObject)?;
+                    let definition = inventory
+                        .items
+                        .items
+                        .get(&item)
+                        .ok_or(replication::Error::UnknownObject)?
+                        .definition;
+                    let car = vehicles
+                        .vehicles
+                        .definition(&definition)
+                        .ok_or(replication::Error::Unsupported)?;
+                    let vehicle = players
+                        .owned_vehicle(owner.connection, owner.persona, participant, item)
+                        .ok_or(replication::Error::UnknownObject)?;
+                    if cars.get(&vehicle) != Some(&(participant, true)) {
+                        return Err(replication::Error::Shape);
+                    }
+                    opening.retire_completed(&players, owner)?;
+                    let (drive, output) = crate::prologue::driving::Active::start_with_car(
+                        content.mode(Chapter::ReturnDrive)?,
+                        &mut players,
+                        owner,
+                        seconds,
+                        crate::event_logic::car_id(&car.blueprint),
+                    )?;
+                    let (_, canceller, _) = modes
+                        .remove(&participant)
+                        .ok_or(replication::Error::UnknownObject)?;
+                    let Outcome::Advanced(chain) =
+                        participants.intro_return_drive_begin(participant)
+                    else {
+                        return Err(replication::Error::Shape);
+                    };
+                    records.extend(output.records);
+                    deleted.extend(output.deleted);
+                    calls.extend(output.calls);
+                    calls.extend(chain.into_iter().map(HostRpc::Participant));
+                    modes.insert(participant, (drive, canceller, Chapter::ReturnDrive));
+                }
+                Some(Stage::FreeRoam)
                     if chapter == Some(Chapter::FirstRace)
                         && content.second_race.is_some()
                         && self
@@ -530,7 +589,7 @@ impl PlayerListener {
         };
         let definition = match chapter {
             Chapter::FirstDrive => content.start.vehicle_item,
-            Chapter::FirstRace | Chapter::SecondRace => {
+            Chapter::FirstRace | Chapter::SecondRace | Chapter::ReturnDrive => {
                 let inventory = inventory.ok_or(replication::Error::Unsupported)?;
                 let item = inventory.slots.values()[0].ok_or(replication::Error::UnknownObject)?;
                 inventory
@@ -571,6 +630,7 @@ impl PlayerListener {
             .intro_chapter(participant)
             .ok_or(replication::Error::Shape)?
         {
+            Chapter::ReturnDrive => return Err(replication::Error::Shape),
             Chapter::FirstDrive => {
                 if players.temporary_vehicle(HOST_SELECTOR as u8, persona, participant)
                     != Some(vehicle)

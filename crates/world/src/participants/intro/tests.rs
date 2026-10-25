@@ -61,6 +61,22 @@ fn movie_suspends_only_its_story_participant_until_owned_completion() {
     assert_eq!(model.intro_movie_complete(8), Outcome::Repeated);
 }
 #[test]
+fn return_drive_starts_in_place_only_after_the_second_movie() {
+    let mut model = ready();
+    assert_eq!(model.intro_return_drive_begin(8), Outcome::Unsupported);
+    model.intro_started.insert(8, Chapter::SecondRace);
+    model.stages.insert(8, Stage::IntroMovie);
+    assert_eq!(model.intro_return_drive_begin(8), Outcome::Unsupported);
+    model.intro_movie_complete(8);
+    assert_eq!(model.intro_return_drive_begin(9), Outcome::Unsupported);
+    assert!(calls(model.intro_return_drive_begin(8)).is_empty());
+    assert_eq!(model.stage(8), Some(Stage::FreeRoam));
+    assert_eq!(model.intro_chapter(8), Some(Chapter::ReturnDrive));
+    assert_eq!(model.intro_return_drive_begin(8), Outcome::Repeated);
+    assert_eq!(model.intro_movie_begin(8), Outcome::Unsupported);
+    assert_eq!(model.stage(9), Some(Stage::Progressing));
+}
+#[test]
 fn second_race_uses_in_world_relocation_and_native_readiness_without_respawn() {
     let mut model = ready();
     assert_eq!(model.intro_second_race_begin(8), Outcome::Unsupported);
