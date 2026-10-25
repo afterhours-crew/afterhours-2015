@@ -113,55 +113,45 @@ impl PlayerListener {
         if sections.is_empty() {
             return Ok(Vec::new());
         }
-        let fits = |section: &Section, chunk: &[HostRpc]| entry_admitted(section, chunk);
-        if !sections.iter().all(|section| fits(section, &[])) {
+        if !sections.iter().all(|section| entry_admitted(section, &[])) {
             return Err(replication::Error::Bound);
         }
-        let mut rest = sections.into_iter();
-        let mut current = rest.next().expect("non-empty section");
-        let mut is_fallback = false;
+        // Calls ride the sections in order, as many as fit (a reply group
+        // carries at most fifteen); calls left over get call-only entries.
+        // Every section is kept: returning once the calls ran out dropped the
+        // record sections after the last call.
         let mut remaining = calls.as_slice();
-        let mut entries: Vec<Finished> = Vec::new();
-        loop {
-            // Reply groups carry at most fifteen messages (session bound).
-            let mut chunk: Vec<HostRpc> = Vec::new();
-            while let Some((call, tail)) = remaining.split_first() {
-                if chunk.len() >= 15 {
-                    break;
-                }
-                chunk.push(*call);
-                if fits(&current, &chunk) {
-                    remaining = tail;
-                } else {
-                    chunk.pop();
-                    break;
-                }
-            }
-            if is_fallback && chunk.is_empty() {
+        let mut entries: Vec<Finished> = Vec::with_capacity(sections.len());
+        for section in sections {
+            let chunk = Self::fitting_calls(&section, &mut remaining);
+            entries.push((section, chunk));
+        }
+        while !remaining.is_empty() {
+            let section = returning::empty_section();
+            let chunk = Self::fitting_calls(&section, &mut remaining);
+            if chunk.is_empty() {
                 // Not even one call fits an empty section.
                 return Err(replication::Error::Bound);
             }
-            let done = remaining.is_empty();
-            let next = if done {
-                None
-            } else {
-                is_fallback = true;
-                rest.next()
-            };
-            if !done && next.is_some() {
-                is_fallback = false;
-            }
-            entries.push((
-                match next {
-                    Some(next) => std::mem::replace(&mut current, next),
-                    None => std::mem::replace(&mut current, returning::empty_section()),
-                },
-                chunk,
-            ));
-            if done {
-                return Ok(entries);
-            }
+            entries.push((section, chunk));
         }
+        Ok(entries)
+    }
+    /// Take the leading calls that still fit `section` as one entry.
+    fn fitting_calls(section: &Section, remaining: &mut &[HostRpc]) -> Vec<HostRpc> {
+        let mut chunk: Vec<HostRpc> = Vec::new();
+        while let Some((call, tail)) = remaining.split_first() {
+            if chunk.len() >= 15 {
+                break;
+            }
+            chunk.push(*call);
+            if !entry_admitted(section, &chunk) {
+                chunk.pop();
+                break;
+            }
+            *remaining = tail;
+        }
+        chunk
     }
     pub(super) fn advance_prologue(&mut self) -> Result<(), replication::Error> {
         self.advance_story_movies()?;

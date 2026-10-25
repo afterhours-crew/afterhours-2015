@@ -1452,7 +1452,85 @@ fn garage_completion_entries_split_to_frame_size_and_carry_every_call() {
     let mut host = crate::net::players::test_wire::session_host();
     crate::net::players::test_wire::flush(&mut listener, &mut host).unwrap();
     assert!(listener.pending_entries.is_empty());
+    assert!(queued > 1, "the records span several entries");
     assert_eq!(host.replication_progress(), (0, queued));
+}
+
+/// Every input record, deletion and call leaves in exactly one entry, in
+/// input order, whatever the ratio of calls to sections (the split once
+/// returned when the calls ran out and dropped the record sections after the
+/// last call).
+#[test]
+fn garage_completion_entries_keep_every_record_and_call_once_in_order() {
+    let record = |id: u16| replication::Record {
+        id,
+        initial: Some(replication::Initial::Actor(replication::ActorInit {
+            participant: 7,
+            flag_a: true,
+            flag_b: true,
+            word_a: 4,
+            word_b: 65535,
+        })),
+        update: replication::Update::Actor(replication::ActorUpdate::default()),
+    };
+    let call = |i: u16| {
+        HostRpc::Participant(nfs_world::participants::Notification {
+            endpoint: Endpoint {
+                scene: 2,
+                selector: i,
+                serial: Serial::new(1).unwrap(),
+            },
+            participant: 7,
+            call: nfs_world::participants::Call::Enter,
+        })
+    };
+    let selector = |c: &HostRpc| match c {
+        HostRpc::Participant(n) => n.endpoint.selector,
+        _ => unreachable!(),
+    };
+    for records in [0u16, 1, 219, 220, 600] {
+        for calls in [0u16, 1, 15, 16, 40] {
+            for deletions in [0u16, 2] {
+                let ids = (1..=records).collect::<Vec<_>>();
+                let deleted = (1000..1000 + deletions).collect::<Vec<_>>();
+                let entries = PlayerListener::garage_entries(
+                    ids.iter().copied().map(record).collect(),
+                    deleted.clone(),
+                    (0..calls).map(call).collect(),
+                )
+                .unwrap();
+                let shape = format!("{records} records, {calls} calls, {deletions} deletions");
+                let out_ids = entries
+                    .iter()
+                    .flat_map(|(s, _)| s.records.iter().map(|r| r.id))
+                    .collect::<Vec<_>>();
+                assert_eq!(out_ids, ids, "{shape}: records lost, repeated or reordered");
+                let out_calls = entries
+                    .iter()
+                    .flat_map(|(_, c)| c.iter().map(selector))
+                    .collect::<Vec<_>>();
+                assert_eq!(out_calls, (0..calls).collect::<Vec<_>>(), "{shape}: calls");
+                let out_deleted = entries
+                    .iter()
+                    .flat_map(|(s, _)| s.deleted.iter().copied())
+                    .collect::<Vec<_>>();
+                assert_eq!(out_deleted, deleted, "{shape}: deletions");
+                if let Some((first, _)) = entries.first() {
+                    assert_eq!(
+                        first.deleted, deleted,
+                        "{shape}: deletions ride the first entry"
+                    );
+                }
+                for (index, (section, chunk)) in entries.iter().enumerate() {
+                    assert!(chunk.len() <= 15, "{shape}: entry {index} reply bound");
+                    assert!(
+                        crate::net::players::entry_admitted(section, chunk),
+                        "{shape}: entry {index} is not admitted"
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// An entry the session does not admit stops the world loudly instead of
