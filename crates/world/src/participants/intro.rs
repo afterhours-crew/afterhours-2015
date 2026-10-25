@@ -13,6 +13,7 @@ use super::*;
 pub enum Chapter {
     FirstDrive,
     FirstRace,
+    SecondRace,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -26,6 +27,7 @@ pub struct Bindings {
     pub opening: Endpoint,
     pub alive: Endpoint,
     pub pending_items: Endpoint,
+    pub relocating: Endpoint,
 }
 impl Bindings {
     pub fn from_records(records: &[Record], startup_key: u32) -> Result<Option<Self>, Error> {
@@ -64,6 +66,7 @@ impl Bindings {
             opening: endpoint(79)?,
             alive: endpoint(2)?,
             pending_items: endpoint(94)?,
+            relocating: endpoint(85)?,
         }))
     }
 }
@@ -78,6 +81,54 @@ fn notifications(participant: u16, chain: &[(Endpoint, Call)]) -> Vec<Notificati
         .collect()
 }
 impl Lifecycle {
+    /// The story owner validated the completed movie, retired previous mode
+    /// and existing selected car. This path retains that car during relocation.
+    pub fn intro_second_race_begin(&mut self, participant: u16) -> Outcome {
+        let Some(i) = self.intro else {
+            return Outcome::Unsupported;
+        };
+        if self.intro_started.get(&participant) == Some(&Chapter::SecondRace) {
+            return Outcome::Repeated;
+        }
+        if self.intro_started.get(&participant) != Some(&Chapter::FirstRace)
+            || self.stages.get(&participant) != Some(&Stage::FreeRoam)
+        {
+            return Outcome::Unsupported;
+        }
+        self.intro_started.insert(participant, Chapter::SecondRace);
+        self.stages.insert(participant, Stage::IntroRelocating);
+        Outcome::Advanced(notifications(
+            participant,
+            &[(i.alive, Call::Leave), (i.relocating, Call::Enter)],
+        ))
+    }
+    /// The installed leave-world provider has no selected sequence. Native
+    /// StateSequence completes immediately on a null provider result.
+    pub fn intro_relocation_ready(&mut self, participant: u16) -> Outcome {
+        let Some(i) = self.intro else {
+            return Outcome::Unsupported;
+        };
+        if self.intro_started.get(&participant) != Some(&Chapter::SecondRace) {
+            return Outcome::Unsupported;
+        }
+        match self.stages.get_mut(&participant) {
+            Some(stage @ Stage::IntroRelocating) => {
+                *stage = Stage::IntroTeleporting;
+                Outcome::Advanced(notifications(
+                    participant,
+                    &[(i.relocating, Call::Leave), (i.teleport, Call::Enter)],
+                ))
+            }
+            Some(
+                Stage::IntroTeleporting
+                | Stage::IntroRendering
+                | Stage::IntroOpening
+                | Stage::IntroStartingDrive
+                | Stage::FreeRoam,
+            ) => Outcome::Repeated,
+            _ => Outcome::Unsupported,
+        }
+    }
     /// The story owner has verified the durable movie objective is active.
     /// Suspend driving presentation while its native sequence/movie gates run.
     pub fn intro_movie_begin(&mut self, participant: u16) -> Outcome {

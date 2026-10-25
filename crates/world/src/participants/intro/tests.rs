@@ -21,6 +21,7 @@ fn bindings() -> Bindings {
         opening: endpoint(78),
         alive: endpoint(1),
         pending_items: endpoint(93),
+        relocating: endpoint(84),
     }
 }
 fn ready() -> Lifecycle {
@@ -58,6 +59,42 @@ fn movie_suspends_only_its_story_participant_until_owned_completion() {
     assert_eq!(model.stage(9), Some(Stage::Progressing));
     assert_eq!(calls(model.intro_movie_complete(8)), vec![(1, Call::Enter)]);
     assert_eq!(model.intro_movie_complete(8), Outcome::Repeated);
+}
+#[test]
+fn second_race_uses_in_world_relocation_and_native_readiness_without_respawn() {
+    let mut model = ready();
+    assert_eq!(model.intro_second_race_begin(8), Outcome::Unsupported);
+    model.intro_started.insert(8, Chapter::FirstRace);
+    model.stages.insert(8, Stage::IntroMovie);
+    assert_eq!(model.intro_second_race_begin(8), Outcome::Unsupported);
+    model.intro_movie_complete(8);
+    assert_eq!(
+        calls(model.intro_second_race_begin(8)),
+        vec![(1, Call::Leave), (84, Call::Enter)]
+    );
+    assert_eq!(model.intro_second_race_begin(8), Outcome::Repeated);
+    assert_eq!(model.intro_chapter(8), Some(Chapter::SecondRace));
+    assert_eq!(model.intro_relocation_ready(9), Outcome::Unsupported);
+    assert_eq!(
+        calls(model.intro_relocation_ready(8)),
+        vec![(84, Call::Leave), (76, Call::Enter)]
+    );
+    assert_eq!(model.intro_relocation_ready(8), Outcome::Repeated);
+    assert!(
+        model
+            .receive_intro(request(8, 80, 0, 0).span(), |_| true)
+            .is_err()
+    );
+    model
+        .receive_intro(request(8, 76, 3, 0).span(), |_| true)
+        .unwrap();
+    model
+        .receive_intro(request(8, 80, 0, 0).span(), |_| true)
+        .unwrap();
+    assert_eq!(model.stage(8), Some(Stage::IntroOpening));
+    model.intro_opening_complete(8);
+    assert_eq!(calls(model.intro_drive_ready(8)), vec![(1, Call::Enter)]);
+    assert_eq!(model.stage(9), Some(Stage::Progressing));
 }
 fn request(participant: u16, selector: u16, method: u32, tail: u8) -> BitWriter {
     let mut payload = BitWriter::new();

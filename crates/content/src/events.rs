@@ -37,7 +37,7 @@ pub mod restart;
 mod rewards;
 mod route;
 mod sequence;
-mod spatial;
+pub(crate) mod spatial;
 mod standings;
 mod values;
 use values::{Evaluator, Number, name};

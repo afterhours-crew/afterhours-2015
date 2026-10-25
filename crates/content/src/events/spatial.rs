@@ -20,9 +20,9 @@ fn vector(v: &Value) -> Result<[f32; 3], Error> {
     Ok(out)
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) struct Transform {
-    pub(super) basis: [[f32; 3]; 3],
-    pub(super) position: [f32; 3],
+pub(crate) struct Transform {
+    pub(crate) basis: [[f32; 3]; 3],
+    pub(crate) position: [f32; 3],
 }
 impl Transform {
     fn read(v: &Value) -> Result<Self, Error> {
@@ -75,7 +75,7 @@ impl Transform {
     }
 }
 
-pub(super) fn location<S: Source>(g: &mut Graph<S>, site: &Site) -> Result<Transform, Error> {
+pub(crate) fn location<S: Source>(g: &mut Graph<S>, site: &Site) -> Result<Transform, Error> {
     let o = g.object(site)?;
     let mut value = Transform::read(
         o.fields

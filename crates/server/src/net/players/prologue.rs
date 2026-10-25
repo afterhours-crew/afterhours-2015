@@ -80,6 +80,7 @@ impl PlayerListener {
         let mut messages = Vec::new();
         let mut calls = Vec::new();
         let mut deleted = Vec::new();
+        let mut teleports = Vec::new();
         {
             for (active, _, chapter) in modes.values_mut() {
                 let out = active.advance(content.mode(*chapter)?, &mut players, seconds)?;
@@ -103,6 +104,64 @@ impl PlayerListener {
             }
             let chapter = participants.intro_chapter(participant);
             match self.participants.stage(participant) {
+                Some(Stage::FreeRoam)
+                    if chapter == Some(Chapter::FirstRace)
+                        && content.second_race.is_some()
+                        && self
+                            .intro_movies
+                            .get(&participant)
+                            .is_some_and(|m| m.phase() == nfs_world::fmv::Phase::Finished)
+                        && modes.get(&participant).is_some_and(|m| m.0.has_left())
+                        && self.pending.is_empty()
+                        && self.pending_rpcs.is_empty() =>
+                {
+                    opening.retire_completed(&players, owner)?;
+                    let Outcome::Advanced(chain) =
+                        participants.intro_second_race_begin(participant)
+                    else {
+                        return Err(replication::Error::Shape);
+                    };
+                    calls.extend(chain.into_iter().map(HostRpc::Participant));
+                }
+                Some(Stage::IntroRelocating)
+                    if self.pending.is_empty() && self.pending_rpcs.is_empty() =>
+                {
+                    let item = self
+                        .inventory
+                        .as_ref()
+                        .and_then(|i| i.slots.values()[0])
+                        .ok_or(replication::Error::UnknownObject)?;
+                    let vehicle = players
+                        .owned_vehicle(owner.connection, owner.persona, participant, item)
+                        .ok_or(replication::Error::UnknownObject)?;
+                    if cars.get(&vehicle) != Some(&(participant, true)) {
+                        return Err(replication::Error::Shape);
+                    }
+                    let pose = content
+                        .second_race
+                        .as_ref()
+                        .ok_or(replication::Error::Unsupported)?
+                        .destination
+                        .teleport;
+                    let command = Command {
+                        endpoint: participants
+                            .intro_bindings()
+                            .ok_or(replication::Error::Shape)?
+                            .teleport,
+                        participant,
+                        vehicle,
+                        position: pose.position,
+                        basis: pose.basis,
+                        speed: 0.,
+                    };
+                    command.encode()?;
+                    let Outcome::Advanced(chain) = participants.intro_relocation_ready(participant)
+                    else {
+                        return Err(replication::Error::Shape);
+                    };
+                    calls.extend(chain.into_iter().map(HostRpc::Participant));
+                    teleports.push((self.world_ms, command));
+                }
                 Some(Stage::IntroSpawning) if !cars.values().any(|(p, _)| *p == participant) => {
                     if cars.len() >= MAX_WORLD_CARS {
                         return Err(replication::Error::Bound);
@@ -151,7 +210,7 @@ impl PlayerListener {
                 Some(Stage::IntroOpening) => {
                     let chapter = chapter.ok_or(replication::Error::Shape)?;
                     let arrival = content.arrival(chapter)?;
-                    let record = if chapter == Chapter::FirstRace {
+                    let record = if chapter != Chapter::FirstDrive {
                         opening.start_stopped(arrival, &mut players, owner)?
                     } else {
                         opening.start(arrival, &mut players, owner)?
@@ -343,6 +402,7 @@ impl PlayerListener {
             });
         }
         if sections.len() > MAX_PENDING.saturating_sub(self.pending.len())
+            || teleports.len() > MAX_PENDING.saturating_sub(self.pending_teleports.len())
             || messages.len() > MAX_PENDING.saturating_sub(self.pending_content.len())
             || calls.len()
                 > nfs_world::session::MAX_RPC_QUEUE.saturating_sub(self.pending_rpcs.len())
@@ -366,6 +426,7 @@ impl PlayerListener {
         self.pending.extend(sections);
         self.pending_content.extend(messages);
         self.pending_rpcs.extend(calls);
+        self.pending_teleports.extend(teleports);
         Ok(())
     }
     pub(super) fn driving_signal(
@@ -469,7 +530,7 @@ impl PlayerListener {
         };
         let definition = match chapter {
             Chapter::FirstDrive => content.start.vehicle_item,
-            Chapter::FirstRace => {
+            Chapter::FirstRace | Chapter::SecondRace => {
                 let inventory = inventory.ok_or(replication::Error::Unsupported)?;
                 let item = inventory.slots.values()[0].ok_or(replication::Error::UnknownObject)?;
                 inventory
@@ -521,6 +582,14 @@ impl PlayerListener {
             Chapter::FirstRace => {
                 content
                     .first_race
+                    .as_ref()
+                    .ok_or(replication::Error::Unsupported)?
+                    .destination
+                    .teleport
+            }
+            Chapter::SecondRace => {
+                content
+                    .second_race
                     .as_ref()
                     .ok_or(replication::Error::Unsupported)?
                     .destination

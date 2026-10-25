@@ -11,6 +11,7 @@ use crate::{
 };
 use nfs_frostbite::ebx::Value;
 use serde_json::{Value as Json, json};
+mod arrival;
 pub mod movies;
 pub mod sequences;
 
@@ -131,39 +132,12 @@ fn exported<S: Source>(
         .filter(|g| *g != [0; 16])
         .ok_or_else(|| bad("export GUID"))
 }
-fn pose(o: &nfs_frostbite::ebx::Object) -> Result<Pose, Error> {
-    let t = o
-        .fields
-        .get("Transform")
-        .and_then(Value::as_fields)
-        .ok_or_else(|| bad("locator transform"))?;
-    let vector = |name: &str| -> Result<[f32; 3], Error> {
-        let v = t
-            .get(name)
-            .and_then(Value::as_fields)
-            .ok_or_else(|| bad("transform axis"))?;
-        let mut values = [0.; 3];
-        for (i, c) in ["x", "y", "z"].into_iter().enumerate() {
-            values[i] = match v.get(c) {
-                Some(Value::Float32(n)) if n.is_finite() && n.abs() <= 1_000_000. => *n,
-                _ => return Err(bad("transform value")),
-            };
-        }
-        Ok(values)
-    };
-    let p = Pose {
-        position: vector("trans")?,
-        basis: [vector("right")?, vector("up")?, vector("forward")?],
-    };
-    nfs_world::replication::vehicle::orientation::quaternion_from_basis(p.basis)
-        .map_err(|_| bad("locator basis"))?;
-    Ok(p)
-}
 fn read_destination<S: Source>(
     graph: &mut Graph<S>,
     links: &Links,
     progression: &crate::progression::Rules,
     scene: Site,
+    conditional: bool,
 ) -> Result<(Destination, Vec<Node>), Error> {
     Links::from_json(&links.to_json())?;
     let progression = crate::progression::Rules::from_json(&progression.to_json())?;
@@ -187,8 +161,15 @@ fn read_destination<S: Source>(
         .filter(|n| n.site.bus == first.bus && n.site.parents == first.parents)
         .cloned()
         .collect::<Vec<_>>();
-    let referer = unique(&nodes, "StateSequenceRefererEntityData")?;
-    let sequence = graph.target_field(referer, "Sequence")?;
+    let (referer, setter) = if conditional {
+        arrival::before_launcher(graph, &nodes)?
+    } else {
+        (
+            unique(&nodes, "StateSequenceRefererEntityData")?.clone(),
+            unique(&nodes, "SetTeleportLocationEntityData")?.clone(),
+        )
+    };
+    let sequence = graph.target_field(&referer, "Sequence")?;
     let opening_guid = exported(graph, &sequence, "ParticipantStateSequenceBlueprint")?;
     let stable = endpoint(
         graph,
@@ -227,10 +208,7 @@ fn read_destination<S: Source>(
     )?;
     let targets = graph.links(&spawners[0], progression.ports["spawner_channels"])?;
     let bindings = crate::participant_logic::bind(graph, &branch, refs, targets)?;
-    let mut channel = graph.links(
-        unique(&nodes, "SetTeleportLocationEntityData")?,
-        links.teleport_location,
-    )?;
+    let mut channel = graph.links(&setter, links.teleport_location)?;
     if channel.len() != 1 {
         return Err(bad("teleport channel"));
     }
@@ -245,13 +223,17 @@ fn read_destination<S: Source>(
         links.teleport_locator,
         "LocatorEntityData",
     )?;
+    let pose = crate::events::spatial::location(graph, &locator)?;
     Ok((
         Destination {
             objective,
             opening_blueprint: sequence.0,
             opening_guid,
-            teleport: pose(&graph.object(&locator)?)?,
-            reference: crate::scoring::events::Identity::from(referer),
+            teleport: Pose {
+                position: pose.position,
+                basis: pose.basis,
+            },
+            reference: crate::scoring::events::Identity::from(&referer),
         },
         nodes,
     ))
@@ -263,7 +245,7 @@ fn read<S: Source>(
     progression: &crate::progression::Rules,
     scene: Site,
 ) -> Result<Start, Error> {
-    let (destination, nodes) = read_destination(graph, links, progression, scene)?;
+    let (destination, nodes) = read_destination(graph, links, progression, scene, false)?;
     let item = endpoint(
         graph,
         unique(&nodes, "ItemSelectorEntityData")?,
@@ -299,6 +281,21 @@ pub fn extract(index: &mut AssetIndex) -> Result<Start, Error> {
 /// Read a selected capability through its occurrence in the intro participant
 /// and that participant's bound scene, including the exact arrival referer.
 pub fn destination(index: &mut AssetIndex, capability: &str) -> Result<Destination, Error> {
+    destination_path(index, capability, false)
+}
+/// Resolve the not-yet-arrived branch of a Boolean-gated story launcher.
+/// The caller owns the latch and must run this arrival before starting its mode.
+pub fn destination_before_launcher(
+    index: &mut AssetIndex,
+    capability: &str,
+) -> Result<Destination, Error> {
+    destination_path(index, capability, true)
+}
+fn destination_path(
+    index: &mut AssetIndex,
+    capability: &str,
+    conditional: bool,
+) -> Result<Destination, Error> {
     let mut links = index.identity.prologue_links.clone();
     links.first_drive = capability.into();
     Links::from_json(&links.to_json())?;
@@ -311,7 +308,7 @@ pub fn destination(index: &mut AssetIndex, capability: &str) -> Result<Destinati
         .get(&progression.scene)
         .ok_or_else(|| bad("progression scene is not loaded"))?
         .clone();
-    Ok(read_destination(&mut graph, &links, &progression, root)?.0)
+    Ok(read_destination(&mut graph, &links, &progression, root, conditional)?.0)
 }
 
 #[cfg(test)]

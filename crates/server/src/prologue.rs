@@ -35,6 +35,7 @@ pub struct Content {
     pub selection: Option<Authored>,
     pub selection_program: Option<Arc<nfs_content::prologue::sequences::program::Definition>>,
     pub first_race: Option<Race>,
+    pub second_race: Option<Race>,
     pub manu_movie: Option<movies::Content>,
     items: Arc<Collection>,
 }
@@ -43,6 +44,45 @@ pub struct Race {
     pub destination: nfs_content::prologue::Destination,
     pub arrival: Authored,
     pub mode: driving::Mode,
+}
+impl Race {
+    fn prepare(
+        index: &mut AssetIndex,
+        parent: Asset,
+        capability: &str,
+        conditional: bool,
+    ) -> Result<Self, nfs_content::Error> {
+        let destination = if conditional {
+            nfs_content::prologue::destination_before_launcher(index, capability)?
+        } else {
+            nfs_content::prologue::destination(index, capability)?
+        };
+        if sequences::timing::extract(index, &destination.opening_blueprint)? != Some(0.) {
+            return Err(nfs_content::Error::Content(
+                "intro race arrival timing".into(),
+            ));
+        }
+        let arrival = Authored::new(
+            sequences::extract_referenced(
+                index,
+                &destination.opening_blueprint,
+                &destination.reference,
+            )?,
+            parent,
+            vec![],
+        )
+        .map_err(|e| nfs_content::Error::Content(format!("race arrival: {e:?}")))?;
+        Ok(Self {
+            destination,
+            arrival,
+            mode: driving::Mode::prepare_from(
+                index,
+                parent,
+                "gameplay/progression/intro/introracegamemode",
+                Some(capability),
+            )?,
+        })
+    }
 }
 impl Content {
     /// Resolve the authored story grid using the same prepared vehicle/item
@@ -53,20 +93,30 @@ impl Content {
         vehicles: crate::vehicle_content::Content,
         items: &nfs_services::item_content::ItemContent,
     ) -> Result<Self, nfs_content::Error> {
-        let race = self
-            .first_race
-            .as_mut()
-            .ok_or_else(|| nfs_content::Error::Content("first race missing".into()))?;
-        let roster = nfs_content::events::intro::roster(
-            index,
-            &race.mode.data.game_mode.layout.blueprint,
-            "gameplay/progression/intro/introracespikeandamy",
-        )?;
-        race.mode = race
-            .mode
-            .clone()
-            .with_opponents(roster, vehicles, items)
-            .map_err(|e| nfs_content::Error::Content(format!("intro opponents: {e:?}")))?;
+        for (race, capability) in [
+            (
+                &mut self.first_race,
+                "gameplay/progression/intro/introracespikeandamy",
+            ),
+            (
+                &mut self.second_race,
+                "gameplay/progression/intro/intromeetandracemanu",
+            ),
+        ] {
+            let race = race
+                .as_mut()
+                .ok_or_else(|| nfs_content::Error::Content("intro race missing".into()))?;
+            let roster = nfs_content::events::intro::roster(
+                index,
+                &race.mode.data.game_mode.layout.blueprint,
+                capability,
+            )?;
+            race.mode = race
+                .mode
+                .clone()
+                .with_opponents(roster, vehicles.clone(), items)
+                .map_err(|e| nfs_content::Error::Content(format!("intro opponents: {e:?}")))?;
+        }
         Ok(self)
     }
     pub fn mode(
@@ -77,6 +127,7 @@ impl Content {
         match chapter {
             Chapter::FirstDrive => self.driving.as_ref().map(|pair| &pair.0),
             Chapter::FirstRace => self.first_race.as_ref().map(|race| &race.mode),
+            Chapter::SecondRace => self.second_race.as_ref().map(|race| &race.mode),
         }
         .ok_or(Error::Unsupported)
     }
@@ -89,6 +140,11 @@ impl Content {
             Chapter::FirstDrive => Ok(&self.opening),
             Chapter::FirstRace => self
                 .first_race
+                .as_ref()
+                .map(|race| &race.arrival)
+                .ok_or(Error::Unsupported),
+            Chapter::SecondRace => self
+                .second_race
                 .as_ref()
                 .map(|race| &race.arrival)
                 .ok_or(Error::Unsupported),
@@ -146,6 +202,7 @@ impl Content {
             selection: None,
             selection_program: None,
             first_race: None,
+            second_race: None,
             manu_movie: None,
         }
     }
@@ -174,34 +231,13 @@ impl Content {
         let loading = loading::Loading::prepare(index)?;
         let selection_program = nfs_content::prologue::sequences::program::extract(index, name)?;
         let capability = "gameplay/progression/intro/introracespikeandamy";
-        let destination = nfs_content::prologue::destination(index, capability)?;
-        // This arrival has a direct Started -> Stop connection. A different
-        // authored clock requires an explicit owned timer before it can run.
-        if sequences::timing::extract(index, &destination.opening_blueprint)? != Some(0.) {
-            return Err(nfs_content::Error::Content(
-                "first race arrival timing".into(),
-            ));
-        }
-        let arrival = Authored::new(
-            sequences::extract_referenced(
-                index,
-                &destination.opening_blueprint,
-                &destination.reference,
-            )?,
+        let first_race = Some(Race::prepare(index, parent, capability, false)?);
+        let second_race = Some(Race::prepare(
+            index,
             parent,
-            vec![],
-        )
-        .map_err(|e| nfs_content::Error::Content(format!("race arrival: {e:?}")))?;
-        let first_race = Some(Race {
-            destination,
-            arrival,
-            mode: driving::Mode::prepare_from(
-                index,
-                parent,
-                "gameplay/progression/intro/introracegamemode",
-                Some(capability),
-            )?,
-        });
+            "gameplay/progression/intro/intromeetandracemanu",
+            true,
+        )?);
         let manu_movie = Some(movies::Content::prepare(
             index,
             parent,
@@ -242,6 +278,7 @@ impl Content {
             selection: Some(selection),
             selection_program: Some(Arc::new(selection_program)),
             first_race,
+            second_race,
             manu_movie,
             items: Arc::new(built.collection),
             previews: Some(Arc::new(PreviewCars {

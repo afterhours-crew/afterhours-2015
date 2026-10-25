@@ -171,8 +171,14 @@ fn run(m: &mut Memory, links: &Links, rules: &crate::progression::Rules) -> Resu
 fn destination_preserves_the_declaring_occurrence_without_reading_an_inventory_item() {
     let (mut m, links, rules) = fixture();
     m.0.remove(&("d".into(), 0));
-    let (destination, _) =
-        read_destination(&mut Graph::new(&mut m), &links, &rules, Site::root("c")).unwrap();
+    let (destination, _) = read_destination(
+        &mut Graph::new(&mut m),
+        &links,
+        &rules,
+        Site::root("c"),
+        false,
+    )
+    .unwrap();
     assert_eq!(destination.objective, 9_007_199_254_740_993);
     assert_eq!(destination.teleport.position, [1., 2., 3.]);
     assert_eq!(destination.reference.asset, "b");
@@ -276,6 +282,42 @@ fn malformed_locator_and_channel_bindings_are_rejected() {
         }
         assert!(run(&mut m, &links, &rules).is_err());
     }
+}
+
+#[test]
+fn destination_applies_the_selected_scene_occurrences_parent_transform() {
+    let (mut m, links, rules) = fixture();
+    let mut parent = transform([100., 20., -50.]);
+    let Value::Struct(fields) = &mut parent else {
+        panic!()
+    };
+    for (index, axis) in [(0, [0., 0., -1.]), (2, [1., 0., 0.])] {
+        let Value::Struct(values) = &mut fields.0[index].1 else {
+            panic!()
+        };
+        for (field, value) in values.0.iter_mut().zip(axis) {
+            field.1 = Value::Float32(value);
+        }
+    }
+    m.put(
+        "h",
+        1,
+        "SpatialPrefabReferenceObjectData",
+        &[("Blueprint", ptr("c", 0)), ("BlueprintTransform", parent)],
+    );
+    let mut scene = Site::root("c");
+    scene.parents.push(crate::graph::Frame {
+        bus: ("h".into(), 0),
+        reference: ("h".into(), 1),
+    });
+    let start = read(&mut Graph::new(&mut m), &links, &rules, scene.clone()).unwrap();
+    assert_eq!(start.teleport.position, [103., 22., -51.]);
+    assert_eq!(
+        start.teleport.basis,
+        [[0., 0., -1.], [0., 1., 0.], [1., 0., 0.]]
+    );
+    *field(&mut m, "h", 1, "BlueprintTransform") = transform([f32::NAN, 0., 0.]);
+    assert!(read(&mut Graph::new(&mut m), &links, &rules, scene).is_err());
 }
 
 #[test]
