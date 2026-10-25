@@ -939,6 +939,32 @@ pub(super) fn ready_for_selection(
         .unwrap()
         .ghost(participant)
         .unwrap();
+    // The cinematic Actor takes its scripted-control flag before the spline
+    // goal is assigned (E1186 review; official career start 289.819 ms).
+    let actor = listener
+        .players
+        .owned_actor(HOST_SELECTOR as u8, listener.persona, participant)
+        .unwrap();
+    let flat: Vec<&replication::Record> = listener
+        .pending_entries
+        .iter()
+        .flat_map(|(section, _)| section.records.iter())
+        .collect();
+    let flag = flat
+        .iter()
+        .position(|r| {
+            r.id == actor
+                && matches!(&r.update, replication::Update::Actor(a) if a.flag_a == Some(true))
+        })
+        .unwrap_or_else(|| panic!("no scripted-control flag record for actor {actor}"));
+    let goal = flat
+        .iter()
+        .position(|r| matches!(r.initial, Some(replication::Initial::ScriptedSplineGoal(_))))
+        .expect("a spline goal record");
+    assert!(
+        flag < goal,
+        "the scripted-control flag precedes the spline goal"
+    );
     let before_previews = listener.players.objects().snapshot();
     // The entry notification is an ordering barrier for later preview cars.
     tick_with_normal_presentation(&mut listener).unwrap();
@@ -1320,4 +1346,102 @@ fn selected_car_reuses_native_startup_and_waits_for_previous_mode_retirement() {
             *inventory.items
         );
     });
+}
+
+#[test]
+fn garage_completion_entries_split_to_frame_size_and_carry_every_call() {
+    // E1186: the intro garage-entry completion packed every record into one
+    // exit entry; with installed content it exceeded OUTBOUND_FRAME_BITS and
+    // the exit-entry check then refused the client's resent completion
+    // forever. The entries must split, keep the deletion on the first section
+    // and carry every call within the frame and reply-group bounds.
+    let record = |id: u16| replication::Record {
+        id,
+        initial: Some(replication::Initial::Actor(replication::ActorInit {
+            participant: 7,
+            flag_a: true,
+            flag_b: true,
+            word_a: 4,
+            word_b: 65535,
+        })),
+        update: replication::Update::Actor(replication::ActorUpdate::default()),
+    };
+    let call = |i: u16| {
+        HostRpc::Participant(nfs_world::participants::Notification {
+            endpoint: Endpoint {
+                scene: 2,
+                selector: i,
+                serial: Serial::new(1).unwrap(),
+            },
+            participant: 7,
+            call: nfs_world::participants::Call::Enter,
+        })
+    };
+    let fits = |section: &Section, calls: &[HostRpc]| {
+        nfs_world::session::replication_frame(section, calls, 0)
+            .unwrap()
+            .len()
+            <= nfs_world::application::OUTBOUND_FRAME_BITS
+    };
+    // Empty output produces no entries at all.
+    assert!(
+        PlayerListener::garage_entries(Vec::new(), Vec::new(), Vec::new())
+            .unwrap()
+            .is_empty()
+    );
+    // Deletions without records ride one entry on their own.
+    let entries = PlayerListener::garage_entries(Vec::new(), vec![9, 10], Vec::new()).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].0.deleted, [9, 10]);
+    assert!(entries[0].0.records.is_empty());
+    assert!(entries[0].1.is_empty());
+    // Small output keeps the single-entry wire shape of the old code.
+    let entries =
+        PlayerListener::garage_entries(vec![record(1), record(2)], vec![5], vec![call(3)]).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].0.setup, Some(Setup::RawEscape([0; 3])));
+    assert_eq!(entries[0].0.deleted, [5]);
+    assert_eq!(entries[0].0.records.len(), 2);
+    assert_eq!(entries[0].1.len(), 1);
+    assert!(fits(&entries[0].0, &entries[0].1));
+    // Deployment-sized output splits; nothing is lost or reordered.
+    let records = (1..=600u16).map(record).collect::<Vec<_>>();
+    let calls = (0..40u16).map(call).collect::<Vec<_>>();
+    let deleted = (1000..1030u16).collect::<Vec<_>>();
+    let entries =
+        PlayerListener::garage_entries(records.clone(), deleted.clone(), calls.clone()).unwrap();
+    assert!(entries.len() > 1, "the deployment-sized output must split");
+    let mut seen_records = Vec::new();
+    let mut seen_calls = Vec::new();
+    for (index, (section, chunk)) in entries.iter().enumerate() {
+        assert!(fits(section, chunk), "entry {index} must fit one frame");
+        assert!(
+            chunk.len() <= 15,
+            "entry {index} must respect the reply bound"
+        );
+        assert_eq!(
+            section.deleted,
+            if index == 0 { deleted.as_slice() } else { &[] }
+        );
+        seen_records.extend(section.records.iter().map(|r| r.id));
+        seen_calls.extend(chunk.iter().copied());
+    }
+    assert_eq!(seen_records, (1..=600u16).collect::<Vec<_>>());
+    assert_eq!(
+        seen_calls
+            .iter()
+            .map(|c| match c {
+                HostRpc::Participant(n) => n.endpoint.selector,
+                _ => unreachable!(),
+            })
+            .collect::<Vec<_>>(),
+        (0..40u16).collect::<Vec<_>>()
+    );
+    let sections = entries.len();
+    assert!(
+        entries[..sections - 1]
+            .iter()
+            .any(|(s, _)| !s.records.is_empty()),
+        "records precede any call-only fallback entry"
+    );
 }

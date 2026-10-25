@@ -78,6 +78,87 @@ impl PlayerListener {
         }
         Ok(sections)
     }
+    /// The intro garage-entry completion as wire entries: records split to
+    /// frame size with the deletions on the first section, and the calls
+    /// distributed so every entry fits one outbound frame. E1186 packed the
+    /// whole completion into a single entry; with installed content it
+    /// exceeded `OUTBOUND_FRAME_BITS`, and the exit-entry check then refused
+    /// the client's resent completion forever (black screen after the
+    /// cinematic).
+    pub(super) fn garage_entries(
+        records: Vec<replication::Record>,
+        deleted: Vec<u16>,
+        calls: Vec<HostRpc>,
+    ) -> Result<Vec<Finished>, replication::Error> {
+        // RawEscape setups cost ~100 bits more than the Packed ones the
+        // splitter budgets for; deletions add a flag and a 13-bit id each.
+        let budget = (nfs_world::application::OUTBOUND_FRAME_BITS - 110)
+            .checked_sub(14 * deleted.len())
+            .ok_or(replication::Error::Bound)?;
+        let mut sections = split_scenes(records, budget)?;
+        for section in &mut sections {
+            section.setup = Some(Setup::RawEscape([0; 3]));
+        }
+        if sections.is_empty() && (!deleted.is_empty() || !calls.is_empty()) {
+            sections.push(returning::empty_section());
+        }
+        if let Some(first) = sections.first_mut() {
+            first.deleted = deleted;
+        }
+        let Some(first) = sections.first() else {
+            return Ok(Vec::new());
+        };
+        let fits = |section: &Section, chunk: &[HostRpc]| {
+            nfs_world::session::replication_frame(section, chunk, 0)
+                .is_ok_and(|wire| wire.len() <= nfs_world::application::OUTBOUND_FRAME_BITS)
+        };
+        debug_assert!(fits(first, &[]), "the split budget must leave headroom");
+        let mut rest = sections.into_iter();
+        let mut current = rest.next().expect("non-empty section");
+        let mut is_fallback = false;
+        let mut remaining = calls.as_slice();
+        let mut entries: Vec<Finished> = Vec::new();
+        loop {
+            // Reply groups carry at most fifteen messages (session bound).
+            let mut chunk: Vec<HostRpc> = Vec::new();
+            while let Some((call, tail)) = remaining.split_first() {
+                if chunk.len() >= 15 {
+                    break;
+                }
+                chunk.push(*call);
+                if fits(&current, &chunk) {
+                    remaining = tail;
+                } else {
+                    chunk.pop();
+                    break;
+                }
+            }
+            if is_fallback && chunk.is_empty() {
+                // Not even one call fits an empty section.
+                return Err(replication::Error::Bound);
+            }
+            let done = remaining.is_empty();
+            let next = if done {
+                None
+            } else {
+                is_fallback = true;
+                rest.next()
+            };
+            if !done && next.is_some() {
+                is_fallback = false;
+            }
+            entries.push((
+                match next {
+                    Some(next) => std::mem::replace(&mut current, next),
+                    None => std::mem::replace(&mut current, returning::empty_section()),
+                },
+                chunk,
+            ));
+            if done {
+                return Ok(entries);
+            }
+        }
+    }
     pub(super) fn advance_prologue(&mut self) -> Result<(), replication::Error> {
         self.advance_story_movies()?;
         let Some(content) = self.prologue.as_deref() else {

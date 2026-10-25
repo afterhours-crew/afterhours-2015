@@ -1922,17 +1922,17 @@ impl Listener for PlayerListener {
                             || !out.output.deleted.is_empty()
                             || !out.output.calls.is_empty()
                         {
-                            exit_entries.push((
-                                Section {
-                                    float_bits: None,
-                                    flag: false,
-                                    setup: (!out.output.records.is_empty())
-                                        .then_some(Setup::RawEscape([0; 3])),
-                                    records: out.output.records,
-                                    deleted: out.output.deleted,
-                                },
+                            // Records split to frame size with the deletions on
+                            // the first section (E1186: one packed entry with
+                            // installed content refused every resent completion).
+                            match Self::garage_entries(
+                                out.output.records,
+                                out.output.deleted,
                                 out.output.calls,
-                            ));
+                            ) {
+                                Ok(entries) => exit_entries.extend(entries),
+                                Err(error) => return self.refuse_rpc(error, body),
+                            }
                         }
                         continue;
                     }

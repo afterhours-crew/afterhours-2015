@@ -143,6 +143,17 @@ impl PlayerListener {
                                 .extend(batch.events.into_iter().map(HostRpc::Event));
                         }
                     }
+                    // The official host's cinematic Actor carries its first
+                    // flag with the scripted goal (career start 289.819 ms:
+                    // a fresh Actor with the flag set; the ordinary arrival
+                    // sets it via `actor_arriving`). Without it the client
+                    // kept the intro car player-owned and the drive-in never
+                    // animated (E1186).
+                    if let Some(record) =
+                        players.actor_arriving(owner.connection, owner.persona, participant)?
+                    {
+                        out.output.records.push(record);
+                    }
                     out.output
                         .records
                         .extend(returns.start_rollout(players, owner)?);
