@@ -493,7 +493,10 @@ impl PlayerListener {
                         },
                     ));
                 }
-                if let Some(logic) = logic.filter(|_| !intro) {
+                // The official career start creates the ordinary participant
+                // presentation logic for the prologue as well (E1183: fade
+                // control 480 and its spawn events at 38118 ms).
+                if let Some(logic) = logic {
                     let ghosts = logic_ghosts.entry(participant).or_default();
                     if !ghosts.is_empty() {
                         return Err(replication::Error::DuplicateObject);
@@ -1411,6 +1414,18 @@ impl Listener for PlayerListener {
                             responses.extend(calls);
                             scheduled_teleports.push((self.world_ms, command));
                             world_cars.insert(target.ghost, (owner.participant, true));
+                            // The official host assigns the intro car its spawn
+                            // point once per assignment lifetime (career start
+                            // 38618 and 563021 ms); its garage-zone report
+                            // during the return cinematic needs it (E1183).
+                            if spawn_points.bindings().is_some()
+                                && spawn_points.assigned(owner.participant).is_none()
+                            {
+                                let value = spawn_points.next_value(owner.participant);
+                                let notification = spawn_points.assign(owner.participant, value)?;
+                                scheduled_spawns
+                                    .push((self.world_ms + SPAWN_DELAY_MS, notification));
+                            }
                         }
                         continue;
                     }
@@ -1787,6 +1802,8 @@ impl Listener for PlayerListener {
                 &mut opening,
                 &mut players,
                 &mut participants,
+                self.logic.as_deref(),
+                &mut logic_ghosts,
                 self.persona,
                 body,
             ) {
@@ -1843,6 +1860,8 @@ impl Listener for PlayerListener {
                     self.inventory.as_ref().zip(self.vehicles.as_deref()).map(
                         |(inventory, content)| prologue::garage::OwnedGarage { inventory, content },
                     ),
+                    self.logic.as_deref(),
+                    &mut logic_ghosts,
                     self.persona,
                     body,
                 ) {
@@ -1850,6 +1869,27 @@ impl Listener for PlayerListener {
                         if let Some((participant, removed)) = out.removed {
                             if world_cars.remove(&removed).is_none() {
                                 return self.refuse_rpc(replication::Error::UnknownObject, body);
+                            }
+                            // The intro keeps its spawn assignment through the
+                            // return cinematic; the garage entry clears it
+                            // (career start 298117 and 1127014 ms).
+                            if spawn_points.assigned(participant).is_some() {
+                                match spawn_points.clear(participant) {
+                                    Ok(Some((notification, flag))) => {
+                                        out.output.calls.push(
+                                            nfs_world::participants::HostRpc::Participant(
+                                                notification,
+                                            ),
+                                        );
+                                        out.output.calls.extend(
+                                            flag.map(
+                                                nfs_world::participants::HostRpc::SpawnOccupied,
+                                            ),
+                                        );
+                                    }
+                                    Ok(None) => {}
+                                    Err(error) => return self.refuse_rpc(error, body),
+                                }
                             }
                             if let Some(crashes) = &mut crashes {
                                 crashes.discard_pending(participant);
@@ -2145,8 +2185,12 @@ impl Listener for PlayerListener {
                     );
                     // First current zone report of a world-car lifetime:
                     // publish spawn presentation and schedule held replies.
+                    // The intro's first zone report comes from its return
+                    // cinematic, not a garage-exit spawn: the official host
+                    // only publishes occupancy there (E1183, 290318 ms).
                     if !report.release
                         && report.current
+                        && participants.intro_chapter(report.participant).is_none()
                         && !spawn_settled.contains(&report.participant)
                         && world_cars.values().any(|(p, _)| *p == report.participant)
                     {
@@ -2662,6 +2706,27 @@ impl Listener for PlayerListener {
                         },
                     });
                 }
+            }
+        }
+        // Presentation events accompany the intro state notifications, so add
+        // them before the queue bounds are checked.
+        {
+            let ctx = prologue::presentation::Context {
+                logic: self.logic.as_deref(),
+                ghosts: &logic_ghosts,
+                players: &players,
+                participants: &participants,
+                content: self.prologue.as_deref(),
+            };
+            responses = match prologue::presentation::present(&ctx, responses) {
+                Ok(calls) => calls,
+                Err(error) => return self.refuse(error),
+            };
+            for (_, calls) in entries.iter_mut() {
+                *calls = match prologue::presentation::present(&ctx, std::mem::take(calls)) {
+                    Ok(calls) => calls,
+                    Err(error) => return self.refuse(error),
+                };
             }
         }
         deferred_sections = output::pack_motion(deferred_sections);

@@ -26,6 +26,7 @@ pub(super) type Modes = BTreeMap<
 pub(super) mod finale;
 pub(super) mod garage;
 pub(super) mod movies;
+pub(super) mod presentation;
 pub(super) mod selection;
 mod story;
 #[cfg(test)]
@@ -571,6 +572,16 @@ impl PlayerListener {
                 deleted,
             });
         }
+        let calls = presentation::present(
+            &presentation::Context {
+                logic: self.logic.as_deref(),
+                ghosts: &self.logic_ghosts,
+                players: &players,
+                participants: &participants,
+                content: Some(content),
+            },
+            calls,
+        )?;
         if sections.len() > MAX_PENDING.saturating_sub(self.pending.len())
             || teleports.len() > MAX_PENDING.saturating_sub(self.pending_teleports.len())
             || messages.len() > MAX_PENDING.saturating_sub(self.pending_content.len())
@@ -876,6 +887,8 @@ impl PlayerListener {
         opening: &mut Instances,
         players: &mut Players,
         participants: &mut Lifecycle,
+        logic: Option<&crate::garage_logic::GarageLogic>,
+        logic_ghosts: &mut BTreeMap<u16, BTreeMap<u16, u16>>,
         persona: u64,
         body: BitSpan<'_>,
     ) -> Result<Option<Option<Finished>>, replication::Error> {
@@ -910,13 +923,30 @@ impl PlayerListener {
         else {
             return Err(replication::Error::Shape);
         };
+        // The first drive's presentation logic (return request, HUD) is
+        // created with the drive, as at the official garage arrival (career
+        // start 914 and 918 precede the first-drive mode 920; E1183).
+        let records = match logic {
+            Some(logic) => {
+                logic
+                    .produce_present(
+                        crate::garage_logic::Which::Arrived,
+                        players,
+                        owner.participant,
+                        logic_ghosts.entry(owner.participant).or_default(),
+                        crate::garage_logic::Part::Creations,
+                    )?
+                    .records
+            }
+            None => Vec::new(),
+        };
         Ok(Some(Some((
             Section {
                 float_bits: None,
                 flag: false,
                 deleted: vec![deleted],
-                setup: None,
-                records: vec![],
+                setup: (!records.is_empty()).then_some(Setup::RawEscape([0; 3])),
+                records,
             },
             calls.into_iter().map(HostRpc::Participant).collect(),
         ))))

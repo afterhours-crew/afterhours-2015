@@ -53,9 +53,12 @@ impl PlayerListener {
         population: Option<&mut Population>,
         sequences: Option<&mut Sequences>,
         owned: Option<OwnedGarage<'_>>,
+        logic: Option<&crate::garage_logic::GarageLogic>,
+        logic_ghosts: &mut BTreeMap<u16, BTreeMap<u16, u16>>,
         persona: u64,
         body: BitSpan<'_>,
     ) -> Result<Option<GarageOutput>, replication::Error> {
+        use crate::garage_logic::{Part, Which};
         if modes.is_empty() {
             return Ok(None);
         }
@@ -120,6 +123,26 @@ impl PlayerListener {
                         participant,
                     };
                     returns.reset(players, owner)?;
+                    // Official order (career start 290017-290127 ms): the
+                    // return-request event, then the return presentation
+                    // replaces the drive's (cinematic logic in, HUD out).
+                    if let Some(logic) = logic {
+                        let ghosts = logic_ghosts.entry(participant).or_default();
+                        for which in [Which::ReturnRequested, Which::Returning] {
+                            let batch = logic.produce_present(
+                                which,
+                                players,
+                                participant,
+                                ghosts,
+                                Part::All,
+                            )?;
+                            out.output.records.extend(batch.records);
+                            out.output.deleted.extend(batch.deleted);
+                            out.output
+                                .calls
+                                .extend(batch.events.into_iter().map(HostRpc::Event));
+                        }
+                    }
                     out.output
                         .records
                         .extend(returns.start_rollout(players, owner)?);
@@ -177,6 +200,18 @@ impl PlayerListener {
         };
         out.output.deleted.push(removed);
         out.removed = Some((participant, removed));
+        // The cinematic logic goes with the return (career start 298018 ms).
+        if let Some(logic) = logic {
+            let ghosts = logic_ghosts.entry(participant).or_default();
+            let batch = logic.produce_present(
+                Which::Returned,
+                players,
+                participant,
+                ghosts,
+                Part::Deletions,
+            )?;
+            out.output.deleted.extend(batch.deleted);
+        }
         let Outcome::Advanced(chain) = participants.returned_to_garage(participant) else {
             return Err(replication::Error::Shape);
         };

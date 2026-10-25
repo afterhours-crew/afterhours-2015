@@ -102,6 +102,27 @@ pub struct Event {
     pub event: u32,
 }
 
+/// FadeControlPresentationBlueprint event that activates ViewWorld (E824).
+pub const VIEW_WORLD: u32 = 0;
+
+fn presentation_fire(
+    players: &Players,
+    ghost: u16,
+    entity: u32,
+    event: u32,
+) -> Result<Fire, replication::Error> {
+    if players.objects().get(ghost).is_none() {
+        return Err(replication::Error::UnknownObject);
+    }
+    let fire = Fire {
+        event,
+        player: None,
+        target: EntityRef { ghost, entity },
+    };
+    fire.encode().map_err(|_| replication::Error::Shape)?;
+    Ok(fire)
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Batch {
     pub scene_updates: Vec<SceneUpdate>,
@@ -1045,6 +1066,113 @@ impl GarageLogic {
         output.deleted = ids;
         Ok(output)
     }
+    /// A batch applied to a prologue participant. The intro reuses the
+    /// ordinary per-participant presentation lifecycle (official career start,
+    /// E1183) but skips the garage entry and exit between its phases, so only
+    /// absent captures are created, present ones deleted, and events fired on
+    /// existing targets. Scene and entity value updates are not applied.
+    pub fn produce_present(
+        &self,
+        which: Which,
+        players: &mut Players,
+        participant: u16,
+        ghosts: &mut BTreeMap<u16, u16>,
+        part: Part,
+    ) -> Result<Output, replication::Error> {
+        if participant == 0 {
+            return Err(replication::Error::Shape);
+        }
+        let batch = self.batch(which);
+        let mut output = Output::default();
+        if part != Part::Deletions {
+            // The intro keeps its spawn logic, so an asset it already holds
+            // (the return cinematic of capture 15 for capture 20) is reused.
+            let held = |asset: &Asset| {
+                ghosts.values().any(|&ghost| {
+                    matches!(
+                        players.objects().get(ghost).map(|o| &o.initial),
+                        Some(replication::Initial::Entity { prefix, .. }) if prefix.asset == *asset
+                    )
+                })
+            };
+            let missing: Vec<&Definition> = batch
+                .entities
+                .iter()
+                .filter(|d| !ghosts.contains_key(&d.capture_id) && !held(&d.asset))
+                .collect();
+            for definition in missing {
+                let creation = self.creation(definition, players, participant, ghosts, None)?;
+                let record = players
+                    .spawn_entities(vec![creation], &self.content)?
+                    .remove(0);
+                ghosts.insert(definition.capture_id, record.id);
+                output.records.push(record);
+            }
+        }
+        if part != Part::Creations {
+            let present: Vec<u16> = batch
+                .delete
+                .iter()
+                .filter(|id| ghosts.contains_key(id))
+                .copied()
+                .collect();
+            let ids: Vec<u16> = present.iter().map(|id| ghosts[id]).collect();
+            if !ids.is_empty() {
+                players.remove_entities(&ids)?;
+            }
+            for id in &present {
+                ghosts.remove(id);
+            }
+            output.deleted = ids;
+        }
+        if part != Part::Deletions {
+            output.events = self.present_events(which, players, ghosts)?;
+        }
+        Ok(output)
+    }
+    /// A batch's participant events whose capture exists, in authored order.
+    /// Scene-wide events belong to the ordinary garage and are left out.
+    pub fn present_events(
+        &self,
+        which: Which,
+        players: &Players,
+        ghosts: &BTreeMap<u16, u16>,
+    ) -> Result<Vec<Fire>, replication::Error> {
+        self.batch(which)
+            .events
+            .iter()
+            .filter_map(|e| match e.target {
+                EventTarget::Capture(id) => ghosts.get(&id).map(|&ghost| (ghost, e)),
+                EventTarget::Scene(_) => None,
+            })
+            .map(|(ghost, e)| presentation_fire(players, ghost, e.entity, e.event))
+            .collect()
+    }
+    /// The fade presentation logic: the target of the free-roam ViewWorld
+    /// event (FadeControlPresentationBlueprint; capture 1 in installed content).
+    pub fn fade_capture(&self) -> Option<u16> {
+        self.free_roam.events.iter().find_map(|e| match e.target {
+            EventTarget::Capture(id) if e.event == VIEW_WORLD && e.entity == 1 => Some(id),
+            _ => None,
+        })
+    }
+    /// Events on the participant's fade presentation logic: 0 activates
+    /// ViewWorld, 1 deactivates it, 2 activates BlackScreen and 3 deactivates
+    /// it (E824). Empty without that logic.
+    pub fn fade(
+        &self,
+        players: &Players,
+        ghosts: &BTreeMap<u16, u16>,
+        events: &[u32],
+    ) -> Result<Vec<Fire>, replication::Error> {
+        let Some(&ghost) = self.fade_capture().and_then(|c| ghosts.get(&c)) else {
+            return Ok(Vec::new());
+        };
+        events
+            .iter()
+            .map(|&event| presentation_fire(players, ghost, 1, event))
+            .collect()
+    }
     /// Resolve authored event targets from current owned objects without
     /// allocating identities or changing the lifecycle.
     pub fn events(
@@ -1064,19 +1192,12 @@ impl GarageLogic {
                     .scene(key)
                     .ok_or(replication::Error::UnknownObject)?,
             };
-            if players.objects().get(ghost).is_none() {
-                return Err(replication::Error::UnknownObject);
-            }
-            let fire = Fire {
-                event: event.event,
-                player: None,
-                target: EntityRef {
-                    ghost,
-                    entity: event.entity,
-                },
-            };
-            fire.encode().map_err(|_| replication::Error::Shape)?;
-            events.push(fire);
+            events.push(presentation_fire(
+                players,
+                ghost,
+                event.entity,
+                event.event,
+            )?);
         }
         Ok(events)
     }
@@ -1883,6 +2004,158 @@ pub(crate) mod tests {
         let mut v = base;
         v["arrive"] = deletes(&[277]);
         assert!(GarageLogic::from_json(&v).is_ok());
+    }
+
+    /// The intro's shape of the lifecycle: spawn logic stays alive, the first
+    /// drive adds a HUD (330) and return-request logic (331), and the return
+    /// cinematic (332) shares the asset of spawn's 295.
+    pub(crate) fn intro_json() -> Json {
+        let mut v = presentation_json();
+        v["content"]["catalogs"][0]["entries"] = json!([[10, 5]]);
+        v["content"]["profiles"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"asset": {"bundle": 4, "type_id": 10, "local_index": 4}, "serializers": ["root", "rpc_reference"]}));
+        let def = |capture: u16, serializer: u16| {
+            json!({"capture_id": capture, "asset": {"bundle": 4, "type_id": 10, "local_index": 4},
+                "blueprint": {"scene_content_key": 101},
+                "roles": [{"kind": "root", "bus_count": 1},
+                          {"kind": "channel", "scene_content_key": 101, "scene_serializer": serializer}]})
+        };
+        let ev = |capture: u16, event: u32| json!({"target": {"capture_id": capture}, "entity": 1, "event": event});
+        let mut cinematic = v["spawn"]["entities"][3].clone();
+        cinematic["capture_id"] = json!(332);
+        v["arrived"] =
+            json!({"scene_updates": [], "entities": [def(330, 46), def(331, 47)], "events": []});
+        v["free_roam"] = json!({"scene_updates": [], "entities": [],
+            "events": [ev(330, 19), ev(330, 17), ev(330, 12), ev(277, 0)]});
+        v["return_requested"] =
+            json!({"scene_updates": [], "entities": [], "events": [ev(331, 3)]});
+        v["returning"] = json!({"scene_updates": [], "entities": [cinematic],
+            "delete_capture_ids": [330, 331], "events": [ev(277, 1)]});
+        v["returned"] =
+            json!({"scene_updates": [], "entities": [], "delete_capture_ids": [332], "events": []});
+        v
+    }
+
+    #[test]
+    fn intro_batches_reuse_held_logic_and_skip_absent_targets() {
+        let logic = GarageLogic::from_json(&intro_json()).unwrap();
+        let (mut players, participant) = world();
+        let mut ghosts = BTreeMap::new();
+        logic
+            .produce(Which::Spawn, &mut players, participant, &mut ghosts)
+            .unwrap();
+        assert_eq!(logic.fade_capture(), Some(277));
+        let fade = ghosts[&277];
+        let arrived = logic
+            .produce_present(
+                Which::Arrived,
+                &mut players,
+                participant,
+                &mut ghosts,
+                Part::Creations,
+            )
+            .unwrap();
+        assert_eq!(arrived.records.len(), 2);
+        assert!(arrived.deleted.is_empty() && arrived.events.is_empty());
+        let (hud, request) = (ghosts[&330], ghosts[&331]);
+        let roam = logic
+            .present_events(Which::FreeRoam, &players, &ghosts)
+            .unwrap();
+        assert_eq!(
+            roam.iter()
+                .map(|f| (f.target.ghost, f.event))
+                .collect::<Vec<_>>(),
+            [(hud, 19), (hud, 17), (hud, 12), (fade, 0)]
+        );
+        let requested = logic
+            .produce_present(
+                Which::ReturnRequested,
+                &mut players,
+                participant,
+                &mut ghosts,
+                Part::All,
+            )
+            .unwrap();
+        assert_eq!(
+            requested
+                .events
+                .iter()
+                .map(|f| (f.target.ghost, f.event))
+                .collect::<Vec<_>>(),
+            [(request, 3)]
+        );
+        let before = players.objects().snapshot().len();
+        let returning = logic
+            .produce_present(
+                Which::Returning,
+                &mut players,
+                participant,
+                &mut ghosts,
+                Part::All,
+            )
+            .unwrap();
+        let mut deleted = returning.deleted.clone();
+        deleted.sort();
+        assert_eq!(deleted, [hud, request]);
+        // Spawn's 295 already provides the cinematic asset.
+        assert!(returning.records.is_empty() && !ghosts.contains_key(&332));
+        assert_eq!(players.objects().snapshot().len(), before - 2);
+        assert_eq!(
+            returning
+                .events
+                .iter()
+                .map(|f| (f.target.ghost, f.event))
+                .collect::<Vec<_>>(),
+            [(fade, 1)]
+        );
+        let returned = logic
+            .produce_present(
+                Which::Returned,
+                &mut players,
+                participant,
+                &mut ghosts,
+                Part::Deletions,
+            )
+            .unwrap();
+        assert_eq!(returned, Output::default());
+        // Without the logic nothing is fired and nothing fails.
+        let empty = BTreeMap::new();
+        assert!(
+            logic
+                .present_events(Which::FreeRoam, &players, &empty)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(logic.fade(&players, &empty, &[2]).unwrap().is_empty());
+        assert_eq!(
+            logic
+                .fade(&players, &ghosts, &[2, 3])
+                .unwrap()
+                .iter()
+                .map(|f| (f.target, f.event))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    EntityRef {
+                        ghost: fade,
+                        entity: 1
+                    },
+                    2
+                ),
+                (
+                    EntityRef {
+                        ghost: fade,
+                        entity: 1
+                    },
+                    3
+                )
+            ]
+        );
+        // Content without the free-roam ViewWorld has no fade logic.
+        let plain = GarageLogic::from_json(&presentation_json()).unwrap();
+        assert_eq!(plain.fade_capture(), None);
     }
 }
 

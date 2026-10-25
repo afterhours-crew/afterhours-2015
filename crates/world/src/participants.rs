@@ -825,6 +825,10 @@ impl Lifecycle {
     pub fn exit_bindings(&self) -> Option<ExitBindings> {
         self.exit
     }
+    /// The bound startup state endpoints, for callers that follow them.
+    pub fn lifecycle_bindings(&self) -> Option<Bindings> {
+        self.bindings
+    }
     /// Participants whose garage exit was granted since the last call; the
     /// caller turns their garage presence off.
     pub fn take_exited(&mut self) -> Vec<u16> {

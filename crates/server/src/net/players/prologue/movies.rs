@@ -73,6 +73,16 @@ impl PlayerListener {
                     .calls,
             );
         }
+        let calls = super::presentation::present(
+            &super::presentation::Context {
+                logic: self.logic.as_deref(),
+                ghosts: &self.logic_ghosts,
+                players: &self.players,
+                participants: &self.participants,
+                content: Some(content),
+            },
+            calls,
+        )?;
         if calls.len() > nfs_world::session::MAX_RPC_QUEUE.saturating_sub(self.pending_rpcs.len()) {
             return Ok(());
         }

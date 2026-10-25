@@ -28,8 +28,11 @@ impl PlayerListener {
             // presentation is suspended until the driving context returns.
             let crashing = self.participants.stage(participant)
                 == Some(nfs_world::participants::Stage::Crashing);
+            // The intro keeps its assignment through the return cinematic,
+            // whose garage-zone report needs it; the garage entry clears it.
             let clearing = !active.contains(&participant)
                 && !crashing
+                && self.participants.intro_chapter(participant).is_none()
                 && self.spawn_points.assigned(participant).is_some();
             let capacity = nfs_world::session::MAX_RPC_QUEUE
                 .saturating_sub(self.pending_rpcs.len())
