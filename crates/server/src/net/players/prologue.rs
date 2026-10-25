@@ -353,6 +353,29 @@ impl PlayerListener {
                     }
                     modes.insert(participant, (drive, canceller, chapter));
                 }
+                Some(Stage::IntroEnteringGarage) if chapter == Some(Chapter::ReturnDrive) => {
+                    let output = population.prepare_return(
+                        &mut players,
+                        crate::vehicle_content::population::Owner {
+                            connection: owner.connection,
+                            persona: owner.persona,
+                            participant,
+                        },
+                        self.inventory
+                            .as_ref()
+                            .ok_or(replication::Error::Unsupported)?
+                            .clone(),
+                        &vehicles.vehicles,
+                        &vehicles.layout,
+                    )?;
+                    records.extend(output.records);
+                    deleted.extend(output.deleted);
+                    messages.extend(output.messages);
+                    calls.extend(output.bindings.into_iter().map(HostRpc::Vehicle));
+                }
+                // The final visit waits for its queued garage composite. It
+                // must never enter the initial starter-selection sequence.
+                Some(Stage::IntroLoadingGarage) if chapter == Some(Chapter::ReturnDrive) => {}
                 Some(Stage::IntroEnteringGarage | Stage::IntroLoadingGarage) => {
                     if let Some(previews) = &content.previews {
                         let out = population.spawn_previews(

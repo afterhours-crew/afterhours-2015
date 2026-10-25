@@ -5,6 +5,7 @@ use super::super::tests::{drain, send};
 use super::*;
 use nfs_world::{bits::BitWriter, participants::Endpoint};
 use std::sync::Arc;
+mod returning;
 
 fn request(endpoint: Endpoint, participant: u16, method: u32) -> BitWriter {
     let mut payload = BitWriter::new();
@@ -445,6 +446,9 @@ fn diner_replaces_finished_movie_and_timer_waits_for_capacity_and_native_ack() {
 }
 #[test]
 fn return_drive_waits_for_retirement_and_keeps_the_owned_car_and_canceller() {
+    return_drive_started();
+}
+fn return_drive_started() -> (PlayerListener, u16, u16) {
     let (mut listener, participant) = finished_diner();
     let owner = Owner {
         connection: HOST_SELECTOR as u8,
@@ -454,6 +458,40 @@ fn return_drive_waits_for_retirement_and_keeps_the_owned_car_and_canceller() {
     let vehicles = Arc::make_mut(listener.vehicles.as_mut().unwrap());
     vehicles.layout = crate::vehicle_content::population::tests::world_layout(&vehicles.layout);
     let inventory = listener.inventory.clone().unwrap();
+    let entry = vehicles
+        .layout
+        .occupied(inventory.slots, &inventory.items)
+        .unwrap()[0];
+    let old_car = listener
+        .players
+        .owned_vehicle(owner.connection, owner.persona, participant, entry.item)
+        .unwrap();
+    let (scene, selector) = listener
+        .players
+        .objects()
+        .scene_endpoint(vehicles.layout.scene_key, entry.slot.component_index)
+        .unwrap();
+    // This fixture skips driving both races, but their original garage load
+    // acknowledgement must still exist before that slot can be replaced.
+    listener
+        .population
+        .as_mut()
+        .unwrap()
+        .acknowledge(
+            &listener.players,
+            crate::vehicle_content::population::Owner {
+                connection: owner.connection,
+                persona: owner.persona,
+                participant,
+            },
+            nfs_world::garage::vehicle::Loaded {
+                scene,
+                selector,
+                participant,
+                vehicle: old_car,
+            },
+        )
+        .unwrap();
     listener
         .population
         .as_mut()
@@ -573,6 +611,7 @@ fn return_drive_waits_for_retirement_and_keeps_the_owned_car_and_canceller() {
     assert_eq!(listener.players.objects().snapshot(), snapshot);
     assert!(listener.pending.is_empty());
     assert!(listener.pending_rpcs.is_empty());
+    (listener, participant, car)
 }
 fn finished_diner() -> (PlayerListener, u16) {
     let (mut listener, participant) = finished_movie();

@@ -207,7 +207,13 @@ impl PlayerListener {
             if sequences.ghost(participant).is_some() {
                 let loaded = population.is_some_and(|p| match participants.stage(participant) {
                     Some(nfs_world::participants::Stage::IntroLoadingGarage) => {
-                        p.previews_loaded(participant)
+                        if participants.intro_chapter(participant)
+                            == Some(nfs_world::participants::intro::Chapter::ReturnDrive)
+                        {
+                            p.all_loaded(participant)
+                        } else {
+                            p.previews_loaded(participant)
+                        }
                     }
                     Some(nfs_world::participants::Stage::LoadingGarage) => {
                         p.all_loaded(participant)

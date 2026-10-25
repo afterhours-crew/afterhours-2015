@@ -10,6 +10,10 @@ pub(in crate::net::players) struct GarageOutput {
     pub output: Output,
     pub removed: Option<(u16, u16)>,
 }
+pub(in crate::net::players) struct OwnedGarage<'a> {
+    pub inventory: &'a Inventory,
+    pub content: &'a GarageContent,
+}
 
 pub(in crate::net::players) fn notify(
     content: &crate::prologue::Content,
@@ -48,6 +52,7 @@ impl PlayerListener {
         returns: Option<&mut Arrivals>,
         population: Option<&mut Population>,
         sequences: Option<&mut Sequences>,
+        owned: Option<OwnedGarage<'_>>,
         persona: u64,
         body: BitSpan<'_>,
     ) -> Result<Option<GarageOutput>, replication::Error> {
@@ -84,9 +89,12 @@ impl PlayerListener {
         let &[_, participant] = envelope.references() else {
             return Err(replication::Error::Shape);
         };
-        let Some((active, _, Chapter::FirstDrive)) = modes.get(&participant) else {
+        let Some((active, _, chapter @ (Chapter::FirstDrive | Chapter::ReturnDrive))) =
+            modes.get(&participant)
+        else {
             return Ok(None);
         };
+        let final_return = *chapter == Chapter::ReturnDrive;
         if !players.owns_participant(HOST_SELECTOR as u8, persona, participant) {
             return Err(replication::Error::UnknownObject);
         }
@@ -151,16 +159,23 @@ impl PlayerListener {
             participant,
             None,
         )?);
-        let removed = population
-            .ok_or(replication::Error::Unsupported)?
-            .remove_temporary_world(
+        let population = population.ok_or(replication::Error::Unsupported)?;
+        let vehicle_owner = crate::vehicle_content::population::Owner {
+            connection: owner.connection,
+            persona,
+            participant,
+        };
+        let removed = if final_return {
+            let owned = owned.ok_or(replication::Error::Unsupported)?;
+            population.finish_return(
                 players,
-                crate::vehicle_content::population::Owner {
-                    connection: owner.connection,
-                    persona,
-                    participant,
-                },
-            )?;
+                vehicle_owner,
+                owned.inventory,
+                &owned.content.layout,
+            )?
+        } else {
+            population.remove_temporary_world(players, vehicle_owner)?
+        };
         out.output.deleted.push(removed);
         out.removed = Some((participant, removed));
         let Outcome::Advanced(chain) = participants.returned_to_garage(participant) else {

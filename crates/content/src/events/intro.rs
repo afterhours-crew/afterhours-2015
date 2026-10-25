@@ -16,6 +16,35 @@ pub struct Mode {
     /// Serializer of the launcher in the owning intro participant logic.
     pub launcher: usize,
     pub completion: Option<results::Completion>,
+    /// Filters whose exact channel links resolve to this intro's participant provider.
+    pub owned_filters: Vec<crate::scoring::events::Identity>,
+}
+
+fn owned_filters<S: Source>(
+    graph: &mut Graph<S>,
+    nodes: &[Node],
+    branch: &[Node],
+    aliases: &BTreeMap<Site, Site>,
+) -> Result<Vec<crate::scoring::events::Identity>, Error> {
+    let mut result = vec![];
+    for node in nodes
+        .iter()
+        .filter(|n| n.object.class == "ParticipantProviderEventFilterEntityData")
+    {
+        let ends = links(
+            graph,
+            &node.site,
+            3_062_566_331,
+            aliases,
+            &mut BTreeSet::new(),
+        )?;
+        let owner = unique(branch, "ParticipantLogicParticipantProviderEntityData")?;
+        if !matches!(ends.as_slice(), [end] if end.port == 0 && end.site == *owner) {
+            return Err(bad("intro filter participant owner"));
+        }
+        result.push(crate::scoring::events::Identity::from(&node.site));
+    }
+    Ok(result)
 }
 
 fn unique<'a>(nodes: &'a [Node], class: &str) -> Result<&'a Site, Error> {
@@ -257,6 +286,15 @@ fn extract_inner(
         );
     }
     let mut lifecycle = lifecycle::extract(&mut graph, &field_sites)?;
+    let owned_filters = owned_filters(
+        &mut graph,
+        &nodes,
+        &branch,
+        &logical
+            .iter()
+            .map(|(s, (t, _))| (s.clone(), t.clone()))
+            .collect(),
+    )?;
     lifecycle.bindings.channels = lifecycle::channels::read(
         &mut graph,
         &logical
@@ -406,6 +444,7 @@ fn extract_inner(
     layout.profile()?;
     Ok((
         Mode {
+            owned_filters,
             completion,
             sequences,
             logics,
@@ -439,6 +478,63 @@ mod tests {
             key: (asset.into(), i),
             ..Site::root(asset)
         }
+    }
+
+    #[test]
+    fn filter_resolves_exact_parent_provider_through_its_bound_channel() {
+        let mut m = Memory::default();
+        m.put(
+            "a",
+            0,
+            "Blueprint",
+            &[(
+                "LinkConnections",
+                Value::Array(vec![edge(local(1), 3_062_566_331, local(2), 17)]),
+            )],
+        );
+        m.put("a", 1, "ParticipantProviderEventFilterEntityData", &[]);
+        m.put("a", 2, "LinkedSchematicChannelReferenceEntityData", &[]);
+        m.put(
+            "b",
+            0,
+            "Blueprint",
+            &[(
+                "LinkConnections",
+                Value::Array(vec![edge(local(1), 17, local(2), 0)]),
+            )],
+        );
+        m.put("b", 1, "LinkedSchematicChannelEntityData", &[]);
+        m.put("b", 2, "ParticipantLogicParticipantProviderEntityData", &[]);
+        m.put("b", 3, "ParticipantLogicParticipantProviderEntityData", &[]);
+        let nodes = vec![Node {
+            site: site("a", 1),
+            object: m.object(&("a".into(), 1)).unwrap(),
+        }];
+        let owner = Node {
+            site: site("b", 2),
+            object: m.object(&("b".into(), 2)).unwrap(),
+        };
+        let aliases = BTreeMap::from([(site("a", 2), site("b", 1))]);
+        let mut g = Graph::new(&mut m);
+        assert_eq!(
+            owned_filters(&mut g, &nodes, std::slice::from_ref(&owner), &aliases).unwrap(),
+            vec![crate::scoring::events::Identity::from(&site("a", 1))]
+        );
+        assert!(
+            owned_filters(
+                &mut g,
+                &nodes,
+                std::slice::from_ref(&owner),
+                &BTreeMap::new()
+            )
+            .is_err()
+        );
+        let foreign = Node {
+            site: site("b", 3),
+            object: owner.object.clone(),
+        };
+        assert!(owned_filters(&mut g, &nodes, &[foreign], &aliases).is_err());
+        assert!(owned_filters(&mut g, &nodes, &[owner.clone(), owner], &aliases).is_err());
     }
 
     #[test]

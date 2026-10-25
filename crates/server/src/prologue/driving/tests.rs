@@ -197,6 +197,7 @@ pub(crate) fn content(parent: Asset, manager: Component) -> (Mode, Mode) {
     )
     .unwrap();
     let data = intro::Mode {
+        owned_filters: vec![],
         completion: None,
         game_mode: GameMode {
             layout,

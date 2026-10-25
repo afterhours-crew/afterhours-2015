@@ -25,6 +25,7 @@ struct HandlerState {
     ai_controls: BTreeSet<u16>,
     controls: BTreeMap<u64, ai_control::Stack>,
     human: Option<u64>,
+    owned_filters: BTreeSet<u16>,
     delay_values: BTreeMap<u16, f32>,
     delay_manager: delay::Manager<Option<u64>>,
     diagnostics: BTreeSet<u16>,
@@ -36,6 +37,19 @@ impl HandlerState {
         participant: Option<u64>,
         d: &mut Dispatch<'_>,
     ) -> Result<(), scoring::Error> {
+        if self.owned_filters.contains(&target.node) {
+            if let Some(participant) = participant.filter(|p| Some(*p) == self.human) {
+                d.emit_participant(
+                    self,
+                    Endpoint {
+                        node: target.node,
+                        event: nodes::OUT,
+                    },
+                    participant,
+                )?;
+            }
+            return Ok(());
+        }
         if self.delay_values.contains_key(&target.node) {
             return d.delay_event(self, target.node, target.event, participant);
         }
@@ -286,6 +300,15 @@ impl Reporters {
                 ai_only,
                 controls: BTreeMap::new(),
                 human: None,
+                owned_filters: data
+                    .owned_filters
+                    .iter()
+                    .map(|id| {
+                        ids.get(id).copied().ok_or_else(|| {
+                            nfs_content::Error::Content("intro filter occurrence".into())
+                        })
+                    })
+                    .collect::<Result<_, _>>()?,
                 delay_values,
                 delay_manager,
                 diagnostics: composition
@@ -408,6 +431,7 @@ mod tests {
                 ai_controls: BTreeSet::new(),
                 controls: BTreeMap::new(),
                 human: None,
+                owned_filters: BTreeSet::new(),
                 delay_values: BTreeMap::new(),
                 delay_manager: delay::Manager::new(4, &[]).unwrap(),
                 diagnostics: BTreeSet::new(),
@@ -437,6 +461,58 @@ mod tests {
             })]
         );
         assert!(r.effect(&effect()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn bound_provider_filter_forwards_only_its_participant_and_keeps_repeats() {
+        let mut r = fixture(false);
+        r.state.owned_filters.insert(1);
+        r.bind_human(19);
+        r.graph = events::Graph::new(
+            3,
+            vec![
+                events::Connection {
+                    source: Endpoint { node: 0, event: 41 },
+                    target: Endpoint {
+                        node: 1,
+                        event: nodes::IN,
+                    },
+                    delivery: events::Delivery::Local,
+                },
+                events::Connection {
+                    source: Endpoint {
+                        node: 1,
+                        event: nodes::OUT,
+                    },
+                    target: Endpoint {
+                        node: 2,
+                        event: transitions::TRIGGER,
+                    },
+                    delivery: events::Delivery::Local,
+                },
+            ],
+        )
+        .unwrap();
+        assert_eq!(r.effect(&effect()).unwrap().len(), 1);
+        assert_eq!(r.effect(&effect()).unwrap().len(), 1);
+        r.bind_human(20);
+        assert!(r.effect(&effect()).unwrap().is_empty());
+        r.state.human = None;
+        assert!(r.effect(&effect()).unwrap().is_empty());
+        let (state, _) = r
+            .graph
+            .transaction(&r.state, |s, d| {
+                s.receive(
+                    Endpoint {
+                        node: 1,
+                        event: nodes::IN,
+                    },
+                    None,
+                    d,
+                )
+            })
+            .unwrap();
+        assert!(state.actions.is_empty());
     }
     #[test]
     fn unsupported_sink_rolls_back_both_gate_and_queued_transition() {

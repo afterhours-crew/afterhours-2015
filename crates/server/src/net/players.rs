@@ -1811,6 +1811,9 @@ impl Listener for PlayerListener {
                     returns.as_mut(),
                     population.as_mut(),
                     sequences.as_mut(),
+                    self.inventory.as_ref().zip(self.vehicles.as_deref()).map(
+                        |(inventory, content)| prologue::garage::OwnedGarage { inventory, content },
+                    ),
                     self.persona,
                     body,
                 ) {
@@ -2610,9 +2613,8 @@ impl Listener for PlayerListener {
                 if let nfs_world::participants::HostRpc::Participant(n) = call
                     && n.endpoint == bindings.preparing[0]
                     && n.call == nfs_world::participants::Call::Enter
-                    && participants
-                        .intro_participants()
-                        .any(|p| p == n.participant)
+                    && participants.intro_chapter(n.participant)
+                        == Some(nfs_world::participants::intro::Chapter::FirstDrive)
                 {
                     if story_pending.len() >= MAX_PENDING {
                         return self.refuse(replication::Error::Bound);
