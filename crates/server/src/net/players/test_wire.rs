@@ -33,12 +33,20 @@ pub(super) fn session_host() -> nfs_world::session::Host {
     .unwrap()
 }
 
+/// What the flush refused: the queue, the session error and the held entry.
+pub(super) type Refused = (
+    &'static str,
+    Option<nfs_world::session::Error>,
+    Option<Box<(super::Section, Vec<nfs_world::participants::HostRpc>)>>,
+);
+
 /// Flush the listener's owned output into `host` with the world loop's code.
 pub(super) fn flush(
     listener: &mut super::PlayerListener,
     host: &mut nfs_world::session::Host,
-) -> Result<(), (&'static str, Option<nfs_world::session::Error>)> {
-    crate::net::flush_owned(listener, host, 1).map_err(|refused| (refused.queue, refused.error))
+) -> Result<(), Refused> {
+    crate::net::flush_owned(listener, host, 1)
+        .map_err(|refused| (refused.queue, refused.error, refused.entry))
 }
 
 /// Everything a scenario left for the world host must be sendable: the host

@@ -123,12 +123,12 @@ impl PlayerListener {
         let mut remaining = calls.as_slice();
         let mut entries: Vec<Finished> = Vec::with_capacity(sections.len());
         for section in sections {
-            let chunk = Self::fitting_calls(&section, &mut remaining);
+            let chunk = fitting_calls(&section, &mut remaining);
             entries.push((section, chunk));
         }
         while !remaining.is_empty() {
             let section = returning::empty_section();
-            let chunk = Self::fitting_calls(&section, &mut remaining);
+            let chunk = fitting_calls(&section, &mut remaining);
             if chunk.is_empty() {
                 // Not even one call fits an empty section.
                 return Err(replication::Error::Bound);
@@ -136,22 +136,6 @@ impl PlayerListener {
             entries.push((section, chunk));
         }
         Ok(entries)
-    }
-    /// Take the leading calls that still fit `section` as one entry.
-    fn fitting_calls(section: &Section, remaining: &mut &[HostRpc]) -> Vec<HostRpc> {
-        let mut chunk: Vec<HostRpc> = Vec::new();
-        while let Some((call, tail)) = remaining.split_first() {
-            if chunk.len() >= 15 {
-                break;
-            }
-            chunk.push(*call);
-            if !entry_admitted(section, &chunk) {
-                chunk.pop();
-                break;
-            }
-            *remaining = tail;
-        }
-        chunk
     }
     pub(super) fn advance_prologue(&mut self) -> Result<(), replication::Error> {
         self.advance_story_movies()?;

@@ -503,6 +503,51 @@ fn inventory_config(
     Ok((Some(service.bind(account)), Some(lease)))
 }
 
+/// The world inputs one session of this server start would get, without
+/// binding listeners: for the reference harness, which drives
+/// [`net::run_world`] with a recorded run. Takes the same arguments as the
+/// server; the returned lease keeps the account open.
+pub async fn prepare_world(
+    args: impl Iterator<Item = std::ffi::OsString>,
+) -> Result<
+    (
+        net::WorldServe,
+        Option<net::Resume>,
+        Option<nfs_storage::sqlite::WriterLease>,
+    ),
+    String,
+> {
+    let mut args = parse_from(args)?;
+    resolve_install_content(&mut args, &nfs_content::Options::default())?;
+    let prepared = prepare(&args).await.map_err(|e| format!("{e:?}"))?;
+    let (persona, mac_template) = prepared
+        .pack
+        .world_identity()
+        .ok_or("the deployment has no local identity")?;
+    let (_, ai) = nfs_server::ai_settings::Live::channel(args.ai);
+    Ok((
+        net::WorldServe {
+            mac_template,
+            content: prepared.world_content,
+            persona,
+            inventory: prepared.inventory,
+            progression: prepared.progression,
+            prologue: prepared.prologue,
+            vehicles: prepared.vehicles,
+            sequences: prepared.sequences,
+            traffic: prepared.traffic,
+            rivals: prepared.rivals,
+            garage_logic: prepared.garage_logic,
+            scoring: prepared.scoring,
+            events: prepared.events,
+            ai,
+            map_feed: None,
+        },
+        prepared.resume,
+        prepared.account_lease,
+    ))
+}
+
 pub fn main() -> std::process::ExitCode {
     main_from(std::env::args_os().skip(1))
 }
@@ -581,8 +626,42 @@ pub fn main_from(args: impl Iterator<Item = std::ffi::OsString>) -> std::process
     }
 }
 
-async fn run(args: Args) -> Result<(), Failure> {
-    let (inventory, _account_lease) = inventory_config(&args)?;
+/// Everything a server start prepares before binding listeners: account
+/// state, deployment policy and the installed world content.
+struct Prepared {
+    inventory: Option<net::InventoryProfile>,
+    account_lease: Option<nfs_storage::sqlite::WriterLease>,
+    pack: Arc<Deployment>,
+    lsx_profile: nfs_lsx::message::Profile,
+    world_content: Option<Arc<content::WorldContent>>,
+    content_messages: usize,
+    progression: Option<Arc<nfs_server::progression::Content>>,
+    vehicles: Option<Arc<nfs_server::vehicle_content::GarageContent>>,
+    sequences: Option<Arc<nfs_server::sequence_content::SequenceContent>>,
+    traffic: Option<Arc<nfs_content::traffic::Content>>,
+    rivals: Option<Arc<nfs_server::rival_content::Content>>,
+    garage_logic: Option<Arc<nfs_server::garage_logic::GarageLogic>>,
+    scoring: Option<Arc<nfs_server::scoring::Content>>,
+    events: Option<Arc<nfs_server::event_logic::catalog::Catalog>>,
+    prologue: Option<Arc<nfs_server::prologue::Content>>,
+    entitlements: Option<(
+        nfs_storage::AccountId,
+        Arc<nfs_services::entitlements::State>,
+    )>,
+    kickback: Option<(nfs_storage::AccountId, Arc<nfs_services::kickback::State>)>,
+    speedwall: Option<(nfs_storage::AccountId, Arc<nfs_services::speedwall::State>)>,
+    item_licenses: Option<Arc<nfs_services::item_licenses::Content>>,
+    catalogs: Option<Arc<nfs_services::control_catalogs::Catalog>>,
+    user_settings: Option<Arc<nfs_server::user_settings::Store>>,
+    challenges: Option<Arc<nfs_services::challenges::Catalog>>,
+    stats: Option<Arc<nfs_services::stats::Catalog>>,
+    resume: Option<net::Resume>,
+}
+
+/// Prepare a server start: open the account, load policy and content, and
+/// settle an unfinished intro. Shared by the server and [`prepare_world`].
+async fn prepare(args: &Args) -> Result<Prepared, Failure> {
+    let (inventory, account_lease) = inventory_config(args)?;
     let account = args.local_account.ok_or(Failure::ProfileConfig)?;
     let root = args.root.join(
         args.state_directory
@@ -1001,6 +1080,61 @@ async fn run(args: Args) -> Result<(), Failure> {
         }
         _ => {}
     }
+    Ok(Prepared {
+        inventory,
+        account_lease,
+        pack,
+        lsx_profile,
+        world_content,
+        content_messages,
+        progression,
+        vehicles,
+        sequences,
+        traffic,
+        rivals,
+        garage_logic,
+        scoring,
+        events,
+        prologue,
+        entitlements,
+        kickback,
+        speedwall,
+        item_licenses,
+        catalogs,
+        user_settings,
+        challenges,
+        stats,
+        resume,
+    })
+}
+
+async fn run(args: Args) -> Result<(), Failure> {
+    let Prepared {
+        inventory,
+        account_lease: _account_lease,
+        pack,
+        lsx_profile,
+        world_content,
+        content_messages,
+        progression,
+        vehicles,
+        sequences,
+        traffic,
+        rivals,
+        garage_logic,
+        scoring,
+        events,
+        prologue,
+        entitlements,
+        kickback,
+        speedwall,
+        item_licenses,
+        catalogs,
+        user_settings,
+        challenges,
+        stats,
+        resume,
+    } = prepare(&args).await?;
     let listeners = net::Listeners::bind(args.listen, args.redirector_port).await?;
     let a = listeners.addresses()?;
     let lsx_listener = match args.lsx_port {

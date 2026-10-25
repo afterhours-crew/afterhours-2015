@@ -81,6 +81,10 @@ pub struct Policy {
     pub timing_interval_ms: u64,
     /// Shortest interval between empty controls sent under window pressure.
     pub control_interval_ms: u64,
+    /// Reference replay only: every sent sequence counts as received and
+    /// accepted, and the peer's reports are ignored. A recorded client
+    /// acknowledges the original host's numbering, not this host's.
+    pub assume_delivered: bool,
 }
 
 impl Default for Policy {
@@ -90,6 +94,7 @@ impl Default for Policy {
             max_frame_bits: 65_536,
             timing_interval_ms: 2_000,
             control_interval_ms: 500,
+            assume_delivered: false,
         }
     }
 }
@@ -320,6 +325,18 @@ impl fmt::Debug for Application {
 
 fn elapsed_bits(origin_ms: u64, now_ms: u64) -> u64 {
     (now_ms.saturating_sub(origin_ms) as f64 / 1000.0).to_bits()
+}
+
+/// Report every sent sequence as received and accepted
+/// ([`Policy::assume_delivered`]).
+fn deliver_all(s: &mut Sequenced) {
+    if outstanding(s) == 0 {
+        return;
+    }
+    let last = Sequence::new(s.next_number.wrapping_sub(1) & 1023).expect("ten-bit sequence");
+    if let Ok(batch) = s.reports.consume(last, u32::MAX) {
+        s.deliveries.apply(batch);
+    }
 }
 
 /// Sent sequences the client has not acknowledged yet.
@@ -653,7 +670,9 @@ impl Application {
             & 1023;
         // A receipt cannot describe a sequence we have not sent. Retain every
         // accepted/nonaccepted result for the owner of a tracked frame.
-        if distance <= outstanding(s)
+        if self.policy.assume_delivered {
+            deliver_all(s);
+        } else if distance <= outstanding(s)
             && let Ok(batch) = s
                 .reports
                 .consume(header.acknowledgement(), header.history())
@@ -810,6 +829,9 @@ impl Application {
         let Phase::Sequenced(s) = &mut self.phase else {
             return Ok(vec![]);
         };
+        if policy.assume_delivered {
+            deliver_all(s);
+        }
         let mut send = Vec::new();
         if let Some(last) = s.last_request_ms
             && now_ms.saturating_sub(last) >= policy.timing_interval_ms
@@ -913,6 +935,9 @@ impl Application {
         let count = frame.len().div_ceil(fragment_bits).max(1);
         if count > 64 {
             return Err(Error::Bound);
+        }
+        if self.policy.assume_delivered {
+            deliver_all(s);
         }
         if usize::from(outstanding(s)) + count > usize::from(WINDOW) - 1 {
             return Err(Error::Window);

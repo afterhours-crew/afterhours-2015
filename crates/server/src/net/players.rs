@@ -209,6 +209,54 @@ pub(super) fn entry_admitted(
     nfs_world::session::queued_replication_bits(section, calls)
         .is_ok_and(|bits| bits <= nfs_world::session::MAX_REPLICATION_FRAME_BITS)
 }
+/// Take the leading calls that still fit `section` as one entry (a reply
+/// group carries at most fifteen).
+pub(super) fn fitting_calls(
+    section: &Section,
+    remaining: &mut &[nfs_world::participants::HostRpc],
+) -> Vec<nfs_world::participants::HostRpc> {
+    let mut chunk = Vec::new();
+    while let Some((call, tail)) = remaining.split_first() {
+        if chunk.len() >= 15 {
+            break;
+        }
+        chunk.push(*call);
+        if !entry_admitted(section, &chunk) {
+            chunk.pop();
+            break;
+        }
+        *remaining = tail;
+    }
+    chunk
+}
+
+/// One entry as entries the session admits: the section with the leading
+/// calls that fit, then call-only entries for the rest, in order.
+/// Presentation adds calls to entries after they were sized (E1191: a
+/// fifteen-call garage completion became eighteen and closed the world).
+pub(super) fn admitted_entries(
+    section: Section,
+    calls: Vec<nfs_world::participants::HostRpc>,
+) -> Result<Vec<(Section, Vec<nfs_world::participants::HostRpc>)>, replication::Error> {
+    if entry_admitted(&section, &calls) {
+        return Ok(vec![(section, calls)]);
+    }
+    if !entry_admitted(&section, &[]) {
+        return Err(replication::Error::Bound);
+    }
+    let mut remaining = calls.as_slice();
+    let chunk = fitting_calls(&section, &mut remaining);
+    let mut entries = vec![(section, chunk)];
+    while !remaining.is_empty() {
+        let section = returning::empty_section();
+        let chunk = fitting_calls(&section, &mut remaining);
+        if chunk.is_empty() {
+            return Err(replication::Error::Bound);
+        }
+        entries.push((section, chunk));
+    }
+    Ok(entries)
+}
 impl PlayerListener {
     /// Queue entries for the world flush. The flush refuses an entry the
     /// session does not admit and closes the world (E1186, E1188), so each
@@ -2762,6 +2810,15 @@ impl Listener for PlayerListener {
                     Err(error) => return self.refuse(error),
                 };
             }
+            // The added events can take an entry past a reply group.
+            let mut admitted = Vec::with_capacity(entries.len());
+            for (section, calls) in entries {
+                match admitted_entries(section, calls) {
+                    Ok(split) => admitted.extend(split),
+                    Err(error) => return self.refuse(error),
+                }
+            }
+            entries = admitted;
         }
         deferred_sections = output::pack_motion(deferred_sections);
         if spawned.messages.len() > MAX_PENDING.saturating_sub(self.pending_content.len())

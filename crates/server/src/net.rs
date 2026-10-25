@@ -16,6 +16,7 @@ use crate::{world_handshake, world_readiness};
 use nfs_server_support::{discovery, qos_tls};
 use nfs_world::{
     application::{self, Policy},
+    replication::section::Section,
     session::{Event, Host, Ids, StageName},
     transport::Codec,
 };
@@ -892,6 +893,7 @@ pub async fn serve(
 struct Refused {
     queue: &'static str,
     error: Option<nfs_world::session::Error>,
+    entry: Option<Box<(Section, Vec<nfs_world::participants::HostRpc>)>>,
 }
 
 /// Move the listener's owned output into the session in client order:
@@ -909,6 +911,7 @@ fn flush_owned(
             return Err(Refused {
                 queue: "content",
                 error: None,
+                entry: None,
             });
         };
         match host.queue_content(message.target(), &bytes) {
@@ -921,6 +924,7 @@ fn flush_owned(
                 return Err(Refused {
                     queue: "content",
                     error: Some(error),
+                    entry: None,
                 });
             }
         }
@@ -943,6 +947,7 @@ fn flush_owned(
                 return Err(Refused {
                     queue: "replication",
                     error: Some(error),
+                    entry: Some(Box::new((section.clone(), Vec::new()))),
                 });
             }
         }
@@ -960,6 +965,7 @@ fn flush_owned(
                 return Err(Refused {
                     queue: "RPC notification",
                     error: Some(error),
+                    entry: None,
                 });
             }
         }
@@ -991,6 +997,7 @@ fn flush_owned(
                 return Err(Refused {
                     queue: "entry transition",
                     error: Some(error),
+                    entry: Some(Box::new((section.clone(), before.clone()))),
                 });
             }
         }
@@ -1006,6 +1013,178 @@ pub async fn world_host(
     connection: u32,
     recorder: Recorder,
 ) {
+    let Some(binding) = start.recv().await else {
+        return;
+    };
+    let mut io = LiveWorld {
+        socket,
+        #[cfg(feature = "network-test")]
+        test_loss: test_loss::Loss::new(recorder.loss_trigger(connection)),
+        recorder,
+        connection,
+        started: Instant::now(),
+        peer: None,
+        last_input: Instant::now(),
+        tick: tokio::time::interval(WORLD_TICK),
+        buffer: vec![0; 2048],
+    };
+    let end = run_world(&mut io, binding, proof, serve, connection).await;
+    debug!(connection, ?end, "world host ended");
+}
+
+/// Why [`run_world`] stopped.
+#[derive(Debug)]
+pub enum WorldEnd {
+    /// Setup or a world step failed; the warning before it says which.
+    Stopped,
+    /// The session refused owned output: the client loses its connection.
+    Refused {
+        queue: &'static str,
+        error: Option<nfs_world::session::Error>,
+        /// The refused entry or section, as the flush held it.
+        entry: Option<Box<(Section, Vec<nfs_world::participants::HostRpc>)>>,
+    },
+    /// The session closed or the client went idle.
+    Closed,
+    /// The input ended (live: the recorder failed; replay: the run ended).
+    Ended,
+}
+
+/// One input for the world loop.
+#[derive(Debug)]
+pub enum WorldInput {
+    Datagram(Vec<u8>),
+    /// A timer pass without input.
+    Tick,
+    /// Nothing for the session (another address, a receive error).
+    Ignore,
+    /// No client input for [`WORLD_IDLE`].
+    Idle,
+    Ended,
+}
+
+/// What the world loop reads, sends and timestamps with: the UDP socket and
+/// the wall clock live, a recorded run in the reference harness.
+pub trait WorldIo: Send {
+    /// Milliseconds on the world clock.
+    fn now_ms(&self) -> u64;
+    /// Microseconds since the Unix epoch, for durable timestamps.
+    fn unix_micros(&self) -> i64;
+    /// Start the world clock: the host is about to serve.
+    fn start_clock(&mut self);
+    /// The source of the session's fresh words.
+    fn random(&mut self) -> Box<dyn nfs_world::application::Random + Send>;
+    /// The session's application policy.
+    fn policy(&self) -> Policy {
+        Policy::default()
+    }
+    /// The next input. `items_working` is true while inventory work is in
+    /// flight; a deterministic source waits for it before moving on.
+    fn next(&mut self, items_working: bool)
+    -> impl std::future::Future<Output = WorldInput> + Send;
+    /// Send (and record) one pass's datagrams; false ends the session.
+    fn send(&mut self, wires: &[Vec<u8>]) -> impl std::future::Future<Output = bool> + Send;
+}
+
+struct LiveWorld {
+    socket: UdpSocket,
+    recorder: Recorder,
+    connection: u32,
+    started: Instant,
+    peer: Option<SocketAddr>,
+    last_input: Instant,
+    tick: tokio::time::Interval,
+    buffer: Vec<u8>,
+    #[cfg(feature = "network-test")]
+    test_loss: test_loss::Loss,
+}
+
+impl WorldIo for LiveWorld {
+    fn now_ms(&self) -> u64 {
+        self.started.elapsed().as_millis() as u64
+    }
+    fn unix_micros(&self) -> i64 {
+        unix_micros()
+    }
+    fn start_clock(&mut self) {
+        self.started = Instant::now();
+    }
+    fn random(&mut self) -> Box<dyn nfs_world::application::Random + Send> {
+        Box::new(OsRandom)
+    }
+    async fn next(&mut self, _items_working: bool) -> WorldInput {
+        let connection = self.connection;
+        tokio::select! {
+            received = self.socket.recv_from(&mut self.buffer) => {
+                let Ok((n, from)) = received else {
+                    return WorldInput::Ignore;
+                };
+                match self.peer {
+                    None => {
+                        self.peer = Some(from);
+                        info!(connection, %from, "world client");
+                    }
+                    Some(p) if p != from => {
+                        debug!(connection, %from, "datagram from another address ignored");
+                        return WorldInput::Ignore;
+                    }
+                    _ => {}
+                }
+                self.last_input = Instant::now();
+                let raw = self.buffer[..n].to_vec();
+                #[cfg(feature = "network-test")]
+                let dropped = self.test_loss.drop_input(self.now_ms());
+                #[cfg(not(feature = "network-test"))]
+                let dropped = false;
+                let note = dropped.then_some("diagnostic packet loss before transport");
+                if self.recorder.chunk("world", connection, Direction::In, &raw, note).await.is_err() {
+                    return WorldInput::Ended;
+                }
+                if dropped {
+                    return WorldInput::Ignore;
+                }
+                WorldInput::Datagram(raw)
+            }
+            _ = self.tick.tick() => {
+                #[cfg(feature = "network-test")]
+                self.test_loss.poll(self.now_ms()).await;
+                if self.last_input.elapsed() > WORLD_IDLE {
+                    return WorldInput::Idle;
+                }
+                WorldInput::Tick
+            }
+        }
+    }
+    async fn send(&mut self, wires: &[Vec<u8>]) -> bool {
+        let Some(peer) = self.peer else {
+            return true;
+        };
+        for wire in wires {
+            if self.socket.send_to(wire, peer).await.is_err() {
+                warn!(connection = self.connection, "world send failed");
+            }
+            if self
+                .recorder
+                .chunk("world", self.connection, Direction::Out, wire, None)
+                .await
+                .is_err()
+            {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// Serve one world session over `io` until it stops: the world loop of
+/// [`world_host`], with the socket, clock and fresh words injected.
+pub async fn run_world<I: WorldIo>(
+    io: &mut I,
+    binding: world_handshake::Binding,
+    proof: watch::Sender<Option<Option<world_readiness::Binding>>>,
+    serve: WorldServe,
+    connection: u32,
+) -> WorldEnd {
     let WorldServe {
         mac_template: template,
         content,
@@ -1023,45 +1202,42 @@ pub async fn world_host(
         mut ai,
         map_feed,
     } = serve;
-    let Some(binding) = start.recv().await else {
-        return;
-    };
     let Some(template) = template else {
         warn!(connection, "world host needs the MAC template; not serving");
-        return;
+        return WorldEnd::Stopped;
     };
     let Ok(codec) = Codec::new(binding.key(), template) else {
         warn!(connection, "world host: bad session key");
-        return;
+        return WorldEnd::Stopped;
     };
     let ids = Ids {
         client: binding.client(),
         host: binding.host(),
         host_index: 0,
     };
-    let Some(mut host) = Host::new(codec, ids, Policy::default(), Box::new(OsRandom)) else {
+    let Some(mut host) = Host::new(codec, ids, io.policy(), io.random()) else {
         warn!(connection, "world host: unusable connection ids");
-        return;
+        return WorldEnd::Stopped;
     };
     if let Some(content) = &content {
         let messages = match content.generate() {
             Ok(messages) => messages,
             Err(_) => {
                 warn!(connection, "invalid local world content");
-                return;
+                return WorldEnd::Stopped;
             }
         };
         let mut chunks = 0;
         for message in &messages {
             let target = message.target();
             let Ok(bytes) = message.encode() else {
-                return;
+                return WorldEnd::Stopped;
             };
             match host.queue_content(target, &bytes) {
                 Ok(n) => chunks += n,
                 Err(error) => {
                     warn!(connection, target, ?error, "world content rejected");
-                    return;
+                    return WorldEnd::Stopped;
                 }
             }
         }
@@ -1073,10 +1249,9 @@ pub async fn world_host(
         );
     }
     let readiness = binding.readiness();
-    let started = Instant::now();
-    let now_ms = || started.elapsed().as_millis() as u64;
+    io.start_clock();
     let Ok(persona) = u64::try_from(persona) else {
-        return;
+        return WorldEnd::Stopped;
     };
     // Leaves the map when this world host returns.
     let mut map_feed = map_feed.map(|board| board.publisher(connection, persona));
@@ -1084,7 +1259,7 @@ pub async fn world_host(
         Ok(arrivals) => arrivals,
         Err(error) => {
             warn!(connection, ?error, "arrive sequence configuration rejected");
-            return;
+            return WorldEnd::Stopped;
         }
     };
     let returns = match sequences.as_ref().and_then(|c| c.returns()).transpose() {
@@ -1095,14 +1270,14 @@ pub async fn world_host(
                 ?error,
                 "garage return sequence configuration rejected"
             );
-            return;
+            return WorldEnd::Stopped;
         }
     };
     let crashes = match sequences.as_ref().and_then(|c| c.crashes()).transpose() {
         Ok(crashes) => crashes,
         Err(error) => {
             warn!(connection, ?error, "crash sequence configuration rejected");
-            return;
+            return WorldEnd::Stopped;
         }
     };
     if crashes.is_some()
@@ -1114,13 +1289,13 @@ pub async fn world_host(
             connection,
             "crash sequence requires paired crash/recovery presentation"
         );
-        return;
+        return WorldEnd::Stopped;
     }
     let sequences = match sequences.as_ref().map(|c| c.instance()).transpose() {
         Ok(owner) => owner,
         Err(error) => {
             warn!(connection, ?error, "sequence configuration rejected");
-            return;
+            return WorldEnd::Stopped;
         }
     };
     let mut listener = players::PlayerListener::new(persona)
@@ -1137,37 +1312,31 @@ pub async fn world_host(
         .with_returns(returns)
         .with_crashes(crashes)
         .with_garage_logic(garage_logic)
-        .with_scoring(scoring, unix_micros().max(0) as u64)
+        .with_scoring(scoring, io.unix_micros().max(0) as u64)
         .with_events(events);
     let mut items = items::Exchanges::new(inventory, connection);
     if let Some(content) = &content
         && let Err(error) = listener.initialize_world(content)
     {
         warn!(connection, ?error, "owned world initialization rejected");
-        return;
+        return WorldEnd::Stopped;
     }
-    let mut peer: Option<SocketAddr> = None;
-    let mut buffer = vec![0; 2048];
     let mut proof_sent = false;
-    let mut last_input = Instant::now();
-    let mut tick = tokio::time::interval(WORLD_TICK);
     let mut delay_reported = None;
-    #[cfg(feature = "network-test")]
-    let mut test_loss = test_loss::Loss::new(recorder.loss_trigger(connection));
     info!(connection, "world host ready");
     loop {
         let advance_started = Instant::now();
-        if let Err(error) = listener.advance_sequences(now_ms()) {
+        if let Err(error) = listener.advance_sequences(io.now_ms()) {
             warn!(connection, ?error, "sequence world clock rejected");
-            return;
+            return WorldEnd::Stopped;
         }
-        if let Err(error) = listener.advance_level_poll(now_ms()) {
+        if let Err(error) = listener.advance_level_poll(io.now_ms()) {
             warn!(connection, ?error, "level poll rejected");
-            return;
+            return WorldEnd::Stopped;
         }
-        if let Err(error) = listener.advance_settled(now_ms()) {
+        if let Err(error) = listener.advance_settled(io.now_ms()) {
             warn!(connection, ?error, "world car settlement rejected");
-            return;
+            return WorldEnd::Stopped;
         }
         // Settings the player saved while this session runs.
         if let Some(settings) = ai.changed() {
@@ -1180,7 +1349,7 @@ pub async fn world_host(
             );
         }
         listener.session_backlog = host.replication_progress().1;
-        if let Err(error) = listener.advance_traffic(now_ms())
+        if let Err(error) = listener.advance_traffic(io.now_ms())
             && listener.disable_traffic()
         {
             warn!(
@@ -1189,7 +1358,7 @@ pub async fn world_host(
                 "owned traffic rejected; spawning disabled for this session"
             );
         }
-        if let Err(error) = listener.advance_rivals(now_ms())
+        if let Err(error) = listener.advance_rivals(io.now_ms())
             && listener.disable_rivals()
         {
             warn!(
@@ -1198,7 +1367,7 @@ pub async fn world_host(
                 "owned rivals rejected; spawning disabled for this session"
             );
         }
-        if let Err(error) = listener.advance_scoring(now_ms()) {
+        if let Err(error) = listener.advance_scoring(io.now_ms()) {
             // Scoring is best effort: a fault disables it for this session
             // and never closes the world host.
             warn!(
@@ -1210,12 +1379,12 @@ pub async fn world_host(
         }
         // Read-only: what the launcher's map shows, after this tick's AI.
         if let Some(feed) = &mut map_feed
-            && feed.due(now_ms())
+            && feed.due(io.now_ms())
         {
-            feed.publish(listener.map_snapshot(now_ms()));
+            feed.publish(listener.map_snapshot(io.now_ms()));
         }
         listener.replication_origin_ms = host.application().and_then(|a| a.origin_ms());
-        if let Err(error) = listener.advance_events(now_ms()) {
+        if let Err(error) = listener.advance_events(io.now_ms()) {
             // A first fault stages event teardown while retaining delegation.
             // If teardown itself fails, dropping this session owns all cleanup.
             if !listener.disable_events() {
@@ -1224,7 +1393,7 @@ pub async fn world_host(
                     ?error,
                     "owned event teardown rejected; closing world"
                 );
-                return;
+                return WorldEnd::Stopped;
             }
             warn!(
                 connection,
@@ -1232,72 +1401,45 @@ pub async fn world_host(
                 "owned event rejected; scheduling event teardown"
             );
         }
-        if !listener.files_alive(now_ms()) {
+        if !listener.files_alive(io.now_ms()) {
             warn!(
                 connection,
                 "incoming File or MessageEX deadline; closing world"
             );
-            return;
+            return WorldEnd::Stopped;
         }
         if let Err(error) = host.set_movement(listener.movement_objects()) {
             warn!(connection, ?error, "movement grants rejected");
-            return;
+            return WorldEnd::Stopped;
         }
         let advance_ms = advance_started.elapsed().as_millis() as u64;
         let receive_started = Instant::now();
+        let working = items.working();
         let output = tokio::select! {
-            success = items.completed(&mut listener), if items.working() => {
-                if !success { return; }
-                host.poll(now_ms())
+            success = items.completed(&mut listener), if working => {
+                if !success { return WorldEnd::Stopped; }
+                host.poll(io.now_ms())
             }
-            received = socket.recv_from(&mut buffer) => {
-                let (n, from) = match received {
-                    Ok(r) => r,
-                    Err(_) => continue,
-                };
-                match peer {
-                    None => {
-                        peer = Some(from);
-                        info!(connection, %from, "world client");
-                    }
-                    Some(p) if p != from => {
-                        debug!(connection, %from, "datagram from another address ignored");
-                        continue;
-                    }
-                    _ => {}
-                }
-                last_input = Instant::now();
-                let raw = buffer[..n].to_vec();
-                #[cfg(feature = "network-test")]
-                let dropped = test_loss.drop_input(now_ms());
-                #[cfg(not(feature = "network-test"))]
-                let dropped = false;
-                let note = dropped.then_some("diagnostic packet loss before transport");
-                if recorder.chunk("world", connection, Direction::In, &raw, note).await.is_err() {
-                    return;
-                }
-                if dropped { continue; }
-                host.receive(&raw, now_ms(), &mut listener)
-            }
-            _ = tick.tick() => {
-                #[cfg(feature = "network-test")]
-                test_loss.poll(now_ms()).await;
-                if last_input.elapsed() > WORLD_IDLE {
+            input = io.next(working) => match input {
+                WorldInput::Datagram(raw) => host.receive(&raw, io.now_ms(), &mut listener),
+                WorldInput::Tick => host.poll(io.now_ms()),
+                WorldInput::Ignore => continue,
+                WorldInput::Idle => {
                     info!(connection, "world host idle; closing");
-                    return;
+                    return WorldEnd::Closed;
                 }
-                host.poll(now_ms())
+                WorldInput::Ended => return WorldEnd::Ended,
             }
         };
         let receive_or_poll_ms = receive_started.elapsed().as_millis() as u64;
         let queue_started = Instant::now();
-        if !items.advance(&mut host, &output.events, now_ms()) {
-            return;
+        if !items.advance(&mut host, &output.events, io.now_ms()) {
+            return WorldEnd::Stopped;
         }
         items.start(
             &mut listener,
-            now_ms(),
-            nfs_storage::Timestamp(unix_micros().max(0) as u64 / 1_000),
+            io.now_ms(),
+            nfs_storage::Timestamp(io.unix_micros().max(0) as u64 / 1_000),
         );
         if let Err(refused) = flush_owned(&mut listener, &mut host, connection) {
             // Loud on purpose: the client never receives the refused output
@@ -1308,14 +1450,18 @@ pub async fn world_host(
                 error = ?refused.error,
                 "owned output rejected; world host stopped, the client will lose its connection"
             );
-            return;
+            return WorldEnd::Refused {
+                queue: refused.queue,
+                error: refused.error,
+                entry: refused.entry,
+            };
         }
-        while let Some(command) = listener.due_teleport(now_ms()) {
+        while let Some(command) = listener.due_teleport(io.now_ms()) {
             let bytes = match command.encode() {
                 Ok(bytes) => bytes,
                 Err(error) => {
                     warn!(connection, ?error, "owned car teleport rejected");
-                    return;
+                    return WorldEnd::Stopped;
                 }
             };
             match host.queue_content_after_replication(nfs_world::teleport::CONTENT_TARGET, &bytes)
@@ -1333,7 +1479,7 @@ pub async fn world_host(
                 Err(nfs_world::session::Error::Application(application::Error::Window)) => break,
                 Err(error) => {
                     warn!(connection, ?error, "owned car teleport rejected");
-                    return;
+                    return WorldEnd::Stopped;
                 }
             }
         }
@@ -1351,7 +1497,7 @@ pub async fn world_host(
                 Ok(bytes) => bytes,
                 Err(error) => {
                     warn!(connection, ?error, "owned Speedwall progress rejected");
-                    return;
+                    return WorldEnd::Stopped;
                 }
             };
             match host.queue_content_after_replication(nfs_world::speedwall::CONTENT_TARGET, &bytes)
@@ -1368,7 +1514,7 @@ pub async fn world_host(
                 Err(nfs_world::session::Error::Application(application::Error::Window)) => break,
                 Err(error) => {
                     warn!(connection, ?error, "owned Speedwall handoff rejected");
-                    return;
+                    return WorldEnd::Stopped;
                 }
             }
         }
@@ -1386,25 +1532,14 @@ pub async fn world_host(
                 other => info!(connection, event = ?other, "world"),
             }
         }
-        if let Some(p) = peer {
-            for wire in &output.send {
-                if socket.send_to(wire, p).await.is_err() {
-                    warn!(connection, "world send failed");
-                }
-                if recorder
-                    .chunk("world", connection, Direction::Out, wire, None)
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-            }
+        if !io.send(&output.send).await {
+            return WorldEnd::Ended;
         }
         let send_and_record_ms = send_started.elapsed().as_millis() as u64;
         if (advance_ms + queue_ms + send_and_record_ms >= 100 || receive_or_poll_ms >= 250)
-            && delay_reported.is_none_or(|last| now_ms().saturating_sub(last) >= 1000)
+            && delay_reported.is_none_or(|last| io.now_ms().saturating_sub(last) >= 1000)
         {
-            delay_reported = Some(now_ms());
+            delay_reported = Some(io.now_ms());
             warn!(connection, advance_ms, receive_or_poll_ms, queue_ms, send_and_record_ms,
                 replication = ?host.replication_progress(), content = ?host.content_progress(),
                 "world loop delay");
@@ -1429,7 +1564,7 @@ pub async fn world_host(
                 replication = ?host.replication_progress(),
                 "world host closed"
             );
-            return;
+            return WorldEnd::Closed;
         }
     }
 }

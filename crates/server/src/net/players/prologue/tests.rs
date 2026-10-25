@@ -1533,6 +1533,62 @@ fn garage_completion_entries_keep_every_record_and_call_once_in_order() {
     }
 }
 
+/// Presentation adds events to an entry after it was sized: the E1188
+/// garage completion went from fifteen calls to eighteen and the session
+/// refused it (E1191, found by the offline replay). Over-long entries are
+/// re-split: the section keeps the leading calls that fit, call-only entries
+/// carry the rest, in order, and every entry is admitted.
+#[test]
+fn entries_past_a_reply_group_are_resplit_in_order() {
+    let record = |id: u16| replication::Record {
+        id,
+        initial: Some(replication::Initial::Actor(replication::ActorInit {
+            participant: 7,
+            flag_a: true,
+            flag_b: true,
+            word_a: 4,
+            word_b: 65535,
+        })),
+        update: replication::Update::Actor(replication::ActorUpdate::default()),
+    };
+    let call = |i: u16| {
+        HostRpc::Participant(nfs_world::participants::Notification {
+            endpoint: Endpoint {
+                scene: 10,
+                selector: i,
+                serial: Serial::new(1).unwrap(),
+            },
+            participant: 179,
+            call: nfs_world::participants::Call::Enter,
+        })
+    };
+    let mut section = returning::empty_section();
+    section.setup = Some(Setup::RawEscape([0; 3]));
+    section.records = vec![record(181), record(177), record(179)];
+    section.deleted = vec![202, 203, 188, 201];
+    let calls = (0..18u16).map(call).collect::<Vec<_>>();
+    assert!(!crate::net::players::entry_admitted(&section, &calls));
+    let entries = crate::net::players::admitted_entries(section.clone(), calls.clone()).unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].0, section);
+    assert!(entries[1].0.records.is_empty() && entries[1].0.deleted.is_empty());
+    assert_eq!(
+        entries
+            .iter()
+            .flat_map(|(_, c)| c.iter().copied())
+            .collect::<Vec<_>>(),
+        calls,
+        "calls lost, repeated or reordered"
+    );
+    for (section, chunk) in &entries {
+        assert!(crate::net::players::entry_admitted(section, chunk));
+    }
+    // An admitted entry is left as it is.
+    let small =
+        crate::net::players::admitted_entries(section.clone(), calls[..15].to_vec()).unwrap();
+    assert_eq!(small, vec![(section, calls[..15].to_vec())]);
+}
+
 /// An entry the session does not admit stops the world loudly instead of
 /// queueing: test builds fail at its producer, and the flush reports which
 /// queue refused it and keeps the entry (E1186, E1188).
@@ -1569,9 +1625,10 @@ fn unadmitted_entries_fail_at_the_producer_and_stop_the_flush() {
     let mut listener = PlayerListener::new(0x100000002);
     listener.pending_entries.push_back((oversized, Vec::new()));
     let mut host = crate::net::players::test_wire::session_host();
-    let (queue, error) =
+    let (queue, error, entry) =
         crate::net::players::test_wire::flush(&mut listener, &mut host).unwrap_err();
     assert_eq!(queue, "entry transition");
+    assert_eq!(entry.map(|entry| entry.0.records.len()), Some(600));
     assert!(matches!(
         error,
         Some(nfs_world::session::Error::Application(
