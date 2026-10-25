@@ -207,6 +207,17 @@ fn completion_rejects_truncation_extra_bytes_wrong_route_and_reserved_words() {
     let wire = call.encode().unwrap();
     assert_eq!(wire.len(), 155);
     assert_eq!(Completed::decode(wire.span()), Ok(call));
+    for padding in 0..128 {
+        let mut native = BitWriter::new();
+        native
+            .put_span(wire.span().slice(0, 148).unwrap())
+            .put(padding, 7);
+        assert_eq!(
+            Completed::decode(native.span()),
+            Ok(call),
+            "padding {padding}"
+        );
+    }
     for cut in 0..155 {
         assert!(Completed::decode(wire.span().slice(0, cut).unwrap()).is_err());
     }

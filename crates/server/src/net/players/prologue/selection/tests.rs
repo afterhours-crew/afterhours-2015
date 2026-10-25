@@ -1,7 +1,7 @@
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
-use super::super::tests::{drain, send};
+use super::super::tests::{drain, native_completion, send};
 use super::*;
 use crate::sequence_content::execution::{AWARD, AWARDED};
 use nfs_content::prologue::sequences::{
@@ -125,7 +125,9 @@ pub(in crate::net::players::prologue) fn program(listener: &PlayerListener) -> A
 
 #[test]
 fn choice_waits_for_commit_then_unloads_previews_and_finishes_once() {
-    selected(false);
+    crate::net::players::test_wire::with_native_padding(|| {
+        selected(false);
+    });
 }
 
 pub(in crate::net::players::prologue) fn selected(handoff: bool) -> (PlayerListener, u16) {
@@ -238,12 +240,10 @@ pub(in crate::net::players::prologue) fn selected(handoff: bool) -> (PlayerListe
     };
     assert!(send(&mut listener, 22, 82, reached(41, 0).span()));
     assert!(listener.story_pending.is_empty());
-    let complete = Completed {
+    let complete = native_completion(Completed {
         sequence: ghost,
         participant,
-    }
-    .encode()
-    .unwrap();
+    });
     assert!(!send(&mut listener, 23, 47, complete.span()));
     let nfs_services::story::Prepared::Mutation(mut batch) = policy
         .complete(

@@ -246,10 +246,15 @@ impl PlayerListener {
             let [_, participant] = envelope.references() else {
                 return Err(replication::Error::Shape);
             };
-            if route.arguments().len() > 7
-                || (0..route.arguments().len()).any(|i| route.arguments().read_u32(i, 1) != Ok(0))
-                || !players.owns_participant(HOST_SELECTOR as u8, persona, *participant)
+            // This method has no arguments. The seven remaining payload bits
+            // only align it to a byte; native writers do not have to clear them.
+            if envelope.words() != [0, 0]
+                || !envelope.remaining().is_empty()
+                || route.arguments().len() != 7
             {
+                return Err(replication::Error::Shape);
+            }
+            if !players.owns_participant(HOST_SELECTOR as u8, persona, *participant) {
                 return Err(replication::Error::UnknownObject);
             }
             let owner = Owner {

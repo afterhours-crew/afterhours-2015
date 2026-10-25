@@ -726,9 +726,6 @@ impl PlayerListener {
             return Ok(None);
         };
         let call = Completed::decode(body)?;
-        if (0..route.arguments().len()).any(|bit| route.arguments().read_u32(bit, 1) != Ok(0)) {
-            return Err(replication::Error::Shape);
-        };
         let definition = match chapter {
             Chapter::FirstDrive => content.start.vehicle_item,
             Chapter::FirstRace | Chapter::SecondRace | Chapter::ReturnDrive => {
@@ -874,9 +871,6 @@ impl PlayerListener {
             return Ok(None);
         }
         let call = Completed::decode(body)?;
-        if (0..route.arguments().len()).any(|bit| route.arguments().read_u32(bit, 1) != Ok(0)) {
-            return Err(replication::Error::Shape);
-        }
         let owner = Owner {
             connection: HOST_SELECTOR as u8,
             persona,

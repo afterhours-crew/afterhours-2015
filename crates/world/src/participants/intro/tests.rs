@@ -325,14 +325,32 @@ fn owned_acknowledgements_gate_render_opening_and_first_mode_without_duplicate_o
     assert_eq!(model, before);
     assert!(model.receive(teleport.span(), |p| p == 9).is_err());
     assert_eq!(model, before);
-    for tail in [1, 127] {
-        assert!(
-            model
-                .receive(request(8, 76, 3, tail).span(), |_| true)
-                .is_err()
+    for tail in 0..128 {
+        let mut native = model.clone();
+        let teleport = request(8, 76, 3, tail);
+        let rendering = request(8, 80, 0, tail);
+        assert!(matches!(
+            native.receive(teleport.span(), |p| p == 8).unwrap(),
+            Outcome::Advanced(_)
+        ));
+        assert!(matches!(
+            native.receive(rendering.span(), |p| p == 8).unwrap(),
+            Outcome::Advanced(_)
+        ));
+        assert_eq!(
+            native.receive(teleport.span(), |p| p == 8).unwrap(),
+            Outcome::Repeated
         );
-        assert_eq!(model, before);
+        assert_eq!(
+            native.receive(rendering.span(), |p| p == 8).unwrap(),
+            Outcome::Repeated
+        );
+        assert_eq!(native.stage(8), Some(Stage::IntroOpening));
     }
+    let mut extra = teleport.clone();
+    extra.put(0, 1);
+    assert!(model.receive(extra.span(), |_| true).is_err());
+    assert_eq!(model, before);
     assert_eq!(
         calls(model.receive(teleport.span(), |p| p == 8).unwrap()),
         [

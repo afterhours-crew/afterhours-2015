@@ -526,7 +526,6 @@ impl Lifecycle {
         if envelope.words() != [0, 0]
             || !envelope.remaining().is_empty()
             || route.arguments().len() != 7
-            || (0..7).any(|bit| route.arguments().read_u32(bit, 1) != Ok(0))
         {
             return Err(Error::Shape);
         }

@@ -41,6 +41,8 @@ mod traffic;
 
 #[cfg(test)]
 mod deployment_tests;
+#[cfg(test)]
+mod test_wire;
 mod vehicles;
 
 const MAX_PENDING: usize = 32;

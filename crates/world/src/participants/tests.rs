@@ -488,11 +488,12 @@ fn exit_bindings() -> ExitBindings {
 }
 fn request(scene: u16, participant: u16, selector: u16, method: u32, bits: usize) -> BitWriter {
     let mut payload = BitWriter::new();
-    payload
-        .put(selector.into(), 9)
-        .put(method.into(), 32)
-        .put(0, bits);
-    payload.align();
+    payload.put(selector.into(), 9).put(method.into(), 32);
+    if bits == 0 || bits == 7 {
+        payload.put(0b0110010, 7);
+    } else {
+        payload.put(0, bits).align();
+    }
     let mut body = BitWriter::new();
     body.put(0, 32)
         .put(0, 32)

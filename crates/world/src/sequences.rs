@@ -207,6 +207,8 @@ impl Stop {
     }
 }
 
+/// A parameterless native completion RPC. The seven bits after its method
+/// are byte alignment, not an argument; their values are unspecified.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Completed {
     pub sequence: u16,

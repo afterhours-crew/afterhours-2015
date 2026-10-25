@@ -61,9 +61,6 @@ pub(in crate::net::players) fn completed(
         return Ok(None);
     }
     let call = Completed::decode(body)?;
-    if (0..route.arguments().len()).any(|b| route.arguments().read_u32(b, 1) != Ok(0)) {
-        return Err(replication::Error::Shape);
-    }
     instances
         .complete(
             players,

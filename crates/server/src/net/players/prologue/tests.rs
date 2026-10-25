@@ -17,91 +17,104 @@ use nfs_world::{
 };
 use std::sync::Arc;
 
+use crate::net::players::test_wire::client_padding;
+
 #[test]
 fn story_opponents_are_delegated_and_retire_after_departures_atomically() {
-    let (players, owner, mode, active) =
-        crate::prologue::driving::opponents::tests::finished_fixture();
-    assert_eq!(owner.connection, HOST_SELECTOR as u8);
-    let (template, _, _) = setup();
-    let mut content = (**template.prologue.as_ref().unwrap()).clone();
-    content.driving = Some((mode.clone(), mode));
-    let cars = active.delegated(&players);
-    let root = active.ghost;
-    let mut listener = PlayerListener::new(owner.persona).with_prologue(Some(Arc::new(content)));
-    listener.players = players;
-    listener.replication_origin_ms = Some(100_000);
-    listener.world_ms = 112_100;
-    listener.intro_modes.insert(
-        owner.participant,
-        (active.clone(), active, Chapter::FirstDrive),
-    );
-    for &car in cars.keys() {
-        assert!(listener.movement_objects().contains(&car));
-        assert!(
+    crate::net::players::test_wire::with_native_padding(|| {
+        let (players, owner, mode, active) =
+            crate::prologue::driving::opponents::tests::finished_fixture();
+        assert_eq!(owner.connection, HOST_SELECTOR as u8);
+        let (template, _, _) = setup();
+        let mut content = (**template.prologue.as_ref().unwrap()).clone();
+        content.driving = Some((mode.clone(), mode));
+        let cars = active.delegated(&players);
+        let root = active.ghost;
+        let mut listener =
+            PlayerListener::new(owner.persona).with_prologue(Some(Arc::new(content)));
+        listener.players = players;
+        listener.replication_origin_ms = Some(100_000);
+        listener.world_ms = 112_100;
+        listener.intro_modes.insert(
+            owner.participant,
+            (active.clone(), active, Chapter::FirstDrive),
+        );
+        for &car in cars.keys() {
+            assert!(listener.movement_objects().contains(&car));
+            assert!(
+                listener
+                    .rival_glass_owner(&listener.players, car, 0)
+                    .is_some()
+            );
+        }
+        assert_eq!(
             listener
-                .rival_glass_owner(&listener.players, car, 0)
-                .is_some()
-        );
-    }
-    assert_eq!(
-        listener
-            .rival_map(&listener.players)
-            .unwrap()
-            .unwrap()
-            .len(),
-        2
-    );
-    let leave = request_with_padding(
-        Endpoint {
-            scene: root,
-            selector: 0,
-            serial: Serial::new(1).unwrap(),
-        },
-        owner.participant,
-        0,
-        0b1101101,
-    );
-    listener.pending_entries.resize(
-        MAX_PENDING,
-        (super::super::returning::empty_section(), vec![]),
-    );
-    let before = listener.players.objects().snapshot();
-    assert!(!send(&mut listener, 0, 47, leave.span()));
-    assert_eq!(listener.players.objects().snapshot(), before);
-    assert!(!listener.intro_modes[&owner.participant].0.has_left());
-    drain(&mut listener);
-    assert!(send(&mut listener, 0, 47, leave.span()));
-    assert!(listener.intro_modes[&owner.participant].0.has_left());
-    assert!(listener.delegated_ai(&listener.players).is_empty());
-    assert!(listener.pending.iter().all(|s| s.deleted.is_empty()));
-    let first_delete = listener
-        .pending_entries
-        .iter()
-        .position(|(s, _)| !s.deleted.is_empty())
-        .unwrap();
-    assert!(first_delete > 0);
-    let departures = listener
-        .pending_entries
-        .iter()
-        .take(first_delete)
-        .flat_map(|(_, calls)| calls)
-        .count();
-    assert!(departures >= 4);
-    for (section, calls) in &listener.pending_entries {
-        assert!(
-            nfs_world::session::replication_frame(section, calls, 0)
+                .rival_map(&listener.players)
                 .unwrap()
-                .len()
-                <= nfs_world::application::OUTBOUND_FRAME_BITS
+                .unwrap()
+                .len(),
+            2
         );
-    }
-    drain(&mut listener);
-    assert!(send(&mut listener, 1, 47, leave.span()));
-    assert!(listener.pending_entries.is_empty());
+        let leave = request_with_padding(
+            Endpoint {
+                scene: root,
+                selector: 0,
+                serial: Serial::new(1).unwrap(),
+            },
+            owner.participant,
+            0,
+            0b1101101,
+        );
+        listener.pending_entries.resize(
+            MAX_PENDING,
+            (super::super::returning::empty_section(), vec![]),
+        );
+        let before = listener.players.objects().snapshot();
+        assert!(!send(&mut listener, 0, 47, leave.span()));
+        assert_eq!(listener.players.objects().snapshot(), before);
+        assert!(!listener.intro_modes[&owner.participant].0.has_left());
+        drain(&mut listener);
+        assert!(send(&mut listener, 0, 47, leave.span()));
+        assert!(listener.intro_modes[&owner.participant].0.has_left());
+        assert!(listener.delegated_ai(&listener.players).is_empty());
+        assert!(listener.pending.iter().all(|s| s.deleted.is_empty()));
+        let first_delete = listener
+            .pending_entries
+            .iter()
+            .position(|(s, _)| !s.deleted.is_empty())
+            .unwrap();
+        assert!(first_delete > 0);
+        let departures = listener
+            .pending_entries
+            .iter()
+            .take(first_delete)
+            .flat_map(|(_, calls)| calls)
+            .count();
+        assert!(departures >= 4);
+        for (section, calls) in &listener.pending_entries {
+            assert!(
+                nfs_world::session::replication_frame(section, calls, 0)
+                    .unwrap()
+                    .len()
+                    <= nfs_world::application::OUTBOUND_FRAME_BITS
+            );
+        }
+        drain(&mut listener);
+        assert!(send(&mut listener, 1, 47, leave.span()));
+        assert!(listener.pending_entries.is_empty());
+    });
 }
 
 fn request(endpoint: Endpoint, participant: u16, method: u32) -> BitWriter {
-    request_with_padding(endpoint, participant, method, 0)
+    request_with_padding(endpoint, participant, method, client_padding() as u8)
+}
+pub(super) fn native_completion(call: Completed) -> BitWriter {
+    let wire = call.encode().unwrap();
+    let mut padded = BitWriter::new();
+    padded
+        .put_span(wire.span().slice(0, wire.span().len() - 7).unwrap())
+        .put(client_padding(), 7);
+    padded
 }
 fn request_with_padding(
     endpoint: Endpoint,
@@ -370,7 +383,9 @@ pub(super) fn setup() -> (PlayerListener, u16, Arc<nfs_world::items::Collection>
 
 #[test]
 fn opening_runs_after_car_and_render_readiness_and_waits_for_native_completion() {
-    ready_for_selection(false);
+    crate::net::players::test_wire::with_native_padding(|| {
+        ready_for_selection(false);
+    });
 }
 pub(super) fn ready_for_selection(
     with_services: bool,
@@ -541,12 +556,10 @@ pub(super) fn ready_for_selection(
             .any(|r| matches!(r,HostRpc::SequenceStop(stop) if stop.sequence==ghost))
     );
     drain(&mut listener);
-    let completed = Completed {
+    let completed = native_completion(Completed {
         sequence: ghost,
         participant,
-    }
-    .encode()
-    .unwrap();
+    });
     listener
         .pending
         .resize(MAX_PENDING, super::super::returning::empty_section());
@@ -666,12 +679,10 @@ pub(super) fn ready_for_selection(
         .unwrap();
     }
     assert!(crashes.pending().is_empty());
-    let completed = Completed {
+    let completed = native_completion(Completed {
         sequence: drive_sequence,
         participant,
-    }
-    .encode()
-    .unwrap();
+    });
     // Completion before the installed stop signal is refused without deleting goals.
     assert!(!send(&mut listener, 6, 47, completed.span()));
     assert!(
@@ -946,12 +957,10 @@ pub(super) fn ready_for_selection(
     assert!(send(&mut listener, 14, 47, enter.span()));
     assert_eq!(listener.players.objects().snapshot(), live);
     assert!(listener.pending_entries.is_empty());
-    let complete = Completed {
+    let complete = native_completion(Completed {
         sequence: entry,
         participant,
-    }
-    .encode()
-    .unwrap();
+    });
     assert!(!send(&mut listener, 15, 47, complete.span()));
     assert_eq!(listener.players.objects().snapshot(), live);
     listener.world_ms += 7500;
@@ -1003,12 +1012,10 @@ pub(super) fn ready_for_selection(
         .unwrap();
     drain(&mut listener);
     listener.advance_sequences(listener.world_ms).unwrap();
-    let complete = Completed {
+    let complete = native_completion(Completed {
         sequence: waiting,
         participant,
-    }
-    .encode()
-    .unwrap();
+    });
     assert!(!send(&mut listener, 16, 47, complete.span()));
     for (i, b) in preview_bindings.iter().enumerate() {
         let ack = b.expected().encode().unwrap();
@@ -1062,226 +1069,228 @@ pub(super) fn ready_for_selection(
 
 #[test]
 fn full_output_queue_preserves_the_car_allocation_and_readiness_gate() {
-    let (mut listener, participant, _) = setup();
-    let before = listener.players.objects().snapshot();
-    listener
-        .pending
-        .resize(MAX_PENDING, super::super::returning::empty_section());
-    tick_with_normal_presentation(&mut listener).unwrap();
-    assert_eq!(listener.players.objects().snapshot(), before);
-    assert!(
+    crate::net::players::test_wire::with_native_padding(|| {
+        let (mut listener, participant, _) = setup();
+        let before = listener.players.objects().snapshot();
         listener
+            .pending
+            .resize(MAX_PENDING, super::super::returning::empty_section());
+        tick_with_normal_presentation(&mut listener).unwrap();
+        assert_eq!(listener.players.objects().snapshot(), before);
+        assert!(
+            listener
+                .players
+                .temporary_vehicle(HOST_SELECTOR as u8, listener.persona, participant)
+                .is_none()
+        );
+        drain(&mut listener);
+        tick_with_normal_presentation(&mut listener).unwrap();
+        let vehicle = listener
             .players
             .temporary_vehicle(HOST_SELECTOR as u8, listener.persona, participant)
-            .is_none()
-    );
-    drain(&mut listener);
-    tick_with_normal_presentation(&mut listener).unwrap();
-    let vehicle = listener
-        .players
-        .temporary_vehicle(HOST_SELECTOR as u8, listener.persona, participant)
+            .unwrap();
+        drain(&mut listener);
+        let before = listener.players.objects().snapshot();
+        listener
+            .pending
+            .resize(MAX_PENDING, super::super::returning::empty_section());
+        let glass = nfs_world::logic::Message::Reached {
+            event: 21_578_436,
+            target: nfs_world::logic::EntityRef {
+                ghost: vehicle,
+                entity: 2,
+            },
+            player: 0,
+        }
+        .encode()
         .unwrap();
-    drain(&mut listener);
-    let before = listener.players.objects().snapshot();
-    listener
-        .pending
-        .resize(MAX_PENDING, super::super::returning::empty_section());
-    let glass = nfs_world::logic::Message::Reached {
-        event: 21_578_436,
-        target: nfs_world::logic::EntityRef {
-            ghost: vehicle,
-            entity: 2,
-        },
-        player: 0,
-    }
-    .encode()
-    .unwrap();
-    assert!(!send(&mut listener, 0, 82, glass.span()));
-    assert_eq!(listener.players.objects().snapshot(), before);
-    assert_eq!(
-        listener.participants.stage(participant),
-        Some(Stage::IntroSpawning)
-    );
-    assert!(listener.pending_teleports.is_empty());
-    drain(&mut listener);
-    assert!(send(&mut listener, 0, 82, glass.span()));
-    assert_eq!(
-        listener.participants.stage(participant),
-        Some(Stage::IntroTeleporting)
-    );
+        assert!(!send(&mut listener, 0, 82, glass.span()));
+        assert_eq!(listener.players.objects().snapshot(), before);
+        assert_eq!(
+            listener.participants.stage(participant),
+            Some(Stage::IntroSpawning)
+        );
+        assert!(listener.pending_teleports.is_empty());
+        drain(&mut listener);
+        assert!(send(&mut listener, 0, 82, glass.span()));
+        assert_eq!(
+            listener.participants.stage(participant),
+            Some(Stage::IntroTeleporting)
+        );
+    });
 }
 
 #[test]
 fn selected_car_reuses_native_startup_and_waits_for_previous_mode_retirement() {
-    let (mut listener, participant) = super::selection::tests::selected(true);
-    let vehicles = Arc::make_mut(listener.vehicles.as_mut().unwrap());
-    vehicles.layout = crate::vehicle_content::population::tests::world_layout(&vehicles.layout);
-    let persona = listener.persona;
-    let inventory = listener.inventory.clone().unwrap();
-    let item = inventory.slots.values()[0].unwrap();
-    let garage = listener
-        .players
-        .owned_vehicle(HOST_SELECTOR as u8, persona, participant, item)
-        .unwrap();
-    let previous = listener.intro_modes[&participant].0.ghost;
-    let canceller = listener.intro_modes[&participant].1.ghost;
-    assert!(!listener.intro_modes[&participant].0.has_left());
-    let before = listener.players.objects().snapshot();
-    listener
-        .pending
-        .resize(MAX_PENDING, super::super::returning::empty_section());
-    tick_with_normal_presentation(&mut listener).unwrap();
-    assert_eq!(listener.players.objects().snapshot(), before);
-    drain(&mut listener);
-    tick_with_normal_presentation(&mut listener).unwrap();
-    let car = listener
-        .players
-        .owned_vehicle(HOST_SELECTOR as u8, persona, participant, item)
-        .unwrap();
-    assert_ne!(car, garage);
-    assert_eq!(
-        listener
+    crate::net::players::test_wire::with_native_padding(|| {
+        let (mut listener, participant) = super::selection::tests::selected(true);
+        let vehicles = Arc::make_mut(listener.vehicles.as_mut().unwrap());
+        vehicles.layout = crate::vehicle_content::population::tests::world_layout(&vehicles.layout);
+        let persona = listener.persona;
+        let inventory = listener.inventory.clone().unwrap();
+        let item = inventory.slots.values()[0].unwrap();
+        let garage = listener
             .players
-            .vehicle_item_of(HOST_SELECTOR as u8, persona, car),
-        Some(item)
-    );
-    assert!(
-        listener
-            .players
-            .temporary_vehicle(HOST_SELECTOR as u8, persona, participant)
-            .is_none()
-    );
-    assert_eq!(listener.world_cars[&car], (participant, false));
-    assert!(
+            .owned_vehicle(HOST_SELECTOR as u8, persona, participant, item)
+            .unwrap();
+        let previous = listener.intro_modes[&participant].0.ghost;
+        let canceller = listener.intro_modes[&participant].1.ghost;
+        assert!(!listener.intro_modes[&participant].0.has_left());
+        let before = listener.players.objects().snapshot();
         listener
             .pending
-            .iter()
-            .flat_map(|s| &s.deleted)
-            .any(|&id| id == garage)
-    );
-    drain(&mut listener);
-    let world = listener.players.objects().snapshot();
-    tick_with_normal_presentation(&mut listener).unwrap();
-    assert_eq!(listener.players.objects().snapshot(), world);
-    let glass = nfs_world::logic::Message::Reached {
-        event: 21_578_436,
-        target: nfs_world::logic::EntityRef {
-            ghost: car,
-            entity: 2,
-        },
-        player: 0,
-    }
-    .encode()
-    .unwrap();
-    listener
-        .pending
-        .resize(MAX_PENDING, super::super::returning::empty_section());
-    assert!(!send(&mut listener, 28, 82, glass.span()));
-    assert_eq!(
-        listener.participants.stage(participant),
-        Some(Stage::IntroSpawning)
-    );
-    assert!(listener.pending_teleports.is_empty());
-    drain(&mut listener);
-    assert!(send(&mut listener, 28, 82, glass.span()));
-    assert_eq!(
-        listener.participants.stage(participant),
-        Some(Stage::IntroTeleporting)
-    );
-    assert_eq!(
-        listener.pending_teleports.front().unwrap().1.position,
-        [100., 20., 300.]
-    );
-    assert_eq!(listener.world_cars[&car], (participant, true));
-    assert!(listener.pending_spawns.is_empty());
-    drain(&mut listener);
-    assert!(send(&mut listener, 29, 82, glass.span()));
-    assert_eq!(listener.pending_teleports.len(), 1);
-    drain(&mut listener);
-    let bindings = listener.participants.intro_bindings().unwrap();
-    assert!(send(
-        &mut listener,
-        30,
-        47,
-        request(bindings.teleport, participant, 3).span()
-    ));
-    drain(&mut listener);
-    assert!(send(
-        &mut listener,
-        31,
-        47,
-        request(bindings.render_ready, participant, 0).span()
-    ));
-    drain(&mut listener);
-    tick_with_normal_presentation(&mut listener).unwrap();
-    let arrival = listener.opening.ghost(participant).unwrap();
-    let replication::Initial::Entity { fields, .. } =
-        &listener.players.objects().get(arrival).unwrap().initial
-    else {
-        panic!()
-    };
-    assert!(matches!(
-        fields.first(),
-        Some(entity::Initial::SequenceRoot { stopping: true, .. })
-    ));
-    assert_eq!(
+            .resize(MAX_PENDING, super::super::returning::empty_section());
+        tick_with_normal_presentation(&mut listener).unwrap();
+        assert_eq!(listener.players.objects().snapshot(), before);
+        drain(&mut listener);
+        tick_with_normal_presentation(&mut listener).unwrap();
+        let car = listener
+            .players
+            .owned_vehicle(HOST_SELECTOR as u8, persona, participant, item)
+            .unwrap();
+        assert_ne!(car, garage);
+        assert_eq!(
+            listener
+                .players
+                .vehicle_item_of(HOST_SELECTOR as u8, persona, car),
+            Some(item)
+        );
+        assert!(
+            listener
+                .players
+                .temporary_vehicle(HOST_SELECTOR as u8, persona, participant)
+                .is_none()
+        );
+        assert_eq!(listener.world_cars[&car], (participant, false));
+        assert!(
+            listener
+                .pending
+                .iter()
+                .flat_map(|s| &s.deleted)
+                .any(|&id| id == garage)
+        );
+        drain(&mut listener);
+        let world = listener.players.objects().snapshot();
+        tick_with_normal_presentation(&mut listener).unwrap();
+        assert_eq!(listener.players.objects().snapshot(), world);
+        let glass = nfs_world::logic::Message::Reached {
+            event: 21_578_436,
+            target: nfs_world::logic::EntityRef {
+                ghost: car,
+                entity: 2,
+            },
+            player: 0,
+        }
+        .encode()
+        .unwrap();
         listener
-            .pending_rpcs
-            .iter()
-            .filter(|r| matches!(r, HostRpc::SequenceStop(s) if s.sequence == arrival))
-            .count(),
-        0
-    );
-    assert_eq!(
-        listener.participants.stage(participant),
-        Some(Stage::IntroOpening)
-    );
-    drain(&mut listener);
-    tick_with_normal_presentation(&mut listener).unwrap();
-    assert!(listener.pending.is_empty());
-    assert!(listener.pending_rpcs.is_empty());
-    let complete = Completed {
-        sequence: arrival,
-        participant,
-    }
-    .encode()
-    .unwrap();
-    assert!(send(&mut listener, 32, 47, complete.span()));
-    drain(&mut listener);
-    tick_with_normal_presentation(&mut listener).unwrap();
-    assert_eq!(listener.intro_modes[&participant].0.ghost, previous);
-    assert_eq!(
-        listener.participants.stage(participant),
-        Some(Stage::IntroStartingDrive)
-    );
-    let leave = request(
-        Endpoint {
-            scene: previous,
-            selector: 0,
-            serial: Serial::new(1).unwrap(),
-        },
-        participant,
-        0,
-    );
-    assert!(send(&mut listener, 33, 47, leave.span()));
-    assert!(listener.intro_modes[&participant].0.has_left());
-    drain(&mut listener);
-    listener
-        .pending
-        .resize(MAX_PENDING, super::super::returning::empty_section());
-    tick_with_normal_presentation(&mut listener).unwrap();
-    assert_eq!(listener.intro_modes[&participant].0.ghost, previous);
-    drain(&mut listener);
-    tick_with_normal_presentation(&mut listener).unwrap();
-    assert_ne!(listener.intro_modes[&participant].0.ghost, previous);
-    assert_eq!(listener.intro_modes[&participant].1.ghost, canceller);
-    assert_eq!(listener.intro_modes[&participant].2, Chapter::FirstRace);
-    assert_eq!(
-        listener.participants.stage(participant),
-        Some(Stage::FreeRoam)
-    );
-    assert_eq!(
-        *listener.inventory.as_ref().unwrap().items,
-        *inventory.items
-    );
+            .pending
+            .resize(MAX_PENDING, super::super::returning::empty_section());
+        assert!(!send(&mut listener, 28, 82, glass.span()));
+        assert_eq!(
+            listener.participants.stage(participant),
+            Some(Stage::IntroSpawning)
+        );
+        assert!(listener.pending_teleports.is_empty());
+        drain(&mut listener);
+        assert!(send(&mut listener, 28, 82, glass.span()));
+        assert_eq!(
+            listener.participants.stage(participant),
+            Some(Stage::IntroTeleporting)
+        );
+        assert_eq!(
+            listener.pending_teleports.front().unwrap().1.position,
+            [100., 20., 300.]
+        );
+        assert_eq!(listener.world_cars[&car], (participant, true));
+        assert!(listener.pending_spawns.is_empty());
+        drain(&mut listener);
+        assert!(send(&mut listener, 29, 82, glass.span()));
+        assert_eq!(listener.pending_teleports.len(), 1);
+        drain(&mut listener);
+        let bindings = listener.participants.intro_bindings().unwrap();
+        assert!(send(
+            &mut listener,
+            30,
+            47,
+            request(bindings.teleport, participant, 3).span()
+        ));
+        drain(&mut listener);
+        assert!(send(
+            &mut listener,
+            31,
+            47,
+            request(bindings.render_ready, participant, 0).span()
+        ));
+        drain(&mut listener);
+        tick_with_normal_presentation(&mut listener).unwrap();
+        let arrival = listener.opening.ghost(participant).unwrap();
+        let replication::Initial::Entity { fields, .. } =
+            &listener.players.objects().get(arrival).unwrap().initial
+        else {
+            panic!()
+        };
+        assert!(matches!(
+            fields.first(),
+            Some(entity::Initial::SequenceRoot { stopping: true, .. })
+        ));
+        assert_eq!(
+            listener
+                .pending_rpcs
+                .iter()
+                .filter(|r| matches!(r, HostRpc::SequenceStop(s) if s.sequence == arrival))
+                .count(),
+            0
+        );
+        assert_eq!(
+            listener.participants.stage(participant),
+            Some(Stage::IntroOpening)
+        );
+        drain(&mut listener);
+        tick_with_normal_presentation(&mut listener).unwrap();
+        assert!(listener.pending.is_empty());
+        assert!(listener.pending_rpcs.is_empty());
+        let complete = native_completion(Completed {
+            sequence: arrival,
+            participant,
+        });
+        assert!(send(&mut listener, 32, 47, complete.span()));
+        drain(&mut listener);
+        tick_with_normal_presentation(&mut listener).unwrap();
+        assert_eq!(listener.intro_modes[&participant].0.ghost, previous);
+        assert_eq!(
+            listener.participants.stage(participant),
+            Some(Stage::IntroStartingDrive)
+        );
+        let leave = request(
+            Endpoint {
+                scene: previous,
+                selector: 0,
+                serial: Serial::new(1).unwrap(),
+            },
+            participant,
+            0,
+        );
+        assert!(send(&mut listener, 33, 47, leave.span()));
+        assert!(listener.intro_modes[&participant].0.has_left());
+        drain(&mut listener);
+        listener
+            .pending
+            .resize(MAX_PENDING, super::super::returning::empty_section());
+        tick_with_normal_presentation(&mut listener).unwrap();
+        assert_eq!(listener.intro_modes[&participant].0.ghost, previous);
+        drain(&mut listener);
+        tick_with_normal_presentation(&mut listener).unwrap();
+        assert_ne!(listener.intro_modes[&participant].0.ghost, previous);
+        assert_eq!(listener.intro_modes[&participant].1.ghost, canceller);
+        assert_eq!(listener.intro_modes[&participant].2, Chapter::FirstRace);
+        assert_eq!(
+            listener.participants.stage(participant),
+            Some(Stage::FreeRoam)
+        );
+        assert_eq!(
+            *listener.inventory.as_ref().unwrap().items,
+            *inventory.items
+        );
+    });
 }

@@ -101,7 +101,6 @@ impl PlayerListener {
         if envelope.words() != [0, 0]
             || !envelope.remaining().is_empty()
             || route.arguments().len() != 7
-            || route.arguments().read_u32(0, 7) != Ok(0)
         {
             return Err(replication::Error::Shape);
         }
