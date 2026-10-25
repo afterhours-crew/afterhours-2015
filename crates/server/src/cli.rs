@@ -960,6 +960,47 @@ async fn run(args: Args) -> Result<(), Failure> {
     if let Some(content) = &world_content {
         content.validate_runtime()?;
     }
+    // An unfinished intro cannot be resumed mid-story, so settle it before
+    // any session restores progression from the account.
+    let resume = match (&inventory, &progression) {
+        (Some(profile), Some(progression)) => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+            let now = nfs_storage::Timestamp(now);
+            let start = prologue
+                .as_deref()
+                .map(|p: &nfs_server::prologue::Content| p.start.objective);
+            match profile.resume_intro(progression.clone(), start, now).await {
+                Ok(resume) => Some(resume),
+                Err(error) => {
+                    tracing::warn!(?error, "unfinished intro check failed; account unchanged");
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+    match resume {
+        Some(net::Resume::Stranded) if args.game_dir.is_some() => {
+            eprintln!(
+                "nfs-server: this account has not finished the prologue and owns no car, but the \
+                 prologue could not be prepared from the game installation. Check the game \
+                 directory and the server log for \"prologue opening unavailable\"."
+            );
+            return Err(Failure::ProfileConfig);
+        }
+        Some(net::Resume::Stranded) => {
+            tracing::warn!("unfinished intro without a car and no prologue; garage will be empty")
+        }
+        Some(resume @ (net::Resume::Restarted | net::Resume::Finished)) => {
+            tracing::warn!(
+                resume = resume.label(),
+                "interrupted intro settled before serving"
+            )
+        }
+        _ => {}
+    }
     let listeners = net::Listeners::bind(args.listen, args.redirector_port).await?;
     let a = listeners.addresses()?;
     let lsx_listener = match args.lsx_port {
@@ -1020,6 +1061,7 @@ async fn run(args: Args) -> Result<(), Failure> {
         "pack"
     });
     ready["lsx"] = serde_json::json!(lsx_address.map(|a| a.to_string()));
+    ready["intro_resume"] = serde_json::json!(resume.map(net::Resume::label));
     ready["manifest_mode"] = serde_json::json!("none");
     ready["install_content"] = args.generated.clone().unwrap_or(serde_json::Value::Null);
     println!("{ready}");

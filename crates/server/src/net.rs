@@ -117,7 +117,7 @@ mod players;
 mod qos;
 #[cfg(feature = "network-test")]
 mod test_loss;
-pub use items::{Profile as InventoryProfile, Service as InventoryService};
+pub use items::{Profile as InventoryProfile, Service as InventoryService, story::Resume};
 const FILE_RECEIVE_MS: u64 = 60_000;
 #[derive(Debug, Default)]
 pub struct Accepting {

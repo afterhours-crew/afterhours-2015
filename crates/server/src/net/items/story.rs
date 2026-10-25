@@ -182,17 +182,155 @@ impl Profile {
     }
 }
 
+/// What a server start did with an account whose intro is unfinished. The
+/// prologue has no playable checkpoint after its opening, and its first
+/// durable completion happens as the first drive starts, so an interrupted
+/// session would otherwise come back to the ordinary garage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Resume {
+    /// Not started, already finished, or nothing safe to change.
+    Unchanged,
+    /// Interrupted before any car was owned: the intro starts again from its
+    /// first objective. Nothing had been granted, so nothing is taken back.
+    Restarted,
+    /// Interrupted after a car was owned (the starter choice is a claimed
+    /// reward and cannot be offered twice): the intro is completed without
+    /// rewards, keeping the car and opening the career.
+    Finished,
+    /// No car and an unfinished intro that this session cannot run.
+    Stranded,
+}
+impl Resume {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Unchanged => "unchanged",
+            Self::Restarted => "restarted",
+            Self::Finished => "finished",
+            Self::Stranded => "stranded",
+        }
+    }
+}
+
+/// `start` is the prologue's first objective when this session can run it.
+fn resume_plan(
+    view: &nfs_services::story::View,
+    owns_car: bool,
+    start: Option<u64>,
+) -> (Resume, Option<nfs_services::story::Checkpoint>) {
+    use nfs_services::story::Checkpoint;
+    let total = view.milestones.len();
+    if view.position == total {
+        return (Resume::Unchanged, None);
+    }
+    if owns_car {
+        return if view.position == 0 {
+            (Resume::Unchanged, None)
+        } else {
+            (Resume::Finished, Some(Checkpoint::AfterIntro))
+        };
+    }
+    match (start, view.milestones.first()) {
+        (Some(start), Some(first)) if start == first.id => {
+            if view.position == 0 {
+                (Resume::Unchanged, None)
+            } else {
+                (Resume::Restarted, Some(Checkpoint::Objective(start)))
+            }
+        }
+        _ => (Resume::Stranded, None),
+    }
+}
+
+/// Blocking. One retry-safe story checkpoint batch at most; the account must
+/// not be in use by a session.
+pub(in crate::net) fn resume_intro(
+    repository: &dyn InventoryRepository,
+    account: AccountId,
+    policy: &nfs_services::story::Policy<'_>,
+    owns_car: impl Fn(&nfs_storage::Snapshot) -> bool,
+    start: Option<u64>,
+    now: Timestamp,
+) -> Result<Resume, nfs_storage::Error> {
+    for _ in 0..8 {
+        let snapshot = repository.snapshot(account)?;
+        let view = policy.inspect(&snapshot)?;
+        let (resume, target) = resume_plan(&view, owns_car(&snapshot), start);
+        let Some(target) = target else {
+            return Ok(resume);
+        };
+        let operation = policy.next_operation(&snapshot)?;
+        match policy.jump(&snapshot, snapshot.generation, operation, target)? {
+            nfs_services::story::Prepared::Replayed => return Ok(resume),
+            nfs_services::story::Prepared::Mutation(batch) => {
+                match repository.apply(account, &batch, now) {
+                    Ok(_) => return Ok(resume),
+                    Err(nfs_storage::Error::Conflict) => continue,
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+    }
+    Err(nfs_storage::Error::Conflict)
+}
+
+impl Profile {
+    /// Run once at server start, before any listener accepts a session.
+    pub async fn resume_intro(
+        &self,
+        progression: Arc<crate::progression::Content>,
+        start: Option<u64>,
+        now: Timestamp,
+    ) -> Result<Resume, crate::Failure> {
+        let service = self.service.clone();
+        let account = self.account;
+        tokio::task::spawn_blocking(move || {
+            let tables = service
+                .persistent
+                .as_ref()
+                .ok_or(crate::Failure::ProfileConfig)?;
+            let snapshot = inventory::load(
+                service.repository.as_ref(),
+                account,
+                &service.catalog,
+                1,
+                now,
+            )
+            .map_err(|_| crate::Failure::ProfileConfig)?;
+            tables
+                .ensure_loaded(service.repository.as_ref(), account, snapshot, now)
+                .map_err(|_| crate::Failure::ProfileConfig)?;
+            let bindings = service.catalog.bindings();
+            let owns_car = |snapshot: &nfs_storage::Snapshot| {
+                snapshot.items.values().any(|item| {
+                    bindings.class(&item.definition.0).is_ok_and(|class| {
+                        class == nfs_world::items::DefinitionClass::RaceVehicleItemData
+                    })
+                })
+            };
+            resume_intro(
+                service.repository.as_ref(),
+                account,
+                &progression.catalog.story_policy(progression.settings),
+                owns_car,
+                start,
+                now,
+            )
+            .map_err(|_| crate::Failure::ProfileConfig)
+        })
+        .await
+        .map_err(|_| crate::Failure::Output)?
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[tokio::test]
-    async fn selection_worker_grants_selects_and_completes_before_acknowledgement() {
+    /// One claimable starter car, definition `[9; 16]`.
+    fn car_catalog() -> Arc<InventoryCatalog> {
         use nfs_world::items::{
             Definition, DefinitionClass, DefinitionFlags, Derived, Layout, OwnershipLevel,
         };
-        let (repository, account, _) = crate::progression::tests::local();
-        let repository = Arc::new(repository);
-        let catalog = Arc::new(
+        Arc::new(
             InventoryCatalog::new(
                 [(
                     [9; 16],
@@ -216,7 +354,18 @@ mod tests {
                 vec![],
             )
             .unwrap(),
-        );
+        )
+    }
+    fn progression() -> Arc<crate::progression::Content> {
+        Arc::new(
+            crate::progression::Content::from_json(&crate::progression::tests::combined()).unwrap(),
+        )
+    }
+    #[tokio::test]
+    async fn selection_worker_grants_selects_and_completes_before_acknowledgement() {
+        let (repository, account, _) = crate::progression::tests::local();
+        let repository = Arc::new(repository);
+        let catalog = car_catalog();
         let service = Service::new(repository.clone(), catalog)
             .with_persistent(Arc::new(crate::progression::tests::tables()));
         let request = Request {
@@ -302,5 +451,200 @@ mod tests {
         rebound.story(&request, Timestamp(12)).await.unwrap();
         rebound.story(&next, Timestamp(13)).await.unwrap();
         assert_eq!(repository.snapshot(account).unwrap(), saved);
+    }
+
+    fn view(position: usize) -> nfs_services::story::View {
+        nfs_services::story::View {
+            generation: 3,
+            position,
+            milestones: [10, 20]
+                .into_iter()
+                .enumerate()
+                .map(|(index, id)| nfs_services::story::Milestone {
+                    id,
+                    active: index == position,
+                    completed: index < position,
+                    played: false,
+                    edited: false,
+                    existing: false,
+                    reward_claimed: false,
+                })
+                .collect(),
+            stats_consistent: true,
+        }
+    }
+    #[test]
+    fn resume_plan_restarts_without_a_car_and_finishes_with_one() {
+        use nfs_services::story::Checkpoint;
+        let cases = [
+            // (position, owns car, prologue start) -> decision
+            (0, false, Some(10), Resume::Unchanged, None),
+            (0, true, Some(10), Resume::Unchanged, None),
+            (0, true, None, Resume::Unchanged, None),
+            (0, false, None, Resume::Stranded, None),
+            (
+                1,
+                false,
+                Some(10),
+                Resume::Restarted,
+                Some(Checkpoint::Objective(10)),
+            ),
+            (1, false, None, Resume::Stranded, None),
+            (1, false, Some(20), Resume::Stranded, None),
+            (
+                1,
+                true,
+                Some(10),
+                Resume::Finished,
+                Some(Checkpoint::AfterIntro),
+            ),
+            (
+                1,
+                true,
+                None,
+                Resume::Finished,
+                Some(Checkpoint::AfterIntro),
+            ),
+            (2, false, None, Resume::Unchanged, None),
+            (2, true, Some(10), Resume::Unchanged, None),
+        ];
+        for (position, car, start, resume, target) in cases {
+            assert_eq!(
+                resume_plan(&view(position), car, start),
+                (resume, target),
+                "position {position} car {car} start {start:?}"
+            );
+        }
+    }
+    #[test]
+    fn interrupted_intro_without_a_car_restarts_once_and_keeps_other_state() {
+        let (repository, account, fresh) = crate::progression::tests::local();
+        let progression = progression();
+        let policy = progression.catalog.story_policy(progression.settings);
+        let no_car = |_: &nfs_storage::Snapshot| false;
+        // A fresh intro and a missing prologue: nothing is written.
+        for start in [Some(10), None] {
+            let expected = if start.is_some() {
+                Resume::Unchanged
+            } else {
+                Resume::Stranded
+            };
+            assert_eq!(
+                resume_intro(&repository, account, &policy, no_car, start, Timestamp(2)),
+                Ok(expected)
+            );
+            assert_eq!(repository.snapshot(account).unwrap(), fresh);
+        }
+        // The first drive started (first objective durable), then the session ended.
+        let nfs_services::story::Prepared::Mutation(batch) = policy
+            .complete(
+                &fresh,
+                fresh.generation,
+                policy.next_operation(&fresh).unwrap(),
+                10,
+                vec![],
+            )
+            .unwrap()
+        else {
+            panic!()
+        };
+        repository.apply(account, &batch, Timestamp(3)).unwrap();
+        let interrupted = repository.snapshot(account).unwrap();
+        assert_eq!(policy.inspect(&interrupted).unwrap().position, 1);
+        assert_eq!(
+            resume_intro(
+                &repository,
+                account,
+                &policy,
+                no_car,
+                Some(10),
+                Timestamp(4)
+            ),
+            Ok(Resume::Restarted)
+        );
+        let restarted = repository.snapshot(account).unwrap();
+        let view = policy.inspect(&restarted).unwrap();
+        assert_eq!(view.position, 0);
+        assert!(view.milestones[0].active && !view.milestones[0].completed);
+        assert_eq!(restarted.items, interrupted.items);
+        assert_eq!(restarted.garage, interrupted.garage);
+        let tables = crate::progression::tests::tables();
+        let restored = progression
+            .catalog
+            .restore(&tables.view(&restarted).unwrap(), progression.settings)
+            .unwrap();
+        assert!(
+            restored
+                .branch(crate::progression::Branch::Intro)
+                .objectives()[&10]
+                == crate::progression::Objective {
+                    active: true,
+                    completed: false
+                }
+        );
+        // The next start finds an intro that has not begun.
+        assert_eq!(
+            resume_intro(
+                &repository,
+                account,
+                &policy,
+                no_car,
+                Some(10),
+                Timestamp(5)
+            ),
+            Ok(Resume::Unchanged)
+        );
+        assert_eq!(repository.snapshot(account).unwrap(), restarted);
+        // Without the prologue the restarted account is reported, not changed.
+        assert_eq!(
+            resume_intro(&repository, account, &policy, no_car, None, Timestamp(6)),
+            Ok(Resume::Stranded)
+        );
+        assert_eq!(repository.snapshot(account).unwrap(), restarted);
+    }
+    #[tokio::test]
+    async fn interrupted_intro_after_the_starter_car_finishes_without_rewards() {
+        let (repository, account, _) = crate::progression::tests::local();
+        let repository = Arc::new(repository);
+        let service = Service::new(repository.clone(), car_catalog())
+            .with_persistent(Arc::new(crate::progression::tests::tables()));
+        let profile = service.bind(account);
+        let progression = progression();
+        let chosen = Request {
+            participant: 19,
+            player_index: 4,
+            progression: progression.clone(),
+            action: Action::Choose {
+                sequence: 50,
+                node: 7,
+                objective: 10,
+                definition: [9; 16],
+            },
+        };
+        let committed = profile.story(&chosen, Timestamp(8)).await.unwrap();
+        let car = committed.reward.unwrap().item;
+        let before = repository.snapshot(account).unwrap();
+        assert_eq!(
+            profile
+                .resume_intro(progression.clone(), Some(10), Timestamp(9))
+                .await,
+            Ok(Resume::Finished)
+        );
+        let finished = repository.snapshot(account).unwrap();
+        let policy = progression.catalog.story_policy(progression.settings);
+        let view = policy.inspect(&finished).unwrap();
+        assert_eq!(view.position, view.milestones.len());
+        assert_eq!(finished.items, before.items);
+        assert!(finished.items.contains_key(&car));
+        assert_eq!(finished.garage, before.garage);
+        for start in [Some(10), None] {
+            assert_eq!(
+                profile
+                    .resume_intro(progression.clone(), start, Timestamp(10))
+                    .await,
+                Ok(Resume::Unchanged)
+            );
+        }
+        assert_eq!(repository.snapshot(account).unwrap(), finished);
     }
 }
