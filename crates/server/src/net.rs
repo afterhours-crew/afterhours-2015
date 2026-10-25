@@ -1050,6 +1050,16 @@ pub enum WorldEnd {
     Ended,
 }
 
+/// What the world loop does with an input once [`WorldIo::admit`] saw it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Admit {
+    Process,
+    /// Recorded but not for the session (diagnostic loss).
+    Skip,
+    /// Recording failed: stop.
+    Ended,
+}
+
 /// One input for the world loop.
 #[derive(Debug)]
 pub enum WorldInput {
@@ -1079,9 +1089,17 @@ pub trait WorldIo: Send {
         Policy::default()
     }
     /// The next input. `items_working` is true while inventory work is in
-    /// flight; a deterministic source waits for it before moving on.
+    /// flight; a deterministic source waits for it before moving on. The loop
+    /// races this against inventory completions, so it must be cancel safe:
+    /// once it has consumed an input it returns without awaiting again.
     fn next(&mut self, items_working: bool)
     -> impl std::future::Future<Output = WorldInput> + Send;
+    /// Account for an input the loop has taken, outside the cancellable wait
+    /// (the live socket records each received datagram here).
+    fn admit(&mut self, input: &WorldInput) -> impl std::future::Future<Output = Admit> + Send {
+        let _ = input;
+        async { Admit::Process }
+    }
     /// Send (and record) one pass's datagrams; false ends the session.
     fn send(&mut self, wires: &[Vec<u8>]) -> impl std::future::Future<Output = bool> + Send;
 }
@@ -1131,28 +1149,41 @@ impl WorldIo for LiveWorld {
                     _ => {}
                 }
                 self.last_input = Instant::now();
-                let raw = self.buffer[..n].to_vec();
-                #[cfg(feature = "network-test")]
-                let dropped = self.test_loss.drop_input(self.now_ms());
-                #[cfg(not(feature = "network-test"))]
-                let dropped = false;
-                let note = dropped.then_some("diagnostic packet loss before transport");
-                if self.recorder.chunk("world", connection, Direction::In, &raw, note).await.is_err() {
-                    return WorldInput::Ended;
-                }
-                if dropped {
-                    return WorldInput::Ignore;
-                }
-                WorldInput::Datagram(raw)
+                // No await after the read: recording happens in `admit`.
+                WorldInput::Datagram(self.buffer[..n].to_vec())
             }
             _ = self.tick.tick() => {
-                #[cfg(feature = "network-test")]
-                self.test_loss.poll(self.now_ms()).await;
                 if self.last_input.elapsed() > WORLD_IDLE {
                     return WorldInput::Idle;
                 }
                 WorldInput::Tick
             }
+        }
+    }
+    async fn admit(&mut self, input: &WorldInput) -> Admit {
+        match input {
+            WorldInput::Datagram(raw) => {
+                #[cfg(feature = "network-test")]
+                let dropped = self.test_loss.drop_input(self.now_ms());
+                #[cfg(not(feature = "network-test"))]
+                let dropped = false;
+                let note = dropped.then_some("diagnostic packet loss before transport");
+                if self
+                    .recorder
+                    .chunk("world", self.connection, Direction::In, raw, note)
+                    .await
+                    .is_err()
+                {
+                    return Admit::Ended;
+                }
+                if dropped { Admit::Skip } else { Admit::Process }
+            }
+            WorldInput::Tick => {
+                #[cfg(feature = "network-test")]
+                self.test_loss.poll(self.now_ms()).await;
+                Admit::Process
+            }
+            _ => Admit::Process,
         }
     }
     async fn send(&mut self, wires: &[Vec<u8>]) -> bool {
@@ -1420,15 +1451,17 @@ pub async fn run_world<I: WorldIo>(
                 if !success { return WorldEnd::Stopped; }
                 host.poll(io.now_ms())
             }
-            input = io.next(working) => match input {
-                WorldInput::Datagram(raw) => host.receive(&raw, io.now_ms(), &mut listener),
-                WorldInput::Tick => host.poll(io.now_ms()),
-                WorldInput::Ignore => continue,
-                WorldInput::Idle => {
+            input = io.next(working) => match (io.admit(&input).await, input) {
+                (Admit::Skip, _) => continue,
+                (Admit::Ended, _) => return WorldEnd::Ended,
+                (Admit::Process, WorldInput::Datagram(raw)) => host.receive(&raw, io.now_ms(), &mut listener),
+                (Admit::Process, WorldInput::Tick) => host.poll(io.now_ms()),
+                (Admit::Process, WorldInput::Ignore) => continue,
+                (Admit::Process, WorldInput::Idle) => {
                     info!(connection, "world host idle; closing");
                     return WorldEnd::Closed;
                 }
-                WorldInput::Ended => return WorldEnd::Ended,
+                (Admit::Process, WorldInput::Ended) => return WorldEnd::Ended,
             }
         };
         let receive_or_poll_ms = receive_started.elapsed().as_millis() as u64;
@@ -1612,6 +1645,61 @@ async fn redirector(
         .chunk("redirector", n, Direction::Out, &response, None)
         .await;
     info!(connection = n, %peer, accepted, written, "redirector request");
+}
+
+#[cfg(test)]
+mod live_world_tests {
+    use super::*;
+
+    /// The world loop races `next` against inventory completions. A datagram
+    /// `next` has read must reach the loop even when the recorder is full and
+    /// the other branch wins: reading and recording are separate steps.
+    #[tokio::test]
+    async fn a_read_datagram_survives_a_cancelled_wait_on_a_full_recorder() {
+        let (recorder, _queue) = crate::record::full_for_tests();
+        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = socket.local_addr().unwrap();
+        let client = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let far = tokio::time::Instant::now() + Duration::from_secs(3600);
+        let mut io = LiveWorld {
+            socket,
+            #[cfg(feature = "network-test")]
+            test_loss: test_loss::Loss::new(None),
+            recorder,
+            connection: 1,
+            started: Instant::now(),
+            peer: None,
+            last_input: Instant::now(),
+            tick: tokio::time::interval_at(far, Duration::from_secs(3600)),
+            buffer: vec![0; 2048],
+        };
+        client.send_to(b"world", address).unwrap();
+        let mut received = None;
+        for _ in 0..200 {
+            // Biased: `next` is polled first; the ready branch stands for an
+            // inventory completion that wins whenever `next` is pending.
+            tokio::select! {
+                biased;
+                input = io.next(false) => {
+                    received = Some(input);
+                    break;
+                }
+                () = std::future::ready(()) => {}
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let Some(input) = received else {
+            panic!("the datagram was read and lost");
+        };
+        assert!(matches!(&input, WorldInput::Datagram(raw) if raw.as_slice() == b"world"));
+        // Recording waits for room in the full queue; the loop still holds it.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), io.admit(&input))
+                .await
+                .is_err()
+        );
+        assert!(matches!(input, WorldInput::Datagram(_)));
+    }
 }
 
 #[cfg(test)]

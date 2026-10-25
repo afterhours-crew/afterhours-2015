@@ -218,6 +218,32 @@ pub fn start_with_options(
     ))
 }
 
+/// A recorder whose bounded queue is full and never drained: every chunk waits.
+#[cfg(test)]
+pub(crate) fn full_for_tests() -> (Recorder, Box<dyn std::any::Any>) {
+    let (sender, receiver) = mpsc::channel(1);
+    sender
+        .try_send(Message::Chunk {
+            service: "world",
+            connection: 0,
+            direction: Direction::In,
+            elapsed_ms: 0,
+            route: None,
+            note: None,
+            length: 0,
+            bytes: Vec::new(),
+        })
+        .unwrap_or_else(|_| panic!("empty test queue"));
+    let recorder = Recorder {
+        sender,
+        origin: Instant::now(),
+        raw: false,
+        #[cfg(feature = "network-test")]
+        test_directory: None,
+    };
+    (recorder, Box::new(receiver))
+}
+
 impl Recorder {
     #[cfg(feature = "network-test")]
     pub(crate) fn loss_trigger(&self, connection: u32) -> Option<PathBuf> {
