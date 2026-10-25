@@ -47,6 +47,53 @@ fn actor() -> crate::actors::Binding {
 }
 
 #[test]
+fn final_composite_requires_return_chapter_exact_endpoint_and_native_completion() {
+    let mut model = ready();
+    let b = model.bindings.unwrap();
+    model.stages.insert(8, Stage::IntroLoadingGarage);
+    model.intro_started.insert(8, Chapter::FirstDrive);
+    assert_eq!(
+        model.intro_final_garage_ready(8, b.composite),
+        Outcome::Unsupported
+    );
+    model.intro_started.insert(8, Chapter::ReturnDrive);
+    assert_eq!(
+        model.intro_final_garage_ready(8, b.loading_garage),
+        Outcome::Unsupported
+    );
+    assert_eq!(
+        model.intro_final_composite_complete(8),
+        Outcome::Unsupported
+    );
+    assert_eq!(
+        calls(model.intro_final_garage_ready(8, b.composite)),
+        vec![
+            (b.loading_garage.selector, Call::Leave),
+            (b.composite.selector, Call::Enter)
+        ]
+    );
+    assert_eq!(
+        model.intro_final_garage_ready(8, b.composite),
+        Outcome::Repeated
+    );
+    assert_eq!(
+        calls(model.intro_final_composite_complete(8)),
+        vec![
+            (b.composite.selector, Call::Leave),
+            (b.initial_teleport.selector, Call::Enter),
+            (b.initial_teleport.selector, Call::Leave),
+            (b.customization.selector, Call::Enter)
+        ]
+    );
+    assert_eq!(model.intro_final_composite_complete(8), Outcome::Repeated);
+    assert_eq!(
+        model.intro_final_composite_complete(9),
+        Outcome::Unsupported
+    );
+    assert_eq!(model.stage(9), Some(Stage::Progressing));
+}
+
+#[test]
 fn movie_suspends_only_its_story_participant_until_owned_completion() {
     let mut model = ready();
     assert_eq!(model.intro_movie_begin(8), Outcome::Unsupported);

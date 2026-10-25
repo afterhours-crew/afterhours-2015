@@ -23,6 +23,7 @@ pub(super) type Modes = BTreeMap<
         Chapter,
     ),
 >;
+pub(super) mod finale;
 pub(super) mod garage;
 pub(super) mod movies;
 pub(super) mod selection;
@@ -73,6 +74,7 @@ impl PlayerListener {
         let mut selection_execution = self.selection_execution.clone();
         let mut modes = self.intro_modes.clone();
         let mut story_pending = self.story_pending.clone();
+        let mut composites = self.intro_composites.clone();
         let mut ai_cursor = self.event_state.ai_cursor.clone();
         let mut participants = self.participants.clone();
         let mut cars = self.world_cars.clone();
@@ -81,6 +83,13 @@ impl PlayerListener {
         let mut calls = Vec::new();
         let mut deleted = Vec::new();
         let mut teleports = Vec::new();
+        if let Some(composite) = &content.final_composite {
+            for active in composites.values_mut() {
+                if let Some(stop) = active.advance(composite, &players, seconds)? {
+                    calls.push(HostRpc::SequenceStop(stop));
+                }
+            }
+        }
         {
             for (active, _, chapter) in modes.values_mut() {
                 let out = active.advance(content.mode(*chapter)?, &mut players, seconds)?;
@@ -375,7 +384,59 @@ impl PlayerListener {
                 }
                 // The final visit waits for its queued garage composite. It
                 // must never enter the initial starter-selection sequence.
-                Some(Stage::IntroLoadingGarage) if chapter == Some(Chapter::ReturnDrive) => {}
+                Some(Stage::IntroLoadingGarage) if chapter == Some(Chapter::ReturnDrive) => {
+                    if let Some(waiting) = &self.sequences
+                        && waiting.is_complete(participant)
+                        && modes
+                            .get(&participant)
+                            .is_some_and(|pair| pair.0.has_left())
+                        && let Some(composite) = &content.final_composite
+                    {
+                        if composites.len() >= nfs_world::sequences::MAX_INSTANCES
+                            || composites.contains_key(&participant)
+                        {
+                            return Err(replication::Error::Bound);
+                        }
+                        let (key, serializer) = composite.data.sequence.state;
+                        let (scene, selector) = players
+                            .objects()
+                            .scene_endpoint(key, serializer)
+                            .ok_or(replication::Error::UnknownObject)?;
+                        let serial = crate::event_logic::call(
+                            players.objects(),
+                            scene,
+                            selector,
+                            0,
+                            Some(participant),
+                            nfs_world::game_mode::Arguments::None,
+                        )?
+                        .serial;
+                        let Outcome::Advanced(chain) = participants.intro_final_garage_ready(
+                            participant,
+                            nfs_world::participants::Endpoint {
+                                scene,
+                                selector,
+                                serial,
+                            },
+                        ) else {
+                            return Err(replication::Error::Shape);
+                        };
+                        let ghost = waiting
+                            .ghost(participant)
+                            .ok_or(replication::Error::UnknownObject)?;
+                        players.remove_entities(&[ghost])?;
+                        deleted.push(ghost);
+                        let (active, record) = crate::prologue::composite::Active::start(
+                            composite,
+                            &mut players,
+                            owner,
+                            seconds,
+                        )?;
+                        composites.insert(participant, active);
+                        records.push(record);
+                        calls.extend(chain.into_iter().map(HostRpc::Participant));
+                    }
+                }
                 Some(Stage::IntroEnteringGarage | Stage::IntroLoadingGarage) => {
                     if let Some(previews) = &content.previews {
                         let out = population.spawn_previews(
@@ -495,7 +556,12 @@ impl PlayerListener {
             Err(replication::Error::Bound) => return Ok(()),
             value => value?,
         }
+        match self.stage_composite_results(&players, &mut composites, &mut story_pending) {
+            Err(replication::Error::Bound) => return Ok(()),
+            value => value?,
+        }
         self.story_pending = story_pending;
+        self.intro_composites = composites;
         self.players = players;
         self.population = Some(population);
         self.opening = opening;

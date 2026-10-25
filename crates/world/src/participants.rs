@@ -249,6 +249,7 @@ pub enum Stage {
     IntroEnteringGarage,
     IntroLoadingGarage,
     IntroCarSelection,
+    IntroComposite,
     LoadingGarage,
     EntryBlocked,
     Customization,

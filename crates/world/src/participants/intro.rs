@@ -82,6 +82,51 @@ fn notifications(participant: u16, chain: &[(Endpoint, Call)]) -> Vec<Notificati
         .collect()
 }
 impl Lifecycle {
+    pub fn intro_final_garage_ready(&mut self, participant: u16, composite: Endpoint) -> Outcome {
+        let Some(b) = self.bindings else {
+            return Outcome::Unsupported;
+        };
+        if composite != b.composite
+            || self.intro_started.get(&participant) != Some(&Chapter::ReturnDrive)
+        {
+            return Outcome::Unsupported;
+        }
+        match self.stages.get_mut(&participant) {
+            Some(stage @ Stage::IntroLoadingGarage) => {
+                *stage = Stage::IntroComposite;
+                Outcome::Advanced(notifications(
+                    participant,
+                    &[(b.loading_garage, Call::Leave), (b.composite, Call::Enter)],
+                ))
+            }
+            Some(Stage::IntroComposite | Stage::Customization) => Outcome::Repeated,
+            _ => Outcome::Unsupported,
+        }
+    }
+    pub fn intro_final_composite_complete(&mut self, participant: u16) -> Outcome {
+        let Some(b) = self.bindings else {
+            return Outcome::Unsupported;
+        };
+        if self.intro_started.get(&participant) != Some(&Chapter::ReturnDrive) {
+            return Outcome::Unsupported;
+        }
+        match self.stages.get_mut(&participant) {
+            Some(stage @ Stage::IntroComposite) => {
+                *stage = Stage::Customization;
+                Outcome::Advanced(notifications(
+                    participant,
+                    &[
+                        (b.composite, Call::Leave),
+                        (b.initial_teleport, Call::Enter),
+                        (b.initial_teleport, Call::Leave),
+                        (b.customization, Call::Enter),
+                    ],
+                ))
+            }
+            Some(Stage::Customization) => Outcome::Repeated,
+            _ => Outcome::Unsupported,
+        }
+    }
     /// The owner has completed the diner movie, retired the race and verified
     /// the selected world car. This mode starts in place without relocation.
     pub fn intro_return_drive_begin(&mut self, participant: u16) -> Outcome {

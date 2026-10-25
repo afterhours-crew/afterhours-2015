@@ -40,6 +40,7 @@ pub struct Content {
     pub manu_movie: Option<movies::Content>,
     pub diner_movie: Option<movies::Content>,
     pub return_drive: Option<driving::Mode>,
+    pub final_composite: Option<composite::Content>,
     items: Arc<Collection>,
 }
 #[derive(Clone, Debug)]
@@ -211,6 +212,7 @@ impl Content {
             manu_movie: None,
             diner_movie: None,
             return_drive: None,
+            final_composite: None,
         }
     }
     pub fn prepare(
@@ -296,6 +298,11 @@ impl Content {
                 index,
                 parent,
                 "gameplay/progression/intro/introreturntogaragegamemode",
+            )?),
+            final_composite: Some(composite::Content::prepare(
+                index,
+                parent,
+                "gameplay/progression/intro/introreturntogarage",
             )?),
             items: Arc::new(built.collection),
             previews: Some(Arc::new(PreviewCars {

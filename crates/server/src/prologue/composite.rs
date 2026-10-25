@@ -23,6 +23,15 @@ pub struct Content {
     fallback_seconds: f64,
 }
 impl Content {
+    #[cfg(test)]
+    pub(crate) fn for_test(data: composite::Composite, sequence: Authored, parent: Asset) -> Self {
+        Self {
+            data,
+            sequence,
+            parent,
+            fallback_seconds: 300.,
+        }
+    }
     pub fn prepare(
         index: &mut AssetIndex,
         parent: Asset,
@@ -67,6 +76,7 @@ pub struct Active {
     deadline: Option<f64>,
     finished: bool,
     queued: bool,
+    completion_seen: bool,
 }
 impl Active {
     pub fn owner(&self) -> Owner {
@@ -112,6 +122,7 @@ impl Active {
                 deadline: Some(seconds + content.fallback_seconds),
                 finished: false,
                 queued: false,
+                completion_seen: false,
             },
             record,
         ))
@@ -176,13 +187,25 @@ impl Active {
         players: &Players,
         message: &Message,
     ) -> Result<Option<u64>, Error> {
+        if !self.observe_completion(players, message)? {
+            return Ok(None);
+        }
+        Ok(self.pending_completion())
+    }
+    /// Keep a valid signal across ordering differences within a received frame;
+    /// native sequence completion still gates the durable claim.
+    pub fn observe_completion(
+        &mut self,
+        players: &Players,
+        message: &Message,
+    ) -> Result<bool, Error> {
         let Message::Reached {
             target,
             event,
             player,
         } = message
         else {
-            return Ok(None);
+            return Ok(false);
         };
         let signal = self.definition.completion;
         if target.ghost != self.parent
@@ -194,7 +217,7 @@ impl Active {
                 self.owner.participant,
             ) != Some(*player)
         {
-            return Ok(None);
+            return Ok(false);
         }
         if !players.owns_participant(
             self.owner.connection,
@@ -209,11 +232,15 @@ impl Active {
         {
             return Err(Error::UnknownObject);
         }
-        if !self.finished || self.queued {
-            return Ok(None);
+        self.completion_seen = true;
+        Ok(true)
+    }
+    pub fn pending_completion(&mut self) -> Option<u64> {
+        if !self.finished || self.queued || !self.completion_seen {
+            return None;
         }
         self.queued = true;
-        Ok(Some(self.definition.objective))
+        Some(self.definition.objective)
     }
 }
 
