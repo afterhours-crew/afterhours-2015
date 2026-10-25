@@ -5,6 +5,34 @@
 use super::*;
 
 impl World {
+    /// Actor-manager entries are weak on the client and disappear with the actor.
+    /// Keep retained scene state in agreement without inventing a removal RPC.
+    pub(in crate::replication) fn release_actor_binding(
+        &mut self,
+        gameplay_key: u32,
+        participant: u16,
+        actor: u16,
+    ) -> Result<(), Error> {
+        let id = self.scene(gameplay_key).ok_or(Error::UnknownObject)?;
+        let (mut creation, content) = scene(self.get(id).ok_or(Error::UnknownObject)?)?;
+        let Some(sublevel::Initial::RpcPairs { value, .. }) =
+            creation.body.initial.as_mut().and_then(|f| f.get_mut(24))
+        else {
+            return Err(Error::TypeMismatch);
+        };
+        if value
+            .iter()
+            .filter(|(p, a)| *p == participant && *a == actor)
+            .count()
+            != 1
+            || value.iter().any(|(p, a)| *p == participant && *a != actor)
+        {
+            return Err(Error::UnknownObject);
+        }
+        value.retain(|(p, a)| (*p, *a) != (participant, actor));
+        self.store_actor_bindings(id, creation, &content)
+    }
+
     pub(in crate::replication) fn bind_actor(
         &mut self,
         gameplay_key: u32,
@@ -46,12 +74,21 @@ impl World {
         };
         reply.encode()?;
         value.push((participant, actor));
+        self.store_actor_bindings(id, creation, &content)?;
+        Ok(Some(reply))
+    }
+    fn store_actor_bindings(
+        &mut self,
+        id: u16,
+        creation: sublevel::Creation,
+        content: &sublevel::Content,
+    ) -> Result<(), Error> {
         let bindings = sublevel::state::Bindings {
             ghost: &|id| self.objects.contains_key(&id),
             level: &|id| self.levels.contains(&id),
         };
-        let state = sublevel::state::State::new(creation, &content, bindings)?;
-        let current = Record::from_scene(id, state.snapshot(bindings)?, &content)?;
+        let state = sublevel::state::State::new(creation, content, bindings)?;
+        let current = Record::from_scene(id, state.snapshot(bindings)?, content)?;
         self.objects.insert(
             id,
             Object {
@@ -59,6 +96,6 @@ impl World {
                 current: current.update,
             },
         );
-        Ok(Some(reply))
+        Ok(())
     }
 }

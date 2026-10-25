@@ -108,6 +108,7 @@ pub(in crate::net::players) fn input(
     players: &mut Players,
     participants: &mut Lifecycle,
     persona: u64,
+    gameplay: Option<u32>,
     body: BitSpan<'_>,
 ) -> Result<Option<Output>, replication::Error> {
     if movies.is_empty() {
@@ -138,8 +139,32 @@ pub(in crate::net::players) fn input(
             persona,
             participant: completed.participant,
         };
+        let before = active.phase();
         let mut output = active.completed(players, owner, completed)?;
+        if before == nfs_world::fmv::Phase::Before
+            && active.phase() == nfs_world::fmv::Phase::Playing
+        {
+            output.deleted.push(
+                players
+                    .retire_actor(
+                        gameplay.ok_or(replication::Error::Shape)?,
+                        owner.connection,
+                        owner.persona,
+                        owner.participant,
+                    )?
+                    .ok_or(replication::Error::Shape)?,
+            );
+        }
         if output.finished {
+            let binding = players
+                .bind_actor(
+                    gameplay.ok_or(replication::Error::Shape)?,
+                    owner.connection,
+                    owner.persona,
+                    owner.participant,
+                )?
+                .ok_or(replication::Error::Shape)?;
+            output.calls.insert(0, HostRpc::Actor(binding));
             let Outcome::Advanced(chain) = participants.intro_movie_complete(owner.participant)
             else {
                 return Err(replication::Error::Shape);
@@ -167,16 +192,18 @@ pub(in crate::net::players) fn input(
     let active = movies
         .get_mut(&participant)
         .ok_or(replication::Error::UnknownObject)?;
-    active.receive(
-        content,
-        players,
-        Owner {
-            connection: HOST_SELECTOR as u8,
-            persona,
-            participant,
-        },
-        body,
-    )
+    let owner = Owner {
+        connection: HOST_SELECTOR as u8,
+        persona,
+        participant,
+    };
+    active.receive_with(content, players, owner, body, |staged| {
+        Ok(vec![
+            staged
+                .create_actor(owner.connection, owner.persona, owner.participant)?
+                .ok_or(replication::Error::Shape)?,
+        ])
+    })
 }
 
 #[cfg(test)]

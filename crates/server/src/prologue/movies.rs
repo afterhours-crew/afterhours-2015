@@ -146,6 +146,18 @@ impl Active {
         owner: Owner,
         body: BitSpan<'_>,
     ) -> Result<Option<Output>, Error> {
+        self.receive_with(content, players, owner, body, |_| Ok(Vec::new()))
+    }
+    /// Recreate participant resources after a validated movie acknowledgement,
+    /// before constructing its outro. Callback and construction share rollback.
+    pub fn receive_with(
+        &mut self,
+        content: &Content,
+        players: &mut Players,
+        owner: Owner,
+        body: BitSpan<'_>,
+        restore: impl FnOnce(&mut Players) -> Result<Vec<Record>, Error>,
+    ) -> Result<Option<Output>, Error> {
         if content.data != self.definition {
             return Err(Error::Shape);
         }
@@ -163,6 +175,7 @@ impl Active {
         };
         let mut staged = players.clone();
         if before == fmv::Phase::Playing && active.flow.phase() == fmv::Phase::After {
+            out.records.extend(restore(&mut staged)?);
             active.sequences.retire_completed(&staged, owner)?;
             out.records.push(
                 active

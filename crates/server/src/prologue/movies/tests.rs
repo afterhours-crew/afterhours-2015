@@ -168,11 +168,16 @@ fn failed_after_sequence_construction_preserves_playing_state_and_allocations() 
     let snapshot = players.objects().snapshot();
     assert!(
         movie
-            .receive(
+            .receive_with(
                 &content,
                 &mut players,
                 a,
-                request(scene, a.participant).span()
+                request(scene, a.participant).span(),
+                |staged| Ok(vec![
+                    staged
+                        .create_actor(a.connection, a.persona, a.participant)?
+                        .unwrap()
+                ]),
             )
             .is_err()
     );

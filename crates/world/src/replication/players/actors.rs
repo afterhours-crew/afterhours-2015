@@ -317,6 +317,46 @@ impl Players {
         Ok(Some(record))
     }
 
+    /// Retire an idle owned actor after its goal owners have released it. The
+    /// participant and selected car survive; subsequent creation receives a new
+    /// object identity. Scene cleanup and deletion commit atomically.
+    pub fn retire_actor(
+        &mut self,
+        gameplay_key: u32,
+        connection: u8,
+        persona: u64,
+        participant: u16,
+    ) -> Result<Option<u16>, Error> {
+        if !self.owns_participant(connection, persona, participant) {
+            return Err(Error::UnknownObject);
+        }
+        let Some(actor) = self.actors.get(&participant).copied() else {
+            return Ok(None);
+        };
+        let Some(state::Object {
+            current: Update::Actor(current),
+            ..
+        }) = self.objects.get(actor)
+        else {
+            return Err(Error::TypeMismatch);
+        };
+        if [current.references_a.as_ref(), current.references_b.as_ref()]
+            .into_iter()
+            .flatten()
+            .any(|goals| !goals.is_empty())
+        {
+            return Err(Error::Shape);
+        }
+        let mut next = self.objects.clone();
+        next.release_actor_binding(gameplay_key, participant, actor)?;
+        if !matches!(next.remove(actor)?.initial,Initial::Actor(a) if a.participant==participant) {
+            return Err(Error::TypeMismatch);
+        }
+        self.objects = next;
+        self.actors.remove(&participant);
+        Ok(Some(actor))
+    }
+
     pub fn owned_actor(&self, connection: u8, persona: u64, participant: u16) -> Option<u16> {
         self.owns_participant(connection, persona, participant)
             .then(|| self.actors.get(&participant).copied())
@@ -488,6 +528,66 @@ impl Players {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retiring_an_idle_actor_clears_weak_bindings_preserves_peers_and_allows_recreation() {
+        let mut world = Players::default();
+        let scene = gameplay(&mut world);
+        let key = crate::test_data::GAMEPLAY_KEY;
+        let a = join(&mut world, 3, 101, 0);
+        let b = join(&mut world, 7, 202, 0);
+        let old = world.create_actor(3, 101, a).unwrap().unwrap().id;
+        let peer = world.create_actor(7, 202, b).unwrap().unwrap().id;
+        world.bind_actor(key, 3, 101, a).unwrap();
+        world.bind_actor(key, 7, 202, b).unwrap();
+        let snapshot = world.objects.snapshot();
+        assert_eq!(
+            world.retire_actor(key, 7, 202, a),
+            Err(Error::UnknownObject)
+        );
+        assert_eq!(
+            world.retire_actor(key + 1, 3, 101, a),
+            Err(Error::UnknownObject)
+        );
+        assert_eq!(world.objects.snapshot(), snapshot);
+        let goal = Initial::SpeedLimitGoal(speed_limit::Initial {
+            selector: 0,
+            serial: 1,
+            allocation_serial: 0,
+            limit: 20f32.to_bits(),
+        });
+        let goals = world.start_controlled_goals(3, 101, a, vec![goal]).unwrap();
+        let snapshot = world.objects.snapshot();
+        assert_eq!(world.retire_actor(key, 3, 101, a), Err(Error::Shape));
+        assert_eq!(world.objects.snapshot(), snapshot);
+        world
+            .release_controlled_goals(3, 101, a, &[goals[0].id])
+            .unwrap();
+        assert_eq!(world.retire_actor(key, 3, 101, a), Ok(Some(old)));
+        assert_eq!(world.retire_actor(key, 3, 101, a), Ok(None));
+        assert!(world.objects.get(old).is_none());
+        assert_eq!(world.owned_actor(7, 202, b), Some(peer));
+        let Some(Initial::SubLevel { fields, .. }) = &world
+            .objects
+            .snapshot()
+            .into_iter()
+            .find(|r| r.id == scene)
+            .unwrap()
+            .initial
+        else {
+            panic!()
+        };
+        assert!(
+            matches!(&fields[24],sublevel::Initial::RpcPairs{value,..} if *value==vec![(b,peer)])
+        );
+        let next = world.create_actor(3, 101, a).unwrap().unwrap().id;
+        assert_ne!(old, next);
+        assert_eq!(
+            world.bind_actor(key, 3, 101, a).unwrap().unwrap().actor,
+            next
+        );
+        assert_eq!(world.bind_actor(key, 3, 101, a), Ok(None));
+    }
 
     #[test]
     fn solo_routes_keep_control_and_reject_foreign_release_or_reassignment() {

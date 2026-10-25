@@ -101,6 +101,10 @@ fn committed_activation_and_native_movie_gates_are_transactional_and_once_only()
 }
 fn finished_movie() -> (PlayerListener, u16) {
     let (mut listener, participant, endpoint) = fixture();
+    let old_actor = listener
+        .players
+        .owned_actor(HOST_SELECTOR as u8, listener.persona, participant)
+        .unwrap();
     // The selected fixture has already completed objective10; no movie replay.
     listener.advance_story_movies().unwrap();
     assert!(listener.intro_movies.is_empty());
@@ -151,6 +155,13 @@ fn finished_movie() -> (PlayerListener, u16) {
     drain(&mut listener);
     assert!(send(&mut listener, 28, 47, done.span()));
     assert_eq!(
+        listener
+            .players
+            .owned_actor(HOST_SELECTOR as u8, listener.persona, participant),
+        None
+    );
+    assert!(listener.players.objects().get(old_actor).is_none());
+    assert_eq!(
         listener.intro_movies[&participant].phase(),
         nfs_world::fmv::Phase::Playing
     );
@@ -175,6 +186,22 @@ fn finished_movie() -> (PlayerListener, u16) {
         listener.intro_movies[&participant].phase(),
         nfs_world::fmv::Phase::Playing
     );
+    listener
+        .pending
+        .resize(MAX_PENDING, super::super::super::returning::empty_section());
+    let world = listener.players.objects().snapshot();
+    assert!(!send(
+        &mut listener,
+        30,
+        47,
+        request(endpoint, participant, 3).span()
+    ));
+    assert_eq!(listener.players.objects().snapshot(), world);
+    assert_eq!(
+        listener.intro_movies[&participant].phase(),
+        nfs_world::fmv::Phase::Playing
+    );
+    drain(&mut listener);
     assert!(send(
         &mut listener,
         30,
@@ -182,6 +209,12 @@ fn finished_movie() -> (PlayerListener, u16) {
         request(endpoint, participant, 3).span()
     ));
     let after = listener.intro_movies[&participant].sequence().unwrap();
+    let replacement = listener
+        .players
+        .owned_actor(HOST_SELECTOR as u8, listener.persona, participant)
+        .unwrap();
+    assert_ne!(replacement, old_actor);
+    assert!(replacement < after);
     assert_ne!(before, after);
     drain(&mut listener);
     assert!(send(
@@ -198,6 +231,9 @@ fn finished_movie() -> (PlayerListener, u16) {
     .encode()
     .unwrap();
     assert!(send(&mut listener, 32, 47, done.span()));
+    assert!(
+        matches!(listener.pending_rpcs.front(),Some(HostRpc::Actor(binding)) if binding.actor==replacement && binding.participant==participant)
+    );
     assert_eq!(
         listener.participants.stage(participant),
         Some(Stage::FreeRoam)
@@ -211,6 +247,12 @@ fn finished_movie() -> (PlayerListener, u16) {
     listener.advance_story_movies().unwrap();
     assert!(listener.pending.is_empty());
     assert!(listener.pending_rpcs.is_empty());
+    assert_eq!(
+        listener
+            .players
+            .owned_actor(HOST_SELECTOR as u8, listener.persona, participant),
+        Some(replacement)
+    );
     (listener, participant)
 }
 

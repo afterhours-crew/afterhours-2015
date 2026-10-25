@@ -1657,6 +1657,7 @@ impl Listener for PlayerListener {
                     &mut players,
                     &mut participants,
                     self.persona,
+                    self.roles.as_ref().map(|r| r.gameplay),
                     body,
                 ) {
                     Ok(Some(out)) => {
