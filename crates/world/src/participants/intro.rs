@@ -78,6 +78,41 @@ fn notifications(participant: u16, chain: &[(Endpoint, Call)]) -> Vec<Notificati
         .collect()
 }
 impl Lifecycle {
+    /// The story owner has verified the durable movie objective is active.
+    /// Suspend driving presentation while its native sequence/movie gates run.
+    pub fn intro_movie_begin(&mut self, participant: u16) -> Outcome {
+        let Some(i) = self.intro else {
+            return Outcome::Unsupported;
+        };
+        if self.intro_started.get(&participant) != Some(&Chapter::FirstRace) {
+            return Outcome::Unsupported;
+        }
+        match self.stages.get_mut(&participant) {
+            Some(stage @ Stage::FreeRoam) => {
+                *stage = Stage::IntroMovie;
+                Outcome::Advanced(notifications(participant, &[(i.alive, Call::Leave)]))
+            }
+            Some(Stage::IntroMovie) => Outcome::Repeated,
+            _ => Outcome::Unsupported,
+        }
+    }
+    /// Only the owned after-sequence acknowledgement releases this gate.
+    pub fn intro_movie_complete(&mut self, participant: u16) -> Outcome {
+        let Some(i) = self.intro else {
+            return Outcome::Unsupported;
+        };
+        if self.intro_started.get(&participant) != Some(&Chapter::FirstRace) {
+            return Outcome::Unsupported;
+        }
+        match self.stages.get_mut(&participant) {
+            Some(stage @ Stage::IntroMovie) => {
+                *stage = Stage::FreeRoam;
+                Outcome::Advanced(notifications(participant, &[(i.alive, Call::Enter)]))
+            }
+            Some(Stage::FreeRoam) => Outcome::Repeated,
+            _ => Outcome::Unsupported,
+        }
+    }
     pub fn intro_participants(&self) -> impl Iterator<Item = u16> + '_ {
         self.intro_started.keys().copied()
     }

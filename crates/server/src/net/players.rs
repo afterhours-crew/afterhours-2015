@@ -95,6 +95,7 @@ pub(super) struct PlayerListener {
     selection_execution: BTreeMap<u16, prologue::selection::State>,
     story_pending: VecDeque<super::items::story::Request>,
     intro_modes: prologue::Modes,
+    intro_movies: prologue::movies::Movies,
     vehicles: Option<std::sync::Arc<GarageContent>>,
     population: Option<Population>,
     traffic_content: Option<std::sync::Arc<nfs_content::traffic::Content>>,
@@ -724,6 +725,7 @@ impl PlayerListener {
             selection_execution: BTreeMap::new(),
             story_pending: VecDeque::new(),
             intro_modes: BTreeMap::new(),
+            intro_movies: BTreeMap::new(),
             vehicles: None,
             population: None,
             traffic_content: None,
@@ -1216,6 +1218,7 @@ impl Listener for PlayerListener {
         let mut selection_execution = self.selection_execution.clone();
         let mut story_pending = self.story_pending.clone();
         let mut intro_modes = self.intro_modes.clone();
+        let mut intro_movies = self.intro_movies.clone();
         let mut unsupported_logic = 0;
         let mut event_inputs = Vec::new();
         let mut glass = self.glass.clone();
@@ -1645,6 +1648,29 @@ impl Listener for PlayerListener {
                     Err(error) => {
                         return self.refuse_rpc(error, body);
                     }
+                }
+            }
+            if let Some(content) = self.prologue.as_deref() {
+                match prologue::movies::input(
+                    content,
+                    &mut intro_movies,
+                    &mut players,
+                    &mut participants,
+                    self.persona,
+                    body,
+                ) {
+                    Ok(Some(out)) => {
+                        deferred_sections.extend(
+                            match prologue::movies::sections(out.records, out.deleted) {
+                                Ok(sections) => sections,
+                                Err(error) => return self.refuse_rpc(error, body),
+                            },
+                        );
+                        responses.extend(out.calls);
+                        continue;
+                    }
+                    Ok(None) => {}
+                    Err(error) => return self.refuse_rpc(error, body),
                 }
             }
             match participants.receive_intro(body, |id| {
@@ -2645,6 +2671,7 @@ impl Listener for PlayerListener {
         self.selection_execution = selection_execution;
         self.story_pending = story_pending;
         self.intro_modes = intro_modes;
+        self.intro_movies = intro_movies;
         self.pending_rpcs.extend(responses);
         for input in event_inputs {
             if self.event_state.inputs.len() >= events::MAX_INPUTS {

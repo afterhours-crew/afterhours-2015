@@ -44,6 +44,21 @@ fn actor() -> crate::actors::Binding {
         actor: 19,
     }
 }
+
+#[test]
+fn movie_suspends_only_its_story_participant_until_owned_completion() {
+    let mut model = ready();
+    assert_eq!(model.intro_movie_begin(8), Outcome::Unsupported);
+    model.intro_started.insert(8, Chapter::FirstRace);
+    model.stages.insert(8, Stage::FreeRoam);
+    assert_eq!(calls(model.intro_movie_begin(8)), vec![(1, Call::Leave)]);
+    assert_eq!(model.intro_movie_begin(8), Outcome::Repeated);
+    assert_eq!(model.intro_movie_complete(9), Outcome::Unsupported);
+    assert_eq!(model.stage(8), Some(Stage::IntroMovie));
+    assert_eq!(model.stage(9), Some(Stage::Progressing));
+    assert_eq!(calls(model.intro_movie_complete(8)), vec![(1, Call::Enter)]);
+    assert_eq!(model.intro_movie_complete(8), Outcome::Repeated);
+}
 fn request(participant: u16, selector: u16, method: u32, tail: u8) -> BitWriter {
     let mut payload = BitWriter::new();
     payload

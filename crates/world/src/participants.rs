@@ -244,6 +244,7 @@ pub enum Stage {
     IntroOpening,
     /// Opening completed; retain input ownership until the first mode is ready.
     IntroStartingDrive,
+    IntroMovie,
     IntroEnteringGarage,
     IntroLoadingGarage,
     IntroCarSelection,
@@ -997,6 +998,7 @@ impl Lifecycle {
                     | Stage::IntroRendering
                     | Stage::IntroOpening
                     | Stage::IntroStartingDrive
+                    | Stage::IntroMovie
                     | Stage::LoadingGarage
                     | Stage::EntryBlocked
                     | Stage::Customization

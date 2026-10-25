@@ -23,6 +23,14 @@ pub struct Content {
     after: Authored,
 }
 impl Content {
+    #[cfg(test)]
+    pub(crate) fn for_test(data: movies::Movie, sequence: Authored) -> Self {
+        Self {
+            data,
+            before: sequence.clone(),
+            after: sequence,
+        }
+    }
     pub fn prepare(
         index: &mut AssetIndex,
         parent: Asset,

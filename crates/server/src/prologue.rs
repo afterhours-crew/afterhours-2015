@@ -35,6 +35,7 @@ pub struct Content {
     pub selection: Option<Authored>,
     pub selection_program: Option<Arc<nfs_content::prologue::sequences::program::Definition>>,
     pub first_race: Option<Race>,
+    pub manu_movie: Option<movies::Content>,
     items: Arc<Collection>,
 }
 #[derive(Clone, Debug)]
@@ -145,6 +146,7 @@ impl Content {
             selection: None,
             selection_program: None,
             first_race: None,
+            manu_movie: None,
         }
     }
     pub fn prepare(
@@ -200,6 +202,11 @@ impl Content {
                 Some(capability),
             )?,
         });
+        let manu_movie = Some(movies::Content::prepare(
+            index,
+            parent,
+            "gameplay/progression/intro/intromeetandracemanu",
+        )?);
         let driving = Some((
             driving::Mode::prepare(
                 index,
@@ -235,6 +242,7 @@ impl Content {
             selection: Some(selection),
             selection_program: Some(Arc::new(selection_program)),
             first_race,
+            manu_movie,
             items: Arc::new(built.collection),
             previews: Some(Arc::new(PreviewCars {
                 garage,

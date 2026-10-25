@@ -24,6 +24,7 @@ pub(super) type Modes = BTreeMap<
     ),
 >;
 pub(super) mod garage;
+pub(super) mod movies;
 pub(super) mod selection;
 mod story;
 #[cfg(test)]
@@ -49,6 +50,7 @@ pub(super) fn retirement(
 
 impl PlayerListener {
     pub(super) fn advance_prologue(&mut self) -> Result<(), replication::Error> {
+        self.advance_story_movies()?;
         let Some(content) = self.prologue.as_deref() else {
             return Ok(());
         };
