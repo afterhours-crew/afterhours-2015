@@ -493,28 +493,32 @@ impl PlayerListener {
                         },
                     ));
                 }
-                // The official career start creates the ordinary participant
-                // presentation logic for the prologue as well (E1183: fade
-                // control 480 and its spawn events at 38118 ms).
                 if let Some(logic) = logic {
                     let ghosts = logic_ghosts.entry(participant).or_default();
                     if !ghosts.is_empty() {
                         return Err(replication::Error::DuplicateObject);
                     }
-                    let scores = logic
-                        .requires_reputation()
-                        .then(|| {
-                            crate::garage_logic::ReputationScores::load(loaded)
-                                .map_err(|_| replication::Error::Shape)
-                        })
-                        .transpose()?;
-                    let out = logic.produce_with_reputation(
-                        crate::garage_logic::Which::Spawn,
-                        players,
-                        participant,
-                        ghosts,
-                        scores,
-                    )?;
+                    // The prologue gets only the spawn logic its events address
+                    // (official career start fade control 480 and 482; E1183,
+                    // E1184), never the garage presentation.
+                    let out = if intro {
+                        logic.produce_intro_spawn(players, participant, ghosts)?
+                    } else {
+                        let scores = logic
+                            .requires_reputation()
+                            .then(|| {
+                                crate::garage_logic::ReputationScores::load(loaded)
+                                    .map_err(|_| replication::Error::Shape)
+                            })
+                            .transpose()?;
+                        logic.produce_with_reputation(
+                            crate::garage_logic::Which::Spawn,
+                            players,
+                            participant,
+                            ghosts,
+                            scores,
+                        )?
+                    };
                     records.extend(out.records);
                     replies.extend(
                         out.events

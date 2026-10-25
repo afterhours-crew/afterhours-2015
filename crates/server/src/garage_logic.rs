@@ -1130,6 +1130,49 @@ impl GarageLogic {
         }
         Ok(output)
     }
+    /// The spawn logic of a prologue participant: only the captures the spawn
+    /// batch's own events address (the fade control and one more in installed
+    /// content; official career start 480 and 482), then those events. The
+    /// rest of the batch is garage presentation; given to an intro player it
+    /// held the client in garage loading behind the whole intro (E1184).
+    pub fn produce_intro_spawn(
+        &self,
+        players: &mut Players,
+        participant: u16,
+        ghosts: &mut BTreeMap<u16, u16>,
+    ) -> Result<Output, replication::Error> {
+        if participant == 0 {
+            return Err(replication::Error::Shape);
+        }
+        let targets: BTreeSet<u16> = self
+            .spawn
+            .events
+            .iter()
+            .filter_map(|e| match e.target {
+                EventTarget::Capture(id) => Some(id),
+                EventTarget::Scene(_) => None,
+            })
+            .collect();
+        let mut output = Output::default();
+        for definition in self
+            .spawn
+            .entities
+            .iter()
+            .filter(|d| targets.contains(&d.capture_id))
+        {
+            if ghosts.contains_key(&definition.capture_id) {
+                return Err(replication::Error::DuplicateObject);
+            }
+            let creation = self.creation(definition, players, participant, ghosts, None)?;
+            let record = players
+                .spawn_entities(vec![creation], &self.content)?
+                .remove(0);
+            ghosts.insert(definition.capture_id, record.id);
+            output.records.push(record);
+        }
+        output.events = self.present_events(Which::Spawn, players, ghosts)?;
+        Ok(output)
+    }
     /// A batch's participant events whose capture exists, in authored order.
     /// Scene-wide events belong to the ordinary garage and are left out.
     pub fn present_events(
@@ -2006,9 +2049,9 @@ pub(crate) mod tests {
         assert!(GarageLogic::from_json(&v).is_ok());
     }
 
-    /// The intro's shape of the lifecycle: spawn logic stays alive, the first
-    /// drive adds a HUD (330) and return-request logic (331), and the return
-    /// cinematic (332) shares the asset of spawn's 295.
+    /// The intro's shape of the lifecycle: spawn's event addresses the fade
+    /// control (277), the first drive adds a HUD (330) and return-request
+    /// logic (331), and the return adds the cinematic (332, spawn 295's asset).
     pub(crate) fn intro_json() -> Json {
         let mut v = presentation_json();
         v["content"]["catalogs"][0]["entries"] = json!([[10, 5]]);
@@ -2025,6 +2068,7 @@ pub(crate) mod tests {
         let ev = |capture: u16, event: u32| json!({"target": {"capture_id": capture}, "entity": 1, "event": event});
         let mut cinematic = v["spawn"]["entities"][3].clone();
         cinematic["capture_id"] = json!(332);
+        v["spawn"]["events"] = json!([ev(277, 2)]);
         v["arrived"] =
             json!({"scene_updates": [], "entities": [def(330, 46), def(331, 47)], "events": []});
         v["free_roam"] = json!({"scene_updates": [], "entities": [],
@@ -2039,13 +2083,30 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn intro_batches_reuse_held_logic_and_skip_absent_targets() {
+    fn intro_batches_create_only_addressed_logic_and_skip_absent_targets() {
         let logic = GarageLogic::from_json(&intro_json()).unwrap();
         let (mut players, participant) = world();
         let mut ghosts = BTreeMap::new();
-        logic
-            .produce(Which::Spawn, &mut players, participant, &mut ghosts)
+        let objects = players.objects().snapshot().len();
+        let spawn = logic
+            .produce_intro_spawn(&mut players, participant, &mut ghosts)
             .unwrap();
+        // Only the fade control its event addresses: no garage logic.
+        assert_eq!(ghosts.keys().copied().collect::<Vec<_>>(), [277]);
+        assert_eq!(spawn.records.len(), 1);
+        assert_eq!(players.objects().snapshot().len(), objects + 1);
+        assert_eq!(
+            spawn
+                .events
+                .iter()
+                .map(|f| (f.target.ghost, f.event))
+                .collect::<Vec<_>>(),
+            [(ghosts[&277], 2)]
+        );
+        assert_eq!(
+            logic.produce_intro_spawn(&mut players, participant, &mut ghosts),
+            Err(replication::Error::DuplicateObject)
+        );
         assert_eq!(logic.fade_capture(), Some(277));
         let fade = ghosts[&277];
         let arrived = logic
@@ -2099,9 +2160,10 @@ pub(crate) mod tests {
         let mut deleted = returning.deleted.clone();
         deleted.sort();
         assert_eq!(deleted, [hud, request]);
-        // Spawn's 295 already provides the cinematic asset.
-        assert!(returning.records.is_empty() && !ghosts.contains_key(&332));
-        assert_eq!(players.objects().snapshot().len(), before - 2);
+        // The cinematic is created with the return.
+        assert_eq!(returning.records.len(), 1);
+        let cinematic = ghosts[&332];
+        assert_eq!(players.objects().snapshot().len(), before - 1);
         assert_eq!(
             returning
                 .events
@@ -2119,7 +2181,9 @@ pub(crate) mod tests {
                 Part::Deletions,
             )
             .unwrap();
-        assert_eq!(returned, Output::default());
+        assert_eq!(returned.deleted, [cinematic]);
+        assert!(returned.records.is_empty() && !ghosts.contains_key(&332));
+        assert!(players.objects().get(cinematic).is_none());
         // Without the logic nothing is fired and nothing fails.
         let empty = BTreeMap::new();
         assert!(

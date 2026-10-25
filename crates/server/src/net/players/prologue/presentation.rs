@@ -178,7 +178,7 @@ mod tests {
         let logic = GarageLogic::from_json(&serde_json::from_str(&json).unwrap()).unwrap();
         let ghosts = listener.logic_ghosts.entry(participant).or_default();
         logic
-            .produce(Which::Spawn, &mut listener.players, participant, ghosts)
+            .produce_intro_spawn(&mut listener.players, participant, ghosts)
             .unwrap();
         logic
             .produce_present(
