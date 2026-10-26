@@ -52,6 +52,7 @@ pub struct Partial {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Bindings {
+    client_info_slots: Option<usize>,
     objects: BTreeMap<u16, Kind>,
     splines: Option<super::spline::Content>,
     scenes: BTreeMap<u16, sublevel::Profile>,
@@ -70,6 +71,25 @@ fn id_valid(id: u16) -> Result<(), Error> {
 }
 
 impl Bindings {
+    /// Client-originated replication has no receive-side packed setup. Its
+    /// information record takes its slot count from connection context.
+    pub fn from_client(slots: usize) -> Result<Self, Error> {
+        if slots == 0 || slots > super::client_info::MAX_SLOTS {
+            return Err(Error::Bound);
+        }
+        Ok(Self {
+            client_info_slots: Some(slots),
+            ..Self::default()
+        })
+    }
+
+    fn setup_profile(&self) -> SetupProfile {
+        if self.client_info_slots.is_some() {
+            SetupProfile::ClientSend
+        } else {
+            SetupProfile::ClientReceivePacked
+        }
+    }
     pub fn with_splines(mut self, content: super::spline::Content) -> Self {
         self.splines = Some(content);
         self
@@ -80,6 +100,9 @@ impl Bindings {
         id: u16,
         bound: Option<Kind>,
     ) -> Result<Decoded_, Error> {
+        if let Some(slots) = self.client_info_slots {
+            return Record::decode_client_info(span, bound, slots);
+        }
         let create = span.read_u32(13, 1).map_err(|_| Error::Truncated)? != 0;
         let kind = if create {
             Kind::from_index(span.read_u32(14, 5).map_err(|_| Error::Truncated)? as u8)?
@@ -185,7 +208,7 @@ impl Bindings {
             deleted.push(id);
         }
         let first = prefix
-            .first_record(SetupProfile::ClientReceivePacked)
+            .first_record(self.setup_profile())
             .map_err(|_| Error::Truncated)?;
         let mut cursor = first
             .as_ref()
@@ -264,7 +287,7 @@ impl Bindings {
             next.waypoint_progress.remove(&id);
         }
         let first = prefix
-            .first_record(SetupProfile::ClientReceivePacked)
+            .first_record(self.setup_profile())
             .map_err(|_| Error::Truncated)?;
         let mut cursor = first
             .as_ref()
@@ -492,6 +515,7 @@ fn split(records: Vec<Record>, max_frame_bits: usize, timed: bool) -> Result<Vec
 
 fn encode_setup(w: &mut BitWriter, setup: Setup) -> Result<(), Error> {
     match setup {
+        Setup::ContextOnly => {}
         Setup::RawEscape(words) => {
             w.put_bool(true).put(0, 3);
             for word in words {

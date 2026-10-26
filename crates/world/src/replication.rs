@@ -23,6 +23,7 @@ pub enum Error {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Kind {
+    ClientToServerInfo,
     PlayerManager,
     PlayerView,
     Actor,
@@ -44,6 +45,7 @@ pub enum Kind {
 impl Kind {
     pub fn index(self) -> u8 {
         match self {
+            Self::ClientToServerInfo => 4,
             Self::PlayerManager => 15,
             Self::PlayerView => 16,
             Self::Actor => 0,
@@ -65,6 +67,7 @@ impl Kind {
     }
     fn from_index(index: u8) -> Result<Self, Error> {
         match index {
+            4 => Ok(Self::ClientToServerInfo),
             15 => Ok(Self::PlayerManager),
             16 => Ok(Self::PlayerView),
             0 => Ok(Self::Actor),
@@ -189,6 +192,7 @@ pub struct PlayerUpdate {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Initial {
+    ClientToServerInfo,
     AiPacingGroup,
     DebrisManager(debris::Initial),
     PursuitInfo,
@@ -220,6 +224,7 @@ pub enum Initial {
 impl Initial {
     pub fn kind(&self) -> Kind {
         match self {
+            Self::ClientToServerInfo => Kind::ClientToServerInfo,
             Self::AiPacingGroup => Kind::AiPacingGroup,
             Self::DebrisManager(_) => Kind::DebrisManager,
             Self::PursuitInfo => Kind::PursuitInfo,
@@ -242,6 +247,7 @@ impl Initial {
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Update {
+    ClientToServerInfo(client_info::Update),
     AiPacingGroup(pacing::Update),
     DebrisManager(debris::Update),
     PursuitInfo(pursuit::Update),
@@ -273,6 +279,7 @@ pub enum Update {
 impl Update {
     pub fn kind(&self) -> Kind {
         match self {
+            Self::ClientToServerInfo(_) => Kind::ClientToServerInfo,
             Self::AiPacingGroup(_) => Kind::AiPacingGroup,
             Self::DebrisManager(_) => Kind::DebrisManager,
             Self::PursuitInfo(_) => Kind::PursuitInfo,
@@ -389,6 +396,7 @@ impl Reader<'_> {
     }
     fn initial(&mut self, kind: Kind) -> Result<Initial, Error> {
         Ok(match kind {
+            Kind::ClientToServerInfo => return Err(Error::Unsupported),
             Kind::SubLevel | Kind::Entity | Kind::ScriptedSplineGoal | Kind::TrafficGoal => {
                 return Err(Error::Unsupported);
             }
@@ -432,6 +440,7 @@ impl Reader<'_> {
     }
     fn update(&mut self, kind: Kind) -> Result<Update, Error> {
         Ok(match kind {
+            Kind::ClientToServerInfo => return Err(Error::Unsupported),
             Kind::PlayerManager => Update::PlayerManager(player_manager::Update::read(self)?),
             Kind::ParticipantLocationMap => {
                 Update::ParticipantLocationMap(location_map::Update::read(self)?)
@@ -560,6 +569,7 @@ impl Writer {
     }
     fn initial(&mut self, v: &Initial) -> Result<(), Error> {
         match v {
+            Initial::ClientToServerInfo => {}
             Initial::SubLevel { .. } | Initial::Entity { .. } | Initial::Vehicle { .. } => {
                 return Err(Error::Unsupported);
             }
@@ -600,6 +610,7 @@ impl Writer {
     }
     fn update(&mut self, v: &Update) -> Result<(), Error> {
         match v {
+            Update::ClientToServerInfo(v) => v.write(self)?,
             Update::SubLevel { .. } | Update::Entity { .. } | Update::Vehicle { .. } => {
                 return Err(Error::Unsupported);
             }
@@ -770,6 +781,7 @@ impl Record {
     }
 }
 
+pub mod client_info;
 pub mod debris;
 pub mod entity;
 mod entity_record;
