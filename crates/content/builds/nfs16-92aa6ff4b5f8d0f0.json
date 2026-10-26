@@ -729,7 +729,7 @@
       "ConditionalVec3EntityData": null,
       "ConsoleCommandTriggerEntityData": null,
       "ConstrainedComponentData": null,
-      "CopCrashDetectionComponentData": null,
+      "CopCrashDetectionComponentData": "rpc",
       "CurveEntityData": null,
       "DampingControllerEntityData": null,
       "DeformationComponentData": null,

@@ -578,11 +578,12 @@ fn police_components_remain_in_installed_vehicle_order_and_cache_identity() {
     let replacement = vehicles::assets_with(|_, objects| {
         let first = objects.len() as u32 + 2;
         objects.push(("SirenComponentData", vec![]));
+        objects.push(("CopCrashDetectionComponentData", vec![]));
         objects.push(("SearchLightComponentData", vec![]));
         let Field::RawPointers(components) = &mut objects[0].1[1].1 else {
             panic!()
         };
-        components.splice(0..0, [first, first + 1]);
+        components.splice(0..0, [first, first + 1, first + 2]);
     });
     let mut fixture = assets();
     fixture.retain(|a| !replacement.iter().any(|b| a.name == b.name));
@@ -590,7 +591,11 @@ fn police_components_remain_in_installed_vehicle_order_and_cache_identity() {
     let install = install_with(&fixture);
     let mut options = install.options();
     let supported = BuildIdentity::supported();
-    for class in ["SirenComponentData", "SearchLightComponentData"] {
+    for class in [
+        "SirenComponentData",
+        "CopCrashDetectionComponentData",
+        "SearchLightComponentData",
+    ] {
         options
             .identity
             .vehicles
@@ -598,16 +603,18 @@ fn police_components_remain_in_installed_vehicle_order_and_cache_identity() {
             .insert(class.into(), supported.vehicles.classes[class].clone());
     }
     let correct = fingerprint(&install.game(), &options).unwrap();
-    let mut omitted = options.clone();
-    omitted
-        .identity
-        .vehicles
-        .classes
-        .insert("SirenComponentData".into(), None);
-    assert_ne!(
-        correct.digest,
-        fingerprint(&install.game(), &omitted).unwrap().digest
-    );
+    for class in [
+        "SirenComponentData",
+        "CopCrashDetectionComponentData",
+        "SearchLightComponentData",
+    ] {
+        let mut omitted = options.clone();
+        omitted.identity.vehicles.classes.insert(class.into(), None);
+        assert_ne!(
+            correct.digest,
+            fingerprint(&install.game(), &omitted).unwrap().digest
+        );
+    }
     let prepared = prepare(&install.game(), &install.cache(), &options).unwrap();
     let json: serde_json::Value =
         serde_json::from_slice(&std::fs::read(prepared.path(Kind::VehicleProfiles)).unwrap())
@@ -617,18 +624,19 @@ fn police_components_remain_in_installed_vehicle_order_and_cache_identity() {
         .profile;
     use nfs_world::replication::vehicle::{Kind as VehicleKind, components::fresh_rpcs};
     assert_eq!(
-        &profile.kinds()[..4],
+        &profile.kinds()[..5],
         &[
             VehicleKind::Root {
                 property_owner: true
             },
             VehicleKind::Siren,
+            VehicleKind::Rpc,
             VehicleKind::SearchLight,
             VehicleKind::Chassis
         ]
     );
-    assert_eq!(profile.kinds().len(), 19);
-    assert_eq!(fresh_rpcs(profile)[3].as_ref().unwrap().selector, 3);
+    assert_eq!(profile.kinds().len(), 20);
+    assert_eq!(fresh_rpcs(profile)[4].as_ref().unwrap().selector, 4);
 }
 
 #[test]
