@@ -212,6 +212,9 @@ pub struct Frame<'a> {
     pub ghost: Option<Ghost<'a>>,
     pub files: Vec<(u8, crate::files::Record)>,
     pub complete: bool,
+    /// End of all decoded handlers, before byte-alignment padding. Absent when
+    /// parsing stopped at a prefix or a nonempty object section.
+    pub consumed_bits: Option<usize>,
     pub rest: usize,
 }
 
@@ -255,6 +258,7 @@ impl Frame<'_> {
         }
         self.files = files;
         self.complete = true;
+        self.consumed_bits = Some(r.pos);
         Ok(r.pos)
     }
 }
@@ -600,6 +604,7 @@ fn parse_inner(
         ghost: None,
         files: Vec::new(),
         complete: true,
+        consumed_bits: None,
         rest: 6,
     };
     for handler in 0..HANDLERS as u8 {
@@ -682,6 +687,7 @@ fn parse_inner(
     if !frame.files.is_empty() && r.rest()?.len() >= 8 {
         return Err(Error::Shape);
     }
+    frame.consumed_bits = Some(r.pos);
     Ok(frame)
 }
 

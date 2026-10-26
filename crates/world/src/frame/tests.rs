@@ -651,3 +651,25 @@ fn load_reports_require_the_entire_declared_list_before_proving_readiness() {
     }
     assert!(sublevel_report_ids(BitWriter::new().span()).is_empty());
 }
+
+#[test]
+fn decoded_handler_boundary_distinguishes_padding_from_unparsed_bytes() {
+    let w = Builder::new()
+        .movement(vec![(293, vec![0])])
+        .build()
+        .unwrap();
+    let decoded = parse(w.span(), Direction::FromHost).unwrap();
+    // Mask 6, count 8, id 16, selector count 4 and one selector 4.
+    assert_eq!(decoded.consumed_bits, Some(38));
+    assert_eq!(w.len() - decoded.consumed_bits.unwrap(), 2);
+    let mut extended = w.clone();
+    extended.put(0, 8);
+    let parsed = parse(extended.span(), Direction::FromHost).unwrap();
+    assert_eq!(extended.len() - parsed.consumed_bits.unwrap(), 10);
+    assert_eq!(
+        parse_prefix(w.span(), Direction::FromHost)
+            .unwrap()
+            .consumed_bits,
+        None
+    );
+}
