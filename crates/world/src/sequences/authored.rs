@@ -7,7 +7,7 @@
 use crate::replication::{
     Error,
     entity::{
-        Body, Initial, Kind, Profile, Rpc, Update,
+        Body, Initial, Kind, Profile, Rpc, Update, VehicleSequenceUpdate,
         creation::{Asset, Creation, Prefix},
     },
 };
@@ -141,7 +141,9 @@ impl Blueprint {
             .iter()
             .map(|kind| {
                 Some(if *kind == Kind::VehicleSequenceRoot {
-                    Update::VehicleSequence(Default::default())
+                    Update::VehicleSequence(VehicleSequenceUpdate {
+                        lists: [Some(vec![]), Some(vec![])],
+                    })
                 } else {
                     Update::Noop
                 })
@@ -236,10 +238,12 @@ mod tests {
         ));
         assert_eq!(
             creation.body.updates,
-            vec![Some(Update::VehicleSequence(Default::default()))]
+            vec![Some(Update::VehicleSequence(VehicleSequenceUpdate {
+                lists: [Some(vec![]), Some(vec![])],
+            }))]
         );
         let wire = creation.body.encode(blueprint.profile()).unwrap();
-        assert_eq!(wire.len(), 113);
+        assert_eq!(wire.len(), 129);
         assert_eq!(
             Body::decode(wire.span(), blueprint.profile(), true)
                 .unwrap()
