@@ -299,6 +299,94 @@ fn synced_float_keeps_its_position_between_other_serializers() {
 }
 
 #[test]
+fn score_debug_reference_keeps_initial_and_update_boundaries() {
+    use crate::graph::tests::{Memory, local};
+    use nfs_world::{
+        bits::BitWriter,
+        replication::{
+            Error as WireError,
+            entity::{Body, Initial, Update},
+        },
+    };
+    let mut source = Memory::default();
+    source.put(
+        "a",
+        0,
+        "ParticipantLogicBlueprint",
+        &[
+            ("Flags", Value::UInt16(1)),
+            ("Objects", Value::Array((1..=4).map(local).collect())),
+        ],
+    );
+    source.put("a", 1, "ParticipantLogicEntityData", &[]);
+    source.put("a", 2, "DebugScoreSetterEntityData", &[]);
+    source.put("a", 3, "RepDebugMenuEntityData", &[]);
+    source.put("a", 4, "SyncedBoolEntityData", &[]);
+    let rules = crate::BuildIdentity::supported().participant_logic;
+    assert_eq!(Rules::from_json(&rules.to_json()).unwrap(), rules);
+    let nodes = Graph::new(&mut source).read(Site::root("a")).unwrap();
+    let (_, fields) = shape(&nodes, &rules).unwrap();
+    let kinds = fields.iter().map(|(_, kind)| *kind).collect::<Vec<_>>();
+    assert_eq!(
+        kinds,
+        [Kind::Root, Kind::RpcGhostReference, Kind::BoolProperty]
+    );
+    let profile = Profile::new(&kinds).unwrap();
+    for next_reference in [None, Some(0), Some(7), Some(8191)] {
+        // Independently packed root, menu RPC/reference and following Boolean.
+        // A local score setter contributes no network serializer. The menu's
+        // update distinguishes an absent change from an explicit null reference.
+        let mut wire = BitWriter::new();
+        wire.put(1, 16).put(0, 9).put(1, 10).put(0, 13);
+        wire.put(1, 9).put(3, 10).put(6, 13);
+        wire.put(1, 1).put(0, 1);
+        wire.put(0, 1).put(1, 1);
+        wire.put(u64::from(next_reference.is_some()), 1);
+        if let Some(reference) = next_reference {
+            wire.put(u64::from(reference), 13);
+        }
+        wire.put(1, 1).put(1, 1).put(1, 1);
+        let decoded = Body::decode(wire.span(), &profile, true).unwrap();
+        assert_eq!(decoded.initial_bits, Some(82));
+        assert_eq!(
+            decoded.bits,
+            if next_reference.is_some() { 101 } else { 88 }
+        );
+        assert!(matches!(
+            &decoded.body.initial.as_ref().unwrap()[1],
+            Initial::RpcGhostReference { rpc, reference: 6 }
+                if rpc.selector == 1 && rpc.serial.value() == 3
+        ));
+        assert_eq!(
+            decoded.body.updates,
+            vec![
+                None,
+                Some(Update::GhostReference(next_reference)),
+                Some(Update::BoolProperty(Some(true))),
+            ]
+        );
+        assert_eq!(decoded.body.encode(&profile).unwrap(), wire);
+        for end in 0..wire.len() {
+            assert_eq!(
+                Body::decode(wire.span().slice(0, end).unwrap(), &profile, true),
+                Err(WireError::Truncated)
+            );
+        }
+        for wrong in [serde_json::Value::Null, serde_json::json!("rpc")] {
+            let mut missing = rules.to_json();
+            missing["classes"]["RepDebugMenuEntityData"] = wrong;
+            let (_, fields) = shape(&nodes, &Rules::from_json(&missing).unwrap()).unwrap();
+            let profile =
+                Profile::new(&fields.iter().map(|(_, kind)| *kind).collect::<Vec<_>>()).unwrap();
+            assert!(
+                !Body::decode(wire.span(), &profile, true)
+                    .is_ok_and(|decoded| decoded.bits == wire.len())
+            );
+        }
+    }
+}
+
+#[test]
 fn kickback_rpc_identity_keeps_the_following_property_aligned() {
     use crate::graph::tests::{Memory, local};
     use nfs_world::{
