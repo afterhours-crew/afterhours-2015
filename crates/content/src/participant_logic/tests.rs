@@ -312,12 +312,16 @@ fn kickback_rpc_identity_keeps_the_following_property_aligned() {
         "ParticipantLogicBlueprint",
         &[
             ("Flags", Value::UInt16(1)),
-            ("Objects", Value::Array(vec![local(1), local(2), local(3)])),
+            (
+                "Objects",
+                Value::Array(vec![local(1), local(4), local(2), local(3)]),
+            ),
         ],
     );
     source.put("a", 1, "ParticipantLogicEntityData", &[]);
     source.put("a", 2, "KickbackNotificationEntityData", &[]);
     source.put("a", 3, "SyncedBoolEntityData", &[]);
+    source.put("a", 4, "KickbackEntityData", &[]);
     let rules = crate::BuildIdentity::supported().participant_logic;
     let nodes = Graph::new(&mut source).read(Site::root("a")).unwrap();
     let (_, fields) = shape(&nodes, &rules).unwrap();

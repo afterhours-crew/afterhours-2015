@@ -1183,6 +1183,7 @@
   },
   "participant_logic": {
     "classes": {
+      "KickbackEntityData": null,
       "KickbackNotificationEntityData": "rpc",
       "RestrictedRaceNotificationSenderEntityData": null,
       "CountDownEntityData": null,
