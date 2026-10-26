@@ -424,6 +424,14 @@ impl Section {
         if self.records.is_empty() != self.setup.is_none() {
             return Err(Error::Shape);
         }
+        let client = matches!(self.setup, Some(Setup::ContextOnly));
+        if self
+            .records
+            .iter()
+            .any(|r| (r.update.kind() == Kind::ClientToServerInfo) != client)
+        {
+            return Err(Error::Unsupported);
+        }
         let mut w = BitWriter::new();
         w.put_bool(self.float_bits.is_some());
         if let Some(value) = self.float_bits {

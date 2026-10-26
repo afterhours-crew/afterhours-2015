@@ -158,6 +158,13 @@ mod tests {
             assert_eq!(decoded.bits, w.len());
             assert_eq!(decoded.section.setup, Some(Setup::ContextOnly));
             assert_eq!(decoded.section.encode().unwrap(), w);
+            let mut wrong_direction = decoded.section.clone();
+            wrong_direction.setup = Some(Setup::Packed {
+                tag: None,
+                width: None,
+                axes: [None; 3],
+            });
+            assert_eq!(wrong_direction.encode(), Err(Error::Unsupported));
             assert_eq!(bindings.get(2), Some(Kind::ClientToServerInfo));
             // A failed duplicate or truncated later record never mutates state.
             let before = bindings.clone();
