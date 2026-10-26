@@ -10,11 +10,13 @@ use nfs_protocol::world::{
 use std::fmt;
 
 mod challenges;
+mod loading;
 pub mod receive;
 pub use challenges::{
     ChallengeAwards, ChallengeFull, ChallengeFullEntry, ChallengePlayerSync, EX_CHALLENGE_AWARDS,
     EX_CHALLENGE_FULL, EX_CHALLENGE_PLAYER_SYNC, MAX_CHALLENGE_SYNC_ENTRIES,
 };
+pub use loading::{EX_LEVEL_LOADED_ACK, LevelLoadedAck, MAX_SUBLEVEL_REPORTS, SubLevelReport};
 
 pub const HANDLERS: usize = 6;
 pub const TIME_SYNC: u8 = 0;
@@ -155,6 +157,7 @@ pub enum Message<'a> {
     ChallengePlayerSync(ChallengePlayerSync),
     ChallengeFull(ChallengeFull),
     ChallengeAwards(ChallengeAwards),
+    LevelLoadedAck(LevelLoadedAck),
     Opaque {
         index: u8,
         body: BitSpan<'a>,
@@ -187,6 +190,7 @@ impl Message<'_> {
             Self::ChallengePlayerSync(_) => EX_CHALLENGE_PLAYER_SYNC,
             Self::ChallengeFull(_) => EX_CHALLENGE_FULL,
             Self::ChallengeAwards(_) => EX_CHALLENGE_AWARDS,
+            Self::LevelLoadedAck(_) => EX_LEVEL_LOADED_ACK,
             Self::Opaque { index, .. } => *index,
         }
     }
@@ -378,12 +382,7 @@ fn message<'a>(r: &mut Reader<'a>, index: u8) -> Result<Message<'a>, Error> {
         },
         8 | 60 | 95 => {
             let start = r.pos;
-            r.take(32)?;
-            let count = r.take(32)? as usize;
-            if count > MAX_MESSAGES * 64 {
-                return Err(Error::Bound);
-            }
-            r.slice(count * 16)?;
+            SubLevelReport::read(r)?;
             let body = r.span.slice(start, r.pos - start)?;
             Message::Opaque { index, body }
         }
@@ -436,6 +435,7 @@ fn message<'a>(r: &mut Reader<'a>, index: u8) -> Result<Message<'a>, Error> {
             Message::Opaque { index, body }
         }
         EX_CHALLENGE_PLAYER_SYNC => Message::ChallengePlayerSync(ChallengePlayerSync::read(r)?),
+        EX_LEVEL_LOADED_ACK => Message::LevelLoadedAck(LevelLoadedAck::read(r)?),
         EX_CHALLENGE_FULL => Message::ChallengeFull(ChallengeFull::read(r)?),
         EX_CHALLENGE_AWARDS => Message::ChallengeAwards(ChallengeAwards::read(r)?),
         // Paired reader 0x554ccd0 / writer 0x554d0f0: count, three words and
@@ -802,15 +802,9 @@ pub const EX_LEVEL_READY: u8 = 70;
 pub const EX_SUBLEVEL_REPORT: u8 = 8;
 
 pub fn sublevel_report_ids(body: BitSpan<'_>) -> Vec<u16> {
-    let Ok(count) = body.read_u32(32, 32) else {
-        return Vec::new();
-    };
-    if count as usize > body.len().saturating_sub(64) / 16 {
-        return Vec::new();
-    }
-    (0..count as usize)
-        .filter_map(|i| body.read_u32(64 + 16 * i, 16).ok().map(|v| v as u16))
-        .collect()
+    SubLevelReport::decode(body)
+        .map(|report| report.levels)
+        .unwrap_or_default()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -909,6 +903,7 @@ impl<'a> Builder<'a> {
             Message::ChallengePlayerSync(value) => value.write(w)?,
             Message::ChallengeFull(value) => value.write(w)?,
             Message::ChallengeAwards(value) => value.write(w)?,
+            Message::LevelLoadedAck(value) => value.write(w)?,
             Message::ChallengeProgress(value) => {
                 if value.entries.len() > MAX_CHALLENGE_PROGRESS_ENTRIES {
                     return Err(Error::Bound);
