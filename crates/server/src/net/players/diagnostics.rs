@@ -82,6 +82,8 @@ impl PlayerListener {
             ],
             replication_pending,
             content_pending,
+            rpc_pending: 0,
+            files_pending: 0,
             items_working: items_working || self.has_challenge_request(),
         }
     }

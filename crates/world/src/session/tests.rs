@@ -302,6 +302,7 @@ fn file_queue_uses_current_receipts_retries_and_cleans_up_on_close() {
     };
     assert!(host.queue_file(3, &data, now).is_err());
     host.queue_file(4, &data, now).unwrap();
+    assert_eq!(host.files_pending(), 1);
     assert!(host.queue_file(4, &data, now).is_err());
     let mut receiver = Receiver::default();
     let mut rejected_start = false;
@@ -311,9 +312,11 @@ fn file_queue_uses_current_receipts_retries_and_cleans_up_on_close() {
         let t = now + step * 2 + 1;
         let out = host.poll(t);
         if out.events.contains(&Event::FileComplete { handler: 4 }) {
+            assert_eq!(host.files_pending(), 0);
             complete = true;
             break;
         }
+        assert_eq!(host.files_pending(), 1);
         assert!(
             !out.events
                 .iter()
@@ -549,9 +552,14 @@ fn launcher_notifications_follow_creations_and_advance_reliable_sequence_in_boun
         [Event::Replication { .. }]
     ));
     assert_eq!(host.rpc_queue.len(), MAX_RPC_QUEUE);
+    assert_eq!(host.rpc_progress(), (0, MAX_RPC_QUEUE));
     let mut previous = None;
     for step in 1..=2 {
         let out = host.poll(t + 2 * STATE_WAIT_MS + step * REPLICATION_INTERVAL_MS);
+        assert_eq!(
+            host.rpc_progress(),
+            (step as usize * 15, MAX_RPC_QUEUE - step as usize * 15)
+        );
         assert_eq!(
             out.events,
             vec![Event::RpcNotifications {

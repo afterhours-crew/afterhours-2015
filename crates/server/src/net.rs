@@ -1635,6 +1635,8 @@ fn observe_world<I: WorldIo>(
             host.content_progress().1,
             items_working,
         );
+        observation.rpc_pending = host.rpc_progress().1;
+        observation.files_pending = host.files_pending();
         if let Some(application) = host.application() {
             observation.health.include_application(application.stats());
         }

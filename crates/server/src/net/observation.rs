@@ -56,6 +56,21 @@ mod tests {
         health.include_application(stats);
         assert_eq!(health.refused_frames, 2);
     }
+    #[test]
+    fn empty_listener_queues_do_not_hide_session_notifications_or_file_receipts() {
+        let mut value = crate::net::players::PlayerListener::new(7).observation(0, 0, 0, false);
+        assert!(value.queues_drained());
+        value.rpc_pending = 283;
+        assert!(!value.queues_drained());
+        value.rpc_pending = 0;
+        value.files_pending = 1;
+        assert!(!value.queues_drained());
+        value.files_pending = 0;
+        value.items_working = true;
+        assert!(!value.queues_drained());
+        value.items_working = false;
+        assert!(value.queues_drained());
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -78,5 +93,22 @@ pub struct WorldObservation {
     pub owned_queues: [usize; 7],
     pub replication_pending: usize,
     pub content_pending: usize,
+    /// Notifications already transferred from the listener into the session.
+    pub rpc_pending: usize,
+    /// Session file transfers, including those awaiting their final receipt.
+    pub files_pending: usize,
     pub items_working: bool,
+}
+
+impl WorldObservation {
+    /// All observed producer/session work is drained. This is not gameplay or
+    /// rendering acceptance, nor a receipt for every ordinary application frame.
+    pub fn queues_drained(&self) -> bool {
+        self.owned_queues == [0; 7]
+            && self.replication_pending == 0
+            && self.content_pending == 0
+            && self.rpc_pending == 0
+            && self.files_pending == 0
+            && !self.items_working
+    }
 }

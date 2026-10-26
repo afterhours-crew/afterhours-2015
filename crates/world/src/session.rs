@@ -546,6 +546,17 @@ impl Host {
         (self.replication_sent, self.replication_queue.len())
     }
 
+    /// Published and still queued notifications. A published notification is
+    /// not proof of client acceptance; this exposes work waiting at this layer.
+    pub fn rpc_progress(&self) -> (usize, usize) {
+        (self.rpc_sent, self.rpc_queue.len())
+    }
+
+    /// Transfers remain pending through the final record's delivery receipt.
+    pub fn files_pending(&self) -> usize {
+        self.files.iter().filter(|file| file.is_some()).count()
+    }
+
     pub fn queue_launcher_enabled(
         &mut self,
         reply: crate::launchers::Enabled,
