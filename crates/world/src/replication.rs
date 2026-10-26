@@ -41,6 +41,8 @@ pub enum Kind {
     GotoWaypointGoal,
     SpeedLimitGoal,
     ScriptedInputGoal,
+    FollowTargetGoal,
+    ChaseTargetGoal,
 }
 impl Kind {
     pub fn index(self) -> u8 {
@@ -63,6 +65,8 @@ impl Kind {
             Self::GotoWaypointGoal => 9,
             Self::SpeedLimitGoal => 23,
             Self::ScriptedInputGoal => 19,
+            Self::FollowTargetGoal => 8,
+            Self::ChaseTargetGoal => 3,
         }
     }
     fn from_index(index: u8) -> Result<Self, Error> {
@@ -85,6 +89,8 @@ impl Kind {
             9 => Ok(Self::GotoWaypointGoal),
             23 => Ok(Self::SpeedLimitGoal),
             19 => Ok(Self::ScriptedInputGoal),
+            8 => Ok(Self::FollowTargetGoal),
+            3 => Ok(Self::ChaseTargetGoal),
             _ => Err(Error::Unsupported),
         }
     }
@@ -204,6 +210,8 @@ pub enum Initial {
     GotoWaypointGoal(goto_waypoint::Initial),
     SpeedLimitGoal(speed_limit::Initial),
     ScriptedInputGoal(scripted_input::Initial),
+    FollowTargetGoal(target_goal::Follow),
+    ChaseTargetGoal(target_goal::Chase),
     Actor(ActorInit),
     Entity {
         prefix: entity::creation::Prefix,
@@ -236,6 +244,8 @@ impl Initial {
             Self::GotoWaypointGoal(_) => Kind::GotoWaypointGoal,
             Self::SpeedLimitGoal(_) => Kind::SpeedLimitGoal,
             Self::ScriptedInputGoal(_) => Kind::ScriptedInputGoal,
+            Self::FollowTargetGoal(_) => Kind::FollowTargetGoal,
+            Self::ChaseTargetGoal(_) => Kind::ChaseTargetGoal,
             Self::Entity { .. } | Self::Vehicle { .. } => Kind::Entity,
             Self::Participant(_) => Kind::Participant,
             Self::ParticipantLocationMap => Kind::ParticipantLocationMap,
@@ -259,6 +269,8 @@ pub enum Update {
     GotoWaypointGoal(goto_waypoint::Update),
     SpeedLimitGoal,
     ScriptedInputGoal,
+    FollowTargetGoal,
+    ChaseTargetGoal,
     Actor(ActorUpdate),
     Entity {
         binding: std::sync::Arc<entity::creation::Binding>,
@@ -290,6 +302,8 @@ impl Update {
             Self::GotoWaypointGoal(_) => Kind::GotoWaypointGoal,
             Self::SpeedLimitGoal => Kind::SpeedLimitGoal,
             Self::ScriptedInputGoal => Kind::ScriptedInputGoal,
+            Self::FollowTargetGoal => Kind::FollowTargetGoal,
+            Self::ChaseTargetGoal => Kind::ChaseTargetGoal,
             Self::Actor(_) => Kind::Actor,
             Self::Entity { .. } | Self::Vehicle { .. } => Kind::Entity,
             Self::Participant(_) => Kind::Participant,
@@ -409,6 +423,8 @@ impl Reader<'_> {
             Kind::ScriptedInputGoal => {
                 Initial::ScriptedInputGoal(scripted_input::Initial::read(self)?)
             }
+            Kind::FollowTargetGoal => Initial::FollowTargetGoal(target_goal::Follow::read(self)?),
+            Kind::ChaseTargetGoal => Initial::ChaseTargetGoal(target_goal::Chase::read(self)?),
             Kind::AiPacingGroup => Initial::AiPacingGroup,
             Kind::DebrisManager => Initial::DebrisManager(debris::Initial::read(self)?),
             Kind::PursuitInfo => Initial::PursuitInfo,
@@ -452,6 +468,8 @@ impl Reader<'_> {
             Kind::GotoWaypointGoal => return Err(Error::Unsupported),
             Kind::SpeedLimitGoal => Update::SpeedLimitGoal,
             Kind::ScriptedInputGoal => Update::ScriptedInputGoal,
+            Kind::FollowTargetGoal => Update::FollowTargetGoal,
+            Kind::ChaseTargetGoal => Update::ChaseTargetGoal,
             Kind::AiPacingGroup => Update::AiPacingGroup(pacing::Update::read(self)?),
             Kind::DebrisManager => Update::DebrisManager(debris::Update::read(self)?),
             Kind::PursuitInfo => Update::PursuitInfo(pursuit::Update::read(self)?),
@@ -581,6 +599,8 @@ impl Writer {
             Initial::GotoWaypointGoal(v) => v.write(self)?,
             Initial::SpeedLimitGoal(v) => v.write(self)?,
             Initial::ScriptedInputGoal(v) => v.write(self)?,
+            Initial::FollowTargetGoal(v) => v.write(self)?,
+            Initial::ChaseTargetGoal(v) => v.write(self)?,
             Initial::AiPacingGroup | Initial::PursuitInfo => {}
             Initial::DebrisManager(v) => v.write(self)?,
             Initial::Actor(v) => {
@@ -623,6 +643,7 @@ impl Writer {
             Update::GotoWaypointGoal(v) => v.write(self)?,
             Update::SpeedLimitGoal => {}
             Update::ScriptedInputGoal => {}
+            Update::FollowTargetGoal | Update::ChaseTargetGoal => {}
             Update::AiPacingGroup(v) => v.write(self)?,
             Update::DebrisManager(v) => v.write(self)?,
             Update::PursuitInfo(v) => v.write(self)?,
@@ -790,6 +811,7 @@ pub mod pacing;
 pub mod scripted_input;
 pub mod speed_limit;
 pub mod spline;
+pub mod target_goal;
 pub mod traffic;
 pub mod wander;
 
