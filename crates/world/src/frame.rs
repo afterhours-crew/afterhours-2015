@@ -9,7 +9,12 @@ use nfs_protocol::world::{
 };
 use std::fmt;
 
+mod challenges;
 pub mod receive;
+pub use challenges::{
+    ChallengeAwards, ChallengeFull, ChallengeFullEntry, ChallengePlayerSync, EX_CHALLENGE_AWARDS,
+    EX_CHALLENGE_FULL, EX_CHALLENGE_PLAYER_SYNC, MAX_CHALLENGE_SYNC_ENTRIES,
+};
 
 pub const HANDLERS: usize = 6;
 pub const TIME_SYNC: u8 = 0;
@@ -147,6 +152,9 @@ pub enum Message<'a> {
     GameModeCall(crate::game_mode::Call),
     Movie(crate::fmv::Play),
     ChallengeProgress(ChallengeProgress),
+    ChallengePlayerSync(ChallengePlayerSync),
+    ChallengeFull(ChallengeFull),
+    ChallengeAwards(ChallengeAwards),
     Opaque {
         index: u8,
         body: BitSpan<'a>,
@@ -176,6 +184,9 @@ impl Message<'_> {
             | Self::Movie(_) => 47,
             Self::LogicEvent(v) => v.index(),
             Self::ChallengeProgress(_) => EX_CHALLENGE_PROGRESS,
+            Self::ChallengePlayerSync(_) => EX_CHALLENGE_PLAYER_SYNC,
+            Self::ChallengeFull(_) => EX_CHALLENGE_FULL,
+            Self::ChallengeAwards(_) => EX_CHALLENGE_AWARDS,
             Self::Opaque { index, .. } => *index,
         }
     }
@@ -424,6 +435,9 @@ fn message<'a>(r: &mut Reader<'a>, index: u8) -> Result<Message<'a>, Error> {
             let body = r.span.slice(start, r.pos - start)?;
             Message::Opaque { index, body }
         }
+        EX_CHALLENGE_PLAYER_SYNC => Message::ChallengePlayerSync(ChallengePlayerSync::read(r)?),
+        EX_CHALLENGE_FULL => Message::ChallengeFull(ChallengeFull::read(r)?),
+        EX_CHALLENGE_AWARDS => Message::ChallengeAwards(ChallengeAwards::read(r)?),
         // Paired reader 0x554ccd0 / writer 0x554d0f0: count, three words and
         // one Boolean per entry, then one final word. Check the whole extent
         // before allocating, including the required trailing word.
@@ -892,6 +906,9 @@ impl<'a> Builder<'a> {
             Message::Opaque { body, .. } => {
                 w.put_span(*body);
             }
+            Message::ChallengePlayerSync(value) => value.write(w)?,
+            Message::ChallengeFull(value) => value.write(w)?,
+            Message::ChallengeAwards(value) => value.write(w)?,
             Message::ChallengeProgress(value) => {
                 if value.entries.len() > MAX_CHALLENGE_PROGRESS_ENTRIES {
                     return Err(Error::Bound);

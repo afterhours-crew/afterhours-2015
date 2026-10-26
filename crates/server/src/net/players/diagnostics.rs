@@ -109,6 +109,18 @@ impl PlayerListener {
 
     pub(super) fn diagnose_unconsumed(&mut self, decoded: &[frame::Message<'_>]) {
         for message in decoded {
+            // A typed codec alone is not a world consumer. Keep these visible
+            // until their owned service/queue transition is implemented.
+            if matches!(
+                message,
+                frame::Message::ChallengePlayerSync(_)
+                    | frame::Message::ChallengeFull(_)
+                    | frame::Message::ChallengeAwards(_)
+            ) {
+                self.unsupported.record(Route::Message {
+                    index: message.index(),
+                });
+            }
             if let frame::Message::Opaque { index, .. } = message {
                 // RPC and reached-event dispatch happens below. Session::Observing
                 // consumes level readiness and sublevel reports after our ACK.
@@ -392,6 +404,24 @@ mod tests {
             assert_eq!((listener.stats.accepted, listener.stats.errors), (0, 1));
         });
         assert!(output.contains("DecoderIndex { index: 106 }"), "{output}");
+    }
+
+    #[test]
+    fn typed_challenge_sync_remains_unsupported_until_it_has_a_consumer() {
+        let mut listener = PlayerListener::new(7);
+        assert!(message(
+            &mut listener,
+            0,
+            frame::Message::ChallengePlayerSync(frame::ChallengePlayerSync {
+                persona: 7,
+                monthly_start: 0,
+                day_id: 1,
+                challenge_ids: vec![1, 2, 3]
+            })
+        ));
+        assert_eq!(listener.unsupported.total(), 1);
+        assert_eq!(listener.stats.errors, 0);
+        assert!(listener.pending_content.is_empty());
     }
 
     #[test]
