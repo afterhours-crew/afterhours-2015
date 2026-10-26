@@ -13,6 +13,9 @@ use crate::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+mod membership;
+pub use membership::{MemberState, Membership};
+
 #[derive(Clone, Debug)]
 pub struct Boundary {
     pub parent_key: u32,

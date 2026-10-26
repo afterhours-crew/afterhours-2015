@@ -34,6 +34,9 @@ pub enum StateKind {
     Waypoints,
     WaitForAi,
     Sequence,
+    /// This scene owns membership, while its service supplies entry/exit hooks
+    /// and completion. Registering it must not run a game-mode default hook.
+    HostOwned,
     /// Membership alias for a state whose behavior belongs to another scene.
     External,
 }

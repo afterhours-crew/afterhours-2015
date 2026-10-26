@@ -68,6 +68,84 @@ fn setup() -> (WorldHost, Instance, Instance, Instance) {
 }
 
 #[test]
+fn scene_service_controls_completion_while_imported_observers_share_membership() {
+    let mut data = scene();
+    for state in &mut data.states {
+        state.kind = data::StateKind::HostOwned;
+    }
+    let mut world = WorldHost::default();
+    let owner = world
+        .install(Arc::new(Plan::scene(&data.scope()).unwrap()), Some(77))
+        .unwrap();
+    let observer = world.install(mode(), None).unwrap();
+    dispatch(&mut world, vec![activate(observer)]);
+    let entered = dispatch(
+        &mut world,
+        vec![state(
+            owner,
+            Action::Enter {
+                state: 1,
+                participant: 91,
+            },
+        )],
+    );
+    assert!(world.view(owner).unwrap().members(1).unwrap().contains(&91));
+    assert!(world.view(owner).unwrap().completed(1).unwrap().is_empty());
+    assert!(entered.iter().any(|e| e.instance == owner
+        && matches!(
+            e.value,
+            Effect::Hook(Notification::Entered { state: 1, .. })
+        )));
+    assert!(
+        !entered
+            .iter()
+            .any(|e| matches!(e.value, Effect::State(Notification::Completed { .. })))
+    );
+    assert_eq!(
+        world.boolean(observer, &BooleanSource::Local(0), 91),
+        Ok(Some(true))
+    );
+    // The service's explicit completion retains membership, then its actual
+    // Move reaches the same observer that saw entry. No RPC pairing is used.
+    dispatch(
+        &mut world,
+        vec![state(
+            owner,
+            Action::Complete {
+                state: 1,
+                participant: 91,
+            },
+        )],
+    );
+    assert!(
+        world
+            .view(owner)
+            .unwrap()
+            .completed(1)
+            .unwrap()
+            .contains(&91)
+    );
+    dispatch(
+        &mut world,
+        vec![state(
+            owner,
+            Action::Move {
+                source: 1,
+                participant: 91,
+                target: Some(2),
+            },
+        )],
+    );
+    assert!(world.view(owner).unwrap().members(1).unwrap().is_empty());
+    assert!(world.view(owner).unwrap().members(2).unwrap().contains(&91));
+    assert!(world.view(owner).unwrap().completed(2).unwrap().is_empty());
+    assert_eq!(
+        world.boolean(observer, &BooleanSource::Local(0), 91),
+        Ok(Some(false))
+    );
+}
+
+#[test]
 fn two_modes_bind_live_scene_membership_and_emit_only_the_scene_serializer() {
     let (mut world, scene, first, second) = setup();
     dispatch(
