@@ -333,7 +333,11 @@ fn overtakes_refresh_both_presentations_on_authored_cadence_and_retry_under_pres
 #[test]
 fn event_racers_join_the_location_map_after_creation_and_survive_adoption_once() {
     let mut h = harness();
-    assert_eq!(h.listener.rival_map(&h.listener.players), Ok(Some(vec![])));
+    assert_eq!(
+        h.listener
+            .rival_map(&h.listener.players, &h.listener.intro_modes),
+        Ok(Some(vec![]))
+    );
     start(&mut h);
     assert_eq!(
         h.listener.players.player_participants().collect::<Vec<_>>(),
@@ -362,7 +366,11 @@ fn event_racers_join_the_location_map_after_creation_and_survive_adoption_once()
         })
         .collect();
     let check = |h: &Harness| {
-        let locations = h.listener.rival_map(&h.listener.players).unwrap().unwrap();
+        let locations = h
+            .listener
+            .rival_map(&h.listener.players, &h.listener.intro_modes)
+            .unwrap()
+            .unwrap();
         assert_eq!(locations.len(), members.len());
         assert_eq!(locations.into_iter().collect::<BTreeMap<_, _>>(), expected);
     };
@@ -371,7 +379,11 @@ fn event_racers_join_the_location_map_after_creation_and_survive_adoption_once()
     h.listener
         .pending_entries
         .push_back((returning::empty_section(), Vec::new()));
-    assert_eq!(h.listener.rival_map(&h.listener.players), Ok(None));
+    assert_eq!(
+        h.listener
+            .rival_map(&h.listener.players, &h.listener.intro_modes),
+        Ok(None)
+    );
     h.listener.pending_entries.clear();
     check(&h);
 

@@ -33,6 +33,7 @@ fn story_opponents_are_delegated_and_retire_after_departures_atomically() {
         let mut listener =
             PlayerListener::new(owner.persona).with_prologue(Some(Arc::new(content)));
         listener.players = players;
+        attach_location_service(&mut listener);
         listener.replication_origin_ms = Some(100_000);
         listener.world_ms = 112_100;
         listener.intro_modes.insert(
@@ -49,7 +50,7 @@ fn story_opponents_are_delegated_and_retire_after_departures_atomically() {
         }
         assert_eq!(
             listener
-                .rival_map(&listener.players)
+                .rival_map(&listener.players, &listener.intro_modes)
                 .unwrap()
                 .unwrap()
                 .len(),
@@ -102,6 +103,77 @@ fn story_opponents_are_delegated_and_retire_after_departures_atomically() {
         drain(&mut listener);
         assert!(send(&mut listener, 1, 47, leave.span()));
         assert!(listener.pending_entries.is_empty());
+        assert_eq!(
+            listener.optional_map_failures, [0; 3],
+            "retirement must be coherent, not merely contained"
+        );
+    });
+}
+
+fn attach_location_service(listener: &mut PlayerListener) {
+    use nfs_world::{
+        replication::sublevel::ordinary,
+        world_activation::{Catalog as Activation, Site},
+    };
+    let key = 1999;
+    let profiles = sublevel::Content::new(vec![(
+        key,
+        Profile::new(
+            false,
+            &[
+                Kind::Noop,
+                Kind::RpcBool,
+                Kind::Rpc,
+                Kind::RpcFourReferences,
+            ],
+        )
+        .unwrap(),
+    )])
+    .unwrap();
+    let scene = ordinary::creation(
+        99,
+        key,
+        None,
+        Serial::new(0).unwrap(),
+        &ordinary::unpopulated(profiles.profile(key).unwrap()).unwrap(),
+        &profiles,
+    )
+    .unwrap();
+    listener
+        .players
+        .create_scenes(&[99], vec![scene], &profiles)
+        .unwrap();
+    let asset = Asset {
+        bundle: 1,
+        type_id: 1,
+        local_index: 0,
+    };
+    listener.roles = Some(crate::scene_roles::SceneRoles {
+        level: b"test".to_vec(),
+        gameplay: 900,
+        startup: 901,
+        garage: 902,
+        progression: 903,
+        traffic: [0; 10],
+        customization_timer: asset,
+        streaming_gate: asset,
+        spawn_points: None,
+        bank: None,
+        free_roam: Some(Activation {
+            volumes: vec![],
+            presence: Site {
+                scene_key: key,
+                serializer: 1,
+            },
+            streamed: Site {
+                scene_key: key,
+                serializer: 2,
+            },
+            location: Site {
+                scene_key: key,
+                serializer: 3,
+            },
+        }),
     });
 }
 

@@ -274,6 +274,21 @@ struct Instance {
     ready_at: Option<u64>,
 }
 
+/// A running waiting instance's readiness. Its Stop is due at `ready_at`
+/// (set once the streaming gate reported loaded and the garage cars loaded);
+/// reaching `fallback_at` first means readiness never held.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Readiness {
+    pub participant: u16,
+    pub sequence: u16,
+    /// The bound streaming gate entity, if one exists for the participant.
+    pub streaming_gate: Option<u16>,
+    pub streaming_loaded: bool,
+    pub garage_loaded: bool,
+    pub ready_at: Option<u64>,
+    pub fallback_at: u64,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Streaming {
     owner: Owner,
@@ -455,6 +470,31 @@ impl Sequences {
         }
         streaming.loaded = loaded;
         Ok(true)
+    }
+    /// What each running waiting instance has and still needs before its
+    /// authored ready delay starts; for diagnostics and acceptance checks.
+    pub fn readiness(&self) -> Vec<Readiness> {
+        self.entries
+            .iter()
+            .filter_map(|(&participant, instance)| {
+                let Phase::Running { fallback_at } = instance.phase else {
+                    return None;
+                };
+                let streaming = self
+                    .streaming
+                    .get(&participant)
+                    .filter(|s| s.owner == instance.owner);
+                Some(Readiness {
+                    participant,
+                    sequence: instance.ghost,
+                    streaming_gate: streaming.map(|s| s.ghost),
+                    streaming_loaded: streaming.is_some_and(|s| s.loaded),
+                    garage_loaded: instance.garage_loaded,
+                    ready_at: instance.ready_at,
+                    fallback_at,
+                })
+            })
+            .collect()
     }
     pub fn garage_loaded(&mut self, owner: Owner, loaded: bool) -> Result<(), Error> {
         let instance = self

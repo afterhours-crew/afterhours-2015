@@ -107,6 +107,8 @@ pub(super) struct PlayerListener {
     rival_content: Option<std::sync::Arc<crate::rival_content::Content>>,
     rival_population: Option<crate::rival_content::population::Population>,
     rivals_failed: bool,
+    /// Human sync, rival-source collection, rival sync; fixed-size counters.
+    optional_map_failures: [usize; 3],
     ai: crate::ai_settings::AiSettings,
     garage_presence: nfs_world::garage::presence::Presence,
     spawn_points: nfs_world::spawn_points::SpawnPoints,
@@ -170,6 +172,8 @@ pub(super) struct PlayerListener {
     event_discovery: events::discovery::State,
     /// The intro participant's world volume memberships (E1194).
     world_volumes: prologue::volumes::State,
+    /// Last logged waiting-sequence readiness per participant.
+    sequence_readiness: BTreeMap<u16, nfs_world::sequences::Readiness>,
     /// Participants in an owned event: free-roam scoring is retired meanwhile.
     event_suspended: BTreeSet<u16>,
     /// The session's replication clock origin, set by the world loop each pass.
@@ -877,6 +881,7 @@ impl PlayerListener {
             rival_content: None,
             rival_population: None,
             rivals_failed: false,
+            optional_map_failures: [0; 3],
             ai: crate::ai_settings::AiSettings::default(),
             garage_presence: nfs_world::garage::presence::Presence::default(),
             spawn_points: nfs_world::spawn_points::SpawnPoints::default(),
@@ -921,6 +926,7 @@ impl PlayerListener {
             event_state: events::State::default(),
             event_discovery: events::discovery::State::default(),
             world_volumes: prologue::volumes::State::default(),
+            sequence_readiness: BTreeMap::new(),
             event_suspended: BTreeSet::new(),
             replication_origin_ms: None,
             pending_content: VecDeque::new(),
@@ -1472,12 +1478,27 @@ impl Listener for PlayerListener {
                 {
                     continue;
                 }
-                if sequences
+                let streamed = sequences
                     .as_mut()
                     .map(|s| s.streaming_event(&message))
                     .transpose()?
-                    .unwrap_or(false)
+                    .unwrap_or(false);
+                if let nfs_world::logic::Message::Reached { event, target, .. } = &message
+                    && matches!(
+                        *event,
+                        nfs_world::sequences::STREAMING_LOADED
+                            | nfs_world::sequences::STREAMING_UNLOADED
+                    )
                 {
+                    tracing::info!(
+                        ghost = target.ghost,
+                        entity = target.entity,
+                        loaded = *event == nfs_world::sequences::STREAMING_LOADED,
+                        consumed = streamed,
+                        "streaming gate event"
+                    );
+                }
+                if streamed {
                     continue;
                 }
                 // The client played the arrive sequence: stop it (E101, E742).
@@ -2735,50 +2756,24 @@ impl Listener for PlayerListener {
             .iter()
             .map(|(&car, &(participant, _))| (participant, car))
             .collect();
-        if let Some(catalog) = self
+        if let Some(location) = self
             .roles
             .as_ref()
             .and_then(|roles| roles.free_roam.as_ref())
+            .map(|catalog| catalog.location)
         {
-            // Roaming rivals have their own map/minimap list (slot 0).
-            match self.rival_map(&players).and_then(|rivals| {
-                let mut batch = players.sync_location_service(
-                    HOST_SELECTOR as u8,
-                    self.persona,
-                    &map_cars,
-                    [0.; 3],
-                    catalog.location,
-                )?;
-                if let Some(rivals) = rivals {
-                    batch.extend(players.sync_rival_locations(
-                        HOST_SELECTOR as u8,
-                        self.persona,
-                        &rivals,
-                        catalog.location,
-                        self.world_ms,
-                    )?);
-                }
-                Ok(batch)
-            }) {
-                Ok(mut batch) => {
-                    // One accepted movement sample can change both chassis and
-                    // minimap position. Two frames per sample can outrun the
-                    // host's bounded send queue and delay lifecycle messages.
-                    // Both use world origin zero; retain ordinary framing if
-                    // their combined timed frame would exceed the wire limit.
-                    if let Some(section) = &mut movement_section {
-                        let original_len = section.records.len();
-                        section.records.append(&mut batch);
-                        if !entry_admitted(section, &[]) {
-                            batch = section.records.split_off(original_len);
-                        }
-                    }
-                    records.extend(batch);
-                }
-                Err(error) => {
-                    return self.refuse(error);
+            let mut batch =
+                self.sync_optional_maps(&mut players, &intro_modes, &map_cars, location);
+            // Keep movement and map records together when they fit, without
+            // letting optional map failures poison a valid movement frame.
+            if let Some(section) = &mut movement_section {
+                let original_len = section.records.len();
+                section.records.append(&mut batch);
+                if !entry_admitted(section, &[]) {
+                    batch = section.records.split_off(original_len);
                 }
             }
+            records.extend(batch);
         }
         if let Err(error) = Self::bind_progression_launchers(
             self.progression.as_deref(),

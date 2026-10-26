@@ -295,6 +295,20 @@ fn sustained_driving_keeps_physics_and_minimap_in_one_bounded_frame() {
     // would grow the queue even with a conservative ten-frame/second drain.
     let mut previous = None;
     for step in 0..600u32 {
+        // A missing optional map binding must neither reject valid movement
+        // nor partially change the map. Repeated failure stays diagnosable;
+        // restoring the service must recover without reconnecting.
+        let map_missing = (100..150).contains(&step);
+        listener
+            .roles
+            .as_mut()
+            .unwrap()
+            .free_roam
+            .as_mut()
+            .unwrap()
+            .location
+            .serializer = if map_missing { 9999 } else { 3 };
+        let map_before = listener.players.objects().get(map).unwrap().current.clone();
         listener.world_ms = u64::from(step) * 100;
         let x = step as f32 * 8.;
         sample.physics.identity_words = [(5f64.to_bits() >> 32) as u32, 0, step + 150];
@@ -343,7 +357,13 @@ fn sustained_driving_keeps_physics_and_minimap_in_one_bounded_frame() {
                 <= nfs_world::application::OUTBOUND_FRAME_BITS
         );
         assert!(section.records.iter().any(|r| r.id == car));
-        if step > 0 {
+        if map_missing {
+            assert!(!section.records.iter().any(|r| r.id == map));
+            assert_eq!(
+                listener.players.objects().get(map).unwrap().current,
+                map_before
+            );
+        } else if step > 0 {
             assert!(section.records.iter().any(|r| r.id == map));
             let Update::ParticipantLocationMap(location) =
                 &listener.players.objects().get(map).unwrap().current
@@ -358,6 +378,7 @@ fn sustained_driving_keeps_physics_and_minimap_in_one_bounded_frame() {
         assert_eq!(listener.refused, usize::from(step >= 300));
         previous = Some(section);
     }
+    assert_eq!(listener.optional_map_failures, [50, 0, 50]);
     // Clearing world ownership still sends map removal and service unbinding
     // without relying on another movement report.
     listener.world_cars.clear();

@@ -72,14 +72,43 @@ impl PlayerListener {
             self.population.as_ref(),
             self.persona,
         )?;
+        let readiness = sequences.readiness();
+        for now in &readiness {
+            if self.sequence_readiness.get(&now.participant) != Some(now) {
+                tracing::info!(
+                    participant = now.participant,
+                    sequence = now.sequence,
+                    streaming_gate = ?now.streaming_gate,
+                    streaming_loaded = now.streaming_loaded,
+                    garage_loaded = now.garage_loaded,
+                    ready_at = ?now.ready_at,
+                    world_ms,
+                    "waiting sequence readiness"
+                );
+            }
+        }
+        self.sequence_readiness = readiness.iter().map(|r| (r.participant, *r)).collect();
         let capacity = nfs_world::session::MAX_RPC_QUEUE.saturating_sub(self.pending_rpcs.len());
         let stops = sequences.poll(world_ms, capacity)?;
         for stop in &stops {
-            tracing::info!(
-                sequence = stop.sequence,
-                world_ms,
-                "owned waiting sequence Stop queued"
-            );
+            let state = readiness.iter().find(|r| r.sequence == stop.sequence);
+            if state.is_some_and(|r| r.ready_at.is_some_and(|at| world_ms >= at)) {
+                tracing::info!(
+                    sequence = stop.sequence,
+                    world_ms,
+                    "owned waiting sequence Stop queued: ready"
+                );
+            } else {
+                // The emergency path: readiness never held. Acceptance fails.
+                tracing::warn!(
+                    sequence = stop.sequence,
+                    world_ms,
+                    streaming_gate = ?state.and_then(|r| r.streaming_gate),
+                    streaming_loaded = state.is_some_and(|r| r.streaming_loaded),
+                    garage_loaded = state.is_some_and(|r| r.garage_loaded),
+                    "owned waiting sequence Stop queued by FALLBACK; readiness never held"
+                );
+            }
         }
         self.pending_rpcs.extend(
             stops
