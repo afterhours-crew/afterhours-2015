@@ -1183,6 +1183,8 @@
   },
   "participant_logic": {
     "classes": {
+      "ServerRecommendationsManagerEntityData": null,
+      "SpeedWallGameReporterEntityData": null,
       "DebugScoreSetterEntityData": null,
       "RepDebugMenuEntityData": "rpc_ghost_reference",
       "KickbackEntityData": null,

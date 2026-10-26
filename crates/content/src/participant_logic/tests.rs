@@ -507,6 +507,8 @@ fn local_participant_nodes_do_not_shift_following_serializers() {
         "CountDownEntityData",
         "LinkedSchematicChannelEntityData",
         "RichPresenceProxyEntityData",
+        "ServerRecommendationsManagerEntityData",
+        "SpeedWallGameReporterEntityData",
         "VehicleSlotQueryEntityData",
         "ParticipantProviderStateReporterEntityData",
         "CountDownEntityData",
