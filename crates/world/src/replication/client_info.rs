@@ -6,6 +6,7 @@
 //! not the wire. Preserve vector codes without guessing their origin or use.
 use super::{Decoded, Error, Initial, Kind, Reader, Record, Writer};
 use nfs_protocol::world::BitSpan;
+use std::collections::BTreeMap;
 
 pub const MAX_SLOTS: usize = 64;
 const WIDTHS: [u8; 7] = [1, 3, 5, 7, 9, 11, 14];
@@ -24,6 +25,78 @@ pub enum Vector {
 pub enum Update {
     Disabled,
     Enabled(Vec<Option<Vector>>),
+}
+
+/// Last reported information for one client-owned object. Missing vector
+/// updates and a disabled report retain the previous vector codes. `None`
+/// means this connection has not supplied a vector for that slot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Information {
+    pub enabled: bool,
+    pub vectors: Vec<Option<Vector>>,
+}
+
+/// Inbound replication belongs to a connection, in a namespace separate from
+/// host-owned objects. The deployment supplies the local slot count; it is not
+/// inferred from the current packet or from the number of remote players.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct State {
+    slots: usize,
+    bindings: super::section::Bindings,
+    objects: BTreeMap<u16, Information>,
+}
+
+impl State {
+    pub fn new(slots: usize) -> Result<Self, Error> {
+        Ok(Self {
+            slots,
+            bindings: super::section::Bindings::from_client(slots)?,
+            objects: BTreeMap::new(),
+        })
+    }
+
+    pub fn get(&self, id: u16) -> Option<&Information> {
+        self.objects.get(&id)
+    }
+
+    /// Apply a complete section atomically, returning its exact bit boundary.
+    /// An enclosing frame must stage this state until its other handlers pass.
+    pub fn decode(&mut self, input: BitSpan<'_>) -> Result<usize, Error> {
+        let mut next = self.clone();
+        let decoded = next.bindings.decode(input)?;
+        for id in decoded.section.deleted {
+            next.objects.remove(&id);
+        }
+        for record in decoded.section.records {
+            if record.initial.is_some() {
+                next.objects.insert(
+                    record.id,
+                    Information {
+                        enabled: false,
+                        vectors: vec![None; self.slots],
+                    },
+                );
+            }
+            let info = next
+                .objects
+                .get_mut(&record.id)
+                .ok_or(Error::UnknownObject)?;
+            match record.update {
+                super::Update::ClientToServerInfo(Update::Disabled) => info.enabled = false,
+                super::Update::ClientToServerInfo(Update::Enabled(values)) => {
+                    info.enabled = true;
+                    for (held, incoming) in info.vectors.iter_mut().zip(values) {
+                        if incoming.is_some() {
+                            *held = incoming;
+                        }
+                    }
+                }
+                _ => return Err(Error::Unsupported),
+            }
+        }
+        *self = next;
+        Ok(decoded.bits)
+    }
 }
 
 impl Update {
@@ -125,6 +198,90 @@ mod tests {
         bits::BitWriter,
         replication::section::{Bindings, Setup},
     };
+
+    fn section(create: bool, update: Update, deleted: Vec<u16>) -> BitWriter {
+        super::super::section::Section {
+            float_bits: None,
+            flag: false,
+            deleted,
+            setup: Some(Setup::ContextOnly),
+            records: vec![Record {
+                id: 2,
+                initial: create.then_some(Initial::ClientToServerInfo),
+                update: super::super::Update::ClientToServerInfo(update),
+            }],
+        }
+        .encode()
+        .unwrap()
+    }
+
+    #[test]
+    fn connection_state_preserves_sparse_updates_and_retires_object_lifetimes() {
+        let mut state = State::new(2).unwrap();
+        let other_connection = state.clone();
+        let vector = Vector::Raw([1, 2, 3]);
+        let first = section(
+            true,
+            Update::Enabled(vec![Some(vector.clone()), None]),
+            vec![],
+        );
+        assert_eq!(state.decode(first.span()).unwrap(), first.len());
+        let partial = section(
+            false,
+            Update::Enabled(vec![None, Some(vector.clone())]),
+            vec![],
+        );
+        state.decode(partial.span()).unwrap();
+        assert_eq!(state.get(2).unwrap().vectors, vec![Some(vector.clone()); 2]);
+        assert!(other_connection.get(2).is_none());
+        state
+            .decode(section(false, Update::Disabled, vec![]).span())
+            .unwrap();
+        assert!(!state.get(2).unwrap().enabled);
+        assert_eq!(state.get(2).unwrap().vectors, vec![Some(vector); 2]);
+        let before = state.clone();
+        assert_eq!(state.decode(first.span()), Err(Error::DuplicateObject));
+        assert_eq!(state, before);
+        // Deletion and recreation reset the lifetime, including cached vectors.
+        state
+            .decode(section(true, Update::Enabled(vec![None, None]), vec![2]).span())
+            .unwrap();
+        assert_eq!(state.get(2).unwrap().vectors, vec![None, None]);
+        let deletion = super::super::section::Section {
+            float_bits: None,
+            flag: false,
+            deleted: vec![2],
+            setup: None,
+            records: vec![],
+        }
+        .encode()
+        .unwrap();
+        state.decode(deletion.span()).unwrap();
+        state.decode(deletion.span()).unwrap();
+        assert!(state.get(2).is_none());
+        assert_eq!(state.decode(partial.span()), Err(Error::UnknownObject));
+    }
+
+    #[test]
+    fn incomplete_sections_never_commit_client_state() {
+        let wire = section(
+            true,
+            Update::Enabled(vec![Some(Vector::Raw([7, 8, 9]))]),
+            vec![],
+        );
+        for bits in 0..wire.len() {
+            let mut state = State::new(1).unwrap();
+            let before = state.clone();
+            assert!(
+                state
+                    .decode(BitSpan::new(wire.bytes(), 0, bits).unwrap())
+                    .is_err()
+            );
+            assert_eq!(state, before);
+        }
+        assert!(State::new(0).is_err());
+        assert!(State::new(MAX_SLOTS + 1).is_err());
+    }
 
     fn wire(tag: u8) -> BitWriter {
         let mut w = BitWriter::new();

@@ -18,6 +18,7 @@ use nfs_world::{
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 mod activation;
+mod client_info;
 mod crashing;
 mod customization;
 mod diagnostics;
@@ -84,6 +85,7 @@ pub(super) fn describe_host_rpc(rpc: &nfs_world::participants::HostRpc) -> Strin
 pub(super) struct PlayerListener {
     stats: Accepting,
     messages: frame::receive::Receiver,
+    client_info: replication::client_info::State,
     persona: u64,
     roles: Option<crate::scene_roles::SceneRoles>,
     players: Players,
@@ -868,6 +870,9 @@ impl PlayerListener {
         Self {
             stats: Accepting::default(),
             messages: frame::receive::Receiver::default(),
+            // The PC client has one local slot per connection. Remote players
+            // do not change this constructor context or share its inbound IDs.
+            client_info: replication::client_info::State::new(1).expect("PC local slot context"),
             persona,
             roles: None,
             players: Players::default(),
@@ -1209,12 +1214,16 @@ impl PlayerListener {
 
 impl Listener for PlayerListener {
     fn frame(&mut self, queued: Queued<'_>) -> bool {
-        let parsed = match self.stats.parse(queued) {
+        let mut parsed = match self.stats.parse(queued) {
             Ok(parsed) => parsed,
             Err(error) => {
                 self.diagnose_decode(error);
                 return self.stats.invalid();
             }
+        };
+        let client_info = match self.prepare_client_info(queued.data, &mut parsed) {
+            Ok(next) => next,
+            Err(()) => return self.stats.invalid(),
         };
         let files = match self.stats.file_transition(&parsed) {
             Ok(files) => files,
@@ -1250,7 +1259,7 @@ impl Listener for PlayerListener {
                 return self.stats.invalid();
             }
         };
-        self.diagnose_unconsumed(&parsed, &decoded);
+        self.diagnose_unconsumed(&decoded);
         let requests: Vec<_> = decoded
             .iter()
             .filter_map(|m| match m {
@@ -1282,6 +1291,7 @@ impl Listener for PlayerListener {
             && parsed.movement.is_none()
         {
             self.messages = messages;
+            self.client_info = client_info;
             return self.stats.record(&parsed, files);
         }
         let mut players = self.players.clone();
@@ -3109,6 +3119,7 @@ impl Listener for PlayerListener {
         self.pending.extend(deferred_sections);
         self.queue_entries(entries);
         self.messages = messages;
+        self.client_info = client_info;
         self.stats.record(&parsed, files)
     }
 }

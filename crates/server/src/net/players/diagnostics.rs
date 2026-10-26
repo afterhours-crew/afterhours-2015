@@ -107,11 +107,7 @@ impl PlayerListener {
         }
     }
 
-    pub(super) fn diagnose_unconsumed(
-        &mut self,
-        parsed: &frame::Frame<'_>,
-        decoded: &[frame::Message<'_>],
-    ) {
+    pub(super) fn diagnose_unconsumed(&mut self, decoded: &[frame::Message<'_>]) {
         for message in decoded {
             if let frame::Message::Opaque { index, .. } = message {
                 // RPC and reached-event dispatch happens below. Session::Observing
@@ -120,13 +116,6 @@ impl PlayerListener {
                     self.unsupported.record(Route::Message { index: *index });
                 }
             }
-        }
-        if parsed
-            .ghost
-            .as_ref()
-            .is_some_and(|ghost| ghost.prefix.record_count() != 0)
-        {
-            self.unsupported.record(Route::ClientGhostRecords);
         }
     }
 
@@ -433,7 +422,7 @@ mod tests {
     }
 
     #[test]
-    fn unconsumed_client_ghost_records_are_visible_but_empty_sections_are_quiet() {
+    fn unsupported_client_ghost_records_are_refused_but_empty_sections_are_quiet() {
         let output = capture(|| {
             let mut listener = PlayerListener::new(7).with_connection(47);
             for count in [0, 1] {
@@ -443,17 +432,21 @@ mod tests {
                     .put(0, 1)
                     .put(count, 13);
                 if count != 0 {
-                    wire.put(1, 1).put(23, 13);
+                    // Context-only setup, creation of an unsupported class.
+                    wire.put(0, 1).put(23, 13).put(1, 1).put(0, 5);
                 }
                 wire.align();
-                assert!(listener.frame(Queued {
-                    advertised: None,
-                    frame: 0,
-                    data: wire.span()
-                }));
+                assert_eq!(
+                    listener.frame(Queued {
+                        advertised: None,
+                        frame: 0,
+                        data: wire.span()
+                    }),
+                    count == 0
+                );
             }
         });
-        assert_eq!(output.matches("WARN").count(), 1, "{output}");
+        assert_eq!(output.matches("WARN").count(), 2, "{output}");
         assert!(output.contains("ClientGhostRecords"), "{output}");
         assert!(output.contains("unsupported_total=1"), "{output}");
     }
