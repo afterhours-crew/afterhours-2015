@@ -285,11 +285,11 @@ enum Phase {
 }
 
 struct Sequenced {
-    client5: Vec<u8>,
-    host6: Vec<u8>,
-    /// Selector on envelopes the client sends to the host.
+    /// Host admission retry pair; absent for an externally negotiated endpoint.
+    admission_retry: Option<(Vec<u8>, Vec<u8>)>,
+    /// Selector on envelopes received by this endpoint.
     inbound: u16,
-    /// Selector on envelopes the host sends.
+    /// Selector on envelopes sent by this endpoint.
     outbound: u16,
     origin_ms: u64,
     history: ReceiveHistory,
@@ -305,7 +305,33 @@ struct Sequenced {
     last_was_empty_control: bool,
 }
 
-/// The application layer of one world connection, host side.
+impl Sequenced {
+    fn new(policy: Policy, inbound: u16, outbound: u16, origin_ms: u64) -> Result<Self, Error> {
+        if !(1..=0x3fff).contains(&inbound) || !(1..=0x3fff).contains(&outbound) {
+            return Err(Error::Selector);
+        }
+        Ok(Self {
+            admission_retry: None,
+            inbound,
+            outbound,
+            origin_ms,
+            history: ReceiveHistory::new(Sequence::new(0).unwrap(), 0),
+            reports: PeerReports::new(Sequence::new(0).unwrap()),
+            deliveries: delivery::Deliveries::default(),
+            next_number: 1,
+            next_frame: 0,
+            assembler: Assembler::new(policy.max_frame_bits).map_err(|_| Error::Bound)?,
+            pending_advertised: None,
+            own_request: None,
+            last_request_ms: None,
+            last_control_ms: None,
+            last_was_empty_control: false,
+        })
+    }
+}
+
+/// One connection's application state. `new` performs host-side admission;
+/// `negotiated` uses an exchange already validated by the caller.
 pub struct Application {
     policy: Policy,
     random: Box<dyn Random + Send>,
@@ -392,6 +418,34 @@ impl Application {
         }
     }
 
+    /// Start a fresh sequenced endpoint after external admission validation.
+    ///
+    /// This does not authenticate, negotiate or restore a connection. The caller
+    /// must validate its own exchange first and supply the negotiated incoming
+    /// and outgoing selectors and clock origin. A peer can thereby use the same
+    /// bounded history, fragment admission and delivery logic as the host, rather
+    /// than acknowledging generated output through a separate codec or shortcut.
+    /// Sequence history starts empty; this is not a mid-connection resume API.
+    pub fn negotiated(
+        policy: Policy,
+        inbound: u16,
+        outbound: u16,
+        origin_ms: u64,
+    ) -> Result<Self, Error> {
+        if policy.assume_delivered {
+            return Err(Error::Shape);
+        }
+        Ok(Self {
+            policy,
+            random: Box::new(Fixed::default()),
+            phase: Phase::Sequenced(Box::new(Sequenced::new(
+                policy, inbound, outbound, origin_ms,
+            )?)),
+            last_ms: origin_ms,
+            stats: Stats::default(),
+        })
+    }
+
     pub fn phase_name(&self) -> PhaseName {
         match &self.phase {
             Phase::AwaitRequest => PhaseName::AwaitRequest,
@@ -406,7 +460,7 @@ impl Application {
         self.stats
     }
 
-    /// Selectors once admitted: (inbound from the client, outbound to it).
+    /// Selectors once admitted: (inbound, outbound), relative to this endpoint.
     pub fn selectors(&self) -> Option<(u16, u16)> {
         match &self.phase {
             Phase::Sequenced(s) => Some((s.inbound, s.outbound)),
@@ -422,7 +476,7 @@ impl Application {
         }
     }
 
-    /// The host's receive frontier and history bits once admitted.
+    /// This endpoint's receive frontier and history bits once admitted.
     pub fn receive_history(&self) -> Option<(u16, u32)> {
         match &self.phase {
             Phase::Sequenced(s) => Some((s.history.frontier().value(), s.history.bits())),
@@ -438,7 +492,7 @@ impl Application {
         Ok(())
     }
 
-    /// Process one application body from the client.
+    /// Process one application body from the peer.
     pub fn receive(
         &mut self,
         body: &[u8],
@@ -594,24 +648,10 @@ impl Application {
         }
         .new_body(fields.client_selector)
         .map_err(|_| Error::Shape)?;
-        self.phase = Phase::Sequenced(Box::new(Sequenced {
-            client5: body.to_vec(),
-            host6: host6.clone(),
-            inbound: HOST_SELECTOR,
-            outbound: fields.client_selector,
-            origin_ms: now_ms,
-            history: ReceiveHistory::new(Sequence::new(0).unwrap(), 0),
-            reports: PeerReports::new(Sequence::new(0).unwrap()),
-            deliveries: delivery::Deliveries::default(),
-            next_number: 1,
-            next_frame: 0,
-            assembler: Assembler::new(self.policy.max_frame_bits).map_err(|_| Error::Bound)?,
-            pending_advertised: None,
-            own_request: None,
-            last_request_ms: None,
-            last_control_ms: None,
-            last_was_empty_control: false,
-        }));
+        let mut sequenced =
+            Sequenced::new(self.policy, HOST_SELECTOR, fields.client_selector, now_ms)?;
+        sequenced.admission_retry = Some((body.to_vec(), host6.clone()));
+        self.phase = Phase::Sequenced(Box::new(sequenced));
         Ok(Received {
             event: Some(Event::Client5 { repeated: false }),
             send: vec![host6],
@@ -627,10 +667,12 @@ impl Application {
         let Phase::Sequenced(s) = &mut self.phase else {
             return Err(Error::Phase);
         };
-        if body == s.client5.as_slice() {
+        if let Some((client5, host6)) = &s.admission_retry
+            && body == client5.as_slice()
+        {
             return Ok(Received {
                 event: Some(Event::Client5 { repeated: true }),
-                send: vec![s.host6.clone()],
+                send: vec![host6.clone()],
             });
         }
         let envelope = ZeroTail::new(self.policy.max_body)

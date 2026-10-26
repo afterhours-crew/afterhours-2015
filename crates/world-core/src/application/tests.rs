@@ -17,6 +17,131 @@ const CLIENT_FRESH: u32 = 0x5555_5555;
 const CLIENT_SELECTOR: u16 = 7;
 
 #[test]
+fn negotiated_peer_reports_actual_complete_rejected_and_missing_fragment_delivery() {
+    use delivery::Status;
+    struct Check {
+        accept: bool,
+        calls: usize,
+    }
+    impl Listener for Check {
+        fn frame(&mut self, frame: Queued<'_>) -> bool {
+            self.calls += 1;
+            assert_eq!(frame.data.len(), 24);
+            assert_eq!(frame.data.read_u32(0, 24).unwrap(), 0xabcdef);
+            self.accept
+        }
+    }
+    for (accept, drop_middle, expected) in [
+        (true, false, Status::Accepted),
+        (false, false, Status::Rejected),
+        (true, true, Status::Rejected),
+    ] {
+        let (mut host, _) = admitted(0);
+        let mut peer =
+            Application::negotiated(Policy::default(), CLIENT_SELECTOR, HOST_SELECTOR, 3).unwrap();
+        let mut bits = BitWriter::new();
+        bits.put(0xabcdef, 24);
+        let (ticket, wires) = host.send_tracked_frame(bits.span(), 8).unwrap();
+        let mut check = Check { accept, calls: 0 };
+        let mut host_listener = Retain::default();
+        for (index, body) in wires.iter().enumerate() {
+            if index == 1 && drop_middle {
+                continue;
+            }
+            let received = peer.receive(body, 10 + index as u64, &mut check).unwrap();
+            for reply in received.send {
+                host.receive(&reply, 10 + index as u64, &mut host_listener)
+                    .unwrap();
+            }
+        }
+        assert_eq!(check.calls, usize::from(!drop_middle));
+        assert_eq!(host.delivery_status(ticket), Some(Status::Pending));
+        // Actual peer-generated history reports the final fragment's outcome.
+        let report = peer.send_frame(bits.span()).unwrap();
+        host.receive(&report, 20, &mut host_listener).unwrap();
+        assert_eq!(host.release_delivery(ticket), Some(expected));
+    }
+}
+
+#[test]
+fn negotiated_peer_rejects_corrupt_or_foreign_input_without_acknowledging_it() {
+    let (mut host, _) = admitted(0);
+    let mut peer =
+        Application::negotiated(Policy::default(), CLIENT_SELECTOR, HOST_SELECTOR, 3).unwrap();
+    let mut bits = BitWriter::new();
+    bits.put(0, 8);
+    let wire = host.send_frame(bits.span()).unwrap();
+    let mut corrupt = wire.clone();
+    *corrupt.last_mut().unwrap() ^= 1;
+    let mut listener = Retain::default();
+    assert_eq!(peer.receive(&corrupt, 4, &mut listener), Err(Error::Shape));
+    let wrong = sequenced(8, 1, 0, 0, &control_payload(CONTROL_EMPTY, &[]));
+    assert_eq!(peer.receive(&wrong, 4, &mut listener), Err(Error::Selector));
+    assert_eq!(peer.receive(&[], 4, &mut listener), Err(Error::Shape));
+    assert_eq!(peer.receive_history(), Some((0, 0)));
+    assert_eq!(listener.frames, 0);
+    let received = peer.receive(&wire, 5, &mut listener).unwrap();
+    assert!(matches!(
+        received.event,
+        Some(Event::Queued {
+            accepted: false,
+            ..
+        })
+    ));
+    assert_eq!(peer.receive_history(), Some((1, 0)));
+    assert_eq!(
+        peer.receive(&wire, 6, &mut listener).unwrap().event,
+        Some(Event::Duplicate)
+    );
+    assert_eq!(listener.frames, 1, "duplicate must not deliver twice");
+    assert_eq!(peer.receive(&wire, 5, &mut listener), Err(Error::Clock));
+}
+
+#[test]
+fn negotiated_endpoint_bounds_and_delivery_policy_are_explicit() {
+    for (inbound, outbound) in [(0, 4), (1, 0), (0x4000, 4), (1, 0x4000)] {
+        assert!(matches!(
+            Application::negotiated(Policy::default(), inbound, outbound, 0),
+            Err(Error::Selector)
+        ));
+    }
+    assert!(matches!(
+        Application::negotiated(
+            Policy {
+                assume_delivered: true,
+                ..Policy::default()
+            },
+            1,
+            4,
+            0
+        ),
+        Err(Error::Shape)
+    ));
+    assert!(matches!(
+        Application::negotiated(
+            Policy {
+                max_frame_bits: usize::MAX,
+                ..Policy::default()
+            },
+            1,
+            4,
+            0
+        ),
+        Err(Error::Bound)
+    ));
+    let mut peer = Application::negotiated(Policy::default(), 1, 4, 91).unwrap();
+    assert_eq!(peer.selectors(), Some((1, 4)));
+    assert_eq!(peer.origin_ms(), Some(91));
+    let mut bits = BitWriter::new();
+    bits.put(0, 1);
+    for _ in 0..WINDOW - 1 {
+        peer.send_frame(bits.span()).unwrap();
+    }
+    assert_eq!(peer.send_frame(bits.span()), Err(Error::Window));
+    assert_eq!(peer.stats().sent, usize::from(WINDOW - 1));
+}
+
+#[test]
 fn tracked_frames_require_every_fragment_and_ignore_future_reports() {
     use delivery::Status;
     let (mut a, _) = admitted(0);

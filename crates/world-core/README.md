@@ -11,8 +11,13 @@ sequential registration allocator covers the supported startup form only.
 Each connection owns its state. Callers supply data, clocks, identifiers, random
 values, keys and resource policies. No MAC template, extracted item catalog,
 profile, replay queue, scene replication or network listener is bundled. The
-application model currently covers a single-peer host connection; this is not a
-complete multiplayer world implementation.
+application model covers a single-peer host connection. `ClientHandshake` and
+`Link::respond` also support a requesting transport endpoint; after validating
+application admission, `Application::negotiated` shares the normal fragment,
+history and delivery path with it. It starts a fresh connection and rejects
+assumed-delivery policy. Callers still own application identity validation and
+every decision about accepting handler frames. These APIs do not implement a
+game client, mid-session restoration or a complete multiplayer world.
 
 Tests cover loss, retries, ordering, rollover, limits, cancellation and constructed
 transfers, plus independently packed startup literals and registration allocation.
