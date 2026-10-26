@@ -93,6 +93,7 @@ pub struct Active {
     owner: Owner,
     bindings: Bindings,
     phase: Phase,
+    membership: crate::participants::membership::Journal,
 }
 impl Active {
     pub fn start(owner: Owner, bindings: Bindings) -> Result<(Self, Vec<HostRpc>), Error> {
@@ -106,6 +107,7 @@ impl Active {
             owner,
             bindings,
             phase: Phase::Before,
+            membership: crate::participants::membership::Journal::default(),
         };
         let calls = vec![active.call(bindings.before, Call::Enter)];
         for endpoint in [bindings.before, bindings.playing, bindings.after] {
@@ -118,6 +120,14 @@ impl Active {
     }
     pub fn phase(&self) -> Phase {
         self.phase
+    }
+    pub fn bindings(&self) -> Bindings {
+        self.bindings
+    }
+    pub fn take_state_operations(
+        &mut self,
+    ) -> Result<Vec<crate::participants::membership::Operation>, Error> {
+        self.membership.take()
     }
     fn call(&self, endpoint: Endpoint, call: Call) -> HostRpc {
         HostRpc::Participant(Notification {
@@ -144,6 +154,12 @@ impl Active {
             }),
         ];
         self.phase = Phase::Playing;
+        self.membership
+            .push(crate::participants::membership::Operation::Move {
+                participant: owner.participant,
+                source: self.bindings.before,
+                target: Some(self.bindings.playing),
+            });
         Ok(calls)
     }
     pub fn receive(
@@ -187,6 +203,12 @@ impl Active {
             Phase::After | Phase::Finished => Ok(Some(vec![])),
             Phase::Playing => {
                 self.phase = Phase::After;
+                self.membership
+                    .push(crate::participants::membership::Operation::Move {
+                        participant: owner.participant,
+                        source: self.bindings.playing,
+                        target: Some(self.bindings.after),
+                    });
                 Ok(Some(vec![
                     self.call(self.bindings.playing, Call::Leave),
                     self.call(self.bindings.after, Call::Enter),
@@ -203,6 +225,11 @@ impl Active {
             Phase::Finished => Ok(vec![]),
             Phase::After => {
                 self.phase = Phase::Finished;
+                self.membership
+                    .push(crate::participants::membership::Operation::Complete {
+                        participant: owner.participant,
+                        state: self.bindings.after,
+                    });
                 Ok(vec![self.call(self.bindings.after, Call::Leave)])
             }
             _ => Err(Error::Shape),

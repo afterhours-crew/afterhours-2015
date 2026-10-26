@@ -411,7 +411,7 @@ pub(super) fn setup() -> (PlayerListener, u16, Arc<nfs_world::items::Collection>
     players.enable_player_manager().unwrap();
     players.sync_player_views().unwrap();
     players.sync_player_manager().unwrap();
-    let story = crate::prologue::Content::for_test(
+    let mut story = crate::prologue::Content::for_test(
         items.clone(),
         parent,
         Component {
@@ -419,6 +419,7 @@ pub(super) fn setup() -> (PlayerListener, u16, Arc<nfs_world::items::Collection>
             index: 3,
         },
     );
+    story.membership = Some(crate::prologue::membership::Content::for_test(909, 1..117));
     let mut listener = PlayerListener::new(persona)
         .with_vehicles(Some(Arc::new(GarageContent { vehicles, layout })))
         .with_prologue(Some(Arc::new(story)));
@@ -1272,12 +1273,46 @@ pub(super) fn ready_for_selection(
 fn full_output_queue_preserves_the_car_allocation_and_readiness_gate() {
     crate::net::players::test_wire::with_native_padding(|| {
         let (mut listener, participant, _) = setup();
+        let asset = Asset {
+            bundle: 32,
+            type_id: 10,
+            local_index: 0,
+        };
+        let story = Arc::make_mut(listener.prologue.as_mut().unwrap());
+        story.membership = Some(story.membership.take().unwrap().with_test_presentation(
+            nfs_content::participant_logic::Layout {
+                asset,
+                catalog: vec![(10, 1)],
+                scene_content_key: 909,
+                owner: nfs_content::participant_logic::Owner::Scene,
+                bus_count: 1,
+                fields: vec![
+                    nfs_content::participant_logic::Field {
+                        kind: entity::Kind::Root,
+                        channel: None,
+                    },
+                    nfs_content::participant_logic::Field {
+                        kind: entity::Kind::RpcReference,
+                        channel: Some(nfs_content::participant_logic::Channel::Scene {
+                            content_key: 909,
+                            serializer: 1,
+                        }),
+                    },
+                    nfs_content::participant_logic::Field {
+                        kind: entity::Kind::FloatProperty,
+                        channel: None,
+                    },
+                ],
+            },
+            &[3, 77],
+        ));
         let before = listener.players.objects().snapshot();
         listener
             .pending
             .resize(MAX_PENDING, super::super::returning::empty_section());
         tick_with_normal_presentation(&mut listener).unwrap();
         assert_eq!(listener.players.objects().snapshot(), before);
+        assert!(listener.scene_membership.is_none());
         assert!(
             listener
                 .players
@@ -1286,6 +1321,22 @@ fn full_output_queue_preserves_the_car_allocation_and_readiness_gate() {
         );
         drain(&mut listener);
         tick_with_normal_presentation(&mut listener).unwrap();
+        assert!(
+            listener
+                .scene_membership
+                .as_ref()
+                .unwrap()
+                .contains(3, participant)
+        );
+        let presentation = listener.players.objects().iter().find_map(|(id, object)|
+            matches!(&object.initial, replication::Initial::Entity { prefix, .. } if prefix.asset == asset).then_some(id)).unwrap();
+        assert!(
+            listener
+                .pending
+                .iter()
+                .flat_map(|section| &section.records)
+                .any(|record| record.id == presentation && record.initial.is_some())
+        );
         let vehicle = listener
             .players
             .temporary_vehicle(HOST_SELECTOR as u8, listener.persona, participant)
@@ -1306,6 +1357,20 @@ fn full_output_queue_preserves_the_car_allocation_and_readiness_gate() {
         .encode()
         .unwrap();
         assert!(!send(&mut listener, 0, 82, glass.span()));
+        assert!(
+            listener
+                .scene_membership
+                .as_ref()
+                .unwrap()
+                .contains(3, participant)
+        );
+        assert!(
+            !listener
+                .scene_membership
+                .as_ref()
+                .unwrap()
+                .contains(77, participant)
+        );
         assert_eq!(listener.players.objects().snapshot(), before);
         assert_eq!(
             listener.participants.stage(participant),
@@ -1314,9 +1379,71 @@ fn full_output_queue_preserves_the_car_allocation_and_readiness_gate() {
         assert!(listener.pending_teleports.is_empty());
         drain(&mut listener);
         assert!(send(&mut listener, 0, 82, glass.span()));
+        assert!(
+            !listener
+                .scene_membership
+                .as_ref()
+                .unwrap()
+                .contains(3, participant)
+        );
+        assert!(
+            listener
+                .scene_membership
+                .as_ref()
+                .unwrap()
+                .contains(77, participant)
+        );
+        assert!(
+            listener.players.objects().get(presentation).is_some(),
+            "a move within the installed list retains the same object"
+        );
+        assert!(
+            !listener
+                .pending
+                .iter()
+                .flat_map(|section| &section.records)
+                .any(|record| record.id == presentation)
+        );
         assert_eq!(
             listener.participants.stage(participant),
             Some(Stage::IntroTeleporting)
+        );
+        let endpoint = listener.participants.intro_bindings().unwrap().teleport;
+        drain(&mut listener);
+        assert!(send(
+            &mut listener,
+            1,
+            47,
+            request(endpoint, participant, 3).span()
+        ));
+        assert!(
+            listener
+                .scene_membership
+                .as_ref()
+                .unwrap()
+                .contains(78, participant)
+        );
+        assert!(listener.players.objects().get(presentation).is_none());
+        assert!(
+            listener
+                .pending
+                .iter()
+                .any(|section| section.deleted.contains(&presentation)),
+            "leaving the list must queue the owned object's deletion"
+        );
+        drain(&mut listener);
+        assert!(send(
+            &mut listener,
+            2,
+            47,
+            request(endpoint, participant, 3).span()
+        ));
+        assert!(
+            listener
+                .pending
+                .iter()
+                .all(|section| section.deleted.is_empty()),
+            "repeated acknowledgement cannot retire twice"
         );
     });
 }

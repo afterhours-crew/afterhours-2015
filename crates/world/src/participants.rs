@@ -15,6 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 const MAX_PARTICIPANTS: usize = 128;
 
 pub mod intro;
+pub mod membership;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Endpoint {
@@ -456,6 +457,7 @@ pub struct Entry {
 }
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Lifecycle {
+    membership: membership::Journal,
     bindings: Option<Bindings>,
     intro: Option<intro::Bindings>,
     /// Only participants who entered this session's intro own its late replies.
@@ -482,6 +484,19 @@ pub enum Outcome {
     Advanced(Vec<Notification>),
 }
 impl Lifecycle {
+    /// Drain domain changes inside the same candidate transaction as RPCs.
+    pub fn take_state_operations(&mut self) -> Result<Vec<membership::Operation>, Error> {
+        self.membership.take()
+    }
+    /// Other scene services (such as a movie) share this transaction journal.
+    pub fn state_operation(&mut self, operation: membership::Operation) {
+        self.membership.push(operation);
+    }
+    /// An owning service supplies its explicit domain path, independently of
+    /// how and when it publishes the corresponding wire notifications.
+    pub fn state_path(&mut self, participant: u16, path: &[Endpoint]) {
+        self.membership.path(participant, path);
+    }
     /// Reserve an in-world relocation only for a participant already in free roam.
     /// The caller publishes its protocol transitions atomically with this change.
     pub fn begin_relocation(&mut self, participant: u16) -> Result<(), Error> {
@@ -551,6 +566,10 @@ impl Lifecycle {
             Stage::IntroEnteringGarage => Stage::IntroLoadingGarage,
             _ => return Outcome::Repeated,
         };
+        let mut path = vec![r.sequence];
+        path.extend(r.finishing);
+        path.extend([b.begin_garage, b.loading_garage]);
+        self.membership.path(participant, &path);
         let mut chain = vec![(r.sequence, Call::Leave)];
         for endpoint in r.finishing {
             chain.extend([(endpoint, Call::Enter), (endpoint, Call::LeaveTagged(31))]);
@@ -657,6 +676,14 @@ impl Lifecycle {
                 && connected(participant)
             {
                 *stage = Stage::PersistentDataLoaded;
+                self.membership.path(
+                    participant,
+                    &[
+                        bindings.persistent,
+                        bindings.check_player,
+                        bindings.persistent_loaded,
+                    ],
+                );
                 out.extend(
                     [
                         (bindings.persistent, Call::Leave),
@@ -702,6 +729,18 @@ impl Lifecycle {
             return Vec::new();
         }
         *stage = Stage::LoadingGarage;
+        self.membership.path(
+            participant,
+            &[
+                b.persistent_loaded,
+                b.recovery,
+                b.progression_loaded,
+                b.entered_game,
+                b.enter_garage_from_boot,
+                b.begin_garage,
+                b.loading_garage,
+            ],
+        );
         [
             (b.persistent_loaded, Call::Leave),
             (b.recovery, Call::Enter),
@@ -778,6 +817,15 @@ impl Lifecycle {
             return Outcome::Unsupported;
         }
         *stage = Stage::Customization;
+        self.membership.path(
+            participant,
+            &[
+                b.loading_garage,
+                b.composite,
+                b.initial_teleport,
+                b.customization,
+            ],
+        );
         Outcome::Advanced(
             [
                 (b.loading_garage, Call::Leave),
@@ -854,6 +902,7 @@ impl Lifecycle {
                 } else {
                     Stage::FreeRoam
                 };
+                self.membership.path(participant, &[x.state_79, x.state_2]);
                 Outcome::Advanced(
                     [(x.state_79, Call::Leave), (x.state_2, Call::Enter)]
                         .into_iter()
@@ -928,6 +977,12 @@ impl Lifecycle {
             return Err(Error::Bound);
         }
         self.stages.insert(participant, Stage::LoadingInventory);
+        self.membership.push(membership::Operation::Enter {
+            participant,
+            state: b.preparing,
+        });
+        self.membership
+            .path(participant, &[b.preparing, b.inventory]);
         Ok([
             (b.manager, Call::Add),
             (b.preparing, Call::Enter),
@@ -1020,6 +1075,8 @@ impl Lifecycle {
             };
         }
         *stage = Stage::LoadingPersistentData;
+        self.membership
+            .path(participant, &[b.inventory, b.persistent]);
         Ok(Outcome::Advanced(
             [(b.inventory, Call::Leave), (b.persistent, Call::Enter)]
                 .into_iter()
@@ -1088,6 +1145,10 @@ impl Lifecycle {
             _ => return Ok(Some(Outcome::Unsupported)),
         }
         *stage = Stage::ReturningToGarage;
+        let mut path = vec![r.free_roam];
+        path.extend(r.preparing);
+        path.push(r.sequence);
+        self.membership.path(participant, &path);
         self.returned_requests.push(participant);
         Ok(Some(Outcome::Advanced(
             r.entering(participant, self.bindings.zip(self.garage)),
@@ -1139,6 +1200,16 @@ impl Lifecycle {
             }
             (ExitRoute::Exit, Stage::Customization) => {
                 *stage = Stage::ExitingGarage;
+                self.membership.path(
+                    participant,
+                    &[
+                        b.customization,
+                        x.state_94,
+                        x.state_4,
+                        x.state_3,
+                        x.state_77,
+                    ],
+                );
                 self.exited.push(participant);
                 let mut chain = vec![
                     (b.customization, Call::Leave),
@@ -1157,6 +1228,8 @@ impl Lifecycle {
             }
             (ExitRoute::WorldLoaded, Stage::ExitingGarage) => {
                 *stage = Stage::EnteringWorld;
+                self.membership
+                    .path(participant, &[x.state_77, x.state_83, x.state_78]);
                 vec![
                     (x.state_77, Call::Leave),
                     (x.state_83, Call::Enter),
@@ -1167,6 +1240,7 @@ impl Lifecycle {
             // The arrive state stays until its sequence completes (`arrived`).
             (ExitRoute::WorldReady, Stage::EnteringWorld) => {
                 *stage = Stage::Arriving;
+                self.membership.path(participant, &[x.state_78, x.state_79]);
                 self.arriving.push(participant);
                 vec![(x.state_78, Call::Leave), (x.state_79, Call::Enter)]
             }

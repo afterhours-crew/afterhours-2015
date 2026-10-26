@@ -108,6 +108,8 @@ impl Lifecycle {
         match self.stages.get_mut(&participant) {
             Some(stage @ Stage::IntroLoadingGarage) => {
                 *stage = Stage::IntroComposite;
+                self.membership
+                    .path(participant, &[b.loading_garage, b.composite]);
                 Outcome::Advanced(notifications(
                     participant,
                     &[(b.loading_garage, Call::Leave), (b.composite, Call::Enter)],
@@ -127,6 +129,10 @@ impl Lifecycle {
         match self.stages.get_mut(&participant) {
             Some(stage @ Stage::IntroComposite) => {
                 *stage = Stage::Customization;
+                self.membership.path(
+                    participant,
+                    &[b.composite, b.initial_teleport, b.customization],
+                );
                 Outcome::Advanced(notifications(
                     participant,
                     &[
@@ -172,6 +178,7 @@ impl Lifecycle {
         }
         self.intro_started.insert(participant, Chapter::SecondRace);
         self.stages.insert(participant, Stage::IntroRelocating);
+        self.membership.path(participant, &[i.alive, i.relocating]);
         Outcome::Advanced(notifications(
             participant,
             &[(i.alive, Call::Leave), (i.relocating, Call::Enter)],
@@ -189,6 +196,8 @@ impl Lifecycle {
         match self.stages.get_mut(&participant) {
             Some(stage @ Stage::IntroRelocating) => {
                 *stage = Stage::IntroTeleporting;
+                self.membership
+                    .path(participant, &[i.relocating, i.teleport]);
                 Outcome::Advanced(notifications(
                     participant,
                     &[(i.relocating, Call::Leave), (i.teleport, Call::Enter)],
@@ -206,7 +215,7 @@ impl Lifecycle {
     }
     /// The story owner has verified the durable movie objective is active.
     /// Suspend driving presentation while its native sequence/movie gates run.
-    pub fn intro_movie_begin(&mut self, participant: u16) -> Outcome {
+    pub fn intro_movie_begin(&mut self, participant: u16, before: Endpoint) -> Outcome {
         let Some(i) = self.intro else {
             return Outcome::Unsupported;
         };
@@ -219,6 +228,7 @@ impl Lifecycle {
         match self.stages.get_mut(&participant) {
             Some(stage @ Stage::FreeRoam) => {
                 *stage = Stage::IntroMovie;
+                self.membership.path(participant, &[i.alive, before]);
                 Outcome::Advanced(notifications(participant, &[(i.alive, Call::Leave)]))
             }
             Some(Stage::IntroMovie) => Outcome::Repeated,
@@ -226,7 +236,7 @@ impl Lifecycle {
         }
     }
     /// Only the owned after-sequence acknowledgement releases this gate.
-    pub fn intro_movie_complete(&mut self, participant: u16) -> Outcome {
+    pub fn intro_movie_complete(&mut self, participant: u16, after: Endpoint) -> Outcome {
         let Some(i) = self.intro else {
             return Outcome::Unsupported;
         };
@@ -239,6 +249,7 @@ impl Lifecycle {
         match self.stages.get_mut(&participant) {
             Some(stage @ Stage::IntroMovie) => {
                 *stage = Stage::FreeRoam;
+                self.membership.path(participant, &[after, i.alive]);
                 Outcome::Advanced(notifications(participant, &[(i.alive, Call::Enter)]))
             }
             Some(Stage::FreeRoam) => Outcome::Repeated,
@@ -267,6 +278,10 @@ impl Lifecycle {
         match self.stages.get_mut(&participant) {
             Some(stage @ Stage::FreeRoam) => {
                 *stage = Stage::IntroEnteringGarage;
+                let mut path = vec![bindings.free_roam];
+                path.extend(bindings.preparing);
+                path.push(bindings.sequence);
+                self.membership.path(participant, &path);
                 Outcome::Advanced(bindings.entering(participant, None))
             }
             Some(
@@ -285,6 +300,8 @@ impl Lifecycle {
         match self.stages.get_mut(&participant) {
             Some(stage @ Stage::IntroLoadingGarage) => {
                 *stage = Stage::IntroCarSelection;
+                self.membership
+                    .path(participant, &[bindings.loading_garage, bindings.composite]);
                 Outcome::Advanced(notifications(
                     participant,
                     &[
@@ -315,6 +332,16 @@ impl Lifecycle {
         }
         self.intro_started.insert(participant, Chapter::FirstRace);
         self.stages.insert(participant, Stage::IntroSpawning);
+        self.membership.path(
+            participant,
+            &[
+                b.composite,
+                b.initial_teleport,
+                i.pending_items,
+                i.parameters,
+                i.spawning,
+            ],
+        );
         Outcome::Advanced(notifications(
             participant,
             &[
@@ -428,6 +455,17 @@ impl Lifecycle {
             rpc.encode()?;
         }
         *stage = Stage::IntroSpawning;
+        self.membership.path(
+            participant,
+            &[
+                b.persistent_loaded,
+                b.recovery,
+                b.progression_loaded,
+                b.entered_game,
+                i.parameters,
+                i.spawning,
+            ],
+        );
         self.intro_started.insert(participant, Chapter::FirstDrive);
         Ok(out)
     }
@@ -438,6 +476,7 @@ impl Lifecycle {
         match self.stages.get_mut(&participant) {
             Some(stage @ Stage::IntroSpawning) => {
                 *stage = Stage::IntroTeleporting;
+                self.membership.path(participant, &[i.spawning, i.teleport]);
                 Outcome::Advanced(notifications(
                     participant,
                     &[(i.spawning, Call::Leave), (i.teleport, Call::Enter)],
@@ -462,6 +501,12 @@ impl Lifecycle {
         match self.stages.get_mut(&participant) {
             Some(stage @ Stage::IntroOpening) => {
                 *stage = Stage::IntroStartingDrive;
+                // Completion and the eventual move are separate owner gates.
+                // The wire Leave may be queued before the drive is ready.
+                self.membership.push(membership::Operation::Complete {
+                    participant,
+                    state: i.opening,
+                });
                 Outcome::Advanced(notifications(participant, &[(i.opening, Call::Leave)]))
             }
             Some(Stage::IntroStartingDrive | Stage::FreeRoam) => Outcome::Repeated,
@@ -475,6 +520,7 @@ impl Lifecycle {
         match self.stages.get_mut(&participant) {
             Some(stage @ Stage::IntroStartingDrive) => {
                 *stage = Stage::FreeRoam;
+                self.membership.path(participant, &[i.opening, i.alive]);
                 Outcome::Advanced(notifications(participant, &[(i.alive, Call::Enter)]))
             }
             Some(Stage::FreeRoam) => Outcome::Repeated,
@@ -532,6 +578,8 @@ impl Lifecycle {
         let chain = match (teleported, *stage) {
             (true, Stage::IntroTeleporting) => {
                 *stage = Stage::IntroRendering;
+                self.membership
+                    .path(participant, &[i.teleport, i.check_player, i.render_wait]);
                 notifications(
                     participant,
                     &[
@@ -544,6 +592,8 @@ impl Lifecycle {
             }
             (false, Stage::IntroRendering) => {
                 *stage = Stage::IntroOpening;
+                self.membership
+                    .path(participant, &[i.render_wait, i.opening]);
                 notifications(
                     participant,
                     &[(i.render_wait, Call::Leave), (i.opening, Call::Enter)],

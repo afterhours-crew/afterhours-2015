@@ -303,6 +303,9 @@ impl PlayerListener {
         ) {
             return Err(replication::Error::Unsupported);
         }
+        let scene_membership = self.stage_scene_membership(&mut players, &mut participants)?;
+        output.records.extend(scene_membership.records);
+        output.deleted.extend(scene_membership.deleted);
         let mut sections = split_scenes(
             output.records,
             nfs_world::application::OUTBOUND_FRAME_BITS - 96,
@@ -329,6 +332,7 @@ impl PlayerListener {
         self.players = players;
         self.intro_modes = modes;
         self.participants = participants;
+        self.scene_membership = scene_membership.session;
         self.selection = selection;
         self.selection_execution = states;
         self.pending.extend(sections);

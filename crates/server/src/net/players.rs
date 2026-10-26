@@ -92,6 +92,7 @@ pub(super) struct PlayerListener {
     persistent: Option<std::sync::Arc<crate::persistent::Loaded>>,
     progression: Option<std::sync::Arc<crate::progression::Content>>,
     prologue: Option<std::sync::Arc<crate::prologue::Content>>,
+    scene_membership: Option<crate::prologue::membership::Session>,
     opening: crate::sequence_content::authored::Instances,
     selection: crate::sequence_content::authored::Instances,
     selection_execution: BTreeMap<u16, prologue::selection::State>,
@@ -513,12 +514,18 @@ impl PlayerListener {
             &mut launchers,
             self.persona,
         )?;
+        let scene_membership = self.stage_scene_membership(&mut players, &mut participants)?;
+        sections.extend(prologue::movies::sections(
+            scene_membership.records,
+            scene_membership.deleted,
+        )?);
         if spawned.messages.len() > MAX_PENDING.saturating_sub(self.pending_content.len())
             || replies.len() > nfs_world::session::MAX_RPC_QUEUE - self.pending_rpcs.len()
             || sections.len() > MAX_PENDING - self.pending.len()
         {
             return Err(replication::Error::Bound);
         }
+        self.scene_membership = scene_membership.session;
         self.participants = participants;
         self.launchers = launchers;
         self.players = players;
@@ -869,6 +876,7 @@ impl PlayerListener {
             persistent: None,
             progression: None,
             prologue: None,
+            scene_membership: None,
             opening: crate::sequence_content::authored::Instances::default(),
             selection: crate::sequence_content::authored::Instances::default(),
             selection_execution: BTreeMap::new(),
@@ -1007,6 +1015,21 @@ impl PlayerListener {
         self.prologue = content;
         self
     }
+    fn stage_scene_membership(
+        &self,
+        players: &mut Players,
+        participants: &mut nfs_world::participants::Lifecycle,
+    ) -> Result<crate::prologue::membership::Staged, replication::Error> {
+        crate::prologue::membership::stage(
+            self.prologue
+                .as_ref()
+                .and_then(|content| content.membership.as_ref()),
+            self.scene_membership.as_ref(),
+            players,
+            (HOST_SELECTOR as u8, self.persona),
+            participants,
+        )
+    }
     pub(super) fn with_sequences(
         mut self,
         sequences: Option<nfs_world::sequences::Sequences>,
@@ -1025,6 +1048,17 @@ impl PlayerListener {
         &mut self,
         content: &crate::content::WorldContent,
     ) -> Result<(), replication::Error> {
+        let logic = match (
+            &self.logic,
+            self.prologue
+                .as_ref()
+                .and_then(|content| content.membership.as_ref()),
+        ) {
+            (Some(logic), Some(content)) => Some(std::sync::Arc::new(
+                logic.without_assets(&content.assets().collect())?,
+            )),
+            _ => self.logic.clone(),
+        };
         use nfs_protocol::world::rpc::Serial;
         use nfs_world::content::bindings::Bindings;
         use replication::sublevel::{Rpc, genesis};
@@ -1146,10 +1180,17 @@ impl PlayerListener {
             .as_ref()
             .map(|catalog| nfs_world::world_activation::Activation::bind(&records, catalog))
             .transpose()?;
-        let sections = split_scenes(records, nfs_world::application::OUTBOUND_FRAME_BITS)?;
+        let mut sections = split_scenes(records, nfs_world::application::OUTBOUND_FRAME_BITS)?;
+        let scene_membership = self.stage_scene_membership(&mut players, &mut participants)?;
+        sections.extend(prologue::movies::sections(
+            scene_membership.records,
+            scene_membership.deleted,
+        )?);
         if sections.len() > MAX_PENDING - self.pending.len() {
             return Err(replication::Error::Bound);
         }
+        self.logic = logic;
+        self.scene_membership = scene_membership.session;
         self.players = players;
         self.launchers = launchers;
         self.participants = participants;
@@ -2875,6 +2916,14 @@ impl Listener for PlayerListener {
             }
             entries = admitted;
         }
+        let scene_membership = match self.stage_scene_membership(&mut players, &mut participants) {
+            Ok(value) => value,
+            Err(error) => return self.refuse(error),
+        };
+        match prologue::movies::sections(scene_membership.records, scene_membership.deleted) {
+            Ok(batch) => sections.extend(batch),
+            Err(error) => return self.refuse(error),
+        }
         deferred_sections = output::pack_motion(deferred_sections);
         if spawned.messages.len() > MAX_PENDING.saturating_sub(self.pending_content.len())
             || scheduled_returns.len() > MAX_PENDING.saturating_sub(self.pending_returns.len())
@@ -2927,6 +2976,7 @@ impl Listener for PlayerListener {
         }
         self.players = players;
         self.launchers = launchers;
+        self.scene_membership = scene_membership.session;
         self.participants = participants;
         self.opening = opening;
         self.selection = selection;

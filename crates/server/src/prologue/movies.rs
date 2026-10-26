@@ -70,6 +70,7 @@ impl Content {
 }
 #[derive(Clone, Debug, Default)]
 pub struct Output {
+    pub state_operations: Vec<nfs_world::participants::membership::Operation>,
     pub records: Vec<Record>,
     pub calls: Vec<HostRpc>,
     pub deleted: Vec<u16>,
@@ -84,6 +85,9 @@ pub struct Active {
     deadline: Option<f64>,
 }
 impl Active {
+    pub fn state_bindings(&self) -> fmv::Bindings {
+        self.flow.bindings()
+    }
     pub fn owner(&self) -> Owner {
         self.flow.owner()
     }
@@ -240,6 +244,7 @@ impl Active {
         };
         let mut out = Output {
             calls,
+            state_operations: active.flow.take_state_operations()?,
             ..Output::default()
         };
         let mut staged = players.clone();
@@ -281,6 +286,7 @@ impl Active {
                 _ => return Err(Error::Shape),
             };
         }
+        out.state_operations = active.flow.take_state_operations()?;
         *players = staged;
         *self = active;
         Ok(out)

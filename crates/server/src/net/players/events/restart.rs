@@ -162,6 +162,7 @@ pub(super) fn input(
     listener: &PlayerListener,
     content: &event_logic::Content,
     players: &mut Players,
+    participants: &mut nfs_world::participants::Lifecycle,
     state: &mut State,
     body: BitSpan<'_>,
     now: u64,
@@ -186,6 +187,7 @@ pub(super) fn input(
         Phase::Teleporting { .. }
             if refs[0] == b.teleport.scene && selector == b.teleport.selector =>
         {
+            participants.state_path(participant, &[b.teleport, b.check, b.wait]);
             publish(
                 out,
                 participant,
@@ -201,6 +203,7 @@ pub(super) fn input(
             };
         }
         Phase::Loading { .. } if refs[0] == b.ready.scene && selector == b.ready.selector => {
+            participants.state_path(participant, &[b.wait, b.arrive]);
             let mut creation = content.sequence_creation(
                 names::RESTART_ARRIVAL,
                 players.objects(),
@@ -253,6 +256,12 @@ pub(super) fn input(
             if completed.sequence != sequence || completed.participant != participant {
                 return Err(replication::Error::Shape);
             }
+            participants.state_operation(
+                nfs_world::participants::membership::Operation::Complete {
+                    participant,
+                    state: b.arrive,
+                },
+            );
             players.remove_entities(&[sequence])?;
             let mut presentation = presentation(
                 listener,
@@ -308,6 +317,7 @@ pub(super) fn advance(
                 };
                 let b = Bindings::new(players, prefix.content_key)?;
                 participants.begin_relocation(participant)?;
+                participants.state_path(participant, &[b.free, b.pre, b.leave]);
                 publish(
                     out,
                     participant,
@@ -324,6 +334,7 @@ pub(super) fn advance(
             }
             Phase::Leaving(at) if now >= at => {
                 let b = instance.bindings.ok_or(replication::Error::Shape)?;
+                participants.state_path(participant, &[b.leave, b.teleport]);
                 publish(
                     out,
                     participant,
@@ -357,6 +368,7 @@ pub(super) fn advance(
             Phase::Resuming(at) if now >= at => {
                 let b = instance.bindings.ok_or(replication::Error::Shape)?;
                 participants.finish_relocation(participant)?;
+                participants.state_path(participant, &[b.arrive, b.free]);
                 publish(out, participant, &[(b.free, Call::Enter)]);
                 done.push(participant);
                 tracing::info!(

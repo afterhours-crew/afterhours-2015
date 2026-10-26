@@ -24,6 +24,7 @@ use std::sync::Arc;
 pub mod composite;
 pub mod driving;
 pub mod loading;
+pub mod membership;
 pub mod movies;
 pub mod volumes;
 
@@ -34,6 +35,7 @@ pub struct Content {
     pub driving: Option<(driving::Mode, driving::Mode)>,
     pub previews: Option<Arc<PreviewCars>>,
     pub loading: Option<loading::Loading>,
+    pub membership: Option<membership::Content>,
     pub selection: Option<Authored>,
     pub selection_program: Option<Arc<nfs_content::prologue::sequences::program::Definition>>,
     pub first_race: Option<Race>,
@@ -208,6 +210,7 @@ impl Content {
             driving: Some(driving::tests::content(parent, manager)),
             previews: None,
             loading: None,
+            membership: None,
             selection: None,
             selection_program: None,
             first_race: None,
@@ -242,6 +245,7 @@ impl Content {
         )
         .map_err(|e| nfs_content::Error::Content(format!("starter selection: {e:?}")))?;
         let loading = loading::Loading::prepare(index)?;
+        let membership = membership::Content::prepare(index)?;
         let selection_program = nfs_content::prologue::sequences::program::extract(index, name)?;
         let capability = "gameplay/progression/intro/introracespikeandamy";
         let first_race = Some(Race::prepare(index, parent, capability, false)?);
@@ -288,6 +292,7 @@ impl Content {
             opening,
             driving,
             loading: Some(loading),
+            membership: Some(membership),
             selection: Some(selection),
             selection_program: Some(Arc::new(selection_program)),
             first_race,

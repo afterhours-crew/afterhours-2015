@@ -528,6 +528,59 @@ fn batch(v: &Json, content: &Content, earlier: &BTreeSet<u16>) -> Result<Batch, 
 }
 
 impl GarageLogic {
+    /// Transfer whole participant assets to a state-owned service. Reject any
+    /// remaining dependency on their legacy IDs instead of dropping events or
+    /// silently inventing a replacement reference.
+    pub fn without_assets(&self, assets: &BTreeSet<Asset>) -> Result<Self, replication::Error> {
+        let mut next = self.clone();
+        let batches = [
+            &mut next.spawn,
+            &mut next.vehicles,
+            &mut next.entry,
+            &mut next.exit,
+            &mut next.arrive,
+            &mut next.arrived,
+            &mut next.world_ready,
+            &mut next.world_spawn,
+            &mut next.world_settled,
+            &mut next.free_roam,
+            &mut next.in_world_teleport,
+            &mut next.in_world_arrival,
+            &mut next.returning,
+            &mut next.return_requested,
+            &mut next.returned,
+            &mut next.crashed,
+            &mut next.recovered,
+            &mut next.resetting,
+            &mut next.reset_arrived,
+        ];
+        let removed: BTreeSet<_> = batches
+            .iter()
+            .flat_map(|batch| &batch.entities)
+            .filter(|definition| assets.contains(&definition.asset))
+            .map(|definition| definition.capture_id)
+            .collect();
+        for batch in &batches {
+            if batch.entity_updates.iter().any(|(id, _, _)| removed.contains(id))
+                || batch.events.iter().any(|event| matches!(event.target, EventTarget::Capture(id) if removed.contains(&id))) {
+                return Err(replication::Error::Unsupported);
+            }
+            for definition in batch.entities.iter().filter(|d| !assets.contains(&d.asset)) {
+                if removed.contains(&definition.capture_id)
+                    || matches!(definition.blueprint, Blueprint::Entity(id) if removed.contains(&id))
+                    || definition.roles.iter().any(|role| matches!(role, Role::EntityChannel { capture_target, .. } if removed.contains(capture_target))) {
+                    return Err(replication::Error::Unsupported);
+                }
+            }
+        }
+        for batch in batches {
+            batch
+                .entities
+                .retain(|definition| !assets.contains(&definition.asset));
+            batch.delete.retain(|id| !removed.contains(id));
+        }
+        Ok(next)
+    }
     pub fn load(path: &Path) -> Result<Self, Failure> {
         Self::load_with_reputation(path, None)
     }
@@ -1380,6 +1433,39 @@ pub(crate) mod tests {
     use nfs_protocol::world::rpc::Serial;
     use nfs_world::replication::{Initial as RecordInitial, players::Request, sublevel::ordinary};
     use serde_json::json;
+    #[test]
+    fn transferring_an_asset_removes_legacy_creation_and_retirement_but_rejects_dependencies() {
+        let original = GarageLogic::from_json(&content_json()).unwrap();
+        let asset = |local_index| Asset {
+            bundle: 4,
+            type_id: 10,
+            local_index,
+        };
+        let transferred = original
+            .without_assets(&BTreeSet::from([asset(3)]))
+            .unwrap();
+        assert!(
+            transferred
+                .spawn
+                .entities
+                .iter()
+                .all(|definition| definition.asset != asset(3))
+        );
+        assert!(!transferred.entry.delete.contains(&295));
+        assert!(original.entry.delete.contains(&295));
+        assert_eq!(transferred.entry.events, original.entry.events);
+        // Another entity uses this asset's legacy ID as its parent/channel.
+        assert!(matches!(
+            original.without_assets(&BTreeSet::from([asset(1)])),
+            Err(replication::Error::Unsupported)
+        ));
+        // A legacy event still targets this asset: moving its lifetime alone
+        // cannot silently drop that behavior.
+        assert!(matches!(
+            original.without_assets(&BTreeSet::from([asset(0)])),
+            Err(replication::Error::Unsupported)
+        ));
+    }
     pub(crate) fn content_json() -> Json {
         json!({
             "format": FORMAT, "version": VERSION, "build_sha256": crate::content::BUILD,

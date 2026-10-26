@@ -159,6 +159,7 @@ impl PlayerListener {
                 .collect();
             if let Some(exit) = participants.exit_bindings() {
                 let bindings = ResetBindings::from_scene(&players, exit.state_2.scene)?;
+                participants.state_path(owner.participant, &[bindings.alive, bindings.cinematic]);
                 events.push(HostRpc::Participant(Notification {
                     endpoint: bindings.cinematic,
                     participant: owner.participant,
@@ -175,6 +176,17 @@ impl PlayerListener {
                 },
                 events,
             ));
+        }
+        let scene_membership = self.stage_scene_membership(&mut players, &mut participants)?;
+        let mut presentation_entries =
+            prologue::movies::sections(scene_membership.records, scene_membership.deleted)?
+                .into_iter()
+                .map(|section| (section, vec![]))
+                .collect::<Vec<_>>();
+        presentation_entries.append(&mut entries);
+        let entries = presentation_entries;
+        if entries.len() > MAX_PENDING.saturating_sub(self.pending_entries.len()) {
+            return Ok(());
         }
         for stop in &stops {
             tracing::warn!(
@@ -198,6 +210,7 @@ impl PlayerListener {
         self.sequence_fallbacks[2] = self.sequence_fallbacks[2].saturating_add(stops.len());
         self.players = players;
         self.participants = participants;
+        self.scene_membership = scene_membership.session;
         self.logic_ghosts = ghosts;
         self.queue_entries(entries);
         self.pending_rpcs
@@ -269,6 +282,15 @@ impl PlayerListener {
             if !crashes.finish_relocation(owner)? {
                 return Ok(Some(None));
             }
+            participants.state_path(
+                owner.participant,
+                &[
+                    bindings.teleport,
+                    bindings.rendering,
+                    bindings.arrive,
+                    bindings.alive,
+                ],
+            );
             let arrived = Self::arrive_logic(
                 logic,
                 crate::garage_logic::Which::ResetArrived,
@@ -342,6 +364,10 @@ impl PlayerListener {
             tracing::info!(participant = owner.participant, vehicle, speed, position = ?destination.position,
                 forward = ?destination.basis[2], event = event_recovery.is_some(), "crash recovery teleport queued");
             crashes.begin_relocation(owner)?;
+            participants.state_path(
+                owner.participant,
+                &[bindings.cinematic, bindings.recover, bindings.teleport],
+            );
             let presentation = Self::arrive_logic(
                 logic,
                 crate::garage_logic::Which::Resetting,
@@ -380,6 +406,7 @@ impl PlayerListener {
             Some(sequence),
         )?;
         if let Some(bindings) = bindings {
+            participants.state_path(owner.participant, &[bindings.cinematic, bindings.alive]);
             events.push(HostRpc::Participant(Notification {
                 endpoint: bindings.cinematic,
                 participant: owner.participant,

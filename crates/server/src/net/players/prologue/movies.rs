@@ -132,16 +132,23 @@ impl PlayerListener {
         };
         let mut players = self.players.clone();
         let mut participants = self.participants.clone();
-        let Outcome::Advanced(chain) = participants.intro_movie_begin(participant) else {
+        let (active, output) = Active::start_at(movie, &mut players, owner, seconds)?;
+        let Outcome::Advanced(chain) =
+            participants.intro_movie_begin(participant, active.state_bindings().before)
+        else {
             return Err(replication::Error::Shape);
         };
-        let (active, output) = Active::start_at(movie, &mut players, owner, seconds)?;
         let mut calls = chain
             .into_iter()
             .map(HostRpc::Participant)
             .collect::<Vec<_>>();
         calls.extend(output.calls);
-        let sections = sections(output.records, output.deleted)?;
+        let scene_membership = self.stage_scene_membership(&mut players, &mut participants)?;
+        let mut records = output.records;
+        records.extend(scene_membership.records);
+        let mut deleted = output.deleted;
+        deleted.extend(scene_membership.deleted);
+        let sections = sections(records, deleted)?;
         if sections.len() > MAX_PENDING.saturating_sub(self.pending.len())
             || calls.len()
                 > nfs_world::session::MAX_RPC_QUEUE.saturating_sub(self.pending_rpcs.len())
@@ -150,6 +157,7 @@ impl PlayerListener {
         }
         self.players = players;
         self.participants = participants;
+        self.scene_membership = scene_membership.session;
         self.intro_movies.insert(participant, active);
         self.pending.extend(sections);
         self.pending_rpcs.extend(calls);
@@ -202,6 +210,9 @@ pub(in crate::net::players) fn input(
         };
         let before = active.phase();
         let mut output = active.completed(players, owner, completed)?;
+        for operation in std::mem::take(&mut output.state_operations) {
+            participants.state_operation(operation);
+        }
         if before == nfs_world::fmv::Phase::Before
             && active.phase() == nfs_world::fmv::Phase::Playing
         {
@@ -225,7 +236,8 @@ pub(in crate::net::players) fn input(
             )? {
                 output.calls.insert(0, HostRpc::Actor(binding));
             }
-            let Outcome::Advanced(chain) = participants.intro_movie_complete(owner.participant)
+            let Outcome::Advanced(chain) =
+                participants.intro_movie_complete(owner.participant, active.state_bindings().after)
             else {
                 return Err(replication::Error::Shape);
             };
@@ -277,6 +289,11 @@ pub(in crate::net::players) fn input(
                 .ok_or(replication::Error::Shape)?,
         ])
     })?;
+    if let Some(output) = output.as_mut() {
+        for operation in std::mem::take(&mut output.state_operations) {
+            participants.state_operation(operation);
+        }
+    }
     // Timed narrative outros need their replacement actor while the sequence
     // is running. The immediate outro binds at its completion boundary.
     if let Some(out) = output.as_mut()

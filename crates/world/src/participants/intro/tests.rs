@@ -100,16 +100,31 @@ fn final_composite_requires_return_chapter_exact_endpoint_and_native_completion(
 #[test]
 fn movie_suspends_only_its_story_participant_until_owned_completion() {
     let mut model = ready();
-    assert_eq!(model.intro_movie_begin(8), Outcome::Unsupported);
+    assert_eq!(
+        model.intro_movie_begin(8, endpoint(54)),
+        Outcome::Unsupported
+    );
     model.intro_started.insert(8, Chapter::FirstRace);
     model.stages.insert(8, Stage::FreeRoam);
-    assert_eq!(calls(model.intro_movie_begin(8)), vec![(1, Call::Leave)]);
-    assert_eq!(model.intro_movie_begin(8), Outcome::Repeated);
-    assert_eq!(model.intro_movie_complete(9), Outcome::Unsupported);
+    assert_eq!(
+        calls(model.intro_movie_begin(8, endpoint(54))),
+        vec![(1, Call::Leave)]
+    );
+    assert_eq!(model.intro_movie_begin(8, endpoint(54)), Outcome::Repeated);
+    assert_eq!(
+        model.intro_movie_complete(9, endpoint(56)),
+        Outcome::Unsupported
+    );
     assert_eq!(model.stage(8), Some(Stage::IntroMovie));
     assert_eq!(model.stage(9), Some(Stage::Progressing));
-    assert_eq!(calls(model.intro_movie_complete(8)), vec![(1, Call::Enter)]);
-    assert_eq!(model.intro_movie_complete(8), Outcome::Repeated);
+    assert_eq!(
+        calls(model.intro_movie_complete(8, endpoint(56))),
+        vec![(1, Call::Enter)]
+    );
+    assert_eq!(
+        model.intro_movie_complete(8, endpoint(56)),
+        Outcome::Repeated
+    );
 }
 #[test]
 fn return_drive_starts_in_place_only_after_the_second_movie() {
@@ -118,13 +133,16 @@ fn return_drive_starts_in_place_only_after_the_second_movie() {
     model.intro_started.insert(8, Chapter::SecondRace);
     model.stages.insert(8, Stage::IntroMovie);
     assert_eq!(model.intro_return_drive_begin(8), Outcome::Unsupported);
-    model.intro_movie_complete(8);
+    model.intro_movie_complete(8, endpoint(56));
     assert_eq!(model.intro_return_drive_begin(9), Outcome::Unsupported);
     assert!(calls(model.intro_return_drive_begin(8)).is_empty());
     assert_eq!(model.stage(8), Some(Stage::FreeRoam));
     assert_eq!(model.intro_chapter(8), Some(Chapter::ReturnDrive));
     assert_eq!(model.intro_return_drive_begin(8), Outcome::Repeated);
-    assert_eq!(model.intro_movie_begin(8), Outcome::Unsupported);
+    assert_eq!(
+        model.intro_movie_begin(8, endpoint(54)),
+        Outcome::Unsupported
+    );
     assert_eq!(model.stage(9), Some(Stage::Progressing));
 }
 #[test]
@@ -134,7 +152,7 @@ fn second_race_uses_in_world_relocation_and_native_readiness_without_respawn() {
     model.intro_started.insert(8, Chapter::FirstRace);
     model.stages.insert(8, Stage::IntroMovie);
     assert_eq!(model.intro_second_race_begin(8), Outcome::Unsupported);
-    model.intro_movie_complete(8);
+    model.intro_movie_complete(8, endpoint(56));
     assert_eq!(
         calls(model.intro_second_race_begin(8)),
         vec![(1, Call::Leave), (84, Call::Enter)]

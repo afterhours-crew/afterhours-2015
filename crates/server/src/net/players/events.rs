@@ -654,6 +654,7 @@ impl PlayerListener {
                         self,
                         content,
                         &mut players,
+                        &mut participants,
                         &mut state,
                         BitSpan::new(bytes, 0, *bits).map_err(|_| replication::Error::Shape)?,
                         now_ms,
@@ -799,6 +800,9 @@ impl PlayerListener {
         )? {
             suspended.remove(&participant);
         }
+        let scene_membership = self.stage_scene_membership(&mut players, &mut participants)?;
+        out.records.extend(scene_membership.records);
+        out.deleted.extend(scene_membership.deleted);
         let mut sections = if out.registrations.is_some() {
             split_scenes(
                 out.records,
@@ -847,6 +851,7 @@ impl PlayerListener {
             self.logic_ghosts = ghosts;
         }
         self.participants = participants;
+        self.scene_membership = scene_membership.session;
         self.event_state = state;
         if self.event_state.failed {
             self.events = None;

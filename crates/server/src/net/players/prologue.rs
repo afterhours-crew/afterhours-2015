@@ -626,6 +626,9 @@ impl PlayerListener {
                 self.persona,
             )?);
         }
+        let scene_membership = self.stage_scene_membership(&mut players, &mut participants)?;
+        records.extend(scene_membership.records);
+        deleted.extend(scene_membership.deleted);
         // A staged car is constructed with an absolute zero origin. Reserve
         // space for that origin rather than inheriting a prior movement frame.
         let mut sections = split_scenes(records, nfs_world::application::OUTBOUND_FRAME_BITS - 96)?;
@@ -710,6 +713,7 @@ impl PlayerListener {
         self.intro_modes = modes;
         self.event_state.ai_cursor = ai_cursor;
         self.participants = participants;
+        self.scene_membership = scene_membership.session;
         self.world_cars = cars;
         self.pending.extend(sections);
         self.pending_content.extend(messages);
