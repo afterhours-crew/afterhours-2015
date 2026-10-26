@@ -4,6 +4,132 @@
 
 use super::*;
 
+#[test]
+fn challenge_progress_preserves_native_words_flags_and_following_message() {
+    let expected = ChallengeProgress {
+        entries: vec![
+            ChallengeProgressEntry {
+                words: [0x80000000, 0xffffffff, 0x7fc01234],
+                flag: true,
+            },
+            ChallengeProgressEntry {
+                words: [9, 0, 42],
+                flag: false,
+            },
+        ],
+        trailing_word: 0xabcdef01,
+    };
+    // Independently written schema, including the final word after the list.
+    let mut wire = BitWriter::new();
+    wire.put(2, 32)
+        .put(0x80000000, 32)
+        .put(0xffffffff, 32)
+        .put(0x7fc01234, 32)
+        .put(1, 1);
+    wire.put(9, 32)
+        .put(0, 32)
+        .put(42, 32)
+        .put(0, 1)
+        .put(0xabcdef01, 32);
+    let mut reader = Reader {
+        span: wire.span(),
+        pos: 0,
+    };
+    assert_eq!(
+        message(&mut reader, EX_CHALLENGE_PROGRESS).unwrap(),
+        Message::ChallengeProgress(expected.clone())
+    );
+    assert_eq!(reader.pos, 258);
+    for end in 0..wire.len() {
+        let mut reader = Reader {
+            span: wire.span().slice(0, end).unwrap(),
+            pos: 0,
+        };
+        assert_eq!(
+            message(&mut reader, EX_CHALLENGE_PROGRESS),
+            Err(Error::Truncated)
+        );
+    }
+    let mut encoded = BitWriter::new();
+    Builder::put_message(&mut encoded, &Message::ChallengeProgress(expected.clone())).unwrap();
+    let mut whole = BitWriter::new();
+    whole.put(76, 7).put_span(wire.span());
+    assert_eq!(encoded, whole);
+    let messages = vec![Message::ChallengeProgress(expected), Message::Sentinel(-7)];
+    let frame = Builder::new()
+        .messages(
+            None,
+            vec![Group {
+                channel: 0,
+                sequence: Some(0),
+                messages: messages.clone(),
+            }],
+        )
+        .build()
+        .unwrap();
+    let decoded = parse(frame.span(), Direction::FromHost).unwrap();
+    assert!(decoded.complete);
+    assert_eq!(decoded.messages.unwrap().groups[0].messages, messages);
+}
+
+#[test]
+fn challenge_progress_empty_and_count_bounds_are_explicit() {
+    let empty = Message::ChallengeProgress(ChallengeProgress {
+        entries: vec![],
+        trailing_word: 17,
+    });
+    let mut wire = BitWriter::new();
+    wire.put(0, 32).put(17, 32);
+    assert_eq!(
+        assembled_message(EX_CHALLENGE_PROGRESS, wire.bytes()).unwrap(),
+        empty
+    );
+    wire.put(0, 8);
+    assert_eq!(
+        assembled_message(EX_CHALLENGE_PROGRESS, wire.bytes()),
+        Err(Error::Shape)
+    );
+    for count in [MAX_CHALLENGE_PROGRESS_ENTRIES as u32 + 1, u32::MAX] {
+        let mut wire = BitWriter::new();
+        wire.put(u64::from(count), 32);
+        let mut reader = Reader {
+            span: wire.span(),
+            pos: 0,
+        };
+        assert_eq!(
+            message(&mut reader, EX_CHALLENGE_PROGRESS),
+            Err(Error::Bound)
+        );
+    }
+    let entry = ChallengeProgressEntry {
+        words: [0; 3],
+        flag: false,
+    };
+    let oversized = Message::ChallengeProgress(ChallengeProgress {
+        entries: vec![entry.clone(); MAX_CHALLENGE_PROGRESS_ENTRIES + 1],
+        trailing_word: 0,
+    });
+    assert_eq!(
+        Builder::put_message(&mut BitWriter::new(), &oversized),
+        Err(Error::Bound)
+    );
+    let maximum = Message::ChallengeProgress(ChallengeProgress {
+        entries: vec![entry; MAX_CHALLENGE_PROGRESS_ENTRIES],
+        trailing_word: 7,
+    });
+    let mut wire = BitWriter::new();
+    Builder::put_message(&mut wire, &maximum).unwrap();
+    let mut reader = Reader {
+        span: wire.span().after(7).unwrap(),
+        pos: 0,
+    };
+    assert_eq!(
+        message(&mut reader, EX_CHALLENGE_PROGRESS).unwrap(),
+        maximum
+    );
+    assert_eq!(reader.rest().unwrap().len(), 0);
+}
+
 fn bits(w: &BitWriter, offset: usize, width: u8) -> u32 {
     w.span().read_u32(offset, width).unwrap()
 }

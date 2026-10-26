@@ -35,6 +35,10 @@ pub const EX_COLLECTION: u8 = 63;
 /// `RaceNetworkSpeedWallsToServerDataSyncMessage` (registry key djb2-xor of its
 /// name; E997): the client sends it once SpeedWall data has loaded.
 pub const EX_SPEED_WALLS_TO_SERVER: u8 = 103;
+/// `RaceNetworkChallengeProgressDataSyncMessage` in the supported registry.
+pub const EX_CHALLENGE_PROGRESS: u8 = 76;
+/// Local allocation bound, independent of the native 32-bit count field.
+pub const MAX_CHALLENGE_PROGRESS_ENTRIES: usize = 1024;
 /// Entries one SpeedWall or recommendations sync message may carry (local bound).
 pub const MAX_SPEED_WALL_ENTRIES: usize = 4096;
 
@@ -92,6 +96,20 @@ pub enum TimeSync {
     Times([u64; 3]),
 }
 
+/// Native challenge-progress entry. Word meanings remain unassigned; preserve
+/// their exact bit patterns rather than treating them as inferred game values.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChallengeProgressEntry {
+    pub words: [u32; 3],
+    pub flag: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChallengeProgress {
+    pub entries: Vec<ChallengeProgressEntry>,
+    pub trailing_word: u32,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Message<'a> {
     Chunk {
@@ -128,6 +146,7 @@ pub enum Message<'a> {
     /// An owned event's game-mode, logic or scene call.
     GameModeCall(crate::game_mode::Call),
     Movie(crate::fmv::Play),
+    ChallengeProgress(ChallengeProgress),
     Opaque {
         index: u8,
         body: BitSpan<'a>,
@@ -156,6 +175,7 @@ impl Message<'_> {
             | Self::GameModeCall(_)
             | Self::Movie(_) => 47,
             Self::LogicEvent(v) => v.index(),
+            Self::ChallengeProgress(_) => EX_CHALLENGE_PROGRESS,
             Self::Opaque { index, .. } => *index,
         }
     }
@@ -403,6 +423,29 @@ fn message<'a>(r: &mut Reader<'a>, index: u8) -> Result<Message<'a>, Error> {
             r.slice(size - 32)?;
             let body = r.span.slice(start, r.pos - start)?;
             Message::Opaque { index, body }
+        }
+        // Paired reader 0x554ccd0 / writer 0x554d0f0: count, three words and
+        // one Boolean per entry, then one final word. Check the whole extent
+        // before allocating, including the required trailing word.
+        EX_CHALLENGE_PROGRESS => {
+            let count = r.take(32)? as usize;
+            if count > MAX_CHALLENGE_PROGRESS_ENTRIES {
+                return Err(Error::Bound);
+            }
+            if r.rest()?.len() < count * 97 + 32 {
+                return Err(Error::Truncated);
+            }
+            let mut entries = Vec::with_capacity(count);
+            for _ in 0..count {
+                entries.push(ChallengeProgressEntry {
+                    words: [r.take(32)?, r.take(32)?, r.take(32)?],
+                    flag: r.take(1)? != 0,
+                });
+            }
+            Message::ChallengeProgress(ChallengeProgress {
+                entries,
+                trailing_word: r.take(32)?,
+            })
         }
         // `RaceNetworkRecommendationsSyncRequestMessage`, parser `0x554cdc0` (E998):
         // a 64-bit value, a 32-bit count and that many (u32, f32, u32, u64, two
@@ -848,6 +891,19 @@ impl<'a> Builder<'a> {
             }
             Message::Opaque { body, .. } => {
                 w.put_span(*body);
+            }
+            Message::ChallengeProgress(value) => {
+                if value.entries.len() > MAX_CHALLENGE_PROGRESS_ENTRIES {
+                    return Err(Error::Bound);
+                }
+                w.put(value.entries.len() as u64, 32);
+                for entry in &value.entries {
+                    for word in entry.words {
+                        w.put(u64::from(word), 32);
+                    }
+                    w.put_bool(entry.flag);
+                }
+                w.put(u64::from(value.trailing_word), 32);
             }
             Message::LauncherEnabled(value) => {
                 w.put_span(value.encode().map_err(|_| Error::Shape)?.span());
