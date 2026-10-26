@@ -100,6 +100,28 @@ impl AssetIndex {
         bundle: &str,
         class: &str,
     ) -> Result<Vec<(String, usize)>, Error> {
+        self.registered_matching(bundle, |candidate| candidate == class)
+    }
+
+    /// Exact class counts across a registry, including non-Blueprint objects.
+    /// This reports installed composition, not inheritance or wire class IDs.
+    pub fn registered_class_counts(
+        &mut self,
+        bundle: &str,
+    ) -> Result<BTreeMap<String, usize>, Error> {
+        let mut counts = BTreeMap::new();
+        self.registered_matching(bundle, |class| {
+            *counts.entry(class.to_owned()).or_default() += 1;
+            true
+        })?;
+        Ok(counts)
+    }
+
+    fn registered_matching(
+        &mut self,
+        bundle: &str,
+        mut include: impl FnMut(&str) -> bool,
+    ) -> Result<Vec<(String, usize)>, Error> {
         let registry = format!(
             "{}{REGISTRY_SUFFIX}",
             bundle.to_lowercase().trim_start_matches("win32/")
@@ -129,7 +151,7 @@ impl AssetIndex {
                         .ok_or_else(|| Error::Content("registry pointer".into()))?,
                 )?
                 .ok_or_else(|| Error::Content("null registry object".into()))?;
-            if self.assets.objects(&key.0)?[key.1].class == class {
+            if include(&self.assets.objects(&key.0)?[key.1].class) {
                 if !seen.insert(key.clone()) {
                     return Err(Error::Content("duplicate registered object".into()));
                 }
@@ -381,6 +403,15 @@ mod tests {
     fn registered_objects_include_non_blueprints_and_preserve_registry_order() {
         let (_dir, mut index) = index();
         let bundle = synthetic::REGISTRY_BUNDLE;
+        assert_eq!(
+            index.registered_class_counts(bundle).unwrap(),
+            BTreeMap::from([
+                ("LogicPrefabBlueprint".into(), 2),
+                ("RaceVehicleBlueprint".into(), 1),
+                ("ItemSystemData".into(), 1),
+            ])
+        );
+        assert!(index.registered_class_counts("levels/absent").is_err());
         assert_eq!(
             index
                 .registered_objects(bundle, "LogicPrefabBlueprint")
