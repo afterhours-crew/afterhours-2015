@@ -187,6 +187,7 @@ impl std::error::Error for Error {}
 
 #[derive(Clone, Debug, Default)]
 struct World {
+    messages: frame::receive::Receiver,
     initialized: Option<u64>,
     next_ex_sequence: u8,
     acked_inputs: usize,
@@ -210,6 +211,7 @@ struct World {
 
 #[derive(Clone, Debug, Default)]
 struct Seen {
+    level_loaded: Option<frame::LevelLoadedAck>,
     state_report: bool,
     state_reports: usize,
     level_ready: bool,
@@ -224,41 +226,73 @@ struct Observing<'a> {
     inner: &'a mut dyn Listener,
     seen: Seen,
     waiting_level: Option<u16>,
+    messages: frame::receive::Receiver,
+    now_ms: u64,
+    invalid: bool,
+}
+
+impl Observing<'_> {
+    fn refused(&mut self, queued: application::Queued<'_>) -> bool {
+        // Output may be blocked on this exact resource while gameplay
+        // needs output capacity to commit. Its load proof is monotonic and
+        // independent of those mutations. Learn only that prerequisite;
+        // keep the frame unaccepted so every gameplay message is retried.
+        if let Some(level) = self.waiting_level
+            && let Ok(parsed) = frame::parse_prefix(queued.data, frame::Direction::FromClient)
+            && parsed.messages.iter().flat_map(|m| &m.groups).any(|group| {
+                group.messages.iter().any(|message| {
+                    matches!(message, frame::Message::Opaque {
+                            index: frame::EX_SUBLEVEL_REPORT, body,
+                        } if frame::sublevel_report_ids(*body).contains(&level))
+                })
+            })
+        {
+            self.seen.reports += 1;
+            self.seen.reported.push(level);
+        }
+        false
+    }
 }
 
 impl Listener for Observing<'_> {
     fn frame(&mut self, queued: application::Queued<'_>) -> bool {
-        if !self.inner.frame(queued) {
-            // Output may be blocked on this exact resource while gameplay
-            // needs output capacity to commit. Its load proof is monotonic and
-            // independent of those mutations. Learn only that prerequisite;
-            // keep the frame unaccepted so every gameplay message is retried.
-            if let Some(level) = self.waiting_level
-                && let Ok(parsed) = frame::parse_prefix(queued.data, frame::Direction::FromClient)
-                && parsed.messages.iter().flat_map(|m| &m.groups).any(|group| {
-                    group.messages.iter().any(|message| {
-                        matches!(message, frame::Message::Opaque {
-                            index: frame::EX_SUBLEVEL_REPORT, body,
-                        } if frame::sublevel_report_ids(*body).contains(&level))
-                    })
-                })
-            {
-                self.seen.reports += 1;
-                self.seen.reported.push(level);
+        let parsed = frame::parse_prefix(queued.data, frame::Direction::FromClient).ok();
+        let prepared = parsed
+            .as_ref()
+            .and_then(|p| p.messages.as_ref())
+            .map(|groups| self.messages.prepare(groups, self.now_ms))
+            .unwrap_or_else(|| Ok((self.messages.clone(), Vec::new())));
+        let (messages, received) = match prepared {
+            Ok(value) => value,
+            Err(_) => {
+                self.invalid = true;
+                return self.refused(queued);
             }
-            return false;
+        };
+        let decoded = match received
+            .iter()
+            .map(|m| m.decode())
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(value) => value,
+            Err(_) => {
+                self.invalid = true;
+                return self.refused(queued);
+            }
+        };
+        if !self.inner.frame(queued) {
+            return self.refused(queued);
         }
-        if let Ok(parsed) = frame::parse_prefix(queued.data, frame::Direction::FromClient) {
+        self.messages = messages;
+        if let Some(parsed) = parsed {
             if let Some(frame::TimeSync::Sample(t)) = parsed.time_sync {
                 self.seen.time_sample = Some(t);
             }
-            for message in parsed
-                .messages
-                .iter()
-                .flat_map(|m| m.groups.iter())
-                .flat_map(|g| g.messages.iter())
-            {
+            for message in &decoded {
                 match message {
+                    frame::Message::LevelLoadedAck(value) => {
+                        self.seen.level_loaded = Some(value.clone())
+                    }
                     frame::Message::State(value) => {
                         self.seen.state_report = true;
                         self.seen.state_reports += 1;
@@ -390,6 +424,8 @@ pub struct Host {
     /// Objects whose creation has been sent and not deleted since: grants
     /// never name an object the client cannot know yet.
     sent_objects: std::collections::BTreeSet<u16>,
+    /// The accepted native identity of the level loaded by this connection.
+    level_loaded: Option<frame::LevelLoadedAck>,
 }
 
 impl fmt::Debug for Host {
@@ -425,12 +461,18 @@ impl Host {
             movement_sent_ms: None,
             replication_clock_ms: None,
             sent_objects: std::collections::BTreeSet::new(),
+            level_loaded: None,
             max_replication_frame_bits: policy.max_frame_bits.min(MAX_REPLICATION_FRAME_BITS),
         })
     }
 
     pub fn queue_replication(&mut self, section: Section) -> Result<(), Error> {
         self.queue_replication_after(section, Vec::new())
+    }
+
+    /// The native identity retained only from accepted, ordered input messages.
+    pub fn loaded_level(&self) -> Option<&frame::LevelLoadedAck> {
+        self.level_loaded.as_ref()
     }
 
     /// Replace the objects whose movement the client reports. The client only
@@ -736,6 +778,9 @@ impl Host {
                     let mut observing = Observing {
                         inner: listener,
                         seen: Seen::default(),
+                        messages: world.messages.clone(),
+                        now_ms,
+                        invalid: false,
                         waiting_level: self.replication_queue.front().and_then(
                             |(section, _, _)| missing_scene_level(section, &world.reported),
                         ),
@@ -757,11 +802,19 @@ impl Host {
                             Err(e) => out.events.push(Event::ApplicationError(e)),
                         }
                     }
+                    if observing.invalid {
+                        out.events
+                            .push(Event::ApplicationError(application::Error::Shape));
+                    }
+                    world.messages = observing.messages;
                     let seen = observing.seen;
+                    if let Some(value) = seen.level_loaded {
+                        self.level_loaded = Some(value);
+                    }
                     world.client_state_reported |= seen.state_report;
                     world.state_reports += seen.state_reports;
                     world.client_level_ready |= seen.level_ready;
-                    world.client_level_linked |= seen.level_linked;
+                    world.client_level_linked |= seen.level_linked && world.state_sent.is_some();
                     world.client_time_ready |= seen.time_ready && world.time_sent.is_some();
                     if seen.reports > 0 {
                         world.reports += seen.reports;
@@ -794,6 +847,7 @@ impl Host {
                 ..
             } = std::mem::replace(&mut self.stage, Stage::Closed(None))
         {
+            self.level_loaded = None;
             world.player_entry.release(&mut application);
             for file in &mut self.files {
                 if let Some(file) = file.take()
@@ -1001,7 +1055,7 @@ impl Host {
         else {
             return;
         };
-        let Some(content_done) = world.content_done_ms else {
+        let Some(_) = world.content_done_ms else {
             return;
         };
         if self
@@ -1021,12 +1075,10 @@ impl Host {
                 }],
             )
         };
-        let Some((state_ms, states_then)) = world.state_sent else {
-            let covered = self.registered_handles > 0
-                && world.reported.len() * 100 >= self.registered_handles * REPORT_COVERAGE_PERCENT;
-            let quiet = world.reports > 0 && now_ms >= world.last_report_ms + REPORT_QUIET_MS;
-            let timed_out = now_ms >= content_done + REPORT_TIMEOUT_MS;
-            if !(covered || quiet || timed_out) {
+        let Some(_) = world.state_sent else {
+            let covered = self.registered_handles == 0
+                || world.reported.len() * 100 >= self.registered_handles * REPORT_COVERAGE_PERCENT;
+            if self.level_loaded.is_none() || !covered {
                 return;
             }
             let builder = reliable(vec![frame::Message::State(7)], world.next_ex_sequence);
@@ -1045,11 +1097,11 @@ impl Host {
             }
             return;
         };
-        let Some((time_ms, states_then)) = world.time_sent else {
-            if world.state_reports == states_then && now_ms < state_ms + STATE_WAIT_MS {
+        let Some(_) = world.time_sent else {
+            if !world.client_level_linked {
                 return;
             }
-            let origin = application.origin_ms().unwrap_or(state_ms);
+            let origin = application.origin_ms().unwrap_or(now_ms);
             let tick = (now_ms.saturating_sub(origin) * 30 / 1000) as u32;
             let builder = reliable(
                 vec![frame::Message::Time {
@@ -1071,7 +1123,7 @@ impl Host {
             }
             return;
         };
-        if world.state_reports == states_then && now_ms < time_ms + STATE_WAIT_MS {
+        if !world.client_time_ready {
             return;
         }
         if world

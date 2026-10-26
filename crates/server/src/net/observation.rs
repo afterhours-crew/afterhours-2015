@@ -23,6 +23,41 @@ pub struct WorldHealth {
     pub disabled_systems: [bool; 4],
 }
 
+impl WorldHealth {
+    pub(super) fn include_application(&mut self, stats: nfs_world::application::Stats) {
+        // Session ordering can refuse a frame before the domain listener runs.
+        // Both counters include listener refusals; adding them counts twice.
+        self.refused_frames = self
+            .refused_frames
+            .max(stats.frames_complete.saturating_sub(stats.frames_accepted));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_refusals_remain_unhealthy_after_recovery_without_double_counting() {
+        let mut health = WorldHealth::default();
+        let mut stats = nfs_world::application::Stats {
+            frames_complete: 3,
+            frames_accepted: 2,
+            ..Default::default()
+        };
+        health.include_application(stats);
+        assert_ne!(health, WorldHealth::default());
+        stats.frames_complete += 1;
+        stats.frames_accepted += 1;
+        health.include_application(stats);
+        assert_eq!(health.refused_frames, 1);
+        health.refused_frames = 2;
+        stats.frames_complete += 1;
+        health.include_application(stats);
+        assert_eq!(health.refused_frames, 2);
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParticipantObservation {
     pub participant: u16,

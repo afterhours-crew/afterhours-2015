@@ -43,8 +43,7 @@ fn entry_setup() -> (Host, Client, AcceptSignals, u64, Output) {
     );
     host.queue_replication(section).unwrap();
     let now = now + REPORT_TIMEOUT_MS;
-    host.poll(now);
-    host.poll(now + STATE_WAIT_MS);
+    loading::after_exchange(&mut host, now);
     let now = now + 2 * STATE_WAIT_MS;
     let sent = host.poll(now);
     assert!(matches!(
@@ -106,36 +105,22 @@ fn first_player_entry_needs_linked_client_and_accepted_owned_creation_then_sends
     );
     let now = now + REPLICATION_INTERVAL_MS;
     acknowledge_entry(&mut host, &mut client, &mut listener, &sent, now + 2, true);
-    host.poll(now + REPLICATION_INTERVAL_MS);
-    let Stage::Running { world, .. } = &host.stage else {
-        panic!()
-    };
-    assert!(matches!(
-        world.player_entry,
-        entry::Entry::Ready { player: 1 }
-    ));
-    assert_eq!(host.application().unwrap().delivery_status(ticket), None);
     let t = now + REPLICATION_INTERVAL_MS + 1;
-    host.receive(
-        &client.app(&message_frame(4, frame::EX_STATE, 4, 1)),
-        t,
-        &mut listener,
-    );
-    assert!(
-        !host
-            .poll(t + 1)
-            .events
-            .iter()
-            .any(|e| matches!(e, Event::FirstPlayerEntered { .. }))
-    );
-    host.receive(
-        &client.app(&message_frame(5, frame::EX_STATE, 4, 0)),
-        t + 2,
-        &mut listener,
-    );
-    let out = host.poll(t + 3);
+    let out = host.poll(t);
     assert_eq!(out.events, vec![Event::FirstPlayerEntered { player: 1 }]);
-    let decoded = host_frames(&client, &out.send);
+    assert_eq!(host.application().unwrap().delivery_status(ticket), None);
+    let decoded = host_frames(&client, &out.send)
+        .into_iter()
+        .filter(|(bytes, bits)| {
+            frame::parse(
+                BitSpan::new(bytes, 0, *bits).unwrap(),
+                frame::Direction::FromHost,
+            )
+            .unwrap()
+            .messages
+            .is_some()
+        })
+        .collect::<Vec<_>>();
     assert_eq!(decoded.len(), 1);
     let frame = frame::parse(
         BitSpan::new(&decoded[0].0, 0, decoded[0].1).unwrap(),
@@ -147,7 +132,7 @@ fn first_player_entry_needs_linked_client_and_accepted_owned_creation_then_sends
         vec![frame::Message::Empty]
     );
     host.receive(
-        &client.app(&message_frame(6, frame::EX_STATE, 4, 1)),
+        &client.app(&loading::state_response(4, 1, 1)),
         t + 4,
         &mut listener,
     );
@@ -169,11 +154,6 @@ fn first_player_entry_needs_linked_client_and_accepted_owned_creation_then_sends
 fn rejected_creation_and_other_players_do_not_enter_and_disconnect_releases_receipt() {
     let (mut host, mut client, mut listener, now, sent) = entry_setup();
     acknowledge_entry(&mut host, &mut client, &mut listener, &sent, now + 1, false);
-    host.receive(
-        &client.app(&message_frame(4, frame::EX_STATE, 4, 1)),
-        now + 2,
-        &mut listener,
-    );
     assert!(
         !host
             .poll(now + REPLICATION_INTERVAL_MS + 3)
@@ -207,16 +187,6 @@ fn rejected_creation_and_other_players_do_not_enter_and_disconnect_releases_rece
 fn first_player_entry_preserves_ready_state_when_application_window_is_full() {
     let (mut host, mut client, mut listener, now, sent) = entry_setup();
     acknowledge_entry(&mut host, &mut client, &mut listener, &sent, now + 1, true);
-    host.receive(
-        &client.app(&message_frame(4, frame::EX_STATE, 4, 1)),
-        now + 2,
-        &mut listener,
-    );
-    host.receive(
-        &client.app(&message_frame(5, frame::EX_STATE, 4, 0)),
-        now + 3,
-        &mut listener,
-    );
     let Stage::Running { application, .. } = &mut host.stage else {
         panic!()
     };
@@ -503,25 +473,24 @@ fn typed_scene_queue_tracks_lifecycle_and_preserves_failed_queue_state() {
 
 #[test]
 fn typed_sections_wait_for_state_time_then_fragment_without_template_inputs() {
-    let (mut host, client, _, now) = established_with_content();
+    let (mut host, mut client, mut listener, now) = established_with_content();
     let section = owned_section(16);
     assert!(section.frame().unwrap().len() > DEFAULT_FRAGMENT_BITS);
     host.queue_replication(section.clone()).unwrap();
     assert_eq!(host.replication_progress(), (0, 1));
     assert!(host.poll(now + REPORT_TIMEOUT_MS - 1).events.is_empty());
-    let t = now + REPORT_TIMEOUT_MS;
-    assert!(matches!(host.poll(t).events[..], [Event::StateSent { .. }]));
-    assert_eq!(host.poll(t + STATE_WAIT_MS).events, vec![Event::TimeSent]);
-    assert!(host.poll(t + 2 * STATE_WAIT_MS - 1).events.is_empty());
-    let mut expected_section = section;
-    expected_section.float_bits = Some(
-        ((t + 2 * STATE_WAIT_MS - host.application().unwrap().origin_ms().unwrap()) as f32
-            / 1000.0)
-            .to_bits(),
+    let t = loading::exchange(
+        &mut host,
+        &mut client,
+        &mut listener,
+        now + REPORT_TIMEOUT_MS,
     );
+    let mut expected_section = section;
+    expected_section.float_bits =
+        Some(((t - host.application().unwrap().origin_ms().unwrap()) as f32 / 1000.0).to_bits());
     expected_section.flag = true;
     let expected = expected_section.frame().unwrap();
-    let out = host.poll(t + 2 * STATE_WAIT_MS);
+    let out = host.poll(t);
     assert_eq!(
         out.events,
         vec![Event::Replication {
@@ -574,8 +543,7 @@ fn launcher_notifications_follow_creations_and_advance_reliable_sequence_in_boun
         Err(Error::Application(application::Error::Window))
     );
     let t = now + REPORT_TIMEOUT_MS;
-    host.poll(t);
-    host.poll(t + STATE_WAIT_MS);
+    loading::after_exchange(&mut host, t);
     assert!(matches!(
         host.poll(t + 2 * STATE_WAIT_MS).events[..],
         [Event::Replication { .. }]
@@ -663,8 +631,7 @@ fn scene_dependencies_wait_for_exact_observer_reports_without_timeout_bypass() {
     host.queue_replication(player).unwrap();
     let t = now + REPORT_TIMEOUT_MS;
     for observer in [&mut host, &mut other] {
-        observer.poll(t);
-        observer.poll(t + STATE_WAIT_MS);
+        loading::after_exchange(observer, t);
         assert_eq!(
             observer.poll(t + 2 * STATE_WAIT_MS).events,
             vec![Event::ReplicationWaiting { level: 175 }]
@@ -966,8 +933,7 @@ fn entry_messages_precede_deletion_in_one_frame_with_atomic_backpressure() {
     );
     assert!(host.replication_bindings.get(1).is_some());
     let t = now + REPORT_TIMEOUT_MS;
-    host.poll(t);
-    host.poll(t + STATE_WAIT_MS);
+    loading::after_exchange(&mut host, t);
     let t = t + 2 * STATE_WAIT_MS;
     host.poll(t);
     host.poll(t + REPLICATION_INTERVAL_MS);
@@ -1061,6 +1027,9 @@ fn refused_frames_do_not_commit_world_pacing_signals() {
         inner: &mut retain,
         seen: Seen::default(),
         waiting_level: None,
+        messages: Default::default(),
+        now_ms: 0,
+        invalid: false,
     };
     assert!(!observing.frame(application::Queued {
         advertised: None,
@@ -1095,8 +1064,7 @@ fn a_blocked_scene_can_learn_its_load_confirmation_without_accepting_gameplay() 
         ];
         host.queue_replication(section).unwrap();
         let now = now + REPORT_TIMEOUT_MS;
-        host.poll(now);
-        host.poll(now + STATE_WAIT_MS);
+        loading::after_exchange(&mut host, now);
         let now = now + 2 * STATE_WAIT_MS;
         assert_eq!(
             host.poll(now).events,
@@ -1117,7 +1085,7 @@ fn a_blocked_scene_can_learn_its_load_confirmation_without_accepting_gameplay() 
                 None,
                 vec![frame::Group {
                     channel: 0,
-                    sequence: Some(0),
+                    sequence: Some(1),
                     messages: vec![
                         frame::Message::State(7),
                         frame::Message::Opaque {
@@ -1254,6 +1222,9 @@ fn learning_a_blocked_load_does_not_skip_reliable_gaps_or_repeat_gameplay() {
         inner: &mut gameplay,
         seen: Seen::default(),
         waiting_level: Some(206),
+        messages: Default::default(),
+        now_ms: 0,
+        invalid: false,
     };
     assert!(!observing.frame(application::Queued {
         advertised: None,
@@ -1284,8 +1255,7 @@ fn learning_a_blocked_load_does_not_skip_reliable_gaps_or_repeat_gameplay() {
 fn typed_dispatch_retains_the_section_under_application_backpressure() {
     let (mut host, mut client, mut listener, now) = established_with_content();
     let t = now + REPORT_TIMEOUT_MS;
-    host.poll(t);
-    host.poll(t + STATE_WAIT_MS);
+    loading::after_exchange(&mut host, t);
     host.queue_replication(owned_section(1)).unwrap();
     let empty = frame::Builder::new().build().unwrap();
     let mut last = 0;
@@ -1989,7 +1959,7 @@ fn queued_content_follows_the_client_signals_and_inputs_get_empty_frames() {
             .put(0, 1)
             .put(1, 1)
             .put(0, 3)
-            .put(0, 7);
+            .put(u64::from(number.saturating_sub(2) & 127), 7);
         w.put(u64::from(index), 7).put(value, width).put(0, 1);
         w.align();
         let mut queued = crate::bits::BitWriter::new();
@@ -2271,7 +2241,7 @@ fn message_frame(number: u16, index: u8, width: usize, value: u64) -> Vec<u8> {
         .put(0, 1)
         .put(1, 1)
         .put(0, 3)
-        .put(0, 7);
+        .put(u64::from(number.saturating_sub(2) & 127), 7);
     w.put(u64::from(index), 7).put(value, width).put(0, 1);
     w.align();
     let mut queued = crate::bits::BitWriter::new();
@@ -2312,21 +2282,15 @@ fn host_frames(client: &Client, wires: &[Vec<u8>]) -> Vec<(Vec<u8>, usize)> {
 
 #[test]
 fn state_exchange_does_not_require_queued_replication() {
-    let (mut host, _client, _listener, now) = established_with_content();
+    let (mut host, mut client, mut listener, now) = established_with_content();
     assert!(host.poll(now + REPORT_TIMEOUT_MS - 1).events.is_empty());
-    assert!(matches!(
-        host.poll(now + REPORT_TIMEOUT_MS).events[..],
-        [Event::StateSent { .. }]
-    ));
-    assert_eq!(
-        host.poll(now + REPORT_TIMEOUT_MS + STATE_WAIT_MS).events,
-        vec![Event::TimeSent]
+    let t = loading::exchange(
+        &mut host,
+        &mut client,
+        &mut listener,
+        now + REPORT_TIMEOUT_MS,
     );
-    assert!(
-        host.poll(now + REPORT_TIMEOUT_MS + 2 * STATE_WAIT_MS)
-            .events
-            .is_empty()
-    );
+    assert!(host.poll(t).events.is_empty());
 }
 
 fn collection_bytes(handles: &[u16]) -> Vec<u8> {
@@ -2357,7 +2321,7 @@ fn report_frame(number: u16, id: u16) -> Vec<u8> {
         .put(0, 1)
         .put(1, 1)
         .put(0, 3)
-        .put(0, 7);
+        .put(u64::from(number.saturating_sub(2) & 127), 7);
     w.put(u64::from(crate::frame::EX_SUBLEVEL_REPORT), 7)
         .put(1, 32)
         .put(1, 32)
@@ -2464,14 +2428,23 @@ fn replication_starts_when_the_reports_cover_the_registered_handles() {
             .any(|e| matches!(e, Event::StateSent { .. }))
     );
     host.receive(&client.app(&report_frame(6, 4)), 2_800, &mut listener);
-    let out = host.poll(2_850);
+    assert!(
+        host.poll(2_850).events.is_empty(),
+        "coverage alone is insufficient"
+    );
+    host.receive(
+        &client.app(&loading::acknowledge_level(7, 5)),
+        2_851,
+        &mut listener,
+    );
+    let out = host.poll(2_852);
     assert_eq!(
         out.events,
         vec![Event::StateSent {
             registered: 4,
             reported: 4
         }],
-        "coverage reached: state 7 at once"
+        "coverage and accepted level acknowledgement permit state 7"
     );
     assert_eq!(host.registration_progress(), (4, 4));
 }
@@ -2686,8 +2659,7 @@ fn queued_notifications_for_sent_objects_ride_ahead_of_the_next_replication_fram
     };
     host.queue_replication(scene(1)).unwrap();
     let t = now + REPORT_TIMEOUT_MS;
-    host.poll(t);
-    host.poll(t + STATE_WAIT_MS);
+    loading::after_exchange(&mut host, t);
     let t = t + 2 * STATE_WAIT_MS;
     assert!(matches!(
         host.poll(t).events[..],
@@ -2819,8 +2791,7 @@ fn ordered_content_barrier(target: u8, payload: &[u8]) {
         .push(Record::from_scene(1, creation, &content).unwrap());
     host.queue_replication(initial).unwrap();
     let t = now + REPORT_TIMEOUT_MS;
-    host.poll(t);
-    host.poll(t + STATE_WAIT_MS);
+    loading::after_exchange(&mut host, t);
     let t = t + 2 * STATE_WAIT_MS;
     host.poll(t);
     assert_eq!(host.replication_progress(), (1, 0));
@@ -2959,3 +2930,5 @@ fn queued_replication_bits_measure_what_the_host_admits() {
     assert_eq!(host.replication_bits, queued);
     const { assert!(MAX_REPLICATION_FRAME_BITS <= application::OUTBOUND_FRAME_BITS) };
 }
+
+mod loading;

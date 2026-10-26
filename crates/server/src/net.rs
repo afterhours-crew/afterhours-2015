@@ -1574,6 +1574,9 @@ pub async fn run_world<I: WorldIo>(
                 Event::Application(application::Event::UnknownControl(subtype)) => {
                     listener.unsupported_control(*subtype);
                 }
+                Event::ApplicationError(error) => {
+                    warn!(connection, ?error, "world session input rejected");
+                }
                 Event::Application(application::Event::Queued { .. })
                 | Event::Application(application::Event::Duplicate) => {
                     debug!(connection, ?event, "world")
@@ -1626,12 +1629,16 @@ fn observe_world<I: WorldIo>(
     items_working: bool,
 ) {
     if io.observes_world() {
-        io.observe(listener.observation(
+        let mut observation = listener.observation(
             io.now_ms(),
             host.replication_progress().1,
             host.content_progress().1,
             items_working,
-        ));
+        );
+        if let Some(application) = host.application() {
+            observation.health.include_application(application.stats());
+        }
+        io.observe(observation);
     }
 }
 

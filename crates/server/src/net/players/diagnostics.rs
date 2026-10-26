@@ -109,13 +109,10 @@ impl PlayerListener {
 
     pub(super) fn diagnose_unconsumed(&mut self, decoded: &[frame::Message<'_>]) {
         for message in decoded {
-            // Host-only challenges and the not-yet-owned level acknowledgement
-            // have no consumer here. A typed layout alone is not support.
+            // Host-only challenges have no client-to-host consumer here.
             if matches!(
                 message,
-                frame::Message::ChallengeFull(_)
-                    | frame::Message::ChallengeAwards(_)
-                    | frame::Message::LevelLoadedAck(_)
+                frame::Message::ChallengeFull(_) | frame::Message::ChallengeAwards(_)
             ) || (matches!(message, frame::Message::ChallengePlayerSync(_))
                 && self.challenges.catalog.is_none())
             {
@@ -428,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    fn typed_level_acknowledgement_stays_unsupported_without_its_consumer() {
+    fn session_owned_level_acknowledgement_does_not_warn_or_invent_a_reply() {
         let mut listener = PlayerListener::new(7);
         assert!(message(
             &mut listener,
@@ -438,7 +435,7 @@ mod tests {
                 identity: [4; 16],
             })
         ));
-        assert_eq!(listener.unsupported.total(), 1);
+        assert_eq!(listener.unsupported.total(), 0);
         assert!(listener.pending_content.is_empty());
     }
 
