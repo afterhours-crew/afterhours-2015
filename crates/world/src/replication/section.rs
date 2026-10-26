@@ -182,6 +182,9 @@ impl Bindings {
         self.waypoint_progress.clear();
     }
 
+    /// Decode received operations transactionally. A deletion of an already
+    /// absent object is accepted by the native reader; updates still require a
+    /// binding. Locally generated operations use the stricter `apply` contract.
     pub fn decode(&mut self, input: BitSpan<'_>) -> Result<Decoded, Error> {
         if input.len() > MAX_SECTION_BITS {
             return Err(Error::Bound);
@@ -201,7 +204,7 @@ impl Bindings {
         for &id in prefix.deleted() {
             let id = id as u16;
             id_valid(id)?;
-            next.objects.remove(&id).ok_or(Error::UnknownObject)?;
+            next.objects.remove(&id);
             next.scenes.remove(&id);
             next.entities.remove(&id);
             next.waypoint_progress.remove(&id);
@@ -561,3 +564,6 @@ fn encode_setup(w: &mut BitWriter, setup: Setup) -> Result<(), Error> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;
