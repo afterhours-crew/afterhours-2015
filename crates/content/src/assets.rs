@@ -90,9 +90,12 @@ impl AssetIndex {
         Ok(result)
     }
 
-    /// Exact object identities of a non-blueprint class in registry order.
-    /// Embedded objects may share a partition and have no asset name of their own.
-    pub(crate) fn registered_objects(
+    /// Exact object identities of a class in registry order, including classes
+    /// outside the Blueprint catalog. Each pair is a partition name and object
+    /// ordinal; embedded objects need not have an asset name of their own.
+    /// A valid registry without that class returns an empty list. A missing or
+    /// malformed registry is an error, not an empty catalog.
+    pub fn registered_objects(
         &mut self,
         bundle: &str,
         class: &str,
@@ -370,6 +373,33 @@ mod tests {
                         local_index: 2
                     }
                 )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn registered_objects_include_non_blueprints_and_preserve_registry_order() {
+        let (_dir, mut index) = index();
+        let bundle = synthetic::REGISTRY_BUNDLE;
+        assert_eq!(
+            index
+                .registered_objects(bundle, "LogicPrefabBlueprint")
+                .unwrap(),
+            [("prefabs/first".into(), 0), ("prefabs/second".into(), 0)]
+        );
+        assert_eq!(
+            index.registered_objects(bundle, "ItemSystemData").unwrap(),
+            [(crate::items::ITEM_SYSTEM.into(), 0)]
+        );
+        assert!(
+            index
+                .registered_objects(bundle, "AbsentClass")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            index
+                .registered_objects("levels/absent", "ItemSystemData")
                 .is_err()
         );
     }
