@@ -30,6 +30,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(test)]
+mod tests;
+
 /// How long preparation subcommands may run.
 const PREPARATION_DEADLINE: Duration = Duration::from_secs(600);
 /// The server also compiles installed event content before publishing readiness,
@@ -448,7 +451,7 @@ impl LiveSession {
                 .to_string_lossy()
                 .into_owned(),
         ];
-        self.run_server(executable, arguments)?;
+        self.run_server(executable, arguments, &digest, "relay")?;
         self.relay_sha256 = Some(digest);
         terminal::success("Connected to your server.");
         Ok(())
@@ -456,7 +459,22 @@ impl LiveSession {
 
     /// Start the server (or the relay standing in for it) and wait for its
     /// readiness record.
-    fn run_server(&mut self, executable: PathBuf, arguments: Vec<String>) -> Result<()> {
+    fn run_server(
+        &mut self,
+        executable: PathBuf,
+        arguments: Vec<String>,
+        expected_sha256: &str,
+        role: &str,
+    ) -> Result<()> {
+        let verify_executable = || -> Result<()> {
+            if crate::digest::sha256_file(&executable)? != expected_sha256 {
+                return Err(Failure::session(
+                    "Serving executable changed before readiness.",
+                ));
+            }
+            Ok(())
+        };
+        verify_executable()?;
         let spec = SpawnSpec {
             executable: executable.clone(),
             arguments,
@@ -469,23 +487,55 @@ impl LiveSession {
             // Map frames are only read in event mode or for the session API.
             map_feed: self.events.observed(),
         };
+        let spawned_utc = clock::now_iso();
         let mut server = self.platform.spawn(&spec)?;
         let deadline = Instant::now() + SERVER_READY_DEADLINE;
-        let line = loop {
-            let text = server.drain_diagnostics();
-            self.forward(DiagnosticSource::Server, &text);
-            server.check_logs()?;
-            if let Some(line) = server.first_line() {
-                break line?;
+        // Keep the child owned through every readiness/receipt failure. A
+        // preparation child never reaches this path; PID lookup by filename
+        // would instead select it or miss a renamed compatibility executable.
+        let result = (|| {
+            let line = loop {
+                let text = server.drain_diagnostics();
+                self.forward(DiagnosticSource::Server, &text);
+                server.check_logs()?;
+                if let Some(line) = server.first_line() {
+                    break line?;
+                }
+                if server.exited() || Instant::now() > deadline || self.stop_file_present() {
+                    return Err(Failure::session("Server did not become ready."));
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            };
+            let ready = self.parse_ready(&line, server.id())?;
+            if server.exited() || self.stop_file_present() {
+                return Err(Failure::session(
+                    "Server exited or was stopped before readiness.",
+                ));
             }
-            if server.exited() || Instant::now() > deadline {
-                server.kill();
-                return Err(Failure::session("Server did not become ready."));
+            verify_executable()?;
+            let receipt = serde_json::json!({
+                "format": "afterhours-serving-process-v1",
+                "session_id": self.request.id,
+                "role": role,
+                "worker_pid": std::process::id(),
+                "pid": server.id(),
+                "spawned_utc": spawned_utc,
+                "ready_utc": clock::now_iso(),
+                "executable": spec.executable,
+                "executable_sha256": expected_sha256,
+                "working_directory": spec.working_directory,
+                "arguments": spec.arguments,
+                "readiness": serde_json::from_str::<serde_json::Value>(&line)?
+            });
+            if serde_json::to_vec(&receipt)?.len() as u64 > records::MAX_RECORD_BYTES {
+                return Err(Failure::session(
+                    "Serving process receipt exceeds its bound.",
+                ));
             }
-            std::thread::sleep(Duration::from_millis(100));
-        };
-        let ready = self.parse_ready(&line, server.id());
-        let ready = match ready {
+            records::write_new_json(&self.run.join("server-process.json"), &receipt)?;
+            Ok(ready)
+        })();
+        let ready = match result {
             Ok(ready) => ready,
             Err(e) => {
                 server.kill();
@@ -617,7 +667,8 @@ impl Steps for LiveSession {
         };
         let arguments = self.server_arguments(&prepared, &account)?;
         let arguments = self.request.server_arguments(arguments);
-        self.run_server(executable, arguments)?;
+        let digest = self.request.server_sha256.clone();
+        self.run_server(executable, arguments, &digest, "local-server")?;
         terminal::success("Your local server is ready.");
         Ok(())
     }

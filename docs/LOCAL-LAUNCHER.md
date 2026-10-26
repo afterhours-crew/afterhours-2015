@@ -378,6 +378,14 @@ therefore always in the log. The JSON results of preparation steps are kept
 from their start instead; one that would exceed 4 MiB fails the step. The
 server recording has a 64 MiB, 100,000-event and 256-stream budget. It stops
 recording at the limit and continues serving.
+After the serving child reports readiness with its own process ID, the launcher
+writes `server-process.json` in the session directory. This bounded receipt keeps
+the session ID, server or relay role, process IDs, executable path and SHA-256,
+working directory, exact argument array, spawn/readiness times and readiness
+record. It excludes preparation children and works with compatibility filenames
+and bundled server roles. A receipt failure stops startup before game launch.
+The receipt is historical provenance; its PID does not prove a process is still
+alive, and server readiness does not establish playable-game acceptance.
 These bounds are per run. When a session starts, only the newest 20 sessions
 are kept (as many as `sessions` lists by default): older ones lose their
 `artifacts/launcher/<session-id>/` folder and their `artifacts/runs/<session-id>/`
