@@ -114,7 +114,9 @@ pub struct WorldServe {
 }
 
 mod items;
+mod observation;
 mod players;
+pub use observation::{ParticipantObservation, WorldHealth, WorldObservation};
 mod qos;
 #[cfg(feature = "network-test")]
 mod test_loss;
@@ -1074,6 +1076,16 @@ pub enum WorldInput {
 /// What the world loop reads, sends and timestamps with: the UDP socket and
 /// the wall clock live, a recorded run in the reference harness.
 pub trait WorldIo: Send {
+    /// Opt in to read-only validation snapshots. Live sockets avoid this work.
+    fn observes_world(&self) -> bool {
+        false
+    }
+    /// Called before waiting for input, after receiving it, and after flushing
+    /// output. An early Stopped/Refused result is still a failed run even if its
+    /// final snapshot predates the error. Snapshots do not certify gameplay.
+    fn observe(&mut self, observation: WorldObservation) {
+        let _ = observation;
+    }
     /// Milliseconds on the world clock.
     fn now_ms(&self) -> u64;
     /// Microseconds since the Unix epoch, for durable timestamps.
@@ -1442,6 +1454,7 @@ pub async fn run_world<I: WorldIo>(
             return WorldEnd::Stopped;
         }
         let advance_ms = advance_started.elapsed().as_millis() as u64;
+        observe_world(io, &listener, &host, items.working());
         let receive_started = Instant::now();
         let working = items.working();
         let output = tokio::select! {
@@ -1463,6 +1476,7 @@ pub async fn run_world<I: WorldIo>(
             }
         };
         let receive_or_poll_ms = receive_started.elapsed().as_millis() as u64;
+        observe_world(io, &listener, &host, items.working());
         let queue_started = Instant::now();
         if !items.advance(&mut host, &output.events, io.now_ms()) {
             return WorldEnd::Stopped;
@@ -1563,6 +1577,7 @@ pub async fn run_world<I: WorldIo>(
                 other => info!(connection, event = ?other, "world"),
             }
         }
+        observe_world(io, &listener, &host, items.working());
         if !io.send(&output.send).await {
             return WorldEnd::Ended;
         }
@@ -1597,6 +1612,22 @@ pub async fn run_world<I: WorldIo>(
             );
             return WorldEnd::Closed;
         }
+    }
+}
+
+fn observe_world<I: WorldIo>(
+    io: &mut I,
+    listener: &players::PlayerListener,
+    host: &Host,
+    items_working: bool,
+) {
+    if io.observes_world() {
+        io.observe(listener.observation(
+            io.now_ms(),
+            host.replication_progress().1,
+            host.content_progress().1,
+            items_working,
+        ));
     }
 }
 

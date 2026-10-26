@@ -732,6 +732,13 @@ fn an_unreported_intro_stops_after_the_fallback() {
     assert_eq!(h.run(3_000, vec![]).calls(), h.flags(0)[3..]);
     let intro = h.race().sequence.unwrap().1;
     assert!(h.run(2_000 + INTRO_FALLBACK_MS - 1, vec![]).rpcs.is_empty());
+    assert_eq!(
+        h.listener
+            .observation(0, 0, 0, false)
+            .health
+            .event_intro_fallbacks,
+        0
+    );
     let stop = h.run(2_000 + INTRO_FALLBACK_MS, vec![]);
     assert!(
         matches!(stop.rpcs.as_slice(), [HostRpc::SequenceStop(Stop { sequence, .. })] if *sequence == intro)
@@ -741,6 +748,13 @@ fn an_unreported_intro_stops_after_the_fallback() {
         h.run(40_000, vec![logic(INTRO_READY, intro)])
             .rpcs
             .is_empty()
+    );
+    assert_eq!(
+        h.listener
+            .observation(40_000, 0, 0, false)
+            .health
+            .event_intro_fallbacks,
+        1
     );
 }
 

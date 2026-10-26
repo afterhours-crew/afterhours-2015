@@ -49,7 +49,8 @@ impl PlayerListener {
         }
         if let Some(arrivals) = self.arrivals.as_mut() {
             for stop in arrivals.poll(world_ms)? {
-                tracing::info!(
+                self.sequence_fallbacks[1] = self.sequence_fallbacks[1].saturating_add(1);
+                tracing::warn!(
                     sequence = stop.sequence,
                     world_ms,
                     "owned arrive sequence not reported; Stop queued after the fallback"
@@ -100,6 +101,7 @@ impl PlayerListener {
                 );
             } else {
                 // The emergency path: readiness never held. Acceptance fails.
+                self.sequence_fallbacks[0] = self.sequence_fallbacks[0].saturating_add(1);
                 tracing::warn!(
                     sequence = stop.sequence,
                     world_ms,

@@ -177,7 +177,7 @@ impl PlayerListener {
             ));
         }
         for stop in &stops {
-            tracing::info!(
+            tracing::warn!(
                 sequence = stop.sequence,
                 "crash sequence fallback Stop queued"
             );
@@ -195,6 +195,7 @@ impl PlayerListener {
             }
         }
         self.crashes = Some(crashes);
+        self.sequence_fallbacks[2] = self.sequence_fallbacks[2].saturating_add(stops.len());
         self.players = players;
         self.participants = participants;
         self.logic_ghosts = ghosts;

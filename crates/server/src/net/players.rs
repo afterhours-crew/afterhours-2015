@@ -109,6 +109,9 @@ pub(super) struct PlayerListener {
     rivals_failed: bool,
     /// Human sync, rival-source collection, rival sync; fixed-size counters.
     optional_map_failures: [usize; 3],
+    /// Waiting, arrive, crash: counted only when the fallback is committed.
+    sequence_fallbacks: [usize; 3],
+    scoring_failed: bool,
     ai: crate::ai_settings::AiSettings,
     garage_presence: nfs_world::garage::presence::Presence,
     spawn_points: nfs_world::spawn_points::SpawnPoints,
@@ -882,6 +885,8 @@ impl PlayerListener {
             rival_population: None,
             rivals_failed: false,
             optional_map_failures: [0; 3],
+            sequence_fallbacks: [0; 3],
+            scoring_failed: false,
             ai: crate::ai_settings::AiSettings::default(),
             garage_presence: nfs_world::garage::presence::Presence::default(),
             spawn_points: nfs_world::spawn_points::SpawnPoints::default(),

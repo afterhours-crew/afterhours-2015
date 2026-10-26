@@ -208,7 +208,8 @@ pub(in crate::net) struct State {
     /// Completions of this session, the event half of the credit batch IDs.
     completed: u64,
     pub(in crate::net::players) ai_cursor: crate::event_ai::Cursor,
-    failed: bool,
+    pub(super) failed: bool,
+    pub(super) intro_fallbacks: usize,
     restarts: BTreeMap<u16, restart::Instance>,
     /// Next authored location in this session's event restart grid.
     restart_cursor: BTreeMap<u32, usize>,
@@ -1789,7 +1790,8 @@ impl PlayerListener {
                         sequence: *ghost,
                         serial: Serial::new(1).ok_or(replication::Error::Shape)?,
                     }));
-                    tracing::info!(
+                    state.intro_fallbacks = state.intro_fallbacks.saturating_add(1);
+                    tracing::warn!(
                         participant,
                         sequence = *ghost,
                         "owned event intro not reported; Stop after the fallback"

@@ -36,6 +36,56 @@ pub(super) enum Route {
 }
 
 impl PlayerListener {
+    pub(in crate::net) fn observation(
+        &self,
+        world_ms: u64,
+        replication_pending: usize,
+        content_pending: usize,
+        items_working: bool,
+    ) -> crate::net::WorldObservation {
+        use crate::net::{ParticipantObservation, WorldHealth, WorldObservation};
+        WorldObservation {
+            world_ms,
+            health: WorldHealth {
+                refused_frames: self.refused,
+                decode_errors: self.stats.errors,
+                unsupported_operations: self.unsupported.total(),
+                optional_map_failures: self.optional_map_failures,
+                waiting_fallbacks: self.sequence_fallbacks[0],
+                arrival_fallbacks: self.sequence_fallbacks[1],
+                crash_fallbacks: self.sequence_fallbacks[2],
+                event_intro_fallbacks: self.event_state.intro_fallbacks,
+                disabled_systems: [
+                    self.traffic_failed,
+                    self.rivals_failed,
+                    self.scoring_failed,
+                    self.event_state.failed,
+                ],
+            },
+            participants: self
+                .players
+                .player_participants()
+                .map(|participant| ParticipantObservation {
+                    participant,
+                    stage: self.participants.stage(participant),
+                    chapter: self.participants.intro_chapter(participant),
+                })
+                .collect(),
+            owned_queues: [
+                self.pending.len(),
+                self.pending_entries.len(),
+                self.pending_rpcs.len(),
+                self.pending_content.len(),
+                self.pending_speedwalls.len(),
+                self.story_pending.len(),
+                self.pending_teleports.len(),
+            ],
+            replication_pending,
+            content_pending,
+            items_working,
+        }
+    }
+
     pub(in crate::net) fn with_connection(mut self, connection: u32) -> Self {
         self.unsupported = crate::diagnostics::Unsupported::new("world", connection);
         self
@@ -126,6 +176,39 @@ mod tests {
         bits::BitWriter,
         logic::{EntityRef, Message as Logic},
     };
+
+    #[test]
+    fn observations_retain_failures_after_a_later_accepted_frame() {
+        let mut listener = PlayerListener::new(7);
+        assert!(!listener.refuse(replication::Error::UnknownObject));
+        assert!(!listener.refuse(replication::Error::UnknownObject));
+        let call = rpc(300);
+        assert!(message(
+            &mut listener,
+            0,
+            frame::Message::Opaque {
+                index: 47,
+                body: call.span()
+            }
+        ));
+        listener.disable_scoring();
+        let state = listener.observation(200, 3, 4, true);
+        assert_eq!(state.health.refused_frames, 2);
+        assert_eq!(state.health.unsupported_operations, 1);
+        assert!(state.health.disabled_systems[2]);
+        assert_eq!(
+            (
+                state.replication_pending,
+                state.content_pending,
+                state.items_working
+            ),
+            (3, 4, true)
+        );
+        assert_eq!(
+            PlayerListener::new(8).observation(200, 0, 0, false).health,
+            crate::net::WorldHealth::default()
+        );
+    }
 
     fn message(listener: &mut PlayerListener, sequence: u8, value: frame::Message<'_>) -> bool {
         let wire = frame::Builder::new()

@@ -664,6 +664,7 @@ impl PlayerListener {
     /// Stop scoring for this session after a fault. Created entities stay in
     /// the client world unchanged; no further ticks, reports or credits.
     pub(in crate::net) fn disable_scoring(&mut self) {
+        self.scoring_failed = true;
         let base = self.scoring_state.batch_base;
         self.scoring = None;
         self.scoring_state = State {
