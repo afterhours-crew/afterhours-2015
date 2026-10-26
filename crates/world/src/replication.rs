@@ -217,6 +217,7 @@ pub enum Initial {
     ChaseTargetGoal(target_goal::Chase),
     LookForLawbreakersGoal(target_goal::LookForLawbreakers),
     Actor(ActorInit),
+    DirectEntity(direct_entity::Prefix),
     Entity {
         prefix: entity::creation::Prefix,
         fields: Vec<entity::Initial>,
@@ -251,7 +252,7 @@ impl Initial {
             Self::FollowTargetGoal(_) => Kind::FollowTargetGoal,
             Self::ChaseTargetGoal(_) => Kind::ChaseTargetGoal,
             Self::LookForLawbreakersGoal(_) => Kind::LookForLawbreakersGoal,
-            Self::Entity { .. } | Self::Vehicle { .. } => Kind::Entity,
+            Self::Entity { .. } | Self::Vehicle { .. } | Self::DirectEntity(_) => Kind::Entity,
             Self::Participant(_) => Kind::Participant,
             Self::ParticipantLocationMap => Kind::ParticipantLocationMap,
             Self::PlayerView(_) => Kind::PlayerView,
@@ -278,6 +279,10 @@ pub enum Update {
     ChaseTargetGoal,
     LookForLawbreakersGoal,
     Actor(ActorUpdate),
+    DirectEntity {
+        binding: std::sync::Arc<direct_entity::Binding>,
+        fields: Option<direct_entity::References>,
+    },
     Entity {
         binding: std::sync::Arc<entity::creation::Binding>,
         fields: Vec<Option<entity::Update>>,
@@ -312,7 +317,7 @@ impl Update {
             Self::ChaseTargetGoal => Kind::ChaseTargetGoal,
             Self::LookForLawbreakersGoal => Kind::LookForLawbreakersGoal,
             Self::Actor(_) => Kind::Actor,
-            Self::Entity { .. } | Self::Vehicle { .. } => Kind::Entity,
+            Self::Entity { .. } | Self::Vehicle { .. } | Self::DirectEntity { .. } => Kind::Entity,
             Self::Participant(_) => Kind::Participant,
             Self::ParticipantLocationMap(_) => Kind::ParticipantLocationMap,
             Self::PlayerView(_) => Kind::PlayerView,
@@ -599,7 +604,10 @@ impl Writer {
     fn initial(&mut self, v: &Initial) -> Result<(), Error> {
         match v {
             Initial::ClientToServerInfo => {}
-            Initial::SubLevel { .. } | Initial::Entity { .. } | Initial::Vehicle { .. } => {
+            Initial::SubLevel { .. }
+            | Initial::Entity { .. }
+            | Initial::Vehicle { .. }
+            | Initial::DirectEntity(_) => {
                 return Err(Error::Unsupported);
             }
             Initial::PlayerManager | Initial::ParticipantLocationMap => {}
@@ -643,7 +651,10 @@ impl Writer {
     fn update(&mut self, v: &Update) -> Result<(), Error> {
         match v {
             Update::ClientToServerInfo(v) => v.write(self)?,
-            Update::SubLevel { .. } | Update::Entity { .. } | Update::Vehicle { .. } => {
+            Update::SubLevel { .. }
+            | Update::Entity { .. }
+            | Update::Vehicle { .. }
+            | Update::DirectEntity { .. } => {
                 return Err(Error::Unsupported);
             }
             Update::PlayerManager(v) => v.write(self)?,
@@ -790,7 +801,10 @@ impl Record {
         w.bit(self.initial.is_some())?;
         if matches!(
             &self.update,
-            Update::SubLevel { .. } | Update::Entity { .. } | Update::Vehicle { .. }
+            Update::SubLevel { .. }
+                | Update::Entity { .. }
+                | Update::Vehicle { .. }
+                | Update::DirectEntity { .. }
         ) {
             if self.initial.is_some() {
                 w.put(u64::from(self.update.kind().index()), 5)?;
@@ -798,6 +812,7 @@ impl Record {
             let body = match &self.update {
                 Update::Entity { .. } => self.entity_wire()?,
                 Update::Vehicle { .. } => self.vehicle_wire()?,
+                Update::DirectEntity { .. } => self.direct_entity_wire()?,
                 _ => self.scene_wire()?,
             };
             if w.0.len() + body.len() > MAX_RECORD_BITS {
@@ -817,6 +832,7 @@ impl Record {
 
 pub mod client_info;
 pub mod debris;
+pub mod direct_entity;
 pub mod entity;
 mod entity_record;
 pub mod goto_waypoint;

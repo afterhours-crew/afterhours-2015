@@ -2,7 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-use super::{Error, Initial, Kind, MAX_OBJECTS, Record, entity, sublevel};
+use super::{Error, Initial, Kind, MAX_OBJECTS, Record, direct_entity, entity, sublevel};
 use crate::bits::BitWriter;
 pub use nfs_protocol::world::ghost::Setup;
 use nfs_protocol::world::{
@@ -59,6 +59,8 @@ pub struct Bindings {
     content: Option<std::sync::Arc<sublevel::Content>>,
     entities: BTreeMap<u16, std::sync::Arc<entity::creation::Binding>>,
     entity_content: Option<std::sync::Arc<entity::creation::Content>>,
+    direct_entities: BTreeMap<u16, std::sync::Arc<direct_entity::Binding>>,
+    direct_content: Option<std::sync::Arc<direct_entity::Content>>,
     waypoint_progress: BTreeMap<u16, bool>,
 }
 
@@ -122,6 +124,21 @@ impl Bindings {
                 self.waypoint_progress.get(&id).copied(),
             );
         }
+        if kind == Kind::Entity
+            && (if create {
+                span.read_u32(19, 1).map_err(|_| Error::Truncated)? == 0
+            } else {
+                self.direct_entities.contains_key(&id)
+            })
+        {
+            return Record::decode_direct_entity(
+                span,
+                id,
+                create,
+                self.direct_content.as_deref(),
+                self.direct_entities.get(&id),
+            );
+        }
         Record::decode_context(
             span,
             bound,
@@ -149,6 +166,10 @@ impl Bindings {
     }
     pub fn with_entities(mut self, content: entity::creation::Content) -> Self {
         self.entity_content = Some(std::sync::Arc::new(content));
+        self
+    }
+    pub fn with_direct_entities(mut self, content: direct_entity::Content) -> Self {
+        self.direct_content = Some(std::sync::Arc::new(content));
         self
     }
     pub fn len(&self) -> usize {
@@ -182,6 +203,7 @@ impl Bindings {
         self.objects.clear();
         self.scenes.clear();
         self.entities.clear();
+        self.direct_entities.clear();
         self.waypoint_progress.clear();
     }
 
@@ -210,6 +232,7 @@ impl Bindings {
             next.objects.remove(&id);
             next.scenes.remove(&id);
             next.entities.remove(&id);
+            next.direct_entities.remove(&id);
             next.waypoint_progress.remove(&id);
             deleted.push(id);
         }
@@ -244,6 +267,10 @@ impl Bindings {
                 }
                 if let Some(binding) = decoded.record.entity_binding() {
                     next.entities.insert(id, std::sync::Arc::clone(binding));
+                }
+                if let Some(binding) = decoded.record.direct_entity_binding() {
+                    next.direct_entities
+                        .insert(id, std::sync::Arc::clone(binding));
                 }
             }
             boundaries.push(Boundary {
@@ -290,6 +317,7 @@ impl Bindings {
             next.objects.remove(&id);
             next.scenes.remove(&id);
             next.entities.remove(&id);
+            next.direct_entities.remove(&id);
             next.waypoint_progress.remove(&id);
         }
         let first = prefix
@@ -331,6 +359,10 @@ impl Bindings {
                             next.entities
                                 .insert(decoded.record.id, std::sync::Arc::clone(binding));
                         }
+                        if let Some(binding) = decoded.record.direct_entity_binding() {
+                            next.direct_entities
+                                .insert(decoded.record.id, std::sync::Arc::clone(binding));
+                        }
                     }
                     boundaries.push(Boundary {
                         id: decoded.record.id,
@@ -364,6 +396,7 @@ impl Bindings {
             next.objects.remove(&id).ok_or(Error::UnknownObject)?;
             next.scenes.remove(&id);
             next.entities.remove(&id);
+            next.direct_entities.remove(&id);
             next.waypoint_progress.remove(&id);
         }
         for record in &section.records {
@@ -394,6 +427,15 @@ impl Bindings {
                     next.entities
                         .insert(record.id, std::sync::Arc::clone(binding));
                 }
+                if let Some(binding) = record.direct_entity_binding() {
+                    if let Some(content) = &next.direct_content
+                        && content.binding(binding.asset())? != **binding
+                    {
+                        return Err(Error::TypeMismatch);
+                    }
+                    next.direct_entities
+                        .insert(record.id, std::sync::Arc::clone(binding));
+                }
             } else {
                 if next.get(record.id).ok_or(Error::UnknownObject)? != kind {
                     return Err(Error::TypeMismatch);
@@ -408,6 +450,9 @@ impl Bindings {
                     return Err(Error::TypeMismatch);
                 }
                 if record.entity_binding() != next.entities.get(&record.id) {
+                    return Err(Error::TypeMismatch);
+                }
+                if record.direct_entity_binding() != next.direct_entities.get(&record.id) {
                     return Err(Error::TypeMismatch);
                 }
             }
