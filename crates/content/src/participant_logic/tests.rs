@@ -299,6 +299,64 @@ fn synced_float_keeps_its_position_between_other_serializers() {
 }
 
 #[test]
+fn kickback_rpc_identity_keeps_the_following_property_aligned() {
+    use crate::graph::tests::{Memory, local};
+    use nfs_world::{
+        bits::BitWriter,
+        replication::entity::{Body, Initial},
+    };
+    let mut source = Memory::default();
+    source.put(
+        "a",
+        0,
+        "ParticipantLogicBlueprint",
+        &[
+            ("Flags", Value::UInt16(1)),
+            ("Objects", Value::Array(vec![local(1), local(2), local(3)])),
+        ],
+    );
+    source.put("a", 1, "ParticipantLogicEntityData", &[]);
+    source.put("a", 2, "KickbackNotificationEntityData", &[]);
+    source.put("a", 3, "SyncedBoolEntityData", &[]);
+    let rules = crate::BuildIdentity::supported().participant_logic;
+    let nodes = Graph::new(&mut source).read(Site::root("a")).unwrap();
+    let (_, fields) = shape(&nodes, &rules).unwrap();
+    let kinds = fields.iter().map(|(_, kind)| *kind).collect::<Vec<_>>();
+    assert_eq!(kinds, [Kind::Root, Kind::Rpc, Kind::BoolProperty]);
+    let profile = Profile::new(&kinds).unwrap();
+    // Initial root, Kickback's 9+10-bit RPC identity, and a Boolean. The RPC
+    // has an empty update, so its presence bit must not consume property data.
+    let mut wire = BitWriter::new();
+    wire.put(1, 16)
+        .put(0, 9)
+        .put(1, 10)
+        .put(0, 13)
+        .put(1, 9)
+        .put(3, 10)
+        .put(1, 1)
+        .put(0, 1)
+        .put(0, 1)
+        .put(1, 1)
+        .put(1, 1)
+        .put(1, 1)
+        .put(1, 1);
+    let decoded = Body::decode(wire.span(), &profile, true).unwrap();
+    assert_eq!(decoded.initial_bits, Some(69));
+    assert_eq!(decoded.bits, 74);
+    assert!(
+        matches!(&decoded.body.initial.as_ref().unwrap()[1], Initial::Rpc(rpc) if rpc.selector==1 && rpc.serial.value()==3)
+    );
+    assert_eq!(decoded.body.encode(&profile).unwrap(), wire);
+    let mut missing = rules.to_json();
+    missing["classes"]["KickbackNotificationEntityData"] = serde_json::Value::Null;
+    let (_, fields) = shape(&nodes, &Rules::from_json(&missing).unwrap()).unwrap();
+    let profile = Profile::new(&fields.iter().map(|(_, kind)| *kind).collect::<Vec<_>>()).unwrap();
+    assert!(
+        !Body::decode(wire.span(), &profile, true).is_ok_and(|decoded| decoded.bits == wire.len())
+    );
+}
+
+#[test]
 fn driving_queries_keep_distinct_serializers_and_unknown_classes_fail() {
     use crate::graph::tests::{Memory, local};
     let mut source = Memory::default();
