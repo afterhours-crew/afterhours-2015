@@ -376,9 +376,14 @@ impl Instances {
         if prefix.asset != content.data.asset {
             return Err(Error::TypeMismatch);
         }
-        let Some(entity::Initial::SequenceRoot {
-            rpc, participants, ..
-        }) = fields.first()
+        let Some(
+            entity::Initial::SequenceRoot {
+                rpc, participants, ..
+            }
+            | entity::Initial::VehicleSequenceRoot {
+                rpc, participants, ..
+            },
+        ) = fields.first()
         else {
             return Err(Error::TypeMismatch);
         };

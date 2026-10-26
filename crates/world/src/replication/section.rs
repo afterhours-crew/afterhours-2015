@@ -170,9 +170,12 @@ impl Bindings {
     /// intro's Stop when only the garage layouts were accepted).
     pub fn is_sequence(&self, id: u16) -> bool {
         self.entities.get(&id).is_some_and(|binding| {
-            binding
-                .profile()
-                .is_ok_and(|profile| profile.kinds().first() == Some(&entity::Kind::SequenceRoot))
+            binding.profile().is_ok_and(|profile| {
+                matches!(
+                    profile.kinds().first(),
+                    Some(entity::Kind::SequenceRoot | entity::Kind::VehicleSequenceRoot)
+                )
+            })
         })
     }
     pub fn reset(&mut self) {

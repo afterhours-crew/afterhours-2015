@@ -41,6 +41,7 @@ pub(crate) fn shape(nodes: &[Node], rules: &Rules) -> Result<(u16, Vec<Field>), 
         let kind = match role.as_deref() {
             None => continue,
             Some("root") => Kind::SequenceRoot,
+            Some("vehicle_root") => Kind::VehicleSequenceRoot,
             Some("provider") => Kind::RpcOptionalReference,
             Some("event") => Kind::Rpc,
             Some("channel") => Kind::RpcReference,
@@ -50,9 +51,9 @@ pub(crate) fn shape(nodes: &[Node], rules: &Rules) -> Result<(u16, Vec<Field>), 
         fields.push((node.site.clone(), node.object.class.clone(), kind));
     }
     if buses == 0
-        || fields
-            .first()
-            .is_none_or(|(_, _, kind)| *kind != Kind::SequenceRoot)
+        || fields.first().is_none_or(|(_, _, kind)| {
+            !matches!(kind, Kind::SequenceRoot | Kind::VehicleSequenceRoot)
+        })
     {
         return Err(bad("sequence root or bus count"));
     }
@@ -70,7 +71,7 @@ mod tests {
     };
 
     #[test]
-    fn participant_and_vehicle_sequences_share_root_shape_but_unknown_roots_fail() {
+    fn participant_and_vehicle_sequences_keep_distinct_updates_and_unknown_roots_fail() {
         let rules = crate::builds::profiles().unwrap().remove(0).sequences;
         for (blueprint, root) in [
             (
@@ -94,7 +95,14 @@ mod tests {
             let (buses, fields) = shape(&nodes, &rules).unwrap();
             assert_eq!(buses, 1);
             assert_eq!(fields.len(), 1);
-            assert_eq!(fields[0].2, Kind::SequenceRoot);
+            assert_eq!(
+                fields[0].2,
+                if root == "VehicleStateSequenceEntityData" {
+                    Kind::VehicleSequenceRoot
+                } else {
+                    Kind::SequenceRoot
+                }
+            );
             for class in ["StringEntityData", "TelemetryHookEntityData"] {
                 let mut node = nodes[1].clone();
                 node.object.class = class.into();

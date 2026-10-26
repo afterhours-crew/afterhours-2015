@@ -15,6 +15,9 @@ pub const MAX_STRING_BYTES: usize = 1023;
 pub enum Kind {
     Root,
     SequenceRoot,
+    /// Same initial fields as a participant sequence, with two optional goal
+    /// reference lists in its update serializer.
+    VehicleSequenceRoot,
     Rpc,
     RpcReference,
     RpcFlags,
@@ -66,8 +69,12 @@ impl Profile {
         if kinds.is_empty() || kinds.len() > MAX_SERIALIZERS {
             return Err(Error::Bound);
         }
-        let root =
-            |kind: &Kind| matches!(kind, Kind::Root | Kind::SequenceRoot | Kind::GameModeRoot);
+        let root = |kind: &Kind| {
+            matches!(
+                kind,
+                Kind::Root | Kind::SequenceRoot | Kind::VehicleSequenceRoot | Kind::GameModeRoot
+            )
+        };
         if !root(&kinds[0]) || kinds[1..].iter().any(root) {
             return Err(Error::Unsupported);
         }
@@ -106,6 +113,15 @@ pub enum Initial {
         reference: u16,
     },
     SequenceRoot {
+        value: u16,
+        rpc: Rpc,
+        manager: u16,
+        manager_selector: u16,
+        sequence: u32,
+        participants: Vec<u16>,
+        stopping: bool,
+    },
+    VehicleSequenceRoot {
         value: u16,
         rpc: Rpc,
         manager: u16,
@@ -184,6 +200,7 @@ impl Initial {
         match self {
             Self::Root { .. } => Kind::Root,
             Self::SequenceRoot { .. } => Kind::SequenceRoot,
+            Self::VehicleSequenceRoot { .. } => Kind::VehicleSequenceRoot,
             Self::Rpc(_) => Kind::Rpc,
             Self::RpcReference { .. } => Kind::RpcReference,
             Self::RpcFlags { .. } => Kind::RpcFlags,
@@ -211,6 +228,7 @@ impl Initial {
         match self {
             Self::Root { rpc, .. }
             | Self::SequenceRoot { rpc, .. }
+            | Self::VehicleSequenceRoot { rpc, .. }
             | Self::Rpc(rpc)
             | Self::RpcReference { rpc, .. }
             | Self::RpcFlags { rpc, .. }
@@ -245,6 +263,52 @@ pub enum Update {
     StringProperty(Option<Vec<u8>>),
     /// The scene codec's optional set of 64-bit values.
     Set64(Option<super::sublevel::Set64>),
+    VehicleSequence(VehicleSequenceUpdate),
+}
+
+/// Two independently replaced lists. Each list carries an 8-bit count; a slot
+/// has a presence bit followed by a Ghost reference when present. Keep absent
+/// lists, empty lists and empty slots distinct.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct VehicleSequenceUpdate {
+    pub lists: [Option<Vec<Option<u16>>>; 2],
+}
+impl VehicleSequenceUpdate {
+    fn read(r: &mut Reader<'_>) -> Result<Self, Error> {
+        let mut lists = [None, None];
+        for list in &mut lists {
+            *list = r.optional(|r| {
+                let count = r.take(8)?;
+                (0..count).map(|_| r.optional(Reader::reference)).collect()
+            })?;
+        }
+        Ok(Self { lists })
+    }
+    fn write(&self, w: &mut Writer) -> Result<(), Error> {
+        for list in &self.lists {
+            w.optional(list, |w, entries| {
+                if entries.len() > 255 {
+                    return Err(Error::Bound);
+                }
+                w.put(entries.len() as u64, 8)?;
+                for entry in entries {
+                    w.optional(entry, Writer::reference)?;
+                }
+                Ok(())
+            })?;
+        }
+        Ok(())
+    }
+    pub(crate) fn merge(&mut self, next: Self) {
+        for (current, incoming) in self.lists.iter_mut().zip(next.lists) {
+            if incoming.is_some() {
+                *current = incoming;
+            }
+        }
+    }
+    pub(crate) fn references(&self) -> impl Iterator<Item = u16> + '_ {
+        self.lists.iter().flatten().flatten().flatten().copied()
+    }
 }
 impl Update {
     fn matches(&self, kind: Kind) -> bool {
@@ -274,6 +338,7 @@ impl Update {
                 | (Self::I32Property(_), Kind::I32Property)
                 | (Self::StringProperty(_), Kind::StringProperty)
                 | (Self::Set64(_), Kind::RpcSet64)
+                | (Self::VehicleSequence(_), Kind::VehicleSequenceRoot)
         )
     }
 }
@@ -365,7 +430,7 @@ impl Body {
                         rpc: read_rpc(&mut r)?,
                         reference: r.reference()?,
                     },
-                    Kind::SequenceRoot => {
+                    Kind::SequenceRoot | Kind::VehicleSequenceRoot => {
                         let value = r.take(16)? as u16;
                         let rpc = read_rpc(&mut r)?;
                         let manager = r.reference()?;
@@ -375,14 +440,27 @@ impl Body {
                         let participants = (0..count)
                             .map(|_| r.reference())
                             .collect::<Result<_, _>>()?;
-                        Initial::SequenceRoot {
-                            value,
-                            rpc,
-                            manager,
-                            manager_selector,
-                            sequence,
-                            participants,
-                            stopping: r.bit()?,
+                        let stopping = r.bit()?;
+                        if *kind == Kind::VehicleSequenceRoot {
+                            Initial::VehicleSequenceRoot {
+                                value,
+                                rpc,
+                                manager,
+                                manager_selector,
+                                sequence,
+                                participants,
+                                stopping,
+                            }
+                        } else {
+                            Initial::SequenceRoot {
+                                value,
+                                rpc,
+                                manager,
+                                manager_selector,
+                                sequence,
+                                participants,
+                                stopping,
+                            }
                         }
                     }
                     Kind::Rpc => Initial::Rpc(read_rpc(&mut r)?),
@@ -540,6 +618,9 @@ impl Body {
                     | Kind::WaypointList
                     | Kind::RpcGuid => Update::Noop,
                     Kind::RpcSet64 => Update::Set64(read_set64(&mut r)?),
+                    Kind::VehicleSequenceRoot => {
+                        Update::VehicleSequence(VehicleSequenceUpdate::read(&mut r)?)
+                    }
                     Kind::RpcGhostReference => {
                         Update::GhostReference(r.optional(Reader::reference)?)
                     }
@@ -590,6 +671,15 @@ impl Body {
                     }
                     Initial::Rpc(rpc) => write_rpc(&mut w, rpc)?,
                     Initial::SequenceRoot {
+                        value,
+                        rpc,
+                        manager,
+                        manager_selector,
+                        sequence,
+                        participants,
+                        stopping,
+                    }
+                    | Initial::VehicleSequenceRoot {
                         value,
                         rpc,
                         manager,
@@ -772,6 +862,7 @@ impl Body {
                         w.optional(v, |w, v| w.string(v, 10, MAX_STRING_BYTES))?
                     }
                     Update::Set64(set) => write_set64(&mut w, set)?,
+                    Update::VehicleSequence(value) => value.write(&mut w)?,
                 }
             }
         }
@@ -787,6 +878,8 @@ mod game_mode_tests;
 mod query_tests;
 #[cfg(test)]
 mod sequence_tests;
+#[cfg(test)]
+mod vehicle_sequence_tests;
 
 pub mod creation;
 pub mod state;

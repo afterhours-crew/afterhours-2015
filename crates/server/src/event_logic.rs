@@ -1331,7 +1331,7 @@ pub fn live_sequences(world: &World, manager: (u16, u16)) -> u32 {
         .iter()
         .filter(|(_, object)| {
             matches!(&object.initial, RecordInitial::Entity { fields, .. }
-                if matches!(fields.first(), Some(Initial::SequenceRoot { manager: m, manager_selector: s, .. })
+                if matches!(fields.first(), Some(Initial::SequenceRoot { manager: m, manager_selector: s, .. } | Initial::VehicleSequenceRoot { manager: m, manager_selector: s, .. })
                     if (*m, *s) == manager))
         })
         .count() as u32

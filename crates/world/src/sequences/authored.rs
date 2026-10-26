@@ -38,7 +38,7 @@ impl Blueprint {
         let profile = Profile::new(fields)?;
         if bus_count == 0
             || embedded_bus == 0
-            || fields[0] != Kind::SequenceRoot
+            || !matches!(fields[0], Kind::SequenceRoot | Kind::VehicleSequenceRoot)
             || fields[1..].iter().any(|kind| {
                 !matches!(
                     kind,
@@ -103,6 +103,15 @@ impl Blueprint {
                     participants: vec![instance.participant],
                     stopping,
                 },
+                Kind::VehicleSequenceRoot => Initial::VehicleSequenceRoot {
+                    value: self.bus_count,
+                    rpc,
+                    manager: instance.manager.0,
+                    manager_selector: instance.manager.1,
+                    sequence: instance.number,
+                    participants: vec![instance.participant],
+                    stopping,
+                },
                 Kind::RpcOptionalReference => Initial::RpcOptionalReference {
                     rpc,
                     reference: Some(instance.participant),
@@ -126,7 +135,18 @@ impl Blueprint {
                 _ => return Err(Error::Unsupported),
             });
         }
-        let updates = vec![Some(Update::Noop); initial.len()];
+        let updates = self
+            .profile
+            .kinds()
+            .iter()
+            .map(|kind| {
+                Some(if *kind == Kind::VehicleSequenceRoot {
+                    Update::VehicleSequence(Default::default())
+                } else {
+                    Update::Noop
+                })
+            })
+            .collect();
         Ok(Creation {
             prefix: Prefix {
                 parent: None,
@@ -202,6 +222,30 @@ mod tests {
         let decoded = Body::decode(wire.span(), blueprint.profile(), true).unwrap();
         assert_eq!(decoded.body, creation.body);
         assert_eq!(decoded.bits, wire.span().len());
+    }
+
+    #[test]
+    fn vehicle_sequence_creation_has_its_required_update_payload() {
+        let blueprint = Blueprint::new(asset(), 1, 1, &[Kind::VehicleSequenceRoot]).unwrap();
+        let creation = blueprint
+            .creation(instance(), |_| panic!("no channels"))
+            .unwrap();
+        assert!(matches!(
+            creation.body.initial.as_ref().unwrap()[0],
+            Initial::VehicleSequenceRoot { .. }
+        ));
+        assert_eq!(
+            creation.body.updates,
+            vec![Some(Update::VehicleSequence(Default::default()))]
+        );
+        let wire = creation.body.encode(blueprint.profile()).unwrap();
+        assert_eq!(wire.len(), 113);
+        assert_eq!(
+            Body::decode(wire.span(), blueprint.profile(), true)
+                .unwrap()
+                .body,
+            creation.body
+        );
     }
 
     #[test]

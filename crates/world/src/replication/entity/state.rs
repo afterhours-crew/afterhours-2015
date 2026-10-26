@@ -15,6 +15,7 @@ pub struct State {
     initial: Vec<Initial>,
     /// The last set update of each `RpcSet64` field, by serializer index.
     sets: std::collections::BTreeMap<usize, Option<crate::replication::sublevel::Set64>>,
+    sequence_references: std::collections::BTreeMap<usize, super::VehicleSequenceUpdate>,
 }
 impl State {
     pub fn new(
@@ -50,6 +51,11 @@ impl State {
                     manager,
                     participants,
                     ..
+                }
+                | Initial::VehicleSequenceRoot {
+                    manager,
+                    participants,
+                    ..
                 } => !valid(*manager) || participants.iter().any(|id| !valid(*id)),
                 Initial::GameModeRoot(root) => {
                     root.bindings.iter().any(|(id, _)| !valid(*id))
@@ -77,9 +83,28 @@ impl State {
             profile,
             initial,
             sets: Default::default(),
+            sequence_references: Default::default(),
         };
         result.apply(creation.body.updates)?;
+        result.validate_sequence_references(known)?;
         Ok(result)
+    }
+
+    /// Check retained references after a tentative update, before the owner
+    /// publishes it. Removed goals are checked through the same snapshot path.
+    pub(crate) fn validate_sequence_references(
+        &self,
+        known: impl Fn(u16) -> bool,
+    ) -> Result<(), Error> {
+        if self
+            .sequence_references
+            .values()
+            .flat_map(super::VehicleSequenceUpdate::references)
+            .any(|id| id != 0 && !known(id))
+        {
+            return Err(Error::UnknownObject);
+        }
+        Ok(())
     }
 
     pub fn apply(&mut self, updates: Vec<Option<Update>>) -> Result<(), Error> {
@@ -93,8 +118,12 @@ impl State {
         .encode(&self.profile)?;
         let mut initial = self.initial.clone();
         let mut sets = self.sets.clone();
+        let mut sequence_references = self.sequence_references.clone();
         for (index, (value, update)) in initial.iter_mut().zip(updates).enumerate() {
             match (value, update) {
+                (Initial::VehicleSequenceRoot { .. }, Some(Update::VehicleSequence(next))) => {
+                    sequence_references.entry(index).or_default().merge(next);
+                }
                 (Initial::RpcSet64(_), Some(Update::Set64(next))) => {
                     sets.insert(index, next);
                 }
@@ -116,6 +145,7 @@ impl State {
         }
         self.initial = initial;
         self.sets = sets;
+        self.sequence_references = sequence_references;
         Ok(())
     }
 
@@ -144,6 +174,12 @@ impl State {
                     | Kind::WaypointList
                     | Kind::RpcGuid => Update::Noop,
                     Kind::RpcSet64 => Update::Set64(self.sets.get(&index).cloned().flatten()),
+                    Kind::VehicleSequenceRoot => Update::VehicleSequence(
+                        self.sequence_references
+                            .get(&index)
+                            .cloned()
+                            .unwrap_or_default(),
+                    ),
                     Kind::RpcGhostReference => Update::GhostReference(None),
                     Kind::BoolProperty => Update::BoolProperty(None),
                     Kind::FloatProperty => Update::FloatProperty(None),

@@ -1163,7 +1163,7 @@
       "TextPresentationDataCollectorEntityData": null,
       "TorusTransposerEntityData": null,
       "UIntPresentationDataCollectorEntityData": null,
-      "VehicleStateSequenceEntityData": "root",
+      "VehicleStateSequenceEntityData": "vehicle_root",
       "WanderCommandEntityData": null,
       "AndEntityData": null,
       "BoolPresentationDataCollectorEntityData": null,

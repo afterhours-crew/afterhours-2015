@@ -139,6 +139,7 @@ impl World {
                 entity::state::State::new(creation, &content, |id| self.objects.contains_key(&id))?;
             let before = state.clone();
             state.apply(fields.clone())?;
+            state.validate_sequence_references(|id| self.objects.contains_key(&id))?;
             if state == before {
                 return Ok(None);
             }
