@@ -211,6 +211,7 @@ impl World {
         let target = match initial {
             Initial::FollowTargetGoal(goal) => Some(goal.target),
             Initial::ChaseTargetGoal(goal) => Some(goal.target),
+            Initial::LookForLawbreakersGoal(goal) => Some(goal.target),
             _ => None,
         };
         if let Some(target) = target
@@ -546,7 +547,8 @@ impl Update {
             (Self::SpeedLimitGoal, Self::SpeedLimitGoal) => {}
             (Self::ScriptedInputGoal, Self::ScriptedInputGoal) => {}
             (Self::FollowTargetGoal, Self::FollowTargetGoal)
-            | (Self::ChaseTargetGoal, Self::ChaseTargetGoal) => {}
+            | (Self::ChaseTargetGoal, Self::ChaseTargetGoal)
+            | (Self::LookForLawbreakersGoal, Self::LookForLawbreakersGoal) => {}
             (Self::Participant(a), Self::Participant(b)) => {
                 replace(&mut a.player, &b.player);
                 replace(&mut a.entity, &b.entity);

@@ -82,6 +82,7 @@ fn chase_has_no_rpc_or_optional_triple_and_updates_are_empty() {
     for (kind, update) in [
         (Kind::ChaseTargetGoal, Update::ChaseTargetGoal),
         (Kind::FollowTargetGoal, Update::FollowTargetGoal),
+        (Kind::LookForLawbreakersGoal, Update::LookForLawbreakersGoal),
     ] {
         let record = Record {
             id: 40,
@@ -95,6 +96,85 @@ fn chase_has_no_rpc_or_optional_triple_and_updates_are_empty() {
         assert_eq!(decoded.record, record);
         assert_eq!(decoded.bits, 14);
     }
+}
+
+#[test]
+fn lawbreakers_native_sequence_has_one_creation_flag_and_no_rpc() {
+    for (allocation_serial, target, flag) in [(0, 0, false), (63, 8191, true)] {
+        let mut wire = BitWriter::new();
+        wire.put(42, 13)
+            .put(1, 1)
+            .put(10, 5)
+            .put(u64::from(allocation_serial), 6)
+            .put(u64::from(target), 13)
+            .put(u64::from(flag), 1);
+        let expected = Record {
+            id: 42,
+            initial: Some(Initial::LookForLawbreakersGoal(LookForLawbreakers {
+                allocation_serial,
+                target,
+                flag,
+            })),
+            update: Update::LookForLawbreakersGoal,
+        };
+        let decoded = Record::decode(wire.span(), None).unwrap();
+        assert_eq!(decoded.record, expected);
+        assert_eq!((decoded.bits, decoded.initial_bits), (39, Some(39)));
+        assert_eq!(expected.encode().unwrap().span(), wire.span());
+        for bits in 0..39 {
+            assert_eq!(
+                Record::decode(wire.span().slice(0, bits).unwrap(), None),
+                Err(Error::Truncated)
+            );
+        }
+        wire.put(0x5a, 8);
+        assert_eq!(Record::decode(wire.span(), None).unwrap().bits, 39);
+        for (allocation_serial, target) in [(64, 1), (1, 8192)] {
+            let invalid = Record {
+                initial: Some(Initial::LookForLawbreakersGoal(LookForLawbreakers {
+                    allocation_serial,
+                    target,
+                    flag,
+                })),
+                ..expected.clone()
+            };
+            assert!(invalid.encode().is_err());
+        }
+    }
+}
+
+#[test]
+fn lawbreakers_owned_reference_is_checked_before_mutation_and_retirement() {
+    let initial = |target| {
+        Initial::LookForLawbreakersGoal(LookForLawbreakers {
+            allocation_serial: 0,
+            target,
+            flag: false,
+        })
+    };
+    let mut world = World::default();
+    assert_eq!(
+        world.spawn(initial(9), Update::LookForLawbreakersGoal),
+        Err(Error::UnknownObject)
+    );
+    assert!(world.is_empty());
+    let target = world
+        .spawn(
+            Initial::PlayerManager,
+            Update::PlayerManager(Default::default()),
+        )
+        .unwrap()
+        .id;
+    let goal = world
+        .spawn(initial(target), Update::LookForLawbreakersGoal)
+        .unwrap()
+        .id;
+    assert_eq!(world.change(goal, Update::LookForLawbreakersGoal), Ok(None));
+    assert_eq!(world.remove(target), Err(Error::UnknownObject));
+    assert!(world.get(target).is_some());
+    world.remove(goal).unwrap();
+    world.remove(target).unwrap();
+    assert!(world.is_empty());
 }
 
 #[test]

@@ -43,6 +43,7 @@ pub enum Kind {
     ScriptedInputGoal,
     FollowTargetGoal,
     ChaseTargetGoal,
+    LookForLawbreakersGoal,
 }
 impl Kind {
     pub fn index(self) -> u8 {
@@ -67,6 +68,7 @@ impl Kind {
             Self::ScriptedInputGoal => 19,
             Self::FollowTargetGoal => 8,
             Self::ChaseTargetGoal => 3,
+            Self::LookForLawbreakersGoal => 10,
         }
     }
     fn from_index(index: u8) -> Result<Self, Error> {
@@ -91,6 +93,7 @@ impl Kind {
             19 => Ok(Self::ScriptedInputGoal),
             8 => Ok(Self::FollowTargetGoal),
             3 => Ok(Self::ChaseTargetGoal),
+            10 => Ok(Self::LookForLawbreakersGoal),
             _ => Err(Error::Unsupported),
         }
     }
@@ -212,6 +215,7 @@ pub enum Initial {
     ScriptedInputGoal(scripted_input::Initial),
     FollowTargetGoal(target_goal::Follow),
     ChaseTargetGoal(target_goal::Chase),
+    LookForLawbreakersGoal(target_goal::LookForLawbreakers),
     Actor(ActorInit),
     Entity {
         prefix: entity::creation::Prefix,
@@ -246,6 +250,7 @@ impl Initial {
             Self::ScriptedInputGoal(_) => Kind::ScriptedInputGoal,
             Self::FollowTargetGoal(_) => Kind::FollowTargetGoal,
             Self::ChaseTargetGoal(_) => Kind::ChaseTargetGoal,
+            Self::LookForLawbreakersGoal(_) => Kind::LookForLawbreakersGoal,
             Self::Entity { .. } | Self::Vehicle { .. } => Kind::Entity,
             Self::Participant(_) => Kind::Participant,
             Self::ParticipantLocationMap => Kind::ParticipantLocationMap,
@@ -271,6 +276,7 @@ pub enum Update {
     ScriptedInputGoal,
     FollowTargetGoal,
     ChaseTargetGoal,
+    LookForLawbreakersGoal,
     Actor(ActorUpdate),
     Entity {
         binding: std::sync::Arc<entity::creation::Binding>,
@@ -304,6 +310,7 @@ impl Update {
             Self::ScriptedInputGoal => Kind::ScriptedInputGoal,
             Self::FollowTargetGoal => Kind::FollowTargetGoal,
             Self::ChaseTargetGoal => Kind::ChaseTargetGoal,
+            Self::LookForLawbreakersGoal => Kind::LookForLawbreakersGoal,
             Self::Actor(_) => Kind::Actor,
             Self::Entity { .. } | Self::Vehicle { .. } => Kind::Entity,
             Self::Participant(_) => Kind::Participant,
@@ -425,6 +432,9 @@ impl Reader<'_> {
             }
             Kind::FollowTargetGoal => Initial::FollowTargetGoal(target_goal::Follow::read(self)?),
             Kind::ChaseTargetGoal => Initial::ChaseTargetGoal(target_goal::Chase::read(self)?),
+            Kind::LookForLawbreakersGoal => {
+                Initial::LookForLawbreakersGoal(target_goal::LookForLawbreakers::read(self)?)
+            }
             Kind::AiPacingGroup => Initial::AiPacingGroup,
             Kind::DebrisManager => Initial::DebrisManager(debris::Initial::read(self)?),
             Kind::PursuitInfo => Initial::PursuitInfo,
@@ -470,6 +480,7 @@ impl Reader<'_> {
             Kind::ScriptedInputGoal => Update::ScriptedInputGoal,
             Kind::FollowTargetGoal => Update::FollowTargetGoal,
             Kind::ChaseTargetGoal => Update::ChaseTargetGoal,
+            Kind::LookForLawbreakersGoal => Update::LookForLawbreakersGoal,
             Kind::AiPacingGroup => Update::AiPacingGroup(pacing::Update::read(self)?),
             Kind::DebrisManager => Update::DebrisManager(debris::Update::read(self)?),
             Kind::PursuitInfo => Update::PursuitInfo(pursuit::Update::read(self)?),
@@ -601,6 +612,7 @@ impl Writer {
             Initial::ScriptedInputGoal(v) => v.write(self)?,
             Initial::FollowTargetGoal(v) => v.write(self)?,
             Initial::ChaseTargetGoal(v) => v.write(self)?,
+            Initial::LookForLawbreakersGoal(v) => v.write(self)?,
             Initial::AiPacingGroup | Initial::PursuitInfo => {}
             Initial::DebrisManager(v) => v.write(self)?,
             Initial::Actor(v) => {
@@ -643,7 +655,8 @@ impl Writer {
             Update::GotoWaypointGoal(v) => v.write(self)?,
             Update::SpeedLimitGoal => {}
             Update::ScriptedInputGoal => {}
-            Update::FollowTargetGoal | Update::ChaseTargetGoal => {}
+            Update::FollowTargetGoal | Update::ChaseTargetGoal | Update::LookForLawbreakersGoal => {
+            }
             Update::AiPacingGroup(v) => v.write(self)?,
             Update::DebrisManager(v) => v.write(self)?,
             Update::PursuitInfo(v) => v.write(self)?,

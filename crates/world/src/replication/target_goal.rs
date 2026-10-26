@@ -2,7 +2,8 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! FollowTargetGoal (8) and ChaseTargetGoal (3). Follow has a completable-goal
+//! FollowTargetGoal (8), ChaseTargetGoal (3) and LookForLawbreakersGoal (10).
+//! Follow has a completable-goal
 //! RPC identity and an optional ordered triple; chase has neither. Both native
 //! update serializers are empty. The triple's gameplay meaning is not assumed.
 use super::{Error, Reader, Writer};
@@ -22,6 +23,15 @@ pub struct Follow {
 pub struct Chase {
     pub allocation_serial: u8,
     pub target: u16,
+}
+
+/// A participant reference plus the native creation flag. The flag's gameplay
+/// meaning is not inferred from the serializer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LookForLawbreakers {
+    pub allocation_serial: u8,
+    pub target: u16,
+    pub flag: bool,
 }
 
 fn finite(values: [u32; 3]) -> Result<[u32; 3], Error> {
@@ -68,6 +78,22 @@ impl Chase {
     pub(super) fn write(&self, w: &mut Writer) -> Result<(), Error> {
         w.put(u64::from(self.allocation_serial), 6)?;
         w.reference(&self.target)
+    }
+}
+
+impl LookForLawbreakers {
+    pub(super) fn read(r: &mut Reader<'_>) -> Result<Self, Error> {
+        Ok(Self {
+            allocation_serial: r.take(6)? as u8,
+            target: r.reference()?,
+            flag: r.bit()?,
+        })
+    }
+
+    pub(super) fn write(&self, w: &mut Writer) -> Result<(), Error> {
+        w.put(u64::from(self.allocation_serial), 6)?;
+        w.reference(&self.target)?;
+        w.put(u64::from(self.flag), 1)
     }
 }
 
