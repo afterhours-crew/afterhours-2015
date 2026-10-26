@@ -22,12 +22,14 @@ use nfs_world::replication::{
     },
 };
 
-pub(super) const BLUEPRINTS: [&str; 5] = [
+// Free-roam statistics still receives event-gated sample/debug updates through
+// GarageLogic. Keep that object's complete lifecycle with its current owner
+// until those updates also move; transferring only allocation would orphan them.
+pub(super) const BLUEPRINTS: [&str; 4] = [
     "gameplay/lockvehicleinputparticipantlogic",
     "presentation/loadingscreenstatepresentationblueprint",
     "presentation/suppressvoipblueprint",
     "gameplay/stats/garagestatslogic",
-    "gameplay/driverdetails/freeroamstatslogic",
 ];
 
 #[derive(Clone, Debug)]
