@@ -188,6 +188,8 @@ pub struct Movement<'a> {
 }
 
 pub struct Ghost<'a> {
+    /// Bit offset of the section prefix in its enclosing frame.
+    pub start: usize,
     pub prefix: Prefix<'a>,
     pub records: BitSpan<'a>,
 }
@@ -211,6 +213,50 @@ pub struct Frame<'a> {
     pub files: Vec<(u8, crate::files::Record)>,
     pub complete: bool,
     pub rest: usize,
+}
+
+impl Frame<'_> {
+    /// Resume the handlers after a canonically decoded nonempty Ghost section.
+    /// `ghost_bits` includes its section prefix. Validate the remainder through
+    /// byte alignment; do not silently lose a File start beside object records.
+    /// File state is returned only after the entire tail decodes successfully.
+    pub fn finish_ghost(
+        &mut self,
+        data: BitSpan<'_>,
+        ghost_bits: usize,
+        sizes: [Option<usize>; 2],
+    ) -> Result<usize, Error> {
+        let ghost = self.ghost.as_ref().ok_or(Error::Shape)?;
+        if ghost.prefix.remaining_records() == 0 || !self.files.is_empty() {
+            return Err(Error::Shape);
+        }
+        let pos = ghost.start.checked_add(ghost_bits).ok_or(Error::Shape)?;
+        let minimum = ghost
+            .records
+            .start()
+            .checked_sub(data.start())
+            .ok_or(Error::Shape)?;
+        if pos < minimum || pos > data.len() {
+            return Err(Error::Shape);
+        }
+        let mut r = Reader { span: data, pos };
+        let mut files = Vec::new();
+        for handler in 4..=5 {
+            if self.mask & (1 << handler) != 0 {
+                let (record, consumed) =
+                    crate::files::decode(r.rest()?, sizes[usize::from(handler - 4)])
+                        .map_err(Error::File)?;
+                r.pos += consumed;
+                files.push((handler, record));
+            }
+        }
+        if r.rest()?.len() >= 8 {
+            return Err(Error::Shape);
+        }
+        self.files = files;
+        self.complete = true;
+        Ok(r.pos)
+    }
 }
 
 struct Reader<'a> {
@@ -593,6 +639,7 @@ fn parse_inner(
             }
             MOVEMENT => frame.movement = Some(movement(&mut r, direction)?),
             GHOST => {
+                let start = r.pos;
                 let rest = r.rest()?;
                 let prefix = Prefix::decode(
                     rest,
@@ -608,12 +655,17 @@ fn parse_inner(
                 if prefix.remaining_records() == 0 {
                     r.pos += rest.len() - records.len();
                     frame.ghost = Some(Ghost {
+                        start,
                         prefix,
                         records: records.slice(0, 0)?,
                     });
                     continue;
                 }
-                frame.ghost = Some(Ghost { prefix, records });
+                frame.ghost = Some(Ghost {
+                    start,
+                    prefix,
+                    records,
+                });
                 frame.complete = mask >> (handler + 1) == 0;
                 return Ok(frame);
             }

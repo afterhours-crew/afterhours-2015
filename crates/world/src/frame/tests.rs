@@ -9,6 +9,92 @@ fn bits(w: &BitWriter, offset: usize, width: u8) -> u32 {
 }
 
 #[test]
+fn file_start_and_finish_after_object_records_are_resumed_atomically() {
+    use crate::{files::Record, replication::section::Bindings};
+    let start = Record::Start {
+        name: b"Items".to_vec(),
+        bytes: 256,
+    };
+    let mut w = BitWriter::new();
+    w.put(0b11_1000, 6)
+        .put(0, 1)
+        .put(0, 1)
+        .put(1, 13)
+        .put(0, 1)
+        .put(1, 13)
+        .put(1, 1)
+        .put(4, 5)
+        .put(0, 1);
+    let section_bits = w.len() - 6;
+    w.put_span(start.encode(None).unwrap().span());
+    let before_finish = w.len();
+    w.put_span(Record::Finish.encode(None).unwrap().span());
+    let end = w.len();
+    w.align();
+    let mut frame = parse(w.span(), Direction::FromClient).unwrap();
+    assert!(!frame.complete && frame.files.is_empty());
+    let decoded = Bindings::from_client(1)
+        .unwrap()
+        .decode(w.span().after(6).unwrap())
+        .unwrap();
+    assert_eq!(decoded.bits, section_bits);
+    assert_eq!(
+        frame
+            .finish_ghost(w.span(), decoded.bits, [None; 2])
+            .unwrap(),
+        end
+    );
+    assert!(frame.complete);
+    assert_eq!(frame.files, [(4, start), (5, Record::Finish)]);
+    let short = BitSpan::new(w.bytes(), 0, before_finish + 1).unwrap();
+    let mut incomplete = parse(short, Direction::FromClient).unwrap();
+    assert!(
+        incomplete
+            .finish_ghost(short, decoded.bits, [None; 2])
+            .is_err()
+    );
+    assert!(!incomplete.complete && incomplete.files.is_empty());
+    w.put(0, 8);
+    let mut extra = parse(w.span(), Direction::FromClient).unwrap();
+    assert_eq!(
+        extra.finish_ghost(w.span(), decoded.bits, [None; 2]),
+        Err(Error::Shape)
+    );
+    assert!(extra.files.is_empty());
+}
+
+#[test]
+fn file_blocks_after_ghost_require_the_previously_observed_start() {
+    use crate::files::Record;
+    let mut w = BitWriter::new();
+    w.put(0b01_1000, 6)
+        .put(0, 1)
+        .put(0, 1)
+        .put(1, 13)
+        .put(0, 1)
+        .put(1, 13)
+        .put(0, 1)
+        .put(0, 1);
+    let section_bits = w.len() - 6;
+    let block = Record::Blocks {
+        first: 0,
+        blocks: vec![vec![0x5a; 128]],
+    };
+    w.put_span(block.encode(Some(256)).unwrap().span());
+    w.align();
+    let mut frame = parse(w.span(), Direction::FromClient).unwrap();
+    assert_eq!(
+        frame.finish_ghost(w.span(), section_bits, [None; 2]),
+        Err(Error::File(crate::files::Error::MissingStart))
+    );
+    assert!(frame.files.is_empty());
+    frame
+        .finish_ghost(w.span(), section_bits, [Some(256), None])
+        .unwrap();
+    assert_eq!(frame.files, [(4, block)]);
+}
+
+#[test]
 fn initializer_has_independent_field_offsets_and_parses_back() {
     let w = initializer(1800, 60.0, 0);
     assert_eq!(w.len(), 232, "232-bit single-fragment frame");
