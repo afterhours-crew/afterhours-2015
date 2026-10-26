@@ -10,7 +10,7 @@ fn content(count: u16) -> Content {
     ])
     .unwrap()
 }
-fn record(fields: Option<References>, parent: Option<Parent>) -> Record {
+fn record(fields: References, parent: Option<Parent>) -> Record {
     Record::from_direct_entity(
         41,
         Prefix {
@@ -56,13 +56,14 @@ fn native_direct_header_and_optional_references_have_independent_boundaries() {
         .put(7, 11)
         .put(1, 4);
     let initial_bits = w.len();
-    w.put(1, 1).put(1, 1).put(0, 13).put(1, 1).put(8191, 13);
+    // One serializer: no outer presence bit precedes the two field flags.
+    w.put(1, 1).put(0, 13).put(1, 1).put(8191, 13);
     let bits = w.len();
     let expected = record(
-        Some(References {
+        References {
             first: Some(0),
             second: Some(8191),
-        }),
+        },
         None,
     );
     assert_eq!(expected.encode().unwrap(), w);
@@ -114,16 +115,15 @@ fn parent_and_absent_fields_round_trip_without_equating_absent_with_null() {
         }),
     ] {
         for fields in [
-            None,
-            Some(References::default()),
-            Some(References {
+            References::default(),
+            References {
                 first: Some(0),
                 second: None,
-            }),
-            Some(References {
+            },
+            References {
                 first: None,
                 second: Some(81),
-            }),
+            },
         ] {
             let expected = record(fields, parent.clone());
             let w = expected.encode().unwrap();
@@ -133,12 +133,12 @@ fn parent_and_absent_fields_round_trip_without_equating_absent_with_null() {
             assert_eq!(decoded.bits, w.len());
         }
     }
-    let mut invalid = record(None, None);
+    let mut invalid = record(References::default(), None);
     if let Update::DirectEntity { fields, .. } = &mut invalid.update {
-        *fields = Some(References {
+        *fields = References {
             first: Some(8192),
             second: None,
-        });
+        };
     }
     assert_eq!(invalid.encode(), Err(Error::Shape));
     assert!(Catalog::new(7, 0, &[]).is_err());
@@ -164,7 +164,7 @@ fn parent_and_absent_fields_round_trip_without_equating_absent_with_null() {
 
 #[test]
 fn section_bindings_are_transactional_retained_and_removed_with_object_lifetime() {
-    let create = record(Some(References::default()), None);
+    let create = record(References::default(), None);
     let mut update = create.clone();
     update.initial = None;
     let incoming = section(vec![], vec![create.clone(), update.clone()]);

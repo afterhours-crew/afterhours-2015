@@ -281,7 +281,7 @@ pub enum Update {
     Actor(ActorUpdate),
     DirectEntity {
         binding: std::sync::Arc<direct_entity::Binding>,
-        fields: Option<direct_entity::References>,
+        fields: direct_entity::References,
     },
     Entity {
         binding: std::sync::Arc<entity::creation::Binding>,

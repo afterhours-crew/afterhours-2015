@@ -132,7 +132,7 @@ impl Record {
     pub fn from_direct_entity(
         id: u16,
         prefix: Prefix,
-        fields: Option<References>,
+        fields: References,
         content: &Content,
     ) -> Result<Self, Error> {
         let result = Self {
@@ -180,7 +180,8 @@ impl Record {
             )?;
         }
         match binding.composition {
-            Composition::RaceSpawner => w.optional(fields, References::write)?,
+            // The native single-serializer path omits the outer presence mask.
+            Composition::RaceSpawner => References::write(&mut w, fields)?,
         }
         Ok(w.0)
     }
@@ -235,7 +236,7 @@ impl Record {
             (None, Arc::clone(binding.ok_or(Error::UnknownObject)?), None)
         };
         let fields = match binding.composition {
-            Composition::RaceSpawner => r.optional(References::read)?,
+            Composition::RaceSpawner => References::read(&mut r)?,
         };
         Ok(Decoded {
             record: Self {
