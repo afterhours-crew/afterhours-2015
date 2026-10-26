@@ -564,7 +564,7 @@ pub(super) fn ready_for_selection(
     .unwrap();
     let loading = listener.players.objects().iter().find_map(|(id,o)| matches!(&o.initial, replication::Initial::Entity{prefix,..} if prefix.asset == load_asset).then_some(id)).unwrap();
     let streamed = nfs_world::logic::Message::Reached {
-        event: nfs_world::sequences::STREAMING_LOADED,
+        event: nfs_world::sequences::STREAMING_UNLOADED,
         target: nfs_world::logic::EntityRef {
             ghost: loading,
             entity: 1,
@@ -1010,6 +1010,12 @@ pub(super) fn ready_for_selection(
             .ghost(participant)
             .is_none()
     );
+    assert!(
+        matches!(&listener.players.objects().get(loading).unwrap().initial,
+        replication::Initial::Entity { fields, .. }
+            if fields[1] == entity::Initial::BoolProperty(Some(false))),
+        "a rejected return must not enable streaming"
+    );
     drain(&mut listener);
     assert!(send(&mut listener, 13, 47, enter.span()));
     assert_eq!(listener.story_pending.len(), 1);
@@ -1021,6 +1027,60 @@ pub(super) fn ready_for_selection(
         listener.participants.stage(participant),
         Some(Stage::IntroEnteringGarage)
     );
+    let replication::Initial::Entity { fields, .. } =
+        &listener.players.objects().get(loading).unwrap().initial
+    else {
+        panic!("garage streaming object disappeared")
+    };
+    assert_eq!(
+        fields[1],
+        entity::Initial::BoolProperty(Some(true)),
+        "the host must enable garage streaming before expecting a loaded report"
+    );
+    assert!(
+        listener
+            .pending
+            .iter()
+            .chain(listener.pending_entries.iter().map(|(s, _)| s))
+            .flat_map(|s| &s.records)
+            .any(|record| record.id == loading
+                && matches!(&record.update, replication::Update::Entity { fields, .. }
+                if fields[1] == Some(entity::Update::BoolProperty(Some(true))))),
+        "the streaming flag must actually be queued for the client"
+    );
+    // The captured client reports loaded only after the synchronized flag.
+    // Feeding it at initial spawn hid the missing host update.
+    let streamed = nfs_world::logic::Message::Reached {
+        event: nfs_world::sequences::STREAMING_LOADED,
+        target: nfs_world::logic::EntityRef {
+            ghost: loading,
+            entity: 1,
+        },
+        player: 0,
+    }
+    .encode()
+    .unwrap();
+    let streaming_frame = frame::Builder::new()
+        .messages(
+            None,
+            vec![frame::Group {
+                channel: 2,
+                sequence: Some(1),
+                messages: vec![frame::Message::Opaque {
+                    index: 82,
+                    body: streamed.span(),
+                }],
+            }],
+        )
+        .build()
+        .unwrap();
+    let queued = crate::net::players::test_wire::queued(&listener);
+    assert!(listener.frame(Queued {
+        advertised: None,
+        frame: 13,
+        data: streaming_frame.span()
+    }));
+    crate::net::players::test_wire::assert_wire_ready(&listener, queued);
     let entry = listener
         .returns
         .as_ref()

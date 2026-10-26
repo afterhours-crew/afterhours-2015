@@ -9,6 +9,7 @@ use nfs_content::prologue::sequences::{
     program::{Definition, Service},
 };
 use nfs_storage::{InventoryRepository, Timestamp};
+use nfs_world::replication::entity;
 use nfs_world::scoring::{
     events::{Connection, Delivery, Endpoint as EventEndpoint},
     interpreter,
@@ -357,6 +358,32 @@ pub(in crate::net::players::prologue) fn selected(handoff: bool) -> (PlayerListe
             Some(Stage::IntroSpawning)
         );
         assert!(listener.opening.ghost(participant).is_none());
+        let asset = listener
+            .prologue
+            .as_ref()
+            .unwrap()
+            .loading
+            .as_ref()
+            .unwrap()
+            .asset();
+        let (loading, object) = listener.players.objects().iter().find(|(_, object)|
+            matches!(&object.initial, replication::Initial::Entity { prefix, .. } if prefix.asset == asset)
+        ).unwrap();
+        assert!(
+            matches!(&object.initial, replication::Initial::Entity { fields, .. }
+            if fields[1] == entity::Initial::BoolProperty(Some(false)))
+        );
+        assert!(
+            listener
+                .pending
+                .iter()
+                .chain(listener.pending_entries.iter().map(|(s, _)| s))
+                .flat_map(|s| &s.records)
+                .any(|r| r.id == loading
+                    && matches!(&r.update, replication::Update::Entity { fields, .. }
+                    if fields[1] == Some(entity::Update::BoolProperty(Some(false))))),
+            "selection exit must publish the garage streaming release"
+        );
     }
     drain(&mut listener);
     assert!(send(&mut listener, 27, 47, complete.span()));

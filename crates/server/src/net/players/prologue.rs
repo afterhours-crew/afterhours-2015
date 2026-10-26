@@ -618,6 +618,14 @@ impl PlayerListener {
                 break;
             }
         }
+        if let Some(loading) = &content.loading {
+            records.extend(loading.sync(
+                &mut players,
+                &participants,
+                HOST_SELECTOR as u8,
+                self.persona,
+            )?);
+        }
         // A staged car is constructed with an absolute zero origin. Reserve
         // space for that origin rather than inheriting a prior movement frame.
         let mut sections = split_scenes(records, nfs_world::application::OUTBOUND_FRAME_BITS - 96)?;

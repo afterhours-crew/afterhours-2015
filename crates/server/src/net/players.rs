@@ -2752,6 +2752,21 @@ impl Listener for PlayerListener {
             }
         }
         entries.extend(exit_entries);
+        if let Some(loading) = self
+            .prologue
+            .as_ref()
+            .and_then(|content| content.loading.as_ref())
+        {
+            match loading.sync(
+                &mut players,
+                &participants,
+                HOST_SELECTOR as u8,
+                self.persona,
+            ) {
+                Ok(batch) => records.extend(batch),
+                Err(error) => return self.refuse(error),
+            }
+        }
         let map_cars = world_cars
             .iter()
             .map(|(&car, &(participant, _))| (participant, car))
