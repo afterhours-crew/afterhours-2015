@@ -19,7 +19,7 @@ pub struct Rank {
     pub id: u32,
     pub unlock: u32,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Definition {
     pub id: u32,
     pub car_id: u32,

@@ -18,6 +18,7 @@ use nfs_world::{
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 mod activation;
+mod challenges;
 mod client_info;
 mod crashing;
 mod customization;
@@ -86,6 +87,7 @@ pub(super) struct PlayerListener {
     stats: Accepting,
     messages: frame::receive::Receiver,
     client_info: replication::client_info::State,
+    challenges: challenges::State,
     persona: u64,
     roles: Option<crate::scene_roles::SceneRoles>,
     players: Players,
@@ -873,6 +875,7 @@ impl PlayerListener {
             // The PC client has one local slot per connection. Remote players
             // do not change this constructor context or share its inbound IDs.
             client_info: replication::client_info::State::new(1).expect("PC local slot context"),
+            challenges: challenges::State::default(),
             persona,
             roles: None,
             players: Players::default(),
@@ -1260,6 +1263,10 @@ impl Listener for PlayerListener {
             }
         };
         self.diagnose_unconsumed(&decoded);
+        let challenges = match self.prepare_challenges(&decoded) {
+            Ok(next) => next,
+            Err(error) => return self.refuse(error),
+        };
         let requests: Vec<_> = decoded
             .iter()
             .filter_map(|m| match m {
@@ -1292,6 +1299,9 @@ impl Listener for PlayerListener {
         {
             self.messages = messages;
             self.client_info = client_info;
+            if let Some(next) = challenges {
+                self.challenges = next;
+            }
             return self.stats.record(&parsed, files);
         }
         let mut players = self.players.clone();
@@ -3120,6 +3130,9 @@ impl Listener for PlayerListener {
         self.queue_entries(entries);
         self.messages = messages;
         self.client_info = client_info;
+        if let Some(next) = challenges {
+            self.challenges = next;
+        }
         self.stats.record(&parsed, files)
     }
 }

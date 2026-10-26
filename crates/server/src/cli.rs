@@ -531,6 +531,7 @@ pub async fn prepare_world(
             content: prepared.world_content,
             persona,
             inventory: prepared.inventory,
+            challenges: prepared.challenges,
             progression: prepared.progression,
             prologue: prepared.prologue,
             vehicles: prepared.vehicles,

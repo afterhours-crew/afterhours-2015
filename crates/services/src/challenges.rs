@@ -10,8 +10,10 @@ use nfs_storage::Snapshot;
 use std::collections::{BTreeMap, BTreeSet};
 
 mod content;
+mod specific;
 mod storage;
 pub use content::{Award, Catalog, Definition, Rank};
+pub use specific::{Query, Selected, Specific};
 pub use storage::ensure_empty;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

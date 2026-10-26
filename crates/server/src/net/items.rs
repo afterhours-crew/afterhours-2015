@@ -674,6 +674,7 @@ enum UnsupportedRoute {
 
 pub(super) struct Exchanges {
     profile: Option<Profile>,
+    challenges: JoinSet<Result<nfs_services::challenges::Current, crate::Failure>>,
     jobs: JoinSet<(usize, u8, Result<Option<LoadedReply>, Error>)>,
     equipment: JoinSet<(EquipmentRequest, Result<Equipped, Error>)>,
     garage: JoinSet<(GarageRequest, Result<garage::Updated, Error>)>,
@@ -695,6 +696,7 @@ impl Exchanges {
     pub(super) fn new(profile: Option<Profile>, connection: u32) -> Self {
         Self {
             profile,
+            challenges: JoinSet::new(),
             jobs: JoinSet::new(),
             equipment: JoinSet::new(),
             garage: JoinSet::new(),
@@ -711,7 +713,8 @@ impl Exchanges {
         }
     }
     pub(super) fn working(&self) -> bool {
-        !self.jobs.is_empty()
+        !self.challenges.is_empty()
+            || !self.jobs.is_empty()
             || !self.equipment.is_empty()
             || !self.awards.is_empty()
             || !self.garage.is_empty()
@@ -821,6 +824,19 @@ impl Exchanges {
             }
             return;
         }
+        if listener.has_challenge_request() {
+            if let Some(profile) = self.profile.clone() {
+                self.challenges
+                    .spawn(async move { profile.current_challenges(utc).await });
+            } else {
+                warn!(
+                    connection = self.connection,
+                    "challenge account service not configured"
+                );
+                self.failed = true;
+            }
+            return;
+        }
         for index in 0..2 {
             if self.started[index].is_some() {
                 continue;
@@ -893,6 +909,29 @@ impl Exchanges {
         }
     }
     pub(super) async fn completed(&mut self, listener: &mut PlayerListener) -> bool {
+        if !self.challenges.is_empty() {
+            return match self.challenges.join_next().await {
+                Some(Ok(Ok(current))) => match listener.challenges_loaded(current) {
+                    Ok(()) => true,
+                    Err(error) => {
+                        warn!(
+                            connection = self.connection,
+                            ?error,
+                            "challenge cache rejected"
+                        );
+                        false
+                    }
+                },
+                failure => {
+                    warn!(
+                        connection = self.connection,
+                        ?failure,
+                        "challenge account read failed"
+                    );
+                    false
+                }
+            };
+        }
         if !self.story.is_empty() {
             let Some(Ok((request, result))) = self.story.join_next().await else {
                 return false;

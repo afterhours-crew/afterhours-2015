@@ -82,7 +82,7 @@ impl PlayerListener {
             ],
             replication_pending,
             content_pending,
-            items_working,
+            items_working: items_working || self.has_challenge_request(),
         }
     }
 
@@ -109,14 +109,13 @@ impl PlayerListener {
 
     pub(super) fn diagnose_unconsumed(&mut self, decoded: &[frame::Message<'_>]) {
         for message in decoded {
-            // A typed codec alone is not a world consumer. Keep these visible
-            // until their owned service/queue transition is implemented.
+            // Host-only challenge messages have no client-to-host consumer.
             if matches!(
                 message,
-                frame::Message::ChallengePlayerSync(_)
-                    | frame::Message::ChallengeFull(_)
-                    | frame::Message::ChallengeAwards(_)
-            ) {
+                frame::Message::ChallengeFull(_) | frame::Message::ChallengeAwards(_)
+            ) || (matches!(message, frame::Message::ChallengePlayerSync(_))
+                && self.challenges.catalog.is_none())
+            {
                 self.unsupported.record(Route::Message {
                     index: message.index(),
                 });
@@ -407,9 +406,9 @@ mod tests {
     }
 
     #[test]
-    fn typed_challenge_sync_remains_unsupported_until_it_has_a_consumer() {
+    fn challenge_sync_without_a_catalog_is_refused_and_reported_unsupported() {
         let mut listener = PlayerListener::new(7);
-        assert!(message(
+        assert!(!message(
             &mut listener,
             0,
             frame::Message::ChallengePlayerSync(frame::ChallengePlayerSync {
@@ -421,6 +420,7 @@ mod tests {
         ));
         assert_eq!(listener.unsupported.total(), 1);
         assert_eq!(listener.stats.errors, 0);
+        assert_eq!(listener.refused, 1);
         assert!(listener.pending_content.is_empty());
     }
 

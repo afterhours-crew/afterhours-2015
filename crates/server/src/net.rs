@@ -100,6 +100,7 @@ pub struct WorldServe {
     pub content: Option<Arc<crate::content::WorldContent>>,
     pub persona: i64,
     pub inventory: Option<InventoryProfile>,
+    pub challenges: Option<Arc<nfs_services::challenges::Catalog>>,
     pub progression: Option<Arc<crate::progression::Content>>,
     pub prologue: Option<Arc<crate::prologue::Content>>,
     pub vehicles: Option<Arc<crate::vehicle_content::GarageContent>>,
@@ -829,6 +830,7 @@ pub async fn serve(
                             content: world_content.clone(),
                             persona: profiles.persona,
                             inventory,
+                            challenges: challenges.clone(),
                             progression,
                             prologue,
                             vehicles,
@@ -1231,6 +1233,7 @@ pub async fn run_world<I: WorldIo>(
         content,
         persona,
         inventory,
+        challenges,
         progression,
         prologue,
         vehicles,
@@ -1341,6 +1344,7 @@ pub async fn run_world<I: WorldIo>(
     };
     let mut listener = players::PlayerListener::new(persona)
         .with_connection(connection)
+        .with_challenges(challenges)
         .with_progression(progression)
         .with_prologue(prologue)
         .with_vehicles(vehicles)
