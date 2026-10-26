@@ -1184,6 +1184,10 @@
   "participant_logic": {
     "classes": {
       "RestrictedRaceNotificationSenderEntityData": null,
+      "CountDownEntityData": null,
+      "RichPresenceProxyEntityData": null,
+      "VehicleSlotQueryEntityData": null,
+      "ParticipantProviderStateReporterEntityData": null,
       "AchievementEntityData": null,
       "AllItemsUnlockerEntityData": null,
       "AndEntityData": null,
