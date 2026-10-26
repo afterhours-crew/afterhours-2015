@@ -44,6 +44,8 @@ mod traffic;
 #[cfg(test)]
 mod deployment_tests;
 #[cfg(test)]
+mod performance_tests;
+#[cfg(test)]
 mod test_wire;
 mod vehicles;
 
@@ -88,6 +90,8 @@ pub(super) struct PlayerListener {
     messages: frame::receive::Receiver,
     client_info: replication::client_info::State,
     challenges: challenges::State,
+    /// Latest accepted hardware report, owned only by this connection.
+    performance_profile: Option<frame::PerformanceProfile>,
     persona: u64,
     roles: Option<crate::scene_roles::SceneRoles>,
     players: Players,
@@ -210,6 +214,10 @@ impl std::fmt::Debug for PlayerListener {
             .field("unsupported_rpcs", &self.unsupported_rpcs)
             .field("unsupported_logic", &self.unsupported_logic)
             .field("refused", &self.refused)
+            .field(
+                "performance_profile_received",
+                &self.performance_profile.is_some(),
+            )
             .field("last_error", &self.last_error)
             .finish()
     }
@@ -876,6 +884,7 @@ impl PlayerListener {
             // do not change this constructor context or share its inbound IDs.
             client_info: replication::client_info::State::new(1).expect("PC local slot context"),
             challenges: challenges::State::default(),
+            performance_profile: None,
             persona,
             roles: None,
             players: Players::default(),
@@ -1263,6 +1272,10 @@ impl Listener for PlayerListener {
             }
         };
         self.diagnose_unconsumed(&decoded);
+        let performance_profile = decoded.iter().rev().find_map(|message| match message {
+            frame::Message::PerformanceProfile(value) => Some(value.clone()),
+            _ => None,
+        });
         let challenges = match self.prepare_challenges(&decoded) {
             Ok(next) => next,
             Err(error) => return self.refuse(error),
@@ -1299,6 +1312,9 @@ impl Listener for PlayerListener {
         {
             self.messages = messages;
             self.client_info = client_info;
+            if let Some(profile) = performance_profile {
+                self.performance_profile = Some(profile);
+            }
             if let Some(next) = challenges {
                 self.challenges = next;
             }
@@ -3130,6 +3146,9 @@ impl Listener for PlayerListener {
         self.queue_entries(entries);
         self.messages = messages;
         self.client_info = client_info;
+        if let Some(profile) = performance_profile {
+            self.performance_profile = Some(profile);
+        }
         if let Some(next) = challenges {
             self.challenges = next;
         }
