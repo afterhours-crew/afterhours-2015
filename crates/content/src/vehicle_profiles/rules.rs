@@ -49,6 +49,8 @@ impl Rules {
             "triple_nibbles",
             "bool",
             "wheel",
+            "search_light",
+            "siren",
             "index",
             "tuning",
             "appearance",

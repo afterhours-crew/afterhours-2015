@@ -101,6 +101,8 @@ pub(super) fn profile(v: &Value) -> Result<Profile, ParseError> {
             Some("triple_nibbles") => (Kind::TripleNibbles, None),
             Some("bool") => (Kind::Bool, None),
             Some("wheel") => (Kind::Wheel, None),
+            Some("search_light") => (Kind::SearchLight, None),
+            Some("siren") => (Kind::Siren, None),
             Some("index") => (Kind::Index, None),
             Some("tuning") => (Kind::Tuning, None),
             Some("tagged") => (Kind::Tagged, None),

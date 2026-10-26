@@ -73,6 +73,8 @@ impl Definition {
                         | Kind::Part { .. }
                         | Kind::Bool
                         | Kind::Wheel
+                        | Kind::SearchLight
+                        | Kind::Siren
                         | Kind::Index
                         | Kind::FourBit
                         | Kind::Rpc

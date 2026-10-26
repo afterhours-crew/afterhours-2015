@@ -60,6 +60,8 @@ pub enum Kind {
     TripleNibbles,
     Bool,
     Wheel,
+    SearchLight,
+    Siren,
     Index,
     Tuning,
     Tagged,
@@ -146,6 +148,14 @@ pub enum Initial {
     Wheel {
         rpc: Rpc,
         flag: bool,
+    },
+    SearchLight {
+        rpc: Rpc,
+        enabled: bool,
+    },
+    Siren {
+        rpc: Rpc,
+        flags: [bool; 2],
     },
     Index {
         rpc: Rpc,
@@ -275,6 +285,12 @@ pub enum Update {
     TripleNibbles(Option<[u8; 3]>),
     Bool(Option<bool>),
     Wheel(Option<bool>),
+    SearchLight(Option<bool>),
+    Siren {
+        flags: [Option<bool>; 2],
+        /// An edge-triggered notification with no additional payload.
+        trigger: bool,
+    },
     Index {
         index: Option<u8>,
         value: Option<u8>,

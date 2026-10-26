@@ -573,6 +573,65 @@ fn vehicle_profiles_reject_ambiguous_missing_and_cyclic_graphs() {
 }
 
 #[test]
+fn police_components_remain_in_installed_vehicle_order_and_cache_identity() {
+    use synthetic::{Field, vehicles};
+    let replacement = vehicles::assets_with(|_, objects| {
+        let first = objects.len() as u32 + 2;
+        objects.push(("SirenComponentData", vec![]));
+        objects.push(("SearchLightComponentData", vec![]));
+        let Field::RawPointers(components) = &mut objects[0].1[1].1 else {
+            panic!()
+        };
+        components.splice(0..0, [first, first + 1]);
+    });
+    let mut fixture = assets();
+    fixture.retain(|a| !replacement.iter().any(|b| a.name == b.name));
+    fixture.extend(replacement);
+    let install = install_with(&fixture);
+    let mut options = install.options();
+    let supported = BuildIdentity::supported();
+    for class in ["SirenComponentData", "SearchLightComponentData"] {
+        options
+            .identity
+            .vehicles
+            .classes
+            .insert(class.into(), supported.vehicles.classes[class].clone());
+    }
+    let correct = fingerprint(&install.game(), &options).unwrap();
+    let mut omitted = options.clone();
+    omitted
+        .identity
+        .vehicles
+        .classes
+        .insert("SirenComponentData".into(), None);
+    assert_ne!(
+        correct.digest,
+        fingerprint(&install.game(), &omitted).unwrap().digest
+    );
+    let prepared = prepare(&install.game(), &install.cache(), &options).unwrap();
+    let json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(prepared.path(Kind::VehicleProfiles)).unwrap())
+            .unwrap();
+    let profile = &vehicle_profiles::Definition::from_json(&json["vehicles"][0])
+        .unwrap()
+        .profile;
+    use nfs_world::replication::vehicle::{Kind as VehicleKind, components::fresh_rpcs};
+    assert_eq!(
+        &profile.kinds()[..4],
+        &[
+            VehicleKind::Root {
+                property_owner: true
+            },
+            VehicleKind::Siren,
+            VehicleKind::SearchLight,
+            VehicleKind::Chassis
+        ]
+    );
+    assert_eq!(profile.kinds().len(), 19);
+    assert_eq!(fresh_rpcs(profile)[3].as_ref().unwrap().selector, 3);
+}
+
+#[test]
 fn traffic_profiles_follow_the_constructed_subset_without_player_defaults() {
     use vehicle_profiles::traffic;
     let install = install_with(&synthetic::vehicles::traffic_assets());

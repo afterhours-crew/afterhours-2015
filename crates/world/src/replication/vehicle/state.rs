@@ -37,7 +37,14 @@ fn merge(old: &mut Option<Update>, new: Option<Update>) {
         (Update::Root(a), Update::Root(b)) => field(a, b),
         (Update::Part(a), Update::Part(b)) => field(a, b),
         (Update::TripleNibbles(a), Update::TripleNibbles(b)) => field(a, b),
-        (Update::Bool(a), Update::Bool(b)) | (Update::Wheel(a), Update::Wheel(b)) => field(a, b),
+        (Update::Bool(a), Update::Bool(b))
+        | (Update::Wheel(a), Update::Wheel(b))
+        | (Update::SearchLight(a), Update::SearchLight(b)) => field(a, b),
+        (Update::Siren { flags: a, .. }, Update::Siren { flags: b, .. }) => {
+            for (old, new) in a.iter_mut().zip(b) {
+                field(old, new);
+            }
+        }
         (Update::Tuning(a), Update::Tuning(b)) => field(a, b),
         (Update::Tagged(a), Update::Tagged(b)) => field(a, b),
         (Update::NibblesGuid(a), Update::NibblesGuid(b)) => field(a, b),
@@ -77,12 +84,17 @@ fn merge(old: &mut Option<Update>, new: Option<Update>) {
     }
 }
 impl State {
-    pub fn new(profile: Profile, body: Body, known: impl Fn(u16) -> bool) -> Result<Self, Error> {
+    pub fn new(
+        profile: Profile,
+        mut body: Body,
+        known: impl Fn(u16) -> bool,
+    ) -> Result<Self, Error> {
         if body.creation.is_none() {
             return Err(Error::Shape);
         }
         body.encode(&profile)?;
         refs(&body, known)?;
+        clear_triggers(&mut body);
         Ok(Self { profile, body })
     }
     pub fn apply(
@@ -101,6 +113,7 @@ impl State {
             merge(old, new);
         }
         next.encode(&self.profile)?;
+        clear_triggers(&mut next);
         self.body = next;
         Ok(())
     }
@@ -109,5 +122,15 @@ impl State {
     }
     pub fn profile(&self) -> &Profile {
         &self.profile
+    }
+}
+
+// The incoming record retains the notification for its consumer. A snapshot is
+// retained state and must not emit that notification again on a later update.
+fn clear_triggers(body: &mut Body) {
+    for update in body.updates.iter_mut().flatten() {
+        if let Update::Siren { trigger, .. } = update {
+            *trigger = false;
+        }
     }
 }

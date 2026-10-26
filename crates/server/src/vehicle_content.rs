@@ -449,6 +449,11 @@ impl Content {
                 Kind::TripleNibbles => Some(lifecycle::Effects::default().update(true)),
                 Kind::Bool => Some(lifecycle::PlayerEntry::default().update(true)),
                 Kind::Wheel => Some(components::Wheel::default().update(true)),
+                Kind::SearchLight => Some(Update::SearchLight(Some(false))),
+                Kind::Siren => Some(Update::Siren {
+                    flags: [Some(false); 2],
+                    trigger: false,
+                }),
                 Kind::Index => Some(nitrous.update(3)?),
                 Kind::Tuning => Some(wheels.update(true)),
                 Kind::Tagged => Some(lifecycle::LockOn::default().update(true)),

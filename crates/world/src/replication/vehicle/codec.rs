@@ -4,6 +4,9 @@
 
 use super::*;
 
+#[cfg(test)]
+mod police_tests;
+
 fn bytes<const N: usize>(r: &mut Reader<'_>, n: u8) -> Result<[u8; N], Error> {
     array(|| Ok(r.take(n)? as u8))
 }
@@ -290,6 +293,14 @@ pub(super) fn initial_read(r: &mut Reader<'_>, k: &Kind) -> Result<Initial, Erro
             rpc: read_rpc(r)?,
             flag: r.bit()?,
         },
+        Kind::SearchLight => Initial::SearchLight {
+            rpc: read_rpc(r)?,
+            enabled: r.bit()?,
+        },
+        Kind::Siren => Initial::Siren {
+            rpc: read_rpc(r)?,
+            flags: array(|| r.bit())?,
+        },
         Kind::Index => Initial::Index {
             rpc: read_rpc(r)?,
             index: r.optional(|r| Ok(r.take(4)? as u8))?,
@@ -336,6 +347,16 @@ pub(super) fn initial_write(w: &mut Writer, k: &Kind, v: &Initial) -> Result<(),
             write_rpc(w, rpc)?;
             w.bit(*flag)?;
         }
+        (Kind::SearchLight, Initial::SearchLight { rpc, enabled }) => {
+            write_rpc(w, rpc)?;
+            w.bit(*enabled)?;
+        }
+        (Kind::Siren, Initial::Siren { rpc, flags }) => {
+            write_rpc(w, rpc)?;
+            for flag in flags {
+                w.bit(*flag)?;
+            }
+        }
         (Kind::Index, Initial::Index { rpc, index, value }) => {
             write_rpc(w, rpc)?;
             w.optional(index, |w, v| w.put(u64::from(*v), 4))?;
@@ -371,6 +392,11 @@ pub(super) fn update_read(r: &mut Reader<'_>, k: &Kind) -> Result<Update, Error>
         Kind::TripleNibbles => Update::TripleNibbles(r.optional(|r| bytes(r, 4))?),
         Kind::Bool => Update::Bool(r.optional(Reader::bit)?),
         Kind::Wheel => Update::Wheel(r.optional(Reader::bit)?),
+        Kind::SearchLight => Update::SearchLight(r.optional(Reader::bit)?),
+        Kind::Siren => Update::Siren {
+            flags: array(|| r.optional(Reader::bit))?,
+            trigger: r.bit()?,
+        },
         Kind::Index => Update::Index {
             index: r.optional(|r| Ok(r.take(2)? as u8))?,
             value: r.optional(|r| Ok(r.take(8)? as u8))?,
@@ -428,8 +454,14 @@ pub(super) fn update_write(w: &mut Writer, k: &Kind, v: &Update) -> Result<(), E
         (Kind::TripleNibbles, Update::TripleNibbles(v)) => {
             w.optional(v, |w, v| put_bytes(w, v, 4))?
         }
-        (Kind::Bool, Update::Bool(v)) | (Kind::Wheel, Update::Wheel(v)) => {
-            w.optional(v, |w, v| w.bit(*v))?
+        (Kind::Bool, Update::Bool(v))
+        | (Kind::Wheel, Update::Wheel(v))
+        | (Kind::SearchLight, Update::SearchLight(v)) => w.optional(v, |w, v| w.bit(*v))?,
+        (Kind::Siren, Update::Siren { flags, trigger }) => {
+            for flag in flags {
+                w.optional(flag, |w, v| w.bit(*v))?;
+            }
+            w.bit(*trigger)?;
         }
         (Kind::Index, Update::Index { index, value }) => {
             w.optional(index, |w, v| w.put(u64::from(*v), 2))?;

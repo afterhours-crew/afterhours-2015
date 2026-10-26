@@ -72,6 +72,11 @@ pub fn construct(
             Kind::Part { variants } => components::Part::new(*variants)?
                 .update(*definition.parts.get(&ordinal).ok_or(Error::Shape)?, true),
             Kind::Bool => Some(lifecycle::PlayerEntry::default().update(true)),
+            Kind::SearchLight => Some(Update::SearchLight(Some(false))),
+            Kind::Siren => Some(Update::Siren {
+                flags: [Some(false); 2],
+                trigger: false,
+            }),
             Kind::Wheel => Some(components::Wheel::default().update(true)),
             Kind::Index => Some(nos::Runtime::new(1.)?.update(3)?),
             Kind::Rpc | Kind::FourBit => Some(Update::Noop),
