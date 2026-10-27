@@ -170,6 +170,29 @@ pub struct Output {
     pub events: Vec<Event>,
 }
 
+/// Cumulative error events from receiving or polling this session. Retained
+/// work awaiting send-window room is deferred, not a failed operation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Failures {
+    pub application: usize,
+    pub link: usize,
+    pub file: usize,
+}
+
+impl Failures {
+    fn observe(&mut self, output: &Output) {
+        for event in &output.events {
+            let count = match event {
+                Event::ApplicationError(_) => &mut self.application,
+                Event::Link(_) => &mut self.link,
+                Event::FileError { .. } => &mut self.file,
+                _ => continue,
+            };
+            *count = count.saturating_add(1);
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
     Stage,
@@ -402,6 +425,7 @@ impl QueuedContent {
 
 pub struct Host {
     stage: Stage,
+    failures: Failures,
     content: std::collections::VecDeque<QueuedContent>,
     content_sent: usize,
     registered_handles: usize,
@@ -446,6 +470,7 @@ impl Host {
         let handshake = HostHandshake::new(codec, ids.client, ids.host, ids.host_index)?;
         Some(Self {
             stage: Stage::Handshake(handshake, Application::new(policy, random)),
+            failures: Failures::default(),
             content: std::collections::VecDeque::new(),
             content_sent: 0,
             registered_handles: 0,
@@ -740,7 +765,17 @@ impl Host {
         }
     }
 
+    pub fn failures(&self) -> Failures {
+        self.failures
+    }
+
     pub fn receive(&mut self, raw: &[u8], now_ms: u64, listener: &mut dyn Listener) -> Output {
+        let output = self.receive_inner(raw, now_ms, listener);
+        self.failures.observe(&output);
+        output
+    }
+
+    fn receive_inner(&mut self, raw: &[u8], now_ms: u64, listener: &mut dyn Listener) -> Output {
         let mut out = Output::default();
         let mut closed = false;
         match &mut self.stage {
@@ -910,6 +945,12 @@ impl Host {
     }
 
     pub fn poll(&mut self, now_ms: u64) -> Output {
+        let output = self.poll_inner(now_ms);
+        self.failures.observe(&output);
+        output
+    }
+
+    fn poll_inner(&mut self, now_ms: u64) -> Output {
         let mut out = Output::default();
         let Stage::Running {
             link,
@@ -1012,7 +1053,7 @@ impl Host {
         else {
             return out;
         };
-        if let Some((sample, received_ms)) = world.time_sample.take() {
+        if let Some((sample, received_ms)) = world.time_sample {
             let origin = application.origin_ms().unwrap_or(initialized_ms);
             let ticks = |ms: u64| ms.saturating_sub(origin) * 1024 / 1000;
             let builder =
@@ -1020,9 +1061,11 @@ impl Host {
             match Self::send_built(link, application, &builder, now_ms) {
                 Ok(wire) => {
                     out.send.push(wire);
+                    world.time_sample = None;
                     world.acked_inputs = application.stats().inputs;
                     out.events.push(Event::TimeSynced);
                 }
+                Err(Event::ApplicationError(application::Error::Window)) => {}
                 Err(e) => out.events.push(e),
             }
         }
@@ -1271,6 +1314,7 @@ impl Host {
                     ));
                     out.events.push(Event::FirstPlayerEntered { player });
                 }
+                Err(Event::ApplicationError(application::Error::Window)) => {}
                 Err(e) => out.events.push(e),
             }
             return;
@@ -1303,6 +1347,7 @@ impl Host {
                         remaining: self.rpc_queue.len(),
                     });
                 }
+                Err(Event::ApplicationError(application::Error::Window)) => {}
                 Err(e) => out.events.push(e),
             }
         }

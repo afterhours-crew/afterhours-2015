@@ -1575,7 +1575,11 @@ pub async fn run_world<I: WorldIo>(
                     listener.unsupported_control(*subtype);
                 }
                 Event::ApplicationError(error) => {
-                    warn!(connection, ?error, "world session input rejected");
+                    warn!(
+                        connection,
+                        ?error,
+                        "world session application operation failed"
+                    );
                 }
                 Event::Application(application::Event::Queued { .. })
                 | Event::Application(application::Event::Duplicate) => {
@@ -1637,6 +1641,7 @@ fn observe_world<I: WorldIo>(
         );
         observation.rpc_pending = host.rpc_progress().1;
         observation.files_pending = host.files_pending();
+        observation.health.include_session(host.failures());
         if let Some(application) = host.application() {
             observation.health.include_application(application.stats());
         }

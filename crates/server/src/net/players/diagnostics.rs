@@ -48,6 +48,9 @@ impl PlayerListener {
             world_ms,
             health: WorldHealth {
                 refused_frames: self.refused,
+                session_application_errors: 0,
+                session_link_errors: 0,
+                session_file_errors: 0,
                 decode_errors: self.stats.errors,
                 unsupported_operations: self.unsupported.total(),
                 optional_map_failures: self.optional_map_failures,

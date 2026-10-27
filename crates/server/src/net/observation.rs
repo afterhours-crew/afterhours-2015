@@ -11,6 +11,11 @@ use nfs_world::participants::{Stage, intro::Chapter};
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct WorldHealth {
     pub refused_frames: usize,
+    /// Application, transport and file error events, including failures before
+    /// listener delivery or while preparing a response. Deferred work is excluded.
+    pub session_application_errors: usize,
+    pub session_link_errors: usize,
+    pub session_file_errors: usize,
     pub decode_errors: usize,
     pub unsupported_operations: u64,
     /// Human map sync, rival source collection, rival map sync.
@@ -24,6 +29,12 @@ pub struct WorldHealth {
 }
 
 impl WorldHealth {
+    pub(super) fn include_session(&mut self, failures: nfs_world::session::Failures) {
+        self.session_application_errors = self.session_application_errors.max(failures.application);
+        self.session_link_errors = self.session_link_errors.max(failures.link);
+        self.session_file_errors = self.session_file_errors.max(failures.file);
+    }
+
     pub(super) fn include_application(&mut self, stats: nfs_world::application::Stats) {
         // Session ordering can refuse a frame before the domain listener runs.
         // Both counters include listener refusals; adding them counts twice.
@@ -36,6 +47,26 @@ impl WorldHealth {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_errors_are_unhealthy_without_any_completed_listener_frame() {
+        let mut health = WorldHealth::default();
+        health.include_application(nfs_world::application::Stats::default());
+        health.include_session(nfs_world::session::Failures {
+            application: 1,
+            link: 2,
+            file: 3,
+        });
+        assert_ne!(health, WorldHealth::default());
+        assert_eq!(health.refused_frames, 0);
+        assert_eq!(health.session_application_errors, 1);
+        assert_eq!(health.session_link_errors, 2);
+        assert_eq!(health.session_file_errors, 3);
+        let recorded = health.clone();
+        health.include_session(nfs_world::session::Failures::default());
+        health.include_application(nfs_world::application::Stats::default());
+        assert_eq!(health, recorded);
+    }
 
     #[test]
     fn session_refusals_remain_unhealthy_after_recovery_without_double_counting() {
