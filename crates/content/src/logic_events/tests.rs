@@ -3,7 +3,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 use super::*;
-use crate::graph::tests::{Memory, local, ptr};
+use crate::graph::tests::{Memory, edge, local, ptr};
 use nfs_frostbite::ebx::Fields;
 fn object(values: Vec<(&str, Value)>) -> Value {
     Value::Struct(Fields(
@@ -247,9 +247,37 @@ fn debug_hides_select_only_property_debug_hide_targets_in_order() {
         Value::Array(vec![hide(1), event(4, 1, 3), event(4, 1, 2), hide(2)]),
     );
     let events = run(&mut m).unwrap();
-    assert_eq!(debug_hides(&events).unwrap(), vec![(1, 0), (1, 3)]);
+    let driven = |m: &mut Memory| {
+        let mut g = Graph::new(m);
+        let n = g.read(Site::root("a")).unwrap();
+        property_targets(&mut g, &n).unwrap()
+    };
+    // Only controllers with a driving property connection fire.
+    assert!(debug_hides(&events, &driven(&mut m)).is_err());
+    set(
+        &mut m,
+        "a",
+        0,
+        "PropertyConnections",
+        Value::Array(vec![edge(local(2), 5, local(1), 6)]),
+    );
+    assert_eq!(debug_hides(&events, &driven(&mut m)).unwrap(), vec![(1, 0)]);
+    set(
+        &mut m,
+        "a",
+        0,
+        "PropertyConnections",
+        Value::Array(vec![
+            edge(local(2), 5, local(1), 6),
+            edge(local(1), 5, local(2), 6),
+        ]),
+    );
+    assert_eq!(
+        debug_hides(&events, &driven(&mut m)).unwrap(),
+        vec![(1, 0), (1, 3)]
+    );
     // A root without any hide is a content mismatch, not an empty plan.
-    assert!(debug_hides(&run(&mut fixture()).unwrap()).is_err());
+    assert!(debug_hides(&run(&mut fixture()).unwrap(), &driven(&mut m)).is_err());
 }
 #[test]
 fn intro_return_rows_are_the_single_client_filter_row() {

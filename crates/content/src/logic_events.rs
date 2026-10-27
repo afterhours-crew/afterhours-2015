@@ -258,9 +258,16 @@ impl AssetIndex {
     /// root once the participant has entered the game (E1026 37.219 → 38.217 s,
     /// E912 33.338 → 33.641 s; E1249), hiding every objective chapter's
     /// PropertyDebug overlay.
+    /// Only controllers that an objective property drives evaluate; one
+    /// without an input connection never fires (outlaw01 #9: official
+    /// E1026 and E912 fire bus 137 rows 0, 4 and 9, never 2).
     pub fn progression_debug_hides(&mut self) -> Result<Vec<(u32, u32)>, Error> {
         let main = self.identity.progression.main.clone();
-        debug_hides(&self.network_events(&main)?)
+        let mut graph = Graph::new(&mut self.assets);
+        let nodes = graph.read(Site::root(&main))?;
+        let events = extract(&mut graph, &nodes)?;
+        let driven = property_targets(&mut graph, &nodes)?;
+        debug_hides(&events, &driven)
     }
 }
 impl AssetIndex {
@@ -288,10 +295,45 @@ fn filtered_rows(events: &[Event]) -> Result<Vec<(u32, u32)>, Error> {
     }
     Ok(rows)
 }
-fn debug_hides(events: &[Event]) -> Result<Vec<(u32, u32)>, Error> {
+/// Objects that receive a property connection in their own bus.
+fn property_targets<S: Source>(
+    graph: &mut Graph<S>,
+    nodes: &[Node],
+) -> Result<std::collections::BTreeSet<Key>, Error> {
+    let mut out = std::collections::BTreeSet::new();
+    for node in nodes.iter().filter(|n| bus_class(&n.object.class)) {
+        let Some(rows) = node
+            .object
+            .fields
+            .get("PropertyConnections")
+            .and_then(Value::as_array)
+        else {
+            continue;
+        };
+        if rows.len() > MAX_EVENTS {
+            return Err(bad("property table bound"));
+        }
+        for row in rows {
+            let target = row
+                .as_fields()
+                .and_then(|f| f.get("Target"))
+                .and_then(Value::as_pointer)
+                .ok_or_else(|| bad("property connection target"))?;
+            if let Some(key) = graph.source.target(&node.site.key.0, target)? {
+                out.insert(key);
+            }
+        }
+    }
+    Ok(out)
+}
+fn debug_hides(
+    events: &[Event],
+    driven: &std::collections::BTreeSet<Key>,
+) -> Result<Vec<(u32, u32)>, Error> {
     let hides: Vec<(u32, u32)> = events
         .iter()
         .filter(|e| e.target.class == PROPERTY_DEBUG && e.target.port == DEBUG_HIDE)
+        .filter(|e| driven.contains(&(e.source.asset.clone(), e.source.index)))
         .map(|e| (e.bus, e.ordinal))
         .collect();
     if hides.is_empty() {
