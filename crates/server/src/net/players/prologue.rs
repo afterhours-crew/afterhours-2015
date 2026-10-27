@@ -166,6 +166,8 @@ impl PlayerListener {
         let mut composites = self.intro_composites.clone();
         let mut ai_cursor = self.event_state.ai_cursor.clone();
         let mut participants = self.participants.clone();
+        let mut world_volumes = self.world_volumes.clone();
+        let mut world_activation = self.world_activation.clone();
         let mut cars = self.world_cars.clone();
         let mut records = Vec::new();
         let mut messages = Vec::new();
@@ -173,6 +175,7 @@ impl PlayerListener {
         let mut after_creation = Vec::new();
         let mut deleted = Vec::new();
         let mut teleports = Vec::new();
+        let mut driving_presentation = BTreeSet::new();
         if let Some(composite) = &content.final_composite {
             for active in composites.values_mut() {
                 if let Some(stop) = active.advance(composite, &players, seconds)? {
@@ -429,13 +432,45 @@ impl PlayerListener {
                     };
                     records.extend(a.records);
                     records.extend(b.records);
-                    calls.extend(a.calls);
-                    calls.extend(b.calls);
+                    // The objects exist immediately, but their launch callbacks
+                    // follow the participant's ordered world subscriptions.
+                    // Reserve all of it on clones: queue pressure cannot expose
+                    // Alive or a mode callback without the preceding memberships.
+                    calls.extend(world_volumes.before_alive(
+                        &content.volumes,
+                        &players,
+                        participant,
+                    )?);
                     let Outcome::Advanced(alive) = participants.intro_drive_ready(participant)
                     else {
                         return Err(replication::Error::Shape);
                     };
                     calls.extend(alive.into_iter().map(HostRpc::Participant));
+                    if let Some(activation) = &mut world_activation {
+                        calls.extend(
+                            activation
+                                .set(participant, true, nfs_world::session::MAX_RPC_QUEUE, |id| {
+                                    players.owns_participant(owner.connection, owner.persona, id)
+                                })?
+                                .into_iter()
+                                .map(HostRpc::WorldActivation),
+                        );
+                    }
+                    calls.extend(world_volumes.after_alive(
+                        &content.volumes,
+                        &players,
+                        participant,
+                    )?);
+                    calls.extend(a.calls);
+                    calls.extend(world_volumes.after_drive(
+                        &content.volumes,
+                        &players,
+                        participant,
+                    )?);
+                    calls.extend(b.calls);
+                    if chapter == Chapter::FirstDrive {
+                        driving_presentation.insert(participant);
+                    }
                     if let Some(ai) = content.mode(chapter)?.opponents() {
                         let previous = population.registrations().clone();
                         let mut registrations = previous.clone();
@@ -655,7 +690,7 @@ impl PlayerListener {
                 deleted,
             });
         }
-        let calls = presentation::present(
+        let calls = presentation::present_with_driving_tail(
             &presentation::Context {
                 logic: self.logic.as_deref(),
                 ghosts: &self.logic_ghosts,
@@ -664,6 +699,7 @@ impl PlayerListener {
                 content: Some(content),
             },
             calls,
+            &driving_presentation,
         )?;
         // Keep the state entry in a later replication entry. Ordinary RPCs
         // can be moved ahead of queued creations when their explicit object
@@ -679,6 +715,10 @@ impl PlayerListener {
                 returning::empty_section(),
                 after_creation,
             )?);
+        }
+        if calls.len() > nfs_world::session::MAX_RPC_QUEUE {
+            // This transaction can never fit, even after pressure clears.
+            return Err(replication::Error::Bound);
         }
         if sections.len() > MAX_PENDING.saturating_sub(self.pending.len())
             || entries.len() > MAX_PENDING.saturating_sub(self.pending_entries.len())
@@ -740,6 +780,8 @@ impl PlayerListener {
         self.intro_modes = modes;
         self.event_state.ai_cursor = ai_cursor;
         self.participants = participants;
+        self.world_volumes = world_volumes;
+        self.world_activation = world_activation;
         self.scene_membership = scene_membership.session;
         self.world_cars = cars;
         self.pending.extend(sections);

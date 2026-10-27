@@ -31,6 +31,12 @@ pub enum Arguments {
     None,
     /// One 32-bit value: a car ID, a local position notification, a racer count.
     Word(u32),
+    /// Volume-participant-set method 0: a full word followed by one boolean.
+    /// Preserve both fields without assigning them unverified meanings.
+    VolumeEntry {
+        value: u32,
+        flag: bool,
+    },
     /// Event-info collector method 0: position and membership in the active
     /// standings. Clearing membership removes the participant from the client's
     /// event-info service; it is not padding after the position.
@@ -83,6 +89,12 @@ impl Call {
             Arguments::None => (),
             Arguments::Word(v) => {
                 payload.put(v.into(), 32);
+            }
+            Arguments::VolumeEntry { value, flag } => {
+                if self.method != 0 || self.reference.is_none() {
+                    return Err(Error::Shape);
+                }
+                payload.put(value.into(), 32).put(u64::from(flag), 1);
             }
             Arguments::EventPosition { position, active } => {
                 // The collector's initial-state snapshot stores positions in

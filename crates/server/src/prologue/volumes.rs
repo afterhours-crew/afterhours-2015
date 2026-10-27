@@ -7,8 +7,9 @@
 //! Every one is a `VolumeParticipantSetFilterEntityData`: the event start areas'
 //! start volumes (the normal-event roster), the activity volumes and the
 //! collectible and spot volumes. The start areas' map visibility follows the
-//! mission-switching notification; the official host switches no other (the
-//! five drag races have none and stay unswitched).
+//! mission-switching notification. This catalog covers that eligibility
+//! subset; other authored requirement notifications have their own predicate
+//! state and cannot be inferred from POI visibility alone.
 //! The families are named by the authored prefab that defines each filter,
 //! as observed in the official capture; their lifecycle belongs to the host.
 use nfs_content::{
@@ -49,6 +50,14 @@ pub struct Binding {
     pub asset: String,
 }
 
+/// An event's eligibility notification precedes its participant subscription.
+/// Keep that relationship: independently sorting the two endpoint sets loses it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EventVolume {
+    pub volume: Endpoint,
+    pub notifications: Vec<Endpoint>,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct WorldVolumes {
     /// Event start volumes (participant memberships).
@@ -59,6 +68,11 @@ pub struct WorldVolumes {
     pub spots: BTreeSet<Endpoint>,
     /// Start-area map notifications (scene switches).
     pub notifications: BTreeSet<Endpoint>,
+    /// Ungated events first, then notification declaration order in the loaded
+    /// scenes. Endpoint hashes and event names are identities, not order keys.
+    pub event_order: Vec<EventVolume>,
+    /// Driving subscriptions in activation-family and scene declaration order.
+    pub driving_order: Vec<Endpoint>,
 }
 
 impl WorldVolumes {
@@ -105,6 +119,58 @@ impl WorldVolumes {
             .flat_map(|entry| entry.notifications.iter().copied())
             .filter(|n| assets.get(n).is_some_and(|a| MISSION_SWITCHING.contains(a)))
             .collect();
+        let order: BTreeMap<_, _> = bindings
+            .iter()
+            .enumerate()
+            .map(|(ordinal, binding)| (binding.endpoint, ordinal))
+            .collect();
+        for entry in roster {
+            let mut notifications: Vec<_> = entry
+                .notifications
+                .iter()
+                .copied()
+                .filter(|n| volumes.notifications.contains(n))
+                .collect();
+            notifications.sort_by_key(|n| order.get(n));
+            if !order.contains_key(&entry.volume)
+                || notifications.iter().any(|n| !order.contains_key(n))
+            {
+                return Err(nfs_content::Error::Content(
+                    "world volume declaration is missing".into(),
+                ));
+            }
+            volumes.event_order.push(EventVolume {
+                volume: entry.volume,
+                notifications,
+            });
+        }
+        volumes.event_order.sort_by_key(|entry| {
+            (
+                !entry.notifications.is_empty(),
+                order[entry.notifications.first().unwrap_or(&entry.volume)],
+            )
+        });
+        // These activation families have distinct owned lifetimes. In
+        // particular the first-drive spot pulse lies between the narrative
+        // subscriptions and the automatic driving activities.
+        for asset in [
+            "gameplay/progression/narrativelocation",
+            "gameplay/progression/missionvolumes",
+            "gameplay/collectibles/donorcarprefab",
+            "gameplay/collectibles/vistaprefab",
+            "gameplay/collectibles/donutprefab",
+            "gameplay/collectibles/urbexprefab",
+            "gameplay/activities/activitynotificationarea",
+            "gameplay/activities/speedrunprefab",
+            "gameplay/activities/driftcornerprefab",
+        ] {
+            volumes.driving_order.extend(
+                bindings
+                    .iter()
+                    .filter(|b| b.class == VOLUME_FILTER && b.asset == asset)
+                    .map(|b| b.endpoint),
+            );
+        }
         if [
             &volumes.events,
             &volumes.activities,
@@ -157,6 +223,7 @@ mod tests {
         ];
         let bindings = vec![
             binding(at(7, 97), VOLUME_FILTER, "eventlogic(set)"),
+            binding(at(7, 300), VOLUME_FILTER, "eventlogic(set)"),
             binding(
                 at(7, 103),
                 "SetClientNotificationEntityData",
@@ -191,5 +258,50 @@ mod tests {
         assert_eq!(volumes.activities, BTreeSet::from([at(8, 4)]));
         assert_eq!(volumes.spots, BTreeSet::from([at(8, 5)]));
         assert_eq!(volumes.notifications, BTreeSet::from([at(7, 151)]));
+        assert_eq!(volumes.event_order[0].volume, at(7, 300));
+        assert_eq!(volumes.event_order[1].volume, at(7, 97));
+        assert_eq!(volumes.event_order[1].notifications, [at(7, 151)]);
+        assert_eq!(volumes.driving_order, [at(8, 5), at(8, 4)]);
+    }
+
+    #[test]
+    fn event_publication_follows_notification_declarations_not_hashes_names_or_volumes() {
+        let roster = vec![
+            entry(at(7, 10), vec![at(7, 40)]),
+            entry(at(90, 30), vec![at(90, 20)]),
+            entry(at(90, 2), vec![at(90, 50)]),
+        ];
+        let bindings = vec![
+            binding(at(90, 2), VOLUME_FILTER, "eventlogic(set)"),
+            binding(
+                at(90, 20),
+                "SetClientNotificationEntityData",
+                MISSION_SWITCHING[0],
+            ),
+            binding(at(90, 30), VOLUME_FILTER, "eventlogic(set)"),
+            binding(
+                at(90, 50),
+                "SetClientNotificationEntityData",
+                MISSION_SWITCHING[0],
+            ),
+            binding(at(7, 10), VOLUME_FILTER, "eventlogic(set)"),
+            binding(
+                at(7, 40),
+                "SetClientNotificationEntityData",
+                MISSION_SWITCHING[0],
+            ),
+        ];
+        let volumes = WorldVolumes::classify(&roster, &bindings).unwrap();
+        assert_eq!(
+            volumes
+                .event_order
+                .iter()
+                .map(|e| e.volume)
+                .collect::<Vec<_>>(),
+            [at(90, 30), at(90, 2), at(7, 10)]
+        );
+        let mut missing = bindings;
+        missing.retain(|b| b.endpoint != at(90, 30));
+        assert!(WorldVolumes::classify(&roster, &missing).is_err());
     }
 }

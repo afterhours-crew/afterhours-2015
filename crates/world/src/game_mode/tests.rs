@@ -85,6 +85,38 @@ fn calls_carry_the_client_reader_argument_layouts() {
 }
 
 #[test]
+fn volume_entries_encode_a_word_and_boolean_before_alignment() {
+    for value in [0, 1, 3, 0x8000_0000, u32::MAX] {
+        for flag in [false, true] {
+            let (refs, selector, method, args) = route(
+                &call(0, Some(351), Arguments::VolumeEntry { value, flag })
+                    .encode()
+                    .unwrap(),
+            );
+            assert_eq!((refs, selector, method), (vec![1503, 351], 7, 0));
+            assert_eq!(args.len(), 37);
+            assert_eq!(word(&args, 0), value);
+            assert_eq!(args[32], flag);
+            assert!(args[33..].iter().all(|bit| !bit));
+        }
+    }
+    for (method, reference) in [(1, Some(351)), (0, None)] {
+        assert_eq!(
+            call(
+                method,
+                reference,
+                Arguments::VolumeEntry {
+                    value: 0,
+                    flag: false,
+                },
+            )
+            .encode(),
+            Err(Error::Shape)
+        );
+    }
+}
+
+#[test]
 fn event_positions_include_membership_before_alignment_padding() {
     // A word-only payload has the same byte size, but its zero padding tells
     // the client's collector to remove the racer instead of updating it.

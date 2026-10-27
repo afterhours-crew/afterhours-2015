@@ -73,6 +73,17 @@ pub(in crate::net::players) fn present(
     ctx: &Context<'_>,
     calls: Vec<HostRpc>,
 ) -> Result<Vec<HostRpc>, replication::Error> {
+    present_with_driving_tail(ctx, calls, &BTreeSet::new())
+}
+
+/// A newly constructed first drive publishes its HUD only after the complete
+/// handoff, including mode callbacks and initial opponents. Ordinary Alive
+/// transitions keep their existing presentation placement.
+pub(super) fn present_with_driving_tail(
+    ctx: &Context<'_>,
+    calls: Vec<HostRpc>,
+    driving_tail: &BTreeSet<u16>,
+) -> Result<Vec<HostRpc>, replication::Error> {
     let (Some(intro), Some(lifecycle)) = (
         ctx.participants.intro_bindings(),
         ctx.participants.lifecycle_bindings(),
@@ -104,7 +115,14 @@ pub(in crate::net::players) fn present(
             (ctx.fade(participant, &[UNBLACK])?, Vec::new())
         } else if endpoint == intro.alive && enter {
             // 125717 ms (with the first-drive HUD), 574121, 758326, 891523 ms.
-            (Vec::new(), ctx.driving(participant)?)
+            (
+                Vec::new(),
+                if driving_tail.contains(&participant) {
+                    Vec::new()
+                } else {
+                    ctx.driving(participant)?
+                },
+            )
         } else if endpoint == intro.relocating && leave {
             // 749427 ms: hide the world for the next teleport.
             (Vec::new(), ctx.fade(participant, &[HIDE_WORLD, BLACK])?)
@@ -147,6 +165,9 @@ pub(in crate::net::players) fn present(
         out.extend(before);
         out.push(*call);
         out.extend(after);
+    }
+    for &participant in driving_tail {
+        out.extend(ctx.driving(participant)?);
     }
     Ok(out)
 }
@@ -260,6 +281,36 @@ mod tests {
                 .collect();
             assert_eq!(run(&listener, calls), expected);
         }
+        let handoff = vec![
+            note(intro.alive, participant, Call::Enter),
+            HostRpc::Event(nfs_world::logic::Fire {
+                target: nfs_world::logic::EntityRef {
+                    ghost: fade,
+                    entity: 1,
+                },
+                event: 77,
+                player: None,
+            }),
+        ];
+        let presented = present_with_driving_tail(
+            &Context {
+                logic: listener.logic.as_deref(),
+                ghosts: &listener.logic_ghosts,
+                players: &listener.players,
+                participants: &listener.participants,
+                content: listener.prologue.as_deref(),
+            },
+            handoff,
+            &BTreeSet::from([participant]),
+        )
+        .unwrap();
+        assert_eq!(
+            presented
+                .iter()
+                .map(|c| label(fade, hud, c))
+                .collect::<Vec<_>>(),
+            ["Enter", "fade:77", "hud:19", "hud:17", "hud:12", "fade:0"]
+        );
         // Another participant's identical notification is left alone.
         let other = vec![note(intro.alive, participant + 1, Call::Enter)];
         assert_eq!(run(&listener, other), vec!["Enter"]);

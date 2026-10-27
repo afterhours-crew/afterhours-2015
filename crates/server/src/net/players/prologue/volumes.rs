@@ -12,11 +12,10 @@
 //! all 30 at every one of its nine transitions, from the first drive
 //! (123619 ms) through the garage request (290318 ms) and the movies to the
 //! final return (1119119 ms). Spot volumes are joined and left in the first
-//! drive's burst only. The rules see each notification when the session
-//! accepts it (`rpc_sent`, `entry_sent`), whichever producer queued it, and
-//! record what the participant should be in; the world loop publishes the
-//! difference in reply-sized batches once the transition's own entries are
-//! out, as the official host spreads it over full frames.
+//! drive's burst only. Starting a drive reserves the entire ordered handoff
+//! with the owned mode transaction; the session's FIFO spreads publication
+//! over reply-sized frames. Other transitions observe accepted notifications
+//! (`rpc_sent`, `entry_sent`) and reconcile their membership changes in batches.
 use super::*;
 use crate::prologue::volumes::WorldVolumes;
 use nfs_content::events::discovery::Endpoint as Site;
@@ -27,9 +26,6 @@ use nfs_world::{
 
 /// Calls published per world loop pass (one reply group).
 const BATCH: usize = 15;
-/// The participant-set argument of every official membership call.
-const MEMBERSHIP: u32 = 3;
-
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum Pulse {
     #[default]
@@ -55,9 +51,11 @@ pub(in crate::net::players) struct Change {
     pub join: bool,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(in crate::net::players) struct State {
     wanted: BTreeMap<u16, Wanted>,
+    // Projection of output reserved in the listener's FIFO, not a client ack.
+    // A driving transaction commits this together with its complete output.
     published: BTreeSet<(Option<u16>, Site)>,
 }
 
@@ -95,11 +93,11 @@ impl State {
             if endpoint == intro.opening && leave {
                 wanted.events = true;
                 wanted.notifications = true;
-                if wanted.spots == Pulse::Never {
-                    wanted.spots = Pulse::Joining;
-                }
             } else if endpoint == intro.alive {
                 wanted.activities = enter;
+                if enter && wanted.spots == Pulse::Never {
+                    wanted.spots = Pulse::Joining;
+                }
             } else if endpoint == lifecycle.loading_garage && enter {
                 wanted.events = false;
             } else if endpoint == intro.relocating && enter {
@@ -124,6 +122,157 @@ impl State {
                 }
             }
         }
+    }
+
+    /// Stage the subscriptions that must precede Alive. The caller works on a
+    /// clone and reserves the complete drive transaction before committing it.
+    pub(super) fn before_alive(
+        &mut self,
+        volumes: &WorldVolumes,
+        players: &Players,
+        participant: u16,
+    ) -> Result<Vec<HostRpc>, replication::Error> {
+        let wanted = self.wanted.entry(participant).or_default();
+        wanted.events = true;
+        wanted.notifications = true;
+        let mut changes = Vec::new();
+        let mut seen = BTreeSet::new();
+        for event in &volumes.event_order {
+            for &site in &event.notifications {
+                let key = (None, site);
+                if !self.published.contains(&key) && seen.insert(key) {
+                    changes.push(Change {
+                        participant: None,
+                        site,
+                        join: true,
+                    });
+                }
+            }
+            let key = (Some(participant), event.volume);
+            if !self.published.contains(&key) && seen.insert(key) {
+                changes.push(Change {
+                    participant: Some(participant),
+                    site: event.volume,
+                    join: true,
+                });
+            }
+        }
+        // A partial catalog must not silently release the downstream state.
+        if volumes
+            .event_order
+            .iter()
+            .map(|e| e.volume)
+            .collect::<BTreeSet<_>>()
+            != volumes.events
+            || volumes
+                .event_order
+                .iter()
+                .flat_map(|e| e.notifications.iter().copied())
+                .collect::<BTreeSet<_>>()
+                != volumes.notifications
+        {
+            return Err(replication::Error::Shape);
+        }
+        self.reserve(players, changes)
+    }
+
+    /// Driving subscriptions follow Alive but precede the drive-mode callback.
+    pub(super) fn after_alive(
+        &mut self,
+        volumes: &WorldVolumes,
+        players: &Players,
+        participant: u16,
+    ) -> Result<Vec<HostRpc>, replication::Error> {
+        let wanted = self.wanted.entry(participant).or_default();
+        wanted.activities = true;
+        let pulse = matches!(wanted.spots, Pulse::Never | Pulse::Joining);
+        if pulse {
+            wanted.spots = Pulse::Leaving;
+        }
+        let expected: BTreeSet<_> = volumes.activities.union(&volumes.spots).copied().collect();
+        if volumes
+            .driving_order
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            != expected
+            || volumes.driving_order.len() != expected.len()
+        {
+            return Err(replication::Error::Shape);
+        }
+        let changes = volumes
+            .driving_order
+            .iter()
+            .copied()
+            .filter(|site| {
+                volumes.activities.contains(site) || pulse && volumes.spots.contains(site)
+            })
+            .filter(|&site| !self.published.contains(&(Some(participant), site)))
+            .map(|site| Change {
+                participant: Some(participant),
+                site,
+                join: true,
+            })
+            .collect();
+        self.reserve(players, changes)
+    }
+
+    /// The once-only spot pulse leaves after the drive callback and before the
+    /// canceller callback. Repeated chapters retain their completed pulse.
+    pub(super) fn after_drive(
+        &mut self,
+        volumes: &WorldVolumes,
+        players: &Players,
+        participant: u16,
+    ) -> Result<Vec<HostRpc>, replication::Error> {
+        if self
+            .wanted
+            .get(&participant)
+            .is_none_or(|w| w.spots != Pulse::Leaving)
+        {
+            return Ok(Vec::new());
+        }
+        let changes = volumes
+            .driving_order
+            .iter()
+            .copied()
+            .filter(|site| volumes.spots.contains(site))
+            .filter(|&site| self.published.contains(&(Some(participant), site)))
+            .map(|site| Change {
+                participant: Some(participant),
+                site,
+                join: false,
+            })
+            .collect();
+        let calls = self.reserve(players, changes)?;
+        self.wanted
+            .get_mut(&participant)
+            .expect("existing owner")
+            .spots = Pulse::Done;
+        Ok(calls)
+    }
+
+    fn reserve(
+        &mut self,
+        players: &Players,
+        changes: Vec<Change>,
+    ) -> Result<Vec<HostRpc>, replication::Error> {
+        if changes.len() > nfs_world::session::MAX_RPC_QUEUE {
+            return Err(replication::Error::Bound);
+        }
+        let calls = changes
+            .iter()
+            .map(|change| encode_change(players, change))
+            .collect::<Result<Vec<_>, _>>()?;
+        for change in changes {
+            let key = (change.participant, change.site);
+            if change.join {
+                self.published.insert(key);
+            } else {
+                self.published.remove(&key);
+            }
+        }
+        Ok(calls)
     }
 
     /// Drop memberships the world no longer holds, without removal calls:
@@ -219,6 +368,29 @@ impl State {
     }
 }
 
+fn encode_change(players: &Players, change: &Change) -> Result<HostRpc, replication::Error> {
+    let world = players.objects();
+    let (scene, selector) = world
+        .scene_endpoint(change.site.scene_key, change.site.serializer)
+        .ok_or(replication::Error::UnknownObject)?;
+    let arguments = if change.join && change.participant.is_some() {
+        Arguments::VolumeEntry {
+            value: 0,
+            flag: false,
+        }
+    } else {
+        Arguments::None
+    };
+    Ok(HostRpc::GameMode(crate::event_logic::call(
+        world,
+        scene,
+        selector,
+        u32::from(!change.join),
+        change.participant,
+        arguments,
+    )?))
+}
+
 impl PlayerListener {
     /// The session accepted the front queued RPC. Every notification passes
     /// here once, whichever producer queued it.
@@ -246,6 +418,15 @@ impl PlayerListener {
         now_ms: u64,
     ) -> Result<(), replication::Error> {
         if !self.pending_entries.is_empty() {
+            return Ok(());
+        }
+        // Starting a drive reserves its whole causal publication in
+        // advance_prologue. Do not race that transaction with partial sweeps.
+        if self
+            .participants
+            .intro_participants()
+            .any(|p| self.participants.stage(p) == Some(Stage::IntroStartingDrive))
+        {
             return Ok(());
         }
         let Some(content) = self.prologue.clone() else {
@@ -276,22 +457,7 @@ impl PlayerListener {
         }
         let mut calls = Vec::with_capacity(changes.len());
         for change in &changes {
-            let (scene, selector) = world
-                .scene_endpoint(change.site.scene_key, change.site.serializer)
-                .ok_or(replication::Error::UnknownObject)?;
-            let arguments = if change.join && change.participant.is_some() {
-                Arguments::Word(MEMBERSHIP)
-            } else {
-                Arguments::None
-            };
-            calls.push(HostRpc::GameMode(crate::event_logic::call(
-                world,
-                scene,
-                selector,
-                u32::from(!change.join),
-                change.participant,
-                arguments,
-            )?));
+            calls.push(encode_change(&self.players, change)?);
         }
         let count = |member: bool, join: bool| {
             changes
@@ -322,6 +488,7 @@ impl PlayerListener {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nfs_protocol::world::rpc::{Envelope, Limits, RouteProfile};
     use std::sync::Arc;
 
     fn site(serializer: usize) -> Site {
@@ -329,6 +496,300 @@ mod tests {
             scene_key: 909,
             serializer,
         }
+    }
+
+    fn ordered_volumes() -> WorldVolumes {
+        use crate::prologue::volumes::EventVolume;
+        WorldVolumes {
+            events: (1..=20).map(site).collect(),
+            activities: [site(70)].into(),
+            spots: [site(71), site(72)].into(),
+            notifications: (31..=50).map(site).collect(),
+            event_order: (1..=20)
+                .rev()
+                .map(|i| EventVolume {
+                    volume: site(i),
+                    notifications: vec![site(i + 30)],
+                })
+                .collect(),
+            driving_order: vec![site(71), site(70), site(72)],
+        }
+    }
+
+    fn decoded(call: HostRpc) -> (Vec<u16>, u16, u32) {
+        let wire = call.encode().unwrap();
+        let envelope = Envelope::decode(
+            wire.span(),
+            Limits {
+                max_input_bits: 512,
+                max_references: 2,
+                max_payload_bytes: 16,
+            },
+        )
+        .unwrap();
+        let route = envelope.route(RouteProfile::ClientReceive).unwrap();
+        (
+            envelope.references().to_vec(),
+            route.selector(),
+            route.method_index(),
+        )
+    }
+
+    fn at_drive_boundary() -> (PlayerListener, u16, HostRpc) {
+        let (mut listener, participant, _) = super::super::tests::setup();
+        let intro = listener.participants.intro_bindings().unwrap();
+        assert!(matches!(
+            listener.participants.intro_vehicle_ready(participant),
+            Outcome::Advanced(_)
+        ));
+        for (endpoint, method) in [(intro.teleport, 3), (intro.render_ready, 0)] {
+            let mut payload = nfs_world::bits::BitWriter::new();
+            payload
+                .put(endpoint.selector.into(), 9)
+                .put(method, 32)
+                .align();
+            let mut request = nfs_world::bits::BitWriter::new();
+            request
+                .put(0, 32)
+                .put(0, 32)
+                .put(2, 8)
+                .put(endpoint.scene.into(), 13)
+                .put(participant.into(), 13)
+                .put(payload.bytes().len() as u64, 9)
+                .put_span(payload.span());
+            assert!(matches!(
+                listener
+                    .participants
+                    .receive_intro(request.span(), |_| true)
+                    .unwrap(),
+                Some(Outcome::Advanced(_))
+            ));
+        }
+        let Outcome::Advanced(leave) = listener.participants.intro_opening_complete(participant)
+        else {
+            panic!()
+        };
+        Arc::make_mut(listener.prologue.as_mut().unwrap()).volumes = ordered_volumes();
+        (listener, participant, HostRpc::Participant(leave[0]))
+    }
+
+    #[test]
+    fn drive_publication_reservation_rolls_back_under_pressure_then_queues_once() {
+        let (mut listener, participant, leave) = at_drive_boundary();
+        let mut host = crate::net::players::test_wire::session_host();
+        for section in split_scenes(
+            listener.players.objects().snapshot(),
+            nfs_world::application::OUTBOUND_FRAME_BITS - 96,
+        )
+        .unwrap()
+        {
+            host.queue_replication(section).unwrap();
+        }
+        listener
+            .pending_rpcs
+            .resize(nfs_world::session::MAX_RPC_QUEUE - 1, leave);
+        let before = listener.players.objects().snapshot();
+        let volumes = listener.world_volumes.clone();
+        listener.advance_prologue().unwrap();
+        assert_eq!(listener.players.objects().snapshot(), before);
+        assert_eq!(listener.world_volumes, volumes);
+        assert!(listener.intro_modes.is_empty());
+        assert_eq!(
+            listener.participants.stage(participant),
+            Some(Stage::IntroStartingDrive)
+        );
+        assert!(listener.pending.is_empty());
+        // Relieve listener pressure through actual session acceptance. The
+        // host now has only one RPC slot, exercising partial admission too.
+        crate::net::players::test_wire::flush(&mut listener, &mut host).unwrap();
+        assert!(listener.pending_rpcs.is_empty());
+        listener.advance_prologue().unwrap();
+        assert_eq!(
+            listener.participants.stage(participant),
+            Some(Stage::FreeRoam)
+        );
+        let calls: Vec<_> = listener.pending_rpcs.iter().copied().collect();
+        let alive = calls.iter().position(|c| matches!(c, HostRpc::Participant(n)
+            if n.endpoint == listener.participants.intro_bindings().unwrap().alive && n.call == Call::Enter)).unwrap();
+        assert_eq!(
+            alive, 40,
+            "twenty notification/membership pairs precede Alive"
+        );
+        let (drive, canceller, _) = &listener.intro_modes[&participant];
+        let joined = |ghost| {
+            calls
+                .iter()
+                .position(|c| {
+                    matches!(c, HostRpc::GameMode(g)
+            if g.method == 4 && g.reference == Some(ghost))
+                })
+                .unwrap()
+        };
+        assert!(alive + 3 < joined(drive.ghost));
+        assert!(joined(drive.ghost) + 2 < joined(canceller.ghost));
+        let created: BTreeSet<_> = listener
+            .pending
+            .iter()
+            .flat_map(|s| s.records.iter().map(|r| r.id))
+            .collect();
+        assert!(created.contains(&drive.ghost) && created.contains(&canceller.ghost));
+        crate::net::players::test_wire::flush(&mut listener, &mut host).unwrap();
+        assert_eq!(
+            listener.pending_rpcs.iter().copied().collect::<Vec<_>>(),
+            calls[1..]
+        );
+        let retained = listener.pending_rpcs.clone();
+        let objects = listener.players.objects().snapshot();
+        let volumes = listener.world_volumes.clone();
+        listener.advance_prologue().unwrap();
+        crate::net::players::test_wire::flush(&mut listener, &mut host).unwrap();
+        assert_eq!(listener.pending_rpcs, retained);
+        assert_eq!(listener.players.objects().snapshot(), objects);
+        assert_eq!(listener.world_volumes, volumes);
+    }
+
+    #[test]
+    fn an_unresolvable_required_subscription_does_not_release_alive_or_create_modes() {
+        let (mut listener, participant, _) = at_drive_boundary();
+        let content = Arc::make_mut(listener.prologue.as_mut().unwrap());
+        content.volumes.events.insert(site(500));
+        content
+            .volumes
+            .event_order
+            .push(crate::prologue::volumes::EventVolume {
+                volume: site(500),
+                notifications: vec![],
+            });
+        let before = listener.players.objects().snapshot();
+        let volumes = listener.world_volumes.clone();
+        assert_eq!(
+            listener.advance_prologue(),
+            Err(replication::Error::UnknownObject)
+        );
+        assert_eq!(listener.players.objects().snapshot(), before);
+        assert_eq!(listener.world_volumes, volumes);
+        assert_eq!(
+            listener.participants.stage(participant),
+            Some(Stage::IntroStartingDrive)
+        );
+        assert!(listener.pending.is_empty() && listener.pending_rpcs.is_empty());
+        assert!(listener.intro_modes.is_empty());
+    }
+
+    #[test]
+    fn staged_handoff_preserves_pairs_and_pulse_order_and_shared_notification_ownership() {
+        let (mut listener, participant, _) = super::super::tests::setup();
+        let volumes = ordered_volumes();
+        let mut state = State::default();
+        let before = state
+            .before_alive(&volumes, &listener.players, participant)
+            .unwrap();
+        let after = state
+            .after_alive(&volumes, &listener.players, participant)
+            .unwrap();
+        let leaves = state
+            .after_drive(&volumes, &listener.players, participant)
+            .unwrap();
+        let (scene, _) = listener.players.objects().scene_endpoint(909, 1).unwrap();
+        let expected: Vec<_> = (1..=20)
+            .rev()
+            .flat_map(|i| {
+                [
+                    (vec![scene], (i + 29) as u16, 0),
+                    (vec![scene, participant], (i - 1) as u16, 0),
+                ]
+            })
+            .collect();
+        assert_eq!(
+            before.iter().copied().map(decoded).collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(
+            after.iter().copied().map(decoded).collect::<Vec<_>>(),
+            [70, 69, 71].map(|s| (vec![scene, participant], s, 0))
+        );
+        assert_eq!(
+            leaves.iter().copied().map(decoded).collect::<Vec<_>>(),
+            [70, 71].map(|s| (vec![scene, participant], s, 1))
+        );
+        let member_calls: Vec<_> = after
+            .iter()
+            .map(|c| match c {
+                HostRpc::GameMode(call) => *call,
+                _ => panic!("membership expected"),
+            })
+            .collect();
+        assert_eq!(counts(&member_calls, participant), [3, 0, 0, 0]);
+
+        // Real session admission, with the fixture's actual creation bindings:
+        // no clearing queues or pretending an RPC has been accepted.
+        let mut host = crate::net::players::test_wire::session_host();
+        for section in split_scenes(
+            listener.players.objects().snapshot(),
+            nfs_world::application::OUTBOUND_FRAME_BITS - 96,
+        )
+        .unwrap()
+        {
+            host.queue_replication(section).unwrap();
+        }
+        listener
+            .pending_rpcs
+            .extend(before.iter().chain(&after).chain(&leaves).copied());
+        crate::net::players::test_wire::flush(&mut listener, &mut host).unwrap();
+        assert!(listener.pending_rpcs.is_empty());
+
+        // A repeated chapter emits neither another spot pulse nor duplicate
+        // subscriptions. A second owner still needs its own subscriptions;
+        // scene-wide notifications remain shared until the last owner leaves.
+        assert!(
+            state
+                .before_alive(&volumes, &listener.players, participant)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            state
+                .after_alive(&volumes, &listener.players, participant)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            state
+                .after_drive(&volumes, &listener.players, participant)
+                .unwrap()
+                .is_empty()
+        );
+        let player = listener
+            .players
+            .create(
+                HOST_SELECTOR as u8,
+                listener.persona + 1,
+                Request {
+                    name: b"Second owner".to_vec(),
+                    flag: false,
+                    slot: 1,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        let other = listener
+            .players
+            .join(HOST_SELECTOR as u8, listener.persona + 1, player.id)
+            .unwrap()
+            .unwrap()
+            .id;
+        let calls = state
+            .before_alive(&volumes, &listener.players, other)
+            .unwrap();
+        assert_eq!(calls.len(), 20);
+        assert!(calls.into_iter().all(|c| decoded(c).0 == [scene, other]));
+        state.wanted.get_mut(&participant).unwrap().notifications = false;
+        assert!(
+            state
+                .plan(&volumes, BATCH, |_| true)
+                .iter()
+                .all(|c| c.participant.is_some())
+        );
     }
 
     /// Queue the notifications and send them the way the world loop does.
@@ -366,12 +827,30 @@ mod tests {
                 .count()
         };
         for call in calls {
-            let expected = if call.reference.is_some() && call.method == 0 {
-                Arguments::Word(MEMBERSHIP)
+            let wire = call.encode().unwrap();
+            let envelope = Envelope::decode(
+                wire.span(),
+                Limits {
+                    max_input_bits: 512,
+                    max_references: 2,
+                    max_payload_bytes: 16,
+                },
+            )
+            .unwrap();
+            let route = envelope.route(RouteProfile::ClientReceive).unwrap();
+            let arguments = route.arguments();
+            if call.reference.is_some() && call.method == 0 {
+                // The client reads a full word and then one boolean. Check
+                // those wire fields rather than the producer's enum value.
+                assert_eq!(envelope.references(), &[call.target, participant]);
+                assert_eq!(arguments.len(), 37);
+                assert_eq!(arguments.read_u32(0, 32).unwrap(), 0);
+                assert_eq!(arguments.read_u32(32, 1).unwrap(), 0);
+                assert_eq!(arguments.read_u32(33, 4).unwrap(), 0);
             } else {
-                Arguments::None
-            };
-            assert_eq!(call.arguments, expected, "{call:?}");
+                assert_eq!(arguments.len(), 5);
+                assert_eq!(arguments.read_u32(0, 5).unwrap(), 0);
+            }
         }
         [
             count(Some(participant), 0),
@@ -390,6 +869,7 @@ mod tests {
             activities: (21..=25).map(site).collect(),
             spots: (26..=30).map(site).collect(),
             notifications: (31..=33).map(site).collect(),
+            ..WorldVolumes::default()
         };
         listener.prologue = Some(Arc::new(content));
         let intro = listener.participants.intro_bindings().unwrap();

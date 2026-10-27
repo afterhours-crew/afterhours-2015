@@ -2758,6 +2758,132 @@ fn ordered_content_cannot_overtake_notifications_under_a_full_send_window() {
 }
 
 #[test]
+fn a_multiframe_publication_keeps_rpc_order_across_early_creations_and_queue_pressure() {
+    use crate::{
+        participants::HostRpc,
+        replication::{
+            Record,
+            sublevel::{Rpc, root},
+        },
+    };
+    use nfs_protocol::world::rpc::Serial;
+    let (mut host, mut client, mut listener, now) = established_with_content();
+    let content = root::content().unwrap();
+    let scene = |id| {
+        let creation = root::creation(
+            Rpc {
+                selector: 0,
+                serial: Serial::new(0).unwrap(),
+            },
+            [None; root::REFERENCES],
+        )
+        .unwrap();
+        let mut section = owned_section(1);
+        section.records = vec![Record::from_scene(id, creation, &content).unwrap()];
+        section
+    };
+    host.queue_replication(scene(1)).unwrap();
+    let t = now + REPORT_TIMEOUT_MS;
+    loading::after_exchange(&mut host, t);
+    let t = t + 2 * STATE_WAIT_MS;
+    host.poll(t);
+    assert!(host.sent_objects.contains(&1));
+    host.queue_replication(scene(2)).unwrap();
+    let calls: Vec<_> = (0..MAX_RPC_QUEUE + 1)
+        .map(|index| {
+            HostRpc::Event(crate::logic::Fire {
+                target: crate::logic::EntityRef {
+                    ghost: if index == 20 { 2 } else { 1 },
+                    entity: 1,
+                },
+                event: index as u32,
+                player: None,
+            })
+        })
+        .collect();
+    for &call in &calls[..MAX_RPC_QUEUE] {
+        host.queue_rpc(call).unwrap();
+    }
+    assert_eq!(
+        host.queue_rpc(calls[MAX_RPC_QUEUE]),
+        Err(Error::Application(application::Error::Window))
+    );
+    let mut decoded = Vec::new();
+    for pass in 1..=calls.len().div_ceil(MAX_EAGER_NOTIFICATIONS) as u64 {
+        let out = host.poll(t + pass * REPLICATION_INTERVAL_MS);
+        for (bytes, bits) in host_frames(&client, &out.send) {
+            let parsed = frame::parse(
+                BitSpan::new(&bytes, 0, bits).unwrap(),
+                frame::Direction::FromHost,
+            )
+            .unwrap();
+            if let Some(messages) = parsed.messages {
+                for group in messages.groups {
+                    for message in group.messages {
+                        if let frame::Message::Opaque { index: 86, body } = message {
+                            // The parsed span borrows the complete frame at a
+                            // bit offset; compare only this message's own bits.
+                            let mut owned = crate::bits::BitWriter::new();
+                            owned.put_span(body);
+                            decoded.push((owned.bytes().to_vec(), owned.len()));
+                        }
+                    }
+                }
+            }
+        }
+        if pass == 1 {
+            // The early creation rides with the first prefix, while its
+            // callback stays at its causal position in the later prefix.
+            assert!(host.sent_objects.contains(&2));
+            assert_eq!(decoded.len(), MAX_EAGER_NOTIFICATIONS);
+            host.queue_rpc(calls[MAX_RPC_QUEUE]).unwrap();
+        }
+        // Acknowledge the actual transport output so the later mode-callback
+        // positions and the final retried call pass through serialization too.
+        let last = out
+            .send
+            .iter()
+            .filter_map(|wire| client.open(wire))
+            .filter_map(|body| {
+                nfs_protocol::world::envelope::ZeroTail::new(1600)
+                    .unwrap()
+                    .decode(&body)
+                    .unwrap()
+                    .sequence()
+                    .map(|s| s.number().value())
+            })
+            .next_back()
+            .expect("a published frame");
+        let mut control = crate::bits::BitWriter::new();
+        control.put(1, 1).put(1, 4);
+        let ack = application::sequenced(HOST_SELECTOR, 3 + pass as u16, last, u32::MAX, &control);
+        let receipt = host.receive(
+            &client.app(&ack),
+            t + pass * REPLICATION_INTERVAL_MS + 1,
+            &mut listener,
+        );
+        assert!(
+            !receipt
+                .events
+                .iter()
+                .any(|event| matches!(event, Event::ApplicationError(_) | Event::Closed))
+        );
+    }
+    assert_eq!(decoded.len(), calls.len());
+    let expected: Vec<_> = calls
+        .iter()
+        .map(|call| {
+            let wire = call.encode().unwrap();
+            (wire.bytes().to_vec(), wire.len())
+        })
+        .collect();
+    for (index, (actual, expected)) in decoded.iter().zip(&expected).enumerate() {
+        assert_eq!(actual, expected, "publication RPC {index}");
+    }
+    assert!(host.rpc_queue.is_empty());
+}
+
+#[test]
 fn speedwall_progress_keeps_its_reliable_finish_boundary_under_pressure() {
     let progress = crate::speedwall::Progress {
         score_bits: 0,

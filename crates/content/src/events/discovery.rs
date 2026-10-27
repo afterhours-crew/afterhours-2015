@@ -6,6 +6,8 @@
 //! Visibility is an explicit free-roam policy; story eligibility is not evaluated.
 use super::*;
 
+pub mod requirements;
+
 pub const MAX_EVENTS: usize = 512;
 
 /// A scene serializer, resolved in its full prefab instance context.
@@ -30,6 +32,21 @@ impl AssetIndex {
     /// Resolve normal authored start areas in loaded scenes. This does not imply
     /// support for starting or completing each of their game modes.
     pub fn event_roster(&mut self) -> Result<Vec<Entry>, Error> {
+        self.roster(false).map(|(entries, _)| entries)
+    }
+
+    /// Include notification-backed start requirements, preserving their own
+    /// participant-state and Boolean-property dependencies.
+    pub fn event_roster_with_requirements(
+        &mut self,
+    ) -> Result<(Vec<Entry>, Vec<requirements::Binding>), Error> {
+        self.roster(true)
+    }
+
+    fn roster(
+        &mut self,
+        include_requirements: bool,
+    ) -> Result<(Vec<Entry>, Vec<requirements::Binding>), Error> {
         let rules = self.identity.scenes.clone();
         let startup = self.startup_entries(&rules.level)?;
         let mut graph = Graph::new(&mut self.assets);
@@ -44,7 +61,13 @@ impl AssetIndex {
             .iter()
             .map(|(n, s)| (n.clone(), s.clone()))
             .collect();
+        let identified = if include_requirements {
+            requirements::identified_bools(&mut graph, &roots)?
+        } else {
+            BTreeMap::new()
+        };
         let mut entries = BTreeMap::new();
+        let mut requirements = Vec::new();
         for (scene, root) in roots {
             let nodes = graph.read(root)?;
             for launcher in nodes.iter().filter(|n| n.object.class == LAUNCHER) {
@@ -149,12 +172,28 @@ impl AssetIndex {
                     },
                     notifications: resolved,
                 };
+                if include_requirements {
+                    let mut start_area = launcher.site.clone();
+                    let frame = start_area
+                        .parents
+                        .pop()
+                        .ok_or_else(|| bad("start area parent"))?;
+                    start_area.key = frame.reference;
+                    start_area.bus = frame.bus;
+                    requirements.extend(requirements::read(
+                        &mut graph,
+                        &mut scenes,
+                        &start_area,
+                        &entry,
+                        &identified,
+                    )?);
+                }
                 if entries.insert(id, entry).is_some() || entries.len() > MAX_EVENTS {
                     return Err(bad("duplicate event identity or roster bound"));
                 }
             }
         }
-        Ok(entries.into_values().collect())
+        Ok((entries.into_values().collect(), requirements))
     }
 }
 
