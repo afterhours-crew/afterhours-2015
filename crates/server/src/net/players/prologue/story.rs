@@ -101,6 +101,23 @@ impl PlayerListener {
             &self.players,
             request.participant,
         )?;
+        // A message is announced once, by the commit that stored it.
+        if let crate::net::items::story::Action::Message { hash } = request.action
+            && let Some(messages) = &request.progression.messages
+        {
+            let held = |loaded: &crate::persistent::Loaded| {
+                nfs_services::messages::rows(loaded.tables(), nfs_services::messages::STATIC)
+                    .map(|rows| rows.iter().any(|r| r.hash == hash))
+                    .map_err(|_| replication::Error::Shape)
+            };
+            if !held(before)? && held(&committed.loaded)? {
+                calls.push(messages.added(self.players.objects(), hash)?);
+            }
+        }
+        // A tutorial accept is durable: its logic goes at the next advance.
+        if let crate::net::items::story::Action::Tutorial { key } = request.action {
+            self.tutorial_committed(request.participant, key, &committed.loaded)?;
+        }
         let mut modes = self.intro_modes.clone();
         if let crate::net::items::story::Action::Complete { objective } = request.action
             && let Some((active, _, chapter)) = modes.get_mut(&request.participant)

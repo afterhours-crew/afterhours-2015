@@ -191,6 +191,25 @@ impl PlayerListener {
                 records.extend(out.records);
                 calls.extend(out.calls);
                 deleted.extend(out.deleted);
+                // A due message is stored first; its commit announces it.
+                for hash in out.messages {
+                    let participant = active.owner().participant;
+                    let (Some(progression), Some(player_index)) = (
+                        self.progression.clone(),
+                        players.runtime_index(HOST_SELECTOR as u8, self.persona, participant),
+                    ) else {
+                        continue;
+                    };
+                    if story_pending.len() >= MAX_PENDING {
+                        return Err(replication::Error::Bound);
+                    }
+                    story_pending.push_back(crate::net::items::story::Request {
+                        participant,
+                        player_index: u32::from(player_index),
+                        progression,
+                        action: crate::net::items::story::Action::Message { hash },
+                    });
+                }
             }
         }
         let owners = players.player_participants().collect::<Vec<_>>();

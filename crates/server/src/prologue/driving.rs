@@ -48,6 +48,8 @@ pub(crate) mod tests;
 #[derive(Clone, Debug)]
 pub struct Mode {
     pub data: intro::Mode,
+    /// The launcher's timed messages as (seconds after the launch, HashId).
+    pub messages: Vec<(f32, u32)>,
     parent: Asset,
     plan: Arc<Plan>,
     content: CreationContent,
@@ -79,6 +81,7 @@ impl Mode {
             mode = name,
             launch_event = ?data.launch_event,
             timed_events = ?data.timed_events,
+            timed_messages = ?data.timed_messages,
             "intro mode prepared; a launch event means the client launches it"
         );
         let mut sequences = BTreeMap::new();
@@ -127,9 +130,15 @@ impl Mode {
                 ));
             }
         }
+        let messages = data
+            .timed_messages
+            .iter()
+            .map(|m| Ok((m.seconds, index.message_hash(&m.message.0, m.message.1)?)))
+            .collect::<Result<Vec<_>, nfs_content::Error>>()?;
         let mut mode = Self::new(data, parent, sequences)
             .map_err(|e| nfs_content::Error::Content(format!("intro mode: {e:?}")))?;
         mode.timing = timing;
+        mode.messages = messages;
         mode.reporters = Some(reporters::Reporters::prepare(
             index, &mode.data, &mode.plan,
         )?);
@@ -163,6 +172,7 @@ impl Mode {
         let plan = Arc::new(Plan::installed(&data.game_mode.lifecycle).map_err(invalid)?);
         Ok(Self {
             data,
+            messages: vec![],
             parent,
             plan,
             content,
@@ -281,6 +291,9 @@ pub struct Output {
     pub records: Vec<Record>,
     pub deleted: Vec<u16>,
     pub calls: Vec<HostRpc>,
+    /// Phone messages now due (HashIds): the caller commits each before
+    /// announcing it.
+    pub messages: Vec<u32>,
 }
 #[derive(Clone, Debug)]
 pub struct Active {
@@ -321,6 +334,8 @@ pub struct Active {
     /// The launcher prefab's timed context triggers still to fire, as
     /// (deadline seconds, event, objective gated).
     timed_events: Vec<(f64, nfs_content::events::intro::LaunchEvent, bool)>,
+    /// Armed phone messages as (deadline seconds, HashId).
+    timed_messages: Vec<(f64, u32)>,
 }
 /// Seconds the host waits for the client's launcher answer before launching
 /// anyway. The official answer arrives within 50 ms (career start 891569 ms);
@@ -361,10 +376,24 @@ impl Active {
             return Ok(None);
         }
         let (launch, _) = self.pending_launch.take().ok_or(Error::Shape)?;
+        self.arm_messages(content, self.seconds);
         Ok(Some(Output {
             calls: vec![launch],
             ..Output::default()
         }))
+    }
+    /// The launcher started: its timed messages count from now (official
+    /// E1026: launch processed 891.623 s, reminder 906.624 s).
+    fn arm_messages(&mut self, content: &Mode, seconds: f64) {
+        self.timed_messages = content
+            .messages
+            .iter()
+            .map(|&(after, hash)| (seconds + f64::from(after), hash))
+            .collect();
+    }
+    /// The garage return began: messages not yet due are dropped.
+    pub fn cancel_messages(&mut self) {
+        self.timed_messages.clear();
     }
     /// The intro progression logic that owns this mode's launcher.
     pub fn parent(&self) -> u16 {
@@ -376,6 +405,10 @@ impl Active {
     /// its participant join at creation (GameMode m4) to its leave. Official
     /// E1026: events s9 follows the canceller from 124.718 s to its shutdown
     /// at 1247.825 s, across both races.
+    /// The mode's objective is active: launched, not arrived and not ending.
+    pub fn objective_live(&self) -> bool {
+        !self.ending && !self.left
+    }
     pub fn held_categories<'a>(&self, content: &'a Mode) -> Option<&'a BTreeSet<u32>> {
         let member = match content.data.game_mode.lifecycle.root_state {
             None => true,
@@ -392,6 +425,16 @@ impl Active {
     /// Fire the timed context triggers that are due; gated ones only while
     /// the objective is active (the drive has not arrived or begun ending).
     fn timed_due(&mut self, seconds: f64, out: &mut Output) {
+        let live = !self.ending && !self.left;
+        self.timed_messages.retain(|&(deadline, hash)| {
+            if seconds < deadline {
+                return true;
+            }
+            if live {
+                out.messages.push(hash);
+            }
+            false
+        });
         let active = !self.arrived && !self.ending;
         let parent = self.parent;
         self.timed_events.retain(|&(deadline, event, gated)| {
@@ -413,11 +456,12 @@ impl Active {
     }
     /// A launch still waiting for the client's answer past its deadline goes
     /// out anyway, logged: the handshake failed, the drive must not hang.
-    fn launch_overdue(&mut self, seconds: f64, out: &mut Output) {
+    fn launch_overdue(&mut self, content: &Mode, seconds: f64, out: &mut Output) {
         if let Some((_, deadline)) = &self.pending_launch
             && seconds >= *deadline
         {
             let (launch, _) = self.pending_launch.take().expect("checked above");
+            self.arm_messages(content, seconds);
             tracing::warn!(
                 mode = self.ghost,
                 participant = self.owner.participant,
@@ -587,6 +631,7 @@ impl Active {
             result_barrier: false,
             result_calls: vec![],
             pending_launch: None,
+            timed_messages: vec![],
             timed_events: content
                 .data
                 .timed_events
@@ -620,7 +665,10 @@ impl Active {
                 }));
                 active.pending_launch = Some((launch, seconds + LAUNCH_HANDSHAKE_SECONDS));
             }
-            None => out.calls.push(launch),
+            None => {
+                out.calls.push(launch);
+                active.arm_messages(content, seconds);
+            }
         }
         for &(key, s) in &content.data.game_mode.checkpoints {
             let (target, selector) = staged

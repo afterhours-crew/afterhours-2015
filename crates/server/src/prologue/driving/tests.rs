@@ -219,6 +219,8 @@ pub(crate) fn content(parent: Asset, manager: Component) -> (Mode, Mode) {
     .unwrap();
     let data = intro::Mode {
         timed_events: vec![],
+        timed_messages: vec![],
+        prefab: "test/intro/mode".into(),
         categories: Default::default(),
         shutdown_row: None,
         shutdown: None,
@@ -819,4 +821,29 @@ fn modes_without_a_root_state_hold_their_participant_from_the_join_until_the_lea
     assert_eq!(active.held_categories(&mode), held);
     active.left = true;
     assert_eq!(active.held_categories(&mode), None);
+}
+
+#[test]
+fn timed_messages_are_due_once_after_the_launch_and_cancelled_by_the_return() {
+    // introreturntogarage #40: the phone reminder 15 s after the launcher
+    // started (official E1026 891.623 -> 906.624 s).
+    let (mut players, owner, mut mode) = clock_fixture(false);
+    mode.messages = vec![(15., 1_422_063_331)];
+    let (mut active, out) = Active::start(&mode, &mut players, owner, 20.).unwrap();
+    assert!(out.messages.is_empty());
+    let mut due = |active: &mut Active, seconds| {
+        active
+            .advance(&mode, &mut players, seconds)
+            .unwrap()
+            .messages
+    };
+    let mut cancelled = active.clone();
+    let mut ending = active.clone();
+    assert!(due(&mut active, 34.99).is_empty());
+    assert_eq!(due(&mut active, 35.), [1_422_063_331]);
+    assert!(due(&mut active, 36.).is_empty());
+    cancelled.cancel_messages();
+    assert!(due(&mut cancelled, 40.).is_empty());
+    ending.ending = true;
+    assert!(due(&mut ending, 40.).is_empty());
 }

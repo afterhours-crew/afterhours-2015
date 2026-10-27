@@ -851,6 +851,7 @@ impl Exchanges {
                     connection = self.connection,
                     "reputation credit dropped: inventory service not configured"
                 );
+                listener.release_award(request.batch_id);
             }
             return;
         }
@@ -985,6 +986,7 @@ impl Exchanges {
                         ?error,
                         "story persistence failed"
                     );
+                    listener.story_failed(&request);
                     false
                 }
             };
@@ -1064,6 +1066,7 @@ impl Exchanges {
                                 batch_id = request.batch_id,
                                 "reputation credit snapshot rejected"
                             );
+                            listener.release_award(request.batch_id);
                             false
                         }
                     }
@@ -1075,6 +1078,7 @@ impl Exchanges {
                         batch_id = request.batch_id,
                         "reputation credit failed"
                     );
+                    listener.release_award(request.batch_id);
                     false
                 }
             };

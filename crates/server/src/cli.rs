@@ -869,6 +869,9 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                 let road = index.road_network();
                 let nitrous = index.nitrous_configurations()?;
                 let hides = index.progression_debug_hides();
+                let messages = nfs_server::messages::Content::prepare(&mut index);
+                let tutorials = nfs_server::tutorials::Content::prepare(&mut index);
+                let chapters = nfs_server::chapter_notifications::Content::prepare(&mut index);
                 // The owned race event resolves from the same installation; its
                 // failure leaves scoring on and the event off.
                 let event = (|| -> Result<_, nfs_content::Error> {
@@ -908,12 +911,70 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                         })?;
                     prepared.with_opponents(&mut index, vehicles, &ai_items)
                 })();
-                Ok::<_, nfs_content::Error>((scoring, road, nitrous, event, story, hides))
+                Ok::<_, nfs_content::Error>((
+                    scoring, road, nitrous, event, story, hides, messages, tutorials, chapters,
+                ))
             })
             .await
             .map_err(|_| Failure::Output)?;
             match content {
-                Ok((content, road, nitrous, event, story, hides)) => {
+                Ok((
+                    content,
+                    road,
+                    nitrous,
+                    event,
+                    story,
+                    hides,
+                    messages,
+                    tutorials,
+                    chapters,
+                )) => {
+                    match chapters {
+                        Ok(chapters) => {
+                            if let Some(current) = progression.take() {
+                                tracing::info!(
+                                    notifications = chapters.len(),
+                                    "chapter notifications read from the installation"
+                                );
+                                progression = Some(Arc::new(
+                                    (*current).clone().with_chapter_notifications(chapters),
+                                ));
+                            }
+                        }
+                        Err(error) => tracing::warn!(
+                            %error,
+                            "chapter notifications unavailable; markers keep their defaults"
+                        ),
+                    }
+                    match tutorials {
+                        Ok(tutorials) => {
+                            if let Some(current) = progression.take() {
+                                tracing::info!("tutorial spawners read from the installation");
+                                progression =
+                                    Some(Arc::new((*current).clone().with_tutorials(tutorials)));
+                            }
+                        }
+                        Err(error) => tracing::warn!(
+                            %error,
+                            "tutorials unavailable; no tutorial logics are created"
+                        ),
+                    }
+                    match messages {
+                        Ok(messages) => {
+                            if let Some(current) = progression.take() {
+                                tracing::info!(
+                                    messages = messages.catalog.len(),
+                                    "phone messages read from the installation"
+                                );
+                                progression =
+                                    Some(Arc::new((*current).clone().with_messages(messages)));
+                            }
+                        }
+                        Err(error) => tracing::warn!(
+                            %error,
+                            "phone messages unavailable; message managers stay uninitiated"
+                        ),
+                    }
                     match hides {
                         Ok(hides) => {
                             if let Some(current) = progression.take() {

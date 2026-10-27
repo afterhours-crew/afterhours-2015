@@ -54,6 +54,15 @@ pub enum Arguments {
         seconds: u32,
         lap: u32,
     },
+    /// Message-manager methods 0 (messageRestored) and 2 (messageAdded),
+    /// client readers `0x14445a8b0`/`0x14445a7d0`: the asset reference (mode
+    /// 2, an 11-bit registry bundle, a 12-bit flat index), an 8-bit
+    /// attachment length (no attachment bytes here) and the message flag.
+    Message {
+        bundle: u16,
+        flat: u16,
+        flag: bool,
+    },
 }
 impl Arguments {
     pub fn time(seconds: f64) -> Self {
@@ -126,6 +135,20 @@ impl Call {
                     .put(next.into(), 32)
                     .put(seconds.into(), 32)
                     .put(lap.into(), 32);
+            }
+            Arguments::Message { bundle, flat, flag } => {
+                if !matches!(self.method, 0 | 2) || self.reference.is_some() {
+                    return Err(Error::Shape);
+                }
+                if bundle == 0 || bundle > 2047 || flat > 4095 {
+                    return Err(Error::Bound);
+                }
+                payload
+                    .put(2, 2)
+                    .put(bundle.into(), 11)
+                    .put(flat.into(), 12)
+                    .put(0, 8)
+                    .put(u64::from(flag), 1);
             }
         }
         payload.align();

@@ -33,12 +33,12 @@ pub(super) const BLUEPRINTS: [&str; 4] = [
 ];
 
 #[derive(Clone, Debug)]
-pub(super) struct Definition {
+pub(crate) struct Definition {
     layout: Layout,
     codec: Codec,
 }
 impl Definition {
-    pub(super) fn prepare(
+    pub(crate) fn prepare(
         index: &mut AssetIndex,
         scene: &str,
         blueprint: &str,
@@ -47,7 +47,7 @@ impl Definition {
             nfs_content::Error::Content(format!("scene presentation layout {blueprint}: {e:?}"))
         })
     }
-    pub(super) fn new(layout: Layout) -> Result<Self, Error> {
+    pub(crate) fn new(layout: Layout) -> Result<Self, Error> {
         if layout.owner != Owner::Scene
             || layout.fields.iter().enumerate().any(|(i, f)| {
                 if i == 0 {
@@ -83,10 +83,24 @@ impl Definition {
         )?;
         Ok(Self { layout, codec })
     }
-    pub(super) fn asset(&self) -> Asset {
+    pub(crate) fn asset(&self) -> Asset {
         self.layout.asset
     }
-    pub(super) fn spawn(&self, players: &mut Players, participant: u16) -> Result<Record, Error> {
+    /// The scene channel (content key, serializer) its reference binds.
+    pub(crate) fn channel(&self) -> Option<(u32, usize)> {
+        let mut channels = self.layout.fields.iter().filter_map(|f| match f.channel {
+            Some(Channel::Scene {
+                content_key,
+                serializer,
+            }) => Some((content_key, serializer)),
+            _ => None,
+        });
+        match (channels.next(), channels.next()) {
+            (Some(one), None) => Some(one),
+            _ => None,
+        }
+    }
+    pub(crate) fn spawn(&self, players: &mut Players, participant: u16) -> Result<Record, Error> {
         let world = players.objects();
         let scene = world
             .scene(self.layout.scene_content_key)

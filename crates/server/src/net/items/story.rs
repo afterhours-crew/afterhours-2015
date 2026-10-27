@@ -14,6 +14,19 @@ pub(in crate::net) enum Action {
         objective: u64,
         definition: [u8; 16],
     },
+    /// A unique phone message joins the normal manager's table; the world
+    /// announces it only after this commit.
+    Message {
+        hash: u32,
+    },
+    /// The client read a stored message.
+    MessageRead {
+        hash: u32,
+    },
+    /// The client accepted a tutorial: its seen value becomes durable.
+    Tutorial {
+        key: u32,
+    },
 }
 #[derive(Clone, Debug)]
 pub(in crate::net) struct Request {
@@ -100,6 +113,52 @@ impl Profile {
                                         Err(e) => return Err(Error::Inventory(e.into())),
                                     }
                                 }
+                            }
+                        }
+                        result.ok_or(Error::Inventory(nfs_storage::Error::Conflict.into()))?
+                    }
+                    Action::Message { hash } | Action::MessageRead { hash } => {
+                        let read = matches!(request.action, Action::MessageRead { .. });
+                        let mut result = None;
+                        for _ in 0..8 {
+                            let snapshot = service
+                                .repository
+                                .snapshot(account)
+                                .map_err(|e| Error::Inventory(e.into()))?;
+                            let table = nfs_services::messages::STATIC;
+                            let prepared = if read {
+                                nfs_services::messages::mark_read(&snapshot, table, hash)
+                            } else {
+                                nfs_services::messages::append(&snapshot, table, hash)
+                            }
+                            .map_err(|e| Error::Inventory(e.into()))?;
+                            let Some(batch) = prepared else {
+                                result = Some(snapshot);
+                                break;
+                            };
+                            match service.repository.apply(account, &batch, now) {
+                                Ok(_) | Err(nfs_storage::Error::Conflict) => continue,
+                                Err(e) => return Err(Error::Inventory(e.into())),
+                            }
+                        }
+                        result.ok_or(Error::Inventory(nfs_storage::Error::Conflict.into()))?
+                    }
+                    Action::Tutorial { key } => {
+                        let mut result = None;
+                        for _ in 0..8 {
+                            let snapshot = service
+                                .repository
+                                .snapshot(account)
+                                .map_err(|e| Error::Inventory(e.into()))?;
+                            let Some(batch) = nfs_services::tutorials::mark(&snapshot, key)
+                                .map_err(|e| Error::Inventory(e.into()))?
+                            else {
+                                result = Some(snapshot);
+                                break;
+                            };
+                            match service.repository.apply(account, &batch, now) {
+                                Ok(_) | Err(nfs_storage::Error::Conflict) => continue,
+                                Err(e) => return Err(Error::Inventory(e.into())),
                             }
                         }
                         result.ok_or(Error::Inventory(nfs_storage::Error::Conflict.into()))?
@@ -423,6 +482,83 @@ mod tests {
             .unwrap();
         assert_eq!(retry.reward, Some(reward));
         assert!(retry.notifications.is_empty());
+        assert_eq!(repository.snapshot(account).unwrap(), saved);
+    }
+    #[tokio::test]
+    async fn a_message_is_stored_once_and_its_read_is_durable() {
+        let repository = Arc::new(nfs_storage::MemoryRepository::default());
+        let account = nfs_storage::AccountId::from_owned_config([43; 16]).unwrap();
+        let catalog = Arc::new(InventoryCatalog::new([], vec![]).unwrap());
+        // The installed StaticMessage columns (layer9 #77: Asset, Read).
+        let mut tables = crate::persistent::tests::content();
+        let message = tables["tables"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|t| t["name"] == "StaticMessage")
+            .unwrap();
+        message["columns"] = serde_json::json!([
+            {"name":"Asset","key":crate::persistent::key("Asset"),"value_type":"int","default":"0"},
+            {"name":"Read","key":crate::persistent::key("Read"),"value_type":"int","default":"0"}
+        ]);
+        let tables = Arc::new(crate::persistent::Catalog::from_json(&tables).unwrap());
+        repository.open(account).unwrap();
+        repository
+            .apply(
+                account,
+                &nfs_storage::Batch {
+                    id: 1,
+                    expected_generation: 0,
+                    ops: vec![nfs_storage::Op::SetGarage(Default::default())],
+                },
+                Timestamp(1),
+            )
+            .unwrap();
+        let (before, _) = tables
+            .ensure_loaded(
+                repository.as_ref(),
+                account,
+                repository.snapshot(account).unwrap(),
+                Timestamp(2),
+            )
+            .unwrap();
+        let service = Service::new(repository.clone(), catalog).with_persistent(tables);
+        let profile = service.bind(account);
+        let request = Request {
+            participant: 19,
+            player_index: 4,
+            progression: progression(),
+            action: Action::Message {
+                hash: 1_422_063_331,
+            },
+        };
+        let rows = |loaded: &crate::persistent::Loaded| {
+            nfs_services::messages::rows(loaded.tables(), nfs_services::messages::STATIC).unwrap()
+        };
+        let committed = profile.story(&request, Timestamp(9)).await.unwrap();
+        assert!(committed.loaded.generation() > before.generation);
+        assert_eq!(
+            rows(&committed.loaded),
+            [nfs_services::messages::Row {
+                index: 0,
+                hash: 1_422_063_331,
+                read: false
+            }]
+        );
+        let saved = repository.snapshot(account).unwrap();
+        let repeated = profile.story(&request, Timestamp(10)).await.unwrap();
+        assert_eq!(repository.snapshot(account).unwrap(), saved);
+        assert_eq!(rows(&repeated.loaded).len(), 1);
+        let read = Request {
+            action: Action::MessageRead {
+                hash: 1_422_063_331,
+            },
+            ..request.clone()
+        };
+        let marked = profile.story(&read, Timestamp(11)).await.unwrap();
+        assert!(rows(&marked.loaded)[0].read);
+        let saved = repository.snapshot(account).unwrap();
+        profile.story(&read, Timestamp(12)).await.unwrap();
         assert_eq!(repository.snapshot(account).unwrap(), saved);
     }
     #[tokio::test]

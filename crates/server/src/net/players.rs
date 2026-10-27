@@ -41,6 +41,7 @@ mod rivals;
 mod scoring;
 mod sequences;
 mod traffic;
+mod tutorials;
 
 #[cfg(test)]
 mod deployment_tests;
@@ -189,6 +190,10 @@ pub(super) struct PlayerListener {
     /// Last participant-in-game-mode notification values sent per intro
     /// participant and notification (prologue content order).
     mode_notified: BTreeMap<(u16, usize), bool>,
+    /// Tutorial logics per participant (`crate::tutorials`).
+    tutorials: BTreeMap<u16, crate::tutorials::Session>,
+    /// Chapter notification values sent per participant.
+    chapter_sent: BTreeMap<u16, crate::chapter_notifications::Sent>,
     /// Last logged waiting-sequence readiness per participant.
     sequence_readiness: BTreeMap<u16, nfs_world::sequences::Readiness>,
     /// Participants in an owned event: free-roam scoring is retired meanwhile.
@@ -659,6 +664,19 @@ impl PlayerListener {
                 if let Some(ghost) = main_root {
                     replies.extend(debug_hide_fires(ghost, &progression.debug_hides)?);
                 }
+                // The message managers restore the stored messages and report
+                // themselves initiated (official E1026 36.220 s, E912 restores).
+                if let Some(messages) = &progression.messages {
+                    let rows = nfs_services::messages::rows(
+                        loaded.tables(),
+                        nfs_services::messages::STATIC,
+                    )
+                    .map_err(|_| replication::Error::Shape)?;
+                    replies.extend(messages.session_start(players.objects(), &rows)?);
+                }
+                // The notified tutorial seen values join the same flush
+                // (E1026 36.220-36.319 s, E912 32.336 s).
+                replies.extend(self.tutorial_notifications(players, loaded)?);
                 if let Some(bank) = roles.bank {
                     let scene = players
                         .objects()
@@ -1001,6 +1019,8 @@ impl PlayerListener {
             event_discovery: events::discovery::State::default(),
             world_volumes: prologue::volumes::State::default(),
             mode_notified: BTreeMap::new(),
+            tutorials: BTreeMap::new(),
+            chapter_sent: BTreeMap::new(),
             sequence_readiness: BTreeMap::new(),
             event_suspended: BTreeSet::new(),
             replication_origin_ms: None,
@@ -1110,15 +1130,21 @@ impl PlayerListener {
         &mut self,
         content: &crate::content::WorldContent,
     ) -> Result<(), replication::Error> {
-        let logic = match (
-            &self.logic,
-            self.prologue
-                .as_ref()
-                .and_then(|content| content.membership.as_ref()),
-        ) {
-            (Some(logic), Some(content)) => Some(std::sync::Arc::new(
-                logic.without_assets(&content.assets().collect())?,
-            )),
+        // Logics another owner creates leave the authored garage batches:
+        // the scene presentation and the tutorials.
+        let mut owned: BTreeSet<_> = self
+            .prologue
+            .as_ref()
+            .and_then(|content| content.membership.as_ref())
+            .map(|content| content.assets().collect())
+            .unwrap_or_default();
+        if let Some(tutorials) = self.progression.as_ref().and_then(|p| p.tutorials.as_ref()) {
+            owned.extend(tutorials.0.assets());
+        }
+        let logic = match &self.logic {
+            Some(logic) if !owned.is_empty() => {
+                Some(std::sync::Arc::new(logic.without_assets(&owned)?))
+            }
             _ => self.logic.clone(),
         };
         use nfs_protocol::world::rpc::Serial;
@@ -1497,6 +1523,7 @@ impl Listener for PlayerListener {
         let mut selection = self.selection.clone();
         let mut selection_execution = self.selection_execution.clone();
         let mut story_pending = self.story_pending.clone();
+        let mut tutorial_sessions = self.tutorials.clone();
         let mut intro_modes = self.intro_modes.clone();
         let mut intro_movies = self.intro_movies.clone();
         let mut intro_composites = self.intro_composites.clone();
@@ -1521,6 +1548,14 @@ impl Listener for PlayerListener {
             for body in logic_events {
                 let message = nfs_world::logic::Message::decode(82, body)
                     .map_err(|_| replication::Error::Shape)?;
+                if self.tutorial_accept(
+                    &mut tutorial_sessions,
+                    &players,
+                    &mut story_pending,
+                    &message,
+                )? {
+                    continue;
+                }
                 if let Some(content) = self.prologue.as_deref()
                     && prologue::finale::signal(
                         content,
@@ -2581,6 +2616,35 @@ impl Listener for PlayerListener {
                     return self.refuse_rpc(error, body);
                 }
             }
+            // The client read a message (official E1026 923.634 s): the
+            // stored row is marked read; nothing is answered.
+            if let Some(progression) = self.progression.clone()
+                && let Some(messages) = progression.messages.clone()
+            {
+                match messages.read(players.objects(), body, |id| {
+                    players.owns_participant(HOST_SELECTOR as u8, self.persona, id)
+                }) {
+                    Ok(Some((hash, participant))) => {
+                        let Some(player_index) =
+                            players.runtime_index(HOST_SELECTOR as u8, self.persona, participant)
+                        else {
+                            return self.refuse_rpc(replication::Error::UnknownObject, body);
+                        };
+                        if story_pending.len() >= MAX_PENDING {
+                            return self.refuse_rpc(replication::Error::Bound, body);
+                        }
+                        story_pending.push_back(super::items::story::Request {
+                            participant,
+                            player_index: u32::from(player_index),
+                            progression,
+                            action: super::items::story::Action::MessageRead { hash },
+                        });
+                        continue;
+                    }
+                    Ok(None) => {}
+                    Err(error) => return self.refuse_rpc(error, body),
+                }
+            }
             match launchers.receive(body, |id| {
                 players.owns(HOST_SELECTOR as u8, self.persona, id)
             }) {
@@ -3139,6 +3203,7 @@ impl Listener for PlayerListener {
         self.selection = selection;
         self.selection_execution = selection_execution;
         self.story_pending = story_pending;
+        self.tutorials = tutorial_sessions;
         self.intro_modes = intro_modes;
         self.intro_movies = intro_movies;
         self.intro_composites = intro_composites;

@@ -205,8 +205,41 @@ pub struct Content {
     /// (bus, ordinal), read from the installation at start (empty without it).
     /// Fired on that root once the participant has entered the game.
     pub debug_hides: Vec<(u32, u32)>,
+    /// Installed phone messages and managers, read at start (None without
+    /// the installation): restored and initiated as the participant enters.
+    pub messages: Option<std::sync::Arc<crate::messages::Content>>,
+    /// Installed tutorial spawners and gate rules, read at start (None
+    /// without the installation).
+    pub tutorials: Option<Tutorials>,
+    /// Installed mission-chapter values on scene notifications (markers,
+    /// entrance prompt gate, car-selection camera).
+    pub chapter_notifications: Option<std::sync::Arc<crate::chapter_notifications::Content>>,
 }
+/// The shared tutorial content, compared by identity (it holds float delays).
+#[derive(Clone, Debug)]
+pub struct Tutorials(pub std::sync::Arc<crate::tutorials::Content>);
+impl PartialEq for Tutorials {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl Eq for Tutorials {}
 impl Content {
+    pub fn with_chapter_notifications(
+        mut self,
+        notifications: crate::chapter_notifications::Content,
+    ) -> Self {
+        self.chapter_notifications = Some(std::sync::Arc::new(notifications));
+        self
+    }
+    pub fn with_tutorials(mut self, tutorials: crate::tutorials::Content) -> Self {
+        self.tutorials = Some(Tutorials(std::sync::Arc::new(tutorials)));
+        self
+    }
+    pub fn with_messages(mut self, messages: crate::messages::Content) -> Self {
+        self.messages = Some(std::sync::Arc::new(messages));
+        self
+    }
     /// Attach the installed debug-print Hide events (bounded).
     pub fn with_debug_hides(mut self, hides: Vec<(u32, u32)>) -> Result<Self, Failure> {
         if hides.len() > MAX_DEBUG_HIDES {
@@ -234,6 +267,9 @@ impl Content {
             settings: value.settings,
             speed_list_bypass: value.speed_list_bypass,
             debug_hides: Vec::new(),
+            messages: None,
+            tutorials: None,
+            chapter_notifications: None,
         }
     }
 }

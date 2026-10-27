@@ -16,6 +16,9 @@ pub struct Mode {
     pub logics: Vec<Layout>,
     /// Serializer of the launcher in the owning intro participant logic.
     pub launcher: usize,
+    /// The launcher's prefab (the mission chapter's reference to this mode,
+    /// e.g. `gameplay/progression/intro/introreturntogarage`).
+    pub prefab: String,
     /// The client-enabled launcher's networked LaunchGameMode event. The
     /// host fires it on that logic when the mode starts in place, and the
     /// client answers on the launcher before the host launches (career start
@@ -26,6 +29,11 @@ pub struct Mode {
     /// 15 + 120 s behind the objective gate; official E1026 137.226 and
     /// 257.219 s after the 122.317 s start).
     pub timed_events: Vec<TimedEvent>,
+    /// Unique message senders of the launcher's prefab that the mode start
+    /// arms through server Delays (introreturntogarage #40: the phone
+    /// reminder 15 s after the launch; official E1026 906.624 s). Senders
+    /// behind a property gate are not scheduled.
+    pub timed_messages: Vec<TimedMessage>,
     /// Game-mode category hashes of the launcher prefab's EventDetails (what
     /// participant-in-game-mode properties test while the mode holds the
     /// participant; e.g. the event canceller is `isinintro`).
@@ -64,6 +72,20 @@ const MAX_TIMED_HOPS: usize = 8;
 /// A networked event the host fires on the intro participant logic a fixed
 /// time after the mode starts; `objective_gated` events only while the
 /// mode's objective is still active.
+/// A message the host sends `seconds` after the mode's launcher started:
+/// the MessageAsset partition and object.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TimedMessage {
+    pub message: (String, usize),
+    pub seconds: f32,
+}
+
+const MESSAGE_SENDER: &str = "UniqueMessageSenderEntityData";
+/// UniqueMessageSender input property that sends on true.
+const SENDER_ENABLE: u32 = 1_037_321_618;
+/// BoolEntityData SetTrue event input.
+const BOOL_SET_TRUE: u32 = 2_753_900_881;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TimedEvent {
     pub event: LaunchEvent,
@@ -160,6 +182,78 @@ fn timed_events<S: Source>(
             seconds,
             objective_gated: gated,
         });
+    }
+    Ok(out)
+}
+
+fn timed_messages<S: Source>(
+    graph: &mut Graph<S>,
+    launcher: &Site,
+    branch: &[Node],
+) -> Result<Vec<TimedMessage>, Error> {
+    let mut out = vec![];
+    for sender in branch.iter().filter(|n| {
+        n.object.class == MESSAGE_SENDER && n.site.key.0.eq_ignore_ascii_case(&launcher.key.0)
+    }) {
+        let sources = graph.property_sources(&sender.site, SENDER_ENABLE)?;
+        let [source] = sources.as_slice() else {
+            return Err(bad("message sender enable input"));
+        };
+        let enable = graph.object(&source.site)?;
+        if enable.class != "BoolEntityData" {
+            return Err(bad("message sender enable source"));
+        }
+        let mut armed = None;
+        for (start, start_port) in graph.event_sources(&source.site, BOOL_SET_TRUE)? {
+            let (mut site, mut port) = (start, start_port);
+            let mut seconds = 0f32;
+            for hop in 0.. {
+                if hop >= MAX_TIMED_HOPS {
+                    return Err(bad("message sender chain bound"));
+                }
+                let object = graph.object(&site)?;
+                let input = match object.class.as_str() {
+                    "SimpleGameModeLauncherEntityData"
+                        if site == *launcher && port == LAUNCHER_STARTED =>
+                    {
+                        if armed.replace(seconds).is_some() {
+                            return Err(bad("message sender armed twice"));
+                        }
+                        break;
+                    }
+                    "DelayEntityData" if port == nfs_world::scoring::nodes::OUT => {
+                        let server = matches!(object.fields.get("Realm"),
+                            Some(Value::Enum { name: Some(n), .. }) if n == "Realm_Server");
+                        let world = matches!(object.fields.get("TimeDeltaType"),
+                            Some(Value::Enum { name: Some(n), .. }) if n == "TimeDeltaType_World");
+                        let Some(Value::Float32(delay)) = object.fields.get("Delay") else {
+                            return Err(bad("message sender delay"));
+                        };
+                        if !server || !world || !delay.is_finite() || !(0. ..=600.).contains(delay)
+                        {
+                            return Err(bad("unsupported message sender delay"));
+                        }
+                        seconds += delay;
+                        nfs_world::scoring::nodes::IN
+                    }
+                    // A property gate's own condition decides; the installed
+                    // gates in front of #38/#39 never open (E1026).
+                    "LogicPrefabReferenceObjectData" => break,
+                    _ => return Err(bad("unsupported message sender source")),
+                };
+                let sources = graph.event_sources(&site, input)?;
+                let [(next, next_port)] = sources.as_slice() else {
+                    return Err(bad("message sender chain input count"));
+                };
+                (site, port) = (next.clone(), *next_port);
+            }
+        }
+        if let Some(seconds) = armed {
+            out.push(TimedMessage {
+                message: graph.target_field(&sender.site, "MessageAsset")?,
+                seconds,
+            });
+        }
     }
     Ok(out)
 }
@@ -490,6 +584,7 @@ fn extract_inner(
     let launcher = launcher(&mut graph, &branch, &name, launcher_asset)?;
     let launch_event = launch_event(&launcher, &branch, &network)?;
     let timed_events = timed_events(&mut graph, &launcher, &branch, &network, GATE_PREFAB)?;
+    let timed_messages = timed_messages(&mut graph, &launcher, &branch)?;
     let categories = {
         let mut details = branch.iter().filter(|n| {
             n.object.class == "EventDetailsEntityData"
@@ -752,6 +847,8 @@ fn extract_inner(
                 .ok_or_else(|| bad("intro launcher serializer"))?,
             launch_event,
             timed_events,
+            timed_messages,
+            prefab: launcher.key.0.to_lowercase(),
             categories,
             game_mode: GameMode {
                 lifecycle,

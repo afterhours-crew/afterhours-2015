@@ -33,6 +33,7 @@ pub mod stats;
 pub mod story;
 pub mod telemetry;
 pub mod text_filter;
+pub mod tutorials;
 
 /// Build identity required by versioned content documents; no game data is bundled.
 pub const SUPPORTED_BUILD_SHA256: &str =
@@ -131,6 +132,7 @@ pub mod entitlements;
 pub mod heartbeat;
 pub mod item_licenses;
 pub mod kickback;
+pub mod messages;
 pub mod speedwall;
 
 pub mod user_session;

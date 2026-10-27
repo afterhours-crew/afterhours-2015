@@ -252,6 +252,38 @@ impl<'a, S: Source> Graph<'a, S> {
             })
             .collect())
     }
+    /// The immediate link targets of `site`'s `port` in its own bus (no
+    /// prefab interface following).
+    pub fn link_targets(&mut self, site: &Site, port: u32) -> Result<Vec<Endpoint>, Error> {
+        Ok(self
+            .edges(&site.bus, Connections::Link)?
+            .iter()
+            .filter(|e| e.source == site.key && e.source_port == port)
+            .map(|e| Endpoint {
+                site: Site {
+                    key: e.target.clone(),
+                    ..site.clone()
+                },
+                port: e.target_port,
+            })
+            .collect())
+    }
+    /// The immediate link sources into `site` in its own bus, with their
+    /// source ports (no prefab interface following).
+    pub fn link_sources(&mut self, site: &Site) -> Result<Vec<Endpoint>, Error> {
+        Ok(self
+            .edges(&site.bus, Connections::Link)?
+            .iter()
+            .filter(|e| e.target == site.key)
+            .map(|e| Endpoint {
+                site: Site {
+                    key: e.source.clone(),
+                    ..site.clone()
+                },
+                port: e.source_port,
+            })
+            .collect())
+    }
     /// Follow an incoming object link through prefab interfaces. Used for a
     /// statically wired schematic channel reference, never asset-name lookup.
     pub fn linked_source(&mut self, site: &Site, port: u32) -> Result<Endpoint, Error> {

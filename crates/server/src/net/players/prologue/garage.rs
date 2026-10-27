@@ -146,11 +146,12 @@ impl PlayerListener {
                     // A return that begins before the destination crossing
                     // releases the drive's route first, as the crossing does.
                     let parent = active.parent();
-                    let released = modes
+                    let drive = &mut modes
                         .get_mut(&participant)
                         .ok_or(replication::Error::UnknownObject)?
-                        .0
-                        .release_owner_routes(players)?;
+                        .0;
+                    drive.cancel_messages();
+                    let released = drive.release_owner_routes(players)?;
                     out.output.records.extend(released.records);
                     out.output.deleted.extend(released.deleted);
                     // Official order (career start 290017-290127 ms): the
