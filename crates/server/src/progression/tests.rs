@@ -58,6 +58,16 @@ pub(crate) fn local() -> (MemoryRepository, AccountId, Snapshot) {
     let snapshot = empty(&repo, who);
     (repo, who, snapshot)
 }
+/// The same empty save in a real SQLite account directory under `root`, so
+/// store constraints the memory repository does not model are exercised.
+pub(crate) fn local_sqlite(
+    root: &std::path::Path,
+) -> (nfs_storage::SqliteRepository, AccountId, Snapshot) {
+    let repo = nfs_storage::SqliteRepository::open_owned_directory(root).unwrap();
+    let who = AccountId::from_owned_config([41; 16]).unwrap();
+    let snapshot = empty(&repo, who);
+    (repo, who, snapshot)
+}
 fn restore(snapshot: &Snapshot) -> Restored {
     Catalog::from_json(&content())
         .unwrap()

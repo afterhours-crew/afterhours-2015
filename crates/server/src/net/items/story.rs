@@ -616,7 +616,39 @@ mod tests {
     #[tokio::test]
     async fn interrupted_intro_after_the_starter_car_finishes_without_rewards() {
         let (repository, account, _) = crate::progression::tests::local();
-        let repository = Arc::new(repository);
+        finishes_without_rewards(Arc::new(repository), account).await;
+    }
+
+    /// E1247: a restart on the real E1192 save failed in this jump with a
+    /// storage error the memory repository never raises. Same flow, SQLite.
+    #[tokio::test]
+    async fn interrupted_intro_after_the_starter_car_finishes_on_a_sqlite_save() {
+        let root = std::env::temp_dir().join(format!(
+            "afterhours-resume-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let (repository, account, _) = crate::progression::tests::local_sqlite(&root);
+        finishes_without_rewards(Arc::new(repository), account).await;
+        // A fresh repository on the same directory sees the committed result.
+        let reopened = nfs_storage::SqliteRepository::open_owned_directory(&root).unwrap();
+        let progression = progression();
+        let policy = progression.catalog.story_policy(progression.settings);
+        let view = policy
+            .inspect(&reopened.snapshot(account).unwrap())
+            .unwrap();
+        assert_eq!(view.position, view.milestones.len());
+        drop(reopened);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    async fn finishes_without_rewards<R: InventoryRepository + 'static>(
+        repository: Arc<R>,
+        account: AccountId,
+    ) {
         let service = Service::new(repository.clone(), car_catalog())
             .with_persistent(Arc::new(crate::progression::tests::tables()));
         let profile = service.bind(account);

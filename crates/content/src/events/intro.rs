@@ -38,9 +38,11 @@ pub struct LaunchEvent {
 /// `LaunchGameMode` on `SimpleGameModeLauncherEntityData` (installed event id).
 const LAUNCH_GAME_MODE: u32 = 2_141_204_117;
 
-/// The launcher's client-side launch event, when the launcher runs on the
-/// client (`ClientEnabled`): the networked-client row of the intro logic's
-/// event table that targets the launcher's LaunchGameMode input.
+/// The launcher's client-side launch event: the networked-client row of the
+/// intro logic's event table that targets this launcher's LaunchGameMode
+/// input. Launchers the server starts itself have no such row (other intro
+/// launchers are client-enabled too, E1247), so absence is `None`; a row for
+/// a launcher the client cannot run, or a repeated row, is malformed content.
 fn launch_event(
     launcher: &Site,
     branch: &[Node],
@@ -55,20 +57,20 @@ fn launch_event(
         None => false,
         Some(_) => return Err(bad("intro launcher ClientEnabled")),
     };
-    if !client_enabled {
-        return Ok(None);
-    }
     let mut found = events.iter().filter(|e| {
         e.delivery == crate::logic_events::Delivery::Client
             && e.target.port == LAUNCH_GAME_MODE
             && e.target.index == launcher.key.1
             && e.target.asset.eq_ignore_ascii_case(&launcher.key.0)
     });
-    let event = found
-        .next()
-        .ok_or_else(|| bad("intro launcher launch event"))?;
+    let Some(event) = found.next() else {
+        return Ok(None);
+    };
     if found.next().is_some() {
         return Err(bad("intro launcher launch event occurrence"));
+    }
+    if !client_enabled {
+        return Err(bad("intro launcher launch event without ClientEnabled"));
     }
     Ok(Some(LaunchEvent {
         bus: event.bus,
@@ -613,11 +615,12 @@ mod tests {
         m.put("p", 1, LAUNCHER, &[("ClientEnabled", Value::Bool(true))]);
         m.put("p", 2, LAUNCHER, &[]);
         m.put("p", 3, LAUNCHER, &[("ClientEnabled", Value::Int32(1))]);
+        m.put("p", 4, LAUNCHER, &[("ClientEnabled", Value::Bool(true))]);
         let mut node = |i: usize| Node {
             site: site("p", i),
             object: m.object(&("p".into(), i)).unwrap(),
         };
-        let branch = vec![node(1), node(2), node(3)];
+        let branch = vec![node(1), node(2), node(3), node(4)];
         let endpoint = |index: usize, port: u32| Endpoint {
             asset: "P".into(),
             index,
@@ -637,17 +640,25 @@ mod tests {
             event(Delivery::ClientAndServer, 1, LAUNCH_GAME_MODE, 8, 3),
             event(Delivery::Client, 1, 5, 8, 4),
             event(Delivery::Client, 1, LAUNCH_GAME_MODE, 8, 7),
+            event(Delivery::Client, 2, LAUNCH_GAME_MODE, 3, 2),
+            event(Delivery::Client, 3, LAUNCH_GAME_MODE, 3, 5),
         ];
         assert_eq!(
             launch_event(&site("p", 1), &branch, &events).unwrap(),
             Some(LaunchEvent { bus: 8, ordinal: 7 })
         );
-        // Server-started launchers have no launch event; a malformed flag,
-        // an unknown launcher, a missing row and a repeated row are errors.
-        assert_eq!(launch_event(&site("p", 2), &branch, &events).unwrap(), None);
+        // A client-enabled launcher the server starts has no networked row
+        // (installed first-drive and race launchers): no launch event.
+        assert_eq!(launch_event(&site("p", 4), &branch, &events).unwrap(), None);
+        assert_eq!(
+            launch_event(&site("p", 1), &branch, &events[..2]).unwrap(),
+            None
+        );
+        // A row for a launcher the client cannot run, a malformed flag, an
+        // unknown launcher and a repeated row are errors.
+        assert!(launch_event(&site("p", 2), &branch, &events).is_err());
         assert!(launch_event(&site("p", 3), &branch, &events).is_err());
         assert!(launch_event(&site("p", 9), &branch, &events).is_err());
-        assert!(launch_event(&site("p", 1), &branch, &events[..2]).is_err());
         let mut twice = events.clone();
         twice.push(events[2].clone());
         assert!(launch_event(&site("p", 1), &branch, &twice).is_err());

@@ -75,6 +75,11 @@ impl Mode {
         launcher: Option<&str>,
     ) -> Result<Self, nfs_content::Error> {
         let data = intro::extract(index, name, launcher)?;
+        tracing::info!(
+            mode = name,
+            launch_event = ?data.launch_event,
+            "intro mode prepared; a launch event means the client launches it"
+        );
         let mut sequences = BTreeMap::new();
         let mut timing = BTreeMap::new();
         for s in &data.sequences {
