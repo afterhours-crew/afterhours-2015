@@ -14,6 +14,7 @@ mod loading;
 mod performance;
 pub mod receive;
 mod recommendations;
+mod rewrite;
 pub use challenges::{
     ChallengeAwards, ChallengeFull, ChallengeFullEntry, ChallengePlayerSync, EX_CHALLENGE_AWARDS,
     EX_CHALLENGE_FULL, EX_CHALLENGE_PLAYER_SYNC, MAX_CHALLENGE_SYNC_ENTRIES,
@@ -21,6 +22,7 @@ pub use challenges::{
 pub use loading::{EX_LEVEL_LOADED_ACK, LevelLoadedAck, MAX_SUBLEVEL_REPORTS, SubLevelReport};
 pub use performance::{EX_PERFORMANCE_PROFILE, PerformanceProfile};
 pub use recommendations::{EX_RECOMMENDATION_SYNC, RecommendationEntry, RecommendationSync};
+pub use rewrite::with_client_movement_ids;
 
 pub const HANDLERS: usize = 6;
 pub const TIME_SYNC: u8 = 0;
