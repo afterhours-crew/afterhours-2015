@@ -13,12 +13,14 @@ mod challenges;
 mod loading;
 mod performance;
 pub mod receive;
+mod recommendations;
 pub use challenges::{
     ChallengeAwards, ChallengeFull, ChallengeFullEntry, ChallengePlayerSync, EX_CHALLENGE_AWARDS,
     EX_CHALLENGE_FULL, EX_CHALLENGE_PLAYER_SYNC, MAX_CHALLENGE_SYNC_ENTRIES,
 };
 pub use loading::{EX_LEVEL_LOADED_ACK, LevelLoadedAck, MAX_SUBLEVEL_REPORTS, SubLevelReport};
 pub use performance::{EX_PERFORMANCE_PROFILE, PerformanceProfile};
+pub use recommendations::{EX_RECOMMENDATION_SYNC, RecommendationEntry, RecommendationSync};
 
 pub const HANDLERS: usize = 6;
 pub const TIME_SYNC: u8 = 0;
@@ -161,6 +163,7 @@ pub enum Message<'a> {
     ChallengeAwards(ChallengeAwards),
     LevelLoadedAck(LevelLoadedAck),
     PerformanceProfile(PerformanceProfile),
+    RecommendationSync(RecommendationSync),
     Opaque {
         index: u8,
         body: BitSpan<'a>,
@@ -195,6 +198,7 @@ impl Message<'_> {
             Self::ChallengeAwards(_) => EX_CHALLENGE_AWARDS,
             Self::LevelLoadedAck(_) => EX_LEVEL_LOADED_ACK,
             Self::PerformanceProfile(_) => EX_PERFORMANCE_PROFILE,
+            Self::RecommendationSync(_) => EX_RECOMMENDATION_SYNC,
             Self::Opaque { index, .. } => *index,
         }
     }
@@ -466,20 +470,7 @@ fn message<'a>(r: &mut Reader<'a>, index: u8) -> Result<Message<'a>, Error> {
                 trailing_word: r.take(32)?,
             })
         }
-        // `RaceNetworkRecommendationsSyncRequestMessage`, parser `0x554cdc0` (E998):
-        // a 64-bit value, a 32-bit count and that many (u32, f32, u32, u64, two
-        // Booleans) entries.
-        89 => {
-            let start = r.pos;
-            r.take64(64)?;
-            let count = r.take(32)? as usize;
-            if count > MAX_SPEED_WALL_ENTRIES {
-                return Err(Error::Bound);
-            }
-            r.slice(count * 162)?;
-            let body = r.span.slice(start, r.pos - start)?;
-            Message::Opaque { index, body }
-        }
+        EX_RECOMMENDATION_SYNC => Message::RecommendationSync(RecommendationSync::read(r)?),
         // Parser `0x5555a70`: a 64-bit value, a 32-bit count and that many
         // (u32, f32, f32) entries. Kept opaque: the host does not act on it, but
         // an undecodable copy would block the reliable channel behind it (E998).
@@ -924,6 +915,7 @@ impl<'a> Builder<'a> {
             Message::ChallengeAwards(value) => value.write(w)?,
             Message::LevelLoadedAck(value) => value.write(w)?,
             Message::PerformanceProfile(value) => value.write(w)?,
+            Message::RecommendationSync(value) => value.write(w)?,
             Message::ChallengeProgress(value) => {
                 if value.entries.len() > MAX_CHALLENGE_PROGRESS_ENTRIES {
                     return Err(Error::Bound);

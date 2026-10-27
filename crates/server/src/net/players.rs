@@ -26,6 +26,7 @@ mod diagnostics;
 mod equipment;
 mod events;
 mod garage;
+mod recommendations;
 pub(super) use equipment::EquipmentRequest;
 pub(super) use garage::{GarageOperation, GarageRequest};
 pub(super) use scoring::{AwardRequest, Credited};
@@ -90,6 +91,7 @@ pub(super) struct PlayerListener {
     messages: frame::receive::Receiver,
     client_info: replication::client_info::State,
     challenges: challenges::State,
+    recommendations: recommendations::State,
     /// Latest accepted hardware report, owned only by this connection.
     performance_profile: Option<frame::PerformanceProfile>,
     persona: u64,
@@ -884,6 +886,7 @@ impl PlayerListener {
             // do not change this constructor context or share its inbound IDs.
             client_info: replication::client_info::State::new(1).expect("PC local slot context"),
             challenges: challenges::State::default(),
+            recommendations: recommendations::State::default(),
             performance_profile: None,
             persona,
             roles: None,
@@ -1280,6 +1283,10 @@ impl Listener for PlayerListener {
             Ok(next) => next,
             Err(error) => return self.refuse(error),
         };
+        let recommendations = match self.prepare_recommendations(&decoded) {
+            Ok(next) => next,
+            Err(error) => return self.refuse(error),
+        };
         let requests: Vec<_> = decoded
             .iter()
             .filter_map(|m| match m {
@@ -1317,6 +1324,9 @@ impl Listener for PlayerListener {
             }
             if let Some(next) = challenges {
                 self.challenges = next;
+            }
+            if let Some(next) = recommendations {
+                self.recommendations = next;
             }
             return self.stats.record(&parsed, files);
         }
@@ -3151,6 +3161,9 @@ impl Listener for PlayerListener {
         }
         if let Some(next) = challenges {
             self.challenges = next;
+        }
+        if let Some(next) = recommendations {
+            self.recommendations = next;
         }
         self.stats.record(&parsed, files)
     }

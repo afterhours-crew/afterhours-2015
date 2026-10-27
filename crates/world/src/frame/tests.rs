@@ -884,14 +884,24 @@ fn speed_wall_sync_has_its_native_bounded_layout() {
 fn recommendations_sync_entries_have_their_native_layout() {
     // Value 9, count 1, then (u32, f32, u32, u64, Boolean, Boolean); 2 pad bits.
     let mut w = BitWriter::new();
-    w.put(0, 32).put(9, 32).put(1, 32);
+    w.put(9, 32).put(0, 32).put(1, 32);
     w.put(5, 32).put(u64::from(1.5f32.to_bits()), 32).put(3, 32);
-    w.put(0, 32).put(7, 32).put(1, 1).put(0, 1);
+    w.put(7, 32).put(0, 32).put(1, 1).put(0, 1);
     let bytes = w.bytes().to_vec();
-    let Ok(Message::Opaque { index, body }) = assembled_message(89, &bytes) else {
+    let Ok(Message::RecommendationSync(sync)) = assembled_message(89, &bytes) else {
         panic!("decoded")
     };
-    assert_eq!((index, body.len()), (89, 64 + 32 + 162));
+    assert_eq!(sync.persona, 9);
+    assert_eq!(
+        sync.entries,
+        vec![RecommendationEntry {
+            word: 5,
+            value_bits: 1.5f32.to_bits(),
+            key: 3,
+            wide_word: 7,
+            flags: [true, false],
+        }]
+    );
     assert_eq!(
         assembled_message(89, &bytes[..bytes.len() - 2]),
         Err(Error::Truncated)

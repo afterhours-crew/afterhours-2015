@@ -37,12 +37,12 @@ pub struct ChallengeAwards {
     pub ids: Vec<u64>,
 }
 
-fn native_u64(r: &mut Reader<'_>) -> Result<u64, Error> {
+pub(super) fn native_u64(r: &mut Reader<'_>) -> Result<u64, Error> {
     let low = r.take(32)?;
     Ok(u64::from(low) | (u64::from(r.take(32)?) << 32))
 }
 
-fn put_native_u64(w: &mut BitWriter, value: u64) {
+pub(super) fn put_native_u64(w: &mut BitWriter, value: u64) {
     w.put(value & u64::from(u32::MAX), 32).put(value >> 32, 32);
 }
 
