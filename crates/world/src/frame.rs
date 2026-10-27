@@ -822,7 +822,13 @@ pub enum TimeSyncOut {
 pub struct Builder<'a> {
     time_sync: Option<TimeSyncOut>,
     messages: Option<(Option<u16>, Vec<Group<'a>>)>,
-    movement: Option<Vec<(u16, Vec<u8>)>>,
+    movement: Option<MovementOut<'a>>,
+}
+
+#[derive(Clone, Debug)]
+enum MovementOut<'a> {
+    Grants(Vec<(u16, Vec<u8>)>),
+    Reports(Movement<'a>),
 }
 
 impl<'a> Builder<'a> {
@@ -850,7 +856,15 @@ impl<'a> Builder<'a> {
     /// selector 0 in each regular frame; the client starts its movement records
     /// for an object 13-16 ms after the object's first listing (E101).
     pub fn movement(mut self, grants: Vec<(u16, Vec<u8>)>) -> Self {
-        self.movement = Some(grants);
+        self.movement = Some(MovementOut::Grants(grants));
+        self
+    }
+
+    /// Client AuthoritativeMove section. The frame clock is exactly 96 bits;
+    /// each component body retains its own explicit bit length. This encodes
+    /// the wire layout only, without granting ownership or interpreting bodies.
+    pub fn client_movement(mut self, reports: Movement<'a>) -> Self {
+        self.movement = Some(MovementOut::Reports(reports));
         self
     }
 
@@ -1022,7 +1036,7 @@ impl<'a> Builder<'a> {
                 }
             }
         }
-        if let Some(grants) = &self.movement {
+        if let Some(MovementOut::Grants(grants)) = &self.movement {
             if grants.len() > MAX_MOVEMENT_RECORDS {
                 return Err(Error::Bound);
             }
@@ -1036,6 +1050,22 @@ impl<'a> Builder<'a> {
                 for selector in selectors {
                     w.put(u64::from(*selector), 4);
                 }
+            }
+        }
+        if let Some(MovementOut::Reports(reports)) = &self.movement {
+            let header = reports.header.ok_or(Error::Shape)?;
+            if header.len() != 96 || reports.records.len() > 63 {
+                return Err(Error::Bound);
+            }
+            w.put_span(header).put(reports.records.len() as u64, 6);
+            for record in &reports.records {
+                if record.component > 15 || record.data.len() > u16::MAX as usize {
+                    return Err(Error::Bound);
+                }
+                w.put(u64::from(record.id), 16)
+                    .put(u64::from(record.component), 4)
+                    .put(record.data.len() as u64, 16)
+                    .put_span(record.data);
             }
         }
         Ok(())

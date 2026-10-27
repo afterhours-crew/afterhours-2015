@@ -5,6 +5,139 @@
 use super::*;
 
 #[test]
+fn client_movement_keeps_clock_component_boundaries_and_neighboring_messages() {
+    let mut header = BitWriter::new();
+    header.put(0x12345678, 32).put(0x90abcdef, 32).put(47, 32);
+    let mut a = BitWriter::new();
+    a.put(0x1a73, 13);
+    let mut b = BitWriter::new();
+    b.put(5, 3);
+    let reports = Movement {
+        header: Some(header.span()),
+        records: vec![
+            MovementRecord {
+                id: 700,
+                component: 0,
+                data: a.span(),
+            },
+            MovementRecord {
+                id: 65535,
+                component: 15,
+                data: b.span(),
+            },
+        ],
+    };
+    let encoded = Builder::new()
+        .messages(
+            None,
+            vec![Group {
+                channel: 1,
+                sequence: None,
+                messages: vec![Message::State(1)],
+            }],
+        )
+        .client_movement(reports.clone())
+        .build()
+        .unwrap();
+    let parsed = parse(encoded.span(), Direction::FromClient).unwrap();
+    assert!(parsed.complete);
+    assert_eq!(parsed.mask, 6);
+    assert_eq!(
+        parsed.messages.unwrap().groups[0].messages,
+        vec![Message::State(1)]
+    );
+    let decoded = parsed.movement.unwrap();
+    let decoded_header = decoded.header.unwrap();
+    assert_eq!(decoded_header.len(), 96);
+    for offset in [0, 32, 64] {
+        assert_eq!(
+            decoded_header.read_u32(offset, 32),
+            header.span().read_u32(offset, 32)
+        );
+    }
+    assert_eq!(decoded.records.len(), reports.records.len());
+    for (actual, expected) in decoded.records.iter().zip(&reports.records) {
+        assert_eq!(
+            (actual.id, actual.component, actual.data.len()),
+            (expected.id, expected.component, expected.data.len())
+        );
+        assert_eq!(
+            actual.data.read_u32(0, actual.data.len() as u8),
+            expected.data.read_u32(0, expected.data.len() as u8)
+        );
+    }
+    assert!(
+        parse(
+            encoded.span().slice(0, encoded.len() - 8).unwrap(),
+            Direction::FromClient
+        )
+        .is_err()
+    );
+
+    let alone = Builder::new().client_movement(reports).build().unwrap();
+    assert_eq!(bits(&alone, 6, 32), 0x12345678);
+    assert_eq!(bits(&alone, 70, 32), 47);
+    assert_eq!(bits(&alone, 102, 6), 2);
+    assert_eq!(bits(&alone, 108, 16), 700);
+    assert_eq!(bits(&alone, 128, 16), 13);
+    assert_eq!(bits(&alone, 144, 13), 0x1a73);
+    assert_eq!(bits(&alone, 157, 16), 65535);
+}
+
+#[test]
+fn client_movement_rejects_unrepresentable_lengths_and_selectors() {
+    let mut header = BitWriter::new();
+    header.put_bytes(&[0; 12]);
+    let mut body = BitWriter::new();
+    body.put_bytes(&[0; 8192]);
+    let record = MovementRecord {
+        id: 1,
+        component: 0,
+        data: body.span().slice(0, 1).unwrap(),
+    };
+    let build = |header, records| {
+        Builder::new()
+            .client_movement(Movement { header, records })
+            .build()
+    };
+    assert!(build(None, vec![]).is_err());
+    for length in [0, 95] {
+        assert!(build(Some(header.span().slice(0, length).unwrap()), vec![]).is_err());
+    }
+    assert!(build(Some(header.span()), vec![record.clone(); 64]).is_err());
+    assert!(
+        build(
+            Some(header.span()),
+            vec![MovementRecord {
+                component: 16,
+                ..record.clone()
+            }]
+        )
+        .is_err()
+    );
+    assert!(
+        build(
+            Some(header.span()),
+            vec![MovementRecord {
+                data: body.span(),
+                ..record.clone()
+            }]
+        )
+        .is_err()
+    );
+    let full = build(Some(header.span()), vec![record; 63]).unwrap();
+    assert_eq!(
+        parse(full.span(), Direction::FromClient)
+            .unwrap()
+            .movement
+            .unwrap()
+            .records
+            .len(),
+        63
+    );
+}
+
+#[test]
 fn challenge_progress_preserves_native_words_flags_and_following_message() {
     let expected = ChallengeProgress {
         entries: vec![
