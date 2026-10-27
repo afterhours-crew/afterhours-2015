@@ -1157,6 +1157,11 @@ fn client_physics_handoff_is_owned_ordered_bounded_and_preserves_other_component
     sample.physics.identity_words = [(5f64.to_bits() >> 32) as u32, 0, 150];
     sample.physics.controls.value3 = 0;
     sample.physics.controls.value6 = 0;
+    // The first report can arrive after a teleport. Its pose and controls are
+    // authoritative too; stamping the old spawn state would move the car back.
+    sample.physics.position =
+        vehicle::Vector::from_position([300., 40., -50.], [0.; 3], 7).unwrap();
+    sample.physics.velocity = vehicle::SparseVector::from_vector([2., 0., -1.], 5).unwrap();
     let (header, body) = sample.encode().unwrap();
     let movement = Movement {
         header: Some(header.span()),
@@ -1180,7 +1185,7 @@ fn client_physics_handoff_is_owned_ordered_bounded_and_preserves_other_component
     assert_eq!(out.len(), 1);
     let handoff = players.vehicle_physics(3, 0x100000002, car).unwrap();
     assert_eq!(handoff.identity_words, sample.physics.identity_words);
-    assert_eq!(handoff.controls.value3, 3);
+    assert_eq!(handoff, sample.physics);
     assert!(
         reports
             .receive(&mut players, 3, 0x100000002, &movement, &cars, 5100)
