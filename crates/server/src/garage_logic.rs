@@ -1183,6 +1183,88 @@ impl GarageLogic {
         }
         Ok(output)
     }
+    /// The intro's final garage becomes an ordinary garage at customization:
+    /// the official host creates the customization presentation with the
+    /// customization Enter (career start 1247625 ms, ghost 7124), so the later
+    /// garage exit finds the same logic as after a normal entry (E912 58041 ms
+    /// deletes garage stats and that presentation). Captures the exit batch
+    /// addresses that the intro created through its own paths are adopted by
+    /// asset from the participant's live objects; the entry batch's remaining
+    /// entities are created without its fade events, which the composite
+    /// Leave presentation already sent. Returns the new records.
+    pub fn intro_customization(
+        &self,
+        players: &mut Players,
+        participant: u16,
+        ghosts: &mut BTreeMap<u16, u16>,
+    ) -> Result<Vec<Record>, replication::Error> {
+        if participant == 0 {
+            return Err(replication::Error::Shape);
+        }
+        let asset_of = |capture: u16| {
+            [
+                &self.spawn,
+                &self.entry,
+                &self.returned,
+                &self.return_requested,
+                &self.returning,
+            ]
+            .into_iter()
+            .flat_map(|b| &b.entities)
+            .find(|d| d.capture_id == capture)
+            .map(|d| d.asset)
+        };
+        let owned_by = |players: &Players, asset: &Asset, ghosts: &BTreeMap<u16, u16>| {
+            let mut found = players.objects().iter().filter_map(|(id, o)| {
+                matches!(&o.initial, replication::Initial::Entity { prefix, fields }
+                    if prefix.asset == *asset
+                    && matches!(fields.first(), Some(Initial::Root { reference, .. })
+                        if *reference == participant))
+                .then_some(id)
+            });
+            match (found.next(), found.next()) {
+                (Some(_), Some(_)) => Err(replication::Error::DuplicateObject),
+                // Already held under another capture: not adopted twice.
+                (Some(id), None) if ghosts.values().any(|&g| g == id) => Ok(None),
+                (first, _) => Ok(first),
+            }
+        };
+        let exit = self.batch(Which::Exit);
+        let needed: Vec<u16> = exit
+            .delete
+            .iter()
+            .copied()
+            .chain(exit.entity_updates.iter().map(|&(capture, _, _)| capture))
+            .collect();
+        for capture in needed {
+            if ghosts.contains_key(&capture) {
+                continue;
+            }
+            let Some(asset) = asset_of(capture) else {
+                continue;
+            };
+            if let Some(id) = owned_by(players, &asset, ghosts)? {
+                ghosts.insert(capture, id);
+            }
+        }
+        let mut records = Vec::new();
+        for definition in &self.entry.entities {
+            if ghosts.contains_key(&definition.capture_id) {
+                continue;
+            }
+            if let Some(id) = owned_by(players, &definition.asset, ghosts)? {
+                ghosts.insert(definition.capture_id, id);
+                continue;
+            }
+            let creation = self.creation(definition, players, participant, ghosts, None)?;
+            let record = players
+                .spawn_entities(vec![creation], &self.content)?
+                .remove(0);
+            ghosts.insert(definition.capture_id, record.id);
+            records.push(record);
+        }
+        Ok(records)
+    }
     /// The spawn logic of a prologue participant: only the captures the spawn
     /// batch's own events address (the fade control and one more in installed
     /// content; official career start 480 and 482), then those events. The
@@ -2056,6 +2138,56 @@ pub(crate) mod tests {
             logic
                 .produce(Which::Exit, &mut players, participant, &mut ghosts)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn intro_customization_makes_the_final_garage_exit_like_a_normal_one() {
+        let exit = json!({"scene_updates": [], "entities": [
+            {"capture_id": 400, "asset": {"bundle": 4, "type_id": 10, "local_index": 2}, "blueprint": {"scene_content_key": 101},
+             "roles": [{"kind": "root", "bus_count": 1}, {"kind": "channel", "scene_content_key": 101, "scene_serializer": 45}]}],
+            "delete_capture_ids": [319]});
+        let logic = GarageLogic::from_json(&with_exit(exit)).unwrap();
+        let (mut players, participant) = world();
+        let mut ghosts = BTreeMap::new();
+        // The intro holds only its spawn-event targets, never the entry batch.
+        logic
+            .produce_intro_spawn(&mut players, participant, &mut ghosts)
+            .unwrap();
+        assert!(!ghosts.contains_key(&319));
+        assert!(
+            logic
+                .produce(
+                    Which::Exit,
+                    &mut players.clone(),
+                    participant,
+                    &mut ghosts.clone()
+                )
+                .is_err()
+        );
+        let created = logic
+            .intro_customization(&mut players, participant, &mut ghosts)
+            .unwrap();
+        let presentation = ghosts[&319];
+        assert!(created.iter().any(|r| r.id == presentation));
+        // Repeats adopt what exists instead of creating it again.
+        let mut again = ghosts.clone();
+        assert!(
+            logic
+                .intro_customization(&mut players, participant, &mut again)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(again, ghosts);
+        let out = logic
+            .produce(Which::Exit, &mut players, participant, &mut ghosts)
+            .unwrap();
+        assert_eq!(out.deleted, vec![presentation]);
+        assert!(players.objects().get(presentation).is_none());
+        // Participant zero is never a garage owner.
+        assert_eq!(
+            logic.intro_customization(&mut players, 0, &mut BTreeMap::new()),
+            Err(replication::Error::Shape)
         );
     }
 

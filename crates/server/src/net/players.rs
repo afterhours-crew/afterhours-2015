@@ -1669,7 +1669,7 @@ impl Listener for PlayerListener {
                             // 38618 and 563021 ms); its garage-zone report
                             // during the return cinematic needs it (E1183).
                             if spawn_points.bindings().is_some()
-                                && spawn_points.assigned(owner.participant).is_none()
+                                && !spawn_points.subscribed(owner.participant)
                             {
                                 let value = spawn_points.next_value(owner.participant);
                                 let notification = spawn_points.assign(owner.participant, value)?;
@@ -1937,10 +1937,35 @@ impl Listener for PlayerListener {
                     body,
                 ) {
                     Ok(Some(out)) => {
-                        deferred_sections.extend(match prologue::movies::sections(vec![], out.0) {
-                            Ok(s) => s,
-                            Err(e) => return self.refuse_rpc(e, body),
-                        });
+                        // Entering customization from the intro's final
+                        // composite: the garage gains the ordinary logic set
+                        // its later exit deletes (career start 1247625 ms).
+                        let mut created = Vec::new();
+                        if let (Some(logic), Some(participant)) = (
+                            self.logic.as_deref(),
+                            out.1.iter().find_map(|c| match c {
+                                nfs_world::participants::HostRpc::Participant(n) => {
+                                    Some(n.participant)
+                                }
+                                _ => None,
+                            }),
+                        ) && logic.has_exit()
+                        {
+                            created = match logic.intro_customization(
+                                &mut players,
+                                participant,
+                                logic_ghosts.entry(participant).or_default(),
+                            ) {
+                                Ok(records) => records,
+                                Err(e) => return self.refuse_rpc(e, body),
+                            };
+                        }
+                        deferred_sections.extend(
+                            match prologue::movies::sections(created, out.0) {
+                                Ok(s) => s,
+                                Err(e) => return self.refuse_rpc(e, body),
+                            },
+                        );
                         responses.extend(out.1);
                         continue;
                     }

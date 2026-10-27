@@ -862,3 +862,40 @@ fn send_frame_fragments_splits_at_the_e101_size_and_needs_window_room() {
         Err(Error::Phase)
     );
 }
+
+#[test]
+fn an_empty_control_acknowledges_received_frames_without_a_handler_frame() {
+    use delivery::Status;
+    struct Accept;
+    impl Listener for Accept {
+        fn frame(&mut self, _: Queued<'_>) -> bool {
+            true
+        }
+    }
+    let (mut host, _) = admitted(0);
+    let mut peer =
+        Application::negotiated(Policy::default(), CLIENT_SELECTOR, HOST_SELECTOR, 3).unwrap();
+    let mut bits = BitWriter::new();
+    bits.put(0x5a, 8);
+    let (ticket, wires) = host.send_tracked_frame(bits.span(), 64).unwrap();
+    // Whatever the peer answers on its own is not delivered: only the empty
+    // control below reaches the host.
+    for body in &wires {
+        peer.receive(body, 10, &mut Accept).unwrap();
+    }
+    assert_eq!(host.delivery_status(ticket), Some(Status::Pending));
+    let control = peer.empty_control(20).unwrap();
+    let mut host_listener = Retain::default();
+    let received = host.receive(&control, 20, &mut host_listener).unwrap();
+    assert_eq!(received.event, Some(Event::EmptyControl));
+    assert!(received.send.is_empty());
+    assert_eq!(host.release_delivery(ticket), Some(Status::Accepted));
+    assert_eq!(peer.stats().empty_controls_sent, 1);
+    // Unacknowledged own sends still bound it like any other send.
+    let frame = [0xaa; 29];
+    while peer
+        .send_frame(BitSpan::new(&frame, 0, 232).unwrap())
+        .is_ok()
+    {}
+    assert_eq!(peer.empty_control(30), Err(Error::Window));
+}

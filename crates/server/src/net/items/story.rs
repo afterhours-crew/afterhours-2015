@@ -157,7 +157,7 @@ impl Profile {
                 );
                 // A story award must deliver its complete item tree before the
                 // sequence callback. The connection cannot acknowledge a subset.
-                let (notifications, unannounced) = credit_notifications(
+                let (notifications, unannounced) = award_notifications(
                     request.player_index,
                     &before,
                     &items,

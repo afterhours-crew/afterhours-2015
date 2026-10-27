@@ -913,6 +913,33 @@ impl Application {
         Ok(send)
     }
 
+    /// One empty control now: it carries the current acknowledgement state and
+    /// nothing else. A peer with no frame to send uses it to acknowledge
+    /// promptly; the receiver consumes it silently (`Event::EmptyControl`).
+    pub fn empty_control(&mut self, now_ms: u64) -> Result<Vec<u8>, Error> {
+        self.clock(now_ms)?;
+        let Phase::Sequenced(s) = &mut self.phase else {
+            return Err(Error::Phase);
+        };
+        if outstanding(s) >= WINDOW - 1 {
+            return Err(Error::Window);
+        }
+        s.deliveries.sent(s.next_number, 1);
+        let number = s.next_number;
+        s.next_number = (s.next_number + 1) & 1023;
+        let body = sequenced(
+            s.outbound,
+            number,
+            s.history.frontier().value(),
+            s.history.bits(),
+            &control_payload(CONTROL_EMPTY, &[]),
+        );
+        s.last_was_empty_control = false;
+        self.stats.empty_controls_sent += 1;
+        self.stats.sent += 1;
+        Ok(body)
+    }
+
     /// Send one complete handler frame as a single queued fragment with the
     /// advertisement absent .
     pub fn send_frame(&mut self, frame: BitSpan<'_>) -> Result<Vec<u8>, Error> {

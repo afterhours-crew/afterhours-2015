@@ -428,11 +428,20 @@ pub(super) fn setup() -> (PlayerListener, u16, Arc<nfs_world::items::Collection>
     listener.world_ms = 100_000;
     listener.population = Some(population);
     listener.participants = participants;
-    listener.logic = Some(Arc::new(
-        crate::garage_logic::GarageLogic::from_json(
-            &crate::garage_logic::tests::presentation_json(),
+    // The ordinary garage logic lives on the layout's item scene, as the
+    // installed content's gameplay scene does (the intro's customization
+    // creates the entry presentation there).
+    let key = listener.vehicles.as_ref().unwrap().layout.item_scene_key;
+    let json: serde_json::Value = crate::garage_logic::tests::presentation_json()
+        .to_string()
+        .replace(
+            "\"scene_content_key\":101",
+            &format!("\"scene_content_key\":{key}"),
         )
-        .unwrap(),
+        .parse()
+        .unwrap();
+    listener.logic = Some(Arc::new(
+        crate::garage_logic::GarageLogic::from_json(&json).unwrap(),
     ));
     let definition = |layout, local_index| nfs_world::sequences::Definition {
         layout,
@@ -1252,14 +1261,18 @@ pub(super) fn ready_for_selection(
         let ack = b.expected().encode().unwrap();
         assert!(send(&mut listener, 16 + i as u8, 47, ack.span()));
     }
-    sequences_checked(&mut listener, 0);
+    // The intro garage wait stops 8 s after readiness (E1026), not 16 s.
+    sequences_checked(
+        &mut listener,
+        nfs_world::sequences::INTRO_FIRST_READY_MS - 1,
+    );
     assert!(
         listener
             .pending_rpcs
             .iter()
             .all(|r| !matches!(r, HostRpc::SequenceStop(_)))
     );
-    sequences_checked(&mut listener, nfs_world::sequences::FIRST_READY_MS);
+    sequences_checked(&mut listener, nfs_world::sequences::INTRO_FIRST_READY_MS);
     assert!(
         listener
             .pending_rpcs

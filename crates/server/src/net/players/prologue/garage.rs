@@ -245,7 +245,13 @@ impl PlayerListener {
         notify(content, modes, players, chain, &mut out.output)?;
         let sequences = sequences.ok_or(replication::Error::Unsupported)?;
         sequences.reset(players, owner)?;
-        out.output.records.extend(sequences.start(players, owner)?);
+        // Both official intro garage waits stopped 8 s after the waiting
+        // sequence (E1026 306.019 and 1134.827 s; E1249 trace 3.14).
+        out.output.records.extend(sequences.start_with_delay(
+            players,
+            owner,
+            nfs_world::sequences::INTRO_FIRST_READY_MS,
+        )?);
         Ok(Some(out))
     }
 }

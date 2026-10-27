@@ -821,6 +821,9 @@ fn leaving_free_roam_clears_the_spawn_assignment_once() {
     );
     // The clear is idempotent at the model level and the counter continues.
     assert_eq!(listener.spawn_points.next_value(40), 2);
+    // The lifetime ended: the intro transfer car is assigned again (career
+    // start: 1 at 38618, Leave at 298117, 2 at 563021 ms).
+    assert!(!listener.spawn_points.subscribed(40));
     let mut unbound = PlayerListener::new(101);
     unbound.initialize_world(&content_with(None)).unwrap();
     assert!(unbound.spawn_clear(40).unwrap().is_empty());
