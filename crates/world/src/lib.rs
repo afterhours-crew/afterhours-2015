@@ -36,7 +36,7 @@ pub mod speedwall;
 pub mod teleport;
 
 pub use nfs_world_core::{
-    application, bits, content, crypto, files, handshake, items, link, transport,
+    application, bits, content, crypto, files, handshake, items, link, rpc, transport,
 };
 
 #[cfg(test)]
