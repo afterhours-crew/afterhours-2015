@@ -170,6 +170,7 @@ impl PlayerListener {
         let mut records = Vec::new();
         let mut messages = Vec::new();
         let mut calls = Vec::new();
+        let mut after_creation = Vec::new();
         let mut deleted = Vec::new();
         let mut teleports = Vec::new();
         if let Some(composite) = &content.final_composite {
@@ -374,6 +375,16 @@ impl PlayerListener {
                     };
                     if let Some(record) = record {
                         records.push(record);
+                        let bindings = participants
+                            .intro_bindings()
+                            .ok_or(replication::Error::Shape)?;
+                        after_creation.push(HostRpc::Participant(
+                            nfs_world::participants::Notification {
+                                endpoint: bindings.opening,
+                                participant,
+                                call: nfs_world::participants::Call::Enter,
+                            },
+                        ));
                     }
                 }
                 Some(Stage::IntroStartingDrive)
@@ -654,7 +665,23 @@ impl PlayerListener {
             },
             calls,
         )?;
+        // Keep the state entry in a later replication entry. Ordinary RPCs
+        // can be moved ahead of queued creations when their explicit object
+        // references already exist; this dependency is on the sequence too.
+        let mut entries = Vec::new();
+        if !after_creation.is_empty() {
+            entries.extend(
+                std::mem::take(&mut sections)
+                    .into_iter()
+                    .map(|s| (s, vec![])),
+            );
+            entries.extend(admitted_entries(
+                returning::empty_section(),
+                after_creation,
+            )?);
+        }
         if sections.len() > MAX_PENDING.saturating_sub(self.pending.len())
+            || entries.len() > MAX_PENDING.saturating_sub(self.pending_entries.len())
             || teleports.len() > MAX_PENDING.saturating_sub(self.pending_teleports.len())
             || messages.len() > MAX_PENDING.saturating_sub(self.pending_content.len())
             || calls.len()
@@ -716,6 +743,7 @@ impl PlayerListener {
         self.scene_membership = scene_membership.session;
         self.world_cars = cars;
         self.pending.extend(sections);
+        self.queue_entries(entries);
         self.pending_content.extend(messages);
         self.pending_rpcs.extend(calls);
         self.pending_teleports.extend(teleports);

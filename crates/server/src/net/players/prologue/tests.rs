@@ -637,9 +637,36 @@ pub(super) fn ready_for_selection(
         listener.participants.stage(participant),
         Some(Stage::IntroOpening)
     );
+    let opening_enter = HostRpc::Participant(nfs_world::participants::Notification {
+        endpoint: bindings.opening,
+        participant,
+        call: nfs_world::participants::Call::Enter,
+    });
+    assert!(
+        !listener.pending_rpcs.contains(&opening_enter),
+        "opening entry must wait for sequence creation publication"
+    );
+    listener.pending_entries.resize(
+        MAX_PENDING,
+        (super::super::returning::empty_section(), Vec::new()),
+    );
+    tick_with_normal_presentation(&mut listener).unwrap();
+    assert!(listener.opening.ghost(participant).is_none());
     drain(&mut listener);
     tick_with_normal_presentation(&mut listener).unwrap();
     let ghost = listener.opening.ghost(participant).unwrap();
+    let creation = listener
+        .pending_entries
+        .iter()
+        .position(|(section, _)| section.records.iter().any(|r| r.id == ghost))
+        .expect("opening creation is an ordered entry");
+    let entered = listener
+        .pending_entries
+        .iter()
+        .position(|(_, calls)| calls.contains(&opening_enter))
+        .expect("opening entry is queued after creation");
+    assert!(creation < entered);
+    assert!(!listener.pending_rpcs.contains(&opening_enter));
     drain(&mut listener);
     tick_with_normal_presentation(&mut listener).unwrap();
     assert!(listener.pending.is_empty());

@@ -1977,9 +1977,22 @@ impl Listener for PlayerListener {
                 players.owns_participant(HOST_SELECTOR as u8, self.persona, id)
             }) {
                 Ok(Some(nfs_world::participants::Outcome::Advanced(calls))) => {
+                    // Opening entry depends on a sequence that is constructed
+                    // by the prologue owner on its next update. That owner
+                    // publishes the entry after the sequence's creation; a
+                    // normal RPC could be sent eagerly before those records.
+                    let opening = self
+                        .prologue
+                        .as_ref()
+                        .and_then(|_| participants.intro_bindings())
+                        .map(|bindings| bindings.opening);
                     responses.extend(
                         calls
                             .into_iter()
+                            .filter(|call| {
+                                Some(call.endpoint) != opening
+                                    || call.call != nfs_world::participants::Call::Enter
+                            })
                             .map(nfs_world::participants::HostRpc::Participant),
                     );
                     continue;
