@@ -50,6 +50,32 @@ impl Context<'_> {
             .map(HostRpc::Event)
             .collect())
     }
+    /// The transfer presentation logic's two entity bursts (career start
+    /// 39419, 563121, 749427 and 891523 ms, one per teleport or in-place
+    /// start). The recovery batch carries the same authored events on the
+    /// same logic (capture 21 in installed content); nothing while the intro
+    /// has not created that logic.
+    fn transfer(&self, participant: u16) -> Result<Vec<HostRpc>, replication::Error> {
+        let (Some(logic), Some(ghosts)) = (self.logic, self.ghosts.get(&participant)) else {
+            return Ok(Vec::new());
+        };
+        let transfer: BTreeSet<u16> = logic
+            .batch(Which::InWorldTeleport)
+            .entities
+            .iter()
+            .map(|d| d.capture_id)
+            .collect();
+        Ok(logic
+            .present_events(Which::Recovered, self.players, ghosts)?
+            .into_iter()
+            .filter(|fire| {
+                ghosts.iter().any(|(capture, &ghost)| {
+                    ghost == fire.target.ghost && transfer.contains(capture)
+                })
+            })
+            .map(HostRpc::Event)
+            .collect())
+    }
     /// The free-roam HUD while its first-drive logic exists, then ViewWorld.
     fn driving(&self, participant: u16) -> Result<Vec<HostRpc>, replication::Error> {
         let (Some(logic), Some(ghosts)) = (self.logic, self.ghosts.get(&participant)) else {
@@ -124,8 +150,15 @@ pub(super) fn present_with_driving_tail(
                 },
             )
         } else if endpoint == intro.relocating && leave {
-            // 749427 ms: hide the world for the next teleport.
-            (Vec::new(), ctx.fade(participant, &[HIDE_WORLD, BLACK])?)
+            // 749427 ms: ViewWorld, then hide the world for the next teleport,
+            // then the transfer logic's two bursts.
+            let mut after = ctx.fade(participant, &[VIEW_WORLD, HIDE_WORLD, BLACK])?;
+            after.extend(ctx.transfer(participant)?);
+            (Vec::new(), after)
+        } else if endpoint == lifecycle.initial_teleport && enter {
+            // 563121 ms: the first transfer's logic fires after its teleport
+            // command; the final composite exit has no transfer logic left.
+            (Vec::new(), ctx.transfer(participant)?)
         } else if ctx.movie_playing(endpoint) && enter {
             // 652722, 826725 ms.
             (Vec::new(), ctx.fade(participant, &[HIDE_WORLD, BLACK])?)
@@ -168,6 +201,11 @@ pub(super) fn present_with_driving_tail(
     }
     for &participant in driving_tail {
         out.extend(ctx.driving(participant)?);
+        // The return drive starts in place after its Enter alive: the
+        // recreated transfer logic fires with the HUD (891523 ms).
+        if ctx.participants.intro_chapter(participant) == Some(Chapter::ReturnDrive) {
+            out.extend(ctx.transfer(participant)?);
+        }
     }
     Ok(out)
 }
@@ -184,6 +222,165 @@ mod tests {
             HostRpc::Participant(n) => format!("{:?}", n.call),
             other => format!("{other:?}"),
         }
+    }
+
+    /// Career start 747725–756224 and 562–572 s: the relocation creates four
+    /// transfer logics; the last fires its bursts after the relocating Leave
+    /// (or the first transfer's initial-teleport Enter), two go at unblack,
+    /// one with the arrival, and the burst logic retires with the next movie.
+    #[test]
+    fn transfer_logic_follows_the_relocation_and_retires_at_unblack_and_arrival() {
+        let (mut listener, participant, _) = super::super::tests::setup();
+        let key = listener.vehicles.as_ref().unwrap().layout.item_scene_key;
+        let json = crate::garage_logic::tests::intro_json()
+            .to_string()
+            .replace(
+                "\"scene_content_key\":101",
+                &format!("\"scene_content_key\":{key}"),
+            );
+        let logic = GarageLogic::from_json(&serde_json::from_str(&json).unwrap()).unwrap();
+        let ghosts = listener.logic_ghosts.entry(participant).or_default();
+        logic
+            .produce_intro_spawn(&mut listener.players, participant, ghosts)
+            .unwrap();
+        let created = logic
+            .produce_present(
+                Which::InWorldTeleport,
+                &mut listener.players,
+                participant,
+                ghosts,
+                Part::Creations,
+            )
+            .unwrap();
+        assert_eq!(created.records.len(), 4);
+        let fade = ghosts[&277];
+        let transfer = ghosts[&336];
+        let unblack = vec![ghosts[&333], ghosts[&334]];
+        let arrival = ghosts[&335];
+        listener.logic = Some(std::sync::Arc::new(logic));
+        let intro = listener.participants.intro_bindings().unwrap();
+        let life = listener.participants.lifecycle_bindings().unwrap();
+        let label = |call: &HostRpc| match call {
+            HostRpc::Event(f) if f.target.ghost == fade => format!("fade:{}", f.event),
+            HostRpc::Event(f) if f.target.ghost == transfer => {
+                format!("xfer:{}:{}", f.target.entity, f.event)
+            }
+            HostRpc::Participant(n) => format!("{:?}", n.call),
+            other => format!("{other:?}"),
+        };
+        let note = |endpoint, call| {
+            HostRpc::Participant(Notification {
+                endpoint,
+                participant,
+                call,
+            })
+        };
+        let run = |listener: &PlayerListener, calls: Vec<HostRpc>| {
+            present(
+                &Context {
+                    logic: listener.logic.as_deref(),
+                    ghosts: &listener.logic_ghosts,
+                    players: &listener.players,
+                    participants: &listener.participants,
+                    content: listener.prologue.as_deref(),
+                },
+                calls,
+            )
+            .unwrap()
+            .iter()
+            .map(label)
+            .collect::<Vec<_>>()
+        };
+        let bursts = [
+            "xfer:1:17",
+            "xfer:1:15",
+            "xfer:1:13",
+            "xfer:1:11",
+            "xfer:2:9",
+            "xfer:2:7",
+            "xfer:2:5",
+            "xfer:2:4",
+        ];
+        let mut expected = vec!["Leave", "fade:0", "fade:1", "fade:2"];
+        expected.extend(bursts);
+        assert_eq!(
+            run(&listener, vec![note(intro.relocating, Call::Leave)]),
+            expected
+        );
+        let mut expected = vec!["Enter"];
+        expected.extend(bursts);
+        assert_eq!(
+            run(&listener, vec![note(life.initial_teleport, Call::Enter)]),
+            expected
+        );
+        // Alive without the return-drive chapter: HUD rules only, no bursts.
+        assert!(
+            run(&listener, vec![note(intro.alive, Call::Enter)])
+                .iter()
+                .all(|l| !l.starts_with("xfer"))
+        );
+        let logic = listener.logic.clone().unwrap();
+        let mut players = listener.players.clone();
+        let mut staged = listener.logic_ghosts.clone();
+        assert!(
+            PlayerListener::intro_unblack(
+                Some(&logic),
+                &mut players,
+                &listener.participants,
+                &mut staged,
+                &[note(intro.alive, Call::Enter)],
+            )
+            .unwrap()
+            .is_none()
+        );
+        let section = PlayerListener::intro_unblack(
+            Some(&logic),
+            &mut players,
+            &listener.participants,
+            &mut staged,
+            &[note(intro.render_wait, Call::Leave)],
+        )
+        .unwrap()
+        .expect("unblack retires the holding logics");
+        assert_eq!(section.deleted, unblack);
+        assert!(section.records.is_empty());
+        assert!(players.objects().get(unblack[0]).is_none());
+        assert!(players.objects().get(transfer).is_some());
+        // Repeated: nothing left to retire.
+        assert!(
+            PlayerListener::intro_unblack(
+                Some(&logic),
+                &mut players,
+                &listener.participants,
+                &mut staged,
+                &[note(intro.render_wait, Call::Leave)],
+            )
+            .unwrap()
+            .is_none()
+        );
+        let out = logic
+            .produce_present(
+                Which::Arrived,
+                &mut players,
+                participant,
+                staged.get_mut(&participant).unwrap(),
+                Part::All,
+            )
+            .unwrap();
+        assert_eq!(out.deleted, vec![arrival]);
+        assert!(!out.records.is_empty());
+        assert!(players.objects().get(transfer).is_some());
+        let out = logic
+            .produce_present(
+                Which::InWorldTeleport,
+                &mut players,
+                participant,
+                staged.get_mut(&participant).unwrap(),
+                Part::Deletions,
+            )
+            .unwrap();
+        assert!(out.deleted.contains(&transfer));
+        assert!(players.objects().get(transfer).is_none());
     }
 
     #[test]
@@ -248,7 +445,7 @@ mod tests {
             ),
             (
                 vec![(intro.relocating, Call::Leave)],
-                vec!["Leave", "fade:1", "fade:2"],
+                vec!["Leave", "fade:0", "fade:1", "fade:2"],
             ),
             (
                 vec![(life.loading_garage, Call::Enter)],

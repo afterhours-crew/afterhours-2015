@@ -148,6 +148,23 @@ impl PlayerListener {
         records.extend(scene_membership.records);
         let mut deleted = output.deleted;
         deleted.extend(scene_membership.deleted);
+        // The movie's first frame retires the drive's transfer logic with the
+        // race (career start 651925 and 826027 ms: logic 3012/4154 deleted as
+        // the player leaves alive); the next drive recreates its presentation.
+        let mut logic_ghosts = self.logic_ghosts.clone();
+        if let Some(logic) = self.logic.as_deref() {
+            deleted.extend(
+                logic
+                    .produce_present(
+                        crate::garage_logic::Which::InWorldTeleport,
+                        &mut players,
+                        participant,
+                        logic_ghosts.entry(participant).or_default(),
+                        crate::garage_logic::Part::Deletions,
+                    )?
+                    .deleted,
+            );
+        }
         let sections = sections(records, deleted)?;
         if sections.len() > MAX_PENDING.saturating_sub(self.pending.len())
             || calls.len()
@@ -158,6 +175,7 @@ impl PlayerListener {
         self.players = players;
         self.participants = participants;
         self.scene_membership = scene_membership.session;
+        self.logic_ghosts = logic_ghosts;
         self.intro_movies.insert(participant, active);
         self.pending.extend(sections);
         self.pending_rpcs.extend(calls);

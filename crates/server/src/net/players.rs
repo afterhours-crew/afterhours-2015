@@ -2024,6 +2024,23 @@ impl Listener for PlayerListener {
                                 chain,
                                 &mut out,
                             )?;
+                            // The transfer to the first race creates the same
+                            // transfer presentation as a relocation (career
+                            // start 562–563 s: logic 3012 fires after the
+                            // teleport, 3013–3015 go at the arrival).
+                            if let Some(logic) = self.logic.as_deref() {
+                                out.records.extend(
+                                    logic
+                                        .produce_present(
+                                            crate::garage_logic::Which::InWorldTeleport,
+                                            &mut players,
+                                            owner.participant,
+                                            logic_ghosts.entry(owner.participant).or_default(),
+                                            crate::garage_logic::Part::Creations,
+                                        )?
+                                        .records,
+                                );
+                            }
                             deferred_sections.extend(Self::binding_sections(out.records)?);
                             if !out.deleted.is_empty() {
                                 deferred_sections.push(Section {
@@ -2697,7 +2714,21 @@ impl Listener for PlayerListener {
                                         Ok((Some(section), chain)) => {
                                             exit_entries.push((section, chain))
                                         }
-                                        Ok((None, chain)) => responses.extend(chain),
+                                        Ok((None, chain)) => match Self::intro_unblack(
+                                            self.logic.as_deref(),
+                                            &mut players,
+                                            &participants,
+                                            &mut logic_ghosts,
+                                            &chain,
+                                        ) {
+                                            Ok(Some(section)) => {
+                                                exit_entries.push((section, chain))
+                                            }
+                                            Ok(None) => responses.extend(chain),
+                                            Err(error) => {
+                                                return self.refuse_rpc(error, body);
+                                            }
+                                        },
                                         Err(error) => {
                                             return self.refuse_rpc(error, body);
                                         }

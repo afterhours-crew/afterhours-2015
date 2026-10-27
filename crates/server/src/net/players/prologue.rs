@@ -169,6 +169,7 @@ impl PlayerListener {
         let mut world_volumes = self.world_volumes.clone();
         let mut world_activation = self.world_activation.clone();
         let mut cars = self.world_cars.clone();
+        let mut logic_ghosts = self.logic_ghosts.clone();
         let mut records = Vec::new();
         let mut messages = Vec::new();
         let mut calls = Vec::new();
@@ -259,10 +260,29 @@ impl PlayerListener {
                     else {
                         return Err(replication::Error::Shape);
                     };
+                    // The in-place return drive recreates the driving
+                    // presentation the diner movie retired: transfer logic,
+                    // return request and HUD (career start 891523 ms, logics
+                    // 4949/4950 created with the Enter alive frame). Their
+                    // fires are placed by `presentation` beside that call.
+                    if let Some(logic) = self.logic.as_deref() {
+                        records.extend(
+                            logic
+                                .produce_present(
+                                    crate::garage_logic::Which::Recovered,
+                                    &mut players,
+                                    participant,
+                                    logic_ghosts.entry(participant).or_default(),
+                                    crate::garage_logic::Part::Creations,
+                                )?
+                                .records,
+                        );
+                    }
                     records.extend(output.records);
                     deleted.extend(output.deleted);
                     calls.extend(output.calls);
                     calls.extend(chain.into_iter().map(HostRpc::Participant));
+                    driving_presentation.insert(participant);
                     modes.insert(participant, (drive, canceller, Chapter::ReturnDrive));
                 }
                 Some(Stage::FreeRoam)
@@ -282,6 +302,23 @@ impl PlayerListener {
                     else {
                         return Err(replication::Error::Shape);
                     };
+                    // Entering relocation creates the transfer presentation
+                    // (career start 747725 ms: four logics, deleted at the
+                    // arrival's unblack, the arrival and the next race end).
+                    // Its fade and bursts follow the relocating Leave.
+                    if let Some(logic) = self.logic.as_deref() {
+                        records.extend(
+                            logic
+                                .produce_present(
+                                    crate::garage_logic::Which::InWorldTeleport,
+                                    &mut players,
+                                    participant,
+                                    logic_ghosts.entry(participant).or_default(),
+                                    crate::garage_logic::Part::Creations,
+                                )?
+                                .records,
+                        );
+                    }
                     calls.extend(chain.into_iter().map(HostRpc::Participant));
                 }
                 Some(Stage::IntroRelocating)
@@ -693,7 +730,7 @@ impl PlayerListener {
         let calls = presentation::present_with_driving_tail(
             &presentation::Context {
                 logic: self.logic.as_deref(),
-                ghosts: &self.logic_ghosts,
+                ghosts: &logic_ghosts,
                 players: &players,
                 participants: &participants,
                 content: Some(content),
@@ -784,12 +821,63 @@ impl PlayerListener {
         self.world_activation = world_activation;
         self.scene_membership = scene_membership.session;
         self.world_cars = cars;
+        self.logic_ghosts = logic_ghosts;
         self.pending.extend(sections);
         self.queue_entries(entries);
         self.pending_content.extend(messages);
         self.pending_rpcs.extend(calls);
         self.pending_teleports.extend(teleports);
         Ok(())
+    }
+    /// Rendering ends the black screen of an intro transfer: the two transfer
+    /// logics that hold it go with that frame (career start 571921 and
+    /// 756022 ms, in-world arrival batch), in the entry that carries the
+    /// render-wait Leave. None at the opening, which created no transfer logic.
+    pub(super) fn intro_unblack(
+        logic: Option<&crate::garage_logic::GarageLogic>,
+        players: &mut Players,
+        participants: &Lifecycle,
+        logic_ghosts: &mut BTreeMap<u16, BTreeMap<u16, u16>>,
+        chain: &[HostRpc],
+    ) -> Result<Option<Section>, replication::Error> {
+        let (Some(logic), Some(intro)) = (logic, participants.intro_bindings()) else {
+            return Ok(None);
+        };
+        let mut deleted = Vec::new();
+        for call in chain {
+            let HostRpc::Participant(nfs_world::participants::Notification {
+                endpoint,
+                participant,
+                call: nfs_world::participants::Call::Leave,
+            }) = *call
+            else {
+                continue;
+            };
+            if endpoint != intro.render_wait || participants.intro_chapter(participant).is_none() {
+                continue;
+            }
+            deleted.extend(
+                logic
+                    .produce_present(
+                        crate::garage_logic::Which::InWorldArrival,
+                        players,
+                        participant,
+                        logic_ghosts.entry(participant).or_default(),
+                        crate::garage_logic::Part::Deletions,
+                    )?
+                    .deleted,
+            );
+        }
+        if deleted.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(Section {
+            float_bits: None,
+            flag: false,
+            setup: None,
+            records: vec![],
+            deleted,
+        }))
     }
     pub(super) fn driving_signal(
         content: &crate::prologue::Content,
@@ -896,6 +984,19 @@ impl PlayerListener {
                 crossing,
                 seconds,
             )?));
+        }
+        if route.method_index() == 6 {
+            for (active, _, chapter) in modes.values_mut() {
+                if let Some(out) = active.launch_request(
+                    content.mode(*chapter)?,
+                    players,
+                    ghost,
+                    route.selector(),
+                    6,
+                )? {
+                    return Ok(Some(out));
+                }
+            }
         }
         let Some((active, _, chapter)) = modes
             .values_mut()
@@ -1059,7 +1160,7 @@ impl PlayerListener {
             persona,
             participant: call.participant,
         };
-        let Some(deleted) = opening.complete(players, owner, call)? else {
+        let Some(deleted_sequence) = opening.complete(players, owner, call)? else {
             return Ok(Some(None));
         };
         let Outcome::Advanced(calls) = participants.intro_opening_complete(owner.participant)
@@ -1068,26 +1169,29 @@ impl PlayerListener {
         };
         // The first drive's presentation logic (return request, HUD) is
         // created with the drive, as at the official garage arrival (career
-        // start 914 and 918 precede the first-drive mode 920; E1183).
-        let records = match logic {
+        // start 914 and 918 precede the first-drive mode 920; E1183). The
+        // arrival also retires the transfer's arrive logic (career start
+        // 572121 and 756224 ms: one of the four relocation logics goes with
+        // the arrival sequence); nothing exists to delete at the opening.
+        let (records, mut deleted) = match logic {
             Some(logic) => {
-                logic
-                    .produce_present(
-                        crate::garage_logic::Which::Arrived,
-                        players,
-                        owner.participant,
-                        logic_ghosts.entry(owner.participant).or_default(),
-                        crate::garage_logic::Part::Creations,
-                    )?
-                    .records
+                let out = logic.produce_present(
+                    crate::garage_logic::Which::Arrived,
+                    players,
+                    owner.participant,
+                    logic_ghosts.entry(owner.participant).or_default(),
+                    crate::garage_logic::Part::All,
+                )?;
+                (out.records, out.deleted)
             }
-            None => Vec::new(),
+            None => (Vec::new(), Vec::new()),
         };
+        deleted.insert(0, deleted_sequence);
         Ok(Some(Some((
             Section {
                 float_bits: None,
                 flag: false,
-                deleted: vec![deleted],
+                deleted,
                 setup: (!records.is_empty()).then_some(Setup::RawEscape([0; 3])),
                 records,
             },

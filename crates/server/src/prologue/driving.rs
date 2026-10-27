@@ -309,7 +309,14 @@ pub struct Active {
     completion_queued: bool,
     result_barrier: bool,
     result_calls: Vec<HostRpc>,
+    /// A client-enabled launcher's launch call, held until the client answers
+    /// the launch event on the launcher (or the handshake deadline passes).
+    pending_launch: Option<(HostRpc, f64)>,
 }
+/// Seconds the host waits for the client's launcher answer before launching
+/// anyway. The official answer arrives within 50 ms (career start 891569 ms);
+/// launching without it is logged as a handshake failure.
+pub const LAUNCH_HANDSHAKE_SECONDS: f64 = 5.;
 impl Active {
     fn dispatch(&mut self, commands: Vec<Command>) -> Result<Vec<Effect>, Error> {
         self.host
@@ -319,6 +326,51 @@ impl Active {
                     .map_or_else(|| Ok(vec![]), |r| r.effect(e))
             })
             .map_err(invalid)
+    }
+    /// This mode's launcher on the owning participant logic (scene, selector).
+    pub fn launcher_endpoint(
+        &self,
+        content: &Mode,
+        players: &Players,
+    ) -> Result<(u16, u16), Error> {
+        field(players.objects(), self.parent, content.data.launcher)
+    }
+    /// The client answered the launch event on this mode's launcher: launch.
+    /// `None` when the call is not that answer or nothing is pending.
+    pub fn launch_request(
+        &mut self,
+        content: &Mode,
+        players: &Players,
+        ghost: u16,
+        selector: u16,
+        method: u32,
+    ) -> Result<Option<Output>, Error> {
+        if self.pending_launch.is_none() || method != 6 {
+            return Ok(None);
+        }
+        if field(players.objects(), self.parent, content.data.launcher)? != (ghost, selector) {
+            return Ok(None);
+        }
+        let (launch, _) = self.pending_launch.take().ok_or(Error::Shape)?;
+        Ok(Some(Output {
+            calls: vec![launch],
+            ..Output::default()
+        }))
+    }
+    /// A launch still waiting for the client's answer past its deadline goes
+    /// out anyway, logged: the handshake failed, the drive must not hang.
+    fn launch_overdue(&mut self, seconds: f64, out: &mut Output) {
+        if let Some((_, deadline)) = &self.pending_launch
+            && seconds >= *deadline
+        {
+            let (launch, _) = self.pending_launch.take().expect("checked above");
+            tracing::warn!(
+                mode = self.ghost,
+                participant = self.owner.participant,
+                "launcher answer missing; launched without the client's request"
+            );
+            out.calls.push(launch);
+        }
     }
     /// Authored collector output is retained until the story owner consumes it.
     /// This snapshot alone does not grant rewards or complete an objective.
@@ -480,17 +532,36 @@ impl Active {
             completion_queued: false,
             result_barrier: false,
             result_calls: vec![],
+            pending_launch: None,
         };
         active.effects(content, &mut staged, &effects, true, &mut out)?;
         let (target, selector) = field(staged.objects(), parent, content.data.launcher)?;
-        out.calls.push(HostRpc::GameMode(event_logic::call(
+        let launch = HostRpc::GameMode(event_logic::call(
             staged.objects(),
             target,
             selector,
             4,
             Some(active.ghost),
             Arguments::None,
-        )?));
+        )?);
+        match content.data.launch_event {
+            // A client-enabled launcher is told to launch by its networked
+            // event; the client answers on the launcher (method 6) and only
+            // then does the host launch (career start 891523, 891569 and
+            // 891923 ms). Server-started launchers launch at once.
+            Some(event) => {
+                out.calls.push(HostRpc::Event(nfs_world::logic::Fire {
+                    target: nfs_world::logic::EntityRef {
+                        ghost: parent,
+                        entity: event.bus,
+                    },
+                    event: event.ordinal,
+                    player: None,
+                }));
+                active.pending_launch = Some((launch, seconds + LAUNCH_HANDSHAKE_SECONDS));
+            }
+            None => out.calls.push(launch),
+        }
         for &(key, s) in &content.data.game_mode.checkpoints {
             let (target, selector) = staged
                 .objects()

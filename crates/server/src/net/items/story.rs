@@ -284,10 +284,12 @@ impl Profile {
         let service = self.service.clone();
         let account = self.account;
         tokio::task::spawn_blocking(move || {
-            let tables = service
-                .persistent
-                .as_ref()
-                .ok_or(crate::Failure::ProfileConfig)?;
+            // Each step names its failure: the start continues unchanged on
+            // any of them, so the log is the only place the cause survives.
+            let tables = service.persistent.as_ref().ok_or_else(|| {
+                tracing::warn!("intro resume check needs persistent tables; none configured");
+                crate::Failure::ProfileConfig
+            })?;
             let snapshot = inventory::load(
                 service.repository.as_ref(),
                 account,
@@ -295,10 +297,16 @@ impl Profile {
                 1,
                 now,
             )
-            .map_err(|_| crate::Failure::ProfileConfig)?;
+            .map_err(|error| {
+                tracing::warn!(?error, "intro resume check could not load the inventory");
+                crate::Failure::ProfileConfig
+            })?;
             tables
                 .ensure_loaded(service.repository.as_ref(), account, snapshot, now)
-                .map_err(|_| crate::Failure::ProfileConfig)?;
+                .map_err(|error| {
+                    tracing::warn!(?error, "intro resume check could not load the tables");
+                    crate::Failure::ProfileConfig
+                })?;
             let bindings = service.catalog.bindings();
             let owns_car = |snapshot: &nfs_storage::Snapshot| {
                 snapshot.items.values().any(|item| {
@@ -315,7 +323,10 @@ impl Profile {
                 start,
                 now,
             )
-            .map_err(|_| crate::Failure::ProfileConfig)
+            .map_err(|error| {
+                tracing::warn!(?error, "intro resume check could not settle the story");
+                crate::Failure::ProfileConfig
+            })
         })
         .await
         .map_err(|_| crate::Failure::Output)?

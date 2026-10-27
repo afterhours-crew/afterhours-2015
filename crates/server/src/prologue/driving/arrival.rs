@@ -168,6 +168,7 @@ impl Active {
         let mut staged = players.clone();
         let mut out = Output::default();
         next.clock(seconds)?;
+        next.launch_overdue(seconds, &mut out);
         if let Some(callbacks) = &mut next.callbacks {
             let actions = callbacks.tick(seconds).map_err(invalid)?;
             let effects = next.dispatch(actions)?;

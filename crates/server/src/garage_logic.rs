@@ -2165,6 +2165,48 @@ pub(crate) mod tests {
             "delete_capture_ids": [330, 331], "events": [ev(277, 1)]});
         v["returned"] =
             json!({"scene_updates": [], "entities": [], "delete_capture_ids": [332], "events": []});
+        // Transfer presentation as installed: four logics per relocation, each
+        // its own asset, the last (336) carrying the two bursts; two go at
+        // unblack, one at the arrival, the last with the next drive's retirement.
+        v["content"]["catalogs"][0]["entries"] = json!([[10, 9]]);
+        for local_index in 5..9 {
+            v["content"]["profiles"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"asset": {"bundle": 4, "type_id": 10, "local_index": local_index}, "serializers": ["root", "rpc_reference"]}));
+        }
+        let transfer = |capture: u16, serializer: u16, local_index: u16| {
+            json!({"capture_id": capture, "asset": {"bundle": 4, "type_id": 10, "local_index": local_index},
+                "blueprint": {"scene_content_key": 101},
+                "roles": [{"kind": "root", "bus_count": 2},
+                          {"kind": "channel", "scene_content_key": 101, "scene_serializer": serializer}]})
+        };
+        let burst = |entity: u32, event: u32| json!({"target": {"capture_id": 336}, "entity": entity, "event": event});
+        let transfers = || {
+            json!([
+                transfer(333, 48, 5),
+                transfer(334, 49, 6),
+                transfer(335, 50, 7),
+                transfer(336, 51, 8)
+            ])
+        };
+        // The ordinary exit/arrive cycle owns the same four roles, so every
+        // relocation, crash and return cycle restores the live set.
+        v["exit"] = json!({"scene_updates": [], "entities": transfers(), "events": [ev(277, 10)]});
+        v["arrive"] = json!({"scene_updates": [], "entities": [],
+            "delete_capture_ids": [333, 334], "events": [ev(277, 15)]});
+        v["arrived"]["delete_capture_ids"] = json!([335]);
+        v["returning"]["delete_capture_ids"] = json!([330, 331, 336]);
+        v["in_world_teleport"] = json!({"scene_updates": [], "entities": transfers(),
+            "delete_capture_ids": [336, 331, 330], "events": [ev(277, 1), ev(277, 2)]});
+        v["in_world_arrival"] = json!({"scene_updates": [], "entities": [],
+            "delete_capture_ids": [333, 334], "events": [ev(277, 3)]});
+        v["crashed"] = json!({"scene_updates": [], "entities": [],
+            "delete_capture_ids": [336, 331, 330], "events": []});
+        v["recovered"] = json!({"scene_updates": [],
+            "entities": [transfer(336, 51, 8), def(331, 47), def(330, 46)],
+            "events": [burst(1, 17), burst(1, 15), burst(1, 13), burst(1, 11),
+                       burst(2, 9), burst(2, 7), burst(2, 5), burst(2, 4)]});
         v
     }
 

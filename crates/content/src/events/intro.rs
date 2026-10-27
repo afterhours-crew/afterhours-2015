@@ -16,10 +16,64 @@ pub struct Mode {
     pub logics: Vec<Layout>,
     /// Serializer of the launcher in the owning intro participant logic.
     pub launcher: usize,
+    /// The client-enabled launcher's networked LaunchGameMode event. The
+    /// host fires it on that logic when the mode starts in place, and the
+    /// client answers on the launcher before the host launches (career start
+    /// 891523–891923 ms). Server-started launchers have none.
+    pub launch_event: Option<LaunchEvent>,
     pub completion: Option<results::Completion>,
     /// Filters whose exact channel links resolve to this intro's participant provider.
     pub owned_filters: Vec<crate::scoring::events::Identity>,
     pub shutdown: Option<shutdown::Binding>,
+}
+
+/// A networked event on the intro participant logic, by registered bus and
+/// event-table ordinal (the wire identities a logic fire carries).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LaunchEvent {
+    pub bus: u32,
+    pub ordinal: u32,
+}
+
+/// `LaunchGameMode` on `SimpleGameModeLauncherEntityData` (installed event id).
+const LAUNCH_GAME_MODE: u32 = 2_141_204_117;
+
+/// The launcher's client-side launch event, when the launcher runs on the
+/// client (`ClientEnabled`): the networked-client row of the intro logic's
+/// event table that targets the launcher's LaunchGameMode input.
+fn launch_event(
+    launcher: &Site,
+    branch: &[Node],
+    events: &[crate::logic_events::Event],
+) -> Result<Option<LaunchEvent>, Error> {
+    let node = branch
+        .iter()
+        .find(|n| n.site == *launcher)
+        .ok_or_else(|| bad("intro launcher node"))?;
+    let client_enabled = match node.object.fields.get("ClientEnabled") {
+        Some(Value::Bool(v)) => *v,
+        None => false,
+        Some(_) => return Err(bad("intro launcher ClientEnabled")),
+    };
+    if !client_enabled {
+        return Ok(None);
+    }
+    let mut found = events.iter().filter(|e| {
+        e.delivery == crate::logic_events::Delivery::Client
+            && e.target.port == LAUNCH_GAME_MODE
+            && e.target.index == launcher.key.1
+            && e.target.asset.eq_ignore_ascii_case(&launcher.key.0)
+    });
+    let event = found
+        .next()
+        .ok_or_else(|| bad("intro launcher launch event"))?;
+    if found.next().is_some() {
+        return Err(bad("intro launcher launch event occurrence"));
+    }
+    Ok(Some(LaunchEvent {
+        bus: event.bus,
+        ordinal: event.ordinal,
+    }))
 }
 
 fn owned_filters<S: Source>(
@@ -205,6 +259,7 @@ fn extract_inner(
         .ok_or_else(|| bad("intro mode bundle"))?;
     let reference = index.reference(&progression.scene, &name)?;
     let catalog = index.catalog(&progression.scene)?;
+    let network = index.network_events(&progression.intro)?;
     let mut graph = Graph::new(&mut index.assets);
     let mut scenes = SceneLookup {
         roots: scene_roots(&mut graph, &scene_rules.level, &startup)?,
@@ -233,6 +288,7 @@ fn extract_inner(
         }
     }
     let launcher = launcher(&mut graph, &branch, &name, launcher_asset)?;
+    let launch_event = launch_event(&launcher, &branch, &network)?;
     let nodes = graph.read(Site::root(&name))?;
     let (bus_count, field_sites) = fields(&nodes, &rules, "GameModeEntityData")?;
     let channels: Vec<_> = field_sites
@@ -462,6 +518,7 @@ fn extract_inner(
             launcher: *parent_fields
                 .get(&launcher)
                 .ok_or_else(|| bad("intro launcher serializer"))?,
+            launch_event,
             game_mode: GameMode {
                 lifecycle,
                 recovery,
@@ -546,6 +603,54 @@ mod tests {
         };
         assert!(owned_filters(&mut g, &nodes, &[foreign], &aliases).is_err());
         assert!(owned_filters(&mut g, &nodes, &[owner.clone(), owner], &aliases).is_err());
+    }
+
+    #[test]
+    fn launch_event_follows_a_client_enabled_launchers_networked_row() {
+        use crate::logic_events::{Delivery, Endpoint, Event};
+        let mut m = Memory::default();
+        m.put("p", 0, "ParticipantLogicBlueprint", &[]);
+        m.put("p", 1, LAUNCHER, &[("ClientEnabled", Value::Bool(true))]);
+        m.put("p", 2, LAUNCHER, &[]);
+        m.put("p", 3, LAUNCHER, &[("ClientEnabled", Value::Int32(1))]);
+        let mut node = |i: usize| Node {
+            site: site("p", i),
+            object: m.object(&("p".into(), i)).unwrap(),
+        };
+        let branch = vec![node(1), node(2), node(3)];
+        let endpoint = |index: usize, port: u32| Endpoint {
+            asset: "P".into(),
+            index,
+            class: LAUNCHER.into(),
+            port,
+            blueprint: None,
+            presentation_key: None,
+        };
+        let event = |delivery, index, port, bus, ordinal| Event {
+            bus,
+            ordinal,
+            delivery,
+            source: endpoint(0, 0),
+            target: endpoint(index, port),
+        };
+        let events = vec![
+            event(Delivery::ClientAndServer, 1, LAUNCH_GAME_MODE, 8, 3),
+            event(Delivery::Client, 1, 5, 8, 4),
+            event(Delivery::Client, 1, LAUNCH_GAME_MODE, 8, 7),
+        ];
+        assert_eq!(
+            launch_event(&site("p", 1), &branch, &events).unwrap(),
+            Some(LaunchEvent { bus: 8, ordinal: 7 })
+        );
+        // Server-started launchers have no launch event; a malformed flag,
+        // an unknown launcher, a missing row and a repeated row are errors.
+        assert_eq!(launch_event(&site("p", 2), &branch, &events).unwrap(), None);
+        assert!(launch_event(&site("p", 3), &branch, &events).is_err());
+        assert!(launch_event(&site("p", 9), &branch, &events).is_err());
+        assert!(launch_event(&site("p", 1), &branch, &events[..2]).is_err());
+        let mut twice = events.clone();
+        twice.push(events[2].clone());
+        assert!(launch_event(&site("p", 1), &branch, &twice).is_err());
     }
 
     #[test]

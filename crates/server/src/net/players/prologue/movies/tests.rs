@@ -452,6 +452,13 @@ fn return_drive_waits_for_retirement_and_keeps_the_owned_car_and_canceller() {
     });
 }
 fn return_drive_started() -> (PlayerListener, u16, u16) {
+    let (listener, participant, car, _) = return_drive_started_with(None);
+    (listener, participant, car)
+}
+/// Also returns the calls queued by the frame that started the return drive.
+fn return_drive_started_with(
+    launch: Option<nfs_content::events::intro::LaunchEvent>,
+) -> (PlayerListener, u16, u16, Vec<HostRpc>) {
     let (mut listener, participant) = finished_diner();
     let owner = Owner {
         connection: HOST_SELECTOR as u8,
@@ -526,6 +533,7 @@ fn return_drive_started() -> (PlayerListener, u16, u16) {
     // A self-contained mode exercises listener ownership/ordering; installed
     // return-mode timer and wire checks live in the private reference harness.
     content.return_drive = Some(content.first_race.as_ref().unwrap().mode.clone());
+    content.return_drive.as_mut().unwrap().data.launch_event = launch;
     let arrival = listener
         .opening
         .start_stopped(
@@ -590,6 +598,7 @@ fn return_drive_started() -> (PlayerListener, u16, u16) {
     assert_eq!(listener.intro_modes[&participant].0.ghost, old);
     listener.world_cars.insert(car, (participant, true));
     tick_with_normal_presentation(&mut listener).unwrap();
+    let started: Vec<HostRpc> = listener.pending_rpcs.iter().copied().collect();
     assert_eq!(
         listener.participants.intro_chapter(participant),
         Some(Chapter::ReturnDrive)
@@ -614,7 +623,108 @@ fn return_drive_started() -> (PlayerListener, u16, u16) {
     assert_eq!(listener.players.objects().snapshot(), snapshot);
     assert!(listener.pending.is_empty());
     assert!(listener.pending_rpcs.is_empty());
-    (listener, participant, car)
+    (listener, participant, car, started)
+}
+
+fn mode_calls(calls: &[HostRpc]) -> usize {
+    calls
+        .iter()
+        .filter(|c| matches!(c, HostRpc::GameMode(_)))
+        .count()
+}
+fn launch_fire(calls: &[HostRpc]) -> Option<u16> {
+    calls.iter().find_map(|c| match c {
+        HostRpc::Event(fire) if fire.target.entity == 8 && fire.event == 7 => {
+            Some(fire.target.ghost)
+        }
+        _ => None,
+    })
+}
+
+#[test]
+fn return_drive_launch_waits_for_the_clients_launcher_answer() {
+    crate::net::players::test_wire::with_native_padding(|| {
+        let event = nfs_content::events::intro::LaunchEvent { bus: 8, ordinal: 7 };
+        let (_, _, _, immediate) = return_drive_started_with(None);
+        assert_eq!(launch_fire(&immediate), None);
+        let (mut listener, participant, _, started) = return_drive_started_with(Some(event));
+        // The launch event replaces the launch call until the client answers.
+        assert_eq!(mode_calls(&started) + 1, mode_calls(&immediate));
+        let parent = launch_fire(&started).expect("launch event on the participant logic");
+        let (scene, selector) = listener.intro_modes[&participant]
+            .0
+            .launcher_endpoint(
+                listener
+                    .prologue
+                    .as_ref()
+                    .unwrap()
+                    .mode(Chapter::ReturnDrive)
+                    .unwrap(),
+                &listener.players,
+            )
+            .unwrap();
+        assert_eq!(scene, parent);
+        let endpoint = Endpoint {
+            scene,
+            selector,
+            serial: nfs_protocol::world::rpc::Serial::new(0).unwrap(),
+        };
+        assert!(send(
+            &mut listener,
+            38,
+            47,
+            request(endpoint, participant, 6).span()
+        ));
+        let answered: Vec<HostRpc> = listener.pending_rpcs.iter().copied().collect();
+        assert_eq!(mode_calls(&answered), 1);
+        assert_eq!(answered.len(), 1);
+        drain(&mut listener);
+        // Answered once: a repeated answer launches nothing more, and the
+        // deadline no longer applies.
+        assert!(send(
+            &mut listener,
+            39,
+            47,
+            request(endpoint, participant, 6).span()
+        ));
+        assert_eq!(
+            mode_calls(&listener.pending_rpcs.iter().copied().collect::<Vec<_>>()),
+            0
+        );
+        drain(&mut listener);
+        listener.world_ms += 10_000;
+        tick_with_normal_presentation(&mut listener).unwrap();
+        assert_eq!(
+            mode_calls(&listener.pending_rpcs.iter().copied().collect::<Vec<_>>()),
+            0
+        );
+    });
+}
+
+#[test]
+fn return_drive_launches_at_the_handshake_deadline_without_an_answer() {
+    crate::net::players::test_wire::with_native_padding(|| {
+        let event = nfs_content::events::intro::LaunchEvent { bus: 8, ordinal: 7 };
+        let (mut listener, _, _, started) = return_drive_started_with(Some(event));
+        assert!(launch_fire(&started).is_some());
+        let deadline_ms = (crate::prologue::driving::LAUNCH_HANDSHAKE_SECONDS * 1000.) as u64;
+        listener.world_ms += deadline_ms - 1_000;
+        tick_with_normal_presentation(&mut listener).unwrap();
+        assert_eq!(
+            mode_calls(&listener.pending_rpcs.iter().copied().collect::<Vec<_>>()),
+            0
+        );
+        listener.world_ms += 1_000;
+        tick_with_normal_presentation(&mut listener).unwrap();
+        let launched: Vec<HostRpc> = listener.pending_rpcs.iter().copied().collect();
+        assert_eq!(mode_calls(&launched), 1);
+        drain(&mut listener);
+        tick_with_normal_presentation(&mut listener).unwrap();
+        assert_eq!(
+            mode_calls(&listener.pending_rpcs.iter().copied().collect::<Vec<_>>()),
+            0
+        );
+    });
 }
 fn finished_diner() -> (PlayerListener, u16) {
     let (mut listener, participant) = finished_movie();
