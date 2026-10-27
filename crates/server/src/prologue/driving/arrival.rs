@@ -39,6 +39,32 @@ impl Active {
     pub fn arrived(&self) -> bool {
         self.arrived
     }
+    /// Release the owner's own route goals as its destination crossing does,
+    /// for a garage return that begins first: the entry spline replaces them
+    /// (the request comes from the garage box, not the checkpoint; E1248).
+    pub fn release_owner_routes(&mut self, players: &mut Players) -> Result<Output, Error> {
+        let mut staged = players.clone();
+        let mut routes = self.routes.clone();
+        let mut out = Output::default();
+        for ((_, p), (_, goal)) in &mut routes {
+            if *p != self.owner.participant {
+                continue;
+            }
+            let Some(id) = goal.take() else { continue };
+            let released = staged.release_player_route(
+                self.owner.connection,
+                self.owner.persona,
+                self.owner.participant,
+                id,
+                None,
+            )?;
+            out.records.extend(released.records);
+            out.deleted.extend(released.deleted);
+        }
+        self.routes = routes;
+        *players = staged;
+        Ok(out)
+    }
 
     pub fn crossing(
         &mut self,

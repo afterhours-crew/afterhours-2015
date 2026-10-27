@@ -125,9 +125,13 @@ impl PlayerListener {
         }
         let mut out = GarageOutput::default();
         if request {
-            if !active.destination_reached() {
-                return Ok(Some(out));
-            }
+            // The client sends the request when its car enters the
+            // SpawnPoints RaceBoxTrigger (trace 11.12), independently of the
+            // route's destination checkpoint; the installed request chain
+            // (layer9 LocalParticipantEvent → state sequence selector and
+            // the state machine channel) has no objective gate. E1248: the
+            // request preceded the crossing in both drives, and the drive
+            // waited for a second request (first drive) or stayed stuck.
             match participants.begin_intro_return(participant) {
                 Outcome::Repeated => return Ok(Some(out)),
                 Outcome::Unsupported => return Err(replication::Error::Shape),
@@ -139,6 +143,16 @@ impl PlayerListener {
                         participant,
                     };
                     returns.reset(players, owner)?;
+                    // A return that begins before the destination crossing
+                    // releases the drive's route first, as the crossing does.
+                    let parent = active.parent();
+                    let released = modes
+                        .get_mut(&participant)
+                        .ok_or(replication::Error::UnknownObject)?
+                        .0
+                        .release_owner_routes(players)?;
+                    out.output.records.extend(released.records);
+                    out.output.deleted.extend(released.deleted);
                     // Official order (career start 290017-290127 ms): the
                     // return-request event, then the return presentation
                     // replaces the drive's (cinematic logic in, HUD out).
@@ -167,7 +181,7 @@ impl PlayerListener {
                             event: ordinal,
                             player: None,
                             target: nfs_world::logic::EntityRef {
-                                ghost: active.parent(),
+                                ghost: parent,
                                 entity: bus,
                             },
                         };
