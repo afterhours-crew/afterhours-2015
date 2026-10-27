@@ -83,7 +83,7 @@ impl Content {
             triggers: vec![],
         };
         for (tutorial, spawn) in tutorials {
-            if spawn.channel() != Some((scene_key, tutorial.channel)) {
+            if !spawn.channels().contains(&(scene_key, tutorial.channel)) {
                 return Err(Error::Shape);
             }
             let key = crate::persistent::key(&tutorial.blueprint);
@@ -316,6 +316,10 @@ impl Session {
             self.locations.remove(&volume);
         }
     }
+    /// Leave every location volume `keep` rejects (the membership went).
+    pub fn keep_locations(&mut self, keep: impl Fn(nfs_content::tutorials::Volume) -> bool) {
+        self.locations.retain(|v| keep(*v));
+    }
     /// The location volumes a tutorial gate tests.
     pub fn watches(content: &Content, volume: nfs_content::tutorials::Volume) -> bool {
         content
@@ -342,9 +346,15 @@ impl Session {
             )?);
         }
         for (index, entry) in content.entries.iter().enumerate() {
+            // A logic waits until every scene its references bind exists.
             let wanted = !self.seen.contains(&entry.key)
                 && !self.accepting.contains(&index)
-                && content.holds(self, entry, seconds);
+                && content.holds(self, entry, seconds)
+                && entry
+                    .spawn
+                    .channels()
+                    .iter()
+                    .all(|&(key, _)| players.objects().scene(key).is_some());
             match (wanted, self.live.get(&index).copied()) {
                 (true, None) => {
                     let record = entry.spawn.spawn(players, self.participant)?;

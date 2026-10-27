@@ -57,9 +57,9 @@ impl Definition {
                         entity::Kind::RpcReference => {
                             !matches!(f.channel, Some(Channel::Scene { .. }))
                         }
-                        entity::Kind::I32Property | entity::Kind::FloatProperty => {
-                            f.channel.is_some()
-                        }
+                        entity::Kind::I32Property
+                        | entity::Kind::FloatProperty
+                        | entity::Kind::BoolProperty => f.channel.is_some(),
                         _ => true,
                     }
                 }
@@ -86,19 +86,19 @@ impl Definition {
     pub(crate) fn asset(&self) -> Asset {
         self.layout.asset
     }
-    /// The scene channel (content key, serializer) its reference binds.
-    pub(crate) fn channel(&self) -> Option<(u32, usize)> {
-        let mut channels = self.layout.fields.iter().filter_map(|f| match f.channel {
-            Some(Channel::Scene {
-                content_key,
-                serializer,
-            }) => Some((content_key, serializer)),
-            _ => None,
-        });
-        match (channels.next(), channels.next()) {
-            (Some(one), None) => Some(one),
-            _ => None,
-        }
+    /// The scene channels (content key, serializer) its references bind.
+    pub(crate) fn channels(&self) -> Vec<(u32, usize)> {
+        self.layout
+            .fields
+            .iter()
+            .filter_map(|f| match f.channel {
+                Some(Channel::Scene {
+                    content_key,
+                    serializer,
+                }) => Some((content_key, serializer)),
+                _ => None,
+            })
+            .collect()
     }
     pub(crate) fn spawn(&self, players: &mut Players, participant: u16) -> Result<Record, Error> {
         let world = players.objects();

@@ -18,6 +18,7 @@ use nfs_world::{
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 mod activation;
+mod activities;
 mod challenges;
 mod client_info;
 mod crashing;
@@ -192,6 +193,8 @@ pub(super) struct PlayerListener {
     mode_notified: BTreeMap<(u16, usize), bool>,
     /// Tutorial logics per participant (`crate::tutorials`).
     tutorials: BTreeMap<u16, crate::tutorials::Session>,
+    /// Last reported inside value per participant and assigned volume.
+    activity_inside: activities::Inside,
     /// Chapter notification values sent per participant.
     chapter_sent: BTreeMap<u16, crate::chapter_notifications::Sent>,
     /// Last logged waiting-sequence readiness per participant.
@@ -1020,6 +1023,7 @@ impl PlayerListener {
             world_volumes: prologue::volumes::State::default(),
             mode_notified: BTreeMap::new(),
             tutorials: BTreeMap::new(),
+            activity_inside: BTreeMap::new(),
             chapter_sent: BTreeMap::new(),
             sequence_readiness: BTreeMap::new(),
             event_suspended: BTreeSet::new(),
@@ -1524,6 +1528,7 @@ impl Listener for PlayerListener {
         let mut selection_execution = self.selection_execution.clone();
         let mut story_pending = self.story_pending.clone();
         let mut tutorial_sessions = self.tutorials.clone();
+        let mut activity_inside = self.activity_inside.clone();
         let mut intro_modes = self.intro_modes.clone();
         let mut intro_movies = self.intro_movies.clone();
         let mut intro_composites = self.intro_composites.clone();
@@ -2478,6 +2483,21 @@ impl Listener for PlayerListener {
                     }
                 }
             }
+            match self.activity_crossing(
+                &players,
+                &mut tutorial_sessions,
+                &mut activity_inside,
+                body,
+            ) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(error) => return self.refuse_rpc(error, body),
+            }
+            match self.cop_patrol_request(&players, body) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(error) => return self.refuse_rpc(error, body),
+            }
             if let Some(activation) = &mut world_activation {
                 match activation.receive_ready(
                     body,
@@ -3204,6 +3224,7 @@ impl Listener for PlayerListener {
         self.selection_execution = selection_execution;
         self.story_pending = story_pending;
         self.tutorials = tutorial_sessions;
+        self.activity_inside = activity_inside;
         self.intro_modes = intro_modes;
         self.intro_movies = intro_movies;
         self.intro_composites = intro_composites;

@@ -60,6 +60,10 @@ pub(in crate::net::players) struct State {
 }
 
 impl State {
+    /// Whether the participant's membership of `site` is published.
+    pub fn member(&self, participant: u16, site: Site) -> bool {
+        self.published.contains(&(Some(participant), site))
+    }
     /// Update what intro participants should be in from notifications the
     /// session has just accepted, in send order; `following` are the calls
     /// queued after `calls`. Other participants are not affected.
@@ -513,6 +517,7 @@ mod tests {
                 })
                 .collect(),
             driving_order: vec![site(71), site(70), site(72)],
+            cop_patrols: BTreeSet::new(),
         }
     }
 
@@ -1030,5 +1035,103 @@ mod tests {
         listener.advance_world_volumes(0).unwrap();
         assert!(listener.pending_rpcs.is_empty());
         assert!(listener.world_volumes.published.is_empty());
+    }
+
+    /// A client crossing report `[scene, participant]` m2/m3 a103: the f64
+    /// clock high word first, the token, seven pad bits.
+    fn crossing(
+        scene: u16,
+        selector: u16,
+        participant: u16,
+        method: u32,
+        token: u32,
+    ) -> nfs_world::bits::BitWriter {
+        let bits = 125.5f64.to_bits();
+        let mut payload = nfs_world::bits::BitWriter::new();
+        payload
+            .put(selector.into(), 9)
+            .put(method.into(), 32)
+            .put(bits >> 32, 32)
+            .put(bits & 0xffff_ffff, 32)
+            .put(token.into(), 32)
+            .put(0, 7)
+            .align();
+        let mut body = nfs_world::bits::BitWriter::new();
+        body.put(0, 32)
+            .put(0, 32)
+            .put(2, 8)
+            .put(scene.into(), 13)
+            .put(participant.into(), 13)
+            .put(payload.bytes().len() as u64, 9)
+            .put_span(payload.span());
+        body
+    }
+
+    #[test]
+    fn assigned_volume_reports_are_consumed_late_ones_dropped_and_bad_tokens_refused() {
+        use super::super::tests::send;
+        let (mut listener, participant, _) = at_drive_boundary();
+        listener.advance_prologue().unwrap();
+        let activity = site(70);
+        assert!(listener.world_volumes.member(participant, activity));
+        let (scene, selector) = listener.players.objects().scene_endpoint(909, 70).unwrap();
+        let unsupported = listener.unsupported_rpcs;
+        let entered = crossing(scene, selector, participant, 2, 0);
+        assert!(send(&mut listener, 1, 47, entered.span()));
+        assert_eq!(
+            listener.activity_inside.get(&(participant, activity)),
+            Some(&true)
+        );
+        // A repeat changes nothing; the exit is recorded.
+        assert!(send(&mut listener, 2, 47, entered.span()));
+        let left = crossing(scene, selector, participant, 3, 0);
+        assert!(send(&mut listener, 3, 47, left.span()));
+        assert_eq!(
+            listener.activity_inside.get(&(participant, activity)),
+            Some(&false)
+        );
+        assert_eq!(listener.unsupported_rpcs, unsupported);
+        // A token the host never assigned is malformed.
+        let wrong = crossing(scene, selector, participant, 2, 1);
+        assert!(!send(&mut listener, 4, 47, wrong.span()));
+        // After the membership left, a report is late and dropped.
+        listener
+            .world_volumes
+            .published
+            .remove(&(Some(participant), activity));
+        let before = listener.activity_inside.clone();
+        assert!(send(&mut listener, 4, 47, entered.span()));
+        assert_eq!(listener.activity_inside, before);
+        assert_eq!(listener.unsupported_rpcs, unsupported);
+    }
+
+    #[test]
+    fn cop_patrol_requests_are_consumed_without_an_answer() {
+        use super::super::tests::send;
+        let (mut listener, participant, _) = at_drive_boundary();
+        Arc::make_mut(listener.prologue.as_mut().unwrap())
+            .volumes
+            .cop_patrols
+            .insert(site(80));
+        let (scene, selector) = listener.players.objects().scene_endpoint(909, 80).unwrap();
+        let mut payload = nfs_world::bits::BitWriter::new();
+        payload
+            .put(selector.into(), 9)
+            .put(0, 32)
+            .put(0b1010101, 7)
+            .align();
+        let mut body = nfs_world::bits::BitWriter::new();
+        body.put(0, 32)
+            .put(0, 32)
+            .put(2, 8)
+            .put(scene.into(), 13)
+            .put(participant.into(), 13)
+            .put(payload.bytes().len() as u64, 9)
+            .put_span(payload.span());
+        let unsupported = listener.unsupported_rpcs;
+        let rpcs = listener.pending_rpcs.len();
+        assert!(send(&mut listener, 1, 47, body.span()));
+        assert_eq!(listener.unsupported_rpcs, unsupported);
+        assert_eq!(listener.pending_rpcs.len(), rpcs);
     }
 }

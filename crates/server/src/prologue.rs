@@ -298,9 +298,18 @@ impl Content {
         let return_events = index.intro_return_events()?;
         // The scenes whose Boolean notifications report participant-in-game-
         // mode properties (official E1026: events s1/s9, ui s1 at race and
-        // intro-canceller transitions; gameplay and garage have none).
+        // intro-canceller transitions, collectibles s1 and activities s0 from
+        // the first drive, 125.317 and 125.516 s; gameplay and garage have
+        // none). The official collectibles/activities values follow the
+        // events value by 0.6 and 0.8 s; that spacing is not traced and ours
+        // sends them in the same pass.
         let mut mode_notifications = Vec::new();
-        for scene in ["levels/genesis01/events", "levels/genesis01/ui"] {
+        for scene in [
+            "levels/genesis01/events",
+            "levels/genesis01/ui",
+            "levels/genesis01/collectibles",
+            "levels/genesis01/activities",
+        ] {
             let key = nfs_content::assets::scene_key(scene);
             for notification in index.scene_mode_notifications(scene)? {
                 mode_notifications.push((key, notification));

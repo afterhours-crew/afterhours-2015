@@ -204,6 +204,14 @@ pub(super) fn build(index: &mut AssetIndex, thresholds: &Json) -> Result<Json> {
             GAMEPLAY,
             "presentation/resetloadingscreenstatepresentationblueprint",
         ),
+        // Lives with DriverDetailsLogic (official E1026 122.317, 572.121,
+        // 756.224, 891.324 s; E912 75.249 s): its server property gates the
+        // driving-style scoring spawner; the client holds nothing for it.
+        (
+            27,
+            GAMEPLAY,
+            "gameplay/isparticipantinfreedriveparticipantlogic",
+        ),
     ];
     let mut doc = json!({"format":"nfs-garage-logic","version":1,"build_sha256":nfs_services::SUPPORTED_BUILD_SHA256,
         "reputation_thresholds":thresholds});
@@ -267,9 +275,9 @@ pub(super) fn build(index: &mut AssetIndex, thresholds: &Json) -> Result<Json> {
         ("entry", vec![17]),
         ("exit", vec![18, 19, 20, 21]),
         ("in_world_teleport", vec![18, 19, 20, 21]),
-        ("arrived", vec![22, 23, 24]),
+        ("arrived", vec![22, 23, 24, 27]),
         ("crashed", vec![25]),
-        ("recovered", vec![21, 22, 23, 24]),
+        ("recovered", vec![21, 22, 23, 24, 27]),
         ("resetting", vec![26]),
         ("returning", vec![20]),
         ("returned", vec![13, 14, 15, 16]),
@@ -283,10 +291,10 @@ pub(super) fn build(index: &mut AssetIndex, thresholds: &Json) -> Result<Json> {
         ("exit", vec![16, 17]),
         ("arrive", vec![18, 19]),
         ("arrived", vec![20]),
-        ("in_world_teleport", vec![21, 22, 23, 24]),
+        ("in_world_teleport", vec![21, 22, 23, 24, 27]),
         ("in_world_arrival", vec![18, 19]),
-        ("returning", vec![23, 22, 21, 24]),
-        ("crashed", vec![23, 22, 21, 24]),
+        ("returning", vec![23, 22, 21, 24, 27]),
+        ("crashed", vec![23, 22, 21, 24, 27]),
         ("recovered", vec![25]),
         ("reset_arrived", vec![26]),
         ("returned", vec![20]),

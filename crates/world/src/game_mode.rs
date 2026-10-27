@@ -46,6 +46,13 @@ pub enum Arguments {
     },
     /// Two 32-bit reads, high word first: the bits of an f64 time.
     Time(u64),
+    /// ScoreKeeper method 0 (`rpcInformClientOfScoreAward`, client handler
+    /// RVA 0x042c9fe0): the participant's running total in that keeper,
+    /// then this award's amount (official E1026 923.725 s: s58 72, 39).
+    ScoreAward {
+        total: u32,
+        amount: u32,
+    },
     /// Waypoints method 2 (client reader `0x14445e5d0`): passed and next checkpoint
     /// ordinals, the bits of the f32 race time in seconds and the lap.
     Progress {
@@ -119,6 +126,12 @@ impl Call {
                     return Err(Error::Shape);
                 }
                 payload.put(bits >> 32, 32).put(bits & 0xffff_ffff, 32);
+            }
+            Arguments::ScoreAward { total, amount } => {
+                if self.method != 0 || self.reference.is_none() {
+                    return Err(Error::Shape);
+                }
+                payload.put(total.into(), 32).put(amount.into(), 32);
             }
             Arguments::Progress {
                 passed,

@@ -306,3 +306,39 @@ fn crossings_carry_the_vehicle_side_and_time() {
         Ok(None)
     );
 }
+
+/// E1026 911.825 s: gameplay s58 m0 `[240, 454]` with the running total 33
+/// and the award 33, then five alignment bits (a69).
+#[test]
+fn score_award_encodes_total_then_amount_and_needs_the_participant() {
+    let call = Call {
+        target: 240,
+        selector: 58,
+        serial: Serial::new(48).unwrap(),
+        method: 0,
+        reference: Some(454),
+        arguments: Arguments::ScoreAward {
+            total: 33,
+            amount: 33,
+        },
+    };
+    let body = call.encode().unwrap();
+    let bytes = body.bytes();
+    let span = nfs_protocol::world::BitSpan::new(bytes, 0, bytes.len() * 8).unwrap();
+    // Two envelope words, the count, two 13-bit references, the length.
+    let payload = 64 + 8 + 26 + 9;
+    let args = payload + 9 + 10 + 32;
+    assert_eq!(span.read_u32(args, 32).unwrap(), 33);
+    assert_eq!(span.read_u32(args + 32, 32).unwrap(), 33);
+    // 115 payload bits round up to 15 bytes: 5 alignment bits.
+    assert_eq!(span.read_u32(payload - 9, 9).unwrap(), 15);
+    for bad in [
+        Call { method: 1, ..call },
+        Call {
+            reference: None,
+            ..call
+        },
+    ] {
+        assert!(bad.encode().is_err());
+    }
+}

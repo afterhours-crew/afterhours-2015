@@ -108,6 +108,15 @@ impl PlayerListener {
             let session = sessions
                 .entry(participant)
                 .or_insert_with(|| content.session(participant, stored.clone()));
+            session.keep_locations(|v| {
+                self.world_volumes.member(
+                    participant,
+                    nfs_content::events::discovery::Endpoint {
+                        scene_key: v.scene_key,
+                        serializer: v.serializer,
+                    },
+                )
+            });
             let mut held = Vec::new();
             if let Some(prologue) = prologue.as_deref() {
                 let running = self.intro_modes.get(&participant);

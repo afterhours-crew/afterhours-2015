@@ -471,3 +471,68 @@ fn unsupported_triggers_and_mismatched_channels_are_rejected() {
         assert!(Content::new(SCENE_KEY, vec![(a.clone(), spawn.clone())], vec![rule]).is_err());
     }
 }
+
+/// Installed cooldown/losingcops/spontaneousraces layouts: Bool properties
+/// and a second scene reference beside the tutorial channel. The logic waits
+/// until the other scene exists.
+#[test]
+fn extra_fields_and_scenes_are_created_once_every_bound_scene_exists() {
+    const OTHER: u32 = 1_909_634_446;
+    let mut wide = layout(0, 3);
+    wide.fields.insert(
+        1,
+        Field {
+            kind: EntityKind::BoolProperty,
+            channel: None,
+        },
+    );
+    wide.fields.push(Field {
+        kind: EntityKind::RpcReference,
+        channel: Some(Channel::Scene {
+            content_key: OTHER,
+            serializer: 2,
+        }),
+    });
+    let a = tutorial("test/tutorial/a", 3, Gate::None);
+    let content =
+        Content::new(SCENE_KEY, vec![(a, Definition::new(wide).unwrap())], vec![]).unwrap();
+    let (mut players, participant) = world();
+    let mut session = content.session(participant, BTreeSet::new());
+    assert!(
+        session
+            .advance(&content, &mut players, 0.0, &[])
+            .unwrap()
+            .records
+            .is_empty(),
+        "the other scene is not loaded yet"
+    );
+    let mut startup = vec![Kind::RpcReferences; 4];
+    startup[0] = Kind::Noop;
+    let scenes =
+        sublevel::Content::new(vec![(OTHER, Profile::new(false, &startup).unwrap())]).unwrap();
+    players
+        .create_scenes(
+            &[78],
+            vec![
+                sublevel::ordinary::creation(
+                    78,
+                    OTHER,
+                    None,
+                    Serial::new(0).unwrap(),
+                    &sublevel::ordinary::unpopulated(scenes.profile(OTHER).unwrap()).unwrap(),
+                    &scenes,
+                )
+                .unwrap(),
+            ],
+            &scenes,
+        )
+        .unwrap();
+    let out = session.advance(&content, &mut players, 0.1, &[]).unwrap();
+    assert_eq!(out.records.len(), 1);
+    let Some(Initial::Entity { fields, .. }) =
+        players.objects().get(out.records[0].id).map(|o| &o.initial)
+    else {
+        panic!()
+    };
+    assert_eq!(fields.len(), 4);
+}

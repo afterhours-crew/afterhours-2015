@@ -1673,6 +1673,66 @@ impl PlayerListener {
         self.scoring_state.pending_awards.pop_front()
     }
 
+    /// The award's ScoreKeeper calls on the gameplay scene, by keeper.
+    fn keeper_calls(
+        &self,
+        players: &Players,
+        participant: u16,
+        totals: nfs_services::reputation::Scores,
+        award: nfs_services::reputation::Scores,
+    ) -> Result<Vec<HostRpc>, replication::Error> {
+        let Some(content) = self.scoring.as_deref() else {
+            return Ok(vec![]);
+        };
+        let keepers = content.keepers();
+        if keepers.is_empty() {
+            return Ok(vec![]);
+        }
+        let world = players.objects();
+        let scene = world
+            .scene(nfs_content::assets::scene_key("levels/genesis01/gameplay"))
+            .ok_or(replication::Error::UnknownObject)?;
+        let Some(replication::Initial::SubLevel { fields, .. }) =
+            world.get(scene).map(|o| &o.initial)
+        else {
+            return Err(replication::Error::TypeMismatch);
+        };
+        let value = |scores: &nfs_services::reputation::Scores,
+                     category|
+         -> Result<u32, replication::Error> {
+            use nfs_world::scoring::interpreter::Category;
+            let v = match category {
+                Category::Total => scores.total,
+                Category::Speed => scores.speed,
+                Category::Style => scores.style,
+                Category::Build => scores.build,
+                Category::Crew => scores.crew,
+                Category::Outlaw => scores.outlaw,
+            };
+            u32::try_from(v).map_err(|_| replication::Error::Shape)
+        };
+        let mut out = Vec::with_capacity(keepers.len());
+        for (category, serializer) in keepers {
+            let selector = fields
+                .get(serializer)
+                .and_then(replication::sublevel::Initial::rpc)
+                .ok_or(replication::Error::TypeMismatch)?
+                .selector;
+            out.push(HostRpc::GameMode(crate::event_logic::call(
+                world,
+                scene,
+                selector,
+                0,
+                Some(participant),
+                nfs_world::game_mode::Arguments::ScoreAward {
+                    total: value(&totals, category)?,
+                    amount: value(&award, category)?,
+                },
+            )?));
+        }
+        Ok(out)
+    }
+
     /// Accept a committed credit: adopt the account view, keep the item
     /// collection for later purchases and refresh the presented REP fields.
     /// Field changes join the coalesced scoring flush.
@@ -1787,8 +1847,24 @@ impl PlayerListener {
             fields = changed,
             "owned reputation credit committed"
         );
+        // Each ScoreKeeper hears the award: the participant's committed total
+        // in that keeper and this award's amount (official E1026 911.825 s:
+        // six calls with the award event and the REP update).
+        let keepers = self.keeper_calls(&players, request.participant, scores, request.credit)?;
+        let held = self.scoring_state.held.contains(&request.batch_id);
+        if keepers.len()
+            > nfs_world::session::MAX_RPC_QUEUE
+                .saturating_sub(self.pending_rpcs.len() + self.scoring_state.held_rpcs.len())
+        {
+            return Err(replication::Error::Bound);
+        }
         self.scoring_state.dirty = dirty;
         self.players = players;
+        if held {
+            self.scoring_state.held_rpcs.extend(keepers);
+        } else {
+            self.pending_rpcs.extend(keepers);
+        }
         if request.event.is_some() {
             self.event_credit_committed(request.participant, request.batch_id);
         }

@@ -866,6 +866,10 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                     &nfs_content::Options::default(),
                 )?;
                 let scoring = index.scoring_content("levels/genesis01/gameplay")?;
+                let keepers = index.score_keepers(
+                    "levels/genesis01/gameplay",
+                    &scoring.categories.keys().copied().collect(),
+                );
                 let road = index.road_network();
                 let nitrous = index.nitrous_configurations()?;
                 let hides = index.progression_debug_hides();
@@ -913,6 +917,7 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                 })();
                 Ok::<_, nfs_content::Error>((
                     scoring, road, nitrous, event, story, hides, messages, tutorials, chapters,
+                    keepers,
                 ))
             })
             .await
@@ -928,6 +933,7 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                     messages,
                     tutorials,
                     chapters,
+                    keepers,
                 )) => {
                     match chapters {
                         Ok(chapters) => {
@@ -1008,6 +1014,18 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                                 .item_catalog(),
                         )
                         .with_nitrous(nitrous);
+                    match keepers.map_err(|e| e.to_string()).and_then(|k| {
+                        content
+                            .clone()
+                            .with_keepers(k)
+                            .map_err(|e| format!("{e:?}"))
+                    }) {
+                        Ok(with) => content = with,
+                        Err(error) => tracing::warn!(
+                            %error,
+                            "score keepers unavailable; award keeper calls stay off"
+                        ),
+                    }
                     match event {
                         Ok(prepared) => {
                             let (catalog, attached) = prepared

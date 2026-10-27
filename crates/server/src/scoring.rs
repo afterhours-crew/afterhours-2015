@@ -81,6 +81,8 @@ pub struct Content {
     nitrous: nfs_content::nitrous::Catalog,
     event: Option<Arc<EventPart>>,
     events: BTreeMap<u32, Arc<EventPart>>,
+    /// Gameplay scene serializer of the ScoreKeeper each keeper link reaches.
+    keepers: BTreeMap<u32, usize>,
 }
 
 impl Content {
@@ -122,6 +124,7 @@ impl Content {
             nitrous: Default::default(),
             event: None,
             events: BTreeMap::new(),
+            keepers: BTreeMap::new(),
         })
     }
     /// Attach the event driving-style participant. `creation` is the event's
@@ -252,6 +255,36 @@ impl Content {
     }
     pub fn road(&self) -> Option<&nfs_world::scoring::road_network::Network> {
         self.road.as_deref()
+    }
+    /// Attach the installed ScoreKeeper serializers (keeper link to serializer).
+    pub fn with_keepers(
+        mut self,
+        keepers: BTreeMap<u32, usize>,
+    ) -> Result<Self, replication::Error> {
+        if keepers.len() != self.installed.categories.len()
+            || keepers
+                .keys()
+                .any(|k| !self.installed.categories.contains_key(k))
+        {
+            return Err(replication::Error::Shape);
+        }
+        self.keepers = keepers;
+        Ok(self)
+    }
+    /// Each keeper's (category, gameplay scene serializer), by serializer.
+    pub fn keepers(&self) -> Vec<(Category, usize)> {
+        let mut out: Vec<_> = self
+            .keepers
+            .iter()
+            .filter_map(|(field, &serializer)| {
+                self.installed
+                    .categories
+                    .get(field)
+                    .map(|&c| (c, serializer))
+            })
+            .collect();
+        out.sort_by_key(|&(_, serializer)| serializer);
+        out
     }
     pub fn installed(&self) -> &ScoringContent {
         &self.installed
