@@ -13,6 +13,8 @@ pub struct Binding {
     pub objective: u64,
     pub source: Identity,
     pub event: u32,
+    /// The objective comparison whose output drives the shutdown channel.
+    pub compare: Identity,
 }
 
 fn property<S: Source>(
@@ -91,6 +93,7 @@ pub(super) fn read<S: Source>(
             {
                 return Err(bad("shutdown comparison"));
             }
+            let compare_identity = Identity::from(&compare);
             let completed = property(graph, compare, 2_088_812_747)?;
             if completed.port != 1_514_830_046
                 || graph.object(&completed.site)?.class != "RaceObjectiveEntityData"
@@ -115,6 +118,7 @@ pub(super) fn read<S: Source>(
                 objective,
                 source: Identity::from(&source),
                 event,
+                compare: compare_identity,
             });
         }
     }

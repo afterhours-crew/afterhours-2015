@@ -186,6 +186,9 @@ pub(super) struct PlayerListener {
     event_discovery: events::discovery::State,
     /// The intro participant's world volume memberships (E1194).
     world_volumes: prologue::volumes::State,
+    /// Last participant-in-game-mode notification values sent per intro
+    /// participant and notification (prologue content order).
+    mode_notified: BTreeMap<(u16, usize), bool>,
     /// Last logged waiting-sequence readiness per participant.
     sequence_readiness: BTreeMap<u16, nfs_world::sequences::Readiness>,
     /// Participants in an owned event: free-roam scoring is retired meanwhile.
@@ -201,6 +204,25 @@ pub(super) struct PlayerListener {
     pub(super) pending_entries: VecDeque<(Section, Vec<nfs_world::participants::HostRpc>)>,
     refused: usize,
     last_error: Option<replication::Error>,
+}
+/// One host Fire per installed debug-print Hide on the main progression root
+/// ghost, in installed order; each must encode.
+fn debug_hide_fires(
+    ghost: u16,
+    hides: &[(u32, u32)],
+) -> Result<Vec<nfs_world::participants::HostRpc>, replication::Error> {
+    hides
+        .iter()
+        .map(|&(bus, ordinal)| {
+            let fire = nfs_world::logic::Fire {
+                event: ordinal,
+                player: None,
+                target: nfs_world::logic::EntityRef { ghost, entity: bus },
+            };
+            fire.encode().map_err(|_| replication::Error::Shape)?;
+            Ok(nfs_world::participants::HostRpc::Event(fire))
+        })
+        .collect()
 }
 impl std::fmt::Debug for PlayerListener {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -601,7 +623,10 @@ impl PlayerListener {
                     .map_err(|_| replication::Error::Unsupported)?;
                 creations.push(creation);
             }
-            records.extend(players.spawn_entities(creations, progression.construction.content())?);
+            let spawned = players.spawn_entities(creations, progression.construction.content())?;
+            // Branches spawn in order: the first record is the main root.
+            let main_root = spawned.first().map(|r| r.id);
+            records.extend(spawned);
             if !participants.begin_progression(participant) {
                 return Err(replication::Error::Shape);
             }
@@ -628,6 +653,12 @@ impl PlayerListener {
                 } else {
                     participants.enter_garage_with_actor(binding)?
                 });
+                // After EnteredGame: hide every objective chapter's debug print
+                // on the main root (official E1026 38.217 s and E912 33.641 s,
+                // after their EnteredGame leave; E1249).
+                if let Some(ghost) = main_root {
+                    replies.extend(debug_hide_fires(ghost, &progression.debug_hides)?);
+                }
                 if let Some(bank) = roles.bank {
                     let scene = players
                         .objects()
@@ -658,19 +689,29 @@ impl PlayerListener {
                     if !ghosts.is_empty() {
                         return Err(replication::Error::DuplicateObject);
                     }
-                    // The prologue gets only the spawn logic its events address
+                    // The prologue gets the spawn logic its events address
                     // (official career start fade control 480 and 482; E1183,
-                    // E1184), never the garage presentation.
-                    let out = if intro {
-                        logic.produce_intro_spawn(players, participant, ghosts)?
+                    // E1184) and the installed intro spawn logic, never the
+                    // garage presentation.
+                    let needs = if intro {
+                        logic.intro_requires_reputation()
                     } else {
-                        let scores = logic
-                            .requires_reputation()
-                            .then(|| {
-                                crate::garage_logic::ReputationScores::load(loaded)
-                                    .map_err(|_| replication::Error::Shape)
-                            })
-                            .transpose()?;
+                        logic.requires_reputation()
+                    };
+                    let scores = needs
+                        .then(|| {
+                            crate::garage_logic::ReputationScores::load(loaded)
+                                .map_err(|_| replication::Error::Shape)
+                        })
+                        .transpose()?;
+                    let out = if intro {
+                        logic.produce_intro_spawn_with_reputation(
+                            players,
+                            participant,
+                            ghosts,
+                            scores,
+                        )?
+                    } else {
                         logic.produce_with_reputation(
                             crate::garage_logic::Which::Spawn,
                             players,
@@ -959,6 +1000,7 @@ impl PlayerListener {
             event_state: events::State::default(),
             event_discovery: events::discovery::State::default(),
             world_volumes: prologue::volumes::State::default(),
+            mode_notified: BTreeMap::new(),
             sequence_readiness: BTreeMap::new(),
             event_suspended: BTreeSet::new(),
             replication_origin_ms: None,

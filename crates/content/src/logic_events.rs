@@ -8,6 +8,9 @@ use nfs_frostbite::ebx::Value;
 use serde_json::{Value as Json, json};
 
 const MAX_EVENTS: usize = 50_000;
+const PROPERTY_DEBUG: &str = "PropertyDebugEntityData";
+/// PropertyDebugEntityData input event Hide.
+const DEBUG_HIDE: u32 = 2_089_152_613;
 const MAX_TOTAL_EVENTS: usize = 500_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -250,6 +253,51 @@ impl AssetIndex {
         let nodes = graph.read(Site::root(blueprint))?;
         extract(&mut graph, &nodes)
     }
+    /// The main progression root's objective debug-print Hide events, as
+    /// (bus, ordinal) in composition order. Official hosts fire them on that
+    /// root once the participant has entered the game (E1026 37.219 → 38.217 s,
+    /// E912 33.338 → 33.641 s; E1249), hiding every objective chapter's
+    /// PropertyDebug overlay.
+    pub fn progression_debug_hides(&mut self) -> Result<Vec<(u32, u32)>, Error> {
+        let main = self.identity.progression.main.clone();
+        debug_hides(&self.network_events(&main)?)
+    }
+}
+impl AssetIndex {
+    /// The intro progression's mission-chapter rows that a participant filter
+    /// fires on the client, as (bus, ordinal). The chapter's state reporter
+    /// triggers the filter when the return state is entered (official E1026
+    /// 290.127 and 1119.627 s, at both intro garage entries); its row stops
+    /// the first drive's sounds.
+    pub fn intro_return_events(&mut self) -> Result<Vec<(u32, u32)>, Error> {
+        let intro = self.identity.progression.intro.clone();
+        filtered_rows(&self.network_events(&intro)?)
+    }
+}
+fn filtered_rows(events: &[Event]) -> Result<Vec<(u32, u32)>, Error> {
+    let rows: Vec<(u32, u32)> = events
+        .iter()
+        .filter(|e| {
+            e.delivery == Delivery::Client
+                && e.source.class == "ParticipantProviderEventFilterEntityData"
+        })
+        .map(|e| (e.bus, e.ordinal))
+        .collect();
+    if rows.len() != 1 {
+        return Err(bad("intro progression mission-chapter filter row count"));
+    }
+    Ok(rows)
+}
+fn debug_hides(events: &[Event]) -> Result<Vec<(u32, u32)>, Error> {
+    let hides: Vec<(u32, u32)> = events
+        .iter()
+        .filter(|e| e.target.class == PROPERTY_DEBUG && e.target.port == DEBUG_HIDE)
+        .map(|e| (e.bus, e.ordinal))
+        .collect();
+    if hides.is_empty() {
+        return Err(bad("main progression has no debug-print hide events"));
+    }
+    Ok(hides)
 }
 
 #[cfg(test)]

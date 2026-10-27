@@ -249,6 +249,19 @@ pub(super) fn build(index: &mut AssetIndex, thresholds: &Json) -> Result<Json> {
         profiles.insert((layout.asset.bundle,layout.asset.type_id,layout.asset.local_index),json!({"asset":asset,"serializers":layout.fields.iter().map(|f|kind(f.kind)).collect::<Result<Vec<_>>>()?}));
         entities.insert(id, entity);
     }
+    // A prologue participant's spawn adds the career-start logic outside the
+    // garage presentation (official E1026 34.631-34.919 s: unlocks 518,
+    // achievements 515, reputation 481, free-roam statistics 527). Reputation
+    // shares the session statistics' installed spawner predicate (PSM range
+    // 25..52). The tutorials and challenges of this batch are not intro spawns.
+    doc["intro_spawn"] = batch();
+    for id in [2, 9, 10, 21] {
+        push(&mut doc, "intro_spawn", "entities", entities[&id].clone());
+    }
+    // Challenges start with the handoff to normal play (official E1026
+    // 1247.825 s: the challenge root with the event canceller's shutdown).
+    doc["intro_handoff"] = batch();
+    push(&mut doc, "intro_handoff", "entities", entities[&11].clone());
     for (phase, ids) in [
         ("spawn", (1..=16).collect::<Vec<_>>()),
         ("entry", vec![17]),
@@ -340,6 +353,7 @@ pub(super) fn build(index: &mut AssetIndex, thresholds: &Json) -> Result<Json> {
     }
     for (phase, id, name) in [
         ("spawn", 3, SESSION),
+        ("intro_spawn", 21, FREE),
         ("world_settled", 21, FREE),
         ("recovered", 21, FREE),
         ("free_roam", 24, DRIVER),

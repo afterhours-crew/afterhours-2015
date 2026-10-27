@@ -25,6 +25,7 @@ pub(super) type Modes = BTreeMap<
 >;
 pub(super) mod finale;
 pub(super) mod garage;
+pub(super) mod mode_notifications;
 pub(super) mod movies;
 pub(super) mod presentation;
 pub(super) mod selection;

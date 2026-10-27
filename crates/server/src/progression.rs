@@ -201,8 +201,20 @@ pub struct Content {
     pub construction: entities::Construction,
     pub settings: Settings,
     pub speed_list_bypass: bool,
+    /// The main progression root's objective debug-print Hide events as
+    /// (bus, ordinal), read from the installation at start (empty without it).
+    /// Fired on that root once the participant has entered the game.
+    pub debug_hides: Vec<(u32, u32)>,
 }
 impl Content {
+    /// Attach the installed debug-print Hide events (bounded).
+    pub fn with_debug_hides(mut self, hides: Vec<(u32, u32)>) -> Result<Self, Failure> {
+        if hides.len() > MAX_DEBUG_HIDES {
+            return Err(Failure::ProfileConfig);
+        }
+        self.debug_hides = hides;
+        Ok(self)
+    }
     pub fn load(path: &Path) -> Result<Self, Failure> {
         Ok(Self::from_definition(
             data::Content::load(path).map_err(parse_error)?,
@@ -221,9 +233,12 @@ impl Content {
             construction: entities::Construction::from_definition(value.construction),
             settings: value.settings,
             speed_list_bypass: value.speed_list_bypass,
+            debug_hides: Vec::new(),
         }
     }
 }
+/// Bound on debug-print Hide events (the supported build has 113).
+const MAX_DEBUG_HIDES: usize = 1024;
 fn int_cell(loaded: &Loaded, table: u32, id: u64, column: u32) -> Result<Option<i32>, Failure> {
     if !loaded.has_cell(table, id, column) {
         return Ok(None);

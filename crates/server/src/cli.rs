@@ -741,7 +741,7 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
         )?)),
         None => None,
     };
-    let progression = args
+    let mut progression = args
         .progression_content
         .as_ref()
         .map(|path| nfs_server::progression::Content::load(&args.root.join(path)))
@@ -868,6 +868,7 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                 let scoring = index.scoring_content("levels/genesis01/gameplay")?;
                 let road = index.road_network();
                 let nitrous = index.nitrous_configurations()?;
+                let hides = index.progression_debug_hides();
                 // The owned race event resolves from the same installation; its
                 // failure leaves scoring on and the event off.
                 let event = (|| -> Result<_, nfs_content::Error> {
@@ -907,12 +908,29 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                         })?;
                     prepared.with_opponents(&mut index, vehicles, &ai_items)
                 })();
-                Ok::<_, nfs_content::Error>((scoring, road, nitrous, event, story))
+                Ok::<_, nfs_content::Error>((scoring, road, nitrous, event, story, hides))
             })
             .await
             .map_err(|_| Failure::Output)?;
             match content {
-                Ok((content, road, nitrous, event, story)) => {
+                Ok((content, road, nitrous, event, story, hides)) => {
+                    match hides {
+                        Ok(hides) => {
+                            if let Some(current) = progression.take() {
+                                let count = hides.len();
+                                progression =
+                                    Some(Arc::new((*current).clone().with_debug_hides(hides)?));
+                                tracing::info!(
+                                    count,
+                                    "progression debug-print hides read from the installation"
+                                );
+                            }
+                        }
+                        Err(error) => tracing::warn!(
+                            %error,
+                            "progression debug-print hides unavailable; objective debug prints stay as created"
+                        ),
+                    }
                     match story {
                         Ok(content) => {
                             prologue = Some(Arc::new(content));

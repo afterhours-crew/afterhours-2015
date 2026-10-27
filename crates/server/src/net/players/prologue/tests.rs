@@ -1054,7 +1054,19 @@ pub(super) fn ready_for_selection(
         "a rejected return must not enable streaming"
     );
     drain(&mut listener);
+    Arc::make_mut(listener.prologue.as_mut().unwrap()).return_events = vec![(2, 16)];
     assert!(send(&mut listener, 13, 47, enter.span()));
+    // The mission chapter's row fires on the intro progression logic, once.
+    assert_eq!(
+        listener
+            .pending_rpcs
+            .iter()
+            .chain(listener.pending_entries.iter().flat_map(|(_, calls)| calls))
+            .filter(|r| matches!(r, HostRpc::Event(f)
+                if f.target.entity == 2 && f.event == 16 && f.player.is_none()))
+            .count(),
+        1
+    );
     assert_eq!(listener.story_pending.len(), 1);
     assert_eq!(
         listener.story_pending[0].action,

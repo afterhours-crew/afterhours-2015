@@ -191,6 +191,14 @@ pub struct GarageLogic {
     content: Content,
     reputation: Option<reputation::Thresholds>,
     spawn: Batch,
+    /// Extra spawn logic of a prologue participant (installed predicates and
+    /// official career start E1026 34.631–34.919 s): created with the spawn
+    /// events' captures; their own events follow the spawn events.
+    intro_spawn: Batch,
+    /// Logic a prologue participant gains when the intro hands over to
+    /// normal play (official E1026 1247.825 s: the challenge root, with the
+    /// event canceller's shutdown).
+    intro_handoff: Batch,
     vehicles: Batch,
     entry: Batch,
     exit: Batch,
@@ -527,6 +535,18 @@ fn batch(v: &Json, content: &Content, earlier: &BTreeSet<u16>) -> Result<Batch, 
     })
 }
 
+/// Captures the spawn batch's own events address.
+fn spawn_targets(spawn: &Batch) -> BTreeSet<u16> {
+    spawn
+        .events
+        .iter()
+        .filter_map(|e| match e.target {
+            EventTarget::Capture(id) => Some(id),
+            EventTarget::Scene(_) => None,
+        })
+        .collect()
+}
+
 impl GarageLogic {
     /// Transfer whole participant assets to a state-owned service. Reject any
     /// remaining dependency on their legacy IDs instead of dropping events or
@@ -636,6 +656,46 @@ impl GarageLogic {
             return Err(Failure::ProfileConfig);
         }
         let spawned: BTreeSet<u16> = spawn.entities.iter().map(|e| e.capture_id).collect();
+        let intro_spawn = match v.get("intro_spawn") {
+            None => Batch::default(),
+            Some(b) => {
+                let b = batch(b, &content, &BTreeSet::new())?;
+                let targets = spawn_targets(&spawn);
+                if !b.scene_updates.is_empty()
+                    || !b.entity_updates.is_empty()
+                    || !b.delete.is_empty()
+                    || b.entities.iter().any(|d| targets.contains(&d.capture_id))
+                    || b.events
+                        .iter()
+                        .any(|e| matches!(e.target, EventTarget::Scene(_)))
+                {
+                    return Err(Failure::ProfileConfig);
+                }
+                b
+            }
+        };
+        let intro_handoff = match v.get("intro_handoff") {
+            None => Batch::default(),
+            Some(b) => {
+                let b = batch(b, &content, &BTreeSet::new())?;
+                let early: BTreeSet<u16> = spawn_targets(&spawn)
+                    .into_iter()
+                    .chain(intro_spawn.entities.iter().map(|d| d.capture_id))
+                    .collect();
+                if b != (Batch {
+                    entities: b.entities.clone(),
+                    ..Batch::default()
+                }) || b.entities.iter().any(|d| {
+                    early.contains(&d.capture_id)
+                        || d.roles
+                            .iter()
+                            .any(|r| matches!(r, Role::Reputation(_) | Role::ReputationLevelStat))
+                }) {
+                    return Err(Failure::ProfileConfig);
+                }
+                b
+            }
+        };
         let vehicles = match v.get("vehicles") {
             None => Batch::default(),
             Some(b) => {
@@ -826,7 +886,12 @@ impl GarageLogic {
         {
             return Err(Failure::ProfileConfig);
         }
-        for definition in spawn.entities.iter().chain(&entry.entities) {
+        for definition in spawn
+            .entities
+            .iter()
+            .chain(&entry.entities)
+            .chain(&intro_spawn.entities)
+        {
             let owned = definition
                 .roles
                 .iter()
@@ -866,6 +931,8 @@ impl GarageLogic {
             content,
             reputation,
             spawn,
+            intro_spawn,
+            intro_handoff,
             vehicles,
             entry,
             exit,
@@ -1276,29 +1343,40 @@ impl GarageLogic {
         participant: u16,
         ghosts: &mut BTreeMap<u16, u16>,
     ) -> Result<Output, replication::Error> {
+        self.produce_intro_spawn_with_reputation(players, participant, ghosts, None)
+    }
+    /// As `produce_intro_spawn`, with the account's reputation for the intro
+    /// spawn's reputation logic (required when it has any).
+    pub fn produce_intro_spawn_with_reputation(
+        &self,
+        players: &mut Players,
+        participant: u16,
+        ghosts: &mut BTreeMap<u16, u16>,
+        scores: Option<ReputationScores>,
+    ) -> Result<Output, replication::Error> {
         if participant == 0 {
             return Err(replication::Error::Shape);
         }
-        let targets: BTreeSet<u16> = self
-            .spawn
-            .events
-            .iter()
-            .filter_map(|e| match e.target {
-                EventTarget::Capture(id) => Some(id),
-                EventTarget::Scene(_) => None,
-            })
-            .collect();
+        let values = match (scores, &self.reputation) {
+            (Some(scores), Some(thresholds)) => Some(thresholds.evaluate(scores)),
+            _ => None,
+        };
+        if values.is_none() && self.intro_requires_reputation() {
+            return Err(replication::Error::Shape);
+        }
+        let targets = spawn_targets(&self.spawn);
         let mut output = Output::default();
         for definition in self
             .spawn
             .entities
             .iter()
             .filter(|d| targets.contains(&d.capture_id))
+            .chain(&self.intro_spawn.entities)
         {
             if ghosts.contains_key(&definition.capture_id) {
                 return Err(replication::Error::DuplicateObject);
             }
-            let creation = self.creation(definition, players, participant, ghosts, None)?;
+            let creation = self.creation(definition, players, participant, ghosts, values)?;
             let record = players
                 .spawn_entities(vec![creation], &self.content)?
                 .remove(0);
@@ -1306,7 +1384,60 @@ impl GarageLogic {
             output.records.push(record);
         }
         output.events = self.present_events(Which::Spawn, players, ghosts)?;
+        for event in &self.intro_spawn.events {
+            let EventTarget::Capture(capture) = event.target else {
+                return Err(replication::Error::Shape);
+            };
+            let ghost = *ghosts
+                .get(&capture)
+                .ok_or(replication::Error::UnknownObject)?;
+            output.events.push(presentation_fire(
+                players,
+                ghost,
+                event.entity,
+                event.event,
+            )?);
+        }
         Ok(output)
+    }
+    /// The drive presentation the arrive sequence completes with (installed
+    /// content: AliveState, EventResultRep, DriverDetails); a prologue drive
+    /// is live while all of them are.
+    pub fn arrived_captures(&self) -> Vec<u16> {
+        self.arrived.entities.iter().map(|d| d.capture_id).collect()
+    }
+    /// The intro's handoff logic, created once when the intro completes;
+    /// captures already live are left alone.
+    pub fn produce_intro_handoff(
+        &self,
+        players: &mut Players,
+        participant: u16,
+        ghosts: &mut BTreeMap<u16, u16>,
+    ) -> Result<Vec<Record>, replication::Error> {
+        if participant == 0 {
+            return Err(replication::Error::Shape);
+        }
+        let mut records = Vec::new();
+        for definition in &self.intro_handoff.entities {
+            if ghosts.contains_key(&definition.capture_id) {
+                continue;
+            }
+            let creation = self.creation(definition, players, participant, ghosts, None)?;
+            let record = players
+                .spawn_entities(vec![creation], &self.content)?
+                .remove(0);
+            ghosts.insert(definition.capture_id, record.id);
+            records.push(record);
+        }
+        Ok(records)
+    }
+    /// Whether the prologue spawn needs the account's reputation.
+    pub fn intro_requires_reputation(&self) -> bool {
+        self.intro_spawn
+            .entities
+            .iter()
+            .flat_map(|d| &d.roles)
+            .any(|r| matches!(r, Role::Reputation(_) | Role::ReputationLevelStat))
     }
     /// A batch's participant events whose capture exists, in authored order.
     /// Scene-wide events belong to the ordinary garage and are left out.
@@ -2340,6 +2471,105 @@ pub(crate) mod tests {
             "events": [burst(1, 17), burst(1, 15), burst(1, 13), burst(1, 11),
                        burst(2, 9), burst(2, 7), burst(2, 5), burst(2, 4)]});
         v
+    }
+
+    #[test]
+    fn intro_spawn_adds_installed_career_start_logic_and_its_events() {
+        let mut v = intro_json();
+        let mut stats = v["recovered"]["entities"][0].clone();
+        stats["capture_id"] = json!(340);
+        v["intro_spawn"] = json!({"scene_updates": [], "entities": [stats],
+            "events": [{"target": {"capture_id": 340}, "entity": 2, "event": 9},
+                       {"target": {"capture_id": 340}, "entity": 1, "event": 17}]});
+        let logic = GarageLogic::from_json(&v).unwrap();
+        assert!(!logic.intro_requires_reputation());
+        let (mut players, participant) = world();
+        let mut ghosts = BTreeMap::new();
+        let spawn = logic
+            .produce_intro_spawn(&mut players, participant, &mut ghosts)
+            .unwrap();
+        // The spawn events' target first, then the intro logic; spawn events
+        // precede the intro logic's own events.
+        assert_eq!(ghosts.keys().copied().collect::<Vec<_>>(), [277, 340]);
+        assert_eq!(
+            spawn.records.iter().map(|r| r.id).collect::<Vec<_>>(),
+            [ghosts[&277], ghosts[&340]]
+        );
+        assert_eq!(
+            spawn
+                .events
+                .iter()
+                .map(|f| (f.target.ghost, f.target.entity, f.event))
+                .collect::<Vec<_>>(),
+            [
+                (ghosts[&277], 1, 2),
+                (ghosts[&340], 2, 9),
+                (ghosts[&340], 1, 17)
+            ]
+        );
+        // A repeated spawn refuses instead of duplicating.
+        assert!(
+            logic
+                .produce_intro_spawn(&mut players, participant, &mut ghosts)
+                .is_err()
+        );
+        // The intro batch may not redefine a spawn event target, update or
+        // delete anything, or fire scene-wide events.
+        let mut bad = v.clone();
+        bad["intro_spawn"]["entities"][0]["capture_id"] = json!(277);
+        bad["intro_spawn"]["events"] = json!([]);
+        assert!(GarageLogic::from_json(&bad).is_err());
+        let mut bad = v.clone();
+        bad["intro_spawn"]["delete_capture_ids"] = json!([277]);
+        assert!(GarageLogic::from_json(&bad).is_err());
+        let mut bad = v.clone();
+        bad["intro_spawn"]["events"] =
+            json!([{"target": {"scene_content_key": 101}, "entity": 1, "event": 0}]);
+        assert!(GarageLogic::from_json(&bad).is_err());
+        let mut bad = v;
+        bad["intro_spawn"]["events"] =
+            json!([{"target": {"capture_id": 277}, "entity": 1, "event": 0}]);
+        assert!(GarageLogic::from_json(&bad).is_err());
+    }
+
+    #[test]
+    fn intro_handoff_creates_its_logic_once_and_only_as_plain_creations() {
+        let mut v = intro_json();
+        let mut root = v["recovered"]["entities"][0].clone();
+        root["capture_id"] = json!(341);
+        v["intro_handoff"] = json!({"scene_updates": [], "entities": [root]});
+        let logic = GarageLogic::from_json(&v).unwrap();
+        let (mut players, participant) = world();
+        let mut ghosts = BTreeMap::new();
+        logic
+            .produce_intro_spawn(&mut players, participant, &mut ghosts)
+            .unwrap();
+        let created = logic
+            .produce_intro_handoff(&mut players, participant, &mut ghosts)
+            .unwrap();
+        assert_eq!(created.len(), 1);
+        assert_eq!(ghosts.get(&341), Some(&created[0].id));
+        // A repeated handoff leaves the live logic alone.
+        assert!(
+            logic
+                .produce_intro_handoff(&mut players, participant, &mut ghosts)
+                .unwrap()
+                .is_empty()
+        );
+        for (key, value) in [
+            ("delete_capture_ids", json!([341])),
+            (
+                "events",
+                json!([{"target": {"capture_id": 341}, "entity": 1, "event": 0}]),
+            ),
+        ] {
+            let mut bad = v.clone();
+            bad["intro_handoff"][key] = value;
+            assert!(GarageLogic::from_json(&bad).is_err(), "{key}");
+        }
+        let mut bad = v;
+        bad["intro_handoff"]["entities"][0]["capture_id"] = json!(277);
+        assert!(GarageLogic::from_json(&bad).is_err());
     }
 
     #[test]

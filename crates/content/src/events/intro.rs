@@ -21,10 +21,23 @@ pub struct Mode {
     /// client answers on the launcher before the host launches (career start
     /// 891523–891923 ms). Server-started launchers have none.
     pub launch_event: Option<LaunchEvent>,
+    /// Networked context triggers of the launcher's own prefab that follow
+    /// the mode start through server Delays (introdrivetoclub: 15 s, and
+    /// 15 + 120 s behind the objective gate; official E1026 137.226 and
+    /// 257.219 s after the 122.317 s start).
+    pub timed_events: Vec<TimedEvent>,
+    /// Game-mode category hashes of the launcher prefab's EventDetails (what
+    /// participant-in-game-mode properties test while the mode holds the
+    /// participant; e.g. the event canceller is `isinintro`).
+    pub categories: BTreeSet<u32>,
     pub completion: Option<results::Completion>,
     /// Filters whose exact channel links resolve to this intro's participant provider.
     pub owned_filters: Vec<crate::scoring::events::Identity>,
     pub shutdown: Option<shutdown::Binding>,
+    /// The shutdown comparison's networked row on the intro logic: the host
+    /// fires it after the mode's shutdown calls (official E1026 1247.925 s,
+    /// event canceller), so the client's channel sees the same trigger.
+    pub shutdown_row: Option<LaunchEvent>,
 }
 
 /// A networked event on the intro participant logic, by registered bus and
@@ -37,6 +50,119 @@ pub struct LaunchEvent {
 
 /// `LaunchGameMode` on `SimpleGameModeLauncherEntityData` (installed event id).
 const LAUNCH_GAME_MODE: u32 = 2_141_204_117;
+/// The launcher's mode-started output (installed event id).
+const LAUNCHER_STARTED: u32 = 3_655_010_165;
+/// `ContextInterfaceEntityData` Trigger input (installed event id).
+const CONTEXT_TRIGGER: u32 = 2_606_354_109;
+/// The `gameplay/gatebyproperty` prefab: an event gate held open while its
+/// Bool is true (server CompareBool on change opens and closes it).
+const GATE_PREFAB: &str = "gameplay/gatebyproperty";
+/// `RaceObjectiveEntityData` Active output (installed property id).
+const OBJECTIVE_ACTIVE: u32 = 1_010_522_579;
+const MAX_TIMED_HOPS: usize = 8;
+
+/// A networked event the host fires on the intro participant logic a fixed
+/// time after the mode starts; `objective_gated` events only while the
+/// mode's objective is still active.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TimedEvent {
+    pub event: LaunchEvent,
+    pub seconds: f32,
+    pub objective_gated: bool,
+}
+
+/// The launcher prefab's networked context triggers fed from the launcher's
+/// start through server-realm Delays and objective gates. A context trigger
+/// of that prefab reached any other way is unsupported content.
+fn timed_events<S: Source>(
+    graph: &mut Graph<S>,
+    launcher: &Site,
+    branch: &[Node],
+    events: &[crate::logic_events::Event],
+    gate_prefab: &str,
+) -> Result<Vec<TimedEvent>, Error> {
+    let mut out = vec![];
+    for e in events.iter().filter(|e| {
+        e.delivery == crate::logic_events::Delivery::Client
+            && e.target.class == "ContextInterfaceEntityData"
+            && e.target.port == CONTEXT_TRIGGER
+            && e.target.asset.eq_ignore_ascii_case(&launcher.key.0)
+    }) {
+        let mut found = branch.iter().filter(|n| {
+            n.site.key.1 == e.source.index && n.site.key.0.eq_ignore_ascii_case(&e.source.asset)
+        });
+        let (Some(start), None) = (found.next(), found.next()) else {
+            return Err(bad("timed context source occurrence"));
+        };
+        let (mut site, mut port) = (start.site.clone(), e.source.port);
+        let (mut seconds, mut gated) = (0f32, false);
+        for hop in 0.. {
+            if hop >= MAX_TIMED_HOPS {
+                return Err(bad("timed context chain bound"));
+            }
+            let object = graph.object(&site)?;
+            let input = match object.class.as_str() {
+                "SimpleGameModeLauncherEntityData"
+                    if site == *launcher && port == LAUNCHER_STARTED =>
+                {
+                    break;
+                }
+                "DelayEntityData" if port == nfs_world::scoring::nodes::OUT => {
+                    let server = matches!(object.fields.get("Realm"),
+                        Some(Value::Enum { name: Some(n), .. }) if n == "Realm_Server");
+                    let world = matches!(object.fields.get("TimeDeltaType"),
+                        Some(Value::Enum { name: Some(n), .. }) if n == "TimeDeltaType_World");
+                    let Some(Value::Float32(delay)) = object.fields.get("Delay") else {
+                        return Err(bad("timed context delay"));
+                    };
+                    if !server || !world || !delay.is_finite() || !(0. ..=600.).contains(delay) {
+                        return Err(bad("unsupported timed context delay"));
+                    }
+                    seconds += delay;
+                    nfs_world::scoring::nodes::IN
+                }
+                "LogicPrefabReferenceObjectData"
+                    if port == nfs_world::scoring::nodes::OUT
+                        && graph.target_field(&site, "Blueprint")?.0 == gate_prefab =>
+                {
+                    let sources: Vec<_> = graph
+                        .input_ports(&site)?
+                        .into_iter()
+                        .map(|p| graph.property_sources(&site, p))
+                        .collect::<Result<Vec<_>, _>>()?
+                        .into_iter()
+                        .flatten()
+                        .collect();
+                    let [source] = sources.as_slice() else {
+                        return Err(bad("timed context gate input"));
+                    };
+                    if source.port != OBJECTIVE_ACTIVE
+                        || graph.object(&source.site)?.class != "RaceObjectiveEntityData"
+                    {
+                        return Err(bad("timed context gate is not the objective"));
+                    }
+                    gated = true;
+                    nfs_world::scoring::nodes::IN
+                }
+                _ => return Err(bad("unsupported timed context source")),
+            };
+            let sources = graph.event_sources(&site, input)?;
+            let [(next, next_port)] = sources.as_slice() else {
+                return Err(bad("timed context input count"));
+            };
+            (site, port) = (next.clone(), *next_port);
+        }
+        out.push(TimedEvent {
+            event: LaunchEvent {
+                bus: e.bus,
+                ordinal: e.ordinal,
+            },
+            seconds,
+            objective_gated: gated,
+        });
+    }
+    Ok(out)
+}
 
 /// The launcher's client-side launch event: the networked-client row of the
 /// intro logic's event table that targets this launcher's LaunchGameMode
@@ -226,6 +352,78 @@ pub(super) fn links<S: Source>(
 
 /// Select a unique launcher by its authored mode reference. An optional declaring
 /// prefab distinguishes the two intro races that intentionally reuse one mode.
+/// A scene Boolean notification fed by a participant-in-game-mode property:
+/// true while the participant is in a game mode that has any (or, with
+/// `all`, every) one of `categories` (category hashes).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModeNotification {
+    pub serializer: usize,
+    pub categories: BTreeSet<u32>,
+    pub all: bool,
+}
+impl ModeNotification {
+    /// Whether a mode with `mode` categories satisfies the property.
+    pub fn matches(&self, mode: &BTreeSet<u32>) -> bool {
+        if self.all {
+            self.categories.is_subset(mode)
+        } else {
+            !self.categories.is_disjoint(mode)
+        }
+    }
+}
+/// `BoolPropertyClientNotificationEntityData` link to its participant property.
+const NOTIFICATION_PROPERTY: u32 = 2_526_680_631;
+
+impl AssetIndex {
+    /// The scene's Boolean notifications that report a participant-in-game-
+    /// mode property, by scene serializer. Other notifications are not listed.
+    pub fn scene_mode_notifications(
+        &mut self,
+        scene: &str,
+    ) -> Result<Vec<ModeNotification>, Error> {
+        let bindings = self.scene_bindings(scene)?;
+        let root = Site::root(scene);
+        let mut graph = Graph::new(&mut self.assets);
+        let mut out = Vec::new();
+        for b in bindings
+            .iter()
+            .filter(|b| b.class == "BoolPropertyClientNotificationEntityData")
+        {
+            let site = Site {
+                key: (b.asset.clone(), b.object),
+                ..root.clone()
+            };
+            let targets = graph.links(&site, NOTIFICATION_PROPERTY)?;
+            let [target] = targets.as_slice() else {
+                continue;
+            };
+            let object = graph.object(&target.site)?;
+            if object.class != "ParticipantInGameModeBoolPropertyEntityData" {
+                continue;
+            }
+            let all = match object.fields.get("Operation") {
+                Some(Value::Enum { name: Some(n), .. }) if n == "GameModeCategoryOperation_Any" => {
+                    false
+                }
+                Some(Value::Enum { name: Some(n), .. }) if n == "GameModeCategoryOperation_All" => {
+                    true
+                }
+                _ => return Err(bad("unsupported participant-in-game-mode operation")),
+            };
+            let categories = results::categories(&mut graph, &target.site)?;
+            if categories.is_empty() {
+                return Err(bad("participant-in-game-mode without categories"));
+            }
+            out.push(ModeNotification {
+                serializer: b.serializer,
+                categories,
+                all,
+            });
+        }
+        Ok(out)
+    }
+}
+
 pub fn extract(
     index: &mut AssetIndex,
     name: &str,
@@ -291,6 +489,18 @@ fn extract_inner(
     }
     let launcher = launcher(&mut graph, &branch, &name, launcher_asset)?;
     let launch_event = launch_event(&launcher, &branch, &network)?;
+    let timed_events = timed_events(&mut graph, &launcher, &branch, &network, GATE_PREFAB)?;
+    let categories = {
+        let mut details = branch.iter().filter(|n| {
+            n.object.class == "EventDetailsEntityData"
+                && n.site.key.0.eq_ignore_ascii_case(&launcher.key.0)
+        });
+        match (details.next(), details.next()) {
+            (Some(node), None) => results::categories(&mut graph, &node.site.clone())?,
+            (None, _) => BTreeSet::new(),
+            _ => return Err(bad("intro launcher event details occurrence")),
+        }
+    };
     let nodes = graph.read(Site::root(&name))?;
     let (bus_count, field_sites) = fields(&nodes, &rules, "GameModeEntityData")?;
     let channels: Vec<_> = field_sites
@@ -354,6 +564,25 @@ fn extract_inner(
         &field_sites,
         progression.ports["stable_id"],
     )?;
+    let shutdown_row = match &shutdown {
+        None => None,
+        Some(binding) => {
+            let mut rows = network.iter().filter(|e| {
+                e.delivery == crate::logic_events::Delivery::ClientAndServer
+                    && e.source.index == binding.compare.index
+                    && e.source.asset.eq_ignore_ascii_case(&binding.compare.asset)
+                    && e.source.port == 2_861_454_674
+            });
+            match (rows.next(), rows.next()) {
+                (Some(e), None) => Some(LaunchEvent {
+                    bus: e.bus,
+                    ordinal: e.ordinal,
+                }),
+                (None, _) => None,
+                _ => return Err(bad("intro shutdown row occurrence")),
+            }
+        }
+    };
     let owned_filters = owned_filters(
         &mut graph,
         &nodes,
@@ -513,6 +742,7 @@ fn extract_inner(
     Ok((
         Mode {
             shutdown,
+            shutdown_row,
             owned_filters,
             completion,
             sequences,
@@ -521,6 +751,8 @@ fn extract_inner(
                 .get(&launcher)
                 .ok_or_else(|| bad("intro launcher serializer"))?,
             launch_event,
+            timed_events,
+            categories,
             game_mode: GameMode {
                 lifecycle,
                 recovery,
@@ -548,6 +780,160 @@ mod tests {
             key: (asset.into(), i),
             ..Site::root(asset)
         }
+    }
+
+    #[test]
+    fn mode_notifications_match_any_or_all_of_their_categories() {
+        let any = ModeNotification {
+            serializer: 2,
+            categories: BTreeSet::from([1, 2]),
+            all: false,
+        };
+        let all = ModeNotification {
+            all: true,
+            ..any.clone()
+        };
+        assert!(any.matches(&BTreeSet::from([2, 9])));
+        assert!(!any.matches(&BTreeSet::from([9])));
+        assert!(!all.matches(&BTreeSet::from([2, 9])));
+        assert!(all.matches(&BTreeSet::from([1, 2, 9])));
+        assert!(!any.matches(&BTreeSet::new()));
+    }
+
+    #[test]
+    fn timed_context_triggers_follow_the_launcher_start_through_delays_and_the_objective_gate() {
+        let id = |v: u32| {
+            Value::Struct(nfs_frostbite::ebx::Fields(vec![(
+                "Id".into(),
+                Value::UInt32(v),
+            )]))
+        };
+        let row = |s: usize, se: u32, t: usize, te: u32| {
+            Value::Struct(nfs_frostbite::ebx::Fields(vec![
+                ("Source".into(), local(s)),
+                ("Target".into(), local(t)),
+                ("SourceEvent".into(), id(se)),
+                ("TargetEvent".into(), id(te)),
+            ]))
+        };
+        let (inp, out) = (
+            nfs_world::scoring::nodes::IN,
+            nfs_world::scoring::nodes::OUT,
+        );
+        let realm = |r: &str| Value::Enum {
+            value: 0,
+            name: Some(r.into()),
+        };
+        let delay = |seconds: f32| {
+            vec![
+                ("Delay", Value::Float32(seconds)),
+                ("Realm", realm("Realm_Server")),
+                ("TimeDeltaType", realm("TimeDeltaType_World")),
+            ]
+        };
+        let build = |rows: Vec<Value>| {
+            let mut m = Memory::default();
+            m.put(
+                "p",
+                0,
+                "LogicPrefabBlueprint",
+                &[
+                    ("EventConnections", Value::Array(rows)),
+                    (
+                        "PropertyConnections",
+                        Value::Array(vec![edge(local(5), OBJECTIVE_ACTIVE, local(4), 77)]),
+                    ),
+                ],
+            );
+            m.put("p", 1, "SimpleGameModeLauncherEntityData", &[]);
+            m.put("p", 2, "DelayEntityData", &delay(15.));
+            m.put("p", 3, "DelayEntityData", &delay(120.));
+            m.put(
+                "p",
+                4,
+                "LogicPrefabReferenceObjectData",
+                &[("Blueprint", ptr("g", 0))],
+            );
+            m.put("p", 5, "RaceObjectiveEntityData", &[]);
+            m.put("p", 6, "ContextInterfaceEntityData", &[]);
+            m.put("p", 7, "ContextInterfaceEntityData", &[]);
+            m.put("g", 0, "LogicPrefabBlueprint", &[]);
+            m
+        };
+        let rows = vec![
+            row(1, LAUNCHER_STARTED, 2, inp),
+            row(2, out, 3, inp),
+            row(3, out, 4, inp),
+            row(2, out, 6, CONTEXT_TRIGGER),
+            row(4, out, 7, CONTEXT_TRIGGER),
+        ];
+        let endpoint = |index: usize, class: &str, port: u32| crate::logic_events::Endpoint {
+            asset: "p".into(),
+            index,
+            class: class.into(),
+            port,
+            blueprint: None,
+            presentation_key: None,
+        };
+        let network = |source: usize, target: usize, ordinal: u32| crate::logic_events::Event {
+            bus: 3,
+            ordinal,
+            delivery: crate::logic_events::Delivery::Client,
+            source: endpoint(source, "x", out),
+            target: endpoint(target, "ContextInterfaceEntityData", CONTEXT_TRIGGER),
+        };
+        let mut m = build(rows.clone());
+        let mut graph = Graph::new(&mut m);
+        let branch: Vec<Node> = (1..=7)
+            .map(|i| Node {
+                site: site("p", i),
+                object: graph.object(&site("p", i)).unwrap(),
+            })
+            .collect();
+        let events = vec![network(2, 6, 7), network(4, 7, 11)];
+        let timed = timed_events(&mut graph, &site("p", 1), &branch, &events, "g").unwrap();
+        assert_eq!(
+            timed,
+            vec![
+                TimedEvent {
+                    event: LaunchEvent { bus: 3, ordinal: 7 },
+                    seconds: 15.,
+                    objective_gated: false
+                },
+                TimedEvent {
+                    event: LaunchEvent {
+                        bus: 3,
+                        ordinal: 11
+                    },
+                    seconds: 135.,
+                    objective_gated: true
+                },
+            ]
+        );
+        // A context trigger the launcher does not start is not silently timed.
+        let mut m = build(rows[1..].to_vec());
+        let mut graph = Graph::new(&mut m);
+        assert!(timed_events(&mut graph, &site("p", 1), &branch, &events, "g").is_err());
+        // Neither is a gate on something other than the objective.
+        let mut m = build(rows.clone());
+        m.put("p", 5, "BoolEntityData", &[]);
+        let mut graph = Graph::new(&mut m);
+        assert!(timed_events(&mut graph, &site("p", 1), &branch, &events, "g").is_err());
+        // Another prefab's triggers are not this launcher's.
+        let other = vec![crate::logic_events::Event {
+            target: crate::logic_events::Endpoint {
+                asset: "q".into(),
+                ..endpoint(6, "ContextInterfaceEntityData", CONTEXT_TRIGGER)
+            },
+            ..network(2, 6, 7)
+        }];
+        let mut m = build(rows);
+        let mut graph = Graph::new(&mut m);
+        assert!(
+            timed_events(&mut graph, &site("p", 1), &branch, &other, "g")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

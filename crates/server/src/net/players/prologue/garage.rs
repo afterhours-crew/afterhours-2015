@@ -159,6 +159,21 @@ impl PlayerListener {
                                 .extend(batch.events.into_iter().map(HostRpc::Event));
                         }
                     }
+                    // The mission chapter stops the first drive's sounds as
+                    // each intro return begins (official E1026 290.127 and
+                    // 1119.627 s, on the intro progression logic).
+                    for &(bus, ordinal) in &content.return_events {
+                        let fire = nfs_world::logic::Fire {
+                            event: ordinal,
+                            player: None,
+                            target: nfs_world::logic::EntityRef {
+                                ghost: active.parent(),
+                                entity: bus,
+                            },
+                        };
+                        fire.encode().map_err(|_| replication::Error::Shape)?;
+                        out.output.calls.push(HostRpc::Event(fire));
+                    }
                     // The official host's cinematic Actor carries its first
                     // flag with the scripted goal (career start 289.819 ms:
                     // a fresh Actor with the flag set; the ordinary arrival

@@ -1663,3 +1663,34 @@ fn settled_logic_precedes_glass_atomically_for_three_new_lifetimes() {
     assert_eq!(listener.pending_settled.len(), 1);
     assert!(listener.pending_rpcs.is_empty());
 }
+#[test]
+fn debug_hides_fire_on_the_main_root_in_installed_order_or_not_at_all() {
+    use nfs_world::logic::{EntityRef, Fire};
+    use nfs_world::participants::HostRpc;
+    let fires = super::debug_hide_fires(361, &[(2, 9), (1, 4)]).unwrap();
+    assert_eq!(
+        fires,
+        vec![
+            HostRpc::Event(Fire {
+                event: 9,
+                player: None,
+                target: EntityRef {
+                    ghost: 361,
+                    entity: 2
+                },
+            }),
+            HostRpc::Event(Fire {
+                event: 4,
+                player: None,
+                target: EntityRef {
+                    ghost: 361,
+                    entity: 1
+                },
+            }),
+        ]
+    );
+    assert!(super::debug_hide_fires(361, &[]).unwrap().is_empty());
+    // A root that cannot be addressed refuses the whole set.
+    assert!(super::debug_hide_fires(0, &[(1, 4)]).is_err());
+    assert!(super::debug_hide_fires(8192, &[(1, 4)]).is_err());
+}

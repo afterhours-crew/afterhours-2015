@@ -81,6 +81,15 @@ impl Context<'_> {
         let (Some(logic), Some(ghosts)) = (self.logic, self.ghosts.get(&participant)) else {
             return Ok(Vec::new());
         };
+        // Only a drive is presented: the relocation's brief Alive carries no
+        // drive logic and the official host shows nothing there (747325 ms).
+        if !logic
+            .arrived_captures()
+            .iter()
+            .all(|c| ghosts.contains_key(c))
+        {
+            return Ok(Vec::new());
+        }
         let mut events = logic.present_events(Which::FreeRoam, self.players, ghosts)?;
         let fade = logic.fade_capture().and_then(|c| ghosts.get(&c)).copied();
         if !events
@@ -511,7 +520,9 @@ mod tests {
         // Another participant's identical notification is left alone.
         let other = vec![note(intro.alive, participant + 1, Call::Enter)];
         assert_eq!(run(&listener, other), vec!["Enter"]);
-        // Once the return retires the first-drive HUD, driving shows the world only.
+        // Without its drive logic an Alive presents nothing: the relocation's
+        // brief Alive (official 747325 ms) shows the world only later, from
+        // the relocating Leave (749427 ms).
         let ghosts = listener.logic_ghosts.get_mut(&participant).unwrap();
         let logic = listener.logic.clone().unwrap();
         logic
@@ -525,7 +536,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             run(&listener, vec![note(intro.alive, participant, Call::Enter)]),
-            vec!["Enter", "fade:0"]
+            vec!["Enter"]
         );
         // Without garage logic nothing is added.
         listener.logic = None;

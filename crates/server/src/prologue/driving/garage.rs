@@ -42,6 +42,18 @@ impl Active {
         if !next.ending {
             return Err(Error::Shape);
         }
+        if let Some(row) = content.data.shutdown_row {
+            let fire = nfs_world::logic::Fire {
+                target: nfs_world::logic::EntityRef {
+                    ghost: next.parent,
+                    entity: row.bus,
+                },
+                event: row.ordinal,
+                player: None,
+            };
+            fire.encode().map_err(|_| Error::Shape)?;
+            out.calls.push(HostRpc::Event(fire));
+        }
         *self = next;
         *players = staged;
         Ok(out)

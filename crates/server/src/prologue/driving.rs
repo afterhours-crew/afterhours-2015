@@ -78,6 +78,7 @@ impl Mode {
         tracing::info!(
             mode = name,
             launch_event = ?data.launch_event,
+            timed_events = ?data.timed_events,
             "intro mode prepared; a launch event means the client launches it"
         );
         let mut sequences = BTreeMap::new();
@@ -317,6 +318,9 @@ pub struct Active {
     /// A client-enabled launcher's launch call, held until the client answers
     /// the launch event on the launcher (or the handshake deadline passes).
     pending_launch: Option<(HostRpc, f64)>,
+    /// The launcher prefab's timed context triggers still to fire, as
+    /// (deadline seconds, event, objective gated).
+    timed_events: Vec<(f64, nfs_content::events::intro::LaunchEvent, bool)>,
 }
 /// Seconds the host waits for the client's launcher answer before launching
 /// anyway. The official answer arrives within 50 ms (career start 891569 ms);
@@ -361,6 +365,51 @@ impl Active {
             calls: vec![launch],
             ..Output::default()
         }))
+    }
+    /// The intro progression logic that owns this mode's launcher.
+    pub fn parent(&self) -> u16 {
+        self.parent
+    }
+    /// The mode's game-mode categories while its owner is in the mode, for
+    /// participant-in-game-mode properties: a member of its root state or,
+    /// for a mode without one (intro drive, event canceller, return), from
+    /// its participant join at creation (GameMode m4) to its leave. Official
+    /// E1026: events s9 follows the canceller from 124.718 s to its shutdown
+    /// at 1247.825 s, across both races.
+    pub fn held_categories<'a>(&self, content: &'a Mode) -> Option<&'a BTreeSet<u32>> {
+        let member = match content.data.game_mode.lifecycle.root_state {
+            None => true,
+            Some(root) => {
+                let root = u16::try_from(root).ok()?;
+                self.host
+                    .machine()
+                    .members(root)
+                    .is_ok_and(|m| m.contains(&u64::from(self.owner.participant)))
+            }
+        };
+        (member && !self.left).then_some(&content.data.categories)
+    }
+    /// Fire the timed context triggers that are due; gated ones only while
+    /// the objective is active (the drive has not arrived or begun ending).
+    fn timed_due(&mut self, seconds: f64, out: &mut Output) {
+        let active = !self.arrived && !self.ending;
+        let parent = self.parent;
+        self.timed_events.retain(|&(deadline, event, gated)| {
+            if seconds < deadline {
+                return true;
+            }
+            if !gated || active {
+                out.calls.push(HostRpc::Event(nfs_world::logic::Fire {
+                    target: nfs_world::logic::EntityRef {
+                        ghost: parent,
+                        entity: event.bus,
+                    },
+                    event: event.ordinal,
+                    player: None,
+                }));
+            }
+            false
+        });
     }
     /// A launch still waiting for the client's answer past its deadline goes
     /// out anyway, logged: the handshake failed, the drive must not hang.
@@ -538,6 +587,12 @@ impl Active {
             result_barrier: false,
             result_calls: vec![],
             pending_launch: None,
+            timed_events: content
+                .data
+                .timed_events
+                .iter()
+                .map(|t| (seconds + f64::from(t.seconds), t.event, t.objective_gated))
+                .collect(),
         };
         active.effects(content, &mut staged, &effects, true, &mut out)?;
         let (target, selector) = field(staged.objects(), parent, content.data.launcher)?;
@@ -693,18 +748,34 @@ impl Active {
                                 )?;
                                 continue;
                             }
+                            // A zero-second countdown is over as it starts: the
+                            // official host creates it stopping and the client
+                            // completes it unprompted (E1026 585.125 -> 585.159).
+                            let over = matches!(
+                                data.configuration,
+                                nfs_content::events::lifecycle::StateConfiguration::Countdown { seconds, .. } if seconds <= 0.
+                            );
+                            let authored = content
+                                .sequences
+                                .get(&usize::from(*state))
+                                .ok_or(Error::Unsupported)?;
                             let mut instances = Instances::default();
-                            let record = instances
-                                .start_bound(
-                                    content
-                                        .sequences
-                                        .get(&usize::from(*state))
-                                        .ok_or(Error::Unsupported)?,
+                            let record = if over {
+                                instances.start_bound_stopped(
+                                    authored,
                                     players,
                                     self.owner,
                                     Some(self.ghost),
                                 )?
-                                .ok_or(Error::Shape)?;
+                            } else {
+                                instances.start_bound(
+                                    authored,
+                                    players,
+                                    self.owner,
+                                    Some(self.ghost),
+                                )?
+                            }
+                            .ok_or(Error::Shape)?;
                             out.records.push(record);
                             if let Some(duration) = content.timing.get(&usize::from(*state)) {
                                 self.sequence_deadlines
@@ -842,6 +913,11 @@ impl Active {
                         .sequences
                         .get_mut(&usize::from(*state))
                         .ok_or(Error::UnknownObject)?;
+                    // A countdown created stopping may already be completed
+                    // and released by the client; its clock still advances.
+                    if instances.ghost(self.owner.participant).is_none() {
+                        continue;
+                    }
                     if let Some(stop) = instances.stop(
                         content
                             .sequences

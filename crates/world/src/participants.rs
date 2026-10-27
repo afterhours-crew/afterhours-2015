@@ -1281,6 +1281,9 @@ pub enum HostRpc {
     SpawnOccupied(crate::garage::presence::Notification),
     /// Level root poll (scene-scoped method 0, same wire shape as presence).
     LevelPoll(crate::garage::presence::Notification),
+    /// A scene Boolean notification of a participant-in-game-mode property
+    /// (same scene rpc_bool wire shape as presence).
+    ModeNotification(crate::garage::presence::Notification),
     SequenceStop(crate::sequences::Stop),
     Event(crate::logic::Fire),
     WorldActivation(crate::world_activation::Notification),
@@ -1301,7 +1304,10 @@ impl HostRpc {
             Self::Garage(v) => vec![v.endpoint.scene, v.participant],
             Self::Actor(v) => vec![v.endpoint.scene, v.participant, v.actor],
             Self::Vehicle(v) => vec![v.endpoint.scene, v.participant, v.vehicle],
-            Self::GaragePresence(v) | Self::SpawnOccupied(v) | Self::LevelPoll(v) => {
+            Self::GaragePresence(v)
+            | Self::SpawnOccupied(v)
+            | Self::LevelPoll(v)
+            | Self::ModeNotification(v) => {
                 vec![v.endpoint.scene]
             }
             Self::SequenceStop(v) => vec![v.sequence],
@@ -1324,9 +1330,10 @@ impl HostRpc {
             Self::Garage(v) => v.endpoint.scene,
             Self::Actor(v) => v.endpoint.scene,
             Self::Vehicle(v) => v.endpoint.scene,
-            Self::GaragePresence(v) | Self::SpawnOccupied(v) | Self::LevelPoll(v) => {
-                v.endpoint.scene
-            }
+            Self::GaragePresence(v)
+            | Self::SpawnOccupied(v)
+            | Self::LevelPoll(v)
+            | Self::ModeNotification(v) => v.endpoint.scene,
             Self::SequenceStop(v) => v.sequence,
             Self::Event(v) => v.target.ghost,
             Self::WorldActivation(v) => v.endpoint.scene,
@@ -1343,7 +1350,10 @@ impl HostRpc {
             Self::Garage(v) => v.encode(),
             Self::Actor(v) => v.encode(),
             Self::Vehicle(v) => v.encode(),
-            Self::GaragePresence(v) | Self::SpawnOccupied(v) | Self::LevelPoll(v) => v.encode(),
+            Self::GaragePresence(v)
+            | Self::SpawnOccupied(v)
+            | Self::LevelPoll(v)
+            | Self::ModeNotification(v) => v.encode(),
             Self::SequenceStop(v) => v.encode(),
             Self::Event(v) => v.encode().map_err(|_| Error::Shape),
             Self::WorldActivation(v) => v.encode(),

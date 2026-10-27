@@ -217,3 +217,68 @@ fn table_bounds_and_unregistered_roots_are_rejected() {
     set(&mut m, "a", 0, "EventConnections", Value::Array(vec![]));
     assert!(run(&mut m).is_err());
 }
+#[test]
+fn debug_hides_select_only_property_debug_hide_targets_in_order() {
+    let mut m = fixture();
+    m.put("a", 3, "PropertyDebugEntityData", &[]);
+    set(
+        &mut m,
+        "a",
+        0,
+        "Objects",
+        Value::Array(vec![local(1), local(2), local(3)]),
+    );
+    let hide = |source| {
+        let mut row = event(4, source, 3);
+        if let Value::Struct(Fields(f)) = &mut row {
+            f.retain(|(k, _)| k != "TargetEvent");
+            f.push((
+                "TargetEvent".into(),
+                object(vec![("Id", Value::UInt32(DEBUG_HIDE))]),
+            ));
+        }
+        row
+    };
+    set(
+        &mut m,
+        "a",
+        0,
+        "EventConnections",
+        Value::Array(vec![hide(1), event(4, 1, 3), event(4, 1, 2), hide(2)]),
+    );
+    let events = run(&mut m).unwrap();
+    assert_eq!(debug_hides(&events).unwrap(), vec![(1, 0), (1, 3)]);
+    // A root without any hide is a content mismatch, not an empty plan.
+    assert!(debug_hides(&run(&mut fixture()).unwrap()).is_err());
+}
+#[test]
+fn intro_return_rows_are_the_single_client_filter_row() {
+    let mut m = fixture();
+    m.put("a", 3, "ParticipantProviderEventFilterEntityData", &[]);
+    set(
+        &mut m,
+        "a",
+        0,
+        "Objects",
+        Value::Array(vec![local(1), local(2), local(3)]),
+    );
+    set(
+        &mut m,
+        "a",
+        0,
+        "EventConnections",
+        Value::Array(vec![event(4, 1, 2), event(4, 3, 2), event(5, 3, 2)]),
+    );
+    let events = run(&mut m).unwrap();
+    // Only the client-delivered filter row; the client-and-server one is not.
+    assert_eq!(filtered_rows(&events).unwrap(), vec![(1, 1)]);
+    assert!(filtered_rows(&run(&mut fixture()).unwrap()).is_err());
+    set(
+        &mut m,
+        "a",
+        0,
+        "EventConnections",
+        Value::Array(vec![event(4, 3, 2), event(4, 3, 1)]),
+    );
+    assert!(filtered_rows(&run(&mut m).unwrap()).is_err());
+}

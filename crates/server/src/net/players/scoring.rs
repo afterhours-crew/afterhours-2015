@@ -1169,6 +1169,27 @@ impl PlayerListener {
                 kinds(self.event_suspended.contains(&participant), race),
             );
         }
+        // Prologue drives (official E1026 122.317, 572.121, 756.224 and
+        // 891.324 s): data acquisition lives with each drive's presentation,
+        // the free-roam driving-style participant only in the return drive
+        // (891.423 s, retired with the drive at 1119.136 s).
+        let drive = self
+            .logic
+            .as_deref()
+            .map(crate::garage_logic::GarageLogic::arrived_captures)
+            .unwrap_or_default();
+        if !drive.is_empty() {
+            for (participant, chapter) in self.participants.intro_chapters() {
+                let live = self
+                    .logic_ghosts
+                    .get(&participant)
+                    .is_some_and(|ghosts| drive.iter().all(|c| ghosts.contains_key(c)));
+                if live && !desired.contains_key(&participant) {
+                    let returning = chapter == nfs_world::participants::intro::Chapter::ReturnDrive;
+                    desired.insert(participant, kinds(!returning, None));
+                }
+            }
+        }
         desired
     }
 

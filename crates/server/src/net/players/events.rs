@@ -564,6 +564,7 @@ impl PlayerListener {
     pub(in crate::net) fn advance_events(&mut self, now_ms: u64) -> Result<(), replication::Error> {
         self.advance_event_discovery()?;
         self.advance_world_volumes(now_ms)?;
+        self.advance_mode_notifications()?;
         let Some(catalog) = self.events.clone() else {
             return Ok(());
         };

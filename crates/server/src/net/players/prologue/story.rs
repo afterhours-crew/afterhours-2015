@@ -143,6 +143,7 @@ impl PlayerListener {
         let mut participants = self.participants.clone();
         let mut selection = self.selection.clone();
         let mut states = self.selection_execution.clone();
+        let mut logic_ghosts = self.logic_ghosts.clone();
         let mut output = crate::vehicle_content::population::Output::default();
         if let crate::net::items::story::Action::Complete { objective } = request.action
             && let Some(content) = self.prologue.as_deref()
@@ -191,6 +192,14 @@ impl PlayerListener {
             output.records.extend(shutdown.records);
             output.deleted.extend(shutdown.deleted);
             calls.extend(shutdown.calls);
+            if let Some(logic) = self.logic.as_deref() {
+                let ghosts = logic_ghosts.entry(request.participant).or_default();
+                output.records.extend(logic.produce_intro_handoff(
+                    &mut players,
+                    request.participant,
+                    ghosts,
+                )?);
+            }
         }
         if let (Some(population), Some(old), Some(next)) =
             (&mut population, &self.inventory, &inventory)
@@ -330,6 +339,7 @@ impl PlayerListener {
             return Err(replication::Error::Bound);
         }
         self.players = players;
+        self.logic_ghosts = logic_ghosts;
         self.intro_modes = modes;
         self.participants = participants;
         self.scene_membership = scene_membership.session;

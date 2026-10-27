@@ -557,6 +557,8 @@ fn first_drive_returns_automatically_and_waits_in_the_selection_composite() {
         finishing: [68, 70, 60].map(endpoint),
     });
     model.stages.insert(8, Stage::FreeRoam);
+    // The first drive's participant owns no car yet.
+    model.garage = Some(crate::garage::Slots::new([None; 5]).unwrap());
     assert_eq!(model.begin_intro_return(8), Outcome::Unsupported);
     model.intro_started.insert(8, Chapter::FirstDrive);
     let Outcome::Advanced(chain) = model.begin_intro_return(8) else {
@@ -583,6 +585,30 @@ fn first_drive_returns_automatically_and_waits_in_the_selection_composite() {
     assert_eq!(model.stage(8), Some(Stage::IntroEnteringGarage));
     assert!(model.take_returning().is_empty());
     assert_eq!(model.begin_intro_return(8), Outcome::Repeated);
+    // The final return of an owned car refreshes the slots inside the last
+    // preparing state; an all-empty garage refreshes nothing.
+    let mut owned = model.clone();
+    owned.stages.insert(8, Stage::FreeRoam);
+    owned.garage = Some(crate::garage::Slots::new([Some(77), None, None, None, None]).unwrap());
+    let Outcome::Advanced(refreshed) = owned.begin_intro_return(8) else {
+        panic!()
+    };
+    let garage = model.bindings.unwrap().garage;
+    assert_eq!(
+        refreshed[8..13]
+            .iter()
+            .map(|n| (n.endpoint, n.call))
+            .collect::<Vec<_>>(),
+        [
+            (garage[0], Call::GarageItem(77)),
+            (garage[1], Call::NotifyTagged(19)),
+            (garage[2], Call::NotifyTagged(19)),
+            (garage[3], Call::NotifyTagged(19)),
+            (garage[4], Call::NotifyTagged(19)),
+        ]
+    );
+    assert_eq!(refreshed[7], chain[7]);
+    assert_eq!(refreshed[13..], chain[8..]);
     assert_eq!(model.intro_garage_ready(8), Outcome::Unsupported);
     assert!(matches!(model.returned_to_garage(8), Outcome::Advanced(_)));
     assert_eq!(model.stage(8), Some(Stage::IntroLoadingGarage));

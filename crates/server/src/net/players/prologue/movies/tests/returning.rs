@@ -487,6 +487,16 @@ fn final_composite_is_owned_and_completion_survives_frame_ordering_and_queue_pre
             &mut listener.intro_modes.get_mut(&participant).unwrap().1,
             20,
         );
+        Arc::make_mut(listener.prologue.as_mut().unwrap())
+            .driving
+            .as_mut()
+            .unwrap()
+            .1
+            .data
+            .shutdown_row = Some(nfs_content::events::intro::LaunchEvent {
+            bus: 11,
+            ordinal: 0,
+        });
         let leave = request_no_args(
             Endpoint {
                 scene: canceller,
@@ -522,6 +532,16 @@ fn final_composite_is_owned_and_completion_survives_frame_ordering_and_queue_pre
                 .iter()
                 .any(|r| matches!(r,HostRpc::GameMode(c) if c.target==canceller && c.method==1))
         );
+        // The shutdown comparison's networked row follows the mode's calls.
+        let row = listener
+            .pending_rpcs
+            .iter()
+            .position(|r| matches!(r, HostRpc::Event(f) if f.target.entity == 11 && f.event == 0));
+        let last_mode_call = listener
+            .pending_rpcs
+            .iter()
+            .rposition(|r| matches!(r,HostRpc::GameMode(c) if c.target==canceller));
+        assert!(row.is_some() && row > last_mode_call);
         drain(&mut listener);
         listener.story_committed(&job, committed).unwrap();
         assert!(listener.pending_rpcs.is_empty());
