@@ -17,6 +17,10 @@ pub mod authored;
 pub const MAX_INSTANCES: usize = 128;
 pub const FALLBACK_MS: u64 = 300_000;
 pub const FIRST_READY_MS: u64 = 16_000;
+/// Prologue garage waits: the official host stopped both intro waiting
+/// sequences 8.0 s after creation (career start 298.018 -> 306.0 and
+/// 1126.827 -> 1134.82; E1026), against 16 s for the ordinary garage load.
+pub const INTRO_FIRST_READY_MS: u64 = 8_000;
 
 pub const STREAMING_LOADED: u32 = 3_648_004;
 pub const STREAMING_UNLOADED: u32 = 12_540_227;
@@ -272,6 +276,8 @@ struct Instance {
     phase: Phase,
     garage_loaded: bool,
     ready_at: Option<u64>,
+    /// Delay from readiness to the Stop.
+    first_ready_ms: u64,
 }
 
 /// A running waiting instance's readiness. Its Stop is due at `ready_at`
@@ -304,7 +310,9 @@ impl Instance {
             && garage
         {
             Ok(Some(
-                world_ms.checked_add(FIRST_READY_MS).ok_or(Error::Bound)?,
+                world_ms
+                    .checked_add(self.first_ready_ms)
+                    .ok_or(Error::Bound)?,
             ))
         } else {
             Ok(self.ready_at)
@@ -364,6 +372,16 @@ impl Sequences {
         })
     }
     pub fn start(&mut self, players: &mut Players, owner: Owner) -> Result<Option<Record>, Error> {
+        self.start_with_delay(players, owner, FIRST_READY_MS)
+    }
+    /// Start with an explicit readiness-to-Stop delay (prologue garage waits
+    /// use [`INTRO_FIRST_READY_MS`]).
+    pub fn start_with_delay(
+        &mut self,
+        players: &mut Players,
+        owner: Owner,
+        first_ready_ms: u64,
+    ) -> Result<Option<Record>, Error> {
         if !players.owns_participant(owner.connection, owner.persona, owner.participant) {
             return Err(Error::UnknownObject);
         }
@@ -395,6 +413,7 @@ impl Sequences {
                 phase: Phase::Running { fallback_at },
                 garage_loaded: false,
                 ready_at: None,
+                first_ready_ms,
             },
         );
         Ok(Some(record))

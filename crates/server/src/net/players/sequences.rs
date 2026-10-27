@@ -276,13 +276,20 @@ impl PlayerListener {
         };
         let mut records = Vec::new();
         for participant in participants.waiting_garage() {
-            if let Some(record) = sequences.start(
+            // The prologue's garage waits follow the official intro timing.
+            let delay = if participants.intro_chapter(participant).is_some() {
+                nfs_world::sequences::INTRO_FIRST_READY_MS
+            } else {
+                nfs_world::sequences::FIRST_READY_MS
+            };
+            if let Some(record) = sequences.start_with_delay(
                 players,
                 Owner {
                     connection: HOST_SELECTOR as u8,
                     persona,
                     participant,
                 },
+                delay,
             )? {
                 records.push(record);
             }
