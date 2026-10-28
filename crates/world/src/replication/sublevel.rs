@@ -35,6 +35,8 @@ pub enum Kind {
     RpcBool,
     /// Trigger volume RPC with an enabled initial collision listener.
     RpcTriggerVolume,
+    /// Waypoint crossing RPC; the Boolean controls its active route presentation.
+    RpcWaypoint,
     RpcMap,
     RpcFourReferences,
     RpcSet64,
@@ -56,6 +58,7 @@ const KIND_NAMES: &[(&str, Kind)] = &[
     ("rpc_guid", Kind::RpcGuid),
     ("rpc_bool", Kind::RpcBool),
     ("rpc_trigger_volume", Kind::RpcTriggerVolume),
+    ("rpc_waypoint", Kind::RpcWaypoint),
     ("rpc_map", Kind::RpcMap),
     ("rpc_four_references", Kind::RpcFourReferences),
     ("rpc_set64", Kind::RpcSet64),

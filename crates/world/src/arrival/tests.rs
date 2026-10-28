@@ -127,7 +127,12 @@ fn timed_entry_repeats_with_new_ids_and_preserves_due_stop_under_backpressure() 
         assert!(returns.reset(&players, owner).is_err());
         assert!(
             returns
-                .arrived(&reached(ARRIVED, record.id, 1))
+                .arrived(
+                    &players,
+                    owner.connection,
+                    owner.persona,
+                    &reached(ARRIVED, record.id, 1)
+                )
                 .unwrap()
                 .is_none()
         );
@@ -248,7 +253,12 @@ fn rollout_goal_is_owned_atomic_ordered_and_cleaned_once() {
     );
     assert_eq!(players.objects().snapshot(), snapshot);
     arrivals
-        .arrived(&reached(ARRIVED, sequence, 1))
+        .arrived(
+            &players,
+            owner.connection,
+            owner.persona,
+            &reached(ARRIVED, sequence, 1),
+        )
         .unwrap()
         .unwrap();
     let call = Completed {
@@ -319,15 +329,65 @@ fn an_arrive_sequence_starts_once_stops_on_the_event_and_completes_once() {
         reached(ARRIVED + 1, ghost, 1),
         reached(ARRIVED, ghost, 2),
         reached(ARRIVED, ghost + 1, 1),
+        Message::Reached {
+            event: ARRIVED,
+            target: EntityRef { ghost, entity: 1 },
+            player: 1,
+        },
+        Message::Reached {
+            event: ARRIVED,
+            target: EntityRef { ghost, entity: 1 },
+            player: 255,
+        },
     ] {
-        assert_eq!(arrivals.arrived(&other).unwrap(), None);
+        assert!(!arrivals.recognizes_arrival(&players, owner.connection, owner.persona, &other));
+        assert_eq!(
+            arrivals
+                .arrived(&players, owner.connection, owner.persona, &other)
+                .unwrap(),
+            None
+        );
+    }
+    let report = reached(ARRIVED, ghost, 1);
+    for (connection, persona) in [
+        (owner.connection + 1, owner.persona),
+        (owner.connection, owner.persona + 1),
+    ] {
+        assert!(!arrivals.recognizes_arrival(&players, connection, persona, &report));
+        assert_eq!(
+            arrivals
+                .arrived(&players, connection, persona, &report)
+                .unwrap(),
+            None
+        );
     }
     let stop = arrivals
-        .arrived(&reached(ARRIVED, ghost, 1))
+        .arrived(
+            &players,
+            owner.connection,
+            owner.persona,
+            &reached(ARRIVED, ghost, 1),
+        )
         .unwrap()
         .unwrap();
     assert_eq!(stop.sequence, ghost);
-    assert_eq!(arrivals.arrived(&reached(ARRIVED, ghost, 1)).unwrap(), None);
+    assert!(arrivals.recognizes_arrival(
+        &players,
+        owner.connection,
+        owner.persona,
+        &reached(ARRIVED, ghost, 1)
+    ));
+    assert_eq!(
+        arrivals
+            .arrived(
+                &players,
+                owner.connection,
+                owner.persona,
+                &reached(ARRIVED, ghost, 1)
+            )
+            .unwrap(),
+        None
+    );
     let foreign = Owner {
         persona: 401,
         ..owner
@@ -338,6 +398,28 @@ fn an_arrive_sequence_starts_once_stops_on_the_event_and_completes_once() {
         Ok(Some(ghost))
     );
     assert_eq!(arrivals.complete(&players, owner, completed), Ok(None));
+    assert!(arrivals.recognizes_arrival(
+        &players,
+        owner.connection,
+        owner.persona,
+        &reached(ARRIVED, ghost, 1)
+    ));
+    arrivals.finish_rollout(&mut players, owner).unwrap();
+    arrivals.reset(&players, owner).unwrap();
+    assert!(!arrivals.recognizes_arrival(
+        &players,
+        owner.connection,
+        owner.persona,
+        &reached(ARRIVED, ghost, 1)
+    ));
+    let next = arrivals.start(&mut players, owner).unwrap().unwrap();
+    assert_ne!(next.id, ghost);
+    assert!(arrivals.recognizes_arrival(
+        &players,
+        owner.connection,
+        owner.persona,
+        &reached(ARRIVED, next.id, 1)
+    ));
 }
 
 #[test]

@@ -148,6 +148,32 @@ fn event(id: u16, event: &nfs_content::logic_events::Event) -> Json {
     json!({"target":{"capture_id":id},"entity":event.bus,"event":event.ordinal})
 }
 
+fn return_confirmation(
+    composition: &nfs_content::scoring::events::Composition,
+    signals: &[nfs_world::scoring::event_sync::Binding],
+    request: &nfs_content::logic_events::Event,
+) -> Result<nfs_world::scoring::event_sync::Binding> {
+    let candidates: Vec<_> = signals
+        .iter()
+        .filter(|signal| {
+            composition
+                .nodes
+                .get(usize::from(signal.node))
+                .is_some_and(|node| {
+                    node.class == "EventSyncEntityData"
+                        && node.identity.instances.iter().any(|(asset, index)| {
+                            asset == &request.target.asset && *index == request.target.index
+                        })
+                })
+        })
+        .copied()
+        .collect();
+    let [signal] = candidates.as_slice() else {
+        return Err("ambiguous garage return confirmation".into());
+    };
+    Ok(*signal)
+}
+
 pub(super) fn build(index: &mut AssetIndex, thresholds: &Json) -> Result<Json> {
     let definitions = [
         (1, GAMEPLAY, FADE),
@@ -417,6 +443,11 @@ pub(super) fn build(index: &mut AssetIndex, thresholds: &Json) -> Result<Json> {
         return Err("ambiguous garage return event".into());
     }
     push(&mut doc, "return_requested", "events", event(22, &alive[0]));
+    let composition = index.scoring_events(ALIVE)?;
+    let signals = index.scoring_event_sync(ALIVE, &composition)?;
+    let confirmation = return_confirmation(&composition, &signals, &alive[0])?;
+    doc["return_confirmation"] = json!({"capture_id":22,
+        "entity":confirmation.entity,"event":confirmation.event});
     doc["content"] = json!({"catalogs":catalogs.into_values().collect::<Vec<_>>(),"profiles":profiles.into_values().collect::<Vec<_>>()});
     crate::garage_logic::GarageLogic::from_json(&doc)
         .map_err(|_| "generated garage lifecycle failed validation")?;
@@ -426,6 +457,66 @@ pub(super) fn build(index: &mut AssetIndex, thresholds: &Json) -> Result<Json> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn return_confirmation_selects_the_requested_prefab_instance() {
+        use nfs_content::{
+            logic_events::{Delivery, Endpoint, Event},
+            scoring::events::{Composition, Identity, Node},
+        };
+        use nfs_world::scoring::event_sync::Binding;
+        let endpoint = Endpoint {
+            asset: "owner".into(),
+            index: 7,
+            class: "PrefabReferenceObjectData".into(),
+            port: 1,
+            blueprint: Some("transition".into()),
+            presentation_key: None,
+        };
+        let request = Event {
+            bus: 1,
+            ordinal: 2,
+            delivery: Delivery::Client,
+            source: endpoint.clone(),
+            target: endpoint,
+        };
+        let node = |instance| Node {
+            identity: Identity {
+                asset: "transition".into(),
+                index: 2,
+                instances: vec![("owner".into(), instance)],
+            },
+            class: "EventSyncEntityData".into(),
+            listeners: None,
+            forward: None,
+        };
+        let mut composition = Composition {
+            nodes: vec![node(8), node(7)],
+            buses: vec![],
+            bus_entities: vec![],
+            connections: vec![],
+            properties: vec![],
+            links: vec![],
+        };
+        let bindings = [
+            Binding {
+                entity: 2,
+                event: 30,
+                node: 0,
+            },
+            Binding {
+                entity: 3,
+                event: 31,
+                node: 1,
+            },
+        ];
+        assert_eq!(
+            return_confirmation(&composition, &bindings, &request).unwrap(),
+            bindings[1]
+        );
+        assert!(return_confirmation(&composition, &bindings[..1], &request).is_err());
+        composition.nodes[0] = node(7);
+        assert!(return_confirmation(&composition, &bindings, &request).is_err());
+    }
     #[test]
     fn unknown_state_and_reputation_inputs_are_not_replaced_with_defaults() {
         let input = Input::ParticipantSetContains(nfs_content::participant_logic::boolean::Port {

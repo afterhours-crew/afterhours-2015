@@ -212,6 +212,8 @@ pub struct GarageLogic {
     in_world_arrival: Batch,
     returning: Batch,
     return_requested: Batch,
+    /// Installed client EventSync that confirms the requested return.
+    return_confirmation: Option<Event>,
     returned: Batch,
     crashed: Batch,
     recovered: Batch,
@@ -830,6 +832,30 @@ impl GarageLogic {
             return Err(Failure::ProfileConfig);
         }
         let return_requested = event_phase("return_requested", &driving)?;
+        let return_confirmation = v
+            .get("return_confirmation")
+            .map(|value| {
+                keys(value, &["capture_id", "entity", "event"])?;
+                let capture = ghost_id(&value["capture_id"])?;
+                let entity = uint(&value["entity"])?;
+                let event = uint(&value["event"])?;
+                if entity == 0
+                    || event > 0x1ff_ffff
+                    || !driving.contains(&capture)
+                    || !return_requested
+                        .events
+                        .iter()
+                        .any(|e| e.target == EventTarget::Capture(capture))
+                {
+                    return Err(Failure::ProfileConfig);
+                }
+                Ok(Event {
+                    target: EventTarget::Capture(capture),
+                    entity,
+                    event,
+                })
+            })
+            .transpose()?;
         let returning = v
             .get("returning")
             .map(|b| batch(b, &content, &driving))
@@ -946,6 +972,7 @@ impl GarageLogic {
             in_world_arrival,
             returning,
             return_requested,
+            return_confirmation,
             returned,
             crashed,
             recovered,
@@ -1457,6 +1484,24 @@ impl GarageLogic {
             .map(|(ghost, e)| presentation_fire(players, ghost, e.entity, e.event))
             .collect()
     }
+    /// Resolve the return callback against this participant's current instance.
+    pub fn return_confirmation(
+        &self,
+        players: &Players,
+        ghosts: &BTreeMap<u16, u16>,
+    ) -> Result<Option<Fire>, replication::Error> {
+        self.return_confirmation
+            .map(|event| {
+                let EventTarget::Capture(capture) = event.target else {
+                    return Err(replication::Error::Shape);
+                };
+                let ghost = *ghosts
+                    .get(&capture)
+                    .ok_or(replication::Error::UnknownObject)?;
+                presentation_fire(players, ghost, event.entity, event.event)
+            })
+            .transpose()
+    }
     /// The fade presentation logic: the target of the free-roam ViewWorld
     /// event (FadeControlPresentationBlueprint; capture 1 in installed content).
     pub fn fade_capture(&self) -> Option<u16> {
@@ -1729,6 +1774,35 @@ pub(crate) mod tests {
         v["in_world_teleport"] = phase(&[22, 23]);
         v["in_world_arrival"] = phase(&[24]);
         v
+    }
+
+    #[test]
+    fn return_confirmation_binds_the_current_instance_and_rejects_unrelated_roles() {
+        let mut v = presentation_json();
+        v["return_requested"] = json!({"scene_updates":[], "entities":[],
+            "events":[{"target":{"capture_id":277},"entity":1,"event":18}]});
+        v["return_confirmation"] = json!({"capture_id":277,"entity":1,"event":33});
+        let logic = GarageLogic::from_json(&v).unwrap();
+        let (mut players, participant) = world();
+        let mut ghosts = BTreeMap::new();
+        assert!(logic.return_confirmation(&players, &ghosts).is_err());
+        logic
+            .produce(Which::Spawn, &mut players, participant, &mut ghosts)
+            .unwrap();
+        let expected = logic
+            .return_confirmation(&players, &ghosts)
+            .unwrap()
+            .unwrap();
+        assert_eq!(expected.target.ghost, ghosts[&277]);
+        assert_eq!(expected.target.entity, 1);
+        assert_eq!(expected.event, 33);
+        for (key, value) in [("capture_id", 291), ("entity", 0), ("event", 0x200_0000)] {
+            let mut invalid = v.clone();
+            invalid["return_confirmation"][key] = json!(value);
+            assert!(GarageLogic::from_json(&invalid).is_err(), "{key}");
+        }
+        players.remove_entities(&[expected.target.ghost]).unwrap();
+        assert!(logic.return_confirmation(&players, &ghosts).is_err());
     }
 
     #[test]

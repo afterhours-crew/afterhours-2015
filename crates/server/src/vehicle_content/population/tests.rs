@@ -1583,14 +1583,21 @@ fn exit_handoff_keeps_car_relations_through_teleport_rollout_and_completion() {
     relations(&players);
     assert!(arrivals.poll(6_000).unwrap().is_empty());
     let stop = arrivals
-        .arrived(&Logic::Reached {
-            event: ARRIVED,
-            target: EntityRef {
-                ghost: sequence,
-                entity: 1,
+        .arrived(
+            &players,
+            owner.connection,
+            owner.persona,
+            &Logic::Reached {
+                event: ARRIVED,
+                target: EntityRef {
+                    ghost: sequence,
+                    entity: 1,
+                },
+                // LogicReached carries the connection-local slot, not the
+                // runtime player index used by the manager above.
+                player: 0,
             },
-            player: 2,
-        })
+        )
         .unwrap()
         .unwrap();
     assert_eq!(stop.sequence, sequence);

@@ -20,6 +20,134 @@ use std::sync::Arc;
 use crate::net::players::test_wire::client_padding;
 
 #[test]
+fn unrelated_waypoint_crossings_from_delegated_racers_are_inert() {
+    crate::net::players::test_wire::with_native_padding(|| {
+        let (mut players, owner, mode, active) =
+            crate::prologue::driving::opponents::tests::finished_fixture();
+        let (template, _, _) = setup();
+        let mut content = (**template.prologue.as_ref().unwrap()).clone();
+        content.driving = Some((mode.clone(), mode));
+        let cars: Vec<_> = active.delegated(&players).keys().copied().collect();
+        assert_eq!(cars.len(), 2);
+        let profiles = sublevel::Content::new(vec![(
+            1998,
+            Profile::new(false, &[Kind::Noop, Kind::RpcWaypoint, Kind::RpcBool]).unwrap(),
+        )])
+        .unwrap();
+        let creation = sublevel::ordinary::creation(
+            98,
+            1998,
+            None,
+            Serial::new(0).unwrap(),
+            &sublevel::ordinary::unpopulated(profiles.profile(1998).unwrap()).unwrap(),
+            &profiles,
+        )
+        .unwrap();
+        let records = players
+            .create_scenes(&[98], vec![creation], &profiles)
+            .unwrap();
+        let (scene, selector) = players.objects().scene_endpoint(1998, 1).unwrap();
+        players.sync_player_views().unwrap();
+        players.sync_player_manager().unwrap();
+        let mut listener =
+            PlayerListener::new(owner.persona).with_prologue(Some(Arc::new(content)));
+        listener.players = players;
+        attach_location_service(&mut listener);
+        listener.replication_origin_ms = Some(100_000);
+        listener.world_ms = 112_100;
+        listener.intro_modes.insert(
+            owner.participant,
+            (active.clone(), active, Chapter::FirstDrive),
+        );
+        listener.trigger_volumes.bind(&records).unwrap();
+        // Fixture startup has not yet published its ordinary rival map.
+        let mut players = listener.players.clone();
+        let location = listener
+            .roles
+            .as_ref()
+            .unwrap()
+            .free_roam
+            .as_ref()
+            .unwrap()
+            .location;
+        assert!(
+            !listener
+                .sync_optional_maps(
+                    &mut players,
+                    &listener.intro_modes.clone(),
+                    &BTreeMap::new(),
+                    location
+                )
+                .is_empty()
+        );
+        listener.players = players;
+        let mut host = crate::net::players::test_wire::session_host();
+        for section in super::super::split_scenes(
+            listener.players.objects().snapshot(),
+            nfs_world::application::OUTBOUND_FRAME_BITS,
+        )
+        .unwrap()
+        {
+            host.queue_replication(section).unwrap();
+        }
+        let before = listener.players.objects().snapshot();
+        let call = |car: u16, selector: u16| {
+            let mut payload = BitWriter::new();
+            payload
+                .put(selector.into(), 9)
+                .put(2, 32)
+                .put(12.1f64.to_bits(), 64)
+                .put(93, 7);
+            let mut body = BitWriter::new();
+            body.put(0, 32)
+                .put(0, 32)
+                .put(2, 8)
+                .put(scene.into(), 13)
+                .put(car.into(), 13)
+                .put(payload.bytes().len() as u64, 9)
+                .put_span(payload.span());
+            body
+        };
+        for (sequence, car) in cars.iter().chain(cars.iter()).enumerate() {
+            assert!(send(
+                &mut listener,
+                sequence as u8,
+                47,
+                call(*car, selector).span()
+            ));
+            assert_eq!(
+                listener
+                    .observation(0, 0, 0, false)
+                    .health
+                    .unsupported_operations,
+                0
+            );
+            assert!(listener.pending_rpcs.is_empty());
+            assert_eq!(listener.players.objects().snapshot(), before);
+            crate::net::players::test_wire::flush(&mut listener, &mut host).unwrap();
+        }
+        // A neighboring Boolean serializer is not a waypoint and stays unsupported.
+        assert!(send(
+            &mut listener,
+            4,
+            47,
+            call(cars[0], selector + 1).span()
+        ));
+        assert_eq!(
+            listener
+                .observation(0, 0, 0, false)
+                .health
+                .unsupported_operations,
+            1
+        );
+        let observations = listener.trigger_volumes.clone();
+        assert!(!send(&mut listener, 5, 47, call(8191, selector).span()));
+        assert_eq!(listener.trigger_volumes, observations);
+        assert_eq!(listener.players.objects().snapshot(), before);
+    });
+}
+
+#[test]
 fn story_opponents_are_delegated_and_retire_after_departures_atomically() {
     crate::net::players::test_wire::with_native_padding(|| {
         let (players, owner, mode, active) =

@@ -1542,6 +1542,7 @@ impl Listener for PlayerListener {
         let mut scheduled_teleports = Vec::new();
         let mut scheduled_binding_refreshes = Vec::new();
         let mut scheduled_returns = Vec::new();
+        let mut pending_returns = self.pending_returns.clone();
         let mut return_trace = false;
         let mut sequences = self.sequences.clone();
         let mut logic_ghosts = self.logic_ghosts.clone();
@@ -1713,18 +1714,30 @@ impl Listener for PlayerListener {
                 if streamed {
                     continue;
                 }
-                // The client played the arrive sequence: stop it (E101, E742).
-                if let Some(stop) = arrivals
-                    .as_mut()
-                    .map(|a| a.arrived(&message))
-                    .transpose()?
-                    .flatten()
+                if pending_returns
+                    .iter_mut()
+                    .any(|pending| pending.confirm(&players, self.persona, &message))
                 {
-                    tracing::info!(
-                        sequence = stop.sequence,
-                        "owned arrive sequence played; stopping it"
-                    );
-                    responses.push(nfs_world::participants::HostRpc::SequenceStop(stop));
+                    continue;
+                }
+                // The client played the arrive sequence: stop it (E101, E742).
+                if let Some(arrivals) = arrivals.as_mut()
+                    && arrivals.recognizes_arrival(
+                        &players,
+                        HOST_SELECTOR as u8,
+                        self.persona,
+                        &message,
+                    )
+                {
+                    if let Some(stop) =
+                        arrivals.arrived(&players, HOST_SELECTOR as u8, self.persona, &message)?
+                    {
+                        tracing::info!(
+                            sequence = stop.sequence,
+                            "owned arrive sequence played; stopping it"
+                        );
+                        responses.push(nfs_world::participants::HostRpc::SequenceStop(stop));
+                    }
                     continue;
                 }
                 if crate::customization_timer::Timers::recognizes(&message) {
@@ -2603,10 +2616,11 @@ impl Listener for PlayerListener {
             match trigger_volumes.receive_retired(
                 body,
                 |id| {
-                    world_cars.contains_key(&id)
+                    (world_cars.contains_key(&id)
                         && players
                             .owned_vehicles(HOST_SELECTOR as u8, self.persona)
-                            .contains(&id)
+                            .contains(&id))
+                        || delegated.contains_key(&id)
                 },
                 |id| players.objects().retired(id),
             ) {
@@ -2806,10 +2820,28 @@ impl Listener for PlayerListener {
                                         return self.refuse_rpc(error, body);
                                     }
                                 }
+                                let confirmation = match self
+                                    .logic
+                                    .as_deref()
+                                    .map(|logic| {
+                                        logic.return_confirmation(
+                                            &players,
+                                            logic_ghosts
+                                                .get(participant)
+                                                .unwrap_or(&BTreeMap::new()),
+                                        )
+                                    })
+                                    .transpose()
+                                {
+                                    Ok(value) => value.flatten(),
+                                    Err(error) => return self.refuse_rpc(error, body),
+                                };
                                 scheduled_returns.push(returning::PendingReturn {
                                     participant: *participant,
                                     requested_ms: self.world_ms,
                                     torn_down: false,
+                                    confirmed: confirmation.is_none(),
+                                    confirmation,
                                     chain,
                                     slots,
                                 });
@@ -3330,7 +3362,8 @@ impl Listener for PlayerListener {
         self.garage_presence = garage_presence;
         self.spawn_points = spawn_points;
         self.level_poll = level_poll;
-        trigger_volumes.retain_vehicles(|id| world_cars.contains_key(&id));
+        trigger_volumes
+            .retain_vehicles(|id| world_cars.contains_key(&id) || delegated.contains_key(&id));
         self.world_cars = world_cars;
         self.trigger_volumes = trigger_volumes;
         self.vehicle_reports = vehicle_reports;
@@ -3343,6 +3376,7 @@ impl Listener for PlayerListener {
         self.pending_settled.extend(scheduled_settled);
         self.arrivals = arrivals;
         self.returns = returns;
+        self.pending_returns = pending_returns;
         self.crashes = crashes;
         if let Some(crashes) = &self.crashes {
             self.pending_rpcs.retain(|rpc| !matches!(

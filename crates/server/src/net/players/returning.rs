@@ -4,7 +4,7 @@
 
 //! The garage return, staged as the official host stages it (E921, both
 //! official returns of E847): the confirming request is answered with the
-//! return-requested presentation event alone; one host frame later the
+//! return-requested presentation event alone; after its client confirmation the
 //! free-roam presentation is deleted and the entry sequence starts with its
 //! path; about 1.4 s after the request the garage car is staged (its content
 //! ahead), the returning presentation is created and the arriving actor
@@ -37,17 +37,50 @@ pub(in crate::net) const RETURN_STAGING_DELAY_MS: u64 = 1_350;
 /// How long client calls are logged after a return begins (diagnostics).
 pub(in crate::net) const RETURN_TRACE_MS: u64 = 12_000;
 
-/// A return in progress: its later stages wait for their world time.
+/// A return in progress: teardown waits for its owned confirmation and world
+/// time; staging follows teardown and its own minimum delay.
 #[derive(Clone, Debug)]
 pub(in crate::net) struct PendingReturn {
     pub participant: u16,
     /// World ms of the confirming request.
     pub requested_ms: u64,
     pub torn_down: bool,
+    /// Current owned callback; retained through staging for in-flight repeats.
+    pub confirmation: Option<nfs_world::logic::Fire>,
+    pub confirmed: bool,
     /// Participant replies to the confirming request; sent with the teardown.
     pub chain: Vec<HostRpc>,
     /// Garage slot refreshes; sent after the staged car.
     pub slots: Vec<HostRpc>,
+}
+
+impl PendingReturn {
+    pub(super) fn confirm(
+        &mut self,
+        players: &Players,
+        persona: u64,
+        message: &nfs_world::logic::Message,
+    ) -> bool {
+        let (
+            Some(expected),
+            nfs_world::logic::Message::Reached {
+                target,
+                event,
+                player,
+            },
+        ) = (&self.confirmation, message)
+        else {
+            return false;
+        };
+        if expected.target != *target
+            || expected.event != *event
+            || players.local_slot(HOST_SELECTOR as u8, persona, self.participant) != Some(*player)
+        {
+            return false;
+        }
+        self.confirmed = true;
+        true
+    }
 }
 
 pub(super) fn empty_section() -> Section {
@@ -192,7 +225,8 @@ impl PlayerListener {
         let mut index = 0;
         while index < self.pending_returns.len() {
             let pending = self.pending_returns[index].clone();
-            let teardown_due = !pending.torn_down
+            let teardown_due = pending.confirmed
+                && !pending.torn_down
                 && world_ms
                     >= pending
                         .requested_ms

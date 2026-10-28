@@ -44,7 +44,7 @@ pub fn unpopulated(profile: &Profile) -> Result<Vec<Value>, Error> {
                 Kind::RpcTagged => Value::Tagged(Vec::new()),
                 Kind::RpcOptional64 => Value::Optional64(None),
                 Kind::RpcGuid => Value::Guid(None),
-                Kind::RpcBool => Value::Boolean(false),
+                Kind::RpcBool | Kind::RpcWaypoint => Value::Boolean(false),
                 Kind::RpcTriggerVolume => Value::Boolean(true),
                 Kind::RpcMap => Value::Map(Vec::new()),
                 Kind::RpcFourReferences => Value::FourReferences([Some(0); 4]),
@@ -127,7 +127,7 @@ pub fn creation(
                 (Initial::RpcOptional64 { rpc, value: *v }, Update::Noop)
             }
             (Kind::RpcGuid, Value::Guid(v)) => (Initial::RpcGuid { rpc, value: *v }, Update::Noop),
-            (Kind::RpcBool | Kind::RpcTriggerVolume, Value::Boolean(v)) => {
+            (Kind::RpcBool | Kind::RpcTriggerVolume | Kind::RpcWaypoint, Value::Boolean(v)) => {
                 (Initial::RpcBool { rpc, value: *v }, Update::Noop)
             }
             (Kind::RpcMap, Value::Map(v)) => (

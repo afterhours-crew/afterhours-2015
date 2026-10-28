@@ -42,10 +42,11 @@ fn generated_trigger_profiles_preserve_enabled_collision_listeners() {
             guid(1),
             "SubWorldData",
             guid(0x81),
-            vec![("Objects", Field::RawPointers(vec![2, 3]))],
+            vec![("Objects", Field::RawPointers(vec![2, 3, 4]))],
             vec![
                 ("TriggerVolumeEntityData", vec![]),
                 ("BoolPropertyClientNotificationEntityData", vec![]),
+                ("VolumeWaypointEntityData", vec![]),
             ],
         ),
     };
@@ -54,6 +55,7 @@ fn generated_trigger_profiles_preserve_enabled_collision_listeners() {
     for class in [
         "TriggerVolumeEntityData",
         "BoolPropertyClientNotificationEntityData",
+        "VolumeWaypointEntityData",
     ] {
         f.index
             .identity
@@ -64,11 +66,21 @@ fn generated_trigger_profiles_preserve_enabled_collision_listeners() {
     let profile = f.index.scene("scene").unwrap().profile;
     assert_eq!(
         profile.kinds(),
-        [Kind::Noop, Kind::RpcTriggerVolume, Kind::RpcBool]
+        [
+            Kind::Noop,
+            Kind::RpcTriggerVolume,
+            Kind::RpcBool,
+            Kind::RpcWaypoint
+        ]
     );
     assert_eq!(
         ordinary::unpopulated(&profile).unwrap(),
-        [Value::Noop, Value::Boolean(true), Value::Boolean(false)]
+        [
+            Value::Noop,
+            Value::Boolean(true),
+            Value::Boolean(false),
+            Value::Boolean(false)
+        ]
     );
     for kind in profile.kinds() {
         assert_eq!(Kind::from_name(kind.name()), Some(*kind));

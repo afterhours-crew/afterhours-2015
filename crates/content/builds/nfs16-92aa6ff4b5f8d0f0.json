@@ -658,7 +658,7 @@
       "VisualEnvironmentEntityData": null,
       "VisualEnvironmentReferenceObjectData": null,
       "VolumeParticipantSetFilterEntityData": "rpc",
-      "VolumeWaypointEntityData": "rpc_bool",
+      "VolumeWaypointEntityData": "rpc_waypoint",
       "WYWScoreDisplayEntityData": null,
       "WaitForPendingItemUpdatesParticipantStateEntityData": "rpc_references",
       "WanderCommandEntityData": null,

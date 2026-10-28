@@ -559,3 +559,106 @@ pub(super) fn arrival_section(
         }),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nfs_world::{
+        logic::{EntityRef, Message},
+        participants::HostRpc,
+        replication::entity::creation::{Asset, Catalog, Content},
+        sequences::{Component, Definition, Layout},
+    };
+
+    #[test]
+    fn repeated_arrival_reports_are_consumed_without_repeating_the_stop() {
+        let (mut players, _, participant) = crate::event_logic::tests::world();
+        let persona = crate::event_logic::tests::PERSONA;
+        let component = Component {
+            scene_key: crate::event_logic::tests::GAMEPLAY,
+            index: 1,
+        };
+        let definition = Definition {
+            presentation: None,
+            layout: Layout::GarageExit,
+            asset: Asset {
+                bundle: 30,
+                type_id: 42,
+                local_index: 0,
+            },
+            manager: component,
+            channel: component,
+            embedded_bus: 2,
+        };
+        let content = Content::new(
+            vec![Catalog::new(30, &[(42, 1)]).unwrap()],
+            vec![(definition.asset, definition.layout.profile())],
+        )
+        .unwrap();
+        let mut arrivals = Arrivals::new(definition, content).unwrap();
+        let owner = Owner {
+            connection: HOST_SELECTOR as u8,
+            persona,
+            participant,
+        };
+        let ghost = arrivals.start(&mut players, owner).unwrap().unwrap().id;
+        let mut host = crate::net::players::test_wire::session_host();
+        for section in split_scenes(
+            players.objects().snapshot(),
+            nfs_world::application::OUTBOUND_FRAME_BITS,
+        )
+        .unwrap()
+        {
+            host.queue_replication(section).unwrap();
+        }
+        let mut listener = PlayerListener::new(persona);
+        listener.players = players;
+        listener.arrivals = Some(arrivals);
+        let message = Message::Reached {
+            event: nfs_world::arrival::ARRIVED,
+            player: 0,
+            target: EntityRef { ghost, entity: 1 },
+        }
+        .encode()
+        .unwrap();
+        for sequence in 0..3 {
+            let wire = frame::Builder::new()
+                .messages(
+                    None,
+                    vec![frame::Group {
+                        channel: 0,
+                        sequence: Some(sequence),
+                        messages: vec![frame::Message::Opaque {
+                            index: 82,
+                            body: message.span(),
+                        }],
+                    }],
+                )
+                .build()
+                .unwrap();
+            assert!(listener.frame(Queued {
+                advertised: None,
+                frame: sequence.into(),
+                data: wire.span(),
+            }));
+            assert_eq!(
+                listener
+                    .pending_rpcs
+                    .iter()
+                    .filter(
+                        |call| matches!(call, HostRpc::SequenceStop(stop) if stop.sequence == ghost)
+                    )
+                    .count(),
+                usize::from(sequence == 0)
+            );
+            assert_eq!(
+                listener
+                    .observation(0, 0, 0, false)
+                    .health
+                    .unsupported_operations,
+                0
+            );
+            crate::net::players::test_wire::flush(&mut listener, &mut host).unwrap();
+        }
+    }
+}

@@ -330,11 +330,65 @@ fn return_handlers_publish_valid_frames_restore_loading_and_allow_three_exits() 
                 participant,
                 requested_ms,
                 torn_down: false,
+                confirmation: Some(nfs_world::logic::Fire {
+                    event: 33,
+                    player: None,
+                    target: nfs_world::logic::EntityRef {
+                        ghost: scene,
+                        entity: 1,
+                    },
+                }),
+                confirmed: false,
                 chain,
                 slots,
             });
             listener.advance_returns(requested_ms + RETURN_TEARDOWN_DELAY_MS - 1);
             assert!(listener.pending_entries.is_empty());
+            listener.advance_returns(requested_ms + RETURN_TEARDOWN_DELAY_MS);
+            assert!(
+                listener.pending_entries.is_empty(),
+                "teardown must await the owned confirmation"
+            );
+            let reached = nfs_world::logic::Message::Reached {
+                event: 33,
+                player: 0,
+                target: nfs_world::logic::EntityRef {
+                    ghost: scene,
+                    entity: 1,
+                },
+            }
+            .encode()
+            .unwrap();
+            for sequence in 0..2 {
+                let wire = frame::Builder::new()
+                    .messages(
+                        None,
+                        vec![frame::Group {
+                            channel: 0,
+                            sequence: Some(sequence),
+                            messages: vec![frame::Message::Opaque {
+                                index: 82,
+                                body: reached.span(),
+                            }],
+                        }],
+                    )
+                    .build()
+                    .unwrap();
+                assert!(listener.frame(Queued {
+                    advertised: None,
+                    frame: sequence.into(),
+                    data: wire.span()
+                }));
+                assert!(listener.pending_returns[0].confirmed);
+                assert_eq!(
+                    listener
+                        .observation(0, 0, 0, false)
+                        .health
+                        .unsupported_operations,
+                    0
+                );
+                crate::net::players::test_wire::flush(&mut listener, &mut transport).unwrap();
+            }
             listener.advance_returns(requested_ms + RETURN_TEARDOWN_DELAY_MS);
             assert_eq!(listener.pending_entries.len(), 1);
             assert!(listener.pending_returns[0].torn_down);
@@ -442,4 +496,58 @@ fn return_handlers_publish_valid_frames_restore_loading_and_allow_three_exits() 
             lifecycle.enter_customization(participant);
         }
     });
+}
+
+#[test]
+fn return_confirmation_rejects_foreign_slots_accounts_and_identities() {
+    let (players, _, participant) = crate::event_logic::tests::world();
+    let persona = crate::event_logic::tests::PERSONA;
+    let expected = nfs_world::logic::Fire {
+        event: 33,
+        player: None,
+        target: nfs_world::logic::EntityRef {
+            ghost: 100,
+            entity: 3,
+        },
+    };
+    let mut pending = PendingReturn {
+        participant,
+        requested_ms: 0,
+        torn_down: false,
+        confirmation: Some(expected),
+        confirmed: false,
+        chain: vec![],
+        slots: vec![],
+    };
+    let reached = |ghost, entity, event, player| nfs_world::logic::Message::Reached {
+        event,
+        player,
+        target: nfs_world::logic::EntityRef { ghost, entity },
+    };
+    for message in [
+        reached(101, 3, 33, 0),
+        reached(100, 2, 33, 0),
+        reached(100, 3, 34, 0),
+        reached(100, 3, 33, 1),
+        reached(100, 3, 33, 255),
+    ] {
+        assert!(!pending.confirm(&players, persona, &message));
+        assert!(!pending.confirmed);
+    }
+    let message = reached(100, 3, 33, 0);
+    assert!(!pending.confirm(&players, persona + 1, &message));
+    assert!(pending.confirm(&players, persona, &message));
+    pending.torn_down = true;
+    assert!(
+        pending.confirm(&players, persona, &message),
+        "in-flight retry after teardown"
+    );
+    pending.confirmation.as_mut().unwrap().target.ghost = 101;
+    pending.confirmed = false;
+    assert!(
+        !pending.confirm(&players, persona, &message),
+        "previous return cannot confirm the next instance"
+    );
+    assert!(!pending.confirmed);
+    assert!(pending.confirm(&players, persona, &reached(101, 3, 33, 0)));
 }
