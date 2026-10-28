@@ -123,6 +123,16 @@ The server edge uses Tokio 1.53.2 (MIT), tracing 0.1.44 (MIT) and
 tracing-subscriber 0.3.23 (MIT). Versions/checksums are locked; these dependencies
 remain at the socket/diagnostic edge rather than in the sans-IO service models.
 
+## Compatibility regressions
+
+Compatibility fixes retain the original failing control and a related case
+exercising the shared mechanism. For transitions affected by message timing,
+include valid order variations, bounded retries and the subsequent transition.
+Assert resulting state and ownership, not just successful encoding or message
+counts. Keep tests constructed and portable; private reference provenance stays
+in the research workspace. Distinguish implemented, offline-tested and
+game-validated in review notes.
+
 ## Local packet-loss diagnostics
 
 Normal server builds do not include packet-loss controls. For a copied test

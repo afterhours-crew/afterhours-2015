@@ -15,7 +15,9 @@
 //! the current group (official E1026 1311.173 s) is acknowledged with a
 //! player-removed notification for the group (`LFPJ` 1); the group's
 //! disconnected report to no connection follows (1311.367 s). The caller may
-//! then rebind departure to the client's new group.
+//! then rebind departure to the client's new group. The most recently retired
+//! group remains eligible for disconnected reports if renewal commits first;
+//! it cannot leave again or change the replacement group's state.
 use crate::{
     bootstrap::body_limits,
     world_readiness::{Binding, frame, wire},
@@ -62,6 +64,9 @@ enum Staged {
 
 pub struct Departure {
     binding: Binding,
+    // Renewal may finish before the retired group's disconnected report.
+    // Keep one tombstone for bounded retries without rebinding the new group.
+    retired_group: Option<u64>,
     left: bool,
     group_left: bool,
     reports: usize,
@@ -74,6 +79,7 @@ impl Departure {
         binding.validate(true).map_err(|_| Error::Context)?;
         Ok(Self {
             binding,
+            retired_group: None,
             left: false,
             group_left: false,
             reports: 0,
@@ -91,9 +97,17 @@ impl Departure {
     }
     /// The client's new group replaces the one it left.
     pub fn rebind_group(&mut self, group: u64) -> Result<(), Error> {
-        if !self.group_left || self.staged.is_some() || group == 0 || group == self.binding.group {
+        if !self.group_left
+            || self.staged.is_some()
+            || group == 0
+            || group > i64::MAX as u64
+            || group == self.binding.group
+            || group == self.binding.game
+            || group == self.binding.matchmaking
+        {
             return Err(Error::Context);
         }
+        self.retired_group = Some(self.binding.group);
         self.binding.group = group;
         self.group_left = false;
         Ok(())
@@ -185,6 +199,9 @@ impl Departure {
             Some(g) if g == b.group => {
                 q.target_group_id == Some(local)
                     || (self.group_left && q.target_group_id == Some(ObjectId(30722, 2, 0)))
+            }
+            Some(g) if Some(g) == self.retired_group => {
+                q.target_group_id == Some(local) || q.target_group_id == Some(ObjectId(30722, 2, 0))
             }
             _ => false,
         };
