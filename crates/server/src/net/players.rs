@@ -1799,14 +1799,16 @@ impl Listener for PlayerListener {
                                 .is_some_and(|(p, _)| *p == owner.participant))
                     {
                         responses.push(nfs_world::participants::HostRpc::Event(fire));
-                        if let Some((records, calls, command)) = Self::intro_car_ready(
-                            self.prologue.as_deref(),
-                            &mut players,
-                            &mut participants,
-                            self.persona,
-                            owner.participant,
-                            target.ghost,
-                        )? {
+                        if world_cars.get(&target.ghost) == Some(&(owner.participant, false))
+                            && let Some((records, calls, command)) = Self::intro_car_ready(
+                                self.prologue.as_deref(),
+                                &mut players,
+                                &mut participants,
+                                self.persona,
+                                owner.participant,
+                                target.ghost,
+                            )?
+                        {
                             deferred_sections.extend(Self::binding_sections(records)?);
                             responses.extend(calls);
                             scheduled_teleports.push((self.world_ms, command));

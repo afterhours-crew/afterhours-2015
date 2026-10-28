@@ -407,7 +407,23 @@ impl PlayerListener {
                     calls.extend(chain.into_iter().map(HostRpc::Participant));
                     teleports.push((self.world_ms, command));
                 }
-                Some(Stage::IntroSpawning) if !cars.values().any(|(p, _)| *p == participant) => {
+                Some(Stage::IntroSpawning)
+                    if self.pending.is_empty()
+                        && self.pending_rpcs.is_empty()
+                        && self.pending_content.is_empty() =>
+                {
+                    let Outcome::Advanced(chain) = participants.intro_teleport_begin(participant)
+                    else {
+                        return Err(replication::Error::Shape);
+                    };
+                    calls.extend(chain.into_iter().map(HostRpc::Participant));
+                }
+                Some(Stage::IntroTeleporting)
+                    if !cars.values().any(|(p, _)| *p == participant)
+                        && self.pending.is_empty()
+                        && self.pending_rpcs.is_empty()
+                        && self.pending_content.is_empty() =>
+                {
                     if cars.len() >= MAX_WORLD_CARS {
                         return Err(replication::Error::Bound);
                     }
@@ -1087,7 +1103,7 @@ impl PlayerListener {
         participant: u16,
         vehicle: u16,
     ) -> Result<Option<Ready>, replication::Error> {
-        if participants.stage(participant) != Some(Stage::IntroSpawning) {
+        if participants.stage(participant) != Some(Stage::IntroTeleporting) {
             return Ok(None);
         }
         let content = content.ok_or(replication::Error::Unsupported)?;
@@ -1143,14 +1159,7 @@ impl PlayerListener {
             speed: 0.,
         };
         command.encode()?;
-        let Outcome::Advanced(calls) = participants.intro_vehicle_ready(participant) else {
-            return Err(replication::Error::Shape);
-        };
-        Ok(Some((
-            records,
-            calls.into_iter().map(HostRpc::Participant).collect(),
-            command,
-        )))
+        Ok(Some((records, Vec::new(), command)))
     }
     pub(super) fn opening_signal(
         content: &crate::prologue::Content,

@@ -480,7 +480,9 @@ impl Lifecycle {
         self.intro_started.insert(participant, Chapter::FirstDrive);
         Ok(out)
     }
-    pub fn intro_vehicle_ready(&mut self, participant: u16) -> Outcome {
+    /// Enter the teleport state before creating the intro car. Readiness of
+    /// that owned car gates the later teleport command, not this membership.
+    pub fn intro_teleport_begin(&mut self, participant: u16) -> Outcome {
         let Some(i) = self.intro else {
             return Outcome::Unsupported;
         };

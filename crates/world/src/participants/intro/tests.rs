@@ -237,7 +237,7 @@ fn completed_selection_enters_the_owned_car_spawn_once_without_restarting_the_op
     assert_eq!(model.intro_chapter(9), None);
     assert_eq!(model.intro_selection_complete(9), Outcome::Unsupported);
     assert_eq!(
-        calls(model.intro_vehicle_ready(8)),
+        calls(model.intro_teleport_begin(8)),
         vec![(2, Call::Leave), (76, Call::Enter)]
     );
     assert_eq!(model.intro_chapter(8), Some(Chapter::FirstRace));
@@ -322,10 +322,10 @@ fn actor_and_empty_runtime_item_precede_spawning_and_leave_the_owned_garage_inta
     assert_eq!(model.intro_drive_ready(8), Outcome::Unsupported);
     assert_eq!(model.intro_opening_complete(8), Outcome::Unsupported);
     assert_eq!(
-        calls(model.intro_vehicle_ready(8)),
+        calls(model.intro_teleport_begin(8)),
         [(2, Call::Leave), (76, Call::Enter)]
     );
-    assert_eq!(model.intro_vehicle_ready(8), Outcome::Repeated);
+    assert_eq!(model.intro_teleport_begin(8), Outcome::Repeated);
 }
 
 #[test]
@@ -337,7 +337,7 @@ fn owned_acknowledgements_gate_render_opening_and_first_mode_without_duplicate_o
     let before = model.clone();
     assert!(model.receive(teleport.span(), |p| p == 8).is_err());
     assert_eq!(model, before);
-    model.intro_vehicle_ready(8);
+    model.intro_teleport_begin(8);
     let before = model.clone();
     assert!(model.receive(rendering.span(), |p| p == 8).is_err());
     assert_eq!(model, before);
@@ -420,7 +420,7 @@ fn owned_acknowledgements_gate_render_opening_and_first_mode_without_duplicate_o
 fn early_intro_router_does_not_consume_another_participants_shared_teleport() {
     let mut model = ready();
     model.enter_intro_with_actor(actor()).unwrap();
-    model.intro_vehicle_ready(8);
+    model.intro_teleport_begin(8);
     model.stages.insert(9, Stage::FreeRoam);
     assert_eq!(
         model
@@ -535,7 +535,7 @@ fn ordinary_garage_progression_still_uses_its_own_route_when_intro_is_bound() {
             .iter()
             .any(|n| n.endpoint == model.bindings.unwrap().enter_garage_from_boot)
     );
-    assert_eq!(model.intro_vehicle_ready(8), Outcome::Unsupported);
+    assert_eq!(model.intro_teleport_begin(8), Outcome::Unsupported);
     let before = model.clone();
     assert_eq!(
         model

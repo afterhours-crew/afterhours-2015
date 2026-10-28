@@ -584,7 +584,7 @@ mod tests {
         let (mut listener, participant, _) = super::super::tests::setup();
         let intro = listener.participants.intro_bindings().unwrap();
         assert!(matches!(
-            listener.participants.intro_vehicle_ready(participant),
+            listener.participants.intro_teleport_begin(participant),
             Outcome::Advanced(_)
         ));
         for (endpoint, method) in [(intro.teleport, 3), (intro.render_ready, 0)] {

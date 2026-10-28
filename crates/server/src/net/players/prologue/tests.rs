@@ -626,6 +626,63 @@ fn opening_runs_after_car_and_render_readiness_and_waits_for_native_completion()
         ready_for_selection(false);
     });
 }
+
+#[test]
+fn intro_teleport_entry_precedes_car_creation_and_the_command_waits_for_readiness() {
+    let (mut listener, participant, _) = setup();
+    let mut host = crate::net::players::test_wire::session_host();
+    for section in super::super::split_scenes(
+        listener.players.objects().snapshot(),
+        nfs_world::application::OUTBOUND_FRAME_BITS,
+    )
+    .unwrap()
+    {
+        host.queue_replication(section).unwrap();
+    }
+    tick_with_normal_presentation(&mut listener).unwrap();
+    assert_eq!(
+        listener.participants.stage(participant),
+        Some(Stage::IntroTeleporting)
+    );
+    assert!(
+        listener
+            .players
+            .temporary_vehicle(HOST_SELECTOR as u8, listener.persona, participant)
+            .is_none()
+    );
+    assert!(listener.pending_teleports.is_empty());
+    let teleport = listener.participants.intro_bindings().unwrap().teleport;
+    assert!(listener.pending_rpcs.iter().chain(listener.pending_entries.iter().flat_map(|(_, calls)| calls)).any(|call|
+        matches!(call, HostRpc::Participant(n) if n.participant == participant && n.endpoint == teleport && n.call == nfs_world::participants::Call::Enter)));
+    crate::net::players::test_wire::flush(&mut listener, &mut host).unwrap();
+    tick_with_normal_presentation(&mut listener).unwrap();
+    let vehicle = listener
+        .players
+        .temporary_vehicle(HOST_SELECTOR as u8, listener.persona, participant)
+        .unwrap();
+    assert!(listener.pending_teleports.is_empty());
+    crate::net::players::test_wire::flush(&mut listener, &mut host).unwrap();
+    let ready = nfs_world::logic::Message::Reached {
+        event: 21_578_436,
+        target: nfs_world::logic::EntityRef {
+            ghost: vehicle,
+            entity: 2,
+        },
+        player: 0,
+    }
+    .encode()
+    .unwrap();
+    assert!(send(&mut listener, 0, 82, ready.span()));
+    assert_eq!(listener.pending_teleports.len(), 1);
+    crate::net::players::test_wire::flush(&mut listener, &mut host).unwrap();
+    assert!(send(&mut listener, 1, 82, ready.span()));
+    assert_eq!(
+        listener.pending_teleports.len(),
+        1,
+        "an in-flight repeat cannot queue a second teleport"
+    );
+    crate::net::players::test_wire::flush(&mut listener, &mut host).unwrap();
+}
 pub(super) fn ready_for_selection(
     with_services: bool,
 ) -> (PlayerListener, u16, Arc<nfs_world::items::Collection>) {
@@ -678,6 +735,18 @@ pub(super) fn ready_for_selection(
         bank: None,
     });
     let before = (*items).clone();
+    tick_with_normal_presentation(&mut listener).unwrap();
+    assert_eq!(
+        listener.participants.stage(participant),
+        Some(Stage::IntroTeleporting)
+    );
+    assert!(
+        listener
+            .players
+            .temporary_vehicle(HOST_SELECTOR as u8, listener.persona, participant)
+            .is_none()
+    );
+    drain(&mut listener);
     tick_with_normal_presentation(&mut listener).unwrap();
     let vehicle = listener
         .players
@@ -1506,7 +1575,7 @@ fn full_output_queue_preserves_the_car_allocation_and_readiness_gate() {
                 .scene_membership
                 .as_ref()
                 .unwrap()
-                .contains(3, participant)
+                .contains(77, participant)
         );
         let presentation = listener.players.objects().iter().find_map(|(id, object)|
             matches!(&object.initial, replication::Initial::Entity { prefix, .. } if prefix.asset == asset).then_some(id)).unwrap();
@@ -1517,6 +1586,27 @@ fn full_output_queue_preserves_the_car_allocation_and_readiness_gate() {
                 .flat_map(|section| &section.records)
                 .any(|record| record.id == presentation && record.initial.is_some())
         );
+        assert!(
+            listener
+                .players
+                .temporary_vehicle(HOST_SELECTOR as u8, listener.persona, participant)
+                .is_none()
+        );
+        drain(&mut listener);
+        let before_car = listener.players.objects().snapshot();
+        listener
+            .pending
+            .resize(MAX_PENDING, super::super::returning::empty_section());
+        tick_with_normal_presentation(&mut listener).unwrap();
+        assert_eq!(listener.players.objects().snapshot(), before_car);
+        assert!(
+            listener
+                .players
+                .temporary_vehicle(HOST_SELECTOR as u8, listener.persona, participant)
+                .is_none()
+        );
+        drain(&mut listener);
+        tick_with_normal_presentation(&mut listener).unwrap();
         let vehicle = listener
             .players
             .temporary_vehicle(HOST_SELECTOR as u8, listener.persona, participant)
@@ -1538,14 +1628,14 @@ fn full_output_queue_preserves_the_car_allocation_and_readiness_gate() {
         .unwrap();
         assert!(!send(&mut listener, 0, 82, glass.span()));
         assert!(
-            listener
+            !listener
                 .scene_membership
                 .as_ref()
                 .unwrap()
                 .contains(3, participant)
         );
         assert!(
-            !listener
+            listener
                 .scene_membership
                 .as_ref()
                 .unwrap()
@@ -1554,7 +1644,7 @@ fn full_output_queue_preserves_the_car_allocation_and_readiness_gate() {
         assert_eq!(listener.players.objects().snapshot(), before);
         assert_eq!(
             listener.participants.stage(participant),
-            Some(Stage::IntroSpawning)
+            Some(Stage::IntroTeleporting)
         );
         assert!(listener.pending_teleports.is_empty());
         drain(&mut listener);
@@ -1652,6 +1742,18 @@ fn selected_car_reuses_native_startup_and_waits_for_previous_mode_retirement() {
         assert_eq!(listener.players.objects().snapshot(), before);
         drain(&mut listener);
         tick_with_normal_presentation(&mut listener).unwrap();
+        assert_eq!(
+            listener.participants.stage(participant),
+            Some(Stage::IntroTeleporting)
+        );
+        assert_eq!(
+            listener
+                .players
+                .owned_vehicle(HOST_SELECTOR as u8, persona, participant, item),
+            Some(garage)
+        );
+        drain(&mut listener);
+        tick_with_normal_presentation(&mut listener).unwrap();
         let car = listener
             .players
             .owned_vehicle(HOST_SELECTOR as u8, persona, participant, item)
@@ -1697,7 +1799,7 @@ fn selected_car_reuses_native_startup_and_waits_for_previous_mode_retirement() {
         assert!(!send(&mut listener, 28, 82, glass.span()));
         assert_eq!(
             listener.participants.stage(participant),
-            Some(Stage::IntroSpawning)
+            Some(Stage::IntroTeleporting)
         );
         assert!(listener.pending_teleports.is_empty());
         drain(&mut listener);

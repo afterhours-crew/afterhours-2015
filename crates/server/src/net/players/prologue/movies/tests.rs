@@ -29,7 +29,7 @@ fn fixture() -> (PlayerListener, u16, Endpoint) {
     let (mut listener, participant) = super::super::selection::tests::selected(true);
     let bindings = listener.participants.intro_bindings().unwrap();
     assert!(matches!(
-        listener.participants.intro_vehicle_ready(participant),
+        listener.participants.intro_teleport_begin(participant),
         Outcome::Advanced(_)
     ));
     // Startup acknowledgements carry opaque byte-alignment bits too.
