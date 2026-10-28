@@ -27,9 +27,10 @@ fn rpc_message(rpc: crate::participants::HostRpc) -> frame::Message<'static> {
         HostRpc::Garage(v) => frame::Message::GarageBinding(v),
         HostRpc::Actor(v) => frame::Message::ActorBinding(v),
         HostRpc::Vehicle(v) => frame::Message::VehicleBinding(v),
-        HostRpc::GaragePresence(v) | HostRpc::SpawnOccupied(v) | HostRpc::LevelPoll(v) => {
-            frame::Message::GaragePresence(v)
-        }
+        HostRpc::GaragePresence(v)
+        | HostRpc::SpawnOccupied(v)
+        | HostRpc::LevelPoll(v)
+        | HostRpc::ModeNotification(v) => frame::Message::GaragePresence(v),
         HostRpc::SequenceStop(v) => frame::Message::SequenceStop(v),
         HostRpc::Event(v) => frame::Message::LogicEvent(v),
         HostRpc::WorldActivation(v) => frame::Message::WorldActivation(v),
@@ -648,6 +649,7 @@ impl Host {
             | crate::participants::HostRpc::GaragePresence(_)
             | crate::participants::HostRpc::SpawnOccupied(_)
             | crate::participants::HostRpc::LevelPoll(_)
+            | crate::participants::HostRpc::ModeNotification(_)
             | crate::participants::HostRpc::SequenceStop(_)
             | crate::participants::HostRpc::Event(_)
             | crate::participants::HostRpc::Query(_)

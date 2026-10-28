@@ -101,6 +101,23 @@ impl PlayerListener {
             &self.players,
             request.participant,
         )?;
+        // A message is announced once, by the commit that stored it.
+        if let crate::net::items::story::Action::Message { hash, manager } = request.action
+            && let Some(messages) = &request.progression.messages
+        {
+            let held = |loaded: &crate::persistent::Loaded| {
+                nfs_services::messages::rows(loaded.tables(), manager.table())
+                    .map(|rows| rows.iter().any(|r| r.hash == hash))
+                    .map_err(|_| replication::Error::Shape)
+            };
+            if !held(before)? && held(&committed.loaded)? {
+                calls.push(messages.added(self.players.objects(), manager, hash)?);
+            }
+        }
+        // A tutorial accept is durable: its logic goes at the next advance.
+        if let crate::net::items::story::Action::Tutorial { key } = request.action {
+            self.tutorial_committed(request.participant, key, &committed.loaded)?;
+        }
         let mut modes = self.intro_modes.clone();
         if let crate::net::items::story::Action::Complete { objective } = request.action
             && let Some((active, _, chapter)) = modes.get_mut(&request.participant)
@@ -143,6 +160,7 @@ impl PlayerListener {
         let mut participants = self.participants.clone();
         let mut selection = self.selection.clone();
         let mut states = self.selection_execution.clone();
+        let mut logic_ghosts = self.logic_ghosts.clone();
         let mut output = crate::vehicle_content::population::Output::default();
         if let crate::net::items::story::Action::Complete { objective } = request.action
             && let Some(content) = self.prologue.as_deref()
@@ -191,6 +209,14 @@ impl PlayerListener {
             output.records.extend(shutdown.records);
             output.deleted.extend(shutdown.deleted);
             calls.extend(shutdown.calls);
+            if let Some(logic) = self.logic.as_deref() {
+                let ghosts = logic_ghosts.entry(request.participant).or_default();
+                output.records.extend(logic.produce_intro_handoff(
+                    &mut players,
+                    request.participant,
+                    ghosts,
+                )?);
+            }
         }
         if let (Some(population), Some(old), Some(next)) =
             (&mut population, &self.inventory, &inventory)
@@ -330,6 +356,7 @@ impl PlayerListener {
             return Err(replication::Error::Bound);
         }
         self.players = players;
+        self.logic_ghosts = logic_ghosts;
         self.intro_modes = modes;
         self.participants = participants;
         self.scene_membership = scene_membership.session;
@@ -338,9 +365,14 @@ impl PlayerListener {
         self.pending.extend(sections);
         self.pending_content.extend(output.messages);
         self.pending_rpcs.extend(calls);
+        let licensed = self.licensed_after_completion(request, &committed.loaded)?;
+        if licensed.len() > MAX_PENDING.saturating_sub(self.story_pending.len()) {
+            return Err(replication::Error::Bound);
+        }
         self.population = population;
         self.inventory = inventory;
         self.persistent = Some(committed.loaded);
+        self.story_pending.extend(licensed);
         Ok(())
     }
 }

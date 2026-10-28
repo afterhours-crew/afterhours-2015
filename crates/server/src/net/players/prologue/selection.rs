@@ -130,6 +130,7 @@ impl State {
                 .ok_or(replication::Error::Unsupported)
         };
         let mut unload = BTreeSet::new();
+        let mut unload_order = Vec::new();
         for command in out.commands {
             match command {
                 Effect::Award {
@@ -297,6 +298,7 @@ impl State {
                     {
                         return Err(replication::Error::Shape);
                     }
+                    unload_order.push((content_key, serializer));
                 }
                 Effect::Stop => {
                     if self.receipt.is_none() || !self.unloaded {
@@ -329,6 +331,26 @@ impl State {
                         participant: context.owner.participant,
                     },
                 )?;
+                // The slots themselves unload too: VehicleSlot method 2 on
+                // each preview slot for the participant (official E1026
+                // 498.920 s; client OnVehicleUnloaded, trace ph5 5.2).
+                for (key, serializer) in unload_order {
+                    let (scene, selector) = context
+                        .players
+                        .objects()
+                        .scene_endpoint(key, serializer)
+                        .ok_or(replication::Error::UnknownObject)?;
+                    effects
+                        .calls
+                        .push(HostRpc::GameMode(crate::event_logic::call(
+                            context.players.objects(),
+                            scene,
+                            selector,
+                            2,
+                            Some(context.owner.participant),
+                            nfs_world::game_mode::Arguments::None,
+                        )?));
+                }
                 self.unloaded = true;
             }
         }

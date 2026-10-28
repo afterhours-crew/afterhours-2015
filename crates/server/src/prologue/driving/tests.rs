@@ -11,6 +11,11 @@ pub(crate) fn configure_shutdown(mode: &mut Mode, active: &mut Active, objective
             instances: vec![],
         },
         event: 41,
+        compare: Identity {
+            asset: "test".into(),
+            index: 1,
+            instances: vec![],
+        },
     });
     active.callbacks = Some(super::reporters::tests::shutdown_fixture(
         active.owner.participant,
@@ -213,6 +218,11 @@ pub(crate) fn content(parent: Asset, manager: Component) -> (Mode, Mode) {
     )
     .unwrap();
     let data = intro::Mode {
+        timed_events: vec![],
+        timed_messages: vec![],
+        prefab: "test/intro/mode".into(),
+        categories: Default::default(),
+        shutdown_row: None,
         shutdown: None,
         owned_filters: vec![],
         launch_event: None,
@@ -407,6 +417,7 @@ fn final_dependency_publications_wait_for_the_owned_leave_acknowledgement() {
     let mut data = base.data;
     data.game_mode.lifecycle.states[1].kind = StateKind::Simple;
     data.game_mode.lifecycle.root_state = Some(3);
+    data.categories = BTreeSet::from([7]);
     data.game_mode.lifecycle.transitions.push(data::Transition {
         serializer: 6,
         kind: data::TransitionKind::Completed,
@@ -434,6 +445,11 @@ fn final_dependency_publications_wait_for_the_owned_leave_acknowledgement() {
             .is_err()
     );
     active.advance(&mode, &mut players, 15.).unwrap();
+    // Outside its root state the mode still holds the participant: official
+    // race 1 sets its in-mode flags at 573.620 s, before the root state
+    // admits the participant at 573.921 s.
+    assert!(active.host.machine().members(3).unwrap().is_empty());
+    assert_eq!(active.held_categories(&mode), Some(&BTreeSet::from([7])));
     let sequence = active.sequences[&1].ghost(owner.participant).unwrap();
     let out = active
         .completed(
@@ -464,6 +480,7 @@ fn final_dependency_publications_wait_for_the_owned_leave_acknowledgement() {
         ]
     );
     assert!(active.ending);
+    assert_eq!(active.held_categories(&mode), Some(&BTreeSet::from([7])));
     // The shared hook completes normally, even while publication awaits ACK.
     assert!(active.host.machine().members(2).unwrap().is_empty());
     assert!(
@@ -643,7 +660,20 @@ fn zero_countdown_stops_before_native_ack_and_does_not_transition_twice() {
         sequence,
         participant: owner.participant,
     };
-    assert!(active.completed(&mode, &mut players, call, 123).is_err());
+    // The zero countdown is created stopping (official E1026 585.125): the
+    // client completes it unprompted, before the host clock's deadline.
+    let created = players.objects().get(sequence).unwrap();
+    assert!(matches!(&created.initial,
+        nfs_world::replication::Initial::Entity { fields, .. }
+            if matches!(fields.first(),
+                Some(nfs_world::replication::entity::Initial::SequenceRoot { stopping: true, .. }
+                    | nfs_world::replication::entity::Initial::VehicleSequenceRoot { stopping: true, .. }))));
+    let ack = active.completed(&mode, &mut players, call, 123).unwrap();
+    assert_eq!(ack.deleted, vec![sequence]);
+    assert!(
+        ack.calls.is_empty(),
+        "native acknowledgement must not advance membership"
+    );
     assert!(
         active
             .advance(&mode, &mut players, 12.)
@@ -652,17 +682,17 @@ fn zero_countdown_stops_before_native_ack_and_does_not_transition_twice() {
             .is_empty()
     );
     assert!(active.advance(&mode, &mut players, 11.).is_err());
+    // The clock then completes membership once, with no host Stop.
     let tick = active.advance(&mode, &mut players, 12.01).unwrap();
-    assert!(matches!(tick.calls.first(), Some(HostRpc::SequenceStop(_))));
+    assert!(
+        !tick
+            .calls
+            .iter()
+            .any(|c| matches!(c, HostRpc::SequenceStop(_)))
+    );
     assert_eq!(
         active.host.machine().members(2).unwrap(),
         &BTreeSet::from([u64::from(owner.participant)])
-    );
-    let ack = active.completed(&mode, &mut players, call, 123).unwrap();
-    assert_eq!(ack.deleted, vec![sequence]);
-    assert!(
-        ack.calls.is_empty(),
-        "native acknowledgement must not advance membership twice"
     );
     assert!(
         active
@@ -732,4 +762,91 @@ fn authored_timer_stops_once_and_still_requires_the_owned_native_acknowledgement
         )
         .unwrap();
     assert_eq!(out.deleted, vec![sequence]);
+}
+
+#[test]
+fn timed_context_triggers_fire_once_at_their_deadlines_and_gated_ones_only_while_active() {
+    let (mut players, owner, mut mode) = clock_fixture(false);
+    let event = |bus, ordinal| intro::LaunchEvent { bus, ordinal };
+    mode.data.timed_events = vec![
+        intro::TimedEvent {
+            event: event(3, 7),
+            seconds: 15.,
+            objective_gated: false,
+        },
+        intro::TimedEvent {
+            event: event(3, 11),
+            seconds: 135.,
+            objective_gated: true,
+        },
+    ];
+    let (mut active, _) = Active::start(&mode, &mut players, owner, 20.).unwrap();
+    let parent = active.parent;
+    let mut fired = |active: &mut Active, seconds| {
+        active
+            .advance(&mode, &mut players, seconds)
+            .unwrap()
+            .calls
+            .iter()
+            .filter_map(|c| match c {
+                HostRpc::Event(f) if f.target.ghost == parent && f.target.entity == 3 => {
+                    Some(f.event)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert!(fired(&mut active, 34.99).is_empty());
+    assert_eq!(fired(&mut active, 35.), [7]);
+    assert!(fired(&mut active, 36.).is_empty());
+    // After the objective is reached the gate holds its trigger back.
+    let mut arrived = active.clone();
+    arrived.arrived = true;
+    assert!(fired(&mut arrived, 155.).is_empty());
+    assert!(fired(&mut arrived, 160.).is_empty());
+    assert_eq!(fired(&mut active, 155.), [11]);
+    assert!(fired(&mut active, 160.).is_empty());
+}
+
+#[test]
+fn intro_modes_hold_their_participant_from_the_join_until_the_leave() {
+    // The event canceller has no root state (installed content); official
+    // events s9 is true from its start to its shutdown, across both races.
+    let (mut players, owner, mut mode) = clock_fixture(false);
+    assert_eq!(mode.data.game_mode.lifecycle.root_state, None);
+    mode.data.categories = BTreeSet::from([3_857_952_219]);
+    let (mut active, out) = Active::start(&mode, &mut players, owner, 12.).unwrap();
+    assert!(out.calls.iter().any(|c| matches!(c,
+        HostRpc::GameMode(g) if g.method == 4 && g.reference == Some(active.ghost))));
+    let held = Some(&BTreeSet::from([3_857_952_219]));
+    assert_eq!(active.held_categories(&mode), held);
+    active.advance(&mode, &mut players, 400.).unwrap();
+    assert_eq!(active.held_categories(&mode), held);
+    active.left = true;
+    assert_eq!(active.held_categories(&mode), None);
+}
+
+#[test]
+fn timed_messages_are_due_once_after_the_launch_and_cancelled_by_the_return() {
+    // introreturntogarage #40: the phone reminder 15 s after the launcher
+    // started (official E1026 891.623 -> 906.624 s).
+    let (mut players, owner, mut mode) = clock_fixture(false);
+    mode.messages = vec![(15., 1_422_063_331)];
+    let (mut active, out) = Active::start(&mode, &mut players, owner, 20.).unwrap();
+    assert!(out.messages.is_empty());
+    let mut due = |active: &mut Active, seconds| {
+        active
+            .advance(&mode, &mut players, seconds)
+            .unwrap()
+            .messages
+    };
+    let mut cancelled = active.clone();
+    let mut ending = active.clone();
+    assert!(due(&mut active, 34.99).is_empty());
+    assert_eq!(due(&mut active, 35.), [1_422_063_331]);
+    assert!(due(&mut active, 36.).is_empty());
+    cancelled.cancel_messages();
+    assert!(due(&mut cancelled, 40.).is_empty());
+    ending.ending = true;
+    assert!(due(&mut ending, 40.).is_empty());
 }

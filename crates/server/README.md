@@ -398,6 +398,18 @@ server continues serving. A raw chunk over 1 MiB also stops recording without
 writing a partial chunk. The final metadata marker identifies exhaustion.
 Structured status logs contain route/error summaries, not request bodies.
 
+The recorder separately syncs `world-<connection>-clock.json` before world
+traffic. It records the recording ID, PID, connection, Unix world-clock origin
+and nanosecond offset from the recorder's monotonic origin. World timestamps
+advance from that origin with monotonic elapsed time. Ordinary log rotation
+cannot remove this receipt. Metadata shares the recorder's bounded byte budget.
+After a normal recorder shutdown, `recording-complete.json` identifies the
+recorded world connections, raw mode and whether a recording limit was reached.
+A crash or failed recorder can leave it absent. Missing clock provenance is
+warned about without stopping gameplay; such a recording cannot certify a
+replay. Preserve these receipts with the exact serving-process receipt and
+pre-launch save when collecting local replay evidence.
+
 ## Unsupported-operation diagnostics
 
 At the default log level, `WARN unsupported operation received` identifies an

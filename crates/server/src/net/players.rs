@@ -18,6 +18,7 @@ use nfs_world::{
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 mod activation;
+mod activities;
 mod challenges;
 mod client_info;
 mod crashing;
@@ -31,6 +32,7 @@ pub(super) use equipment::EquipmentRequest;
 pub(super) use garage::{GarageOperation, GarageRequest};
 pub(super) use scoring::{AwardRequest, Credited};
 mod launchers;
+mod licensed;
 mod map_feed;
 mod output;
 mod prologue;
@@ -41,6 +43,7 @@ mod rivals;
 mod scoring;
 mod sequences;
 mod traffic;
+mod tutorials;
 
 #[cfg(test)]
 mod deployment_tests;
@@ -186,6 +189,28 @@ pub(super) struct PlayerListener {
     event_discovery: events::discovery::State,
     /// The intro participant's world volume memberships (E1194).
     world_volumes: prologue::volumes::State,
+    /// Last participant-in-game-mode notification values sent per intro
+    /// participant and notification (prologue content order).
+    mode_notified: BTreeMap<(u16, usize), bool>,
+    /// Tutorial logics per participant (`crate::tutorials`).
+    tutorials: BTreeMap<u16, crate::tutorials::Session>,
+    /// Last driven-distance sample per participant (position, seconds).
+    tutorial_samples: BTreeMap<u16, ([f64; 3], f64)>,
+    /// Last reported inside value per participant and assigned volume.
+    activity_inside: activities::Inside,
+    /// Participants whose client reported a licence this session.
+    licence_reported: BTreeSet<u16>,
+    /// A normal garage exit's Alive Enter, held until the event lane has
+    /// subscribed the participant (official E912 75.249-76.538 s), with the
+    /// time it was held.
+    held_alive: BTreeMap<u16, (nfs_world::participants::HostRpc, u64)>,
+    /// When a held Alive was released: its free-roam presentation waits for
+    /// the participant's world memberships (official E912 78.037 s).
+    alive_released_ms: BTreeMap<u16, u64>,
+    /// Chapter notification values sent per participant.
+    chapter_sent: BTreeMap<u16, crate::chapter_notifications::Sent>,
+    /// The intro objectives' (active, completed) at the last chapter pass.
+    chapter_objectives: Option<BTreeMap<u64, (bool, bool)>>,
     /// Last logged waiting-sequence readiness per participant.
     sequence_readiness: BTreeMap<u16, nfs_world::sequences::Readiness>,
     /// Participants in an owned event: free-roam scoring is retired meanwhile.
@@ -201,6 +226,25 @@ pub(super) struct PlayerListener {
     pub(super) pending_entries: VecDeque<(Section, Vec<nfs_world::participants::HostRpc>)>,
     refused: usize,
     last_error: Option<replication::Error>,
+}
+/// One host Fire per installed debug-print Hide on the main progression root
+/// ghost, in installed order; each must encode.
+fn debug_hide_fires(
+    ghost: u16,
+    hides: &[(u32, u32)],
+) -> Result<Vec<nfs_world::participants::HostRpc>, replication::Error> {
+    hides
+        .iter()
+        .map(|&(bus, ordinal)| {
+            let fire = nfs_world::logic::Fire {
+                event: ordinal,
+                player: None,
+                target: nfs_world::logic::EntityRef { ghost, entity: bus },
+            };
+            fire.encode().map_err(|_| replication::Error::Shape)?;
+            Ok(nfs_world::participants::HostRpc::Event(fire))
+        })
+        .collect()
 }
 impl std::fmt::Debug for PlayerListener {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -601,7 +645,10 @@ impl PlayerListener {
                     .map_err(|_| replication::Error::Unsupported)?;
                 creations.push(creation);
             }
-            records.extend(players.spawn_entities(creations, progression.construction.content())?);
+            let spawned = players.spawn_entities(creations, progression.construction.content())?;
+            // Branches spawn in order: the first record is the main root.
+            let main_root = spawned.first().map(|r| r.id);
+            records.extend(spawned);
             if !participants.begin_progression(participant) {
                 return Err(replication::Error::Shape);
             }
@@ -628,6 +675,28 @@ impl PlayerListener {
                 } else {
                     participants.enter_garage_with_actor(binding)?
                 });
+                // After EnteredGame: hide every objective chapter's debug print
+                // on the main root (official E1026 38.217 s and E912 33.641 s,
+                // after their EnteredGame leave; E1249).
+                if let Some(ghost) = main_root {
+                    replies.extend(debug_hide_fires(ghost, &progression.debug_hides)?);
+                }
+                // The message managers restore the stored messages and report
+                // themselves initiated (official E1026 36.220 s, E912 restores).
+                if let Some(messages) = &progression.messages {
+                    let rows = |manager: crate::messages::Manager| {
+                        nfs_services::messages::rows(loaded.tables(), manager.table())
+                            .map_err(|_| replication::Error::Shape)
+                    };
+                    replies.extend(messages.session_start(
+                        players.objects(),
+                        &rows(crate::messages::Manager::Normal)?,
+                        &rows(crate::messages::Manager::Underground)?,
+                    )?);
+                }
+                // The notified tutorial seen values join the same flush
+                // (E1026 36.220-36.319 s, E912 32.336 s).
+                replies.extend(self.tutorial_notifications(players, loaded)?);
                 if let Some(bank) = roles.bank {
                     let scene = players
                         .objects()
@@ -658,19 +727,29 @@ impl PlayerListener {
                     if !ghosts.is_empty() {
                         return Err(replication::Error::DuplicateObject);
                     }
-                    // The prologue gets only the spawn logic its events address
+                    // The prologue gets the spawn logic its events address
                     // (official career start fade control 480 and 482; E1183,
-                    // E1184), never the garage presentation.
-                    let out = if intro {
-                        logic.produce_intro_spawn(players, participant, ghosts)?
+                    // E1184) and the installed intro spawn logic, never the
+                    // garage presentation.
+                    let needs = if intro {
+                        logic.intro_requires_reputation()
                     } else {
-                        let scores = logic
-                            .requires_reputation()
-                            .then(|| {
-                                crate::garage_logic::ReputationScores::load(loaded)
-                                    .map_err(|_| replication::Error::Shape)
-                            })
-                            .transpose()?;
+                        logic.requires_reputation()
+                    };
+                    let scores = needs
+                        .then(|| {
+                            crate::garage_logic::ReputationScores::load(loaded)
+                                .map_err(|_| replication::Error::Shape)
+                        })
+                        .transpose()?;
+                    let out = if intro {
+                        logic.produce_intro_spawn_with_reputation(
+                            players,
+                            participant,
+                            ghosts,
+                            scores,
+                        )?
+                    } else {
                         logic.produce_with_reputation(
                             crate::garage_logic::Which::Spawn,
                             players,
@@ -959,6 +1038,15 @@ impl PlayerListener {
             event_state: events::State::default(),
             event_discovery: events::discovery::State::default(),
             world_volumes: prologue::volumes::State::default(),
+            mode_notified: BTreeMap::new(),
+            tutorials: BTreeMap::new(),
+            tutorial_samples: BTreeMap::new(),
+            activity_inside: BTreeMap::new(),
+            licence_reported: BTreeSet::new(),
+            held_alive: BTreeMap::new(),
+            alive_released_ms: BTreeMap::new(),
+            chapter_sent: BTreeMap::new(),
+            chapter_objectives: None,
             sequence_readiness: BTreeMap::new(),
             event_suspended: BTreeSet::new(),
             replication_origin_ms: None,
@@ -1068,15 +1156,21 @@ impl PlayerListener {
         &mut self,
         content: &crate::content::WorldContent,
     ) -> Result<(), replication::Error> {
-        let logic = match (
-            &self.logic,
-            self.prologue
-                .as_ref()
-                .and_then(|content| content.membership.as_ref()),
-        ) {
-            (Some(logic), Some(content)) => Some(std::sync::Arc::new(
-                logic.without_assets(&content.assets().collect())?,
-            )),
+        // Logics another owner creates leave the authored garage batches:
+        // the scene presentation and the tutorials.
+        let mut owned: BTreeSet<_> = self
+            .prologue
+            .as_ref()
+            .and_then(|content| content.membership.as_ref())
+            .map(|content| content.assets().collect())
+            .unwrap_or_default();
+        if let Some(tutorials) = self.progression.as_ref().and_then(|p| p.tutorials.as_ref()) {
+            owned.extend(tutorials.0.assets());
+        }
+        let logic = match &self.logic {
+            Some(logic) if !owned.is_empty() => {
+                Some(std::sync::Arc::new(logic.without_assets(&owned)?))
+            }
             _ => self.logic.clone(),
         };
         use nfs_protocol::world::rpc::Serial;
@@ -1455,6 +1549,12 @@ impl Listener for PlayerListener {
         let mut selection = self.selection.clone();
         let mut selection_execution = self.selection_execution.clone();
         let mut story_pending = self.story_pending.clone();
+        let mut tutorial_sessions = self.tutorials.clone();
+        let mut licence_reported = self.licence_reported.clone();
+        let mut held_alive = self.held_alive.clone();
+        licence_reported
+            .retain(|&p| players.owns_participant(HOST_SELECTOR as u8, self.persona, p));
+        let mut activity_inside = self.activity_inside.clone();
         let mut intro_modes = self.intro_modes.clone();
         let mut intro_movies = self.intro_movies.clone();
         let mut intro_composites = self.intro_composites.clone();
@@ -1479,6 +1579,22 @@ impl Listener for PlayerListener {
             for body in logic_events {
                 let message = nfs_world::logic::Message::decode(82, body)
                     .map_err(|_| replication::Error::Shape)?;
+                if self.tutorial_accept(
+                    &mut tutorial_sessions,
+                    &players,
+                    &mut story_pending,
+                    &message,
+                )? {
+                    continue;
+                }
+                if self.licence_report(
+                    &mut licence_reported,
+                    &players,
+                    &mut story_pending,
+                    &message,
+                )? {
+                    continue;
+                }
                 if let Some(content) = self.prologue.as_deref()
                     && prologue::finale::signal(
                         content,
@@ -1494,12 +1610,16 @@ impl Listener for PlayerListener {
                 if let nfs_world::logic::Message::Reached { target, .. } = &message
                     && let Some(owner) = selection.owner(target.ghost)
                 {
-                    if owner.connection != HOST_SELECTOR as u8 || owner.persona != self.persona {
-                        return Err(replication::Error::UnknownObject);
-                    }
-                    let state = selection_execution
-                        .get_mut(&owner.participant)
-                        .ok_or(replication::Error::UnknownObject)?;
+                    let Some(state) =
+                        selection_execution.get_mut(&owner.participant).filter(|_| {
+                            owner.connection == HOST_SELECTOR as u8 && owner.persona == self.persona
+                        })
+                    else {
+                        Self::unowned_logic(&message, replication::Error::UnknownObject);
+                        unsupported_logic += 1;
+                        self.diagnose_logic(&message);
+                        continue;
+                    };
                     let effects = state.signal(
                         &message,
                         &mut prologue::selection::Context {
@@ -1608,13 +1728,22 @@ impl Listener for PlayerListener {
                     continue;
                 }
                 if crate::customization_timer::Timers::recognizes(&message) {
-                    let owner = Self::customization_owner(
+                    let owner = match Self::customization_owner(
                         self.roles.as_ref(),
                         &players,
                         &logic_ghosts,
                         self.persona,
                         &message,
-                    )?;
+                    ) {
+                        Ok(owner) => owner,
+                        Err(error) if Self::is_unowned(error) => {
+                            Self::unowned_logic(&message, error);
+                            unsupported_logic += 1;
+                            self.diagnose_logic(&message);
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    };
                     let item = self.inventory.as_ref().and_then(|i| {
                         let id = i.slots.values()[0]?;
                         i.items.items.contains_key(&id).then_some(id)
@@ -1628,7 +1757,7 @@ impl Listener for PlayerListener {
                     let nfs_world::logic::Message::Reached { target, player, .. } = &message else {
                         return Err(replication::Error::Shape);
                     };
-                    let owner = population
+                    let Some(owner) = population
                         .as_ref()
                         .and_then(|p| {
                             p.signal_owner(
@@ -1639,7 +1768,12 @@ impl Listener for PlayerListener {
                             )
                         })
                         .or_else(|| self.rival_glass_owner(&players, target.ghost, *player))
-                        .ok_or(replication::Error::UnknownObject)?;
+                    else {
+                        Self::unowned_logic(&message, replication::Error::UnknownObject);
+                        unsupported_logic += 1;
+                        self.diagnose_logic(&message);
+                        continue;
+                    };
                     let fire = glass.receive(owner, &message)?;
                     if players.temporary_vehicle(
                         HOST_SELECTOR as u8,
@@ -1669,7 +1803,7 @@ impl Listener for PlayerListener {
                             // 38618 and 563021 ms); its garage-zone report
                             // during the return cinematic needs it (E1183).
                             if spawn_points.bindings().is_some()
-                                && spawn_points.assigned(owner.participant).is_none()
+                                && !spawn_points.subscribed(owner.participant)
                             {
                                 let value = spawn_points.next_value(owner.participant);
                                 let notification = spawn_points.assign(owner.participant, value)?;
@@ -1937,10 +2071,35 @@ impl Listener for PlayerListener {
                     body,
                 ) {
                     Ok(Some(out)) => {
-                        deferred_sections.extend(match prologue::movies::sections(vec![], out.0) {
-                            Ok(s) => s,
-                            Err(e) => return self.refuse_rpc(e, body),
-                        });
+                        // Entering customization from the intro's final
+                        // composite: the garage gains the ordinary logic set
+                        // its later exit deletes (career start 1247625 ms).
+                        let mut created = Vec::new();
+                        if let (Some(logic), Some(participant)) = (
+                            self.logic.as_deref(),
+                            out.1.iter().find_map(|c| match c {
+                                nfs_world::participants::HostRpc::Participant(n) => {
+                                    Some(n.participant)
+                                }
+                                _ => None,
+                            }),
+                        ) && logic.has_exit()
+                        {
+                            created = match logic.intro_customization(
+                                &mut players,
+                                participant,
+                                logic_ghosts.entry(participant).or_default(),
+                            ) {
+                                Ok(records) => records,
+                                Err(e) => return self.refuse_rpc(e, body),
+                            };
+                        }
+                        deferred_sections.extend(
+                            match prologue::movies::sections(created, out.0) {
+                                Ok(s) => s,
+                                Err(e) => return self.refuse_rpc(e, body),
+                            },
+                        );
                         responses.extend(out.1);
                         continue;
                     }
@@ -2059,6 +2218,13 @@ impl Listener for PlayerListener {
                                 owner.participant,
                                 self.persona,
                             )?);
+                            if let Some(previews) = content.previews.as_deref() {
+                                responses.extend(prologue::garage::preview_slot_unloads(
+                                    &previews.garage,
+                                    &players,
+                                    owner.participant,
+                                )?);
+                            }
                             Ok::<_, replication::Error>(())
                         })();
                         if let Err(error) = transition {
@@ -2289,6 +2455,20 @@ impl Listener for PlayerListener {
                                 .map(nfs_world::participants::HostRpc::Event),
                         );
                         rollout_records.extend(logic.records);
+                        // With an event lane the Alive Enter waits for the
+                        // participant's event subscriptions (official E912:
+                        // the opening's Leave at 75.249 s, the event start
+                        // volumes, Alive at 76.538 s).
+                        if self.events.is_some()
+                            && !self.event_state.failed
+                            && let Some(index) = chain.iter().position(|c| {
+                                matches!(c, nfs_world::participants::HostRpc::Participant(n)
+                                    if n.participant == participant
+                                        && n.call == nfs_world::participants::Call::Enter)
+                            })
+                        {
+                            held_alive.insert(participant, (chain.remove(index), self.world_ms));
+                        }
                         scheduled_binding_refreshes.push((
                             self.world_ms.saturating_add(BINDING_REFRESH_DELAY_MS),
                             participant,
@@ -2375,6 +2555,21 @@ impl Listener for PlayerListener {
                         return self.refuse_rpc(error, body);
                     }
                 }
+            }
+            match self.activity_crossing(
+                &players,
+                &mut tutorial_sessions,
+                &mut activity_inside,
+                body,
+            ) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(error) => return self.refuse_rpc(error, body),
+            }
+            match self.cop_patrol_request(&players, body) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(error) => return self.refuse_rpc(error, body),
             }
             if let Some(activation) = &mut world_activation {
                 match activation.receive_ready(
@@ -2512,6 +2707,35 @@ impl Listener for PlayerListener {
                 Ok(None) => {}
                 Err(error) => {
                     return self.refuse_rpc(error, body);
+                }
+            }
+            // The client read a message (official E1026 923.634 s): the
+            // stored row is marked read; nothing is answered.
+            if let Some(progression) = self.progression.clone()
+                && let Some(messages) = progression.messages.clone()
+            {
+                match messages.read(players.objects(), body, |id| {
+                    players.owns_participant(HOST_SELECTOR as u8, self.persona, id)
+                }) {
+                    Ok(Some((hash, participant, manager))) => {
+                        let Some(player_index) =
+                            players.runtime_index(HOST_SELECTOR as u8, self.persona, participant)
+                        else {
+                            return self.refuse_rpc(replication::Error::UnknownObject, body);
+                        };
+                        if story_pending.len() >= MAX_PENDING {
+                            return self.refuse_rpc(replication::Error::Bound, body);
+                        }
+                        story_pending.push_back(super::items::story::Request {
+                            participant,
+                            player_index: u32::from(player_index),
+                            progression,
+                            action: super::items::story::Action::MessageRead { hash, manager },
+                        });
+                        continue;
+                    }
+                    Ok(None) => {}
+                    Err(error) => return self.refuse_rpc(error, body),
                 }
             }
             match launchers.receive(body, |id| {
@@ -3072,6 +3296,10 @@ impl Listener for PlayerListener {
         self.selection = selection;
         self.selection_execution = selection_execution;
         self.story_pending = story_pending;
+        self.tutorials = tutorial_sessions;
+        self.licence_reported = licence_reported;
+        self.held_alive = held_alive;
+        self.activity_inside = activity_inside;
         self.intro_modes = intro_modes;
         self.intro_movies = intro_movies;
         self.intro_composites = intro_composites;

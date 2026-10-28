@@ -648,8 +648,21 @@ fn return_drive_launch_waits_for_the_clients_launcher_answer() {
         let (_, _, _, immediate) = return_drive_started_with(None);
         assert_eq!(launch_fire(&immediate), None);
         let (mut listener, participant, _, started) = return_drive_started_with(Some(event));
-        // The launch event replaces the launch call until the client answers.
-        assert_eq!(mode_calls(&started) + 1, mode_calls(&immediate));
+        // The launch event replaces the launch call until the client answers;
+        // the item clear (gameplay s7 m2, official E1026 891.523 s) goes with
+        // the launch event only.
+        let clears = |calls: &[HostRpc]| {
+            calls
+                .iter()
+                .filter(|c| matches!(c, HostRpc::GameMode(g)
+                    if g.method == 2 && g.reference == Some(participant)
+                        && matches!(g.arguments, nfs_world::game_mode::Arguments::None)
+                        && g.selector == listener.participants.lifecycle_bindings().unwrap().garage[0].selector))
+                .count()
+        };
+        assert_eq!(clears(&started), 1);
+        assert_eq!(clears(&immediate), 0);
+        assert_eq!(mode_calls(&started), mode_calls(&immediate));
         let parent = launch_fire(&started).expect("launch event on the participant logic");
         let (scene, selector) = listener.intro_modes[&participant]
             .0

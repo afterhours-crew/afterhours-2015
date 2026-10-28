@@ -521,3 +521,22 @@ fn three_lifetimes_clear_and_reassign_with_delayed_callbacks_and_isolation() {
     assert_eq!(model.clear(PLAYER).unwrap().unwrap().1, None);
     assert_eq!(model.assigned(41), Some(5));
 }
+
+#[test]
+fn a_cleared_subscription_is_not_live_and_the_next_assignment_continues_the_count() {
+    let mut points = bound();
+    assert!(!points.subscribed(PLAYER));
+    points.assign(PLAYER, points.next_value(PLAYER)).unwrap();
+    assert!(points.subscribed(PLAYER));
+    // Career start: the club garage ends the first lifetime (298117 ms) and
+    // the transfer car is assigned 2 (563021 ms).
+    assert!(points.clear(PLAYER).unwrap().is_some());
+    assert!(!points.subscribed(PLAYER));
+    assert_eq!(points.assigned(PLAYER), Some(1));
+    assert_eq!(points.next_value(PLAYER), 2);
+    points.assign(PLAYER, 2).unwrap();
+    assert!(points.subscribed(PLAYER));
+    // A participant never assigned has nothing to clear.
+    assert!(points.clear(PLAYER + 1).unwrap().is_none());
+    assert!(!points.subscribed(PLAYER + 1));
+}

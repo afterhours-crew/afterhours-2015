@@ -1025,6 +1025,7 @@ pub async fn world_host(
         recorder,
         connection,
         started: Instant::now(),
+        unix_origin_micros: 0,
         peer: None,
         last_input: Instant::now(),
         tick: tokio::time::interval(WORLD_TICK),
@@ -1094,6 +1095,10 @@ pub trait WorldIo: Send {
     fn unix_micros(&self) -> i64;
     /// Start the world clock: the host is about to serve.
     fn start_clock(&mut self);
+    /// Offline drivers need no receipt; live recording durably binds its clock.
+    fn preserve_clock(&mut self) -> impl std::future::Future<Output = Result<(), String>> + Send {
+        std::future::ready(Ok(()))
+    }
     /// The source of the session's fresh words.
     fn random(&mut self) -> Box<dyn nfs_world::application::Random + Send>;
     /// The session's application policy.
@@ -1121,6 +1126,7 @@ struct LiveWorld {
     recorder: Recorder,
     connection: u32,
     started: Instant,
+    unix_origin_micros: i64,
     peer: Option<SocketAddr>,
     last_input: Instant,
     tick: tokio::time::Interval,
@@ -1134,10 +1140,24 @@ impl WorldIo for LiveWorld {
         self.started.elapsed().as_millis() as u64
     }
     fn unix_micros(&self) -> i64 {
-        unix_micros()
+        self.unix_origin_micros
+            .saturating_add(self.started.elapsed().as_micros().min(i64::MAX as u128) as i64)
     }
     fn start_clock(&mut self) {
         self.started = Instant::now();
+        self.unix_origin_micros = unix_micros();
+    }
+    async fn preserve_clock(&mut self) -> Result<(), String> {
+        match timeout(
+            Duration::from_secs(5),
+            self.recorder
+                .world_clock(self.connection, self.started, self.unix_origin_micros),
+        )
+        .await
+        {
+            Ok(Ok(())) => Ok(()),
+            _ => Err("world clock receipt was not durably recorded".into()),
+        }
     }
     fn random(&mut self) -> Box<dyn nfs_world::application::Random + Send> {
         Box::new(OsRandom)
@@ -1294,6 +1314,11 @@ pub async fn run_world<I: WorldIo>(
     }
     let readiness = binding.readiness();
     io.start_clock();
+    if let Err(error) = io.preserve_clock().await {
+        // Recording limits must not stop play. Missing provenance instead makes
+        // this connection ineligible for a verified offline replay.
+        warn!(connection, %error, "world recording provenance failed");
+    }
     let Ok(persona) = u64::try_from(persona) else {
         return WorldEnd::Stopped;
     };
@@ -1715,6 +1740,7 @@ mod live_world_tests {
             recorder,
             connection: 1,
             started: Instant::now(),
+            unix_origin_micros: 0,
             peer: None,
             last_input: Instant::now(),
             tick: tokio::time::interval_at(far, Duration::from_secs(3600)),

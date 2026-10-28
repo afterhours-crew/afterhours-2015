@@ -81,6 +81,15 @@ impl Context<'_> {
         let (Some(logic), Some(ghosts)) = (self.logic, self.ghosts.get(&participant)) else {
             return Ok(Vec::new());
         };
+        // Only a drive is presented: the relocation's brief Alive carries no
+        // drive logic and the official host shows nothing there (747325 ms).
+        if !logic
+            .arrived_captures()
+            .iter()
+            .all(|c| ghosts.contains_key(c))
+        {
+            return Ok(Vec::new());
+        }
         let mut events = logic.present_events(Which::FreeRoam, self.players, ghosts)?;
         let fade = logic.fade_capture().and_then(|c| ghosts.get(&c)).copied();
         if !events
@@ -173,15 +182,17 @@ pub(super) fn present_with_driving_tail(
             (Vec::new(), ctx.fade(participant, &[UNBLACK, VIEW_WORLD])?)
         } else if endpoint == lifecycle.composite && leave {
             // 562123 ms toward the first race; 1247625 ms into customization.
-            let next = calls[index + 1..].iter().find_map(|c| match c {
-                HostRpc::Participant(n)
-                    if n.participant == participant && n.call == Call::Enter =>
-                {
-                    Some(n.endpoint)
-                }
-                _ => None,
+            // Both exits pass through a transient state (s85 Enter, Leave)
+            // before the next stage's Enter, so the batch decides by whether
+            // customization is entered in it (E1255: the first Enter chose
+            // the race fades and left the garage black).
+            let customization = calls[index + 1..].iter().any(|c| {
+                matches!(c, HostRpc::Participant(n)
+                    if n.participant == participant
+                        && n.call == Call::Enter
+                        && n.endpoint == lifecycle.customization)
             });
-            if next == Some(lifecycle.customization) {
+            if customization {
                 (
                     ctx.fade(participant, &[HIDE_WORLD, VIEW_WORLD])?,
                     Vec::new(),
@@ -411,6 +422,10 @@ mod tests {
         listener.logic = Some(std::sync::Arc::new(logic));
         let intro = listener.participants.intro_bindings().unwrap();
         let life = listener.participants.lifecycle_bindings().unwrap();
+        let transient = nfs_world::participants::Endpoint {
+            selector: 85,
+            ..life.customization
+        };
         let note = |endpoint, participant, call| {
             HostRpc::Participant(Notification {
                 endpoint,
@@ -469,6 +484,29 @@ mod tests {
                 ],
                 vec!["fade:1", "fade:0", "Leave", "Enter"],
             ),
+            // The real batches pass through the transient s85 first (official
+            // E1026 562.221 s and 1247.625 s; E1255 showed a black garage when
+            // this chose the race fades).
+            (
+                vec![
+                    (life.composite, Call::Leave),
+                    (transient, Call::Enter),
+                    (transient, Call::Leave),
+                    (life.initial_teleport, Call::Enter),
+                ],
+                vec![
+                    "fade:1", "fade:2", "fade:3", "fade:2", "Leave", "Enter", "Leave", "Enter",
+                ],
+            ),
+            (
+                vec![
+                    (life.composite, Call::Leave),
+                    (transient, Call::Enter),
+                    (transient, Call::Leave),
+                    (life.customization, Call::Enter),
+                ],
+                vec!["fade:1", "fade:0", "Leave", "Enter", "Leave", "Enter"],
+            ),
             (vec![(intro.teleport, Call::Enter)], vec!["Enter"]),
         ];
         for (calls, expected) in cases {
@@ -511,7 +549,9 @@ mod tests {
         // Another participant's identical notification is left alone.
         let other = vec![note(intro.alive, participant + 1, Call::Enter)];
         assert_eq!(run(&listener, other), vec!["Enter"]);
-        // Once the return retires the first-drive HUD, driving shows the world only.
+        // Without its drive logic an Alive presents nothing: the relocation's
+        // brief Alive (official 747325 ms) shows the world only later, from
+        // the relocating Leave (749427 ms).
         let ghosts = listener.logic_ghosts.get_mut(&participant).unwrap();
         let logic = listener.logic.clone().unwrap();
         logic
@@ -525,7 +565,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             run(&listener, vec![note(intro.alive, participant, Call::Enter)]),
-            vec!["Enter", "fade:0"]
+            vec!["Enter"]
         );
         // Without garage logic nothing is added.
         listener.logic = None;

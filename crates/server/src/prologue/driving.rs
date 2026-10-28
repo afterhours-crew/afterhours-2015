@@ -48,6 +48,8 @@ pub(crate) mod tests;
 #[derive(Clone, Debug)]
 pub struct Mode {
     pub data: intro::Mode,
+    /// The launcher's timed messages as (seconds after the launch, HashId).
+    pub messages: Vec<(f32, u32)>,
     parent: Asset,
     plan: Arc<Plan>,
     content: CreationContent,
@@ -78,6 +80,8 @@ impl Mode {
         tracing::info!(
             mode = name,
             launch_event = ?data.launch_event,
+            timed_events = ?data.timed_events,
+            timed_messages = ?data.timed_messages,
             "intro mode prepared; a launch event means the client launches it"
         );
         let mut sequences = BTreeMap::new();
@@ -126,9 +130,15 @@ impl Mode {
                 ));
             }
         }
+        let messages = data
+            .timed_messages
+            .iter()
+            .map(|m| Ok((m.seconds, index.message_hash(&m.message.0, m.message.1)?)))
+            .collect::<Result<Vec<_>, nfs_content::Error>>()?;
         let mut mode = Self::new(data, parent, sequences)
             .map_err(|e| nfs_content::Error::Content(format!("intro mode: {e:?}")))?;
         mode.timing = timing;
+        mode.messages = messages;
         mode.reporters = Some(reporters::Reporters::prepare(
             index, &mode.data, &mode.plan,
         )?);
@@ -162,6 +172,7 @@ impl Mode {
         let plan = Arc::new(Plan::installed(&data.game_mode.lifecycle).map_err(invalid)?);
         Ok(Self {
             data,
+            messages: vec![],
             parent,
             plan,
             content,
@@ -280,6 +291,9 @@ pub struct Output {
     pub records: Vec<Record>,
     pub deleted: Vec<u16>,
     pub calls: Vec<HostRpc>,
+    /// Phone messages now due (HashIds): the caller commits each before
+    /// announcing it.
+    pub messages: Vec<u32>,
 }
 #[derive(Clone, Debug)]
 pub struct Active {
@@ -317,6 +331,11 @@ pub struct Active {
     /// A client-enabled launcher's launch call, held until the client answers
     /// the launch event on the launcher (or the handshake deadline passes).
     pending_launch: Option<(HostRpc, f64)>,
+    /// The launcher prefab's timed context triggers still to fire, as
+    /// (deadline seconds, event, objective gated).
+    timed_events: Vec<(f64, nfs_content::events::intro::LaunchEvent, bool)>,
+    /// Armed phone messages as (deadline seconds, HashId).
+    timed_messages: Vec<(f64, u32)>,
 }
 /// Seconds the host waits for the client's launcher answer before launching
 /// anyway. The official answer arrives within 50 ms (career start 891569 ms);
@@ -357,18 +376,86 @@ impl Active {
             return Ok(None);
         }
         let (launch, _) = self.pending_launch.take().ok_or(Error::Shape)?;
+        self.arm_messages(content, self.seconds);
         Ok(Some(Output {
             calls: vec![launch],
             ..Output::default()
         }))
     }
+    /// The launcher started: its timed messages count from now (official
+    /// E1026: launch processed 891.623 s, reminder 906.624 s).
+    fn arm_messages(&mut self, content: &Mode, seconds: f64) {
+        self.timed_messages = content
+            .messages
+            .iter()
+            .map(|&(after, hash)| (seconds + f64::from(after), hash))
+            .collect();
+    }
+    /// The garage return began: messages not yet due are dropped.
+    pub fn cancel_messages(&mut self) {
+        self.timed_messages.clear();
+    }
+    /// The intro progression logic that owns this mode's launcher.
+    pub fn parent(&self) -> u16 {
+        self.parent
+    }
+    /// The mode's objective is active: launched, not arrived and not ending.
+    pub fn objective_live(&self) -> bool {
+        !self.ending && !self.left
+    }
+    /// The mode's game-mode categories while its owner is in the mode, for
+    /// participant-in-game-mode properties: from its participant join at
+    /// creation (GameMode m4) to its leave, for every intro mode. Official
+    /// E1026: events s9 follows the canceller from 124.718 s to its shutdown
+    /// at 1247.825 s, across both races; race 1's events and ui s1 from
+    /// 573.620 s (1.5 s after the mode's creation, before its root state
+    /// admits the participant at 573.921 s) to the mode end at 652.123 s, and
+    /// the race tutorial's context row with it (574.121 s). Root-state
+    /// membership is later in our state machine (E1249 v3j: 635.833 s) and
+    /// would hold the flags only at the race end.
+    pub fn held_categories<'a>(&self, content: &'a Mode) -> Option<&'a BTreeSet<u32>> {
+        (!self.left).then_some(&content.data.categories)
+    }
+    /// Fire the timed context triggers that are due; gated ones only while
+    /// the objective is active (the drive has not arrived or begun ending).
+    fn timed_due(&mut self, seconds: f64, out: &mut Output) {
+        let live = !self.ending && !self.left;
+        self.timed_messages.retain(|&(deadline, hash)| {
+            if seconds < deadline {
+                return true;
+            }
+            if live {
+                out.messages.push(hash);
+            }
+            false
+        });
+        let active = !self.arrived && !self.ending;
+        let parent = self.parent;
+        self.timed_events.retain(|&(deadline, event, gated)| {
+            if seconds < deadline {
+                return true;
+            }
+            if !gated || active {
+                out.calls.push(HostRpc::Event(nfs_world::logic::Fire {
+                    target: nfs_world::logic::EntityRef {
+                        ghost: parent,
+                        entity: event.bus,
+                    },
+                    event: event.ordinal,
+                    player: None,
+                }));
+            }
+            false
+        });
+    }
     /// A launch still waiting for the client's answer past its deadline goes
     /// out anyway, logged: the handshake failed, the drive must not hang.
-    fn launch_overdue(&mut self, seconds: f64, out: &mut Output) {
+    fn launch_overdue(&mut self, content: &Mode, seconds: f64, out: &mut Output) {
         if let Some((_, deadline)) = &self.pending_launch
             && seconds >= *deadline
         {
             let (launch, _) = self.pending_launch.take().expect("checked above");
+            self.arm_messages(content, seconds);
             tracing::warn!(
                 mode = self.ghost,
                 participant = self.owner.participant,
@@ -538,6 +625,13 @@ impl Active {
             result_barrier: false,
             result_calls: vec![],
             pending_launch: None,
+            timed_messages: vec![],
+            timed_events: content
+                .data
+                .timed_events
+                .iter()
+                .map(|t| (seconds + f64::from(t.seconds), t.event, t.objective_gated))
+                .collect(),
         };
         active.effects(content, &mut staged, &effects, true, &mut out)?;
         let (target, selector) = field(staged.objects(), parent, content.data.launcher)?;
@@ -565,7 +659,10 @@ impl Active {
                 }));
                 active.pending_launch = Some((launch, seconds + LAUNCH_HANDSHAKE_SECONDS));
             }
-            None => out.calls.push(launch),
+            None => {
+                out.calls.push(launch);
+                active.arm_messages(content, seconds);
+            }
         }
         for &(key, s) in &content.data.game_mode.checkpoints {
             let (target, selector) = staged
@@ -693,18 +790,34 @@ impl Active {
                                 )?;
                                 continue;
                             }
+                            // A zero-second countdown is over as it starts: the
+                            // official host creates it stopping and the client
+                            // completes it unprompted (E1026 585.125 -> 585.159).
+                            let over = matches!(
+                                data.configuration,
+                                nfs_content::events::lifecycle::StateConfiguration::Countdown { seconds, .. } if seconds <= 0.
+                            );
+                            let authored = content
+                                .sequences
+                                .get(&usize::from(*state))
+                                .ok_or(Error::Unsupported)?;
                             let mut instances = Instances::default();
-                            let record = instances
-                                .start_bound(
-                                    content
-                                        .sequences
-                                        .get(&usize::from(*state))
-                                        .ok_or(Error::Unsupported)?,
+                            let record = if over {
+                                instances.start_bound_stopped(
+                                    authored,
                                     players,
                                     self.owner,
                                     Some(self.ghost),
                                 )?
-                                .ok_or(Error::Shape)?;
+                            } else {
+                                instances.start_bound(
+                                    authored,
+                                    players,
+                                    self.owner,
+                                    Some(self.ghost),
+                                )?
+                            }
+                            .ok_or(Error::Shape)?;
                             out.records.push(record);
                             if let Some(duration) = content.timing.get(&usize::from(*state)) {
                                 self.sequence_deadlines
@@ -842,6 +955,11 @@ impl Active {
                         .sequences
                         .get_mut(&usize::from(*state))
                         .ok_or(Error::UnknownObject)?;
+                    // A countdown created stopping may already be completed
+                    // and released by the client; its clock still advances.
+                    if instances.ghost(self.owner.participant).is_none() {
+                        continue;
+                    }
                     if let Some(stop) = instances.stop(
                         content
                             .sequences

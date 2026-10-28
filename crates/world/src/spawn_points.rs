@@ -46,6 +46,9 @@ pub struct Bindings {
 pub struct SpawnPoints {
     bindings: Option<Bindings>,
     assigned: BTreeMap<u16, u32>,
+    /// Assigned participants whose subscription a garage entry ended; their
+    /// session counter continues.
+    cleared: BTreeSet<u16>,
     occupants: BTreeSet<u16>,
     presentation_blocked: BTreeSet<u16>,
 }
@@ -93,6 +96,12 @@ impl SpawnPoints {
     }
     pub fn assigned(&self, participant: u16) -> Option<u32> {
         self.assigned.get(&participant).copied()
+    }
+    /// An assignment is live: assigned and not cleared since. The intro's
+    /// transfer car is assigned again after the club garage ended the first
+    /// lifetime (career start: 1 at 38618, Leave at 298117, 2 at 563021 ms).
+    pub fn subscribed(&self, participant: u16) -> bool {
+        self.assigned.contains_key(&participant) && !self.cleared.contains(&participant)
     }
     fn presented(&self) -> bool {
         self.occupants
@@ -148,6 +157,7 @@ impl SpawnPoints {
         };
         notification.encode()?;
         self.assigned.insert(participant, value);
+        self.cleared.remove(&participant);
         Ok(notification)
     }
     /// Clear the subscription when the car enters the garage, allowing the
@@ -172,6 +182,7 @@ impl SpawnPoints {
         let was = self.presented();
         self.occupants.remove(&participant);
         self.presentation_blocked.remove(&participant);
+        self.cleared.insert(participant);
         let now = self.presented();
         let flag = (now != was).then_some(Flag {
             endpoint: b.occupied,

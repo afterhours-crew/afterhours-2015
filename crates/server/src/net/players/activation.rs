@@ -3,7 +3,67 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 use super::*;
 
+/// Longest wait for a held Alive (the event lane releases it after its
+/// subscriptions, official E912 1.29 s).
+const HELD_ALIVE_LIMIT_MS: u64 = 5_000;
+/// Longest wait of a released participant's presentation for its world
+/// memberships (official 0.2-2.1 s after Alive, E912 and E1026).
+const PRESENTATION_LIMIT_MS: u64 = 3_000;
+
+/// Whether a held Alive goes now: at once without an event lane (nothing
+/// will subscribe the participant), after [`HELD_ALIVE_LIMIT_MS`] with one.
+fn held_alive_due(lane: bool, held_ms: u64, now_ms: u64) -> bool {
+    !lane || now_ms >= held_ms.saturating_add(HELD_ALIVE_LIMIT_MS)
+}
+/// Whether a participant's free-roam presentation goes now: at once unless
+/// its Alive was held, then once its memberships are out or after
+/// [`PRESENTATION_LIMIT_MS`].
+fn presentation_ready(released_ms: Option<u64>, settled: bool, now_ms: u64) -> bool {
+    released_ms.is_none_or(|t| settled || now_ms >= t.saturating_add(PRESENTATION_LIMIT_MS))
+}
+
 impl PlayerListener {
+    /// A held Alive goes at once without an event lane, and after
+    /// [`HELD_ALIVE_LIMIT_MS`] in any case.
+    pub(super) fn release_held_alive(&mut self) {
+        let lane = self.events.is_some() && !self.event_state.failed;
+        let due: Vec<u16> = self
+            .held_alive
+            .iter()
+            .filter(|(_, (_, held))| held_alive_due(lane, *held, self.world_ms))
+            .map(|(&p, _)| p)
+            .collect();
+        for participant in due {
+            if lane {
+                tracing::warn!(
+                    participant,
+                    "held Alive released without the event subscriptions"
+                );
+            }
+            let (rpc, _) = self.held_alive.remove(&participant).expect("listed");
+            self.pending_rpcs.push_back(rpc);
+            self.alive_released_ms.insert(participant, self.world_ms);
+        }
+    }
+    /// A released participant presents once its world memberships are out
+    /// (official E912: last membership 77.537 s, presentation 78.037 s), or
+    /// after [`PRESENTATION_LIMIT_MS`]; any other entry presents at once.
+    fn presentation_due(&self, participant: u16) -> bool {
+        let released = self.alive_released_ms.get(&participant).copied();
+        if released.is_none() {
+            return true;
+        }
+        let world = self.players.objects();
+        let settled = self.prologue.as_ref().is_none_or(|content| {
+            self.world_volumes
+                .settled(participant, &content.volumes, |site| {
+                    world
+                        .scene_endpoint(site.scene_key, site.serializer)
+                        .is_some()
+                })
+        });
+        presentation_ready(released, settled, self.world_ms)
+    }
     /// Membership follows the current owned lifecycle. Keep it behind all
     /// completion creations/binding refreshes and retain it under backpressure.
     pub(super) fn advance_world_activation(&mut self) -> Result<(), replication::Error> {
@@ -13,6 +73,7 @@ impl PlayerListener {
         {
             return Ok(());
         }
+        self.release_held_alive();
         // Deactivation currently retires all configured volumes at return
         // start. Separate later sublevel retirement is not modeled here.
         let active: BTreeSet<_> = self.participants.in_free_roam().into_iter().collect();
@@ -24,6 +85,12 @@ impl PlayerListener {
             .chain(active.iter().copied())
             .collect();
         for participant in targets {
+            // A held Alive keeps the whole activation for a later pass; the
+            // world activation itself goes with Alive (official E912
+            // 76.538 s), only the presentation waits for the memberships.
+            if self.held_alive.contains_key(&participant) {
+                continue;
+            }
             // The garage volume subscription survives a crash. Only its
             // presentation is suspended until the driving context returns.
             let crashing = self.participants.stage(participant)
@@ -42,7 +109,8 @@ impl PlayerListener {
             // are not the ordinary garage-exit presentation retained here.
             let presenting = active.contains(&participant)
                 && self.participants.intro_chapter(participant).is_none()
-                && !self.free_roam_presented.contains(&participant);
+                && !self.free_roam_presented.contains(&participant)
+                && self.presentation_due(participant);
             // AliveState and the driving context must have reached the client
             // before the garage-zone notification can trigger its prompt.
             // Prepare this on a clone so queue pressure retains the gate.
@@ -112,6 +180,7 @@ impl PlayerListener {
             if presenting {
                 self.pending_rpcs.extend(events);
                 self.free_roam_presented.insert(participant);
+                self.alive_released_ms.remove(&participant);
             }
             if presenting || crashing {
                 self.pending_rpcs
@@ -120,6 +189,7 @@ impl PlayerListener {
             }
         }
         self.free_roam_presented.retain(|p| active.contains(p));
+        self.alive_released_ms.retain(|p, _| active.contains(p));
         Ok(())
     }
     /// The spawn-assignment clear for a participant leaving free roam, with
@@ -142,6 +212,52 @@ impl PlayerListener {
         let mut rpcs = vec![nfs_world::participants::HostRpc::Participant(notification)];
         rpcs.extend(flag.map(nfs_world::participants::HostRpc::SpawnOccupied));
         Ok(rpcs)
+    }
+}
+
+#[cfg(test)]
+mod timing_tests {
+    use super::*;
+    use nfs_world::participants::{Call, Endpoint, HostRpc, Notification};
+
+    #[test]
+    fn a_held_alive_waits_for_the_event_lane_within_a_bound() {
+        assert!(held_alive_due(false, 100, 100), "no lane: at once");
+        assert!(!held_alive_due(true, 100, 100 + HELD_ALIVE_LIMIT_MS - 1));
+        assert!(held_alive_due(true, 100, 100 + HELD_ALIVE_LIMIT_MS));
+        let mut listener = PlayerListener::new(101);
+        let alive = HostRpc::Participant(Notification {
+            endpoint: Endpoint {
+                scene: 2,
+                selector: 1,
+                serial: nfs_protocol::world::rpc::Serial::new(0).unwrap(),
+            },
+            participant: 7,
+            call: Call::Enter,
+        });
+        listener.held_alive.insert(7, (alive, 40));
+        listener.world_ms = 90;
+        listener.release_held_alive();
+        assert!(listener.held_alive.is_empty());
+        assert_eq!(listener.pending_rpcs.iter().collect::<Vec<_>>(), [&alive]);
+        assert_eq!(listener.alive_released_ms.get(&7), Some(&90));
+    }
+
+    #[test]
+    fn a_released_participant_presents_after_its_memberships_or_the_bound() {
+        assert!(presentation_ready(None, false, 0), "not held: at once");
+        assert!(!presentation_ready(Some(1_000), false, 1_000));
+        assert!(presentation_ready(Some(1_000), true, 1_000));
+        assert!(!presentation_ready(
+            Some(1_000),
+            false,
+            1_000 + PRESENTATION_LIMIT_MS - 1
+        ));
+        assert!(presentation_ready(
+            Some(1_000),
+            false,
+            1_000 + PRESENTATION_LIMIT_MS
+        ));
     }
 }
 

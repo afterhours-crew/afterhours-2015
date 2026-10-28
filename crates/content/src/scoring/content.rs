@@ -358,6 +358,54 @@ impl AssetIndex {
         })
     }
 
+    /// The scene serializer of the ScoreKeeper each keeper link reaches: the
+    /// scene's channel instances link the keeper fields to the layer's
+    /// `ScoreKeeperEntityData` (installed: gameplay `layer8_repscore`, six
+    /// keepers, official calls on s58 and s63-s67).
+    pub fn score_keepers(
+        &mut self,
+        scene: &str,
+        fields: &std::collections::BTreeSet<u32>,
+    ) -> Result<BTreeMap<u32, usize>, Error> {
+        use crate::graph::{Graph, Site};
+        let bindings: BTreeMap<(String, usize), usize> = self
+            .scene_bindings(scene)?
+            .into_iter()
+            .map(|b| ((b.asset.to_lowercase(), b.object), b.serializer))
+            .collect();
+        let mut graph = Graph::new(&mut self.assets);
+        let nodes = graph.read(Site::root(scene))?;
+        let mut out = BTreeMap::new();
+        for node in nodes
+            .iter()
+            .filter(|n| n.object.class == "LinkedSchematicChannelEntityData")
+        {
+            for port in graph.link_ports(&node.site)? {
+                if !fields.contains(&port) {
+                    continue;
+                }
+                for target in graph.link_targets(&node.site, port)? {
+                    if graph.object(&target.site)?.class != "ScoreKeeperEntityData" {
+                        continue;
+                    }
+                    let serializer = *bindings
+                        .get(&(target.site.key.0.to_lowercase(), target.site.key.1))
+                        .ok_or_else(|| bad("score keeper serializer"))?;
+                    if out
+                        .insert(port, serializer)
+                        .is_some_and(|s| s != serializer)
+                    {
+                        return Err(bad("score keeper reached twice"));
+                    }
+                }
+            }
+        }
+        if out.len() != fields.len() {
+            return Err(bad("score keeper missing"));
+        }
+        Ok(out)
+    }
+
     /// Read both installed driving participants for one gameplay scene.
     pub fn scoring_content(&mut self, scene: &str) -> Result<ScoringContent, Error> {
         let (acquisition, acquisition_composition) =

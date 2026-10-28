@@ -821,6 +821,9 @@ fn leaving_free_roam_clears_the_spawn_assignment_once() {
     );
     // The clear is idempotent at the model level and the counter continues.
     assert_eq!(listener.spawn_points.next_value(40), 2);
+    // The lifetime ended: the intro transfer car is assigned again (career
+    // start: 1 at 38618, Leave at 298117, 2 at 563021 ms).
+    assert!(!listener.spawn_points.subscribed(40));
     let mut unbound = PlayerListener::new(101);
     unbound.initialize_world(&content_with(None)).unwrap();
     assert!(unbound.spawn_clear(40).unwrap().is_empty());
@@ -1194,8 +1197,27 @@ fn recreated_customization_timer_accepts_new_lifetime_without_reusing_old_measur
             .unwrap();
         listener.logic_ghosts.insert(participant, ghosts.clone());
         assert_ne!(ghosts[&295], current);
-        assert!(!deliver(&mut listener, current, timer::STOP));
+        // The replaced timer's late stop names no owned timer: consumed and
+        // logged, never refused (a refused reliable message is resent forever,
+        // E1252). It measures nothing, and the committed frame drops the old
+        // lifetime's measurement with its entity.
+        assert!(deliver(&mut listener, current, timer::STOP));
+        assert!(listener.customization.state(participant).is_none());
     }
+    // A live timer the garage logic did not record (the intro's final garage
+    // presentation creates it, E1252) is owned through its root participant
+    // and measures like any other.
+    listener.logic_ghosts.remove(&participant);
+    let current = ghosts[&295];
+    listener.world_ms = 40_000;
+    assert!(deliver(&mut listener, current, timer::STOP));
+    assert!(deliver(&mut listener, current, timer::START));
+    listener.world_ms += 6_000;
+    assert!(deliver(&mut listener, current, timer::STOP));
+    assert_eq!(
+        listener.customization.state(participant).unwrap().completed,
+        1
+    );
 }
 
 #[test]
@@ -1659,4 +1681,35 @@ fn settled_logic_precedes_glass_atomically_for_three_new_lifetimes() {
     );
     assert_eq!(listener.pending_settled.len(), 1);
     assert!(listener.pending_rpcs.is_empty());
+}
+#[test]
+fn debug_hides_fire_on_the_main_root_in_installed_order_or_not_at_all() {
+    use nfs_world::logic::{EntityRef, Fire};
+    use nfs_world::participants::HostRpc;
+    let fires = super::debug_hide_fires(361, &[(2, 9), (1, 4)]).unwrap();
+    assert_eq!(
+        fires,
+        vec![
+            HostRpc::Event(Fire {
+                event: 9,
+                player: None,
+                target: EntityRef {
+                    ghost: 361,
+                    entity: 2
+                },
+            }),
+            HostRpc::Event(Fire {
+                event: 4,
+                player: None,
+                target: EntityRef {
+                    ghost: 361,
+                    entity: 1
+                },
+            }),
+        ]
+    );
+    assert!(super::debug_hide_fires(361, &[]).unwrap().is_empty());
+    // A root that cannot be addressed refuses the whole set.
+    assert!(super::debug_hide_fires(0, &[(1, 4)]).is_err());
+    assert!(super::debug_hide_fires(8192, &[(1, 4)]).is_err());
 }

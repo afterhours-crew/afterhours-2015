@@ -134,7 +134,21 @@ pub(super) struct State {
     pub trace: bool,
     /// Owned nitrous fuel per world car (E920), ticked with the car's reports.
     pub nitrous: BTreeMap<u16, Nitrous>,
+    /// Banked credits whose commit is outstanding. Their driving-style
+    /// records and calls wait for it, so the REP total the client reads
+    /// when it builds the REP ring arrives with the banked amount: official
+    /// E1026 sends the award event, the driving-style update and the REP
+    /// update in one frame. Client `ClientWYWScoreDisplayEntity` (handler
+    /// RVA 0x044149d0, queue builder 0x044173f0) starts the ring at
+    /// `TotalRep - RepRewarded`; an older total below the amount makes the
+    /// first segment endless and the ring stays at level 0 (E1248).
+    pub held: BTreeSet<u64>,
+    pub held_rpcs: VecDeque<HostRpc>,
+    pub held_since_ms: u64,
 }
+
+/// A commit that has not answered by then releases its held output.
+const HOLD_LIMIT_MS: u64 = 2_000;
 
 /// One car's nitrous fuel and the world time it was last advanced to.
 #[derive(Clone, Debug, PartialEq)]
@@ -274,6 +288,71 @@ mod flush_tests {
         assert_eq!(listener.pending.len(), 1);
         assert_eq!(listener.pending[0].records.len(), 1);
         assert_eq!(listener.pending[0].records[0].id, 8);
+    }
+
+    fn fire() -> nfs_world::participants::HostRpc {
+        nfs_world::participants::HostRpc::Event(nfs_world::logic::Fire {
+            event: 3,
+            player: None,
+            target: nfs_world::logic::EntityRef {
+                ghost: 337,
+                entity: 1,
+            },
+        })
+    }
+
+    /// E1248: the REP ring stayed at level 0 because the banked amount
+    /// arrived 190-290 ms before the REP total. A bank's records and calls
+    /// now wait for its commit and leave with the committed REP fields.
+    #[test]
+    fn a_banked_credit_holds_its_output_until_the_commit_releases_it() {
+        let mut listener = PlayerListener::new(806_588_082);
+        listener.scoring_state.held.insert(5);
+        listener.scoring_state.held_since_ms = 1_000;
+        listener.scoring_state.dirty.insert(7, record(7));
+        listener.scoring_state.held_rpcs.push_back(fire());
+        // Neither the interval nor a fired event flushes a held bank.
+        listener.flush_scoring(1_500, true);
+        assert!(listener.pending.is_empty());
+        assert!(listener.pending_rpcs.is_empty());
+        // Another batch's answer does not release this one.
+        listener.release_award(4);
+        assert!(listener.pending.is_empty());
+        // The commit merges the REP record, then both leave together, the
+        // records ahead of the calls.
+        listener.scoring_state.dirty.insert(9, record(9));
+        listener.release_award(5);
+        assert_eq!(listener.pending.len(), 1);
+        let ids: Vec<u16> = listener.pending[0].records.iter().map(|r| r.id).collect();
+        assert_eq!(ids, [7, 9]);
+        assert_eq!(listener.pending_rpcs.len(), 1);
+        assert!(listener.scoring_state.held_rpcs.is_empty());
+        // A repeated answer is a no-op.
+        listener.release_award(5);
+        assert_eq!(listener.pending.len(), 1);
+        assert_eq!(listener.pending_rpcs.len(), 1);
+    }
+
+    #[test]
+    fn structure_flushes_through_a_hold_and_an_unanswered_commit_times_out() {
+        let mut listener = PlayerListener::new(806_588_082);
+        listener.scoring_state.held.insert(6);
+        listener.scoring_state.held_since_ms = 2_000;
+        listener.scoring_state.dirty_deleted.push(11);
+        listener.flush_scoring(2_100, false);
+        assert_eq!(listener.pending.len(), 1, "a deletion never waits");
+        listener.pending.clear();
+        listener.scoring_state.dirty.insert(8, record(8));
+        listener.scoring_state.held_rpcs.push_back(fire());
+        listener.flush_scoring(3_999, true);
+        assert!(listener.pending.is_empty());
+        listener.flush_scoring(2_000 + super::HOLD_LIMIT_MS, false);
+        assert_eq!(listener.pending.len(), 1);
+        assert_eq!(listener.pending_rpcs.len(), 1);
+        assert!(listener.scoring_state.held.is_empty());
+        // The late answer finds nothing held.
+        listener.release_award(6);
+        assert_eq!(listener.pending.len(), 1);
     }
 }
 
@@ -1114,6 +1193,24 @@ impl PlayerListener {
     /// (sections drain before RPC notifications; E914 shows the official
     /// popup reads the amount the row refers to at once).
     fn flush_scoring(&mut self, now_ms: u64, force: bool) {
+        if !self.scoring_state.held.is_empty() {
+            if now_ms.saturating_sub(self.scoring_state.held_since_ms) < HOLD_LIMIT_MS {
+                let state = &self.scoring_state;
+                if state.dirty_deleted.is_empty()
+                    && state.dirty.values().all(|record| record.initial.is_none())
+                {
+                    return;
+                }
+            } else {
+                tracing::warn!(
+                    batches = ?self.scoring_state.held,
+                    "credit commit outstanding; held scoring output released"
+                );
+                self.scoring_state.held.clear();
+                self.release_held(now_ms);
+                return;
+            }
+        }
         let state = &mut self.scoring_state;
         if state.dirty.is_empty() && state.dirty_deleted.is_empty() {
             return;
@@ -1142,6 +1239,36 @@ impl PlayerListener {
         self.pending.push_back(packed(records, deleted));
     }
 
+    /// Flush the held records with the committed REP fields, then the held
+    /// calls, as one output.
+    fn release_held(&mut self, now_ms: u64) {
+        let state = &mut self.scoring_state;
+        if !state.dirty.is_empty() || !state.dirty_deleted.is_empty() {
+            let records = std::mem::take(&mut state.dirty).into_values().collect();
+            let deleted = std::mem::take(&mut state.dirty_deleted);
+            state.last_flush_ms = now_ms;
+            self.pending.push_back(packed(records, deleted));
+        }
+        let held = std::mem::take(&mut self.scoring_state.held_rpcs);
+        tracing::info!(
+            calls = held.len(),
+            "held scoring output released with the commit"
+        );
+        self.pending_rpcs.extend(held);
+    }
+
+    /// A banked credit committed, failed or was dropped: once no commit is
+    /// outstanding, its held output leaves.
+    pub(in crate::net) fn release_award(&mut self, batch_id: u64) {
+        if self.scoring_state.held.remove(&batch_id) && self.scoring_state.held.is_empty() {
+            let now_ms = self
+                .scoring_state
+                .last_flush_ms
+                .max(self.scoring_state.held_since_ms);
+            self.release_held(now_ms);
+        }
+    }
+
     pub(super) fn desired_scoring(
         &self,
         has_event: bool,
@@ -1168,6 +1295,27 @@ impl PlayerListener {
                 participant,
                 kinds(self.event_suspended.contains(&participant), race),
             );
+        }
+        // Prologue drives (official E1026 122.317, 572.121, 756.224 and
+        // 891.324 s): data acquisition lives with each drive's presentation,
+        // the free-roam driving-style participant only in the return drive
+        // (891.423 s, retired with the drive at 1119.136 s).
+        let drive = self
+            .logic
+            .as_deref()
+            .map(crate::garage_logic::GarageLogic::arrived_captures)
+            .unwrap_or_default();
+        if !drive.is_empty() {
+            for (participant, chapter) in self.participants.intro_chapters() {
+                let live = self
+                    .logic_ghosts
+                    .get(&participant)
+                    .is_some_and(|ghosts| drive.iter().all(|c| ghosts.contains_key(c)));
+                if live && !desired.contains_key(&participant) {
+                    let returning = chapter == nfs_world::participants::intro::Chapter::ReturnDrive;
+                    desired.insert(participant, kinds(!returning, None));
+                }
+            }
         }
         desired
     }
@@ -1471,6 +1619,10 @@ impl PlayerListener {
                 return Err(replication::Error::Bound);
             }
             let batch_id = state.batch_base | state.sequence;
+            if state.held.is_empty() {
+                state.held_since_ms = now_ms;
+            }
+            state.held.insert(batch_id);
             tracing::info!(
                 participant,
                 total = credit.total,
@@ -1494,7 +1646,8 @@ impl PlayerListener {
             });
         }
         if collected.replies.len()
-            > nfs_world::session::MAX_RPC_QUEUE.saturating_sub(self.pending_rpcs.len())
+            > nfs_world::session::MAX_RPC_QUEUE
+                .saturating_sub(self.pending_rpcs.len() + state.held_rpcs.len())
         {
             return Err(replication::Error::Bound);
         }
@@ -1503,6 +1656,13 @@ impl PlayerListener {
             .iter()
             .any(|reply| matches!(reply, HostRpc::Event(_)));
         self.players = players;
+        if !state.held.is_empty() {
+            // Wait for the commit (released by `release_award`).
+            state.held_rpcs.extend(collected.replies);
+            self.scoring_state = state;
+            self.flush_scoring(now_ms, false);
+            return Ok(());
+        }
         self.scoring_state = state;
         self.flush_scoring(now_ms, fired);
         self.pending_rpcs.extend(collected.replies);
@@ -1511,6 +1671,66 @@ impl PlayerListener {
 
     pub(in crate::net) fn take_award(&mut self) -> Option<AwardRequest> {
         self.scoring_state.pending_awards.pop_front()
+    }
+
+    /// The award's ScoreKeeper calls on the gameplay scene, by keeper.
+    fn keeper_calls(
+        &self,
+        players: &Players,
+        participant: u16,
+        totals: nfs_services::reputation::Scores,
+        award: nfs_services::reputation::Scores,
+    ) -> Result<Vec<HostRpc>, replication::Error> {
+        let Some(content) = self.scoring.as_deref() else {
+            return Ok(vec![]);
+        };
+        let keepers = content.keepers();
+        if keepers.is_empty() {
+            return Ok(vec![]);
+        }
+        let world = players.objects();
+        let scene = world
+            .scene(nfs_content::assets::scene_key("levels/genesis01/gameplay"))
+            .ok_or(replication::Error::UnknownObject)?;
+        let Some(replication::Initial::SubLevel { fields, .. }) =
+            world.get(scene).map(|o| &o.initial)
+        else {
+            return Err(replication::Error::TypeMismatch);
+        };
+        let value = |scores: &nfs_services::reputation::Scores,
+                     category|
+         -> Result<u32, replication::Error> {
+            use nfs_world::scoring::interpreter::Category;
+            let v = match category {
+                Category::Total => scores.total,
+                Category::Speed => scores.speed,
+                Category::Style => scores.style,
+                Category::Build => scores.build,
+                Category::Crew => scores.crew,
+                Category::Outlaw => scores.outlaw,
+            };
+            u32::try_from(v).map_err(|_| replication::Error::Shape)
+        };
+        let mut out = Vec::with_capacity(keepers.len());
+        for (category, serializer) in keepers {
+            let selector = fields
+                .get(serializer)
+                .and_then(replication::sublevel::Initial::rpc)
+                .ok_or(replication::Error::TypeMismatch)?
+                .selector;
+            out.push(HostRpc::GameMode(crate::event_logic::call(
+                world,
+                scene,
+                selector,
+                0,
+                Some(participant),
+                nfs_world::game_mode::Arguments::ScoreAward {
+                    total: value(&totals, category)?,
+                    amount: value(&award, category)?,
+                },
+            )?));
+        }
+        Ok(out)
     }
 
     /// Accept a committed credit: adopt the account view, keep the item
@@ -1627,11 +1847,28 @@ impl PlayerListener {
             fields = changed,
             "owned reputation credit committed"
         );
+        // Each ScoreKeeper hears the award: the participant's committed total
+        // in that keeper and this award's amount (official E1026 911.825 s:
+        // six calls with the award event and the REP update).
+        let keepers = self.keeper_calls(&players, request.participant, scores, request.credit)?;
+        let held = self.scoring_state.held.contains(&request.batch_id);
+        if keepers.len()
+            > nfs_world::session::MAX_RPC_QUEUE
+                .saturating_sub(self.pending_rpcs.len() + self.scoring_state.held_rpcs.len())
+        {
+            return Err(replication::Error::Bound);
+        }
         self.scoring_state.dirty = dirty;
         self.players = players;
+        if held {
+            self.scoring_state.held_rpcs.extend(keepers);
+        } else {
+            self.pending_rpcs.extend(keepers);
+        }
         if request.event.is_some() {
             self.event_credit_committed(request.participant, request.batch_id);
         }
+        self.release_award(request.batch_id);
         Ok(())
     }
 }

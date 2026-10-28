@@ -322,9 +322,23 @@ pub(in crate::net::players::prologue) fn selected(handoff: bool) -> (PlayerListe
     assert!(listener.pending_rpcs.is_empty());
     assert!(send(&mut listener, 23, 82, reached(43, 0).span()));
     assert_eq!(listener.pending.iter().flat_map(|s| &s.deleted).count(), 3);
+    // Each preview slot unloads for the participant (method 2), once.
+    let unloads = |listener: &PlayerListener| {
+        listener
+            .pending_rpcs
+            .iter()
+            .filter(|r| {
+                matches!(r, HostRpc::GameMode(c)
+                    if c.method == 2 && c.reference == Some(participant)
+                        && c.arguments == nfs_world::game_mode::Arguments::None)
+            })
+            .count()
+    };
+    assert_eq!(unloads(&listener), 3);
     drain(&mut listener);
     assert!(send(&mut listener, 24, 82, reached(43, 0).span()));
     assert!(listener.pending.is_empty());
+    assert_eq!(unloads(&listener), 0);
     assert!(send(&mut listener, 25, 82, reached(42, 0).span()));
     assert!(
         listener

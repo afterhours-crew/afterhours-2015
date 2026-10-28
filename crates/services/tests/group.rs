@@ -405,3 +405,82 @@ fn configuration_and_generated_state_are_bounded() {
 
 #[path = "support/matchmaking_admission.rs"]
 mod matchmaking_admission;
+
+fn renewal_wire(persona: i64, world_game: &'static [u8], correlation: u32) -> Vec<u8> {
+    let mut q = create(persona, false);
+    let attrs = &mut q
+        .game_creation_data
+        .as_mut()
+        .unwrap()
+        .game_attribs
+        .as_mut()
+        .unwrap()
+        .0;
+    for (key, value) in attrs.iter_mut() {
+        if *key == b"gameSessionId" {
+            *value = world_game;
+        }
+    }
+    wire(
+        CREATE_GAME,
+        correlation,
+        &q.encode(group::body_limits()).unwrap(),
+    )
+}
+
+/// After leaving its group in the world the client creates a new one whose
+/// `gameSessionId` names the world game (official E1026 1311.264 s, otherwise
+/// the startup request of 42.226 s); the renewed group has identifiers of its
+/// own and runs the same create, mesh, finalize, advance lifecycle, once.
+#[test]
+fn an_initialized_group_renews_once_for_the_world_game() {
+    let mut s = session(10, 1);
+    assert!(s.renew(generated(2), 777).is_err(), "not initialized yet");
+    for w in [
+        create_wire(10, false),
+        mesh(10, generated(1).game_id),
+        finalize(generated(1).game_id),
+        initialize(generated(1).game_id),
+    ] {
+        assert!(s.response(&w).unwrap().is_some());
+        s.commit_after_write();
+    }
+    assert_eq!(s.state(), State::Initialized);
+    assert!(s.renew(generated(1), 777).is_err(), "same identifiers");
+    assert!(s.renew(generated(2), 0).is_err(), "no world game");
+    s.renew(generated(2), 777).unwrap();
+    assert_eq!(s.state(), State::AwaitCreate);
+    assert_eq!(s.game_id(), None);
+    let mut startup_shaped = session(10, 1);
+    startup_shaped.renew(generated(2), 777).unwrap_err();
+    // The startup attribute does not create the renewed group.
+    let mut t = session(10, 1);
+    for w in [
+        create_wire(10, false),
+        mesh(10, generated(1).game_id),
+        finalize(generated(1).game_id),
+        initialize(generated(1).game_id),
+    ] {
+        t.response(&w).unwrap();
+        t.commit_after_write();
+    }
+    t.renew(generated(2), 777).unwrap();
+    assert!(t.response(&renewal_wire(10, b"0", 11)).is_err());
+    // The renewed lifecycle.
+    let out = s.response(&renewal_wire(10, b"777", 11)).unwrap().unwrap();
+    assert_eq!(out.len(), 2);
+    let reply = CreateGameResponse::decode(body(&out[0]), group::body_limits()).unwrap();
+    assert_eq!(reply.game_id, Some(generated(2).game_id));
+    s.commit_after_write();
+    for w in [
+        mesh(10, generated(2).game_id),
+        finalize(generated(2).game_id),
+        initialize(generated(2).game_id),
+    ] {
+        assert!(s.response(&w).unwrap().is_some());
+        s.commit_after_write();
+    }
+    assert_eq!(s.state(), State::Initialized);
+    assert_eq!(s.game_id(), Some(generated(2).game_id));
+    assert!(s.renew(generated(3), 777).is_err(), "once per session");
+}

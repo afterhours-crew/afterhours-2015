@@ -37,6 +37,28 @@ impl PlayerListener {
                 _ => replication::Error::Shape,
             })
     }
+    /// Whether a lookup error only means the message names no object this
+    /// connection owns: logged and consumed, never a refused frame (a refused
+    /// reliable message is resent forever and jams the channel, E1252).
+    pub(super) fn is_unowned(error: replication::Error) -> bool {
+        matches!(
+            error,
+            replication::Error::UnknownObject
+                | replication::Error::TypeMismatch
+                | replication::Error::DuplicateObject
+        )
+    }
+    pub(super) fn unowned_logic(message: &Message, error: replication::Error) {
+        if let Message::Reached { event, target, .. } = message {
+            tracing::warn!(
+                ghost = target.ghost,
+                entity = target.entity,
+                event,
+                ?error,
+                "client logic message names no owned object; consumed"
+            );
+        }
+    }
     pub(super) fn customization_owner(
         roles: Option<&crate::scene_roles::SceneRoles>,
         players: &Players,
@@ -50,10 +72,25 @@ impl PlayerListener {
         let mut candidates = ghosts
             .iter()
             .filter(|(_, map)| map.values().any(|g| *g == target.ghost));
-        let (&participant, _) = candidates.next().ok_or(replication::Error::UnknownObject)?;
-        if candidates.next().is_some() {
-            return Err(replication::Error::DuplicateObject);
-        }
+        let participant = match (candidates.next(), candidates.next()) {
+            (Some((&participant, _)), None) => participant,
+            (Some(_), Some(_)) => return Err(replication::Error::DuplicateObject),
+            // A timer the garage logic did not create (the intro's final
+            // garage presentation, E1252) is owned by its root's participant;
+            // the type and ownership checks below still apply.
+            (None, _) => match &players
+                .objects()
+                .get(target.ghost)
+                .ok_or(replication::Error::UnknownObject)?
+                .initial
+            {
+                replication::Initial::Entity { fields, .. } => match fields.first() {
+                    Some(entity::Initial::Root { reference, .. }) => *reference,
+                    _ => return Err(replication::Error::TypeMismatch),
+                },
+                _ => return Err(replication::Error::TypeMismatch),
+            },
+        };
         let local_slot = players
             .local_slot(HOST_SELECTOR as u8, persona, participant)
             .ok_or(replication::Error::UnknownObject)?;

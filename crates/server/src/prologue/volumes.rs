@@ -73,6 +73,10 @@ pub struct WorldVolumes {
     pub event_order: Vec<EventVolume>,
     /// Driving subscriptions in activation-family and scene declaration order.
     pub driving_order: Vec<Endpoint>,
+    /// `CopSpawnPatrolEntityData` serializers: the client's patrol requests
+    /// (m0 `[scene, player]`, no arguments) get no host answer (official
+    /// E1026, E912: no reply and no cop goal in the following 3 s).
+    pub cop_patrols: BTreeSet<Endpoint>,
 }
 
 impl WorldVolumes {
@@ -106,6 +110,11 @@ impl WorldVolumes {
         let assets: BTreeMap<Endpoint, &str> = bindings
             .iter()
             .map(|b| (b.endpoint, b.asset.as_str()))
+            .collect();
+        volumes.cop_patrols = bindings
+            .iter()
+            .filter(|b| b.class == "CopSpawnPatrolEntityData")
+            .map(|b| b.endpoint)
             .collect();
         for binding in bindings.iter().filter(|b| b.class == VOLUME_FILTER) {
             if ACTIVITIES.contains(&binding.asset.as_str()) {

@@ -16,7 +16,7 @@ use nfs_world::{
     replication::{Error, Initial, players::Players},
 };
 use std::{collections::BTreeMap, sync::Arc};
-mod presentation;
+pub(crate) mod presentation;
 
 #[derive(Clone, Debug)]
 pub struct Content {

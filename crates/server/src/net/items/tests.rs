@@ -663,6 +663,39 @@ fn credit_announces_each_new_record_then_each_changed_root() {
     assert_eq!(added, (10..30).collect::<Vec<_>>());
 }
 
+#[test]
+fn a_story_award_announces_its_whole_item_tree_in_one_change_notification() {
+    let bindings = catalog();
+    let bindings = bindings.bindings();
+    let before = items::Collection {
+        roots: vec![1, 2],
+        items: [(1, record(1, items::OWNED)), (2, record(2, items::OWNED))].into(),
+    };
+    assert_eq!(
+        award_notifications(2, &before, &before, bindings),
+        Ok((vec![], 0))
+    );
+    // E1026: the starter car and its parts arrive in one notification, where a
+    // level-up credit of as many records would use thirteen.
+    let mut after = before.clone();
+    after.items.get_mut(&1).unwrap().buy_price = 1;
+    for id in 10..59 {
+        after.roots.push(id);
+        after.items.insert(id, record(id, items::OWNED));
+    }
+    let (sent, unannounced) = award_notifications(2, &before, &after, bindings).unwrap();
+    assert_eq!(unannounced, 0);
+    assert_eq!(sent.len(), 2);
+    let change = items::ChangeNotification::decode(&sent[0], bindings).unwrap();
+    assert_eq!(change.player_index, 2);
+    assert_eq!(change.added.roots, (10..59).collect::<Vec<_>>());
+    assert_eq!(change.removed, items::Collection::default());
+    let update = items::UpdateNotification::decode(&sent[1], bindings).unwrap();
+    assert_eq!(update.items, after.for_roots(vec![1]).unwrap());
+    let (credit, _) = credit_notifications(2, &before, &after, bindings).unwrap();
+    assert_eq!(credit.len(), 14);
+}
+
 #[tokio::test]
 async fn queued_notifications_go_out_one_at_a_time_ahead_of_requests() {
     let repo = Arc::new(MemoryRepository::default());

@@ -36,9 +36,39 @@ fn credit_notifications(
     after: &nfs_world::items::Collection,
     catalog: &nfs_world::items::Catalog,
 ) -> Result<(Vec<Vec<u8>>, usize), nfs_world::items::Error> {
+    let added = after.changes_since(before)?.added.len();
+    notifications_with(
+        player_index,
+        before,
+        after,
+        catalog,
+        added.div_ceil(MAX_SEPARATE).max(1),
+    )
+}
+
+/// Notifications for a story award: every new record in one change
+/// notification. The official career start sent the starter car's complete
+/// item tree as a single 3,926-byte Items change notification, together with
+/// the car's creation and before the selection callback (E1026 497.299 s,
+/// E1249); changed roots keep their own update notifications.
+fn award_notifications(
+    player_index: u32,
+    before: &nfs_world::items::Collection,
+    after: &nfs_world::items::Collection,
+    catalog: &nfs_world::items::Catalog,
+) -> Result<(Vec<Vec<u8>>, usize), nfs_world::items::Error> {
+    notifications_with(player_index, before, after, catalog, usize::MAX)
+}
+
+fn notifications_with(
+    player_index: u32,
+    before: &nfs_world::items::Collection,
+    after: &nfs_world::items::Collection,
+    catalog: &nfs_world::items::Catalog,
+    per: usize,
+) -> Result<(Vec<Vec<u8>>, usize), nfs_world::items::Error> {
     let changes = after.changes_since(before)?;
     let mut notifications = Vec::new();
-    let per = changes.added.len().div_ceil(MAX_SEPARATE).max(1);
     for roots in changes.added.chunks(per) {
         notifications.push(
             nfs_world::items::ChangeNotification {
@@ -821,6 +851,7 @@ impl Exchanges {
                     connection = self.connection,
                     "reputation credit dropped: inventory service not configured"
                 );
+                listener.release_award(request.batch_id);
             }
             return;
         }
@@ -955,6 +986,7 @@ impl Exchanges {
                         ?error,
                         "story persistence failed"
                     );
+                    listener.story_failed(&request);
                     false
                 }
             };
@@ -1034,6 +1066,7 @@ impl Exchanges {
                                 batch_id = request.batch_id,
                                 "reputation credit snapshot rejected"
                             );
+                            listener.release_award(request.batch_id);
                             false
                         }
                     }
@@ -1045,6 +1078,7 @@ impl Exchanges {
                         batch_id = request.batch_id,
                         "reputation credit failed"
                     );
+                    listener.release_award(request.batch_id);
                     false
                 }
             };

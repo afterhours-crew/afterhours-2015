@@ -12,7 +12,7 @@ use std::{
     thread,
     time::Instant,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 pub const CHANNEL_CAPACITY: usize = 256;
 const MAX_CHUNK_BYTES: usize = 1 << 20;
@@ -71,6 +71,12 @@ impl Route {
 }
 
 enum Message {
+    WorldClock {
+        connection: u32,
+        recorder_offset_ns: u64,
+        unix_origin_micros: i64,
+        written: oneshot::Sender<bool>,
+    },
     Chunk {
         service: &'static str,
         connection: u32,
@@ -135,8 +141,66 @@ pub fn start_with_options(
         .name("nfs-server-recorder".into())
         .spawn(move || {
             let mut streams: BTreeMap<PathBuf, (File, u64)> = BTreeMap::new();
+            let mut clocks = std::collections::BTreeSet::new();
+            let completion = |clocks: &std::collections::BTreeSet<u32>, exhausted: bool| {
+                json!({"format": "afterhours-recording-complete-v1",
+                    "recording_id": directory.file_name().and_then(|s| s.to_str()),
+                    "pid": std::process::id(), "raw": options.raw,
+                    "exhausted": exhausted, "world_connections": clocks})
+                .to_string()
+            };
+            let mut footer_bytes = 0u64;
             let (mut total_bytes, mut total_events, mut exhausted) = (0u64, 0u64, false);
             while let Some(message) = receiver.blocking_recv() {
+                let message = match message {
+                    Message::WorldClock {
+                        connection,
+                        recorder_offset_ns,
+                        unix_origin_micros,
+                        written,
+                    } => {
+                        let receipt = json!({"format": "afterhours-world-clock-v1",
+                            "recording_id": directory.file_name().and_then(|s| s.to_str()),
+                            "pid": std::process::id(), "connection": connection,
+                            "recorder_offset_ns": recorder_offset_ns,
+                            "unix_origin_micros": unix_origin_micros});
+                        let encoded = serde_json::to_vec(&receipt).map_err(|_| Failure::Output)?;
+                        let mut prospective_clocks = clocks.clone();
+                        prospective_clocks.insert(connection);
+                        // `false` is longer than `true`: reserve the larger footer.
+                        let prospective_footer =
+                            completion(&prospective_clocks, false).len() as u64;
+                        let allowed = !exhausted
+                            && connection > 0
+                            && unix_origin_micros > 0
+                            && clocks.len() < options.max_streams
+                            && !clocks.contains(&connection)
+                            && total_bytes
+                                .saturating_add(encoded.len() as u64)
+                                .saturating_add(prospective_footer)
+                                .saturating_add(128)
+                                <= options.max_bytes;
+                        if !allowed {
+                            let _ = written.send(false);
+                            continue;
+                        }
+                        let result = (|| {
+                            let mut file = File::create_new(
+                                directory.join(format!("world-{connection}-clock.json")),
+                            )?;
+                            file.write_all(&encoded)?;
+                            file.sync_all()
+                        })();
+                        let ok = result.is_ok();
+                        let _ = written.send(ok);
+                        result.map_err(|_| Failure::Output)?;
+                        clocks.insert(connection);
+                        footer_bytes = prospective_footer;
+                        total_bytes += encoded.len() as u64;
+                        continue;
+                    }
+                    chunk => chunk,
+                };
                 if exhausted {
                     continue;
                 }
@@ -149,7 +213,10 @@ pub fn start_with_options(
                     note,
                     length,
                     bytes,
-                } = message;
+                } = message
+                else {
+                    unreachable!("clock handled above")
+                };
                 let suffix = match direction {
                     Direction::In => "in",
                     Direction::Out => "out",
@@ -174,7 +241,11 @@ pub fn start_with_options(
                 // Reserve space for one final marker. Exhaustion stops recording,
                 // never gameplay, and does not leave a partial protocol chunk.
                 if total_events >= options.max_events
-                    || total_bytes.saturating_add(needed).saturating_add(128) > options.max_bytes
+                    || total_bytes
+                        .saturating_add(needed)
+                        .saturating_add(footer_bytes)
+                        .saturating_add(128)
+                        > options.max_bytes
                     || (options.raw
                         && (length != bytes.len()
                             || (!streams.contains_key(&path)
@@ -203,7 +274,16 @@ pub fn start_with_options(
             for (_, (file, _)) in streams {
                 file.sync_all().map_err(|_| Failure::Output)?;
             }
-            events.sync_all().map_err(|_| Failure::Output)
+            events.sync_all().map_err(|_| Failure::Output)?;
+            if !clocks.is_empty() {
+                let receipt = completion(&clocks, exhausted);
+                let mut file = File::create_new(directory.join("recording-complete.json"))
+                    .map_err(|_| Failure::Output)?;
+                file.write_all(receipt.to_string().as_bytes())
+                    .map_err(|_| Failure::Output)?;
+                file.sync_all().map_err(|_| Failure::Output)?;
+            }
+            Ok(())
         })
         .map_err(|_| Failure::Io)?;
     Ok((
@@ -245,6 +325,35 @@ pub(crate) fn full_for_tests() -> (Recorder, Box<dyn std::any::Any>) {
 }
 
 impl Recorder {
+    /// Persist the exact affine world clock before accepting world traffic.
+    /// The recorder worker owns the file; acknowledgement follows sync_all.
+    /// This receipt survives ordinary diagnostic-log rotation.
+    pub async fn world_clock(
+        &self,
+        connection: u32,
+        started: Instant,
+        unix_origin_micros: i64,
+    ) -> Result<(), Failure> {
+        let offset = started
+            .checked_duration_since(self.origin)
+            .ok_or(Failure::Output)?;
+        let recorder_offset_ns = u64::try_from(offset.as_nanos()).map_err(|_| Failure::Output)?;
+        let (written, received) = oneshot::channel();
+        self.sender
+            .send(Message::WorldClock {
+                connection,
+                recorder_offset_ns,
+                unix_origin_micros,
+                written,
+            })
+            .await
+            .map_err(|_| Failure::Output)?;
+        if received.await.map_err(|_| Failure::Output)? {
+            Ok(())
+        } else {
+            Err(Failure::Output)
+        }
+    }
     #[cfg(feature = "network-test")]
     pub(crate) fn loss_trigger(&self, connection: u32) -> Option<PathBuf> {
         self.test_directory

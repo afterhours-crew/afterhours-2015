@@ -31,6 +31,37 @@ pub(in crate::net::players) fn insert_presence(
     calls.insert(at, HostRpc::GaragePresence(presence));
 }
 
+/// The selection's preview slots unload again when the participant leaves
+/// the intro garage: VehicleSlot m2 for the participant on each slot, in
+/// serializer order (official E1026 562.221 s: garage s23 off, then s15, s16,
+/// s17 m2; the selection unloaded them first at 498.920 s; client
+/// OnVehicleUnloaded sets the slot Bool false, ph5 5.2).
+pub(in crate::net::players) fn preview_slot_unloads(
+    garage: &nfs_content::garage::starter::Garage,
+    players: &Players,
+    participant: u16,
+) -> Result<Vec<HostRpc>, replication::Error> {
+    let mut slots: Vec<usize> = garage.slots.iter().map(|s| s.component).collect();
+    slots.sort_unstable();
+    slots
+        .into_iter()
+        .map(|serializer| {
+            let (scene, selector) = players
+                .objects()
+                .scene_endpoint(garage.scene_key, serializer)
+                .ok_or(replication::Error::UnknownObject)?;
+            Ok(HostRpc::GameMode(crate::event_logic::call(
+                players.objects(),
+                scene,
+                selector,
+                2,
+                Some(participant),
+                nfs_world::game_mode::Arguments::None,
+            )?))
+        })
+        .collect()
+}
+
 pub(in crate::net::players) fn notify(
     content: &crate::prologue::Content,
     modes: &mut Modes,
@@ -108,6 +139,12 @@ impl PlayerListener {
         let &[_, participant] = envelope.references() else {
             return Err(replication::Error::Shape);
         };
+        // Once the intro is finished the ordinary garage path owns the
+        // participant's requests; the retired modes stay recorded (E1257: the
+        // free-roam request was claimed here and refused for good).
+        if participants.intro_chapter(participant).is_none() {
+            return Ok(None);
+        }
         let Some((active, _, chapter @ (Chapter::FirstDrive | Chapter::ReturnDrive))) =
             modes.get(&participant)
         else {
@@ -125,12 +162,19 @@ impl PlayerListener {
         }
         let mut out = GarageOutput::default();
         if request {
-            if !active.destination_reached() {
-                return Ok(Some(out));
-            }
+            // The client sends the request when its car enters the
+            // SpawnPoints RaceBoxTrigger (trace 11.12), independently of the
+            // route's destination checkpoint; the installed request chain
+            // (layer9 LocalParticipantEvent → state sequence selector and
+            // the state machine channel) has no objective gate. E1248: the
+            // request preceded the crossing in both drives, and the drive
+            // waited for a second request (first drive) or stayed stuck.
             match participants.begin_intro_return(participant) {
                 Outcome::Repeated => return Ok(Some(out)),
-                Outcome::Unsupported => return Err(replication::Error::Shape),
+                // Not an intro return in this stage: the ordinary path decides
+                // (and logs what it cannot use); a well-formed request is
+                // never refused for the stage it arrives in.
+                Outcome::Unsupported => return Ok(None),
                 Outcome::Advanced(chain) => {
                     let returns = returns.ok_or(replication::Error::Unsupported)?;
                     let owner = Owner {
@@ -139,6 +183,17 @@ impl PlayerListener {
                         participant,
                     };
                     returns.reset(players, owner)?;
+                    // A return that begins before the destination crossing
+                    // releases the drive's route first, as the crossing does.
+                    let parent = active.parent();
+                    let drive = &mut modes
+                        .get_mut(&participant)
+                        .ok_or(replication::Error::UnknownObject)?
+                        .0;
+                    drive.cancel_messages();
+                    let released = drive.release_owner_routes(players)?;
+                    out.output.records.extend(released.records);
+                    out.output.deleted.extend(released.deleted);
                     // Official order (career start 290017-290127 ms): the
                     // return-request event, then the return presentation
                     // replaces the drive's (cinematic logic in, HUD out).
@@ -158,6 +213,21 @@ impl PlayerListener {
                                 .calls
                                 .extend(batch.events.into_iter().map(HostRpc::Event));
                         }
+                    }
+                    // The mission chapter stops the first drive's sounds as
+                    // each intro return begins (official E1026 290.127 and
+                    // 1119.627 s, on the intro progression logic).
+                    for &(bus, ordinal) in &content.return_events {
+                        let fire = nfs_world::logic::Fire {
+                            event: ordinal,
+                            player: None,
+                            target: nfs_world::logic::EntityRef {
+                                ghost: parent,
+                                entity: bus,
+                            },
+                        };
+                        fire.encode().map_err(|_| replication::Error::Shape)?;
+                        out.output.calls.push(HostRpc::Event(fire));
                     }
                     // The official host's cinematic Actor carries its first
                     // flag with the scripted goal (career start 289.819 ms:
@@ -245,7 +315,13 @@ impl PlayerListener {
         notify(content, modes, players, chain, &mut out.output)?;
         let sequences = sequences.ok_or(replication::Error::Unsupported)?;
         sequences.reset(players, owner)?;
-        out.output.records.extend(sequences.start(players, owner)?);
+        // Both official intro garage waits stopped 8 s after the waiting
+        // sequence (E1026 306.019 and 1134.827 s; E1249 trace 3.14).
+        out.output.records.extend(sequences.start_with_delay(
+            players,
+            owner,
+            nfs_world::sequences::INTRO_FIRST_READY_MS,
+        )?);
         Ok(Some(out))
     }
 }

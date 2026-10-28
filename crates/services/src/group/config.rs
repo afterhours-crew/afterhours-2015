@@ -77,7 +77,14 @@ impl Config {
         }
         Self::from_json(&serde_json::from_slice(&bytes).map_err(|_| crate::ContentError::Invalid)?)
     }
-    pub(super) fn validate_request(&self, q: &CreateGameRequest<'_>) -> Result<(), Error> {
+    /// `session` is the expected `gameSessionId` attribute: "0" for the
+    /// startup group, the current world game for a renewed group (official
+    /// E1026 1311.264 s; the request is otherwise identical to 42.226 s).
+    pub(super) fn validate_request(
+        &self,
+        q: &CreateGameRequest<'_>,
+        session: &[u8],
+    ) -> Result<(), Error> {
         let c = q.common_game_data.as_ref().ok_or(Error::Ineligible)?;
         let g = q.game_creation_data.as_ref().ok_or(Error::Ineligible)?;
         let j = q.player_join_data.as_ref().ok_or(Error::Ineligible)?;
@@ -124,7 +131,7 @@ impl Config {
             || s.sub_session_name != Some(b"")
             || !matches!(c.x_lspnetwork_address, Some(NetworkAddress::Unset))
             || attrs.len() != 4
-            || value(b"gameSessionId") != Some(b"0")
+            || value(b"gameSessionId") != Some(session)
             || value(b"Matchmaking") != Some(b"Idle")
             || value(b"mode") != Some(b"Group")
             || g.entry_criteria_map.is_some()

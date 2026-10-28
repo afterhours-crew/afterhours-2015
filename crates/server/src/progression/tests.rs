@@ -403,3 +403,22 @@ fn post_intro_rows_restore_as_intro_complete_with_the_activated_main_objective()
     assert_eq!(dispatched[&Branch::Main].activated, [30]);
     assert!(ready(&dispatched, false));
 }
+#[test]
+fn debug_hides_are_bounded_and_kept_in_installed_order() {
+    let content = Content::from_json(&combined()).unwrap();
+    assert!(content.debug_hides.is_empty());
+    let hides = vec![(2, 9), (1, 4), (2, 3)];
+    assert_eq!(
+        content
+            .clone()
+            .with_debug_hides(hides.clone())
+            .unwrap()
+            .debug_hides,
+        hides
+    );
+    assert!(
+        content
+            .with_debug_hides(vec![(1, 0); super::MAX_DEBUG_HIDES + 1])
+            .is_err()
+    );
+}

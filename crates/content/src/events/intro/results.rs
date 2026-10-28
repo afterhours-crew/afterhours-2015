@@ -22,7 +22,10 @@ fn one<S: Source>(graph: &mut Graph<S>, site: &Site, port: u32) -> Result<Site, 
         _ => Err(bad("intro result direct link")),
     }
 }
-fn categories<S: Source>(graph: &mut Graph<S>, site: &Site) -> Result<BTreeSet<u32>, Error> {
+pub(crate) fn categories<S: Source>(
+    graph: &mut Graph<S>,
+    site: &Site,
+) -> Result<BTreeSet<u32>, Error> {
     let object = graph.object(site)?;
     let rows = object
         .fields

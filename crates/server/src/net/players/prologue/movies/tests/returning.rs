@@ -26,9 +26,10 @@ fn final_garage_stages_the_owned_car_and_waits_for_native_entry_without_selectin
         final_garage_loaded();
     });
 }
-fn final_garage_loaded() -> (PlayerListener, u16) {
+/// The return drive after its arrive sequence: the car drives, no
+/// destination crossing yet.
+fn return_drive_driving() -> (PlayerListener, u16, u16) {
     let (mut listener, participant, car) = return_drive_started();
-    let selected_sequence = listener.selection.ghost(participant);
     let content = listener.prologue.clone().unwrap();
     let mode = content.return_drive.as_ref().unwrap();
     let inventory = listener.inventory.clone().unwrap();
@@ -77,6 +78,15 @@ fn final_garage_loaded() -> (PlayerListener, u16) {
             car_id,
         )
         .unwrap();
+    (listener, participant, car)
+}
+fn final_garage_loaded() -> (PlayerListener, u16) {
+    let (mut listener, participant, car) = return_drive_driving();
+    let content = listener.prologue.clone().unwrap();
+    let mode = content.return_drive.as_ref().unwrap();
+    let inventory = listener.inventory.clone().unwrap();
+    let item = inventory.slots.values()[0].unwrap();
+    let selected_sequence = listener.selection.ghost(participant);
     let &(key, serializer) = &mode.data.game_mode.checkpoints[0];
     let (scene, selector) = listener
         .players
@@ -487,6 +497,16 @@ fn final_composite_is_owned_and_completion_survives_frame_ordering_and_queue_pre
             &mut listener.intro_modes.get_mut(&participant).unwrap().1,
             20,
         );
+        Arc::make_mut(listener.prologue.as_mut().unwrap())
+            .driving
+            .as_mut()
+            .unwrap()
+            .1
+            .data
+            .shutdown_row = Some(nfs_content::events::intro::LaunchEvent {
+            bus: 11,
+            ordinal: 0,
+        });
         let leave = request_no_args(
             Endpoint {
                 scene: canceller,
@@ -522,6 +542,16 @@ fn final_composite_is_owned_and_completion_survives_frame_ordering_and_queue_pre
                 .iter()
                 .any(|r| matches!(r,HostRpc::GameMode(c) if c.target==canceller && c.method==1))
         );
+        // The shutdown comparison's networked row follows the mode's calls.
+        let row = listener
+            .pending_rpcs
+            .iter()
+            .position(|r| matches!(r, HostRpc::Event(f) if f.target.entity == 11 && f.event == 0));
+        let last_mode_call = listener
+            .pending_rpcs
+            .iter()
+            .rposition(|r| matches!(r,HostRpc::GameMode(c) if c.target==canceller));
+        assert!(row.is_some() && row > last_mode_call);
         drain(&mut listener);
         listener.story_committed(&job, committed).unwrap();
         assert!(listener.pending_rpcs.is_empty());
@@ -558,6 +588,44 @@ fn final_composite_is_owned_and_completion_survives_frame_ordering_and_queue_pre
                 .branch(crate::progression::Branch::Intro)
                 .objectives()[&20]
                 .completed
+        );
+    });
+}
+
+#[test]
+fn a_garage_request_before_the_destination_crossing_begins_the_final_return() {
+    // E1248: the client's RaceBoxTrigger request (automatic on box entry)
+    // reached the host before the route's destination crossing; the host
+    // answered nothing, the prompt closed and the return never began.
+    crate::net::players::test_wire::with_native_padding(|| {
+        let (mut listener, participant, _) = return_drive_driving();
+        assert!(!listener.intro_modes[&participant].0.destination_reached());
+        listener.world_ms += 1000;
+        let endpoint = listener.participants.return_bindings().unwrap().request;
+        listener
+            .returns
+            .as_mut()
+            .unwrap()
+            .poll_capacity(listener.world_ms, 0)
+            .unwrap();
+        let accepted = send(
+            &mut listener,
+            38,
+            47,
+            request_no_args(endpoint, participant).span(),
+        );
+        assert!(accepted, "refused: {:?}", listener.last_error);
+        assert_eq!(
+            listener.participants.stage(participant),
+            Some(Stage::IntroEnteringGarage)
+        );
+        assert!(
+            listener
+                .returns
+                .as_ref()
+                .unwrap()
+                .ghost(participant)
+                .is_some()
         );
     });
 }

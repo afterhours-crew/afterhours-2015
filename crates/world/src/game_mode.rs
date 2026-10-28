@@ -46,6 +46,13 @@ pub enum Arguments {
     },
     /// Two 32-bit reads, high word first: the bits of an f64 time.
     Time(u64),
+    /// ScoreKeeper method 0 (`rpcInformClientOfScoreAward`, client handler
+    /// RVA 0x042c9fe0): the participant's running total in that keeper,
+    /// then this award's amount (official E1026 923.725 s: s58 72, 39).
+    ScoreAward {
+        total: u32,
+        amount: u32,
+    },
     /// Waypoints method 2 (client reader `0x14445e5d0`): passed and next checkpoint
     /// ordinals, the bits of the f32 race time in seconds and the lap.
     Progress {
@@ -53,6 +60,15 @@ pub enum Arguments {
         next: u32,
         seconds: u32,
         lap: u32,
+    },
+    /// Message-manager methods 0 (messageRestored) and 2 (messageAdded),
+    /// client readers `0x14445a8b0`/`0x14445a7d0`: the asset reference (mode
+    /// 2, an 11-bit registry bundle, a 12-bit flat index), an 8-bit
+    /// attachment length (no attachment bytes here) and the message flag.
+    Message {
+        bundle: u16,
+        flat: u16,
+        flag: bool,
     },
 }
 impl Arguments {
@@ -111,6 +127,12 @@ impl Call {
                 }
                 payload.put(bits >> 32, 32).put(bits & 0xffff_ffff, 32);
             }
+            Arguments::ScoreAward { total, amount } => {
+                if self.method != 0 || self.reference.is_none() {
+                    return Err(Error::Shape);
+                }
+                payload.put(total.into(), 32).put(amount.into(), 32);
+            }
             Arguments::Progress {
                 passed,
                 next,
@@ -126,6 +148,20 @@ impl Call {
                     .put(next.into(), 32)
                     .put(seconds.into(), 32)
                     .put(lap.into(), 32);
+            }
+            Arguments::Message { bundle, flat, flag } => {
+                if !matches!(self.method, 0 | 2) || self.reference.is_some() {
+                    return Err(Error::Shape);
+                }
+                if bundle == 0 || bundle > 2047 || flat > 4095 {
+                    return Err(Error::Bound);
+                }
+                payload
+                    .put(2, 2)
+                    .put(bundle.into(), 11)
+                    .put(flat.into(), 12)
+                    .put(0, 8)
+                    .put(u64::from(flag), 1);
             }
         }
         payload.align();

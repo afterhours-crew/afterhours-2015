@@ -155,6 +155,7 @@ impl Deployment {
                 self.group.as_ref().ok_or(Failure::ProfileConfig)?.clone(),
                 group,
             )?
+            .with_group_renewal(fresh::<{ nfs_services::group::SEED_BYTES }>(seeds)?)
             .with_owned_matchmaking(
                 self.admission
                     .as_ref()

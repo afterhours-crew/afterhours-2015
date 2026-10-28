@@ -262,12 +262,19 @@ impl Lifecycle {
     pub fn intro_chapter(&self, participant: u16) -> Option<Chapter> {
         self.intro_started.get(&participant).copied()
     }
+    /// Every participant past its first intro drive start, with its chapter.
+    pub fn intro_chapters(&self) -> impl Iterator<Item = (u16, Chapter)> + '_ {
+        self.intro_started.iter().map(|(&p, &c)| (p, c))
+    }
     pub fn return_bindings(&self) -> Option<ReturnBindings> {
         self.returning
     }
 
     /// The story owner validates destination progress before calling this.
-    /// Intro arrival is automatic and has no owned-car slot refresh.
+    /// Intro arrival is automatic. Its preparing walk refreshes the garage
+    /// slots only once the participant owns a car: none at the first return
+    /// (official E1026 290 s), the chosen car and four empty slots at the
+    /// final one (1119.426 s).
     pub fn begin_intro_return(&mut self, participant: u16) -> Outcome {
         let Some(bindings) = self.returning else {
             return Outcome::Unsupported;
@@ -282,7 +289,11 @@ impl Lifecycle {
                 path.extend(bindings.preparing);
                 path.push(bindings.sequence);
                 self.membership.path(participant, &path);
-                Outcome::Advanced(bindings.entering(participant, None))
+                let slots = self
+                    .bindings
+                    .zip(self.garage)
+                    .filter(|(_, slots)| slots.values().iter().any(Option::is_some));
+                Outcome::Advanced(bindings.entering(participant, slots))
             }
             Some(
                 Stage::IntroEnteringGarage | Stage::IntroLoadingGarage | Stage::IntroCarSelection,

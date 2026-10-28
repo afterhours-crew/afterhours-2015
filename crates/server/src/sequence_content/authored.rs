@@ -263,6 +263,17 @@ impl Instances {
     ) -> Result<Option<Record>, Error> {
         self.spawn(content, players, owner, game_mode, Phase::Playing)
     }
+    /// `start_bound` for a sequence that is already over when it starts (a
+    /// zero-second countdown): created stopping, so no host Stop follows.
+    pub fn start_bound_stopped(
+        &mut self,
+        content: &Authored,
+        players: &mut Players,
+        owner: Owner,
+        game_mode: Option<u16>,
+    ) -> Result<Option<Record>, Error> {
+        self.spawn(content, players, owner, game_mode, Phase::Stopping)
+    }
     /// An authored immediate stop can precede initial replication. The native
     /// constructor then carries stopping=true and still requires Completed.
     pub fn start_stopped(

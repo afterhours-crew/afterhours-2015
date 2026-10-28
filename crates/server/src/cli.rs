@@ -741,7 +741,7 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
         )?)),
         None => None,
     };
-    let progression = args
+    let mut progression = args
         .progression_content
         .as_ref()
         .map(|path| nfs_server::progression::Content::load(&args.root.join(path)))
@@ -866,8 +866,16 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                     &nfs_content::Options::default(),
                 )?;
                 let scoring = index.scoring_content("levels/genesis01/gameplay")?;
+                let keepers = index.score_keepers(
+                    "levels/genesis01/gameplay",
+                    &scoring.categories.keys().copied().collect(),
+                );
                 let road = index.road_network();
                 let nitrous = index.nitrous_configurations()?;
+                let hides = index.progression_debug_hides();
+                let messages = nfs_server::messages::Content::prepare(&mut index);
+                let tutorials = nfs_server::tutorials::Content::prepare(&mut index);
+                let chapters = nfs_server::chapter_notifications::Content::prepare(&mut index);
                 // The owned race event resolves from the same installation; its
                 // failure leaves scoring on and the event off.
                 let event = (|| -> Result<_, nfs_content::Error> {
@@ -907,12 +915,89 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                         })?;
                     prepared.with_opponents(&mut index, vehicles, &ai_items)
                 })();
-                Ok::<_, nfs_content::Error>((scoring, road, nitrous, event, story))
+                Ok::<_, nfs_content::Error>((
+                    scoring, road, nitrous, event, story, hides, messages, tutorials, chapters,
+                    keepers,
+                ))
             })
             .await
             .map_err(|_| Failure::Output)?;
             match content {
-                Ok((content, road, nitrous, event, story)) => {
+                Ok((
+                    content,
+                    road,
+                    nitrous,
+                    event,
+                    story,
+                    hides,
+                    messages,
+                    tutorials,
+                    chapters,
+                    keepers,
+                )) => {
+                    match chapters {
+                        Ok(chapters) => {
+                            if let Some(current) = progression.take() {
+                                tracing::info!(
+                                    notifications = chapters.len(),
+                                    "chapter notifications read from the installation"
+                                );
+                                progression = Some(Arc::new(
+                                    (*current).clone().with_chapter_notifications(chapters),
+                                ));
+                            }
+                        }
+                        Err(error) => tracing::warn!(
+                            %error,
+                            "chapter notifications unavailable; markers keep their defaults"
+                        ),
+                    }
+                    match tutorials {
+                        Ok(tutorials) => {
+                            if let Some(current) = progression.take() {
+                                tracing::info!("tutorial spawners read from the installation");
+                                progression =
+                                    Some(Arc::new((*current).clone().with_tutorials(tutorials)));
+                            }
+                        }
+                        Err(error) => tracing::warn!(
+                            %error,
+                            "tutorials unavailable; no tutorial logics are created"
+                        ),
+                    }
+                    match messages {
+                        Ok(messages) => {
+                            if let Some(current) = progression.take() {
+                                tracing::info!(
+                                    messages = messages.catalog.len(),
+                                    "phone messages read from the installation"
+                                );
+                                progression =
+                                    Some(Arc::new((*current).clone().with_messages(messages)));
+                            }
+                        }
+                        Err(error) => tracing::warn!(
+                            %error,
+                            "phone messages unavailable; message managers stay uninitiated"
+                        ),
+                    }
+                    match hides {
+                        Ok(hides) => {
+                            if let Some(current) = progression.take() {
+                                let count = hides.len();
+                                progression =
+                                    Some(Arc::new((*current).clone().with_debug_hides(hides)?));
+                                tracing::info!(
+                                    count,
+                                    "progression debug-print hides read from the installation"
+                                );
+                            }
+                        }
+                        Err(error) => tracing::warn!(
+                            %error,
+                            "progression debug-print hides unavailable; objective debug prints stay as created"
+                        ),
+                    }
                     match story {
                         Ok(content) => {
                             prologue = Some(Arc::new(content));
@@ -929,6 +1014,18 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                                 .item_catalog(),
                         )
                         .with_nitrous(nitrous);
+                    match keepers.map_err(|e| e.to_string()).and_then(|k| {
+                        content
+                            .clone()
+                            .with_keepers(k)
+                            .map_err(|e| format!("{e:?}"))
+                    }) {
+                        Ok(with) => content = with,
+                        Err(error) => tracing::warn!(
+                            %error,
+                            "score keepers unavailable; award keeper calls stay off"
+                        ),
+                    }
                     match event {
                         Ok(prepared) => {
                             let (catalog, attached) = prepared

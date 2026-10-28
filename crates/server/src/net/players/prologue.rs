@@ -25,6 +25,7 @@ pub(super) type Modes = BTreeMap<
 >;
 pub(super) mod finale;
 pub(super) mod garage;
+pub(super) mod mode_notifications;
 pub(super) mod movies;
 pub(super) mod presentation;
 pub(super) mod selection;
@@ -190,6 +191,28 @@ impl PlayerListener {
                 records.extend(out.records);
                 calls.extend(out.calls);
                 deleted.extend(out.deleted);
+                // A due message is stored first; its commit announces it.
+                for hash in out.messages {
+                    let participant = active.owner().participant;
+                    let (Some(progression), Some(player_index)) = (
+                        self.progression.clone(),
+                        players.runtime_index(HOST_SELECTOR as u8, self.persona, participant),
+                    ) else {
+                        continue;
+                    };
+                    if story_pending.len() >= MAX_PENDING {
+                        return Err(replication::Error::Bound);
+                    }
+                    story_pending.push_back(crate::net::items::story::Request {
+                        participant,
+                        player_index: u32::from(player_index),
+                        progression,
+                        action: crate::net::items::story::Action::Message {
+                            hash,
+                            manager: crate::messages::Manager::Normal,
+                        },
+                    });
+                }
             }
         }
         let owners = players.player_participants().collect::<Vec<_>>();
@@ -280,7 +303,31 @@ impl PlayerListener {
                     }
                     records.extend(output.records);
                     deleted.extend(output.deleted);
+                    // The return launch also clears the participant's held
+                    // item: `introreturntogarage` #25 ItemSelector selects
+                    // the null ItemEntity #24 on the gate output that
+                    // launches the mode (official E1026 891.523 s, gameplay
+                    // s7 m2 with the launch row; the return refresh selects
+                    // the car again at 1119.426 s).
+                    let launch = content.mode(Chapter::ReturnDrive)?.data.launch_event;
+                    let launched = launch.is_some_and(|launch| {
+                        output.calls.iter().any(|c| {
+                            matches!(c, HostRpc::Event(f)
+                            if f.event == launch.ordinal && f.target.entity == launch.bus)
+                        })
+                    });
                     calls.extend(output.calls);
+                    if launched && let Some(bindings) = participants.lifecycle_bindings() {
+                        let slot = bindings.garage[0];
+                        calls.push(HostRpc::GameMode(crate::event_logic::call(
+                            players.objects(),
+                            slot.scene,
+                            slot.selector,
+                            2,
+                            Some(participant),
+                            nfs_world::game_mode::Arguments::None,
+                        )?));
+                    }
                     calls.extend(chain.into_iter().map(HostRpc::Participant));
                     driving_presentation.insert(participant);
                     modes.insert(participant, (drive, canceller, Chapter::ReturnDrive));

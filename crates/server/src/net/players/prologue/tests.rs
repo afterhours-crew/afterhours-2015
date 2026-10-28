@@ -428,11 +428,20 @@ pub(super) fn setup() -> (PlayerListener, u16, Arc<nfs_world::items::Collection>
     listener.world_ms = 100_000;
     listener.population = Some(population);
     listener.participants = participants;
-    listener.logic = Some(Arc::new(
-        crate::garage_logic::GarageLogic::from_json(
-            &crate::garage_logic::tests::presentation_json(),
+    // The ordinary garage logic lives on the layout's item scene, as the
+    // installed content's gameplay scene does (the intro's customization
+    // creates the entry presentation there).
+    let key = listener.vehicles.as_ref().unwrap().layout.item_scene_key;
+    let json: serde_json::Value = crate::garage_logic::tests::presentation_json()
+        .to_string()
+        .replace(
+            "\"scene_content_key\":101",
+            &format!("\"scene_content_key\":{key}"),
         )
-        .unwrap(),
+        .parse()
+        .unwrap();
+    listener.logic = Some(Arc::new(
+        crate::garage_logic::GarageLogic::from_json(&json).unwrap(),
     ));
     let definition = |layout, local_index| nfs_world::sequences::Definition {
         layout,
@@ -1045,7 +1054,19 @@ pub(super) fn ready_for_selection(
         "a rejected return must not enable streaming"
     );
     drain(&mut listener);
+    Arc::make_mut(listener.prologue.as_mut().unwrap()).return_events = vec![(2, 16)];
     assert!(send(&mut listener, 13, 47, enter.span()));
+    // The mission chapter's row fires on the intro progression logic, once.
+    assert_eq!(
+        listener
+            .pending_rpcs
+            .iter()
+            .chain(listener.pending_entries.iter().flat_map(|(_, calls)| calls))
+            .filter(|r| matches!(r, HostRpc::Event(f)
+                if f.target.entity == 2 && f.event == 16 && f.player.is_none()))
+            .count(),
+        1
+    );
     assert_eq!(listener.story_pending.len(), 1);
     assert_eq!(
         listener.story_pending[0].action,
@@ -1252,14 +1273,18 @@ pub(super) fn ready_for_selection(
         let ack = b.expected().encode().unwrap();
         assert!(send(&mut listener, 16 + i as u8, 47, ack.span()));
     }
-    sequences_checked(&mut listener, 0);
+    // The intro garage wait stops 8 s after readiness (E1026), not 16 s.
+    sequences_checked(
+        &mut listener,
+        nfs_world::sequences::INTRO_FIRST_READY_MS - 1,
+    );
     assert!(
         listener
             .pending_rpcs
             .iter()
             .all(|r| !matches!(r, HostRpc::SequenceStop(_)))
     );
-    sequences_checked(&mut listener, nfs_world::sequences::FIRST_READY_MS);
+    sequences_checked(&mut listener, nfs_world::sequences::INTRO_FIRST_READY_MS);
     assert!(
         listener
             .pending_rpcs
@@ -2038,6 +2063,82 @@ fn intro_garage_presence_precedes_the_mode_reactions() {
         without_mode.last(),
         Some(&HostRpc::GaragePresence(presence))
     );
+}
+
+/// A client logic message that names no object this connection owns is
+/// logged and consumed, never refused: a refused reliable message is resent
+/// forever and jams the channel (E1252: the customization timer's stop on the
+/// intro's final-garage timer, refused 1,500+ times; the garage stayed black
+/// and the exit never loaded).
+#[test]
+fn logic_messages_naming_no_owned_object_are_consumed_not_refused() {
+    let (mut listener, _, _) = setup();
+    drain(&mut listener);
+    let before = listener.players.objects().snapshot();
+    for (sequence, event) in [
+        (0u8, crate::customization_timer::STOP),
+        (1, crate::customization_timer::START),
+        (2, 21_578_436),
+    ] {
+        let message = nfs_world::logic::Message::Reached {
+            event,
+            target: nfs_world::logic::EntityRef {
+                ghost: 4_000,
+                entity: 2,
+            },
+            player: 0,
+        }
+        .encode()
+        .unwrap();
+        assert!(
+            send(&mut listener, sequence, 82, message.span()),
+            "event {event} on an unowned ghost must not refuse the frame"
+        );
+    }
+    assert_eq!(listener.players.objects().snapshot(), before);
+    assert_eq!(listener.refused, 0);
+}
+
+/// Leaving the intro garage unloads the three preview slots again, in
+/// serializer order, for the participant (official E1026 562.221 s).
+#[test]
+fn leaving_the_intro_garage_unloads_the_preview_slots_again() {
+    let (players, _, participant) = crate::event_logic::tests::world();
+    let slot = |component| nfs_content::garage::starter::Slot {
+        component,
+        item_component: 0,
+        definition: [0; 16],
+        transform: [0; 16],
+    };
+    let garage = nfs_content::garage::starter::Garage {
+        scene_key: crate::event_logic::tests::GAMEPLAY,
+        creation_scene_key: crate::event_logic::tests::GAMEPLAY,
+        component: 1,
+        slots: [slot(4), slot(2), slot(3)],
+    };
+    let calls = garage::preview_slot_unloads(&garage, &players, participant).unwrap();
+    let selector = |serializer| {
+        players
+            .objects()
+            .scene_endpoint(crate::event_logic::tests::GAMEPLAY, serializer)
+            .unwrap()
+            .1
+    };
+    assert_eq!(
+        calls
+            .iter()
+            .map(|c| match c {
+                HostRpc::GameMode(call) => (call.selector, call.method, call.reference),
+                _ => panic!("game mode call"),
+            })
+            .collect::<Vec<_>>(),
+        [2, 3, 4].map(|s| (selector(s), 2, Some(participant)))
+    );
+    let missing = nfs_content::garage::starter::Garage {
+        scene_key: 4_242,
+        ..garage
+    };
+    assert!(garage::preview_slot_unloads(&missing, &players, participant).is_err());
 }
 
 /// An entry the session does not admit stops the world loudly instead of
