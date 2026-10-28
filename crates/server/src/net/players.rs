@@ -2200,6 +2200,13 @@ impl Listener for PlayerListener {
                                 owner.participant,
                                 self.persona,
                             )?);
+                            if let Some(previews) = content.previews.as_deref() {
+                                responses.extend(prologue::garage::preview_slot_unloads(
+                                    &previews.garage,
+                                    &players,
+                                    owner.participant,
+                                )?);
+                            }
                             Ok::<_, replication::Error>(())
                         })();
                         if let Err(error) = transition {

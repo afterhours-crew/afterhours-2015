@@ -2065,6 +2065,48 @@ fn intro_garage_presence_precedes_the_mode_reactions() {
     );
 }
 
+/// Leaving the intro garage unloads the three preview slots again, in
+/// serializer order, for the participant (official E1026 562.221 s).
+#[test]
+fn leaving_the_intro_garage_unloads_the_preview_slots_again() {
+    let (players, _, participant) = crate::event_logic::tests::world();
+    let slot = |component| nfs_content::garage::starter::Slot {
+        component,
+        item_component: 0,
+        definition: [0; 16],
+        transform: [0; 16],
+    };
+    let garage = nfs_content::garage::starter::Garage {
+        scene_key: crate::event_logic::tests::GAMEPLAY,
+        creation_scene_key: crate::event_logic::tests::GAMEPLAY,
+        component: 1,
+        slots: [slot(4), slot(2), slot(3)],
+    };
+    let calls = garage::preview_slot_unloads(&garage, &players, participant).unwrap();
+    let selector = |serializer| {
+        players
+            .objects()
+            .scene_endpoint(crate::event_logic::tests::GAMEPLAY, serializer)
+            .unwrap()
+            .1
+    };
+    assert_eq!(
+        calls
+            .iter()
+            .map(|c| match c {
+                HostRpc::GameMode(call) => (call.selector, call.method, call.reference),
+                _ => panic!("game mode call"),
+            })
+            .collect::<Vec<_>>(),
+        [2, 3, 4].map(|s| (selector(s), 2, Some(participant)))
+    );
+    let missing = nfs_content::garage::starter::Garage {
+        scene_key: 4_242,
+        ..garage
+    };
+    assert!(garage::preview_slot_unloads(&missing, &players, participant).is_err());
+}
+
 /// An entry the session does not admit stops the world loudly instead of
 /// queueing: test builds fail at its producer, and the flush reports which
 /// queue refused it and keeps the entry (E1186, E1188).

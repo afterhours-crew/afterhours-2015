@@ -31,6 +31,37 @@ pub(in crate::net::players) fn insert_presence(
     calls.insert(at, HostRpc::GaragePresence(presence));
 }
 
+/// The selection's preview slots unload again when the participant leaves
+/// the intro garage: VehicleSlot m2 for the participant on each slot, in
+/// serializer order (official E1026 562.221 s: garage s23 off, then s15, s16,
+/// s17 m2; the selection unloaded them first at 498.920 s; client
+/// OnVehicleUnloaded sets the slot Bool false, ph5 5.2).
+pub(in crate::net::players) fn preview_slot_unloads(
+    garage: &nfs_content::garage::starter::Garage,
+    players: &Players,
+    participant: u16,
+) -> Result<Vec<HostRpc>, replication::Error> {
+    let mut slots: Vec<usize> = garage.slots.iter().map(|s| s.component).collect();
+    slots.sort_unstable();
+    slots
+        .into_iter()
+        .map(|serializer| {
+            let (scene, selector) = players
+                .objects()
+                .scene_endpoint(garage.scene_key, serializer)
+                .ok_or(replication::Error::UnknownObject)?;
+            Ok(HostRpc::GameMode(crate::event_logic::call(
+                players.objects(),
+                scene,
+                selector,
+                2,
+                Some(participant),
+                nfs_world::game_mode::Arguments::None,
+            )?))
+        })
+        .collect()
+}
+
 pub(in crate::net::players) fn notify(
     content: &crate::prologue::Content,
     modes: &mut Modes,
