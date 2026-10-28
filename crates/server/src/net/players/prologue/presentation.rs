@@ -107,8 +107,9 @@ impl Context<'_> {
 pub(in crate::net::players) fn present(
     ctx: &Context<'_>,
     calls: Vec<HostRpc>,
+    deferred: &mut Vec<HostRpc>,
 ) -> Result<Vec<HostRpc>, replication::Error> {
-    present_with_driving_tail(ctx, calls, &BTreeSet::new())
+    present_with_driving_tail(ctx, calls, &BTreeSet::new(), deferred)
 }
 
 /// A newly constructed first drive publishes its HUD only after the complete
@@ -118,6 +119,7 @@ pub(super) fn present_with_driving_tail(
     ctx: &Context<'_>,
     calls: Vec<HostRpc>,
     driving_tail: &BTreeSet<u16>,
+    deferred: &mut Vec<HostRpc>,
 ) -> Result<Vec<HostRpc>, replication::Error> {
     let (Some(intro), Some(lifecycle)) = (
         ctx.participants.intro_bindings(),
@@ -130,6 +132,20 @@ pub(super) fn present_with_driving_tail(
     }
     let mut out = Vec::with_capacity(calls.len());
     for (index, call) in calls.iter().enumerate() {
+        // The final return's HideWorld follows Leave Alive. The return batch
+        // can construct that fire before the membership notification; keep
+        // its semantic dependency instead of inheriting that vector order.
+        if let HostRpc::Event(fire) = *call
+            && fire.event == HIDE_WORLD
+            && calls.iter().any(|c| matches!(c, HostRpc::Participant(n)
+                if n.endpoint == intro.alive && n.call == Call::Leave
+                    && ctx.participants.intro_chapter(n.participant) == Some(Chapter::ReturnDrive)
+                    && ctx.logic.and_then(GarageLogic::fade_capture)
+                        .and_then(|capture| ctx.ghosts.get(&n.participant)?.get(&capture)) == Some(&fire.target.ghost)))
+        {
+            deferred.push(*call);
+            continue;
+        }
         let HostRpc::Participant(Notification {
             endpoint,
             participant,
@@ -154,6 +170,9 @@ pub(super) fn present_with_driving_tail(
                 Vec::new(),
                 if driving_tail.contains(&participant) {
                     Vec::new()
+                } else if ctx.participants.intro_chapter(participant) == Some(Chapter::SecondRace) {
+                    deferred.extend(ctx.driving(participant)?);
+                    Vec::new()
                 } else {
                     ctx.driving(participant)?
                 },
@@ -161,16 +180,25 @@ pub(super) fn present_with_driving_tail(
         } else if endpoint == intro.relocating && leave {
             // 749427 ms: ViewWorld, then hide the world for the next teleport,
             // then the transfer logic's two bursts.
-            let mut after = ctx.fade(participant, &[VIEW_WORLD, HIDE_WORLD, BLACK])?;
-            after.extend(ctx.transfer(participant)?);
-            (Vec::new(), after)
+            deferred.extend(ctx.fade(participant, &[VIEW_WORLD, HIDE_WORLD, BLACK])?);
+            deferred.extend(ctx.transfer(participant)?);
+            (Vec::new(), Vec::new())
+        } else if endpoint == intro.teleport
+            && enter
+            && ctx.participants.intro_chapter(participant) == Some(Chapter::FirstDrive)
+        {
+            // Spawn creates a dormant fade controller. Its first Black is
+            // caused by teleport membership and follows that publication.
+            deferred.extend(ctx.fade(participant, &[BLACK])?);
+            (Vec::new(), Vec::new())
         } else if endpoint == lifecycle.initial_teleport && enter {
             // 563121 ms: the first transfer's logic fires after its teleport
             // command; the final composite exit has no transfer logic left.
             (Vec::new(), ctx.transfer(participant)?)
         } else if ctx.movie_playing(endpoint) && enter {
             // 652722, 826725 ms.
-            (Vec::new(), ctx.fade(participant, &[HIDE_WORLD, BLACK])?)
+            deferred.extend(ctx.fade(participant, &[HIDE_WORLD, BLACK])?);
+            (Vec::new(), Vec::new())
         } else if ctx.movie_playing(endpoint) && leave {
             // 747127, 889025 ms.
             (Vec::new(), ctx.fade(participant, &[UNBLACK])?)
@@ -211,7 +239,11 @@ pub(super) fn present_with_driving_tail(
         out.extend(after);
     }
     for &participant in driving_tail {
-        out.extend(ctx.driving(participant)?);
+        if ctx.participants.intro_chapter(participant) == Some(Chapter::SecondRace) {
+            deferred.extend(ctx.driving(participant)?);
+        } else {
+            out.extend(ctx.driving(participant)?);
+        }
         // The return drive starts in place after its Enter alive: the
         // recreated transfer logic fires with the HUD (891523 ms).
         if ctx.participants.intro_chapter(participant) == Some(Chapter::ReturnDrive) {
@@ -219,6 +251,29 @@ pub(super) fn present_with_driving_tail(
         }
     }
     Ok(out)
+}
+
+impl PlayerListener {
+    /// Evaluate the held presentation effects only after earlier state output
+    /// and teleport commands have left both producer and session queues. This
+    /// is a publication dependency, with no elapsed-time substitute. It does
+    /// not claim receipt or acceptance by the game.
+    pub(in crate::net) fn release_intro_presentation(&mut self, host: &nfs_world::session::Host) {
+        if self.pending_intro_presentation.is_empty()
+            || !self.pending.is_empty()
+            || !self.pending_entries.is_empty()
+            || !self.pending_rpcs.is_empty()
+            || !self.pending_content.is_empty()
+            || !self.pending_teleports.is_empty()
+            || host.replication_progress().1 != 0
+            || host.rpc_progress().1 != 0
+            || host.content_progress().1 != 0
+        {
+            return;
+        }
+        self.pending_rpcs
+            .extend(self.pending_intro_presentation.drain(..));
+    }
 }
 
 #[cfg(test)]
@@ -287,7 +342,8 @@ mod tests {
             })
         };
         let run = |listener: &PlayerListener, calls: Vec<HostRpc>| {
-            present(
+            let mut deferred = Vec::new();
+            let mut output = present(
                 &Context {
                     logic: listener.logic.as_deref(),
                     ghosts: &listener.logic_ghosts,
@@ -296,11 +352,11 @@ mod tests {
                     content: listener.prologue.as_deref(),
                 },
                 calls,
+                &mut deferred,
             )
-            .unwrap()
-            .iter()
-            .map(label)
-            .collect::<Vec<_>>()
+            .unwrap();
+            output.extend(deferred);
+            output.iter().map(label).collect::<Vec<_>>()
         };
         let bursts = [
             "xfer:1:17",
@@ -434,7 +490,8 @@ mod tests {
             })
         };
         let run = |listener: &PlayerListener, calls: Vec<HostRpc>| {
-            present(
+            let mut deferred = Vec::new();
+            let mut output = present(
                 &Context {
                     logic: listener.logic.as_deref(),
                     ghosts: &listener.logic_ghosts,
@@ -443,11 +500,14 @@ mod tests {
                     content: listener.prologue.as_deref(),
                 },
                 calls,
+                &mut deferred,
             )
-            .unwrap()
-            .iter()
-            .map(|c| label(fade, hud, c))
-            .collect::<Vec<_>>()
+            .unwrap();
+            output.extend(deferred);
+            output
+                .iter()
+                .map(|c| label(fade, hud, c))
+                .collect::<Vec<_>>()
         };
         let cases = [
             (
@@ -507,7 +567,7 @@ mod tests {
                 ],
                 vec!["fade:1", "fade:0", "Leave", "Enter", "Leave", "Enter"],
             ),
-            (vec![(intro.teleport, Call::Enter)], vec!["Enter"]),
+            (vec![(intro.teleport, Call::Enter)], vec!["Enter", "fade:2"]),
         ];
         for (calls, expected) in cases {
             let calls = calls
@@ -537,6 +597,7 @@ mod tests {
             },
             handoff,
             &BTreeSet::from([participant]),
+            &mut Vec::new(),
         )
         .unwrap();
         assert_eq!(

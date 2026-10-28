@@ -104,6 +104,117 @@ fn committed_activation_and_native_movie_gates_are_transactional_and_once_only()
         finished_movie();
     });
 }
+
+#[test]
+fn movie_fade_waits_for_publication_and_capacity_failure_keeps_the_movie_unchanged() {
+    crate::net::players::test_wire::with_native_padding(|| {
+        let (mut listener, participant, _) = fixture();
+        let key = listener.vehicles.as_ref().unwrap().layout.item_scene_key;
+        let value = crate::garage_logic::tests::intro_json()
+            .to_string()
+            .replace(
+                "\"scene_content_key\":101",
+                &format!("\"scene_content_key\":{key}"),
+            );
+        let logic =
+            crate::garage_logic::GarageLogic::from_json(&serde_json::from_str(&value).unwrap())
+                .unwrap();
+        let mut ghosts = BTreeMap::new();
+        let spawn = logic
+            .produce_intro_spawn(&mut listener.players, participant, &mut ghosts)
+            .unwrap();
+        let fade = ghosts[&277];
+        assert!(spawn.events.iter().all(|fire| fire.target.ghost != fade));
+        listener.logic_ghosts.insert(participant, ghosts);
+        listener.logic = Some(Arc::new(logic));
+        let (_, _, snapshot) = crate::progression::tests::local();
+        listener.persistent = Some(Arc::new(
+            crate::progression::tests::tables().view(&snapshot).unwrap(),
+        ));
+        tick_with_normal_presentation(&mut listener).unwrap();
+        let sequence = listener.intro_movies[&participant].sequence().unwrap();
+        drain(&mut listener);
+        let done = native_completion(Completed {
+            sequence,
+            participant,
+        });
+        let placeholder = HostRpc::Event(nfs_world::logic::Fire {
+            target: nfs_world::logic::EntityRef {
+                ghost: fade,
+                entity: 1,
+            },
+            event: 2,
+            player: None,
+        });
+        listener
+            .pending_intro_presentation
+            .resize(nfs_world::session::MAX_RPC_QUEUE, placeholder);
+        let world = listener.players.objects().snapshot();
+        assert!(!send(&mut listener, 28, 47, done.span()));
+        assert_eq!(listener.players.objects().snapshot(), world);
+        assert_eq!(
+            listener.intro_movies[&participant].phase(),
+            nfs_world::fmv::Phase::Before
+        );
+        assert_eq!(
+            listener.pending_intro_presentation.len(),
+            nfs_world::session::MAX_RPC_QUEUE
+        );
+        listener.pending_intro_presentation.clear();
+        assert!(send(&mut listener, 28, 47, done.span()));
+        assert_eq!(
+            listener.intro_movies[&participant].phase(),
+            nfs_world::fmv::Phase::Playing
+        );
+        assert!(
+            listener
+                .pending_rpcs
+                .iter()
+                .chain(listener.pending_entries.iter().flat_map(|(_, calls)| calls))
+                .all(|call| !matches!(call, HostRpc::Event(f) if f.target.ghost == fade))
+        );
+        assert_eq!(
+            listener
+                .pending_intro_presentation
+                .iter()
+                .map(|call| match call {
+                    HostRpc::Event(f) => f.event,
+                    _ => panic!("expected a fade event"),
+                })
+                .collect::<Vec<_>>(),
+            [1, 2]
+        );
+        let empty_session = crate::net::players::test_wire::session_host();
+        listener.release_intro_presentation(&empty_session);
+        assert_eq!(
+            listener.pending_intro_presentation.len(),
+            2,
+            "producer output still pending"
+        );
+        drain(&mut listener);
+        assert_eq!(listener.observation(0, 0, 0, false).owned_queues[2], 2);
+        // A drained producer is insufficient while its session still holds output.
+        let mut busy_session = crate::net::players::test_wire::session_host();
+        for section in super::super::super::split_scenes(
+            listener.players.objects().snapshot(),
+            nfs_world::application::OUTBOUND_FRAME_BITS,
+        )
+        .unwrap()
+        {
+            busy_session.queue_replication(section).unwrap();
+        }
+        busy_session.queue_rpc(placeholder).unwrap();
+        listener.release_intro_presentation(&busy_session);
+        assert_eq!(listener.pending_intro_presentation.len(), 2);
+        // A separately constructed empty session is the unit control for the
+        // drained publication state. Full replay checks the real session loop.
+        listener.release_intro_presentation(&empty_session);
+        assert!(listener.pending_intro_presentation.is_empty());
+        assert_eq!(listener.pending_rpcs.len(), 2);
+        listener.release_intro_presentation(&empty_session);
+        assert_eq!(listener.pending_rpcs.len(), 2);
+    });
+}
 fn finished_movie() -> (PlayerListener, u16) {
     let (mut listener, participant, endpoint) = fixture();
     let old_actor = listener

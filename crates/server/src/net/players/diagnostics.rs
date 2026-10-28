@@ -77,7 +77,7 @@ impl PlayerListener {
             owned_queues: [
                 self.pending.len(),
                 self.pending_entries.len(),
-                self.pending_rpcs.len(),
+                self.pending_rpcs.len() + self.pending_intro_presentation.len(),
                 self.pending_content.len(),
                 self.pending_speedwalls.len(),
                 self.story_pending.len(),

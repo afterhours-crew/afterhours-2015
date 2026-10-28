@@ -51,6 +51,7 @@ impl PlayerListener {
             return Ok(());
         };
         if self.session_backlog >= MAX_PENDING
+            || !self.pending_intro_presentation.is_empty()
             || !self.pending_entries.is_empty()
             || !self.pending.is_empty()
             || !self.pending_rpcs.is_empty()
@@ -73,6 +74,7 @@ impl PlayerListener {
                     .calls,
             );
         }
+        let mut deferred_presentation = Vec::new();
         let calls = super::presentation::present(
             &super::presentation::Context {
                 logic: self.logic.as_deref(),
@@ -82,11 +84,18 @@ impl PlayerListener {
                 content: Some(content),
             },
             calls,
+            &mut deferred_presentation,
         )?;
-        if calls.len() > nfs_world::session::MAX_RPC_QUEUE.saturating_sub(self.pending_rpcs.len()) {
+        if calls.len() > nfs_world::session::MAX_RPC_QUEUE.saturating_sub(self.pending_rpcs.len())
+            || deferred_presentation.len()
+                > nfs_world::session::MAX_RPC_QUEUE
+                    .saturating_sub(self.pending_intro_presentation.len())
+        {
             return Ok(());
         }
         self.intro_movies = movies;
+        self.pending_intro_presentation
+            .extend(deferred_presentation);
         if !calls.is_empty() {
             self.pending_rpcs.extend(calls);
             return Ok(());

@@ -1361,7 +1361,8 @@ impl GarageLogic {
     }
     /// The spawn logic of a prologue participant: only the captures the spawn
     /// batch's own events address (the fade control and one more in installed
-    /// content; official career start 480 and 482), then those events. The
+    /// content; official career start 480 and 482), then the startup events.
+    /// BlackScreen is held for the intro teleport membership publication. The
     /// rest of the batch is garage presentation; given to an intro player it
     /// held the client in garage loading behind the whole intro (E1184).
     pub fn produce_intro_spawn(
@@ -1411,6 +1412,13 @@ impl GarageLogic {
             output.records.push(record);
         }
         output.events = self.present_events(Which::Spawn, players, ghosts)?;
+        // Intro membership, rather than allocating its controller, causes
+        // BlackScreen. The listener publishes that effect after EnterTeleport.
+        if let Some(fade) = self.fade_capture().and_then(|id| ghosts.get(&id)) {
+            output
+                .events
+                .retain(|fire| fire.target.ghost != *fade || fire.event != 2);
+        }
         for event in &self.intro_spawn.events {
             let EventTarget::Capture(capture) = event.target else {
                 return Err(replication::Error::Shape);
@@ -2562,8 +2570,8 @@ pub(crate) mod tests {
         let spawn = logic
             .produce_intro_spawn(&mut players, participant, &mut ghosts)
             .unwrap();
-        // The spawn events' target first, then the intro logic; spawn events
-        // precede the intro logic's own events.
+        // Keep the fade controller dormant; intro startup owns its Black.
+        // Other authored intro events still fire in their original order.
         assert_eq!(ghosts.keys().copied().collect::<Vec<_>>(), [277, 340]);
         assert_eq!(
             spawn.records.iter().map(|r| r.id).collect::<Vec<_>>(),
@@ -2575,11 +2583,7 @@ pub(crate) mod tests {
                 .iter()
                 .map(|f| (f.target.ghost, f.target.entity, f.event))
                 .collect::<Vec<_>>(),
-            [
-                (ghosts[&277], 1, 2),
-                (ghosts[&340], 2, 9),
-                (ghosts[&340], 1, 17)
-            ]
+            [(ghosts[&340], 2, 9), (ghosts[&340], 1, 17)]
         );
         // A repeated spawn refuses instead of duplicating.
         assert!(
@@ -2659,9 +2663,12 @@ pub(crate) mod tests {
         assert_eq!(ghosts.keys().copied().collect::<Vec<_>>(), [277]);
         assert_eq!(spawn.records.len(), 1);
         assert_eq!(players.objects().snapshot().len(), objects + 1);
+        assert!(spawn.events.is_empty());
+        // Ordinary spawn retains its Black; only intro membership defers it.
         assert_eq!(
-            spawn
-                .events
+            logic
+                .present_events(Which::Spawn, &players, &ghosts)
+                .unwrap()
                 .iter()
                 .map(|f| (f.target.ghost, f.event))
                 .collect::<Vec<_>>(),

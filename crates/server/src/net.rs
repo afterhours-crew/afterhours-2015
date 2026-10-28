@@ -1396,6 +1396,7 @@ pub async fn run_world<I: WorldIo>(
     info!(connection, "world host ready");
     loop {
         let advance_started = Instant::now();
+        listener.release_intro_presentation(&host);
         if let Err(error) = listener.advance_sequences(io.now_ms()) {
             warn!(connection, ?error, "sequence world clock rejected");
             return WorldEnd::Stopped;

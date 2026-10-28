@@ -148,7 +148,10 @@ impl PlayerListener {
         let Some(vehicles) = self.vehicles.as_deref() else {
             return Err(replication::Error::Unsupported);
         };
-        if self.session_backlog >= MAX_PENDING || !self.pending_entries.is_empty() {
+        if self.session_backlog >= MAX_PENDING
+            || !self.pending_entries.is_empty()
+            || !self.pending_intro_presentation.is_empty()
+        {
             return Ok(());
         }
         let Some(seconds) = self.event_seconds(self.world_ms) else {
@@ -174,6 +177,7 @@ impl PlayerListener {
         let mut records = Vec::new();
         let mut messages = Vec::new();
         let mut calls = Vec::new();
+        let mut deferred_presentation = Vec::new();
         let mut after_creation = Vec::new();
         let mut deleted = Vec::new();
         let mut teleports = Vec::new();
@@ -800,6 +804,7 @@ impl PlayerListener {
             },
             calls,
             &driving_presentation,
+            &mut deferred_presentation,
         )?;
         // Keep the state entry in a later replication entry. Ordinary RPCs
         // can be moved ahead of queued creations when their explicit object
@@ -821,6 +826,9 @@ impl PlayerListener {
             return Err(replication::Error::Bound);
         }
         if sections.len() > MAX_PENDING.saturating_sub(self.pending.len())
+            || deferred_presentation.len()
+                > nfs_world::session::MAX_RPC_QUEUE
+                    .saturating_sub(self.pending_intro_presentation.len())
             || entries.len() > MAX_PENDING.saturating_sub(self.pending_entries.len())
             || teleports.len() > MAX_PENDING.saturating_sub(self.pending_teleports.len())
             || messages.len() > MAX_PENDING.saturating_sub(self.pending_content.len())
@@ -889,6 +897,8 @@ impl PlayerListener {
         self.queue_entries(entries);
         self.pending_content.extend(messages);
         self.pending_rpcs.extend(calls);
+        self.pending_intro_presentation
+            .extend(deferred_presentation);
         self.pending_teleports.extend(teleports);
         Ok(())
     }

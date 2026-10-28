@@ -219,6 +219,8 @@ pub(super) struct PlayerListener {
     pub(in crate::net) replication_origin_ms: Option<u64>,
     pub(super) pending_content: VecDeque<nfs_world::content::Message>,
     pub(super) pending_rpcs: VecDeque<nfs_world::participants::HostRpc>,
+    /// Story presentation waiting for its triggering state output to publish.
+    pending_intro_presentation: VecDeque<nfs_world::participants::HostRpc>,
     unsupported_rpcs: usize,
     unsupported_logic: usize,
     unsupported: crate::diagnostics::Unsupported<diagnostics::Route>,
@@ -1052,6 +1054,7 @@ impl PlayerListener {
             replication_origin_ms: None,
             pending_content: VecDeque::new(),
             pending_rpcs: VecDeque::new(),
+            pending_intro_presentation: VecDeque::new(),
             unsupported_rpcs: 0,
             unsupported_logic: 0,
             unsupported: crate::diagnostics::Unsupported::new("world", 0),
@@ -1566,6 +1569,7 @@ impl Listener for PlayerListener {
         customization.retain_ghosts(|id| players.objects().get(id).is_some());
         let mut measurements = Vec::new();
         let mut responses = Vec::new();
+        let mut deferred_presentation = Vec::new();
         let logic_result = (|| {
             if let Some(sequences) = &mut sequences {
                 Self::refresh_readiness(
@@ -3244,12 +3248,20 @@ impl Listener for PlayerListener {
                 participants: &participants,
                 content: self.prologue.as_deref(),
             };
-            responses = match prologue::presentation::present(&ctx, responses) {
+            responses = match prologue::presentation::present(
+                &ctx,
+                responses,
+                &mut deferred_presentation,
+            ) {
                 Ok(calls) => calls,
                 Err(error) => return self.refuse(error),
             };
             for (_, calls) in entries.iter_mut() {
-                *calls = match prologue::presentation::present(&ctx, std::mem::take(calls)) {
+                *calls = match prologue::presentation::present(
+                    &ctx,
+                    std::mem::take(calls),
+                    &mut deferred_presentation,
+                ) {
                     Ok(calls) => calls,
                     Err(error) => return self.refuse(error),
                 };
@@ -3318,6 +3330,9 @@ impl Listener for PlayerListener {
             entries = ordered;
         }
         if spawned.messages.len() > MAX_PENDING.saturating_sub(self.pending_content.len())
+            || deferred_presentation.len()
+                > nfs_world::session::MAX_RPC_QUEUE
+                    .saturating_sub(self.pending_intro_presentation.len())
             || scheduled_returns.len() > MAX_PENDING.saturating_sub(self.pending_returns.len())
             || scheduled_teleports.len() > MAX_PENDING.saturating_sub(self.pending_teleports.len())
             || responses.len() > nfs_world::session::MAX_RPC_QUEUE - self.pending_rpcs.len()
@@ -3381,6 +3396,8 @@ impl Listener for PlayerListener {
         self.intro_movies = intro_movies;
         self.intro_composites = intro_composites;
         self.pending_rpcs.extend(responses);
+        self.pending_intro_presentation
+            .extend(deferred_presentation);
         for input in event_inputs {
             if self.event_state.inputs.len() >= events::MAX_INPUTS {
                 tracing::warn!("owned event input queue full; input dropped");
