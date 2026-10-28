@@ -123,6 +123,9 @@ impl Players {
         {
             return Err(Error::UnknownObject);
         }
+        let retired = self
+            .human_goal_owner(connection, persona, goal)
+            .ok_or(Error::UnknownObject)?;
         let mut next = self.objects.clone();
         let cleared = next
             .change(
@@ -136,6 +139,7 @@ impl Players {
             .ok_or(Error::Shape)?;
         next.remove(goal)?;
         self.objects = next;
+        self.retired_goals.insert(goal, retired);
         Ok(ai::GoalChanges {
             records: vec![cleared],
             deleted: vec![goal],
@@ -211,6 +215,9 @@ impl Players {
         {
             return Err(Error::UnknownObject);
         }
+        let retired = self
+            .human_goal_owner(connection, persona, goal)
+            .ok_or(Error::UnknownObject)?;
         let mut next = self.objects.clone();
         let cleared = next
             .change(
@@ -225,6 +232,7 @@ impl Players {
             .ok_or(Error::Shape)?;
         next.remove(goal)?;
         self.objects = next;
+        self.retired_goals.insert(goal, retired);
         Ok(cleared)
     }
 
@@ -506,6 +514,13 @@ impl Players {
         {
             return Err(Error::UnknownObject);
         }
+        let retired: Vec<_> = goals
+            .iter()
+            .filter_map(|goal| {
+                self.human_goal_owner(connection, persona, *goal)
+                    .map(|owner| (*goal, owner))
+            })
+            .collect();
         let mut next = self.objects.clone();
         let cleared = next
             .change(
@@ -521,6 +536,7 @@ impl Players {
             next.remove(*goal)?;
         }
         self.objects = next;
+        self.retired_goals.extend(retired);
         Ok(cleared)
     }
 }

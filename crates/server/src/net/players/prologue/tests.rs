@@ -1531,19 +1531,6 @@ fn ready_for_selection_with_return_confirmation(
         )
         .build()
         .unwrap();
-    assert!(listener.frame(Queued {
-        advertised: None,
-        frame: 13,
-        data: completed.span()
-    }));
-    assert_eq!(
-        listener
-            .observation(0, 0, 0, false)
-            .health
-            .unsupported_operations,
-        0,
-        "the assigned cinematic goal's completion belongs to this participant"
-    );
     let before_previews = listener.players.objects().snapshot();
     // The entry notification is an ordering barrier for later preview cars.
     tick_with_normal_presentation(&mut listener).unwrap();
@@ -1628,6 +1615,26 @@ fn ready_for_selection_with_return_confirmation(
     );
     assert!(listener.players.objects().get(vehicle).is_none());
     assert!(listener.players.objects().get(entry).is_none());
+    assert!(listener.players.objects().get(goal_id).is_none());
+    let after_retirement = listener.players.objects().snapshot();
+    // The sequence can finish before the client's first goal-completed RPC
+    // arrives. It retains the retired lifetime's authority and has no effects
+    // on the newly created garage loading state. The reliable retry is inert.
+    for _ in 0..2 {
+        assert!(listener.frame(Queued {
+            advertised: None,
+            frame: 13,
+            data: completed.span()
+        }));
+    }
+    assert_eq!(listener.players.objects().snapshot(), after_retirement);
+    assert_eq!(
+        listener
+            .observation(0, 0, 0, false)
+            .health
+            .unsupported_operations,
+        0
+    );
     assert!(!listener.world_cars.contains_key(&vehicle));
     assert!(
         listener

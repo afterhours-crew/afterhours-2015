@@ -2072,6 +2072,7 @@ impl Listener for PlayerListener {
                         actor = report.actor,
                         participant = report.participant,
                         first = report.first,
+                        retired = report.retired,
                         "owned client goal completed"
                     );
                     continue;

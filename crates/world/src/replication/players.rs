@@ -60,6 +60,9 @@ pub struct Players {
     goal_allocation_serial: u8,
     /// Completed goal lifetimes, bounded by the world's non-reused object IDs.
     completed_goals: BTreeMap<u16, goals::Owner>,
+    /// Human goal ownership retained at an owned release, for callbacks already
+    /// in flight. IDs are never reused within this bounded world lifetime.
+    retired_goals: BTreeMap<u16, goals::Owner>,
     ai: BTreeMap<(u8, u64, u64), ai::Instance>,
     /// Persistent AI participants whose cars come and go (roaming rivals).
     ai_slots: BTreeMap<(u8, u64, u64), ai::Slot>,

@@ -26,13 +26,16 @@ pub struct Completion {
     pub participant: u16,
     /// Repeated notifications do not complete the owning operation twice.
     pub first: bool,
+    /// The owning operation already retired this goal; never advance it again.
+    pub retired: bool,
 }
 
 impl Players {
     /// Accept the no-argument completion RPC only for an assigned spline or
     /// waypoint goal. AI reporting additionally requires current delegation.
-    /// An already accepted lifetime can acknowledge an in-flight repeat after
-    /// retirement; unknown and never-completed retired IDs remain unsupported.
+    /// Owned human releases retain authority for an in-flight first report or
+    /// repeat. Unknown retired IDs remain unsupported. AI repeats require an
+    /// earlier accepted report while the goal had current delegation.
     pub fn receive_goal_completion(
         &mut self,
         connection: u8,
@@ -58,7 +61,11 @@ impl Players {
         let selector = match self.objects.get(goal).map(|o| &o.initial) {
             Some(Initial::ScriptedSplineGoal(g)) => g.selector,
             Some(Initial::GotoWaypointGoal(g)) => g.selector,
-            None => match self.completed_goals.get(&goal) {
+            None => match self
+                .completed_goals
+                .get(&goal)
+                .or_else(|| self.retired_goals.get(&goal))
+            {
                 Some(owner) => owner.selector,
                 None => return Ok(None),
             },
@@ -79,6 +86,7 @@ impl Players {
             .completed_goals
             .get(&goal)
             .copied()
+            .or_else(|| self.retired_goals.get(&goal).copied())
             .or_else(|| {
                 self.goal_assignment(connection, persona, goal, delegated)
                     .map(|(actor, participant)| Owner {
@@ -100,7 +108,30 @@ impl Players {
             actor: owner.actor,
             participant: owner.participant,
             first,
+            retired: self.objects.get(goal).is_none(),
         }))
+    }
+
+    pub(super) fn human_goal_owner(
+        &self,
+        connection: u8,
+        persona: u64,
+        goal: u16,
+    ) -> Option<Owner> {
+        let selector = match &self.objects.get(goal)?.initial {
+            Initial::ScriptedSplineGoal(g) => g.selector,
+            Initial::GotoWaypointGoal(g) => g.selector,
+            _ => return None,
+        };
+        let (actor, participant) =
+            self.goal_assignment(connection, persona, goal, &BTreeMap::new())?;
+        Some(Owner {
+            connection,
+            persona,
+            actor,
+            participant,
+            selector,
+        })
     }
 
     fn goal_assignment(
@@ -174,6 +205,97 @@ mod tests {
             .create_actor(connection, persona, participant)
             .unwrap();
         participant
+    }
+    #[test]
+    fn first_completion_after_owned_retirement_cannot_affect_the_next_goal() {
+        let mut players = Players::default();
+        let participant = human(&mut players, 1, 101);
+        let definition = spline::Definition {
+            asset: entity::creation::Asset {
+                bundle: 4,
+                type_id: 5000,
+                local_index: 0,
+            },
+            catalog: entity::creation::Catalog::new(4, &[(5000, 1)]).unwrap(),
+            flag: false,
+        };
+        let (old, _) = players
+            .start_spline(1, 101, participant, &definition)
+            .unwrap();
+        players.finish_spline(1, 101, participant, old.id).unwrap();
+        let (next, _) = players
+            .start_spline(1, 101, participant, &definition)
+            .unwrap();
+        let before = players.objects.snapshot();
+        let delegates = BTreeMap::new();
+        let callback = request(old.id, 0, 0, 127, false);
+        assert!(
+            players
+                .receive_goal_completion(1, 101, callback.span(), &delegates)
+                .unwrap()
+                .expect("retired owned goal")
+                .first
+        );
+        assert_eq!(
+            players.receive_goal_completion(2, 202, callback.span(), &delegates),
+            Err(Error::UnknownObject)
+        );
+        assert!(
+            !players
+                .receive_goal_completion(1, 101, callback.span(), &delegates)
+                .unwrap()
+                .unwrap()
+                .first
+        );
+        assert_eq!(players.objects.snapshot(), before);
+        assert!(players.objects.get(next.id).is_some());
+        assert_eq!(
+            Players::default().receive_goal_completion(1, 101, callback.span(), &delegates),
+            Ok(None)
+        );
+    }
+    #[test]
+    fn delayed_waypoint_completions_share_owned_retirement_without_reviving_control() {
+        for controlled in [false, true] {
+            let mut players = Players::default();
+            let p = human(&mut players, 1, 101);
+            let route = goto_waypoint::Initial {
+                selector: 7,
+                serial: 1,
+                allocation_serial: 0,
+                waypoint: 0,
+                word: 1,
+                points: vec![[0, 0, 0]],
+                flags: [false; 2],
+                radius: 150f32.to_bits(),
+                progress_updates: !controlled,
+            };
+            let goal = if controlled {
+                let records = players
+                    .start_controlled_goals(1, 101, p, vec![Initial::GotoWaypointGoal(route)])
+                    .unwrap();
+                let id = records[0].id;
+                players.release_controlled_goals(1, 101, p, &[id]).unwrap();
+                id
+            } else {
+                let changes = players.start_player_route(1, 101, p, route, None).unwrap();
+                let id = changes.goals[0];
+                players.release_player_route(1, 101, p, id, None).unwrap();
+                id
+            };
+            let before = players.objects.snapshot();
+            let result = players
+                .receive_goal_completion(
+                    1,
+                    101,
+                    request(goal, 7, 0, 85, false).span(),
+                    &BTreeMap::new(),
+                )
+                .unwrap()
+                .expect("retired waypoint");
+            assert!(result.first && result.retired);
+            assert_eq!(players.objects.snapshot(), before);
+        }
     }
     #[test]
     fn assigned_goal_completion_is_owned_idempotent_and_lifetime_bound() {
