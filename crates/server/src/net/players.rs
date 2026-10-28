@@ -3271,12 +3271,55 @@ impl Listener for PlayerListener {
             Err(error) => return self.refuse(error),
         }
         deferred_sections = output::pack_motion(deferred_sections);
+        if !records.is_empty() {
+            sections.insert(
+                0,
+                Section {
+                    float_bits: None,
+                    flag: false,
+                    deleted: Vec::new(),
+                    setup: Some(Setup::Packed {
+                        tag: None,
+                        width: None,
+                        axes: [None; 3],
+                    }),
+                    records,
+                },
+            );
+        }
+        if let Some(crashes) = &crashes {
+            responses.retain(|rpc| !matches!(
+                rpc,
+                nfs_world::participants::HostRpc::SequenceStop(stop) if crashes.completed(stop.sequence)
+            ));
+        }
+        // Earlier transitions may own objects whose creation has not yet
+        // reached the host. All output from this later frame must follow
+        // those entries, including motion and callbacks naming the objects.
+        // Keep older replication/RPC queues in place: their calls may need to
+        // precede a deletion in one of the earlier entries.
+        if !self.pending_entries.is_empty() {
+            let mut ordered = Vec::new();
+            for section in sections.drain(..).chain(deferred_sections.drain(..)) {
+                match admitted_entries(section, Vec::new()) {
+                    Ok(batch) => ordered.extend(batch),
+                    Err(error) => return self.refuse(error),
+                }
+            }
+            if !responses.is_empty() {
+                match admitted_entries(returning::empty_section(), std::mem::take(&mut responses)) {
+                    Ok(batch) => ordered.extend(batch),
+                    Err(error) => return self.refuse(error),
+                }
+            }
+            ordered.extend(entries);
+            entries = ordered;
+        }
         if spawned.messages.len() > MAX_PENDING.saturating_sub(self.pending_content.len())
             || scheduled_returns.len() > MAX_PENDING.saturating_sub(self.pending_returns.len())
             || scheduled_teleports.len() > MAX_PENDING.saturating_sub(self.pending_teleports.len())
             || responses.len() > nfs_world::session::MAX_RPC_QUEUE - self.pending_rpcs.len()
-            || sections.len() + deferred_sections.len() + usize::from(!records.is_empty())
-                > MAX_PENDING - self.pending.len()
+            || sections.len() + deferred_sections.len() > MAX_PENDING - self.pending.len()
             || entries.len() > MAX_PENDING - self.pending_entries.len()
             || scheduled_binding_refreshes.len()
                 > MAX_PENDING.saturating_sub(self.pending_binding_refreshes.len())
@@ -3444,19 +3487,6 @@ impl Listener for PlayerListener {
         self.scoring_state.reports.extend(scoring_reports);
         self.scoring_state.nitrous = nitrous;
         self.scoring_state.reported.extend(nitrous_reported);
-        if !records.is_empty() {
-            self.pending.push_back(Section {
-                float_bits: None,
-                flag: false,
-                deleted: Vec::new(),
-                setup: Some(Setup::Packed {
-                    tag: None,
-                    width: None,
-                    axes: [None; 3],
-                }),
-                records,
-            });
-        }
         self.pending.extend(sections);
         self.pending.extend(deferred_sections);
         self.queue_entries(entries);
