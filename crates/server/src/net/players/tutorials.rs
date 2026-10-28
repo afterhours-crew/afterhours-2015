@@ -10,6 +10,11 @@
 use super::*;
 use nfs_world::participants::{HostRpc, Stage, intro::Chapter};
 
+/// Seconds between driven-distance samples.
+const DISTANCE_SAMPLE_SECONDS: f64 = 1.0;
+/// Metres per second beyond which a position change is a relocation.
+const MAX_SPEED_M_S: f64 = 150.0;
+
 const CHAPTERS: [Chapter; 4] = [
     Chapter::FirstDrive,
     Chapter::FirstRace,
@@ -42,34 +47,6 @@ impl PlayerListener {
         content.notifications(players.objects(), &Self::stored_tutorials(loaded)?)
     }
 
-    /// Whether the intro's return objective is completed in the committed
-    /// progression.
-    fn intro_completed(&self) -> Result<bool, replication::Error> {
-        let (Some(content), Some(progression), Some(loaded)) = (
-            self.prologue.as_deref(),
-            &self.progression,
-            &self.persistent,
-        ) else {
-            return Ok(false);
-        };
-        let Some(binding) = content
-            .driving
-            .as_ref()
-            .and_then(|pair| pair.1.data.shutdown.as_ref())
-        else {
-            return Ok(false);
-        };
-        let restored = progression
-            .catalog
-            .restore(loaded, progression.settings)
-            .map_err(|_| replication::Error::Shape)?;
-        Ok(restored
-            .branch(crate::progression::Branch::Intro)
-            .objectives()
-            .get(&binding.objective)
-            .is_some_and(|s| s.completed))
-    }
-
     pub(super) fn advance_tutorials(&mut self) -> Result<(), replication::Error> {
         self.advance_chapter_notifications()?;
         let Some(content) = self.tutorial_content() else {
@@ -91,10 +68,31 @@ impl PlayerListener {
             return Ok(());
         }
         let stored = Self::stored_tutorials(&loaded)?;
-        let completed = self.intro_completed()?;
+        let restored = match &self.progression {
+            Some(progression) => Some(
+                progression
+                    .catalog
+                    .restore(&loaded, progression.settings)
+                    .map_err(|_| replication::Error::Shape)?,
+            ),
+            None => None,
+        };
+        let objective = |id: u64| {
+            restored
+                .as_ref()
+                .and_then(|r| {
+                    r.branch(crate::progression::Branch::Intro)
+                        .objectives()
+                        .get(&id)
+                        .map(|o| (o.active, o.completed))
+                })
+                .unwrap_or((false, false))
+        };
         let prologue = self.prologue.clone();
         let mut players = self.players.clone();
         let mut sessions = self.tutorials.clone();
+        let mut samples = self.tutorial_samples.clone();
+        let mut commits = Vec::new();
         let mut records = Vec::new();
         let mut deleted = Vec::new();
         let mut calls = Vec::new();
@@ -118,21 +116,18 @@ impl PlayerListener {
                 )
             });
             let mut held = Vec::new();
+            session.objectives(&content, objective, seconds);
             if let Some(prologue) = prologue.as_deref() {
                 let running = self.intro_modes.get(&participant);
                 for chapter in CHAPTERS {
                     let Ok(mode) = prologue.mode(chapter) else {
                         continue;
                     };
-                    let live = running
-                        .is_some_and(|(active, _, c)| *c == chapter && active.objective_live());
-                    if live {
+                    if running
+                        .is_some_and(|(active, _, c)| *c == chapter && active.objective_live())
+                    {
                         session.launched(&content, &mode.data.prefab, seconds);
                     }
-                    session.objective(&content, &mode.data.prefab, live);
-                }
-                if completed && let Ok(mode) = prologue.mode(Chapter::ReturnDrive) {
-                    session.completed(&content, &mode.data.prefab, seconds);
                 }
                 if let Some((active, canceller, chapter)) = running {
                     held.extend(
@@ -151,13 +146,73 @@ impl PlayerListener {
                     );
                 }
             }
+            // Driven distance: the car's position sampled once a second,
+            // as DriverDetailsLogic's distance loop does (Delay #17, 1 s);
+            // a jump beyond any car's speed is a teleport, not driving.
+            match self
+                .world_cars
+                .iter()
+                .find(|(_, (p, ready))| *p == participant && *ready)
+                .and_then(|(&car, _)| {
+                    players
+                        .vehicle_physics(HOST_SELECTOR as u8, self.persona, car)
+                        .ok()?
+                        .decode([0.; 3])
+                        .ok()
+                }) {
+                Some(motion) => {
+                    let position = motion.position.map(f64::from);
+                    match samples.get(&participant).copied() {
+                        Some((last, at)) if seconds - at >= DISTANCE_SAMPLE_SECONDS => {
+                            let metres = position
+                                .iter()
+                                .zip(last)
+                                .map(|(a, b)| (a - b) * (a - b))
+                                .sum::<f64>()
+                                .sqrt();
+                            if metres <= MAX_SPEED_M_S * (seconds - at) {
+                                session.drove(metres);
+                            }
+                            samples.insert(participant, (position, seconds));
+                        }
+                        Some(_) => {}
+                        None => {
+                            samples.insert(participant, (position, seconds));
+                        }
+                    }
+                }
+                None => {
+                    samples.remove(&participant);
+                }
+            }
             let out = session.advance(&content, &mut players, seconds, &held)?;
             records.extend(out.records);
             deleted.extend(out.deleted);
             calls.extend(out.calls);
+            commits.extend(out.commits.into_iter().map(|key| (participant, key)));
+        }
+        samples.retain(|p, _| sessions.contains_key(p));
+        let mut story = self.story_pending.clone();
+        if let Some(progression) = self.progression.clone() {
+            for (participant, key) in commits {
+                let player_index = players
+                    .runtime_index(HOST_SELECTOR as u8, self.persona, participant)
+                    .ok_or(replication::Error::UnknownObject)?;
+                if story.len() >= MAX_PENDING {
+                    return Ok(());
+                }
+                story.push_back(crate::net::items::story::Request {
+                    participant,
+                    player_index: u32::from(player_index),
+                    progression: progression.clone(),
+                    action: crate::net::items::story::Action::Tutorial { key },
+                });
+            }
         }
         if records.is_empty() && deleted.is_empty() && calls.is_empty() {
             self.tutorials = sessions;
+            self.tutorial_samples = samples;
+            self.story_pending = story;
             return Ok(());
         }
         let mut sections = split_scenes(records, nfs_world::application::OUTBOUND_FRAME_BITS - 96)?;
@@ -181,6 +236,8 @@ impl PlayerListener {
         }
         self.players = players;
         self.tutorials = sessions;
+        self.tutorial_samples = samples;
+        self.story_pending = story;
         self.pending.extend(sections);
         self.pending_rpcs.extend(calls);
         Ok(())
@@ -224,21 +281,23 @@ impl PlayerListener {
         let owners: Vec<u16> = self.players.player_participants().collect();
         sent.retain(|p, _| owners.contains(p));
         let mut calls = vec![];
+        let mut boxes = vec![];
         for participant in owners {
             if !self.entered(participant) {
                 continue;
             }
-            calls.extend(content.update(
-                self.players.objects(),
-                state,
-                sent.entry(participant).or_default(),
-            )?);
+            let values = sent.entry(participant).or_default();
+            calls.extend(content.update(self.players.objects(), state, values)?);
+            boxes.extend(content.entry_box(values).map(|on| (participant, on)));
         }
         if calls.len() > nfs_world::session::MAX_RPC_QUEUE.saturating_sub(self.pending_rpcs.len()) {
             return Ok(());
         }
         self.chapter_sent = sent;
         self.pending_rpcs.extend(calls);
+        for (participant, enabled) in boxes {
+            self.participants.set_entry_box(participant, enabled);
+        }
         Ok(())
     }
 

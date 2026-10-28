@@ -193,6 +193,8 @@ pub(super) struct PlayerListener {
     mode_notified: BTreeMap<(u16, usize), bool>,
     /// Tutorial logics per participant (`crate::tutorials`).
     tutorials: BTreeMap<u16, crate::tutorials::Session>,
+    /// Last driven-distance sample per participant (position, seconds).
+    tutorial_samples: BTreeMap<u16, ([f64; 3], f64)>,
     /// Last reported inside value per participant and assigned volume.
     activity_inside: activities::Inside,
     /// Chapter notification values sent per participant.
@@ -1023,6 +1025,7 @@ impl PlayerListener {
             world_volumes: prologue::volumes::State::default(),
             mode_notified: BTreeMap::new(),
             tutorials: BTreeMap::new(),
+            tutorial_samples: BTreeMap::new(),
             activity_inside: BTreeMap::new(),
             chapter_sent: BTreeMap::new(),
             sequence_readiness: BTreeMap::new(),

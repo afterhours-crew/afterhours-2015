@@ -476,6 +476,12 @@ pub struct Lifecycle {
     /// carries this pending request into free roam; a zone release ends it.
     /// This state alone does not establish whether the client UI is visible.
     arrival_prompts: BTreeSet<u16>,
+    /// Participants whose garage-entry box the host disabled (spawnpoints
+    /// s4 = 0): the client then sends a request only for the player's
+    /// prompt accept, and the first one starts the return (official E742
+    /// seg03 and E1026 1118.936 s, answered in 300-408 ms). While the box is
+    /// enabled its automatic request on approach is only the prompt.
+    entry_box_off: BTreeSet<u16>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Outcome {
@@ -532,6 +538,14 @@ impl Lifecycle {
     }
     pub fn take_returning(&mut self) -> Vec<u16> {
         std::mem::take(&mut self.returned_requests)
+    }
+    /// The garage-entry box value the client was told for `participant`.
+    pub fn set_entry_box(&mut self, participant: u16, enabled: bool) {
+        if enabled {
+            self.entry_box_off.remove(&participant);
+        } else {
+            self.entry_box_off.insert(participant);
+        }
     }
     /// Participants whose Enter Garage prompt began since the last call.
     pub fn take_prompted(&mut self) -> Vec<u16> {
@@ -1124,6 +1138,8 @@ impl Lifecycle {
             .ok_or(Error::UnknownObject)?;
         match *stage {
             Stage::ReturningToGarage => return Ok(Some(Outcome::Repeated)),
+            // The player accepted the prompt: the return begins.
+            Stage::FreeRoam if self.entry_box_off.contains(&participant) => {}
             Stage::FreeRoam => {
                 // First request of this zone visit: the prompt shows and the
                 // host answers nothing, so that the client repeats the request

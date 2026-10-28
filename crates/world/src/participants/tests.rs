@@ -951,6 +951,19 @@ fn arrival_requests_carry_the_prompt_into_free_roam_across_three_lifetimes() {
     assert!(model.take_prompted().is_empty());
     return_chain(&mut model);
     assert_eq!(model.stage(9), Some(Stage::Customization));
+    // Lifetime 4: with the entry box disabled the client sends a request
+    // only for the player's accept, and the first one returns.
+    exit_to_arriving(&mut model, false);
+    assert_eq!(calls(model.arrived(8)).len(), 2);
+    model.set_entry_box(8, false);
+    return_chain(&mut model);
+    // Lifetime 5: an enabled box again prompts first.
+    exit_to_arriving(&mut model, false);
+    assert_eq!(calls(model.arrived(8)).len(), 2);
+    model.set_entry_box(8, true);
+    assert_eq!(model.receive(route.span(), owns).unwrap(), prompt_only);
+    assert_eq!(model.take_prompted(), [8]);
+    return_chain(&mut model);
 }
 
 #[test]

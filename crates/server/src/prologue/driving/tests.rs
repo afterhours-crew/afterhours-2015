@@ -445,8 +445,11 @@ fn final_dependency_publications_wait_for_the_owned_leave_acknowledgement() {
             .is_err()
     );
     active.advance(&mode, &mut players, 15.).unwrap();
-    // Outside the root state the mode does not hold the participant.
-    assert_eq!(active.held_categories(&mode), None);
+    // Outside its root state the mode still holds the participant: official
+    // race 1 sets its in-mode flags at 573.620 s, before the root state
+    // admits the participant at 573.921 s.
+    assert!(active.host.machine().members(3).unwrap().is_empty());
+    assert_eq!(active.held_categories(&mode), Some(&BTreeSet::from([7])));
     let sequence = active.sequences[&1].ghost(owner.participant).unwrap();
     let out = active
         .completed(
@@ -806,7 +809,7 @@ fn timed_context_triggers_fire_once_at_their_deadlines_and_gated_ones_only_while
 }
 
 #[test]
-fn modes_without_a_root_state_hold_their_participant_from_the_join_until_the_leave() {
+fn intro_modes_hold_their_participant_from_the_join_until_the_leave() {
     // The event canceller has no root state (installed content); official
     // events s9 is true from its start to its shutdown, across both races.
     let (mut players, owner, mut mode) = clock_fixture(false);

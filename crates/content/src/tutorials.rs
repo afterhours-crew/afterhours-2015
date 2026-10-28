@@ -13,7 +13,9 @@
 use crate::{Error, assets::AssetIndex, graph::*};
 use nfs_frostbite::ebx::Value;
 use std::collections::{BTreeMap, BTreeSet};
+mod distance;
 pub mod gates;
+pub use distance::Distance;
 
 const GAMEPLAY: &str = "levels/genesis01/gameplay";
 const LAYER: &str = "levels/genesis01/gameplay/layer34_tutorial_schematic";
@@ -76,6 +78,8 @@ pub struct Tutorial {
     pub accept: Option<u32>,
     /// A server context reporter's networked prompt rows.
     pub context: Option<Context>,
+    /// A server driven-distance check (accelerate).
+    pub distance: Option<Distance>,
 }
 
 /// A server `ParticipantContextReporter` feeding a server CompareBool that
@@ -321,6 +325,7 @@ impl AssetIndex {
                 notification,
                 accept: None,
                 context: None,
+                distance: None,
             });
         }
         let mut volumes = vec![];
@@ -356,6 +361,7 @@ impl AssetIndex {
             let mut graph = Graph::new(&mut self.assets);
             let nodes = graph.read(Site::root(&tutorial.blueprint))?;
             tutorial.context = context(&mut graph, &nodes, &network)?;
+            tutorial.distance = distance::distance(&mut graph, &nodes, &network)?;
             let mut accept = nodes
                 .iter()
                 .filter(|n| n.object.class == "EventSyncEntityData")

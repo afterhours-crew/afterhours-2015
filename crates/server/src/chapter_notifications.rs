@@ -72,6 +72,11 @@ impl Content {
         })
     }
 
+    /// The garage-entry box value last sent, when the content has one.
+    pub fn entry_box(&self, sent: &Sent) -> Option<bool> {
+        let index = self.entries.iter().position(|e| e.entry_box)?;
+        sent.get(&index).map(|&v| v != 0)
+    }
     /// The calls that bring the client to the current values. `objective`
     /// answers (active, completed) per stable objective id. Scenes not yet
     /// in the world are left for a later pass.
@@ -126,6 +131,7 @@ mod tests {
                 scene_key: SPAWN,
                 serializer: 5,
                 default: 0,
+                entry_box: false,
             },
             Notification {
                 kind: Kind::Int,
@@ -133,6 +139,7 @@ mod tests {
                 scene_key: SPAWN,
                 serializer: 6,
                 default: 0,
+                entry_box: false,
             },
             Notification {
                 kind: Kind::Bool,
@@ -140,6 +147,7 @@ mod tests {
                 scene_key: GARAGE,
                 serializer: 25,
                 default: 0,
+                entry_box: false,
             },
         ])
     }

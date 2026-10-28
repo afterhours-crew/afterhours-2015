@@ -31,6 +31,13 @@ const CAST_INT: u32 = 245_372_264;
 const LOGIC_OUT: u32 = 193_453_899;
 const NOT_IN: u32 = 5_862_146;
 const MAX_NOTIFICATIONS: usize = 32;
+/// A resolved notification before its serializer: kind, value, scene,
+/// object, default and (scene, object) of the notification itself.
+type Found = (Kind, Expr, String, Key, i32, (String, Key));
+const BOX: &str = "RaceBoxTriggerEntityData";
+const BOX_ENABLE: u32 = 2_342_790_116;
+const BOX_DISABLE: u32 = 4_177_663_665;
+const COMPARE_BOOL: u32 = 2_088_812_747;
 const MAX_NODES: usize = 32;
 
 /// A boolean over intro objectives (stable objective ids).
@@ -79,9 +86,17 @@ pub struct Notification {
     pub serializer: usize,
     /// The target property's default: a value equal to it is no change.
     pub default: i32,
+    /// The value enables a `RaceBoxTriggerEntityData` through client logic
+    /// (installed: spawnpoints s4, the garage-entry box whose automatic
+    /// request starts the return while it is enabled).
+    pub entry_box: bool,
 }
 
-fn stable<S: Source>(graph: &mut Graph<S>, port: u32, site: &Site) -> Result<u64, Error> {
+pub(crate) fn stable<S: Source>(
+    graph: &mut Graph<S>,
+    port: u32,
+    site: &Site,
+) -> Result<u64, Error> {
     let endpoints = graph.links(site, port)?;
     let [endpoint] = endpoints.as_slice() else {
         return Err(bad("chapter objective stable id"));
@@ -145,6 +160,48 @@ fn expr<S: Source>(
     })
 }
 
+/// Whether a notification's client output drives a box trigger's Enable or
+/// Disable through a CompareBool over Not/PropertyCast steps in its scene
+/// (`scene`, its bus: layers share their scene's connections). Installed:
+/// spawnpoints #17 (s4) -> cast #3 -> Not #13 -> CompareBool #12, whose
+/// OnFalse enables and OnTrue disables RaceBoxTrigger #16.
+fn drives_box<S: Source>(
+    graph: &mut Graph<S>,
+    scene: &str,
+    notification: &Key,
+) -> Result<bool, Error> {
+    let nodes = graph.read(Site::root(scene))?;
+    for node in nodes.iter().filter(|n| n.object.class == BOX) {
+        for event in [BOX_ENABLE, BOX_DISABLE] {
+            for (source, _) in graph.event_sources(&node.site, event)? {
+                if graph.object(&source)?.class != "CompareBoolEntityData" {
+                    continue;
+                }
+                let mut at = graph.input(&source, COMPARE_BOOL)?;
+                for _ in 0..MAX_NODES {
+                    let class = graph.object(&at.site)?.class;
+                    let next = match class.as_str() {
+                        "NotEntityData" => NOT_IN,
+                        "PropertyCastEntityData" => {
+                            let ports = graph.input_ports(&at.site)?;
+                            let [port] = ports.as_slice() else {
+                                break;
+                            };
+                            *port
+                        }
+                        _ => break,
+                    };
+                    at = graph.input(&at.site, next)?;
+                }
+                if at.site.key == *notification {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+
 fn default(object: &nfs_frostbite::ebx::Object) -> Result<i32, Error> {
     match object.fields.get("DefaultValue") {
         Some(Value::Bool(b)) => Ok(i32::from(*b)),
@@ -177,7 +234,7 @@ impl AssetIndex {
             return Err(bad("progression sub-world reference"));
         };
         let reference = reference.site.clone();
-        let mut out: Vec<(Kind, Expr, String, Key, i32)> = vec![];
+        let mut out: Vec<Found> = vec![];
         for node in branch.iter().filter(|n| {
             matches!(n.object.class.as_str(), INT_ACCESSOR | BOOL_ACCESSOR)
                 && !n.site.parents.is_empty()
@@ -240,15 +297,20 @@ impl AssetIndex {
                                 source.site.bus.0.clone(),
                                 source.site.key.clone(),
                                 default,
+                                (source.site.bus.0.clone(), source.site.key.clone()),
                             ));
                         }
                     }
                 }
             }
         }
+        let mut boxes = vec![];
+        for (.., (scene, notification)) in &out {
+            boxes.push(drives_box(&mut graph, scene, notification)?);
+        }
         drop(graph);
         let mut result = vec![];
-        for (kind, value, scene, key, default) in out {
+        for ((kind, value, scene, key, default, _), entry_box) in out.into_iter().zip(boxes) {
             if !bindings.contains_key(&scene) {
                 let rows: std::collections::BTreeMap<(String, usize), usize> = self
                     .scene_bindings(&scene)?
@@ -266,8 +328,12 @@ impl AssetIndex {
                 scene_key: crate::assets::scene_key(&scene),
                 serializer,
                 default,
+                entry_box,
             });
         }
         Ok(result)
     }
 }
+
+#[cfg(test)]
+mod tests;

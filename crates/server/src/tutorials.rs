@@ -200,6 +200,8 @@ impl Content {
             accepting: BTreeSet::new(),
             context: BTreeMap::new(),
             notify: vec![],
+            driven: 0.0,
+            watches: BTreeMap::new(),
         }
     }
 
@@ -225,6 +227,8 @@ pub struct Output {
     pub records: Vec<Record>,
     pub deleted: Vec<u16>,
     pub calls: Vec<HostRpc>,
+    /// Seen values a server check set (accelerate): commit like an accept.
+    pub commits: Vec<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -245,6 +249,10 @@ pub struct Session {
     context: BTreeMap<usize, bool>,
     /// Committed seen values to notify at the next advance.
     notify: Vec<usize>,
+    /// Metres driven in this session.
+    driven: f64,
+    /// Distance checks: entry index to (watch start, finished).
+    watches: BTreeMap<usize, (f64, bool)>,
 }
 
 impl Session {
@@ -274,39 +282,50 @@ impl Session {
             seconds,
         );
     }
-    /// The objective of `prefab`'s mode became active or inactive.
-    pub fn objective(&mut self, content: &Content, prefab: &str, active: bool) {
+    /// The committed objectives: `state` answers (active, completed) per
+    /// stable objective id. An active objective holds its While terms; a
+    /// completion's first observation is its rise (a restored completion
+    /// rises at the session's first pass, E912 35.636 s).
+    pub fn objectives(
+        &mut self,
+        content: &Content,
+        state: impl Fn(u64) -> (bool, bool),
+        seconds: f64,
+    ) {
         for (index, trigger) in content.triggers.iter().enumerate() {
-            let matches = match trigger {
+            match *trigger {
                 Trigger::PrefabProperty {
-                    prefab: p,
                     property,
+                    objective,
+                    ..
                 }
                 | Trigger::Objective {
-                    prefab: p,
                     property,
-                } => p == prefab && *property == OBJECTIVE_ACTIVE,
-                _ => false,
-            };
-            if matches {
-                if active {
-                    self.holding.insert(index);
-                } else {
-                    self.holding.remove(&index);
+                    objective,
+                    ..
+                } if property == OBJECTIVE_ACTIVE => {
+                    if state(objective).0 {
+                        self.holding.insert(index);
+                    } else {
+                        self.holding.remove(&index);
+                    }
                 }
+                Trigger::PrefabProperty {
+                    property,
+                    objective,
+                    ..
+                } if property == OBJECTIVE_COMPLETED && state(objective).1 => {
+                    self.rises.entry(index).or_insert(seconds);
+                }
+                _ => {}
             }
         }
     }
-    /// The objective of `prefab`'s mode completed (or was restored completed).
-    pub fn completed(&mut self, content: &Content, prefab: &str, seconds: f64) {
-        self.rise(
-            content,
-            |t| {
-                matches!(t, Trigger::PrefabProperty { prefab: p, property }
-                    if p == prefab && *property == OBJECTIVE_COMPLETED)
-            },
-            seconds,
-        );
+    /// Distance the participant's car covered (metres, non-negative).
+    pub fn drove(&mut self, metres: f64) {
+        if metres.is_finite() && metres > 0.0 {
+            self.driven += metres;
+        }
     }
     /// A location volume crossing of this participant.
     pub fn location(&mut self, volume: nfs_content::tutorials::Volume, inside: bool) {
@@ -368,6 +387,41 @@ impl Session {
                     out.deleted.push(ghost);
                 }
                 _ => {}
+            }
+        }
+        // Distance checks: the watch starts at `start` metres and, when it
+        // runs out, either sets the seen value or fires the prompt rows.
+        for (&index, &ghost) in &self.live {
+            let entry = &content.entries[index];
+            let Some(check) = &entry.tutorial.distance else {
+                continue;
+            };
+            let watch = match self.watches.get(&index).copied() {
+                Some(watch) => watch,
+                None if self.driven >= f64::from(check.start) => {
+                    self.watches.insert(index, (seconds, false));
+                    (seconds, false)
+                }
+                None => continue,
+            };
+            if watch.1 || seconds < watch.0 + f64::from(check.millis) / 1000.0 {
+                continue;
+            }
+            self.watches.insert(index, (watch.0, true));
+            if self.driven >= f64::from(check.enough) {
+                // Deleted by the commit: the cancel row is never sent
+                // (official E1026 146.119 s, a delete without a fire).
+                if self.accepting.insert(index) {
+                    out.commits.push(entry.key);
+                }
+            } else {
+                out.calls.extend(check.prompt.iter().map(|&(bus, ordinal)| {
+                    HostRpc::Event(Fire {
+                        target: EntityRef { ghost, entity: bus },
+                        event: ordinal,
+                        player: None,
+                    })
+                }));
             }
         }
         for (&index, &ghost) in &self.live {

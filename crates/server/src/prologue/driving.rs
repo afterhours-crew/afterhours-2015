@@ -399,28 +399,22 @@ impl Active {
     pub fn parent(&self) -> u16 {
         self.parent
     }
-    /// The mode's game-mode categories while its owner is in the mode, for
-    /// participant-in-game-mode properties: a member of its root state or,
-    /// for a mode without one (intro drive, event canceller, return), from
-    /// its participant join at creation (GameMode m4) to its leave. Official
-    /// E1026: events s9 follows the canceller from 124.718 s to its shutdown
-    /// at 1247.825 s, across both races.
     /// The mode's objective is active: launched, not arrived and not ending.
     pub fn objective_live(&self) -> bool {
         !self.ending && !self.left
     }
+    /// The mode's game-mode categories while its owner is in the mode, for
+    /// participant-in-game-mode properties: from its participant join at
+    /// creation (GameMode m4) to its leave, for every intro mode. Official
+    /// E1026: events s9 follows the canceller from 124.718 s to its shutdown
+    /// at 1247.825 s, across both races; race 1's events and ui s1 from
+    /// 573.620 s (1.5 s after the mode's creation, before its root state
+    /// admits the participant at 573.921 s) to the mode end at 652.123 s, and
+    /// the race tutorial's context row with it (574.121 s). Root-state
+    /// membership is later in our state machine (E1249 v3j: 635.833 s) and
+    /// would hold the flags only at the race end.
     pub fn held_categories<'a>(&self, content: &'a Mode) -> Option<&'a BTreeSet<u32>> {
-        let member = match content.data.game_mode.lifecycle.root_state {
-            None => true,
-            Some(root) => {
-                let root = u16::try_from(root).ok()?;
-                self.host
-                    .machine()
-                    .members(root)
-                    .is_ok_and(|m| m.contains(&u64::from(self.owner.participant)))
-            }
-        };
-        (member && !self.left).then_some(&content.data.categories)
+        (!self.left).then_some(&content.data.categories)
     }
     /// Fire the timed context triggers that are due; gated ones only while
     /// the objective is active (the drive has not arrived or begun ending).

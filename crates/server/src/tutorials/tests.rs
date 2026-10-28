@@ -22,6 +22,8 @@ const CLUB: &str = "test/intro/club";
 const INTRO_FINISH: &str = "test/tutorial/introfinish";
 const REMINDER: &str = "test/tutorial/reminder";
 const CATEGORY: u32 = 380_569_058;
+const CLUB_OBJECTIVE: u64 = 11;
+const RETURN_OBJECTIVE: u64 = 15;
 
 fn layout(local_index: u16, serializer: usize) -> Layout {
     Layout {
@@ -59,6 +61,7 @@ fn tutorial(name: &str, channel: usize, gate: Gate) -> Tutorial {
         notification: None,
         accept: Some(1000 + channel as u32),
         context: None,
+        distance: None,
     }
 }
 
@@ -83,6 +86,7 @@ fn content() -> Content {
                 trigger: Trigger::PrefabProperty {
                     prefab: RETURN.into(),
                     property: OBJECTIVE_COMPLETED,
+                    objective: RETURN_OBJECTIVE,
                 },
                 seconds: 5.0,
             }],
@@ -93,6 +97,7 @@ fn content() -> Content {
                 Term::While(Trigger::Objective {
                     prefab: CLUB.into(),
                     property: OBJECTIVE_ACTIVE,
+                    objective: CLUB_OBJECTIVE,
                 }),
                 Term::Since {
                     trigger: Trigger::LauncherStarted {
@@ -206,18 +211,19 @@ fn gates_create_and_delete_tutorials_as_their_terms_change() {
             .records
             .is_empty()
     );
-    session.objective(&content, CLUB, true);
+    session.objectives(&content, |id| (id == CLUB_OBJECTIVE, false), 1.1);
     let out = session.advance(&content, &mut players, 1.1, &[]).unwrap();
     assert_eq!(blueprints(&content, &players, &out), [2]);
     let reminder = out.records[0].id;
-    session.objective(&content, CLUB, false);
+    session.objectives(&content, |id| (false, id == CLUB_OBJECTIVE), 2.0);
     let out = session.advance(&content, &mut players, 2.0, &[]).unwrap();
     assert_eq!(out.deleted, [reminder]);
     assert!(players.objects().get(reminder).is_none());
     // A second launch does not move the first rise; the intro finish waits
     // its 5 s from the completion.
-    session.completed(&content, RETURN, 10.0);
-    session.completed(&content, RETURN, 12.0);
+    let done = |id| (false, id == RETURN_OBJECTIVE);
+    session.objectives(&content, done, 10.0);
+    session.objectives(&content, done, 12.0);
     assert!(
         session
             .advance(&content, &mut players, 14.9, &[])
@@ -460,6 +466,7 @@ fn unsupported_triggers_and_mismatched_channels_are_rejected() {
             trigger: Trigger::Objective {
                 prefab: CLUB.into(),
                 property: OBJECTIVE_ACTIVE,
+                objective: CLUB_OBJECTIVE,
             },
             seconds: 1.0,
         },
@@ -535,4 +542,81 @@ fn extra_fields_and_scenes_are_created_once_every_bound_scene_exists() {
         panic!()
     };
     assert_eq!(fields.len(), 4);
+}
+
+/// Installed accelerate: the watch starts at 20 m and after 20 s either sets
+/// the seen value (200 m or more; official E1026 deletes it at 146.119 s
+/// without a fire) or fires the prompt row [9].
+#[test]
+fn a_distance_check_commits_when_driven_far_enough_and_prompts_otherwise() {
+    let mut a = tutorial("test/tutorial/a", 3, Gate::None);
+    a.distance = Some(nfs_content::tutorials::Distance {
+        start: 20,
+        millis: 20_000,
+        enough: 200,
+        prompt: vec![(1, 9)],
+    });
+    let content = Content::new(
+        SCENE_KEY,
+        vec![(a, Definition::new(layout(0, 3)).unwrap())],
+        vec![],
+    )
+    .unwrap();
+    for (driven, committed) in [(250.0, true), (120.0, false)] {
+        let (mut players, participant) = world();
+        let mut session = content.session(participant, BTreeSet::new());
+        let ghost = session
+            .advance(&content, &mut players, 0.0, &[])
+            .unwrap()
+            .records[0]
+            .id;
+        session.drove(10.0);
+        let quiet = session.advance(&content, &mut players, 1.0, &[]).unwrap();
+        assert!(quiet.calls.is_empty() && quiet.commits.is_empty());
+        session.drove(15.0);
+        // The watch starts at 25 m (t = 2 s) and runs 20 s.
+        assert!(
+            session
+                .advance(&content, &mut players, 2.0, &[])
+                .unwrap()
+                .calls
+                .is_empty()
+        );
+        session.drove(driven - 25.0);
+        assert!(
+            session
+                .advance(&content, &mut players, 21.9, &[])
+                .unwrap()
+                .calls
+                .is_empty()
+        );
+        let out = session.advance(&content, &mut players, 22.0, &[]).unwrap();
+        if committed {
+            assert_eq!(out.commits, [crate::persistent::key("test/tutorial/a")]);
+            assert!(out.calls.is_empty());
+            session.committed(&content, out.commits[0]);
+            assert_eq!(
+                session
+                    .advance(&content, &mut players, 22.1, &[])
+                    .unwrap()
+                    .deleted,
+                [ghost]
+            );
+        } else {
+            assert!(out.commits.is_empty());
+            let fires: Vec<_> = out
+                .calls
+                .iter()
+                .map(|c| match c {
+                    HostRpc::Event(f) => (f.target.ghost, f.target.entity, f.event),
+                    _ => panic!(),
+                })
+                .collect();
+            assert_eq!(fires, [(ghost, 1, 9)]);
+            // Once: the watch has run out.
+            session.drove(500.0);
+            let later = session.advance(&content, &mut players, 60.0, &[]).unwrap();
+            assert!(later.calls.is_empty() && later.commits.is_empty());
+        }
+    }
 }

@@ -219,6 +219,7 @@ fn spawners_yield_channel_seen_gate_notification_and_accept() {
                 notification: Some(bindings[&5]),
                 accept: Some(1234),
                 context: None,
+                distance: None,
             },
             Tutorial {
                 blueprint: "gameplay/tutorial/b".into(),
@@ -228,6 +229,7 @@ fn spawners_yield_channel_seen_gate_notification_and_accept() {
                 notification: None,
                 accept: None,
                 context: None,
+                distance: None,
             },
             Tutorial {
                 blueprint: "gameplay/tutorial/c".into(),
@@ -237,6 +239,7 @@ fn spawners_yield_channel_seen_gate_notification_and_accept() {
                 notification: None,
                 accept: Some(77),
                 context: None,
+                distance: None,
             },
         ]
     );

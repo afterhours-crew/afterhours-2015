@@ -29,10 +29,19 @@ const MAX_RULES: usize = 64;
 pub enum Trigger {
     /// An interface event of a referenced prefab (its partition).
     PrefabEvent { prefab: String, event: u32 },
-    /// An interface property of a referenced prefab, as a SyncedBool sees it.
-    PrefabProperty { prefab: String, property: u32 },
-    /// A RaceObjective's property inside `prefab`.
-    Objective { prefab: String, property: u32 },
+    /// An interface property of a referenced prefab, as a SyncedBool sees
+    /// it: the property of the prefab's RaceObjective (stable id).
+    PrefabProperty {
+        prefab: String,
+        property: u32,
+        objective: u64,
+    },
+    /// A RaceObjective's property inside `prefab` (stable id).
+    Objective {
+        prefab: String,
+        property: u32,
+        objective: u64,
+    },
     /// The mode-started output of the launcher inside `prefab`.
     LauncherStarted { prefab: String },
 }
@@ -60,6 +69,7 @@ fn realm_server(object: &nfs_frostbite::ebx::Object) -> bool {
 /// The chain behind one event input: server Delays back to a root.
 fn chain<S: Source>(
     graph: &mut Graph<S>,
+    stable: u32,
     mut site: Site,
     mut port: u32,
 ) -> Result<(Trigger, f32), Error> {
@@ -98,7 +108,7 @@ fn chain<S: Source>(
                 return Ok((Trigger::LauncherStarted { prefab }, seconds));
             }
             "SyncedBoolEntityData" if port == SYNCED_ON_TRUE => {
-                return Ok((synced(graph, &site)?, seconds));
+                return Ok((synced(graph, stable, &site)?, seconds));
             }
             _ => return Err(bad("unsupported tutorial gate event source")),
         }
@@ -106,8 +116,8 @@ fn chain<S: Source>(
     Err(bad("tutorial gate chain bound"))
 }
 
-/// The prefab property a SyncedBool mirrors.
-fn synced<S: Source>(graph: &mut Graph<S>, site: &Site) -> Result<Trigger, Error> {
+/// The prefab property a SyncedBool mirrors, and the objective behind it.
+fn synced<S: Source>(graph: &mut Graph<S>, stable: u32, site: &Site) -> Result<Trigger, Error> {
     let sources = graph.property_sources(site, SYNCED_IN)?;
     let [source] = sources.as_slice() else {
         return Err(bad("tutorial gate synced input"));
@@ -115,15 +125,21 @@ fn synced<S: Source>(graph: &mut Graph<S>, site: &Site) -> Result<Trigger, Error
     if graph.object(&source.site)?.class != "LogicPrefabReferenceObjectData" {
         return Err(bad("tutorial gate synced source"));
     }
+    let inner = graph.input(site, SYNCED_IN)?;
+    if graph.object(&inner.site)?.class != "RaceObjectiveEntityData" || inner.port != source.port {
+        return Err(bad("tutorial gate synced objective"));
+    }
     Ok(Trigger::PrefabProperty {
         prefab: graph.target_field(&source.site, "Blueprint")?.0,
         property: source.port,
+        objective: crate::chapter_notifications::stable(graph, stable, &inner.site)?,
     })
 }
 
 /// The terms of one property source.
 fn terms<S: Source>(
     graph: &mut Graph<S>,
+    stable: u32,
     source: &Endpoint,
     depth: usize,
     out: &mut Vec<Term>,
@@ -143,7 +159,7 @@ fn terms<S: Source>(
                 let [input] = inputs.as_slice() else {
                     return Err(bad("tutorial gate and input"));
                 };
-                terms(graph, input, depth + 1, out)?;
+                terms(graph, stable, input, depth + 1, out)?;
             }
         }
         "BoolEntityData" if realm_server(&object) => {
@@ -156,10 +172,10 @@ fn terms<S: Source>(
                 ([(set, SYNCED_ON_TRUE)], [(reset, SYNCED_ON_FALSE)])
                     if set == reset && graph.object(set)?.class == "SyncedBoolEntityData" =>
                 {
-                    out.push(Term::While(synced(graph, set)?));
+                    out.push(Term::While(synced(graph, stable, set)?));
                 }
                 ([(set, port)], []) => {
-                    let (trigger, seconds) = chain(graph, set.clone(), *port)?;
+                    let (trigger, seconds) = chain(graph, stable, set.clone(), *port)?;
                     out.push(Term::Since { trigger, seconds });
                 }
                 _ => return Err(bad("unsupported tutorial gate bool")),
@@ -168,6 +184,7 @@ fn terms<S: Source>(
         "RaceObjectiveEntityData" => out.push(Term::While(Trigger::Objective {
             prefab: source.site.key.0.clone(),
             property: source.port,
+            objective: crate::chapter_notifications::stable(graph, stable, &source.site)?,
         })),
         _ => return Err(bad("unsupported tutorial gate source")),
     }
@@ -177,6 +194,7 @@ fn terms<S: Source>(
 impl AssetIndex {
     /// The rules of every IdentifiedBool `chapter` sets (one writer each).
     pub fn tutorial_gates(&mut self, chapter: &str) -> Result<Vec<Rule>, Error> {
+        let stable = self.identity.progression.ports["stable_id"];
         let mut graph = Graph::new(&mut self.assets);
         let nodes = graph.read(Site::root(chapter))?;
         let mut rules: Vec<Rule> = vec![];
@@ -197,9 +215,12 @@ impl AssetIndex {
                 return Err(bad("tutorial gate rule count"));
             }
             let mut all = vec![];
-            terms(&mut graph, source, 0, &mut all)?;
+            terms(&mut graph, stable, source, 0, &mut all)?;
             rules.push(Rule { gate, all });
         }
         Ok(rules)
     }
 }
+
+#[cfg(test)]
+mod tests;
