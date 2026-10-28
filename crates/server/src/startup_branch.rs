@@ -17,6 +17,8 @@ pub struct SoloProfile {
         crate::matchmaking_session::Generated,
     )>,
     group: Option<(nfs_services::group::Config, nfs_services::group::Generated)>,
+    /// Fresh entropy for the client's one renewed group in the world.
+    group_renewal: Option<[u8; nfs_services::group::SEED_BYTES]>,
 }
 impl SoloProfile {
     pub fn owned(persona: i64) -> Result<Self, Failure> {
@@ -27,7 +29,12 @@ impl SoloProfile {
             persona,
             matchmaking: None,
             group: None,
+            group_renewal: None,
         })
+    }
+    pub fn with_group_renewal(mut self, seed: [u8; nfs_services::group::SEED_BYTES]) -> Self {
+        self.group_renewal = Some(seed);
+        self
     }
     pub fn persona_id(&self) -> i64 {
         self.persona
@@ -92,6 +99,8 @@ pub struct Session<'a> {
     continuation: Option<crate::world_post_readiness::Session>,
 
     group: Option<nfs_services::group::Session>,
+    group_renewal: Option<[u8; nfs_services::group::SEED_BYTES]>,
+    group_renewed: bool,
     matchmaking: Option<crate::matchmaking_session::Session<'a>>,
 }
 impl<'a> Session<'a> {
@@ -157,8 +166,34 @@ impl<'a> Session<'a> {
             continuation: None,
 
             group,
+            group_renewal: profile.group_renewal,
+            group_renewed: false,
             matchmaking: None,
         })
+    }
+    pub fn group_state(&self) -> Option<nfs_services::group::State> {
+        self.group.as_ref().map(|g| g.state())
+    }
+    /// The client left its group in the world and creates a new one for
+    /// the current world game (official E1026 1311.173-1311.806 s). Once.
+    pub fn renew_group(&mut self, world_game: u64, unix_micros: i64) -> Result<(), Failure> {
+        let seed = self.group_renewal.ok_or(Failure::IneligibleRequest)?;
+        let generated = nfs_services::group::Generated::from_seed(&seed, unix_micros)
+            .map_err(crate::group_failure)?;
+        self.group
+            .as_mut()
+            .ok_or(Failure::IneligibleRequest)?
+            .renew(generated, world_game)
+            .map_err(crate::group_failure)?;
+        self.group_renewal = None;
+        self.group_renewed = true;
+        Ok(())
+    }
+    /// The renewed group's id once its create was answered.
+    pub fn renewed_group(&self) -> Option<u64> {
+        self.group_renewed
+            .then(|| self.group.as_ref().and_then(|g| g.game_id()))
+            .flatten()
     }
     pub fn requests(&self) -> usize {
         self.requests
@@ -348,6 +383,22 @@ impl<'a> Session<'a> {
             return Ok(replies);
         }
         if f.fields.routing_a == 4 {
+            // A renewed group's own mesh report belongs to the group.
+            if f.fields.routing_b == 29
+                && self.group_renewed
+                && self.group_state() == Some(nfs_services::group::State::Created)
+            {
+                let replies = self
+                    .group
+                    .as_mut()
+                    .ok_or(Failure::IneligibleRequest)?
+                    .response(wire)
+                    .map_err(crate::group_failure)?;
+                if replies.is_some() {
+                    self.previous = Some((f.fields.correlation, wire.to_vec()));
+                }
+                return Ok(replies);
+            }
             if f.fields.routing_b == 29
                 && self.profile.world_setup_enabled()
                 && self.matchmaking.is_some()

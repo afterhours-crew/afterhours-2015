@@ -514,18 +514,12 @@ mod tests {
                 })
                 .to_vec();
             if foreign {
-                events.push(
-                    Message::Reached {
-                        event: 28_404_286,
-                        target: EntityRef {
-                            ghost: ids.actor,
-                            entity: 2,
-                        },
-                        player: 0,
-                    }
-                    .encode()
-                    .unwrap(),
-                );
+                // A malformed logic body: the whole frame is refused. (A
+                // well-formed report on an unowned object is consumed
+                // instead, E1252.)
+                let mut malformed = nfs_world::bits::BitWriter::new();
+                malformed.put(1, 3);
+                events.push(malformed);
             }
             let messages = frame::Builder::new().messages(
                 None,
@@ -560,7 +554,7 @@ mod tests {
                 data: wire.span(),
             })
         };
-        // A later invalid event must roll back the earlier valid glass and motion.
+        // A later malformed event must roll back the earlier valid glass and motion.
         assert!(!deliver(&mut listener, &make_frame(0, true)));
         assert!(listener.glass.state(ids.vehicle).is_none());
         assert_eq!(

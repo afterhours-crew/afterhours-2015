@@ -2065,6 +2065,40 @@ fn intro_garage_presence_precedes_the_mode_reactions() {
     );
 }
 
+/// A client logic message that names no object this connection owns is
+/// logged and consumed, never refused: a refused reliable message is resent
+/// forever and jams the channel (E1252: the customization timer's stop on the
+/// intro's final-garage timer, refused 1,500+ times; the garage stayed black
+/// and the exit never loaded).
+#[test]
+fn logic_messages_naming_no_owned_object_are_consumed_not_refused() {
+    let (mut listener, _, _) = setup();
+    drain(&mut listener);
+    let before = listener.players.objects().snapshot();
+    for (sequence, event) in [
+        (0u8, crate::customization_timer::STOP),
+        (1, crate::customization_timer::START),
+        (2, 21_578_436),
+    ] {
+        let message = nfs_world::logic::Message::Reached {
+            event,
+            target: nfs_world::logic::EntityRef {
+                ghost: 4_000,
+                entity: 2,
+            },
+            player: 0,
+        }
+        .encode()
+        .unwrap();
+        assert!(
+            send(&mut listener, sequence, 82, message.span()),
+            "event {event} on an unowned ghost must not refuse the frame"
+        );
+    }
+    assert_eq!(listener.players.objects().snapshot(), before);
+    assert_eq!(listener.refused, 0);
+}
+
 /// Leaving the intro garage unloads the three preview slots again, in
 /// serializer order, for the participant (official E1026 562.221 s).
 #[test]

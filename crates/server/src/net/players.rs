@@ -1610,12 +1610,16 @@ impl Listener for PlayerListener {
                 if let nfs_world::logic::Message::Reached { target, .. } = &message
                     && let Some(owner) = selection.owner(target.ghost)
                 {
-                    if owner.connection != HOST_SELECTOR as u8 || owner.persona != self.persona {
-                        return Err(replication::Error::UnknownObject);
-                    }
-                    let state = selection_execution
-                        .get_mut(&owner.participant)
-                        .ok_or(replication::Error::UnknownObject)?;
+                    let Some(state) =
+                        selection_execution.get_mut(&owner.participant).filter(|_| {
+                            owner.connection == HOST_SELECTOR as u8 && owner.persona == self.persona
+                        })
+                    else {
+                        Self::unowned_logic(&message, replication::Error::UnknownObject);
+                        unsupported_logic += 1;
+                        self.diagnose_logic(&message);
+                        continue;
+                    };
                     let effects = state.signal(
                         &message,
                         &mut prologue::selection::Context {
@@ -1724,13 +1728,22 @@ impl Listener for PlayerListener {
                     continue;
                 }
                 if crate::customization_timer::Timers::recognizes(&message) {
-                    let owner = Self::customization_owner(
+                    let owner = match Self::customization_owner(
                         self.roles.as_ref(),
                         &players,
                         &logic_ghosts,
                         self.persona,
                         &message,
-                    )?;
+                    ) {
+                        Ok(owner) => owner,
+                        Err(error) if Self::is_unowned(error) => {
+                            Self::unowned_logic(&message, error);
+                            unsupported_logic += 1;
+                            self.diagnose_logic(&message);
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    };
                     let item = self.inventory.as_ref().and_then(|i| {
                         let id = i.slots.values()[0]?;
                         i.items.items.contains_key(&id).then_some(id)
@@ -1744,7 +1757,7 @@ impl Listener for PlayerListener {
                     let nfs_world::logic::Message::Reached { target, player, .. } = &message else {
                         return Err(replication::Error::Shape);
                     };
-                    let owner = population
+                    let Some(owner) = population
                         .as_ref()
                         .and_then(|p| {
                             p.signal_owner(
@@ -1755,7 +1768,12 @@ impl Listener for PlayerListener {
                             )
                         })
                         .or_else(|| self.rival_glass_owner(&players, target.ghost, *player))
-                        .ok_or(replication::Error::UnknownObject)?;
+                    else {
+                        Self::unowned_logic(&message, replication::Error::UnknownObject);
+                        unsupported_logic += 1;
+                        self.diagnose_logic(&message);
+                        continue;
+                    };
                     let fire = glass.receive(owner, &message)?;
                     if players.temporary_vehicle(
                         HOST_SELECTOR as u8,

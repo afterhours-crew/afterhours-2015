@@ -1197,7 +1197,12 @@ fn recreated_customization_timer_accepts_new_lifetime_without_reusing_old_measur
             .unwrap();
         listener.logic_ghosts.insert(participant, ghosts.clone());
         assert_ne!(ghosts[&295], current);
-        assert!(!deliver(&mut listener, current, timer::STOP));
+        // The replaced timer's late stop names no owned timer: consumed and
+        // logged, never refused (a refused reliable message is resent forever,
+        // E1252). It measures nothing, and the committed frame drops the old
+        // lifetime's measurement with its entity.
+        assert!(deliver(&mut listener, current, timer::STOP));
+        assert!(listener.customization.state(participant).is_none());
     }
 }
 

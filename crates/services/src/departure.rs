@@ -11,7 +11,11 @@
 //! (local to host, or to no connection) or for the current G1 self mesh is
 //! acknowledged with an empty response. State changes only after the batch is
 //! written; a failed write closes the departure. Departure ends this world
-//! association; it does not create, re-enter or destroy any group.
+//! association; it does not create, re-enter or destroy any group. A leave of
+//! the current group (official E1026 1311.173 s) is acknowledged with a
+//! player-removed notification for the group (`LFPJ` 1); the group's
+//! disconnected report to no connection follows (1311.367 s). The caller may
+//! then rebind departure to the client's new group.
 use crate::{
     bootstrap::body_limits,
     world_readiness::{Binding, frame, wire},
@@ -52,12 +56,14 @@ pub fn owns(wire: &[u8]) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Staged {
     Leave,
+    GroupLeave,
     Mesh,
 }
 
 pub struct Departure {
     binding: Binding,
     left: bool,
+    group_left: bool,
     reports: usize,
     staged: Option<Staged>,
     closed: bool,
@@ -69,6 +75,7 @@ impl Departure {
         Ok(Self {
             binding,
             left: false,
+            group_left: false,
             reports: 0,
             staged: None,
             closed: false,
@@ -77,6 +84,19 @@ impl Departure {
     /// The current G2 has been left (the leave batch was written).
     pub fn left(&self) -> bool {
         self.left
+    }
+    /// The current group has been left (the leave batch was written).
+    pub fn group_left(&self) -> bool {
+        self.group_left
+    }
+    /// The client's new group replaces the one it left.
+    pub fn rebind_group(&mut self, group: u64) -> Result<(), Error> {
+        if !self.group_left || self.staged.is_some() || group == 0 || group == self.binding.group {
+            return Err(Error::Context);
+        }
+        self.binding.group = group;
+        self.group_left = false;
+        Ok(())
     }
     /// Answer one departure request. `Ineligible` is "not mine": the caller
     /// must not fall back to another reply.
@@ -103,7 +123,7 @@ impl Departure {
             || q.encode(body_limits()).map_err(|_| Error::Ineligible)? != f.body
             || q.blaze_object_type_and_id != Some(ObjectId(30722, 2, b.local_connection as i64))
             || q.player_removed_title_context != Some(0)
-            || q.game_id != Some(b.game)
+            || !(q.game_id == Some(b.game) || q.game_id == Some(b.group))
             || q.player_id != Some(b.persona)
             || q.player_removed_reason != Some(GROUP_LEFT)
             || q.title_context_string != Some(b"")
@@ -118,16 +138,17 @@ impl Departure {
             },
         )
         .map_err(|_| Error::Encode)?;
+        let group = q.game_id == Some(b.group);
         // A repeated leave after the removal was published is acknowledged
         // without a second notification.
-        if self.left {
+        if (group && self.group_left) || (!group && self.left) {
             self.staged = Some(Staged::Mesh);
             return Ok(vec![ack]);
         }
         let removed = NotifyPlayerRemoved {
             player_removed_title_context: Some(0),
-            game_id: Some(b.game),
-            is_lockable_for_preferred_joins: Some(false),
+            game_id: Some(if group { b.group } else { b.game }),
+            is_lockable_for_preferred_joins: Some(group),
             player_id: Some(b.persona),
             player_removed_reason: Some(PLAYER_LEFT),
             ..Default::default()
@@ -144,7 +165,11 @@ impl Departure {
             },
         )
         .map_err(|_| Error::Encode)?;
-        self.staged = Some(Staged::Leave);
+        self.staged = Some(if group {
+            Staged::GroupLeave
+        } else {
+            Staged::Leave
+        });
         Ok(vec![ack, removed])
     }
     fn mesh(&mut self, f: nfs_fire2::Frame<'_>) -> Result<Vec<Vec<u8>>, Error> {
@@ -157,7 +182,10 @@ impl Departure {
                 q.target_group_id == Some(ObjectId(30722, 2, b.host_connection as i64))
                     || q.target_group_id == Some(ObjectId(30722, 2, 0))
             }
-            Some(g) if g == b.group => q.target_group_id == Some(local),
+            Some(g) if g == b.group => {
+                q.target_group_id == Some(local)
+                    || (self.group_left && q.target_group_id == Some(ObjectId(30722, 2, 0)))
+            }
             _ => false,
         };
         if f.fields.correlation == 0
@@ -193,6 +221,7 @@ impl Departure {
     pub fn committed(&mut self) -> Result<(), Error> {
         match self.staged.take() {
             Some(Staged::Leave) => self.left = true,
+            Some(Staged::GroupLeave) => self.group_left = true,
             Some(Staged::Mesh) => {}
             None => return Err(Error::Write),
         }
