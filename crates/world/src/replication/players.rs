@@ -7,6 +7,8 @@ use std::collections::BTreeMap;
 
 mod actors;
 pub mod ai;
+mod goals;
+pub use goals::Completion as GoalCompletion;
 mod locations;
 mod manager;
 mod vehicles;
@@ -56,6 +58,8 @@ pub struct Players {
     /// Garage display cars prepared while the participant still drives the world car.
     staged_vehicles: BTreeMap<(u16, u64), u16>,
     goal_allocation_serial: u8,
+    /// Completed goal lifetimes, bounded by the world's non-reused object IDs.
+    completed_goals: BTreeMap<u16, goals::Owner>,
     ai: BTreeMap<(u8, u64, u64), ai::Instance>,
     /// Persistent AI participants whose cars come and go (roaming rivals).
     ai_slots: BTreeMap<(u8, u64, u64), ai::Slot>,

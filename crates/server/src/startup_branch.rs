@@ -198,6 +198,11 @@ impl<'a> Session<'a> {
     pub fn requests(&self) -> usize {
         self.requests
     }
+    pub fn retire_world_association(&mut self) {
+        if let Some(continuation) = &mut self.continuation {
+            continuation.retire();
+        }
+    }
     pub fn world_scope_eligible(&self) -> Option<bool> {
         self.matchmaking
             .as_ref()

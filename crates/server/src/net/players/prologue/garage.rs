@@ -9,6 +9,7 @@ use nfs_world::{arrival::Arrivals, participants::Notification, sequences::Sequen
 pub(in crate::net::players) struct GarageOutput {
     pub output: Output,
     pub removed: Option<(u16, u16)>,
+    pub pending: Option<returning::PendingReturn>,
 }
 pub(in crate::net::players) struct OwnedGarage<'a> {
     pub inventory: &'a Inventory,
@@ -89,6 +90,65 @@ pub(in crate::net::players) fn notify(
 }
 
 impl PlayerListener {
+    /// Retire the driving presentation only after its owned client confirmation.
+    /// The caller commits the complete cinematic, actor and notification batch.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::net::players) fn confirmed_intro_return(
+        content: &crate::prologue::Content,
+        modes: &mut Modes,
+        players: &mut Players,
+        returns: &mut Arrivals,
+        logic: Option<&crate::garage_logic::GarageLogic>,
+        logic_ghosts: &mut BTreeMap<u16, BTreeMap<u16, u16>>,
+        persona: u64,
+        participant: u16,
+        chain: Vec<Notification>,
+    ) -> Result<Output, replication::Error> {
+        let parent = modes
+            .get(&participant)
+            .ok_or(replication::Error::UnknownObject)?
+            .0
+            .parent();
+        let mut out = Output::default();
+        if let Some(logic) = logic {
+            let batch = logic.produce_present(
+                crate::garage_logic::Which::Returning,
+                players,
+                participant,
+                logic_ghosts.entry(participant).or_default(),
+                crate::garage_logic::Part::All,
+            )?;
+            out.records.extend(batch.records);
+            out.deleted.extend(batch.deleted);
+            out.calls
+                .extend(batch.events.into_iter().map(HostRpc::Event));
+        }
+        // Each intro return stops the driving chapter's sounds.
+        for &(bus, ordinal) in &content.return_events {
+            let fire = nfs_world::logic::Fire {
+                event: ordinal,
+                player: None,
+                target: nfs_world::logic::EntityRef {
+                    ghost: parent,
+                    entity: bus,
+                },
+            };
+            fire.encode().map_err(|_| replication::Error::Shape)?;
+            out.calls.push(HostRpc::Event(fire));
+        }
+        let owner = Owner {
+            connection: HOST_SELECTOR as u8,
+            persona,
+            participant,
+        };
+        // Scripted control must precede assignment of the cinematic goal.
+        out.records
+            .extend(players.actor_arriving(owner.connection, persona, participant)?);
+        out.records.extend(returns.start_rollout(players, owner)?);
+        notify(content, modes, players, chain, &mut out)?;
+        Ok(out)
+    }
+
     /// These models are all candidates from the enclosing client-frame transaction.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::net::players) fn intro_garage_input(
@@ -103,6 +163,7 @@ impl PlayerListener {
         logic: Option<&crate::garage_logic::GarageLogic>,
         logic_ghosts: &mut BTreeMap<u16, BTreeMap<u16, u16>>,
         persona: u64,
+        world_ms: u64,
         body: BitSpan<'_>,
     ) -> Result<Option<GarageOutput>, replication::Error> {
         use crate::garage_logic::{Part, Which};
@@ -145,7 +206,7 @@ impl PlayerListener {
         if participants.intro_chapter(participant).is_none() {
             return Ok(None);
         }
-        let Some((active, _, chapter @ (Chapter::FirstDrive | Chapter::ReturnDrive))) =
+        let Some((_, _, chapter @ (Chapter::FirstDrive | Chapter::ReturnDrive))) =
             modes.get(&participant)
         else {
             return Ok(None);
@@ -185,7 +246,6 @@ impl PlayerListener {
                     returns.reset(players, owner)?;
                     // A return that begins before the destination crossing
                     // releases the drive's route first, as the crossing does.
-                    let parent = active.parent();
                     let drive = &mut modes
                         .get_mut(&participant)
                         .ok_or(replication::Error::UnknownObject)?
@@ -199,51 +259,55 @@ impl PlayerListener {
                     // replaces the drive's (cinematic logic in, HUD out).
                     if let Some(logic) = logic {
                         let ghosts = logic_ghosts.entry(participant).or_default();
-                        for which in [Which::ReturnRequested, Which::Returning] {
-                            let batch = logic.produce_present(
-                                which,
+                        let batch = logic.produce_present(
+                            Which::ReturnRequested,
+                            players,
+                            participant,
+                            ghosts,
+                            Part::All,
+                        )?;
+                        out.output.records.extend(batch.records);
+                        out.output.deleted.extend(batch.deleted);
+                        out.output
+                            .calls
+                            .extend(batch.events.into_iter().map(HostRpc::Event));
+                    }
+                    let confirmation = logic
+                        .map(|logic| {
+                            logic.return_confirmation(
                                 players,
-                                participant,
-                                ghosts,
-                                Part::All,
-                            )?;
-                            out.output.records.extend(batch.records);
-                            out.output.deleted.extend(batch.deleted);
-                            out.output
-                                .calls
-                                .extend(batch.events.into_iter().map(HostRpc::Event));
-                        }
+                                logic_ghosts.get(&participant).unwrap_or(&BTreeMap::new()),
+                            )
+                        })
+                        .transpose()?
+                        .flatten();
+                    if confirmation.is_some() {
+                        out.pending = Some(returning::PendingReturn {
+                            participant,
+                            intro: true,
+                            requested_ms: world_ms,
+                            torn_down: false,
+                            confirmation,
+                            confirmed: false,
+                            chain: chain.into_iter().map(HostRpc::Participant).collect(),
+                            slots: Vec::new(),
+                        });
+                    } else {
+                        let staged = Self::confirmed_intro_return(
+                            content,
+                            modes,
+                            players,
+                            returns,
+                            logic,
+                            logic_ghosts,
+                            persona,
+                            participant,
+                            chain,
+                        )?;
+                        out.output.records.extend(staged.records);
+                        out.output.deleted.extend(staged.deleted);
+                        out.output.calls.extend(staged.calls);
                     }
-                    // The mission chapter stops the first drive's sounds as
-                    // each intro return begins (official E1026 290.127 and
-                    // 1119.627 s, on the intro progression logic).
-                    for &(bus, ordinal) in &content.return_events {
-                        let fire = nfs_world::logic::Fire {
-                            event: ordinal,
-                            player: None,
-                            target: nfs_world::logic::EntityRef {
-                                ghost: parent,
-                                entity: bus,
-                            },
-                        };
-                        fire.encode().map_err(|_| replication::Error::Shape)?;
-                        out.output.calls.push(HostRpc::Event(fire));
-                    }
-                    // The official host's cinematic Actor carries its first
-                    // flag with the scripted goal (career start 289.819 ms:
-                    // a fresh Actor with the flag set; the ordinary arrival
-                    // sets it via `actor_arriving`). Without it the client
-                    // kept the intro car player-owned and the drive-in never
-                    // animated (E1186).
-                    if let Some(record) =
-                        players.actor_arriving(owner.connection, owner.persona, participant)?
-                    {
-                        out.output.records.push(record);
-                    }
-                    out.output
-                        .records
-                        .extend(returns.start_rollout(players, owner)?);
-                    notify(content, modes, players, chain, &mut out.output)?;
                     return Ok(Some(out));
                 }
             }

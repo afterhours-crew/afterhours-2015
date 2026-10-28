@@ -983,6 +983,95 @@ mod tests {
     }
 
     #[test]
+    fn waypoint_completion_requires_delegation_and_keeps_the_sequence_in_control() {
+        use crate::{bits::BitWriter, replication::goto_waypoint};
+        let mut world = world();
+        let (creation, content) = car();
+        let ids = world
+            .spawn_ai_vehicle(1, 100, request(1), creation, &content)
+            .unwrap()
+            .unwrap()
+            .ids;
+        let goals = || {
+            vec![(
+                Initial::GotoWaypointGoal(goto_waypoint::Initial {
+                    selector: 3,
+                    serial: 1,
+                    allocation_serial: 0,
+                    waypoint: 0,
+                    word: 1,
+                    points: vec![[0; 3]],
+                    flags: [false; 2],
+                    radius: 2f32.to_bits(),
+                    progress_updates: false,
+                }),
+                Update::GotoWaypointGoal(goto_waypoint::Update::NoProgress),
+            )]
+        };
+        let assigned = world.replace_ai_goals(1, 100, 1, goals(), None).unwrap();
+        let request = |goal: u16| {
+            let mut payload = BitWriter::new();
+            payload.put(3, 9).put(0, 32).put(127, 7);
+            let mut body = BitWriter::new();
+            body.put(0, 32)
+                .put(0, 32)
+                .put(1, 8)
+                .put(goal.into(), 13)
+                .put(payload.bytes().len() as u64, 9)
+                .put_span(payload.span());
+            body
+        };
+        let body = request(assigned.goals[0]);
+        let before = world.objects.snapshot();
+        for delegation in [
+            BTreeMap::new(),
+            BTreeMap::from([(ids.vehicle, 2)]),
+            BTreeMap::from([(ids.vehicle + 1, 1)]),
+        ] {
+            assert_eq!(
+                world.receive_goal_completion(1, 100, body.span(), &delegation),
+                Err(Error::UnknownObject)
+            );
+        }
+        let delegated = BTreeMap::from([(ids.vehicle, 1)]);
+        assert_eq!(
+            world.receive_goal_completion(2, 200, body.span(), &delegated),
+            Err(Error::UnknownObject)
+        );
+        let completed = world
+            .receive_goal_completion(1, 100, body.span(), &delegated)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (completed.actor, completed.participant, completed.first),
+            (ids.actor, ids.participant, true)
+        );
+        assert!(
+            !world
+                .receive_goal_completion(1, 100, body.span(), &delegated)
+                .unwrap()
+                .unwrap()
+                .first
+        );
+        assert_eq!(world.objects.snapshot(), before);
+        let replaced = world.replace_ai_goals(1, 100, 1, goals(), None).unwrap();
+        assert!(
+            !world
+                .receive_goal_completion(1, 100, body.span(), &delegated)
+                .unwrap()
+                .unwrap()
+                .first
+        );
+        assert!(
+            world
+                .receive_goal_completion(1, 100, request(replaced.goals[0]).span(), &delegated)
+                .unwrap()
+                .unwrap()
+                .first
+        );
+    }
+
+    #[test]
     fn race_commands_replace_atomically_and_share_pacing_until_last_release() {
         use crate::replication::{goto_waypoint, pacing, speed_limit};
         let mut world = world();

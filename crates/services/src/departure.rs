@@ -48,6 +48,12 @@ pub fn owns(wire: &[u8]) -> bool {
     if frame(wire, LEAVE_GAME_BY_GROUP, 0).is_ok() {
         return true;
     }
+    if let Ok(f) = frame(wire, SET_GAME_ATTRIBUTES, 0) {
+        return SetGameAttributesRequest::decode(f.body, body_limits()).is_ok_and(|q| {
+            q.game_attribs
+                .is_some_and(|a| a.0.as_slice() == [(b"gameSessionId".as_slice(), b"0".as_slice())])
+        });
+    }
     let Ok(f) = frame(wire, UPDATE_MESH_CONNECTION, 0) else {
         return false;
     };
@@ -60,6 +66,7 @@ enum Staged {
     Leave,
     GroupLeave,
     Mesh,
+    ClearAssociation,
 }
 
 pub struct Departure {
@@ -69,6 +76,7 @@ pub struct Departure {
     retired_group: Option<u64>,
     left: bool,
     group_left: bool,
+    association_cleared: bool,
     reports: usize,
     staged: Option<Staged>,
     closed: bool,
@@ -82,6 +90,7 @@ impl Departure {
             retired_group: None,
             left: false,
             group_left: false,
+            association_cleared: false,
             reports: 0,
             staged: None,
             closed: false,
@@ -110,6 +119,7 @@ impl Departure {
         self.retired_group = Some(self.binding.group);
         self.binding.group = group;
         self.group_left = false;
+        self.association_cleared = false;
         Ok(())
     }
     /// Answer one departure request. `Ineligible` is "not mine": the caller
@@ -125,8 +135,66 @@ impl Departure {
         if let Ok(f) = frame(request, LEAVE_GAME_BY_GROUP, 0) {
             return self.leave(f);
         }
+        if let Ok(f) = frame(request, SET_GAME_ATTRIBUTES, 0) {
+            return self.clear_association(f);
+        }
         let f = frame(request, UPDATE_MESH_CONNECTION, 0).map_err(|_| Error::Ineligible)?;
         self.mesh(f)
+    }
+    /// A departed world leaves the current local group alive, with no world
+    /// association. Publish the changed attribute once, after an owned leave.
+    fn clear_association(&mut self, f: nfs_fire2::Frame<'_>) -> Result<Vec<Vec<u8>>, Error> {
+        use nfs_protocol::util::ConfigEntries;
+        let q = SetGameAttributesRequest::decode(f.body, body_limits())
+            .map_err(|_| Error::Ineligible)?;
+        if !self.left
+            || self.group_left
+            || f.fields.correlation == 0
+            || q.game_id != Some(self.binding.group)
+            || q.unknown_field_count() != 0
+            || q.game_attribs
+                .as_ref()
+                .is_none_or(|a| a.0.as_slice() != [(b"gameSessionId".as_slice(), b"0".as_slice())])
+            || q.encode(body_limits()).map_err(|_| Error::Ineligible)? != f.body
+        {
+            return Err(Error::Ineligible);
+        }
+        if self.reports >= MAX_MESH_REPORTS {
+            return Err(Error::Bound);
+        }
+        let ack = wire(
+            &[],
+            Fields {
+                category: 1,
+                ..f.fields
+            },
+        )
+        .map_err(|_| Error::Encode)?;
+        let mut frames = vec![ack];
+        if !self.association_cleared {
+            let body = NotifyGameAttribChange {
+                game_id: Some(self.binding.group),
+                game_attribs: Some(ConfigEntries(vec![(b"gameSessionId", b"0")])),
+                ..Default::default()
+            }
+            .encode(body_limits())
+            .map_err(|_| Error::Encode)?;
+            frames.push(
+                wire(
+                    &body,
+                    Fields {
+                        routing_b: NOTIFY_GAME_ATTRIB_CHANGE,
+                        category: 2,
+                        correlation: 0,
+                        ..f.fields
+                    },
+                )
+                .map_err(|_| Error::Encode)?,
+            );
+        }
+        self.reports += 1;
+        self.staged = Some(Staged::ClearAssociation);
+        Ok(frames)
     }
     fn leave(&mut self, f: nfs_fire2::Frame<'_>) -> Result<Vec<Vec<u8>>, Error> {
         let q = LeaveGameByGroupRequest::decode(f.body, body_limits())
@@ -239,6 +307,7 @@ impl Departure {
         match self.staged.take() {
             Some(Staged::Leave) => self.left = true,
             Some(Staged::GroupLeave) => self.group_left = true,
+            Some(Staged::ClearAssociation) => self.association_cleared = true,
             Some(Staged::Mesh) => {}
             None => return Err(Error::Write),
         }

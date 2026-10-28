@@ -261,6 +261,26 @@ impl Envelope {
         )
     }
 
+    /// The local SDK has no remote friends, blocked users, avatar images or
+    /// achievement catalog. Empty collections use the client's ordinary readers;
+    /// no external records or downloaded resources are fabricated.
+    pub fn empty_collection(
+        kind: Kind,
+        sender: &str,
+        id: u64,
+        collection: LocalCollection,
+    ) -> Self {
+        let payload = match collection {
+            LocalCollection::Blocked => {
+                Element::new("GetBlockListResponse").attribute("Return", "")
+            }
+            LocalCollection::Friends => Element::new("QueryFriendsResponse"),
+            LocalCollection::Images => Element::new("QueryImageResponse").attribute("Result", "0"),
+            LocalCollection::Achievements => Element::new("AchievementSets"),
+        };
+        Self::reply(kind, sender, id, payload)
+    }
+
     /// The typed meaning of a request's payload, from the game's point of view.
     pub fn incoming(&self) -> Result<Incoming, Error> {
         let p = &self.payload;
@@ -285,6 +305,30 @@ impl Envelope {
                 scope: field("Scope")?,
             },
             "GetInternetConnectedState" => Incoming::GetInternetConnectedState,
+            "GetBlockList" => Incoming::GetBlockList,
+            "QueryFriends" => Incoming::QueryFriends {
+                user_id: field("UserId")?.parse().map_err(|_| Error::Field)?,
+            },
+            "QueryImage" => Incoming::QueryImage {
+                image_id: field("ImageId")?,
+                width: field("Width")?.parse().map_err(|_| Error::Field)?,
+                height: field("Height")?.parse().map_err(|_| Error::Field)?,
+            },
+            "QueryAchievements" => Incoming::QueryAchievements {
+                user_id: field("UserId")?.parse().map_err(|_| Error::Field)?,
+                persona_id: field("PersonaId")?.parse().map_err(|_| Error::Field)?,
+                all: match field("All")?.as_str() {
+                    "true" | "1" => true,
+                    "false" | "0" => false,
+                    _ => return Err(Error::Field),
+                },
+                game_ids: p
+                    .children
+                    .iter()
+                    .filter(|c| c.name == "GameId")
+                    .map(|c| c.text.clone())
+                    .collect(),
+            },
             "GetPresence" => Incoming::GetPresence {
                 user_id: field("UserId")?.parse().map_err(|_| Error::Field)?,
             },
@@ -326,6 +370,21 @@ pub enum Incoming {
     },
     GetConfig,
     GetInternetConnectedState,
+    GetBlockList,
+    QueryFriends {
+        user_id: u64,
+    },
+    QueryImage {
+        image_id: String,
+        width: u32,
+        height: u32,
+    },
+    QueryAchievements {
+        user_id: u64,
+        persona_id: u64,
+        all: bool,
+        game_ids: Vec<String>,
+    },
     GetPresence {
         user_id: u64,
     },
@@ -346,6 +405,14 @@ pub enum Incoming {
     Unknown {
         name: String,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LocalCollection {
+    Blocked,
+    Friends,
+    Images,
+    Achievements,
 }
 
 /// The SDK identity the launcher reports. Local values, not EA ids.

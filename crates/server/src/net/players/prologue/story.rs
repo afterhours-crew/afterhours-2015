@@ -7,6 +7,47 @@ use crate::progression::{Branch, entities::Role};
 use nfs_world::replication::entity;
 
 impl PlayerListener {
+    /// Persist the first drive only with its accepted garage-entry publication.
+    /// Used by immediate fixture transitions and confirmed live transitions.
+    pub(in crate::net::players) fn stage_first_drive_return<'a>(
+        &self,
+        players: &Players,
+        participants: &Lifecycle,
+        calls: impl Iterator<Item = &'a HostRpc>,
+        pending: &mut VecDeque<Request>,
+    ) -> Result<(), replication::Error> {
+        let (Some(content), Some(progression), Some(bindings)) = (
+            self.prologue.as_deref(),
+            self.progression.as_ref(),
+            participants.return_bindings(),
+        ) else {
+            return Ok(());
+        };
+        for call in calls {
+            if let HostRpc::Participant(n) = call
+                && n.endpoint == bindings.preparing[0]
+                && n.call == nfs_world::participants::Call::Enter
+                && participants.intro_chapter(n.participant) == Some(Chapter::FirstDrive)
+            {
+                if pending.len() >= MAX_PENDING {
+                    return Err(replication::Error::Bound);
+                }
+                let player_index = players
+                    .runtime_index(HOST_SELECTOR as u8, self.persona, n.participant)
+                    .ok_or(replication::Error::UnknownObject)?;
+                pending.push_back(Request {
+                    participant: n.participant,
+                    player_index: u32::from(player_index),
+                    progression: progression.clone(),
+                    action: crate::net::items::story::Action::Complete {
+                        objective: content.start.objective,
+                    },
+                });
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn stage_story_results(
         &self,
         content: &crate::prologue::Content,

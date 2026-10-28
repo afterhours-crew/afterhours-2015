@@ -19,6 +19,247 @@ fn content() -> WorldContent {
 }
 
 #[test]
+fn garage_livery_cache_update_uses_owned_scene_and_reliable_reply_queue() {
+    use nfs_protocol::world::rpc::Serial;
+    use nfs_world::{bits::BitWriter, replication::sublevel};
+    let (mut listener, _) = binding_refresh_listener();
+    let mut kinds = vec![Kind::Noop; 9];
+    kinds[8] = Kind::Rpc;
+    let scenes = Content::new(vec![(101, Profile::new(false, &kinds).unwrap())]).unwrap();
+    let creation = sublevel::ordinary::creation(
+        1,
+        101,
+        None,
+        Serial::new(7).unwrap(),
+        &sublevel::ordinary::unpopulated(scenes.profile(101).unwrap()).unwrap(),
+        &scenes,
+    )
+    .unwrap();
+    listener
+        .players
+        .create_scenes(&[1], vec![creation], &scenes)
+        .unwrap();
+    let scene = listener.players.objects().scene(101).unwrap();
+    let mut roles = content().roles.unwrap();
+    roles.garage = 101;
+    listener.roles = Some(roles);
+    let key = b"BakedLivery_0X0123456789ABCDEF";
+    let mut payload = BitWriter::new();
+    payload
+        .put(0, 9)
+        .put(0, 32)
+        .put(101, 32)
+        .put(0, 32)
+        .put(key.len() as u64, 10);
+    for byte in key {
+        payload.put(u64::from(*byte), 8);
+    }
+    payload.put(5, 5);
+    let mut rpc = BitWriter::new();
+    rpc.put(0, 32)
+        .put(0, 32)
+        .put(1, 8)
+        .put(scene.into(), 13)
+        .put(payload.bytes().len() as u64, 9)
+        .put_span(payload.span());
+    let send = |listener: &mut PlayerListener, sequence| {
+        let wire = frame::Builder::new()
+            .messages(
+                None,
+                vec![frame::Group {
+                    channel: 0,
+                    sequence: Some(sequence),
+                    messages: vec![frame::Message::Opaque {
+                        index: 47,
+                        body: rpc.span(),
+                    }],
+                }],
+            )
+            .build()
+            .unwrap();
+        listener.frame(Queued {
+            advertised: None,
+            frame: 0,
+            data: wire.span(),
+        })
+    };
+    assert!(send(&mut listener, 1));
+    assert_eq!(listener.unsupported_rpcs, 0);
+    assert_eq!(listener.pending_rpcs.len(), 1);
+    assert!(send(&mut listener, 1));
+    assert_eq!(
+        listener.pending_rpcs.len(),
+        1,
+        "same reliable message is not applied twice"
+    );
+    assert!(send(&mut listener, 2));
+    assert_eq!(
+        listener.pending_rpcs.len(),
+        2,
+        "a later update invalidates again"
+    );
+    let notification = listener.pending_rpcs[0];
+    listener
+        .pending_rpcs
+        .resize(nfs_world::session::MAX_RPC_QUEUE, notification);
+    assert!(!send(&mut listener, 3));
+    assert_eq!(
+        listener.pending_rpcs.len(),
+        nfs_world::session::MAX_RPC_QUEUE
+    );
+    listener.pending_rpcs.clear();
+    assert!(
+        send(&mut listener, 3),
+        "capacity refusal must preserve the input for retry"
+    );
+    assert_eq!(listener.pending_rpcs.len(), 1);
+}
+
+#[test]
+fn owned_driving_timer_signals_are_consumed_by_the_configured_lifetime() {
+    use crate::garage_logic::{GarageLogic, Which};
+    use nfs_protocol::world::rpc::Serial;
+    use nfs_world::{
+        logic::{EntityRef, Message},
+        replication::sublevel,
+    };
+    let (mut listener, participant) = binding_refresh_listener();
+    let scenes = Content::new(vec![(101, sublevel::gameplay::profile().unwrap())]).unwrap();
+    let creation = sublevel::ordinary::creation(
+        1,
+        101,
+        None,
+        Serial::new(0).unwrap(),
+        &sublevel::ordinary::unpopulated(scenes.profile(101).unwrap()).unwrap(),
+        &scenes,
+    )
+    .unwrap();
+    listener
+        .players
+        .create_scenes(&[1], vec![creation], &scenes)
+        .unwrap();
+    let mut policy = crate::garage_logic::tests::content_json();
+    let definition = policy["spawn"]["entities"][3].clone();
+    let role = definition["capture_id"].as_u64().unwrap() as u16;
+    let empty = serde_json::json!({"scene_updates":[],"entities":[],"events":[]});
+    policy["spawn"] = empty.clone();
+    policy["spawn"]["entities"] = serde_json::json!([definition]);
+    policy["entry"] = empty.clone();
+    policy["vehicles"] = empty;
+    policy["driving_timer"] = serde_json::json!({"role":role,"start":{"entity":2,"event":37},"stop":{"entity":2,"event":38}});
+    for (path, value) in [
+        ("/driving_timer/role", serde_json::json!(999)),
+        ("/driving_timer/start/entity", serde_json::json!(3)),
+        ("/driving_timer/stop/event", serde_json::json!(37)),
+        ("/driving_timer/stop/event", serde_json::json!(0x200_0000)),
+    ] {
+        let mut invalid = policy.clone();
+        *invalid.pointer_mut(path).unwrap() = value;
+        assert!(GarageLogic::from_json(&invalid).is_err(), "{path}");
+    }
+    let logic = GarageLogic::from_json(&policy).unwrap();
+    let mut ghosts = BTreeMap::new();
+    logic
+        .produce(
+            Which::Spawn,
+            &mut listener.players,
+            participant,
+            &mut ghosts,
+        )
+        .unwrap();
+    let ghost = ghosts[&role];
+    listener.logic_ghosts.insert(participant, ghosts);
+    listener.logic = Some(std::sync::Arc::new(logic));
+    let message = Message::Reached {
+        target: EntityRef { ghost, entity: 2 },
+        event: 37,
+        player: 0,
+    };
+    let logic = listener.logic.as_ref().unwrap();
+    assert!(
+        logic
+            .driving_timer_owner(
+                &listener.players,
+                &listener.logic_ghosts,
+                HOST_SELECTOR as u8,
+                listener.persona,
+                &message
+            )
+            .is_ok()
+    );
+    for (connection, persona, message) in [
+        (HOST_SELECTOR as u8, listener.persona + 1, message.clone()),
+        (HOST_SELECTOR as u8 + 1, listener.persona, message.clone()),
+        (
+            HOST_SELECTOR as u8,
+            listener.persona,
+            Message::Reached {
+                target: EntityRef { ghost, entity: 2 },
+                event: 37,
+                player: 1,
+            },
+        ),
+        (
+            HOST_SELECTOR as u8,
+            listener.persona,
+            Message::Reached {
+                target: EntityRef {
+                    ghost: ghost + 1,
+                    entity: 2,
+                },
+                event: 37,
+                player: 0,
+            },
+        ),
+    ] {
+        assert!(
+            logic
+                .driving_timer_owner(
+                    &listener.players,
+                    &listener.logic_ghosts,
+                    connection,
+                    persona,
+                    &message
+                )
+                .is_err()
+        );
+    }
+    for (sequence, event) in [(1, 38), (2, 37), (3, 38), (4, 38)] {
+        let body = Message::Reached {
+            target: EntityRef { ghost, entity: 2 },
+            event,
+            player: 0,
+        }
+        .encode()
+        .unwrap();
+        let wire = frame::Builder::new()
+            .messages(
+                None,
+                vec![frame::Group {
+                    channel: 0,
+                    sequence: Some(sequence),
+                    messages: vec![frame::Message::Opaque {
+                        index: 82,
+                        body: body.span(),
+                    }],
+                }],
+            )
+            .build()
+            .unwrap();
+        listener.world_ms = u64::from(sequence) * 1000;
+        assert!(listener.frame(Queued {
+            advertised: None,
+            frame: 0,
+            data: wire.span()
+        }));
+    }
+    assert_eq!(listener.unsupported_logic, 0);
+    let state = listener.driving_time.state(participant).unwrap();
+    assert_eq!(state.completed, 0, "no owned world vehicle in this fixture");
+    assert!(state.last.is_none());
+}
+
+#[test]
 fn nitrous_acknowledgements_commit_with_the_reliable_queue_and_roll_back_when_full() {
     use crate::vehicle_content::population::{Owner, tests as population_tests};
     use nfs_world::{

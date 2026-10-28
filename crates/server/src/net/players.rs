@@ -165,6 +165,7 @@ pub(super) struct PlayerListener {
     pub(in crate::net) session_backlog: usize,
     glass: crate::glass::Glass,
     customization: crate::customization_timer::Timers,
+    driving_time: crate::driving_timer::Timers,
     world_ms: u64,
     vehicle_reports: nfs_world::vehicle_reports::Reports,
     traffic_reports: nfs_world::vehicle_reports::Reports,
@@ -1018,6 +1019,7 @@ impl PlayerListener {
             crashes: None,
             glass: crate::glass::Glass::default(),
             customization: crate::customization_timer::Timers::default(),
+            driving_time: crate::driving_timer::Timers::default(),
             world_ms: 0,
             vehicle_reports: nfs_world::vehicle_reports::Reports::default(),
             traffic_reports: nfs_world::vehicle_reports::Reports::default(),
@@ -1567,6 +1569,9 @@ impl Listener for PlayerListener {
         let mut glass = self.glass.clone();
         let mut customization = self.customization.clone();
         customization.retain_ghosts(|id| players.objects().get(id).is_some());
+        let mut driving_time = self.driving_time.clone();
+        driving_time.retain_ghosts(|id| players.objects().get(id).is_some());
+        let mut driving_measurements = Vec::new();
         let mut measurements = Vec::new();
         let mut responses = Vec::new();
         let mut deferred_presentation = Vec::new();
@@ -1744,7 +1749,44 @@ impl Listener for PlayerListener {
                     }
                     continue;
                 }
-                if crate::customization_timer::Timers::recognizes(&message) {
+                if let Some((logic, action)) = self.logic.as_ref().and_then(|logic| {
+                    logic
+                        .driving_timer()?
+                        .action(&message)
+                        .map(|action| (logic, action))
+                }) {
+                    let owner = match logic.driving_timer_owner(
+                        &players,
+                        &logic_ghosts,
+                        HOST_SELECTOR as u8,
+                        self.persona,
+                        &message,
+                    ) {
+                        Ok(owner) => owner,
+                        Err(error) if Self::is_unowned(error) => {
+                            Self::unowned_logic(&message, error);
+                            unsupported_logic += 1;
+                            self.diagnose_logic(&message);
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    let mut cars = world_cars
+                        .iter()
+                        .filter(|(_, (p, _))| *p == owner.participant)
+                        .filter_map(|(&car, _)| {
+                            players.vehicle_item_of(HOST_SELECTOR as u8, self.persona, car)
+                        });
+                    let item = match (cars.next(), cars.next()) {
+                        (item, None) => item,
+                        _ => return Err(replication::Error::DuplicateObject),
+                    };
+                    if let Some(measurement) =
+                        driving_time.receive(owner, action, item, self.world_ms)?
+                    {
+                        driving_measurements.push((owner.participant, measurement));
+                    }
+                } else if crate::customization_timer::Timers::recognizes(&message) {
                     let owner = match Self::customization_owner(
                         self.roles.as_ref(),
                         &players,
@@ -1963,6 +2005,16 @@ impl Listener for PlayerListener {
         let mut garage_commands = self.garage_commands.clone();
         let delegated = self.delegated_ai(&players);
         for body in rpcs {
+            match Self::livery_cache_update(self.roles.as_ref(), &players, self.persona, body) {
+                Ok(Some(invalidation)) => {
+                    responses.push(nfs_world::participants::HostRpc::LiveryInvalidation(
+                        invalidation,
+                    ));
+                    continue;
+                }
+                Ok(None) => {}
+                Err(error) => return self.refuse_rpc(error, body),
+            }
             if self.event_claims_rpc(body) {
                 event_inputs.push(Self::event_input_rpc(body));
                 continue;
@@ -2003,6 +2055,25 @@ impl Listener for PlayerListener {
                         }
                         nitrous_reported.insert(report.vehicle);
                     }
+                    continue;
+                }
+                Ok(None) => {}
+                Err(error) => return self.refuse_rpc(error, body),
+            }
+            match players.receive_goal_completion(
+                HOST_SELECTOR as u8,
+                self.persona,
+                body,
+                &delegated,
+            ) {
+                Ok(Some(report)) => {
+                    tracing::debug!(
+                        goal = report.goal,
+                        actor = report.actor,
+                        participant = report.participant,
+                        first = report.first,
+                        "owned client goal completed"
+                    );
                     continue;
                 }
                 Ok(None) => {}
@@ -2328,9 +2399,11 @@ impl Listener for PlayerListener {
                     self.logic.as_deref(),
                     &mut logic_ghosts,
                     self.persona,
+                    self.world_ms,
                     body,
                 ) {
                     Ok(Some(mut out)) => {
+                        scheduled_returns.extend(out.pending.take());
                         if let Some((participant, removed)) = out.removed {
                             if world_cars.remove(&removed).is_none() {
                                 return self.refuse_rpc(replication::Error::UnknownObject, body);
@@ -2844,6 +2917,7 @@ impl Listener for PlayerListener {
                                 };
                                 scheduled_returns.push(returning::PendingReturn {
                                     participant: *participant,
+                                    intro: false,
                                     requested_ms: self.world_ms,
                                     torn_down: false,
                                     confirmed: confirmation.is_none(),
@@ -3204,39 +3278,15 @@ impl Listener for PlayerListener {
         // Packing them here prevents one frame per delegated car from filling
         // the listener queue before the session can coalesce them. The helper
         // preserves non-motion records as ordering barriers.
-        if let (Some(content), Some(progression), Some(bindings)) = (
-            self.prologue.as_deref(),
-            self.progression.as_ref(),
-            participants.return_bindings(),
-        ) {
-            for call in responses
+        if let Err(error) = self.stage_first_drive_return(
+            &players,
+            &participants,
+            responses
                 .iter()
-                .chain(entries.iter().flat_map(|(_, calls)| calls))
-            {
-                if let nfs_world::participants::HostRpc::Participant(n) = call
-                    && n.endpoint == bindings.preparing[0]
-                    && n.call == nfs_world::participants::Call::Enter
-                    && participants.intro_chapter(n.participant)
-                        == Some(nfs_world::participants::intro::Chapter::FirstDrive)
-                {
-                    if story_pending.len() >= MAX_PENDING {
-                        return self.refuse(replication::Error::Bound);
-                    }
-                    let Some(player_index) =
-                        players.runtime_index(HOST_SELECTOR as u8, self.persona, n.participant)
-                    else {
-                        return self.refuse(replication::Error::UnknownObject);
-                    };
-                    story_pending.push_back(super::items::story::Request {
-                        participant: n.participant,
-                        player_index: u32::from(player_index),
-                        progression: progression.clone(),
-                        action: super::items::story::Action::Complete {
-                            objective: content.start.objective,
-                        },
-                    });
-                }
-            }
+                .chain(entries.iter().flat_map(|(_, calls)| calls)),
+            &mut story_pending,
+        ) {
+            return self.refuse(error);
         }
         // Presentation events accompany the intro state notifications, so add
         // them before the queue bounds are checked.
@@ -3474,6 +3524,14 @@ impl Listener for PlayerListener {
         glass.retain_vehicles(|id| self.players.objects().get(id).is_some());
         self.glass = glass;
         self.customization = customization;
+        self.driving_time = driving_time;
+        for (participant, measurement) in driving_measurements {
+            tracing::info!(
+                participant,
+                ?measurement,
+                "owned driving timer sampled (local measurement)"
+            );
+        }
         for (participant, measurement) in measurements {
             tracing::info!(
                 participant,

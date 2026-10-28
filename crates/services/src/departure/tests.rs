@@ -78,6 +78,88 @@ fn assert_ack(frame_bytes: &[u8], command: u16, correlation: u32) {
     assert!(f.body.is_empty());
 }
 
+fn clear_group(group: u64, value: &[u8], correlation: u32) -> Vec<u8> {
+    let body = SetGameAttributesRequest {
+        game_id: Some(group),
+        game_attribs: Some(nfs_protocol::util::ConfigEntries(vec![(
+            b"gameSessionId",
+            value,
+        )])),
+        ..Default::default()
+    }
+    .encode(body_limits())
+    .unwrap();
+    wire(
+        &body,
+        Fields {
+            routing_a: 4,
+            routing_b: SET_GAME_ATTRIBUTES,
+            correlation,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn departing_world_clears_only_the_current_group_after_committed_leave() {
+    let mut d = departure();
+    let q = clear_group(100, b"0", 90);
+    assert!(owns(&q));
+    assert!(matches!(d.reply(&q), Err(Error::Ineligible)));
+    d.reply(&leave(89)).unwrap();
+    d.committed().unwrap();
+    let out = d.reply(&q).unwrap();
+    assert_ack(&out[0], SET_GAME_ATTRIBUTES, 90);
+    assert_eq!(
+        frame(&out[1], NOTIFY_GAME_ATTRIB_CHANGE, 2).unwrap().body,
+        frame(&q, SET_GAME_ATTRIBUTES, 0).unwrap().body
+    );
+    assert!(d.pending());
+    d.committed().unwrap();
+    let retry = d.reply(&clear_group(100, b"0", 91)).unwrap();
+    assert_eq!(retry.len(), 1);
+    assert_ack(&retry[0], SET_GAME_ATTRIBUTES, 91);
+    d.committed().unwrap();
+    for q in [
+        clear_group(101, b"0", 92),
+        clear_group(100, b"300", 92),
+        clear_group(100, b"00", 92),
+    ] {
+        assert!(matches!(d.reply(&q), Err(Error::Ineligible)));
+    }
+    let mesh = d.reply(&mesh(93, 300, 29, 0, 0)).unwrap();
+    assert_ack(&mesh[0], UPDATE_MESH_CONNECTION, 93);
+    d.committed().unwrap();
+}
+
+#[test]
+fn clear_after_renewal_and_partial_write_keeps_current_group_ownership() {
+    let mut d = departure();
+    d.reply(&leave_with(1, |q| q.game_id = Some(100))).unwrap();
+    d.committed().unwrap();
+    d.rebind_group(500).unwrap();
+    d.reply(&leave(2)).unwrap();
+    d.committed().unwrap();
+    assert!(matches!(
+        d.reply(&clear_group(100, b"0", 3)),
+        Err(Error::Ineligible)
+    ));
+    let out = d.reply(&clear_group(500, b"0", 4)).unwrap();
+    assert_eq!(out.len(), 2);
+    d.abort_write();
+    assert!(!d.association_cleared);
+    assert_eq!(d.reply(&clear_group(500, b"0", 5)), Err(Error::Closed));
+    let mut d = departure();
+    d.reply(&leave(1)).unwrap();
+    d.committed().unwrap();
+    for n in 0..MAX_MESH_REPORTS {
+        d.reply(&clear_group(100, b"0", n as u32 + 2)).unwrap();
+        d.committed().unwrap();
+    }
+    assert_eq!(d.reply(&clear_group(100, b"0", 99)), Err(Error::Bound));
+}
+
 #[test]
 fn leave_acknowledges_then_notifies_player_left_after_the_write() {
     let mut d = departure();

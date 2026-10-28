@@ -27,6 +27,7 @@ fn rpc_message(rpc: crate::participants::HostRpc) -> frame::Message<'static> {
         HostRpc::Garage(v) => frame::Message::GarageBinding(v),
         HostRpc::Actor(v) => frame::Message::ActorBinding(v),
         HostRpc::Vehicle(v) => frame::Message::VehicleBinding(v),
+        HostRpc::LiveryInvalidation(v) => frame::Message::LiveryInvalidation(v),
         HostRpc::GaragePresence(v)
         | HostRpc::SpawnOccupied(v)
         | HostRpc::LevelPoll(v)
@@ -647,6 +648,7 @@ impl Host {
             crate::participants::HostRpc::Launcher(_)
             | crate::participants::HostRpc::Bank(_)
             | crate::participants::HostRpc::GaragePresence(_)
+            | crate::participants::HostRpc::LiveryInvalidation(_)
             | crate::participants::HostRpc::SpawnOccupied(_)
             | crate::participants::HostRpc::LevelPoll(_)
             | crate::participants::HostRpc::ModeNotification(_)
@@ -837,8 +839,13 @@ impl Host {
                         match application.receive(body, now_ms, &mut observing) {
                             Ok(received) => {
                                 if let Some(event) = received.event {
+                                    closed |=
+                                        matches!(event, application::Event::Disconnected { .. });
                                     queued |= matches!(event, application::Event::Queued { .. });
                                     out.events.push(Event::Application(event));
+                                }
+                                if closed {
+                                    break;
                                 }
                                 for reply in received.send {
                                     match link.send_application(&reply, now_ms) {
@@ -872,7 +879,7 @@ impl Host {
                     if let Some(sample) = seen.time_sample {
                         world.time_sample = Some((sample, now_ms));
                     }
-                    if queued && world.initialized.is_none() {
+                    if queued && !closed && world.initialized.is_none() {
                         match Self::initialize(link, application, world, now_ms) {
                             Ok(wire) => {
                                 out.send.push(wire);
@@ -881,7 +888,7 @@ impl Host {
                             Err(e) => out.events.push(e),
                         }
                     }
-                    if delivery.closed {
+                    if delivery.closed || closed {
                         out.events.push(Event::Closed);
                         closed = true;
                     }

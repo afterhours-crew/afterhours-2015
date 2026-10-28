@@ -686,7 +686,40 @@ fn intro_teleport_entry_precedes_car_creation_and_the_command_waits_for_readines
 pub(super) fn ready_for_selection(
     with_services: bool,
 ) -> (PlayerListener, u16, Arc<nfs_world::items::Collection>) {
+    ready_for_selection_with_return_confirmation(with_services, false)
+}
+
+#[test]
+fn intro_return_keeps_presentation_until_owned_confirmation_and_accepts_repeats() {
+    crate::net::players::test_wire::with_native_padding(|| {
+        ready_for_selection_with_return_confirmation(false, true);
+    });
+}
+
+fn ready_for_selection_with_return_confirmation(
+    with_services: bool,
+    confirm_return: bool,
+) -> (PlayerListener, u16, Arc<nfs_world::items::Collection>) {
     let (mut listener, participant, items) = setup();
+    if confirm_return {
+        let key = listener.vehicles.as_ref().unwrap().layout.item_scene_key;
+        let mut json: serde_json::Value = crate::garage_logic::tests::presentation_json()
+            .to_string()
+            .replace(
+                "\"scene_content_key\":101",
+                &format!("\"scene_content_key\":{key}"),
+            )
+            .parse()
+            .unwrap();
+        json["return_requested"] = serde_json::json!({"scene_updates":[],"entities":[],
+            "events":[{"target":{"capture_id":277},"entity":1,"event":18}]});
+        json["return_confirmation"] = serde_json::json!({"capture_id":277,"entity":1,"event":33});
+        json["returning"] = serde_json::json!({"scene_updates":[],"entities":[],"events":[],"delete_capture_ids":[277]});
+        json["returned"] = serde_json::json!({"scene_updates":[],"entities":[json["spawn"]["entities"][0]],"events":[]});
+        listener.logic = Some(Arc::new(
+            crate::garage_logic::GarageLogic::from_json(&json).unwrap(),
+        ));
+    }
     let load_asset = Asset {
         bundle: 32,
         type_id: 10,
@@ -1252,7 +1285,120 @@ pub(super) fn ready_for_selection(
     );
     drain(&mut listener);
     Arc::make_mut(listener.prologue.as_mut().unwrap()).return_events = vec![(2, 16)];
+    if confirm_return {
+        listener
+            .logic
+            .as_ref()
+            .unwrap()
+            .produce_present(
+                crate::garage_logic::Which::Spawn,
+                &mut listener.players,
+                participant,
+                listener.logic_ghosts.entry(participant).or_default(),
+                crate::garage_logic::Part::All,
+            )
+            .unwrap();
+    }
+    let confirmation = confirm_return.then(|| {
+        listener
+            .logic
+            .as_ref()
+            .unwrap()
+            .return_confirmation(&listener.players, &listener.logic_ghosts[&participant])
+            .unwrap()
+            .unwrap()
+    });
     assert!(send(&mut listener, 13, 47, enter.span()));
+    let streaming_was_sent = confirm_return
+        && listener
+            .pending
+            .iter()
+            .chain(listener.pending_entries.iter().map(|(s, _)| s))
+            .flat_map(|s| &s.records)
+            .any(|record| {
+                record.id == loading
+                    && matches!(&record.update, replication::Update::Entity { fields, .. }
+                if fields[1] == Some(entity::Update::BoolProperty(Some(true))))
+            });
+    if let Some(expected) = confirmation {
+        assert!(
+            listener
+                .players
+                .objects()
+                .get(expected.target.ghost)
+                .is_some(),
+            "intro return must preserve the presentation that will confirm it"
+        );
+        assert!(
+            listener
+                .returns
+                .as_ref()
+                .unwrap()
+                .ghost(participant)
+                .is_none()
+        );
+        drain(&mut listener);
+        listener.world_ms += 100;
+        listener.advance_returns(listener.world_ms);
+        assert!(
+            listener
+                .players
+                .objects()
+                .get(expected.target.ghost)
+                .is_some()
+        );
+        let confirm = nfs_world::logic::Message::Reached {
+            target: expected.target,
+            event: expected.event,
+            player: 0,
+        }
+        .encode()
+        .unwrap();
+        let confirm_frame = |sequence| {
+            frame::Builder::new()
+                .messages(
+                    None,
+                    vec![frame::Group {
+                        channel: 1,
+                        sequence: Some(sequence),
+                        messages: vec![frame::Message::Opaque {
+                            index: 82,
+                            body: confirm.span(),
+                        }],
+                    }],
+                )
+                .build()
+                .unwrap()
+        };
+        assert!(listener.frame(Queued {
+            advertised: None,
+            frame: 13,
+            data: confirm_frame(1).span()
+        }));
+        listener.advance_returns(listener.world_ms);
+        assert!(
+            listener
+                .players
+                .objects()
+                .get(expected.target.ghost)
+                .is_none()
+        );
+        let after = listener.players.objects().snapshot();
+        assert!(listener.frame(Queued {
+            advertised: None,
+            frame: 13,
+            data: confirm_frame(2).span()
+        }));
+        listener.advance_returns(listener.world_ms);
+        assert_eq!(listener.players.objects().snapshot(), after);
+        assert_eq!(
+            listener
+                .observation(0, 0, 0, false)
+                .health
+                .unsupported_operations,
+            0
+        );
+    }
     // The mission chapter's row fires on the intro progression logic, once.
     assert_eq!(
         listener
@@ -1291,7 +1437,8 @@ pub(super) fn ready_for_selection(
             .flat_map(|s| &s.records)
             .any(|record| record.id == loading
                 && matches!(&record.update, replication::Update::Entity { fields, .. }
-                if fields[1] == Some(entity::Update::BoolProperty(Some(true))))),
+                if fields[1] == Some(entity::Update::BoolProperty(Some(true)))))
+            || streaming_was_sent,
         "the streaming flag must actually be queued for the client"
     );
     // The captured client reports loaded only after the synchronized flag.
@@ -1358,6 +1505,44 @@ pub(super) fn ready_for_selection(
     assert!(
         flag < goal,
         "the scripted-control flag precedes the spline goal"
+    );
+    let goal_id = flat[goal].id;
+    let mut payload = BitWriter::new();
+    payload.put(0, 9).put(0, 32).put(0b1010101, 7);
+    let mut completion = BitWriter::new();
+    completion
+        .put(0, 32)
+        .put(0, 32)
+        .put(1, 8)
+        .put(goal_id.into(), 13)
+        .put(payload.bytes().len() as u64, 9)
+        .put_span(payload.span());
+    let completed = frame::Builder::new()
+        .messages(
+            None,
+            vec![frame::Group {
+                channel: 3,
+                sequence: Some(1),
+                messages: vec![frame::Message::Opaque {
+                    index: 47,
+                    body: completion.span(),
+                }],
+            }],
+        )
+        .build()
+        .unwrap();
+    assert!(listener.frame(Queued {
+        advertised: None,
+        frame: 13,
+        data: completed.span()
+    }));
+    assert_eq!(
+        listener
+            .observation(0, 0, 0, false)
+            .health
+            .unsupported_operations,
+        0,
+        "the assigned cinematic goal's completion belongs to this participant"
     );
     let before_previews = listener.players.objects().snapshot();
     // The entry notification is an ordering barrier for later preview cars.

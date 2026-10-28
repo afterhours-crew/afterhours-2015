@@ -21,6 +21,86 @@ const REP: &str = "gameplay/scoring/replevelcalculationlogic";
 const FREE: &str = "gameplay/driverdetails/freeroamstatslogic";
 const DRIVER: &str = "gameplay/driverdetails/driverdetailslogic";
 const SESSION: &str = "gameplay/stats/sessionstatslogic";
+const DRIVING_TIMER: &str = "gameplay/stats/cardrivingtelemetrytimerprefab";
+
+fn driving_timer(
+    composition: &nfs_content::scoring::events::Composition,
+    signals: &[nfs_world::scoring::event_sync::Binding],
+    nodes: &[nfs_content::scoring::nodes::Node],
+) -> Result<crate::driving_timer::Binding> {
+    use crate::driving_timer::{Binding, Signal};
+    use nfs_world::scoring::nodes::{CLOSE, Definition, IN, LOAD, OPEN, OUT};
+    let candidates = |port| {
+        composition
+            .connections
+            .iter()
+            .filter_map(|edge| {
+                let target = composition.nodes.get(usize::from(edge.target.node))?;
+                let source = composition.nodes.get(usize::from(edge.source.node))?;
+                if target.identity.asset != DRIVING_TIMER
+                    || target.class != "EventGateEntityData"
+                    || source.identity.asset != DRIVING_TIMER
+                    || source.identity.instances != target.identity.instances
+                    || edge.source.event != OUT
+                    || edge.target.event != port
+                {
+                    return None;
+                }
+                let signal = signals.iter().find(|s| s.node == edge.source.node)?;
+                Some((edge.target.node, *signal))
+            })
+            .collect::<Vec<_>>()
+    };
+    let start = candidates(OPEN);
+    let stop = candidates(IN);
+    let ([(gate, start)], [(stop_gate, stop)]) = (start.as_slice(), stop.as_slice()) else {
+        return Err("ambiguous driving timer input topology".into());
+    };
+    let gate_identity = &composition.nodes[usize::from(*gate)].identity;
+    let cache = |source| {
+        composition
+            .connections
+            .iter()
+            .filter_map(|e| {
+                let n = composition.nodes.get(usize::from(e.target.node))?;
+                (e.source.node == source
+                    && e.source.event == OUT
+                    && e.target.event == LOAD
+                    && n.class == "FloatCacheEntityData"
+                    && n.identity.asset == DRIVING_TIMER
+                    && n.identity.instances == gate_identity.instances)
+                    .then_some(e.target.node)
+            })
+            .collect::<Vec<_>>()
+    };
+    if gate != stop_gate
+        || start == stop
+        || !nodes.iter().any(|n| {
+            n.identity == *gate_identity
+                && n.configuration.definition == (Definition::Gate { open: false })
+        })
+        || composition
+            .connections
+            .iter()
+            .any(|e| e.target.node == *gate && e.target.event == CLOSE)
+        || cache(start.node).len() != 1
+        || cache(*gate).len() != 1
+        || cache(start.node) == cache(*gate)
+    {
+        return Err("unsupported driving timer gate/cache behavior".into());
+    }
+    Ok(Binding {
+        role: 3,
+        start: Signal {
+            entity: start.entity,
+            event: start.event,
+        },
+        stop: Signal {
+            entity: stop.entity,
+            event: stop.event,
+        },
+    })
+}
 
 fn boolean_state(name: &str, input: &Input) -> Option<bool> {
     match (name, input) {
@@ -448,6 +528,13 @@ pub(super) fn build(index: &mut AssetIndex, thresholds: &Json) -> Result<Json> {
     let confirmation = return_confirmation(&composition, &signals, &alive[0])?;
     doc["return_confirmation"] = json!({"capture_id":22,
         "entity":confirmation.entity,"event":confirmation.event});
+    let composition = index.scoring_events(SESSION)?;
+    let signals = index.scoring_event_sync(SESSION, &composition)?;
+    let nodes = index.scoring_nodes(SESSION)?;
+    let timer = driving_timer(&composition, &signals, &nodes)?;
+    doc["driving_timer"] = json!({"role":timer.role,
+        "start":{"entity":timer.start.entity,"event":timer.start.event},
+        "stop":{"entity":timer.stop.entity,"event":timer.stop.event}});
     doc["content"] = json!({"catalogs":catalogs.into_values().collect::<Vec<_>>(),"profiles":profiles.into_values().collect::<Vec<_>>()});
     crate::garage_logic::GarageLogic::from_json(&doc)
         .map_err(|_| "generated garage lifecycle failed validation")?;
@@ -457,6 +544,104 @@ pub(super) fn build(index: &mut AssetIndex, thresholds: &Json) -> Result<Json> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn driving_timer_binds_authored_routes_and_rejects_changed_gate_behavior() {
+        use nfs_content::scoring::{
+            events::{Composition, Identity, Node},
+            nodes::Configuration,
+        };
+        use nfs_world::scoring::{
+            event_sync::Binding,
+            events::{Connection, Delivery, Endpoint},
+            nodes::{CLOSE, Definition, IN, LOAD, OPEN, OUT},
+        };
+        let nodes = [
+            "EventSyncEntityData",
+            "FloatCacheEntityData",
+            "EventGateEntityData",
+            "EventSyncEntityData",
+            "FloatCacheEntityData",
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, class)| Node {
+            identity: Identity {
+                asset: DRIVING_TIMER.into(),
+                index,
+                instances: vec![(SESSION.into(), 42)],
+            },
+            class: class.into(),
+            listeners: None,
+            forward: None,
+        })
+        .collect::<Vec<_>>();
+        let configurations = vec![nfs_content::scoring::nodes::Node {
+            identity: nodes[2].identity.clone(),
+            configuration: Configuration {
+                definition: Definition::Gate { open: false },
+                defaults: vec![],
+            },
+        }];
+        let edge = |from, to, event| Connection {
+            source: Endpoint {
+                node: from,
+                event: OUT,
+            },
+            target: Endpoint { node: to, event },
+            delivery: Delivery::Local,
+        };
+        let mut graph = Composition {
+            nodes,
+            buses: vec![],
+            bus_entities: vec![],
+            connections: vec![
+                edge(0, 2, OPEN),
+                edge(0, 1, LOAD),
+                edge(3, 2, IN),
+                edge(2, 4, LOAD),
+            ],
+            properties: vec![],
+            links: vec![],
+        };
+        let signals = vec![
+            Binding {
+                node: 0,
+                entity: 5,
+                event: 71,
+            },
+            Binding {
+                node: 3,
+                entity: 5,
+                event: 72,
+            },
+        ];
+        let binding = driving_timer(&graph, &signals, &configurations).unwrap();
+        assert_eq!(
+            binding.start,
+            crate::driving_timer::Signal {
+                entity: 5,
+                event: 71
+            }
+        );
+        assert_eq!(
+            binding.stop,
+            crate::driving_timer::Signal {
+                entity: 5,
+                event: 72
+            }
+        );
+        graph.connections.push(edge(3, 2, CLOSE));
+        assert!(driving_timer(&graph, &signals, &configurations).is_err());
+        graph.connections.pop();
+        let mut open = configurations.clone();
+        open[0].configuration.definition = Definition::Gate { open: true };
+        assert!(driving_timer(&graph, &signals, &open).is_err());
+        graph.nodes[3].identity.instances[0].1 += 1;
+        assert!(driving_timer(&graph, &signals, &configurations).is_err());
+        graph.nodes[3].identity.instances[0].1 -= 1;
+        graph.connections.remove(1);
+        assert!(driving_timer(&graph, &signals, &configurations).is_err());
+    }
     #[test]
     fn return_confirmation_selects_the_requested_prefab_instance() {
         use nfs_content::{

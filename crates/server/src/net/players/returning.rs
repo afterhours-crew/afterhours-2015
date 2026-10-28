@@ -42,6 +42,8 @@ pub(in crate::net) const RETURN_TRACE_MS: u64 = 12_000;
 #[derive(Clone, Debug)]
 pub(in crate::net) struct PendingReturn {
     pub participant: u16,
+    /// Intro owns its car and staging; only the confirmation gate is shared.
+    pub intro: bool,
     /// World ms of the confirming request.
     pub requested_ms: u64,
     pub torn_down: bool,
@@ -231,7 +233,8 @@ impl PlayerListener {
                     >= pending
                         .requested_ms
                         .saturating_add(RETURN_TEARDOWN_DELAY_MS);
-            let staging_due = pending.torn_down
+            let staging_due = !pending.intro
+                && pending.torn_down
                 && world_ms >= pending.requested_ms.saturating_add(RETURN_STAGING_DELAY_MS);
             if !(teardown_due || staging_due) {
                 index += 1;
@@ -240,7 +243,9 @@ impl PlayerListener {
             if self.pending_entries.len() + 3 > MAX_PENDING {
                 return;
             }
-            let result = if teardown_due {
+            let result = if teardown_due && pending.intro {
+                self.run_intro_return(&pending)
+            } else if teardown_due {
                 self.run_return_teardown(&pending)
             } else {
                 self.run_return_staging(&pending)
@@ -268,6 +273,77 @@ impl PlayerListener {
                 }
             }
         }
+    }
+    fn run_intro_return(&mut self, pending: &PendingReturn) -> Result<bool, replication::Error> {
+        let mut players = self.players.clone();
+        let mut returns = self
+            .returns
+            .clone()
+            .ok_or(replication::Error::Unsupported)?;
+        let mut modes = self.intro_modes.clone();
+        let mut ghosts = self.logic_ghosts.clone();
+        let chain = pending
+            .chain
+            .iter()
+            .map(|call| match call {
+                HostRpc::Participant(notification) => Ok(*notification),
+                _ => Err(replication::Error::Shape),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut out = Self::confirmed_intro_return(
+            self.prologue
+                .as_deref()
+                .ok_or(replication::Error::Unsupported)?,
+            &mut modes,
+            &mut players,
+            &mut returns,
+            self.logic.as_deref(),
+            &mut ghosts,
+            self.persona,
+            pending.participant,
+            chain,
+        )?;
+        let mut story_pending = self.story_pending.clone();
+        match self.stage_first_drive_return(
+            &players,
+            &self.participants,
+            out.calls.iter(),
+            &mut story_pending,
+        ) {
+            Ok(()) => {}
+            Err(replication::Error::Bound) => return Ok(false),
+            Err(error) => return Err(error),
+        }
+        let mut deferred = Vec::new();
+        out.calls = prologue::presentation::present(
+            &prologue::presentation::Context {
+                logic: self.logic.as_deref(),
+                ghosts: &ghosts,
+                players: &players,
+                participants: &self.participants,
+                content: self.prologue.as_deref(),
+            },
+            out.calls,
+            &mut deferred,
+        )?;
+        let entries = Self::garage_entries(out.records, out.deleted, out.calls)?;
+        if entries.len() > MAX_PENDING.saturating_sub(self.pending_entries.len())
+            || deferred.len() > MAX_PENDING.saturating_sub(self.pending_intro_presentation.len())
+        {
+            return Ok(false);
+        }
+        self.players = players;
+        self.returns = Some(returns);
+        self.intro_modes = modes;
+        self.logic_ghosts = ghosts;
+        self.story_pending = story_pending;
+        self.pending_intro_presentation.extend(deferred);
+        self.queue_entries(entries);
+        tracing::info!(
+            participant = pending.participant,
+            "confirmed intro garage return queued"
+        );
+        Ok(true)
     }
     fn run_return_teardown(&mut self, pending: &PendingReturn) -> Result<bool, replication::Error> {
         let mut players = self.players.clone();

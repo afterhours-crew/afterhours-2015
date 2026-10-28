@@ -17,6 +17,78 @@ const CLIENT_FRESH: u32 = 0x5555_5555;
 const CLIENT_SELECTOR: u16 = 7;
 
 #[test]
+fn admitted_connection_accepts_unsequenced_disconnect() {
+    let (mut host, _) = admitted(0);
+    let mut listener = Retain::default();
+    // Constructed native close shape: envelope, reason byte, u16 byte count.
+    let mut wire = BitWriter::new();
+    wire.put(4, 3)
+        .put(0, 3)
+        .put(u64::from(HOST_SELECTOR), 14)
+        .put(14, 8)
+        .put(0, 8)
+        .put(0, 16)
+        .align();
+    let wire = wire.into_bytes();
+    let mut frame = BitWriter::new();
+    frame.put(0, 8);
+    let (ticket, _) = host.send_tracked_frame(frame.span(), 8).unwrap();
+    let frontier = host.receive_history();
+    let stats = host.stats();
+    let mut foreign = wire.clone();
+    foreign[2] ^= 0x10;
+    assert_eq!(
+        host.receive(&foreign, 4, &mut listener),
+        Err(Error::Selector)
+    );
+    let mut short = wire.clone();
+    short[5] = 1;
+    assert_eq!(host.receive(&short, 5, &mut listener), Err(Error::Shape));
+    assert_eq!(host.phase_name(), PhaseName::Sequenced);
+    assert_eq!(host.receive_history(), frontier);
+    assert_eq!(host.stats(), stats);
+    assert_eq!(
+        host.delivery_status(ticket),
+        Some(delivery::Status::Pending)
+    );
+    for (i, padding) in [0, 15, 7, 1].into_iter().enumerate() {
+        let mut retry = wire.clone();
+        *retry.last_mut().unwrap() |= padding;
+        let result = host.receive(&retry, 10 + i as u64, &mut listener).unwrap();
+        assert_eq!(
+            result.event,
+            Some(Event::Disconnected {
+                reason: 0,
+                repeated: i != 0
+            })
+        );
+        assert!(result.send.is_empty());
+    }
+    assert_eq!(host.phase_name(), PhaseName::Closed);
+    assert_eq!(host.disconnect().unwrap().reason, 0);
+    assert_eq!(host.delivery_status(ticket), None);
+    assert_eq!(host.receive_history(), None);
+    assert!(host.poll(100_000).unwrap().is_empty());
+    assert_eq!(host.send_frame(frame.span()), Err(Error::Phase));
+    assert_eq!(listener.frames, 0);
+    assert_eq!(
+        host.receive(&foreign, 100_001, &mut listener),
+        Err(Error::Selector)
+    );
+    let mut changed = wire.clone();
+    changed[3] |= 1;
+    host.receive(&changed, 100_002, &mut listener).unwrap();
+    assert_eq!(
+        host.disconnect().unwrap().reason,
+        0,
+        "first reason is retained"
+    );
+    let (mut other, _) = admitted(0);
+    assert_eq!(other.phase_name(), PhaseName::Sequenced);
+    assert!(other.send_frame(frame.span()).is_ok());
+}
+
+#[test]
 fn negotiated_peer_reports_actual_complete_rejected_and_missing_fragment_delivery() {
     use delivery::Status;
     struct Check {

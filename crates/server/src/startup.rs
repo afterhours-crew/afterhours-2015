@@ -725,7 +725,13 @@ impl<'p> Startup<'p> {
         if let Some(departure) = self.departure.as_mut()
             && departure.pending()
         {
-            return departure.committed().map_err(|_| Failure::Reply);
+            departure.committed().map_err(|_| Failure::Reply)?;
+            if departure.left()
+                && let Some(branch) = &mut self.branch
+            {
+                branch.retire_world_association();
+            }
+            return Ok(());
         }
         let Some(branch) = self.branch.as_mut() else {
             return Ok(());

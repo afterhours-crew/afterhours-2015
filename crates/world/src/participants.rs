@@ -1293,6 +1293,7 @@ pub enum HostRpc {
     Actor(crate::actors::Binding),
     Vehicle(crate::garage::vehicle::Binding),
     GaragePresence(crate::garage::presence::Notification),
+    LiveryInvalidation(crate::garage::livery::Invalidation),
     /// SpawnPoints occupied flag (same scene rpc_bool wire shape as presence).
     SpawnOccupied(crate::garage::presence::Notification),
     /// Level root poll (scene-scoped method 0, same wire shape as presence).
@@ -1326,6 +1327,7 @@ impl HostRpc {
             | Self::ModeNotification(v) => {
                 vec![v.endpoint.scene]
             }
+            Self::LiveryInvalidation(v) => vec![v.endpoint.scene],
             Self::SequenceStop(v) => vec![v.sequence],
             Self::Event(v) => vec![v.target.ghost],
             Self::WorldActivation(v) => {
@@ -1346,6 +1348,7 @@ impl HostRpc {
             Self::Garage(v) => v.endpoint.scene,
             Self::Actor(v) => v.endpoint.scene,
             Self::Vehicle(v) => v.endpoint.scene,
+            Self::LiveryInvalidation(v) => v.endpoint.scene,
             Self::GaragePresence(v)
             | Self::SpawnOccupied(v)
             | Self::LevelPoll(v)
@@ -1366,6 +1369,7 @@ impl HostRpc {
             Self::Garage(v) => v.encode(),
             Self::Actor(v) => v.encode(),
             Self::Vehicle(v) => v.encode(),
+            Self::LiveryInvalidation(v) => v.encode(),
             Self::GaragePresence(v)
             | Self::SpawnOccupied(v)
             | Self::LevelPoll(v)

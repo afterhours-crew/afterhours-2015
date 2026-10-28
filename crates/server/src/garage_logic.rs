@@ -214,6 +214,7 @@ pub struct GarageLogic {
     return_requested: Batch,
     /// Installed client EventSync that confirms the requested return.
     return_confirmation: Option<Event>,
+    driving_timer: Option<crate::driving_timer::Binding>,
     returned: Batch,
     crashed: Batch,
     recovered: Batch,
@@ -658,6 +659,38 @@ impl GarageLogic {
             return Err(Failure::ProfileConfig);
         }
         let spawned: BTreeSet<u16> = spawn.entities.iter().map(|e| e.capture_id).collect();
+        let driving_timer = v
+            .get("driving_timer")
+            .map(|value| {
+                use crate::driving_timer::{Binding, Signal};
+                keys(value, &["role", "start", "stop"])?;
+                let role = ghost_id(&value["role"])?;
+                let definition = spawn
+                    .entities
+                    .iter()
+                    .find(|d| d.capture_id == role)
+                    .ok_or(Failure::ProfileConfig)?;
+                let Some(Role::Root { bus_count }) = definition.roles.first() else {
+                    return Err(Failure::ProfileConfig);
+                };
+                let signal = |name: &str| -> Result<Signal, Failure> {
+                    let value = &value[name];
+                    keys(value, &["entity", "event"])?;
+                    let entity = uint(&value["entity"])?;
+                    let event = uint(&value["event"])?;
+                    if entity == 0 || entity > u32::from(*bus_count) || event > 0x1ff_ffff {
+                        return Err(Failure::ProfileConfig);
+                    }
+                    Ok(Signal { entity, event })
+                };
+                let start = signal("start")?;
+                let stop = signal("stop")?;
+                if start == stop {
+                    return Err(Failure::ProfileConfig);
+                }
+                Ok(Binding { role, start, stop })
+            })
+            .transpose()?;
         let intro_spawn = match v.get("intro_spawn") {
             None => Batch::default(),
             Some(b) => {
@@ -973,6 +1006,7 @@ impl GarageLogic {
             returning,
             return_requested,
             return_confirmation,
+            driving_timer,
             returned,
             crashed,
             recovered,
@@ -982,6 +1016,53 @@ impl GarageLogic {
     }
     pub fn content(&self) -> &Content {
         &self.content
+    }
+    pub fn driving_timer(&self) -> Option<crate::driving_timer::Binding> {
+        self.driving_timer
+    }
+    pub fn driving_timer_owner(
+        &self,
+        players: &Players,
+        ghosts: &BTreeMap<u16, BTreeMap<u16, u16>>,
+        connection: u8,
+        persona: u64,
+        message: &nfs_world::logic::Message,
+    ) -> Result<crate::driving_timer::Owner, replication::Error> {
+        let binding = self.driving_timer.ok_or(replication::Error::Unsupported)?;
+        let nfs_world::logic::Message::Reached { target, player, .. } = message else {
+            return Err(replication::Error::Shape);
+        };
+        let mut candidates = ghosts
+            .iter()
+            .filter(|(_, map)| map.get(&binding.role) == Some(&target.ghost));
+        let participant = match (candidates.next(), candidates.next()) {
+            (Some((&participant, _)), None) => participant,
+            _ => return Err(replication::Error::UnknownObject),
+        };
+        let local_slot = players
+            .local_slot(connection, persona, participant)
+            .ok_or(replication::Error::UnknownObject)?;
+        let definition = self
+            .spawn
+            .entities
+            .iter()
+            .find(|d| d.capture_id == binding.role)
+            .ok_or(replication::Error::Shape)?;
+        if *player != local_slot
+            || !matches!(
+                players.objects().get(target.ghost).map(|o| &o.initial),
+                Some(replication::Initial::Entity { prefix, fields })
+                    if prefix.asset == definition.asset
+                        && matches!(fields.first(), Some(Initial::Root { reference, .. }) if *reference == participant)
+            )
+        {
+            return Err(replication::Error::UnknownObject);
+        }
+        Ok(crate::driving_timer::Owner {
+            participant,
+            ghost: target.ghost,
+            local_slot,
+        })
     }
     pub fn requires_reputation(&self) -> bool {
         self.reputation.is_some()

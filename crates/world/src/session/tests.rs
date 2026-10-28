@@ -184,6 +184,54 @@ fn rejected_creation_and_other_players_do_not_enter_and_disconnect_releases_rece
 }
 
 #[test]
+fn application_close_ends_session_releases_receipts_and_repeats_are_inert() {
+    let (mut host, mut client, mut listener, now, _) = entry_setup();
+    let Stage::Running { world, .. } = &host.stage else {
+        panic!()
+    };
+    let entry::Entry::Pending { ticket, .. } = world.player_entry else {
+        panic!()
+    };
+    let mut close = crate::bits::BitWriter::new();
+    close
+        .put(4, 3)
+        .put(0, 3)
+        .put(u64::from(HOST_SELECTOR), 14)
+        .put(14, 8)
+        .put(0, 8)
+        .put(0, 16)
+        .align();
+    let wire = client.app(&close.into_bytes());
+    let out = host.receive(&wire, now + 1, &mut listener);
+    assert_eq!(
+        out.events,
+        vec![
+            Event::Application(App::Disconnected {
+                reason: 0,
+                repeated: false
+            }),
+            Event::Closed,
+        ]
+    );
+    assert_eq!(host.stage(), StageName::Closed);
+    assert_eq!(host.application().unwrap().delivery_status(ticket), None);
+    for delay in [2, 5, 9] {
+        assert!(
+            host.receive(&wire, now + delay, &mut listener)
+                .events
+                .is_empty()
+        );
+    }
+    assert!(
+        host.receive(&client.close(), now + 43, &mut listener)
+            .events
+            .is_empty()
+    );
+    assert_eq!(host.failures(), Failures::default());
+    assert!(host.poll(now + 10_000).send.is_empty());
+}
+
+#[test]
 fn first_player_entry_preserves_ready_state_when_application_window_is_full() {
     let (mut host, mut client, mut listener, now, sent) = entry_setup();
     acknowledge_entry(&mut host, &mut client, &mut listener, &sent, now + 1, true);

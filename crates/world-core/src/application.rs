@@ -37,6 +37,7 @@ use nfs_protocol::world::{
         type_zero::{Client5, Host6},
     },
     challenge::{Challenge15, OpaqueAnswer16, Request13},
+    disconnect::{self, Disconnect},
     envelope::{ZeroTail, checksum},
     fragment::{Assembler, Fragment, Outcome},
     history::{AdvanceError, PeerReports, ReceiveHistory, Sequence},
@@ -199,6 +200,11 @@ impl std::error::Error for Error {}
 /// What an accepted input was.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Event {
+    /// Unsequenced peer close. Repeats cannot change the original close reason.
+    Disconnected {
+        reason: u8,
+        repeated: bool,
+    },
     ChallengeRequest {
         repeated: bool,
     },
@@ -245,6 +251,7 @@ pub enum PhaseName {
     AwaitClient2,
     AwaitClient5,
     Sequenced,
+    Closed,
 }
 
 /// Counters for diagnostics and the reference harness.
@@ -282,6 +289,7 @@ enum Phase {
         host4: Vec<u8>,
     },
     Sequenced(Box<Sequenced>),
+    Closed(Disconnect),
 }
 
 struct Sequenced {
@@ -453,11 +461,19 @@ impl Application {
             Phase::AwaitClient2 { .. } => PhaseName::AwaitClient2,
             Phase::AwaitClient5 { .. } => PhaseName::AwaitClient5,
             Phase::Sequenced(_) => PhaseName::Sequenced,
+            Phase::Closed(_) => PhaseName::Closed,
         }
     }
 
     pub fn stats(&self) -> Stats {
         self.stats
+    }
+
+    pub fn disconnect(&self) -> Option<&Disconnect> {
+        match &self.phase {
+            Phase::Closed(close) => Some(close),
+            _ => None,
+        }
     }
 
     /// Selectors once admitted: (inbound, outbound), relative to this endpoint.
@@ -503,6 +519,32 @@ impl Application {
             return Err(Error::Bound);
         }
         self.clock(now_ms)?;
+        // Close is unsequenced, even after admission. Decode fully and qualify
+        // its selector before releasing history, fragments and delivery tickets.
+        if let Ok(envelope) = ZeroTail::new(self.policy.max_body)
+            .map_err(|_| Error::Bound)?
+            .decode(body)
+            && envelope.kind() == disconnect::KIND
+        {
+            let close = Disconnect::decode(body).map_err(|_| Error::Shape)?;
+            let (selector, repeated) = match &self.phase {
+                Phase::Sequenced(s) => (s.inbound, false),
+                Phase::Closed(first) => (first.selector, true),
+                _ => return Err(Error::Phase),
+            };
+            if close.selector != selector {
+                return Err(Error::Selector);
+            }
+            let reason = close.reason;
+            if !repeated {
+                self.phase = Phase::Closed(close);
+            }
+            self.stats.inputs += 1;
+            return Ok(Received {
+                event: Some(Event::Disconnected { reason, repeated }),
+                send: vec![],
+            });
+        }
         let received = match &mut self.phase {
             Phase::AwaitRequest => self.challenge(body, now_ms)?,
             Phase::Challenged {
@@ -568,6 +610,7 @@ impl Application {
                 }
             }
             Phase::Sequenced(_) => self.sequenced_input(body, now_ms, listener)?,
+            Phase::Closed(_) => return Err(Error::Phase),
         };
         self.stats.inputs += 1;
         self.stats.sent += received.send.len();

@@ -7,6 +7,45 @@ use crate::customization_timer::Owner;
 use nfs_world::{logic::Message, replication::entity};
 
 impl PlayerListener {
+    pub(super) fn livery_cache_update(
+        roles: Option<&crate::scene_roles::SceneRoles>,
+        players: &Players,
+        persona: u64,
+        body: nfs_protocol::world::BitSpan<'_>,
+    ) -> Result<Option<nfs_world::garage::livery::Invalidation>, replication::Error> {
+        use nfs_world::{
+            garage::livery,
+            participants::Endpoint,
+            replication::{Initial, sublevel},
+        };
+        let Some(roles) = roles else { return Ok(None) };
+        let Some(scene) = players.objects().scene(roles.garage) else {
+            return Ok(None);
+        };
+        let Some(Initial::SubLevel { fields, .. }) =
+            players.objects().get(scene).map(|o| &o.initial)
+        else {
+            return Ok(None);
+        };
+        let Some(sublevel::Initial::Rpc(rpc)) = fields.get(livery::COMPONENT) else {
+            return Ok(None);
+        };
+        livery::receive(
+            Endpoint {
+                scene,
+                selector: rpc.selector,
+                serial: rpc.serial,
+            },
+            body,
+            |claimed| {
+                claimed == persona
+                    && players
+                        .player_participants()
+                        .any(|p| players.owns_participant(HOST_SELECTOR as u8, persona, p))
+            },
+        )
+    }
+
     pub(super) fn item_builder_begin(
         roles: Option<&crate::scene_roles::SceneRoles>,
         players: &Players,

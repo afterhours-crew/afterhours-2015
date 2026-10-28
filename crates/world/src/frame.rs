@@ -150,6 +150,7 @@ pub enum Message<'a> {
     ActorBinding(crate::actors::Binding),
     VehicleBinding(crate::garage::vehicle::Binding),
     GaragePresence(crate::garage::presence::Notification),
+    LiveryInvalidation(crate::garage::livery::Invalidation),
     SequenceStop(crate::sequences::Stop),
     LogicEvent(crate::logic::Fire),
     WorldActivation(crate::world_activation::Notification),
@@ -188,6 +189,7 @@ impl Message<'_> {
             | Self::ActorBinding(_)
             | Self::VehicleBinding(_)
             | Self::GaragePresence(_)
+            | Self::LiveryInvalidation(_)
             | Self::SequenceStop(_)
             | Self::WorldActivation(_)
             | Self::QueryControl(_)
@@ -947,6 +949,9 @@ impl<'a> Builder<'a> {
                 w.put_span(value.encode().map_err(|_| Error::Shape)?.span());
             }
             Message::GaragePresence(value) => {
+                w.put_span(value.encode().map_err(|_| Error::Shape)?.span());
+            }
+            Message::LiveryInvalidation(value) => {
                 w.put_span(value.encode().map_err(|_| Error::Shape)?.span());
             }
             Message::BankBalance(value) => {

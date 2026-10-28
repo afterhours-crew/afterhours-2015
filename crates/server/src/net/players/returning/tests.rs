@@ -328,6 +328,7 @@ fn return_handlers_publish_valid_frames_restore_loading_and_allow_three_exits() 
             let requested_ms = cycle * 10_000;
             listener.pending_returns.push_back(PendingReturn {
                 participant,
+                intro: false,
                 requested_ms,
                 torn_down: false,
                 confirmation: Some(nfs_world::logic::Fire {
@@ -512,6 +513,7 @@ fn return_confirmation_rejects_foreign_slots_accounts_and_identities() {
     };
     let mut pending = PendingReturn {
         participant,
+        intro: false,
         requested_ms: 0,
         torn_down: false,
         confirmation: Some(expected),

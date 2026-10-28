@@ -9,6 +9,7 @@
 
 pub mod admission;
 pub mod challenge;
+pub mod disconnect;
 pub mod envelope;
 pub mod fragment;
 pub mod ghost;
