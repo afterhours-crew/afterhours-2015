@@ -41,6 +41,9 @@ struct Wanted {
     activities: bool,
     notifications: bool,
     spots: Pulse,
+    /// A participant after the intro: the spots stay with the activities
+    /// (official E912: joined in the Alive Enter burst, no pulse).
+    normal: bool,
 }
 
 /// One membership (`Some` participant) or map notification (`None`) change.
@@ -64,9 +67,13 @@ impl State {
     pub fn member(&self, participant: u16, site: Site) -> bool {
         self.published.contains(&(Some(participant), site))
     }
-    /// Update what intro participants should be in from notifications the
-    /// session has just accepted, in send order; `following` are the calls
-    /// queued after `calls`. Other participants are not affected.
+    /// Update what participants should be in from notifications the session
+    /// has just accepted, in send order; `following` are the calls queued
+    /// after `calls`. A participant after the intro follows Alive with the
+    /// activity and spot memberships only (official E912 76.538-77.537 s, in
+    /// the Alive Enter frame and the next ones; the release at the Alive
+    /// Leave is inferred from the intro). Its event start volumes belong to
+    /// the owned events.
     pub fn observe<'a>(
         &mut self,
         participants: &Lifecycle,
@@ -88,11 +95,19 @@ impl State {
             else {
                 continue;
             };
-            if participants.intro_chapter(participant).is_none() {
-                continue;
-            }
             let enter = matches!(kind, Call::Enter);
             let leave = matches!(kind, Call::Leave);
+            if participants.intro_chapter(participant).is_none() {
+                if endpoint == intro.alive
+                    && (enter || leave)
+                    && participants.stage(participant).is_some()
+                {
+                    let wanted = self.wanted.entry(participant).or_default();
+                    wanted.normal = true;
+                    wanted.activities = enter;
+                }
+                continue;
+            }
             let wanted = self.wanted.entry(participant).or_default();
             if endpoint == intro.opening && leave {
                 wanted.events = true;
@@ -298,7 +313,7 @@ impl State {
             if wanted.activities {
                 desired.extend(volumes.activities.iter().map(|&s| (who, s)));
             }
-            if wanted.spots == Pulse::Joining {
+            if wanted.spots == Pulse::Joining || (wanted.normal && wanted.activities) {
                 desired.extend(volumes.spots.iter().map(|&s| (who, s)));
             }
             if wanted.notifications {
@@ -999,6 +1014,44 @@ mod tests {
                 join: false,
             }]
         );
+    }
+
+    #[test]
+    fn a_participant_after_the_intro_holds_activities_and_spots_while_alive() {
+        // E912: after a normal garage exit the narrative, mission and spot
+        // volumes join in the Alive Enter burst and stay (no spot pulse).
+        let volumes = WorldVolumes {
+            events: BTreeSet::from([site(1)]),
+            activities: BTreeSet::from([site(70)]),
+            spots: BTreeSet::from([site(71)]),
+            ..WorldVolumes::default()
+        };
+        let mut state = State::default();
+        let alive = |activities| Wanted {
+            normal: true,
+            activities,
+            ..Wanted::default()
+        };
+        state.wanted.insert(5, alive(true));
+        let changes = state.plan(&volumes, BATCH, |_| true);
+        let joined: BTreeSet<_> = changes
+            .iter()
+            .map(|c| (c.participant, c.site, c.join))
+            .collect();
+        assert_eq!(
+            joined,
+            BTreeSet::from([(Some(5), site(70), true), (Some(5), site(71), true)]),
+            "no event volume: the owned events subscribe those"
+        );
+        state.commit(&volumes, &changes, |_| true);
+        assert!(
+            state.plan(&volumes, BATCH, |_| true).is_empty(),
+            "spots stay"
+        );
+        state.wanted.insert(5, alive(false));
+        let left = state.plan(&volumes, BATCH, |_| true);
+        assert_eq!(left.len(), 2);
+        assert!(left.iter().all(|c| !c.join));
     }
 
     #[test]
