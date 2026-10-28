@@ -85,14 +85,10 @@ impl PlayerListener {
             .chain(active.iter().copied())
             .collect();
         for participant in targets {
-            // A held Alive, or a presentation still waiting for the
-            // memberships, keeps the whole activation for a later pass.
-            if self.held_alive.contains_key(&participant)
-                || (active.contains(&participant)
-                    && self.participants.intro_chapter(participant).is_none()
-                    && !self.free_roam_presented.contains(&participant)
-                    && !self.presentation_due(participant))
-            {
+            // A held Alive keeps the whole activation for a later pass; the
+            // world activation itself goes with Alive (official E912
+            // 76.538 s), only the presentation waits for the memberships.
+            if self.held_alive.contains_key(&participant) {
                 continue;
             }
             // The garage volume subscription survives a crash. Only its
@@ -113,7 +109,8 @@ impl PlayerListener {
             // are not the ordinary garage-exit presentation retained here.
             let presenting = active.contains(&participant)
                 && self.participants.intro_chapter(participant).is_none()
-                && !self.free_roam_presented.contains(&participant);
+                && !self.free_roam_presented.contains(&participant)
+                && self.presentation_due(participant);
             // AliveState and the driving context must have reached the client
             // before the garage-zone notification can trigger its prompt.
             // Prepare this on a clone so queue pressure retains the gate.
