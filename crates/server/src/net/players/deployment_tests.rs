@@ -1204,6 +1204,20 @@ fn recreated_customization_timer_accepts_new_lifetime_without_reusing_old_measur
         assert!(deliver(&mut listener, current, timer::STOP));
         assert!(listener.customization.state(participant).is_none());
     }
+    // A live timer the garage logic did not record (the intro's final garage
+    // presentation creates it, E1252) is owned through its root participant
+    // and measures like any other.
+    listener.logic_ghosts.remove(&participant);
+    let current = ghosts[&295];
+    listener.world_ms = 40_000;
+    assert!(deliver(&mut listener, current, timer::STOP));
+    assert!(deliver(&mut listener, current, timer::START));
+    listener.world_ms += 6_000;
+    assert!(deliver(&mut listener, current, timer::STOP));
+    assert_eq!(
+        listener.customization.state(participant).unwrap().completed,
+        1
+    );
 }
 
 #[test]
