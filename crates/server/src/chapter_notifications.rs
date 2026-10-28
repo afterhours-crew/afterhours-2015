@@ -11,6 +11,9 @@
 //! a Bool value only when it differs from the property default (official
 //! E1026 36.319 s: s4 0, s5 0, s24 true; E912 32.336 s: s4 0, s5 0 and no
 //! s24). The first written s4 sets the client's box: 0 disables it.
+//! Within one commit the completions apply before the activations, so a
+//! value can pass through the completed-only state: official E1026
+//! 651.925 s sends s5 0 then 1 when race 1 completes and race 2 starts.
 use nfs_content::chapter_notifications::{Kind, Notification};
 use nfs_world::{
     game_mode::Arguments,
@@ -78,20 +81,35 @@ impl Content {
         sent.get(&index).map(|&v| v != 0)
     }
     /// The calls that bring the client to the current values. `objective`
-    /// answers (active, completed) per stable objective id. Scenes not yet
-    /// in the world are left for a later pass.
+    /// answers (active, completed) per stable objective id now, `before` at
+    /// the previous pass. Scenes not yet in the world are left for a later
+    /// pass.
     pub fn update(
         &self,
         world: &World,
+        before: impl Fn(u64) -> (bool, bool),
         objective: impl Fn(u64) -> (bool, bool),
         sent: &mut Sent,
     ) -> Result<Vec<HostRpc>, Error> {
+        // The completions applied, the new activations not yet.
+        let completed_only = |id| {
+            let (active, completed) = objective(id);
+            (active && before(id).0, completed)
+        };
         let mut out = vec![];
         for (index, entry) in self.entries.iter().enumerate() {
             if world.scene(entry.scene_key).is_none() {
                 continue;
             }
             let value = i32::from(entry.value.eval(&objective));
+            let step = i32::from(entry.value.eval(&completed_only));
+            if let Some(&last) = sent.get(&index)
+                && step != last
+                && step != value
+            {
+                out.push(Self::call(world, entry, step)?);
+                sent.insert(index, step);
+            }
             let unchanged = match sent.get(&index) {
                 Some(&last) => last == value,
                 None => entry.kind == Kind::Bool && value == entry.default,
@@ -210,11 +228,14 @@ mod tests {
         let (s4, s5, s24) = (selector(SPAWN, 5), selector(SPAWN, 6), selector(GARAGE, 25));
         let mut state: BTreeMap<u64, (bool, bool)> = BTreeMap::new();
         let mut sent = Sent::new();
+        let before = std::cell::RefCell::new(state.clone());
         let step = |state: &BTreeMap<u64, (bool, bool)>, sent: &mut Sent| {
+            let previous = before.replace(state.clone());
             values(
                 &content
                     .update(
                         world,
+                        |id| previous.get(&id).copied().unwrap_or_default(),
                         |id| state.get(&id).copied().unwrap_or_default(),
                         sent,
                     )
@@ -232,16 +253,22 @@ mod tests {
         state.insert(DRIVE, (false, true));
         state.insert(RACE1, (true, false));
         assert_eq!(step(&state, &mut sent), [(s4, 0), (s5, 1)]);
-        // Race 1 completes and race 2 starts in one commit: s5 stays 1.
+        // Race 1 completes and race 2 starts in one commit: s5 passes
+        // through 0 (official E1026 651.925 s).
         state.insert(RACE1, (false, true));
         state.insert(RACE2, (true, false));
-        assert_eq!(step(&state, &mut sent), [(s24, 0)]);
+        assert_eq!(step(&state, &mut sent), [(s5, 0), (s5, 1), (s24, 0)]);
         state.insert(RACE2, (false, true));
         assert_eq!(step(&state, &mut sent), [(s5, 0)]);
         // A session after the intro: the ints only, the camera stays at its
         // default and is not sent (E912).
         let mut after = Sent::new();
         assert_eq!(step(&state, &mut after), [(s4, 0), (s5, 0)]);
+        // An activation alone, or a completion alone, has no step.
+        state.insert(RACE2, (true, false));
+        assert_eq!(step(&state, &mut after), [(s5, 1)]);
+        state.insert(RACE2, (false, true));
+        assert_eq!(step(&state, &mut after), [(s5, 0)]);
     }
 
     #[test]
@@ -250,7 +277,12 @@ mod tests {
         let only_spawn = world(&[SPAWN]);
         let mut sent = Sent::new();
         let calls = content
-            .update(only_spawn.objects(), |_| (false, false), &mut sent)
+            .update(
+                only_spawn.objects(),
+                |_| (false, false),
+                |_| (false, false),
+                &mut sent,
+            )
             .unwrap();
         assert_eq!(calls.len(), 2);
         assert!(
@@ -259,13 +291,23 @@ mod tests {
         );
         let both = world(&[SPAWN, GARAGE]);
         let calls = content
-            .update(both.objects(), |_| (false, false), &mut sent)
+            .update(
+                both.objects(),
+                |_| (false, false),
+                |_| (false, false),
+                &mut sent,
+            )
             .unwrap();
         assert_eq!(values(&calls).len(), 1);
         let mut other = Sent::new();
         assert_eq!(
             content
-                .update(both.objects(), |_| (false, false), &mut other)
+                .update(
+                    both.objects(),
+                    |_| (false, false),
+                    |_| (false, false),
+                    &mut other
+                )
                 .unwrap()
                 .len(),
             3

@@ -202,6 +202,8 @@ pub(super) struct PlayerListener {
     licence_reported: BTreeSet<u16>,
     /// Chapter notification values sent per participant.
     chapter_sent: BTreeMap<u16, crate::chapter_notifications::Sent>,
+    /// The intro objectives' (active, completed) at the last chapter pass.
+    chapter_objectives: Option<BTreeMap<u64, (bool, bool)>>,
     /// Last logged waiting-sequence readiness per participant.
     sequence_readiness: BTreeMap<u16, nfs_world::sequences::Readiness>,
     /// Participants in an owned event: free-roam scoring is retired meanwhile.
@@ -1035,6 +1037,7 @@ impl PlayerListener {
             activity_inside: BTreeMap::new(),
             licence_reported: BTreeSet::new(),
             chapter_sent: BTreeMap::new(),
+            chapter_objectives: None,
             sequence_readiness: BTreeMap::new(),
             event_suspended: BTreeSet::new(),
             replication_origin_ms: None,

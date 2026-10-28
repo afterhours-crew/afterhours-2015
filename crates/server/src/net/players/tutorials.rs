@@ -277,6 +277,12 @@ impl PlayerListener {
                 .get(&id)
                 .map_or((false, false), |o| (o.active, o.completed))
         };
+        let now: BTreeMap<u64, (bool, bool)> = objectives
+            .iter()
+            .map(|(&id, o)| (id, (o.active, o.completed)))
+            .collect();
+        let previous = self.chapter_objectives.as_ref().unwrap_or(&now);
+        let before = |id| previous.get(&id).copied().unwrap_or_default();
         let mut sent = self.chapter_sent.clone();
         let owners: Vec<u16> = self.players.player_participants().collect();
         sent.retain(|p, _| owners.contains(p));
@@ -287,13 +293,14 @@ impl PlayerListener {
                 continue;
             }
             let values = sent.entry(participant).or_default();
-            calls.extend(content.update(self.players.objects(), state, values)?);
+            calls.extend(content.update(self.players.objects(), before, state, values)?);
             boxes.extend(content.entry_box(values).map(|on| (participant, on)));
         }
         if calls.len() > nfs_world::session::MAX_RPC_QUEUE.saturating_sub(self.pending_rpcs.len()) {
             return Ok(());
         }
         self.chapter_sent = sent;
+        self.chapter_objectives = Some(now);
         self.pending_rpcs.extend(calls);
         for (participant, enabled) in boxes {
             self.participants.set_entry_box(participant, enabled);
