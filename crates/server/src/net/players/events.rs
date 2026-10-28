@@ -596,7 +596,10 @@ impl PlayerListener {
             .participants
             .in_free_roam()
             .into_iter()
-            .filter(|p| !state.failed && self.free_roam_presented.contains(p))
+            .filter(|p| {
+                !state.failed
+                    && (self.free_roam_presented.contains(p) || self.held_alive.contains_key(p))
+            })
             .chain(self.crashing_event_participants().filter(|_| !state.failed))
             // Official restart restores event subscriptions before the final
             // FreeRoam entry. Do not wait for that entry's presentation marker.
@@ -829,6 +832,15 @@ impl PlayerListener {
         if state.steps.len() > MAX_STEPS {
             return Err(replication::Error::Bound);
         }
+        // A held Alive follows the participant's event subscriptions.
+        let released: Vec<u16> = self
+            .held_alive
+            .keys()
+            .copied()
+            .filter(|p| active.contains(p))
+            .collect();
+        out.rpcs
+            .extend(released.iter().map(|p| self.held_alive[p].0));
         if out.rpcs.len()
             > nfs_world::session::MAX_RPC_QUEUE.saturating_sub(self.pending_rpcs.len())
             || out.entries.len() > MAX_PENDING.saturating_sub(self.pending_entries.len())
@@ -871,6 +883,10 @@ impl PlayerListener {
             .extend(out.teleports.into_iter().map(|c| (now_ms, c)));
         for request in completions {
             self.scoring_state.pending_awards.push_back(request);
+        }
+        for participant in released {
+            self.held_alive.remove(&participant);
+            self.alive_released_ms.insert(participant, now_ms);
         }
         Ok(())
     }

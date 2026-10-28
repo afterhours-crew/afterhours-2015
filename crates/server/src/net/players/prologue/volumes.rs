@@ -67,6 +67,24 @@ impl State {
     pub fn member(&self, participant: u16, site: Site) -> bool {
         self.published.contains(&(Some(participant), site))
     }
+    /// Whether a participant after the intro is in free roam with all of
+    /// its wanted memberships published (official E912: its presentation
+    /// follows them).
+    pub fn settled(
+        &self,
+        participant: u16,
+        volumes: &WorldVolumes,
+        resolvable: impl Fn(Site) -> bool,
+    ) -> bool {
+        self.wanted
+            .get(&participant)
+            .is_some_and(|w| w.normal && w.activities)
+            && self
+                .desired(volumes)
+                .into_iter()
+                .filter(|&(who, site)| who == Some(participant) && resolvable(site))
+                .all(|key| self.published.contains(&key))
+    }
     /// Update what participants should be in from notifications the session
     /// has just accepted, in send order; `following` are the calls queued
     /// after `calls`. A participant after the intro follows Alive with the
@@ -1058,11 +1076,14 @@ mod tests {
         );
         // The budget takes the front of that order.
         assert_eq!(state.plan(&volumes, 1, |_| true)[0].site, site(71));
+        assert!(!state.settled(5, &volumes, |_| true), "joins outstanding");
         state.commit(&volumes, &changes, |_| true);
         assert!(
             state.plan(&volumes, BATCH, |_| true).is_empty(),
             "spots stay"
         );
+        assert!(state.settled(5, &volumes, |_| true));
+        assert!(!state.settled(6, &volumes, |_| true), "no Alive seen");
         state.wanted.insert(5, alive(false));
         let left = state.plan(&volumes, BATCH, |_| true);
         assert_eq!(left.len(), 2);

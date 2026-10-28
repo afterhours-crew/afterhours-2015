@@ -200,6 +200,13 @@ pub(super) struct PlayerListener {
     activity_inside: activities::Inside,
     /// Participants whose client reported a licence this session.
     licence_reported: BTreeSet<u16>,
+    /// A normal garage exit's Alive Enter, held until the event lane has
+    /// subscribed the participant (official E912 75.249-76.538 s), with the
+    /// time it was held.
+    held_alive: BTreeMap<u16, (nfs_world::participants::HostRpc, u64)>,
+    /// When a held Alive was released: its free-roam presentation waits for
+    /// the participant's world memberships (official E912 78.037 s).
+    alive_released_ms: BTreeMap<u16, u64>,
     /// Chapter notification values sent per participant.
     chapter_sent: BTreeMap<u16, crate::chapter_notifications::Sent>,
     /// The intro objectives' (active, completed) at the last chapter pass.
@@ -1036,6 +1043,8 @@ impl PlayerListener {
             tutorial_samples: BTreeMap::new(),
             activity_inside: BTreeMap::new(),
             licence_reported: BTreeSet::new(),
+            held_alive: BTreeMap::new(),
+            alive_released_ms: BTreeMap::new(),
             chapter_sent: BTreeMap::new(),
             chapter_objectives: None,
             sequence_readiness: BTreeMap::new(),
@@ -1542,6 +1551,7 @@ impl Listener for PlayerListener {
         let mut story_pending = self.story_pending.clone();
         let mut tutorial_sessions = self.tutorials.clone();
         let mut licence_reported = self.licence_reported.clone();
+        let mut held_alive = self.held_alive.clone();
         licence_reported
             .retain(|&p| players.owns_participant(HOST_SELECTOR as u8, self.persona, p));
         let mut activity_inside = self.activity_inside.clone();
@@ -2420,6 +2430,20 @@ impl Listener for PlayerListener {
                                 .map(nfs_world::participants::HostRpc::Event),
                         );
                         rollout_records.extend(logic.records);
+                        // With an event lane the Alive Enter waits for the
+                        // participant's event subscriptions (official E912:
+                        // the opening's Leave at 75.249 s, the event start
+                        // volumes, Alive at 76.538 s).
+                        if self.events.is_some()
+                            && !self.event_state.failed
+                            && let Some(index) = chain.iter().position(|c| {
+                                matches!(c, nfs_world::participants::HostRpc::Participant(n)
+                                    if n.participant == participant
+                                        && n.call == nfs_world::participants::Call::Enter)
+                            })
+                        {
+                            held_alive.insert(participant, (chain.remove(index), self.world_ms));
+                        }
                         scheduled_binding_refreshes.push((
                             self.world_ms.saturating_add(BINDING_REFRESH_DELAY_MS),
                             participant,
@@ -3249,6 +3273,7 @@ impl Listener for PlayerListener {
         self.story_pending = story_pending;
         self.tutorials = tutorial_sessions;
         self.licence_reported = licence_reported;
+        self.held_alive = held_alive;
         self.activity_inside = activity_inside;
         self.intro_modes = intro_modes;
         self.intro_movies = intro_movies;
