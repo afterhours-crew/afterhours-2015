@@ -182,15 +182,17 @@ pub(super) fn present_with_driving_tail(
             (Vec::new(), ctx.fade(participant, &[UNBLACK, VIEW_WORLD])?)
         } else if endpoint == lifecycle.composite && leave {
             // 562123 ms toward the first race; 1247625 ms into customization.
-            let next = calls[index + 1..].iter().find_map(|c| match c {
-                HostRpc::Participant(n)
-                    if n.participant == participant && n.call == Call::Enter =>
-                {
-                    Some(n.endpoint)
-                }
-                _ => None,
+            // Both exits pass through a transient state (s85 Enter, Leave)
+            // before the next stage's Enter, so the batch decides by whether
+            // customization is entered in it (E1255: the first Enter chose
+            // the race fades and left the garage black).
+            let customization = calls[index + 1..].iter().any(|c| {
+                matches!(c, HostRpc::Participant(n)
+                    if n.participant == participant
+                        && n.call == Call::Enter
+                        && n.endpoint == lifecycle.customization)
             });
-            if next == Some(lifecycle.customization) {
+            if customization {
                 (
                     ctx.fade(participant, &[HIDE_WORLD, VIEW_WORLD])?,
                     Vec::new(),
@@ -420,6 +422,10 @@ mod tests {
         listener.logic = Some(std::sync::Arc::new(logic));
         let intro = listener.participants.intro_bindings().unwrap();
         let life = listener.participants.lifecycle_bindings().unwrap();
+        let transient = nfs_world::participants::Endpoint {
+            selector: 85,
+            ..life.customization
+        };
         let note = |endpoint, participant, call| {
             HostRpc::Participant(Notification {
                 endpoint,
@@ -477,6 +483,29 @@ mod tests {
                     (life.customization, Call::Enter),
                 ],
                 vec!["fade:1", "fade:0", "Leave", "Enter"],
+            ),
+            // The real batches pass through the transient s85 first (official
+            // E1026 562.221 s and 1247.625 s; E1255 showed a black garage when
+            // this chose the race fades).
+            (
+                vec![
+                    (life.composite, Call::Leave),
+                    (transient, Call::Enter),
+                    (transient, Call::Leave),
+                    (life.initial_teleport, Call::Enter),
+                ],
+                vec![
+                    "fade:1", "fade:2", "fade:3", "fade:2", "Leave", "Enter", "Leave", "Enter",
+                ],
+            ),
+            (
+                vec![
+                    (life.composite, Call::Leave),
+                    (transient, Call::Enter),
+                    (transient, Call::Leave),
+                    (life.customization, Call::Enter),
+                ],
+                vec!["fade:1", "fade:0", "Leave", "Enter", "Leave", "Enter"],
             ),
             (vec![(intro.teleport, Call::Enter)], vec!["Enter"]),
         ];
