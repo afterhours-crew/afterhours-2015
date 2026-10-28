@@ -207,7 +207,10 @@ impl PlayerListener {
                         participant,
                         player_index: u32::from(player_index),
                         progression,
-                        action: crate::net::items::story::Action::Message { hash },
+                        action: crate::net::items::story::Action::Message {
+                            hash,
+                            manager: crate::messages::Manager::Normal,
+                        },
                     });
                 }
             }

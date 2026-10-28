@@ -85,6 +85,23 @@ impl Catalog {
     }
 }
 
+/// A unique message the intro participant logic sends once the client has
+/// reported a licence and an intro objective completed (installed:
+/// `progression_intro` #57 `preorderclaimparts`, enabled by And(Bool #8 set
+/// by the client's EventSync #24 licence report, the intro chapter's
+/// completion); official E1026 34.664 s report, 1247.925 s underground s107
+/// m2 at the handoff).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LicensedMessage {
+    /// The client's EventSync id on the intro logic (Flags & 0x1FFFFFF).
+    pub accept: u32,
+    /// Stable id of the objective whose completion releases it.
+    pub objective: u64,
+    pub hash: u32,
+    /// Gameplay scene serializer of the manager it goes to.
+    pub manager: usize,
+}
+
 /// Gameplay scene serializers of the two managers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Managers {
@@ -162,6 +179,105 @@ impl AssetIndex {
                 .get("HashId")
                 .ok_or_else(|| bad("message hash"))?,
         )
+    }
+
+    pub fn licensed_messages(&mut self) -> Result<Vec<LicensedMessage>, Error> {
+        const SENDER: &str = "UniqueMessageSenderEntityData";
+        /// The sender's SendMessage property (enables the send).
+        const SEND_MESSAGE: u32 = 1_037_321_618;
+        const SENDER_CHANNEL: u32 = 4_117_124_221;
+        const BOOL_SET_TRUE: u32 = 2_753_900_881;
+        const EVENT_SYNC_OUT: u32 = 193_453_899;
+        const COMPLETED: u32 = 1_514_830_046;
+        let rules = self.identity.progression.clone();
+        let stable = rules.ports["stable_id"];
+        let bindings: BTreeMap<(String, usize), usize> = self
+            .scene_bindings(GAMEPLAY)?
+            .into_iter()
+            .filter(|b| b.class == MANAGER)
+            .map(|b| ((b.asset.to_lowercase(), b.object), b.serializer))
+            .collect();
+        let mut graph = Graph::new(&mut self.assets);
+        let branch = graph.read(Site::root(&rules.intro))?;
+        let world = graph.read(Site::root(GAMEPLAY))?;
+        let mut out = vec![];
+        for sender in branch.iter().filter(|n| n.object.class == SENDER) {
+            if !graph.input_ports(&sender.site)?.contains(&SEND_MESSAGE) {
+                continue;
+            }
+            let enable = graph.input(&sender.site, SEND_MESSAGE)?;
+            if graph.object(&enable.site)?.class != "AndEntityData" {
+                continue;
+            }
+            let (mut accept, mut objective) = (None, None);
+            for port in graph.input_ports(&enable.site)? {
+                let input = graph.input(&enable.site, port)?;
+                let object = graph.object(&input.site)?;
+                match object.class.as_str() {
+                    "BoolEntityData" => {
+                        for (source, event) in graph.event_sources(&input.site, BOOL_SET_TRUE)? {
+                            let sync = graph.object(&source)?;
+                            if sync.class == "EventSyncEntityData" && event == EVENT_SYNC_OUT {
+                                let flags = bits32(
+                                    sync.fields.get("Flags").ok_or_else(|| bad("sync flags"))?,
+                                )?;
+                                accept = Some(flags & 0x1ff_ffff);
+                            }
+                        }
+                    }
+                    "RaceObjectiveEntityData" if input.port == COMPLETED => {
+                        objective = Some(crate::chapter_notifications::stable(
+                            &mut graph,
+                            stable,
+                            &input.site,
+                        )?);
+                    }
+                    _ => {}
+                }
+            }
+            let (Some(accept), Some(objective)) = (accept, objective) else {
+                continue;
+            };
+            let channels = graph.links(&sender.site, SENDER_CHANNEL)?;
+            let [channel] = channels.as_slice() else {
+                return Err(bad("licensed sender channel"));
+            };
+            // The channel's instance is a gameplay layer object (installed:
+            // layer26 messages schematic #2) linked to the manager.
+            let asset = graph.target_field(&channel.site, "ChannelAsset")?;
+            let mut managers = vec![];
+            for n in world
+                .iter()
+                .filter(|n| n.object.class == "LinkedSchematicChannelEntityData")
+            {
+                if graph.target_field(&n.site, "ChannelAsset")? != asset {
+                    continue;
+                }
+                for target in graph.links(&n.site, channel.port)? {
+                    if let Some(&serializer) =
+                        bindings.get(&(target.site.key.0.to_lowercase(), target.site.key.1))
+                    {
+                        managers.push(serializer);
+                    }
+                }
+            }
+            let [manager] = managers.as_slice() else {
+                return Err(bad("licensed sender manager"));
+            };
+            let (partition, object) = graph.target_field(&sender.site, "MessageAsset")?;
+            out.push((accept, objective, (partition, object), *manager));
+        }
+        drop(graph);
+        out.into_iter()
+            .map(|(accept, objective, (partition, object), manager)| {
+                Ok(LicensedMessage {
+                    accept,
+                    objective,
+                    hash: self.message_hash(&partition, object)?,
+                    manager,
+                })
+            })
+            .collect()
     }
 
     pub fn message_managers(&mut self) -> Result<Managers, Error> {
@@ -250,3 +366,7 @@ mod tests {
         assert!(Catalog::new(0, vec![]).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "messages/licensed_tests.rs"]
+mod licensed_tests;

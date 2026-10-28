@@ -14,14 +14,16 @@ pub(in crate::net) enum Action {
         objective: u64,
         definition: [u8; 16],
     },
-    /// A unique phone message joins the normal manager's table; the world
+    /// A unique phone message joins its manager's table; the world
     /// announces it only after this commit.
     Message {
         hash: u32,
+        manager: crate::messages::Manager,
     },
     /// The client read a stored message.
     MessageRead {
         hash: u32,
+        manager: crate::messages::Manager,
     },
     /// The client accepted a tutorial: its seen value becomes durable.
     Tutorial {
@@ -117,7 +119,7 @@ impl Profile {
                         }
                         result.ok_or(Error::Inventory(nfs_storage::Error::Conflict.into()))?
                     }
-                    Action::Message { hash } | Action::MessageRead { hash } => {
+                    Action::Message { hash, manager } | Action::MessageRead { hash, manager } => {
                         let read = matches!(request.action, Action::MessageRead { .. });
                         let mut result = None;
                         for _ in 0..8 {
@@ -125,7 +127,7 @@ impl Profile {
                                 .repository
                                 .snapshot(account)
                                 .map_err(|e| Error::Inventory(e.into()))?;
-                            let table = nfs_services::messages::STATIC;
+                            let table = manager.table();
                             let prepared = if read {
                                 nfs_services::messages::mark_read(&snapshot, table, hash)
                             } else {
@@ -530,6 +532,7 @@ mod tests {
             progression: progression(),
             action: Action::Message {
                 hash: 1_422_063_331,
+                manager: crate::messages::Manager::Normal,
             },
         };
         let rows = |loaded: &crate::persistent::Loaded| {
@@ -552,6 +555,7 @@ mod tests {
         let read = Request {
             action: Action::MessageRead {
                 hash: 1_422_063_331,
+                manager: crate::messages::Manager::Normal,
             },
             ..request.clone()
         };

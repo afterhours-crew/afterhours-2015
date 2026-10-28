@@ -32,6 +32,7 @@ pub(super) use equipment::EquipmentRequest;
 pub(super) use garage::{GarageOperation, GarageRequest};
 pub(super) use scoring::{AwardRequest, Credited};
 mod launchers;
+mod licensed;
 mod map_feed;
 mod output;
 mod prologue;
@@ -197,6 +198,8 @@ pub(super) struct PlayerListener {
     tutorial_samples: BTreeMap<u16, ([f64; 3], f64)>,
     /// Last reported inside value per participant and assigned volume.
     activity_inside: activities::Inside,
+    /// Participants whose client reported a licence this session.
+    licence_reported: BTreeSet<u16>,
     /// Chapter notification values sent per participant.
     chapter_sent: BTreeMap<u16, crate::chapter_notifications::Sent>,
     /// Last logged waiting-sequence readiness per participant.
@@ -672,12 +675,15 @@ impl PlayerListener {
                 // The message managers restore the stored messages and report
                 // themselves initiated (official E1026 36.220 s, E912 restores).
                 if let Some(messages) = &progression.messages {
-                    let rows = nfs_services::messages::rows(
-                        loaded.tables(),
-                        nfs_services::messages::STATIC,
-                    )
-                    .map_err(|_| replication::Error::Shape)?;
-                    replies.extend(messages.session_start(players.objects(), &rows)?);
+                    let rows = |manager: crate::messages::Manager| {
+                        nfs_services::messages::rows(loaded.tables(), manager.table())
+                            .map_err(|_| replication::Error::Shape)
+                    };
+                    replies.extend(messages.session_start(
+                        players.objects(),
+                        &rows(crate::messages::Manager::Normal)?,
+                        &rows(crate::messages::Manager::Underground)?,
+                    )?);
                 }
                 // The notified tutorial seen values join the same flush
                 // (E1026 36.220-36.319 s, E912 32.336 s).
@@ -1027,6 +1033,7 @@ impl PlayerListener {
             tutorials: BTreeMap::new(),
             tutorial_samples: BTreeMap::new(),
             activity_inside: BTreeMap::new(),
+            licence_reported: BTreeSet::new(),
             chapter_sent: BTreeMap::new(),
             sequence_readiness: BTreeMap::new(),
             event_suspended: BTreeSet::new(),
@@ -1531,6 +1538,9 @@ impl Listener for PlayerListener {
         let mut selection_execution = self.selection_execution.clone();
         let mut story_pending = self.story_pending.clone();
         let mut tutorial_sessions = self.tutorials.clone();
+        let mut licence_reported = self.licence_reported.clone();
+        licence_reported
+            .retain(|&p| players.owns_participant(HOST_SELECTOR as u8, self.persona, p));
         let mut activity_inside = self.activity_inside.clone();
         let mut intro_modes = self.intro_modes.clone();
         let mut intro_movies = self.intro_movies.clone();
@@ -1558,6 +1568,14 @@ impl Listener for PlayerListener {
                     .map_err(|_| replication::Error::Shape)?;
                 if self.tutorial_accept(
                     &mut tutorial_sessions,
+                    &players,
+                    &mut story_pending,
+                    &message,
+                )? {
+                    continue;
+                }
+                if self.licence_report(
+                    &mut licence_reported,
                     &players,
                     &mut story_pending,
                     &message,
@@ -2647,7 +2665,7 @@ impl Listener for PlayerListener {
                 match messages.read(players.objects(), body, |id| {
                     players.owns_participant(HOST_SELECTOR as u8, self.persona, id)
                 }) {
-                    Ok(Some((hash, participant))) => {
+                    Ok(Some((hash, participant, manager))) => {
                         let Some(player_index) =
                             players.runtime_index(HOST_SELECTOR as u8, self.persona, participant)
                         else {
@@ -2660,7 +2678,7 @@ impl Listener for PlayerListener {
                             participant,
                             player_index: u32::from(player_index),
                             progression,
-                            action: super::items::story::Action::MessageRead { hash },
+                            action: super::items::story::Action::MessageRead { hash, manager },
                         });
                         continue;
                     }
@@ -3227,6 +3245,7 @@ impl Listener for PlayerListener {
         self.selection_execution = selection_execution;
         self.story_pending = story_pending;
         self.tutorials = tutorial_sessions;
+        self.licence_reported = licence_reported;
         self.activity_inside = activity_inside;
         self.intro_modes = intro_modes;
         self.intro_movies = intro_movies;

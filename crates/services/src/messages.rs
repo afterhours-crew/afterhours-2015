@@ -6,11 +6,15 @@
 //! start and append as messages arrive. The normal manager's table is
 //! `StaticMessage {Index, Asset, Read}`: the row key is the message number,
 //! `Asset` the message's HashId (official E1026 906.624 s appends
-//! `intro_01_obj05_pho_reminder01_01`, HashId 1422063331).
+//! `intro_01_obj05_pho_reminder01_01`, HashId 1422063331). The underground
+//! manager's `UgStaticMessages {Index, MessageHash, Read}` holds the same
+//! rows under another hash column (installed persistent content; E1026
+//! 1247.925 s announces `preorderclaimparts` there, E912 32.336 s restores it).
 use crate::persistent::key;
 use nfs_storage::{Batch, Error, Op, Snapshot, tables::Value};
 
 pub const STATIC: &str = "StaticMessage";
+pub const UNDERGROUND: &str = "UgStaticMessages";
 const NAMESPACE: u64 = 1 << 53;
 const MAX_ROWS: usize = 512;
 
@@ -21,12 +25,21 @@ pub struct Row {
     pub read: bool,
 }
 
+/// The column holding a table's message HashId.
+fn hash_column(table: &str) -> &'static str {
+    if table == UNDERGROUND {
+        "MessageHash"
+    } else {
+        "Asset"
+    }
+}
+
 /// One table's rows in message-number order (an unwritten table is empty).
 pub fn rows(
     tables: &std::collections::BTreeMap<u32, nfs_storage::tables::Table>,
-    table: &str,
+    name: &str,
 ) -> Result<Vec<Row>, Error> {
-    let Some(table) = tables.get(&key(table)) else {
+    let Some(table) = tables.get(&key(name)) else {
         return Ok(vec![]);
     };
     if table.rows.len() > MAX_ROWS {
@@ -42,7 +55,7 @@ pub fn rows(
             };
             Ok(Row {
                 index,
-                hash: int("Asset")? as u32,
+                hash: int(hash_column(name))? as u32,
                 read: match int("Read")? {
                     0 => false,
                     1 => true,
@@ -73,7 +86,7 @@ pub fn append(snapshot: &Snapshot, table: &str, hash: u32) -> Result<Option<Batc
     next.rows.insert(
         index,
         [
-            (key("Asset"), Value::Int(hash as i32)),
+            (key(hash_column(table)), Value::Int(hash as i32)),
             (key("Read"), Value::Int(0)),
         ]
         .into(),
@@ -174,6 +187,41 @@ mod tests {
         assert_eq!(table(&batch).rows[&0][&key("Read")], Value::Int(0));
         assert!(mark_read(&held, STATIC, 5).unwrap().is_none());
         assert!(mark_read(&held, STATIC, 77).unwrap().is_none());
+    }
+    #[test]
+    fn the_underground_table_keeps_its_hash_in_message_hash() {
+        let empty = snapshot(&[]);
+        let batch = append(&empty, UNDERGROUND, 985_423_157).unwrap().unwrap();
+        let [Op::SetTable(k, t)] = batch.ops.as_slice() else {
+            panic!()
+        };
+        assert_eq!(*k, key(UNDERGROUND));
+        assert_eq!(t.rows[&0][&key("MessageHash")], Value::Int(985_423_157));
+        assert!(!t.rows[&0].contains_key(&key("Asset")));
+        let tables = [(key(UNDERGROUND), t.clone())].into();
+        assert_eq!(
+            rows(&tables, UNDERGROUND).unwrap(),
+            [Row {
+                index: 0,
+                hash: 985_423_157,
+                read: false
+            }]
+        );
+        assert!(
+            append(
+                &Snapshot {
+                    tables,
+                    ..empty.clone()
+                },
+                UNDERGROUND,
+                985_423_157
+            )
+            .unwrap()
+            .is_none()
+        );
+        // The normal table's column does not stand in for it.
+        let normal = snapshot(&[(0, 9, 0)]).tables[&key(STATIC)].clone();
+        assert!(rows(&[(key(UNDERGROUND), normal)].into(), UNDERGROUND).is_err());
     }
     #[test]
     fn malformed_rows_are_refused_and_an_unwritten_table_is_empty() {

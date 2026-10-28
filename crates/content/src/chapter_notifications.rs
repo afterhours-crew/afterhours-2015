@@ -211,6 +211,56 @@ fn default(object: &nfs_frostbite::ebx::Object) -> Result<i32, Error> {
     }
 }
 
+/// The objects an intro participant-logic channel field reaches in the
+/// gameplay sub-worlds: the channel's instance in the progression scene
+/// (`scene`) forwards the field through the scene interface, and the
+/// gameplay scene links the progression sub-world's field on (`reference`,
+/// its SubWorldReference there).
+pub(crate) fn forwarded<S: Source>(
+    graph: &mut Graph<S>,
+    scene: &[Node],
+    reference: &Site,
+    channel: &Endpoint,
+) -> Result<Vec<Endpoint>, Error> {
+    let asset = graph.target_field(&channel.site, "ChannelAsset")?;
+    let mut instances = vec![];
+    for n in scene
+        .iter()
+        .filter(|n| n.object.class == "LinkedSchematicChannelEntityData")
+    {
+        if graph.target_field(&n.site, "ChannelAsset")? == asset {
+            instances.push(n.site.clone());
+        }
+    }
+    let [instance] = instances.as_slice() else {
+        return Err(bad("intro channel instance"));
+    };
+    let mut out = vec![];
+    for target in graph.link_targets(instance, channel.port)? {
+        if graph.object(&target.site)?.class != "InterfaceDescriptorData" {
+            continue;
+        }
+        out.extend(graph.links(reference, target.port)?);
+    }
+    Ok(out)
+}
+
+/// The gameplay scene's reference to the progression sub-world.
+pub(crate) fn progression_reference(world: &[Node], scene: &str) -> Result<Site, Error> {
+    let mut references = world.iter().filter(|n| {
+        n.object.class == "SubWorldReferenceObjectData"
+            && n.object
+                .fields
+                .get("BundleName")
+                .and_then(Value::as_str)
+                .is_some_and(|b| b.eq_ignore_ascii_case(scene))
+    });
+    match (references.next(), references.next()) {
+        (Some(reference), None) => Ok(reference.site.clone()),
+        _ => Err(bad("progression sub-world reference")),
+    }
+}
+
 impl AssetIndex {
     pub fn chapter_notifications(&mut self) -> Result<Vec<Notification>, Error> {
         let rules = self.identity.progression.clone();
@@ -221,19 +271,7 @@ impl AssetIndex {
         let branch = graph.read(Site::root(&rules.intro))?;
         let scene = graph.read(Site::root(&rules.scene))?;
         let world = graph.read(Site::root(gameplay))?;
-        // The progression sub-world's reference in the gameplay scene.
-        let mut references = world.iter().filter(|n| {
-            n.object.class == "SubWorldReferenceObjectData"
-                && n.object
-                    .fields
-                    .get("BundleName")
-                    .and_then(Value::as_str)
-                    .is_some_and(|b| b.eq_ignore_ascii_case(&rules.scene))
-        });
-        let (Some(reference), None) = (references.next(), references.next()) else {
-            return Err(bad("progression sub-world reference"));
-        };
-        let reference = reference.site.clone();
+        let reference = progression_reference(&world, &rules.scene)?;
         let mut out: Vec<Found> = vec![];
         for node in branch.iter().filter(|n| {
             matches!(n.object.class.as_str(), INT_ACCESSOR | BOOL_ACCESSOR)
@@ -255,28 +293,11 @@ impl AssetIndex {
                 // A participant-logic-local property: no scene sees it.
                 continue;
             }
-            let asset = graph.target_field(&channel.site, "ChannelAsset")?;
             let source = graph.input(&node.site, ACCESSOR_VALUE)?;
             let value = expr(&mut graph, stable_port, source, 0)?;
-            // The channel's instance in the progression scene forwards the
-            // field through the scene interface.
-            let mut instances = vec![];
-            for n in scene
-                .iter()
-                .filter(|n| n.object.class == "LinkedSchematicChannelEntityData")
             {
-                if graph.target_field(&n.site, "ChannelAsset")? == asset {
-                    instances.push(n.site.clone());
-                }
-            }
-            let [instance] = instances.as_slice() else {
-                return Err(bad("chapter channel instance"));
-            };
-            for target in graph.link_targets(instance, channel.port)? {
-                if graph.object(&target.site)?.class != "InterfaceDescriptorData" {
-                    continue;
-                }
-                for property in graph.links(&reference, target.port)? {
+                let channel = channel.clone();
+                for property in forwarded(&mut graph, &scene, &reference, &channel)? {
                     let object = graph.object(&property.site)?;
                     if !object.class.ends_with("ParticipantPropertyEntityData") {
                         return Err(bad("chapter target property"));
