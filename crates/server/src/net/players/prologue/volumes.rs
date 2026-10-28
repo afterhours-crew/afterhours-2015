@@ -324,7 +324,10 @@ impl State {
     }
 
     /// The next changes toward what is wanted, at most `budget` (and one
-    /// batch): removals first. Endpoints the world cannot resolve are left out.
+    /// batch): removals first, then joins in the authored driving order
+    /// (official E912 76.538 s: the narrative locations in the Alive Enter
+    /// frame, the other families after), the rest after them. Endpoints the
+    /// world cannot resolve are left out.
     pub fn plan(
         &self,
         volumes: &WorldVolumes,
@@ -341,14 +344,18 @@ impl State {
             site,
             join,
         };
+        let rank: BTreeMap<Site, usize> = volumes
+            .driving_order
+            .iter()
+            .enumerate()
+            .map(|(index, &site)| (site, index))
+            .collect();
+        let mut joins: Vec<_> = desired.difference(&self.published).collect();
+        joins.sort_by_key(|(_, site)| rank.get(site).copied().unwrap_or(usize::MAX));
         self.published
             .difference(&desired)
             .map(|item| change(item, false))
-            .chain(
-                desired
-                    .difference(&self.published)
-                    .map(|item| change(item, true)),
-            )
+            .chain(joins.into_iter().map(|item| change(item, true)))
             .take(budget.min(BATCH))
             .collect()
     }
@@ -1024,6 +1031,7 @@ mod tests {
             events: BTreeSet::from([site(1)]),
             activities: BTreeSet::from([site(70)]),
             spots: BTreeSet::from([site(71)]),
+            driving_order: vec![site(71), site(70)],
             ..WorldVolumes::default()
         };
         let mut state = State::default();
@@ -1043,6 +1051,13 @@ mod tests {
             BTreeSet::from([(Some(5), site(70), true), (Some(5), site(71), true)]),
             "no event volume: the owned events subscribe those"
         );
+        assert_eq!(
+            changes.iter().map(|c| c.site).collect::<Vec<_>>(),
+            [site(71), site(70)],
+            "joins follow the driving order, not the endpoint order"
+        );
+        // The budget takes the front of that order.
+        assert_eq!(state.plan(&volumes, 1, |_| true)[0].site, site(71));
         state.commit(&volumes, &changes, |_| true);
         assert!(
             state.plan(&volumes, BATCH, |_| true).is_empty(),
