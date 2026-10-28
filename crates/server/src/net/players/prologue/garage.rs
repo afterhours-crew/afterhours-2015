@@ -139,6 +139,12 @@ impl PlayerListener {
         let &[_, participant] = envelope.references() else {
             return Err(replication::Error::Shape);
         };
+        // Once the intro is finished the ordinary garage path owns the
+        // participant's requests; the retired modes stay recorded (E1257: the
+        // free-roam request was claimed here and refused for good).
+        if participants.intro_chapter(participant).is_none() {
+            return Ok(None);
+        }
         let Some((active, _, chapter @ (Chapter::FirstDrive | Chapter::ReturnDrive))) =
             modes.get(&participant)
         else {
@@ -165,7 +171,10 @@ impl PlayerListener {
             // waited for a second request (first drive) or stayed stuck.
             match participants.begin_intro_return(participant) {
                 Outcome::Repeated => return Ok(Some(out)),
-                Outcome::Unsupported => return Err(replication::Error::Shape),
+                // Not an intro return in this stage: the ordinary path decides
+                // (and logs what it cannot use); a well-formed request is
+                // never refused for the stage it arrives in.
+                Outcome::Unsupported => return Ok(None),
                 Outcome::Advanced(chain) => {
                     let returns = returns.ok_or(replication::Error::Unsupported)?;
                     let owner = Owner {
