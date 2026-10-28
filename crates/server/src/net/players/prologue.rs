@@ -187,33 +187,9 @@ impl PlayerListener {
         }
         {
             for (active, _, chapter) in modes.values_mut() {
-                let mode = content.mode(*chapter)?;
-                let out = active.advance(mode, &mut players, seconds)?;
+                let out = active.advance(content.mode(*chapter)?, &mut players, seconds)?;
                 records.extend(out.records);
-                // The return launch also clears the participant's held item:
-                // `introreturntogarage` #25 ItemSelector selects the null
-                // ItemEntity #24 on the gate output that launches the mode
-                // (official E1026 891.523 s, gameplay s7 m2 with the launch
-                // row; the return refresh selects the car again at 1119.426 s).
-                let launched = *chapter == Chapter::ReturnDrive
-                    && mode.data.launch_event.is_some_and(|launch| {
-                        out.calls.iter().any(|c| {
-                            matches!(c, HostRpc::Event(f)
-                            if f.event == launch.ordinal && f.target.entity == launch.bus)
-                        })
-                    });
                 calls.extend(out.calls);
-                if launched && let Some(bindings) = participants.lifecycle_bindings() {
-                    let slot = bindings.garage[0];
-                    calls.push(HostRpc::GameMode(crate::event_logic::call(
-                        players.objects(),
-                        slot.scene,
-                        slot.selector,
-                        2,
-                        Some(active.owner().participant),
-                        nfs_world::game_mode::Arguments::None,
-                    )?));
-                }
                 deleted.extend(out.deleted);
                 // A due message is stored first; its commit announces it.
                 for hash in out.messages {
@@ -324,7 +300,31 @@ impl PlayerListener {
                     }
                     records.extend(output.records);
                     deleted.extend(output.deleted);
+                    // The return launch also clears the participant's held
+                    // item: `introreturntogarage` #25 ItemSelector selects
+                    // the null ItemEntity #24 on the gate output that
+                    // launches the mode (official E1026 891.523 s, gameplay
+                    // s7 m2 with the launch row; the return refresh selects
+                    // the car again at 1119.426 s).
+                    let launch = content.mode(Chapter::ReturnDrive)?.data.launch_event;
+                    let launched = launch.is_some_and(|launch| {
+                        output.calls.iter().any(|c| {
+                            matches!(c, HostRpc::Event(f)
+                            if f.event == launch.ordinal && f.target.entity == launch.bus)
+                        })
+                    });
                     calls.extend(output.calls);
+                    if launched && let Some(bindings) = participants.lifecycle_bindings() {
+                        let slot = bindings.garage[0];
+                        calls.push(HostRpc::GameMode(crate::event_logic::call(
+                            players.objects(),
+                            slot.scene,
+                            slot.selector,
+                            2,
+                            Some(participant),
+                            nfs_world::game_mode::Arguments::None,
+                        )?));
+                    }
                     calls.extend(chain.into_iter().map(HostRpc::Participant));
                     driving_presentation.insert(participant);
                     modes.insert(participant, (drive, canceller, Chapter::ReturnDrive));
