@@ -790,6 +790,7 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
             .vehicles
             .clone();
         let game_dir = args.game_dir.clone();
+        let road_cache_root = args.root.clone();
         let (content, graph, index) = tokio::task::spawn_blocking(move || {
             let items = nfs_services::item_content::ItemContent::load(&item_path)
                 .map_err(|_| Failure::ProfileConfig)?;
@@ -800,7 +801,13 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
             let graph = game_dir.ok_or(None).and_then(|dir| {
                 nfs_content::assets::AssetIndex::open(&dir, &nfs_content::Options::default())
                     .and_then(|mut opened| {
-                        let graph = opened.road_graph();
+                        let graph = nfs_server::prepared_content::Cache::for_index(
+                            &road_cache_root,
+                            &opened,
+                        )
+                        .and_then(|cache| {
+                            nfs_server::prepared_content::roads::graph(&mut opened, cache.as_ref())
+                        });
                         // Preserve the validated source and its immutable tables
                         // for scoring, events and story preparation below.
                         index = Some(opened);
@@ -900,7 +907,10 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                     "levels/genesis01/gameplay",
                     &scoring.categories.keys().copied().collect(),
                 );
-                let road = index.road_network();
+                let road = nfs_server::prepared_content::roads::network(
+                    &mut index,
+                    runtime_cache.as_ref(),
+                );
                 let nitrous = index.nitrous_configurations()?;
                 let hides = index.progression_debug_hides();
                 let messages = nfs_server::messages::Content::prepare(&mut index);

@@ -87,6 +87,11 @@ fn segment(object: &Object) -> Result<Segment, Error> {
 
 /// Every `LaneSegment` of a road network partition, in object order.
 pub fn parse(objects: &[Object]) -> Result<Network, Error> {
+    Network::new(parse_segments(objects)?).map_err(|e| bad(&format!("road network: {e}")))
+}
+
+/// Static constructor inputs, in authored order. Consumers must use `Network::new`.
+pub fn parse_segments(objects: &[Object]) -> Result<Vec<Segment>, Error> {
     let mut segments = Vec::new();
     for object in objects.iter().filter(|o| o.class == "LaneSegment") {
         if segments.len() >= MAX_SEGMENTS {
@@ -97,7 +102,14 @@ pub fn parse(objects: &[Object]) -> Result<Network, Error> {
     if !objects.iter().any(|o| o.class == "RoadNetworkEntityData") {
         return Err(bad("road network entity missing"));
     }
-    Network::new(segments).map_err(|e| bad(&format!("road network: {e}")))
+    Ok(segments)
+}
+
+/// Static junction graph inputs. Derived spatial grids and live AI state are
+/// excluded; `Graph::new` remains the validation/instantiation boundary.
+pub struct GraphInput {
+    pub nodes: Vec<[f32; 3]>,
+    pub lanes: Vec<LaneInput>,
 }
 
 fn squared(a: [f32; 3], b: [f32; 3]) -> f32 {
@@ -108,6 +120,11 @@ fn squared(a: [f32; 3], b: [f32; 3]) -> f32 {
 /// `Lane` with its segments' points joined in order. Four installed lanes list
 /// their segments from the end node; those are reversed to run start to end.
 pub fn parse_graph(objects: &[Object]) -> Result<Graph, Error> {
+    let input = parse_graph_input(objects)?;
+    Graph::new(input.nodes, input.lanes).map_err(|e| bad(&format!("road graph: {e}")))
+}
+
+pub fn parse_graph_input(objects: &[Object]) -> Result<GraphInput, Error> {
     let mut node_of = BTreeMap::new();
     let mut nodes = Vec::new();
     for (index, object) in objects.iter().enumerate() {
@@ -172,10 +189,18 @@ pub fn parse_graph(objects: &[Object]) -> Result<Graph, Error> {
             widths,
         });
     }
-    Graph::new(nodes, lanes).map_err(|e| bad(&format!("road graph: {e}")))
+    Ok(GraphInput { nodes, lanes })
 }
 
 impl AssetIndex {
+    pub fn road_graph_input(&mut self) -> Result<GraphInput, Error> {
+        parse_graph_input(self.assets.objects(PARTITION)?)
+    }
+
+    pub fn road_segments(&mut self) -> Result<Vec<Segment>, Error> {
+        parse_segments(self.assets.objects(PARTITION)?)
+    }
+
     /// The installed road network of the open world.
     pub fn road_network(&mut self) -> Result<Network, Error> {
         let objects = self.assets.objects(PARTITION)?;

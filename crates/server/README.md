@@ -255,7 +255,8 @@ derive Stats scopes from the installed game modes and use local AllDrive policy:
 time-limited features and recent-player listing are disabled, and no SpeedList
 types are offered. Explicit catalogs retain their configured policies.
 
-Compiled normal-sprint and complete-prologue inputs are also reused across processes in
+Compiled road-routing, road-scoring, normal-sprint and complete-prologue inputs
+are also reused across processes in
 `artifacts/prepared-runtime` under the selected data root. This separate cache
 contains installed static definitions, never player inventory, progression or
 live session state. It belongs on the local machine and is not a distributable
@@ -264,6 +265,17 @@ scoring categories (sprints) or the parent blueprint (prologue). An installation
 truncated, corrupt or invalid models are rebuilt. Publication is bounded and
 atomic, with one builder per key. Runtime constructors still validate cached
 inputs against the current vehicle/item definitions.
+
+The road products retain authored node/lane/segment order, lane direction,
+widths, points and speed limits. Reads rebuild spatial indexes through the
+ordinary graph/network constructors; player positions and current AI routes
+are excluded. The two components are independent, so an unavailable routing
+graph does not suppress an otherwise valid scoring network. Topology, geometry
+and spatial-grid bounds are checked before publication and on every load.
+The local cache encoding preserves float bits and rejects unknown versions,
+oversized counts, truncated fields and trailing data; it is not a game protocol.
+`profile_roads_cache` compares complete installed uncached/cold/warm models
+without opening a save or listener.
 
 The prologue snapshot includes both races, movies, garage selection and return,
 sequences, membership and world-volume definitions. A missing required phase or
