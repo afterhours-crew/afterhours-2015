@@ -25,6 +25,20 @@ let items = prepared.path(nfs_content::Kind::ItemContent);
    replaced only when it holds nothing but entry files. A patched or repaired
    installation produces a new fingerprint and therefore a new entry.
 
+Within an `AssetIndex`, event preparation shares validated scene serializer and
+embedded-bus indexes. Entries retain the full parent-instance context and exact
+construction rules; distinct installations own distinct caches. Retention is
+bounded to 64 scenes and 100,000 table rows. The first read still compares graph
+occurrences with the independent scene constructor before publishing a table.
+
+`prepared_cache` supplies a bounded atomic file cache for future static compiled
+products. Component callers must key every input and compiler revision and
+validate decoded models. It does not cache account/session state and is not yet
+connected to runtime compilation. Startup benchmarks use
+`uv run --script tools/benchmark_startup.py` from the repository root with an
+explicit executable, installation and new disposable output directory; they run
+server-only and keep their content, save and logs local.
+
 | Kind | File | Source |
 | --- | --- | --- |
 | `ItemContent` | `item-content.json` | `Items/GameItemSystem`: every definition, its prices, quantity, ownership level, flags, sub/additional items and derived default, plus the starting inventory |

@@ -8,6 +8,8 @@ use crate::{
     world::{StartupEntry, StartupKind},
 };
 
+pub(crate) mod cache;
+
 /// UI widget children have a client owner. The supported data-vtable realm
 /// getter05546180 returns Realm_Client for these classes; their widget
 /// blueprints are not children of the server's scene execution context.
@@ -98,7 +100,30 @@ impl SceneLookup<'_> {
     /// belongs to the manager's scene, independently of a spawned blueprint.
     pub fn embedded_bus(&self, graph: &mut Graph<Assets>, site: &Site) -> Result<u32, Error> {
         let scene = self.scene_name(site)?;
-        embedded_bus(&graph.read(self.roots[&scene].clone())?, site)
+        self.prepared(graph, &scene)?.embedded_bus(site)
+    }
+    fn prepared(
+        &self,
+        graph: &mut Graph<Assets>,
+        scene: &str,
+    ) -> Result<std::sync::Arc<cache::Prepared>, Error> {
+        let root = &self.roots[scene];
+        if let Some(prepared) = graph.source.scene_cache.get(root, self.rules) {
+            return Ok(prepared);
+        }
+        let nodes = graph.read(root.clone())?;
+        let (_, instances) = scenes::construct(graph.source, self.rules, scene, true)?;
+        let key = if scene == self.rules.level.to_lowercase() {
+            1
+        } else {
+            crate::assets::scene_key(scene)
+        };
+        let prepared = std::sync::Arc::new(cache::Prepared::new(&nodes, &instances, key)?);
+        graph
+            .source
+            .scene_cache
+            .insert(root.clone(), self.rules.clone(), prepared.clone());
+        Ok(prepared)
     }
     pub fn endpoint(
         &mut self,
@@ -109,31 +134,17 @@ impl SceneLookup<'_> {
             .chain(site.parents.iter().rev().map(|f| &f.bus))
             .find_map(|bus| self.roots.contains_key(&bus.0).then(|| bus.0.clone()))
             .ok_or_else(|| bad("channel outside startup scenes"))?;
-        if self.loaded.insert(scene.clone()) {
-            let nodes = graph.read(self.roots[&scene].clone())?;
-            // Compare both builders' occurrence order before using an index.
-            let (_, instances) = scenes::construct(graph.source, self.rules, &scene, true)?;
-            if nodes.len() != instances.len() {
-                return Err(bad("scene occurrence count differs"));
+        if !self.loaded.contains(&scene) {
+            let prepared = self.prepared(graph, &scene)?;
+            if prepared
+                .endpoints
+                .keys()
+                .any(|site| self.endpoints.contains_key(site))
+            {
+                return Err(bad("ambiguous scene occurrence"));
             }
-            let key = if scene == self.rules.level.to_lowercase() {
-                1
-            } else {
-                crate::assets::scene_key(&scene)
-            };
-            for (node, instance) in nodes.into_iter().zip(instances) {
-                if node.site.key != (instance.asset, instance.index) {
-                    return Err(bad("scene occurrence order differs"));
-                }
-                if let Some(serializer) = instance.serializer
-                    && self
-                        .endpoints
-                        .insert(node.site, (key, serializer))
-                        .is_some()
-                {
-                    return Err(bad("ambiguous scene occurrence"));
-                }
-            }
+            self.endpoints.extend(prepared.endpoints.clone());
+            self.loaded.insert(scene);
         }
         self.endpoints
             .get(site)

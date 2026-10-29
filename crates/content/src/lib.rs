@@ -32,6 +32,7 @@ pub mod logic_events;
 pub mod messages;
 pub mod nitrous;
 pub mod participant_logic;
+pub mod prepared_cache;
 mod progress;
 pub mod progression;
 pub mod prologue;
