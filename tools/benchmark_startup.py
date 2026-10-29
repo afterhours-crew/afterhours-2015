@@ -31,7 +31,17 @@ def digest(path: Path) -> str:
 
 
 def read(path: Path) -> dict:
-    return json.loads(path.read_text(encoding="utf-8-sig"))
+    # Windows can briefly deny a read while the supervisor atomically replaces
+    # its status file. Retry only that sharing/access race, with a fixed bound;
+    # malformed JSON and persistent access failures still fail the benchmark.
+    deadline = time.monotonic() + 1.0
+    while True:
+        try:
+            return json.loads(path.read_text(encoding="utf-8-sig"))
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
 
 
 class WindowsMemory:
