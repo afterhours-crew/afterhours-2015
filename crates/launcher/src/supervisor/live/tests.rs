@@ -90,7 +90,20 @@ impl Platform for Scripted {
     fn spawn(&self, spec: &SpawnSpec) -> Result<Box<dyn ChildProcess>> {
         self.observed.borrow_mut().spawned.push(spec.clone());
         if !spec.capture_first_line {
-            std::fs::write(&spec.stdout_log, b"{\"prepared\":true}")?;
+            if spec.arguments.iter().any(|a| a == "create-account") {
+                let at = spec
+                    .arguments
+                    .iter()
+                    .position(|a| a == "--state-directory")
+                    .unwrap();
+                std::fs::create_dir_all(&spec.arguments[at + 1])?;
+                std::fs::write(
+                    &spec.stdout_log,
+                    br#"{"local_account":"0123456789abcdef0123456789abcdef"}"#,
+                )?;
+            } else {
+                std::fs::write(&spec.stdout_log, b"{\"prepared\":true}")?;
+            }
         } else if matches!(self.fault, Fault::ChangedExecutable) {
             std::fs::write(&spec.executable, b"replacement bytes")?;
         }
@@ -252,5 +265,53 @@ fn receipt_is_bounded_and_remote_relay_is_explicit() {
     let receipt: serde_json::Value =
         records::read_json(&session.run.join("server-process.json")).unwrap();
     assert_eq!(receipt["role"], "relay");
+    std::fs::remove_dir_all(session.data).unwrap();
+}
+
+#[test]
+fn first_setup_starts_the_prologue_and_repeated_setup_preserves_the_account() {
+    let (mut session, observed) = session(Fault::None);
+    session.request.game_directory = Some(session.data.join("Game"));
+    let prepared = Prepared {
+        files: BTreeMap::from([("account-policy".into(), session.data.join("policy.json"))]),
+    };
+    let created = session.ensure_account(&prepared).unwrap();
+    assert_eq!(created.progression, "fresh");
+    let args = &observed.borrow().spawned[0].arguments;
+    for (flag, value) in [
+        ("--progression", "fresh"),
+        ("--starting-resources", "standard"),
+    ] {
+        let at = args.iter().position(|a| a == flag).unwrap();
+        assert_eq!(args[at + 1], value);
+    }
+    let account_path = session.data.join("account.json");
+    let original = std::fs::read(&account_path).unwrap();
+    let marker = session.data.join("artifacts/account/preserved.sqlite");
+    std::fs::write(&marker, b"existing save bytes").unwrap();
+    assert_eq!(
+        session.ensure_account(&Prepared::default()).unwrap(),
+        created
+    );
+    assert_eq!(std::fs::read(&account_path).unwrap(), original);
+    assert_eq!(std::fs::read(&marker).unwrap(), b"existing save bytes");
+    assert_eq!(observed.borrow().spawned.len(), 1);
+    std::fs::remove_dir_all(session.data).unwrap();
+}
+
+#[test]
+fn existing_post_intro_accounts_are_not_reinitialized_by_setup() {
+    let (mut session, observed) = session(Fault::None);
+    let account = AccountRecord::post_intro("a".repeat(32));
+    let path = session.data.join("account.json");
+    records::write_new_json(&path, &account).unwrap();
+    std::fs::create_dir_all(session.data.join("artifacts/account")).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    assert_eq!(
+        session.ensure_account(&Prepared::default()).unwrap(),
+        account
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert!(observed.borrow().spawned.is_empty());
     std::fs::remove_dir_all(session.data).unwrap();
 }

@@ -39,6 +39,10 @@ nfs-afterhours schema <RECORD>              print the JSON Schema of one --json 
 nfs-afterhours recover --account-id <ID>    restore account.json for an existing database
 ```
 
+New accounts start at the beginning of the prologue with the installed game's
+standard resources and no owned starter car. The story grants the chosen car.
+Setup reuses existing accounts without resetting their progress or resources.
+
 Story editing requires newly prepared installation content. The opening checkpoint
 replays the prologue from its beginning; `after-intro` skips to the ordinary garage.
 Middle objectives remain visible but unselectable. A skip without an owned car

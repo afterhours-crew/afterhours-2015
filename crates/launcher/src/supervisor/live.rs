@@ -271,7 +271,7 @@ impl LiveSession {
             .ok_or_else(|| Failure::session("prepare-local did not produce an account policy."))?
             .clone();
         let game = self.game_directory()?.to_path_buf();
-        terminal::step("Creating your local tester account and starter garage...");
+        terminal::step("Creating your local driver at the beginning of the prologue...");
         let created = self.run_tool(
             "create-account",
             vec![
@@ -291,25 +291,18 @@ impl LiveSession {
                     .to_string_lossy()
                     .into_owned(),
                 "--progression".into(),
-                "post-intro".into(),
+                "fresh".into(),
                 "--starting-resources".into(),
-                "tester".into(),
+                "standard".into(),
             ],
         )?;
         let id = created["local_account"]
             .as_str()
             .filter(|id| records::is_id(id))
             .ok_or_else(|| Failure::session("create-account did not report a valid account."))?;
-        let account = AccountRecord::post_intro(id.to_owned());
+        let account = AccountRecord::fresh(id.to_owned());
         records::write_new_json(&account_path, &account)?;
         terminal::success("Your local save is ready. Future launches keep this driver and garage.");
-        if let Some(level) = created["starting_level"].as_u64() {
-            terminal::detail(
-                "Starting REP",
-                format_args!("level {level} (one below the cap)"),
-            );
-            terminal::detail("Starting cash", "$10,000,000");
-        }
         Ok(account)
     }
 

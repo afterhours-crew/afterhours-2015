@@ -96,11 +96,19 @@ pub struct AccountRecord {
     pub version: u32,
     /// The 32-character account ID; the save is `artifacts/account/<id>.sqlite`.
     pub local_account: String,
-    /// Story progression the account was created with, `post-intro`.
+    /// Initial story mode: `fresh` for new drivers, `post-intro` for older profiles.
     pub progression: String,
 }
 
 impl AccountRecord {
+    pub fn fresh(local_account: String) -> Self {
+        Self {
+            version: VERSION,
+            local_account,
+            progression: "fresh".into(),
+        }
+    }
+
     pub fn post_intro(local_account: String) -> Self {
         Self {
             version: VERSION,

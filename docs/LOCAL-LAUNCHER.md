@@ -160,12 +160,11 @@ game process, this session ends with an error; start again after activation. It
 never adopts a different game process without the original identity guards.
 
 `--player-name "My Driver"` sets the first account's display name. It does not
-rename or replace an existing account. New accounts start **after the scripted
-prologue**; the official prologue and complete progression are not yet supported.
-Launcher-created tester accounts start one level below the installed REP cap
-(level 69 of 70 on the supported build), with $10,000,000. These resources are
-committed with the new account; existing accounts are reused without a top-up.
-This is a local testing preset, not earned rewards or completed career events.
+rename or replace an existing account. New accounts start **at the beginning of
+the prologue**, with standard resources and the starter car granted by story
+selection. Existing accounts retain their progress, cars, level and balance;
+older tester profiles are not reset or topped up. Complete progression after
+the prologue remains tracked separately from this entry path.
 Stage headings and labeled colors distinguish progress, success, activation waits
 and errors. Redirected output and `NO_COLOR=1` remain plain; JSON is uncolored.
 The local challenge menu uses three fixed preview objectives derived from installed

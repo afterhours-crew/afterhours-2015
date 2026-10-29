@@ -109,7 +109,7 @@ fn game_exit_message(code: Option<i32>, suffix: &str) -> String {
 
 fn finished_message(action: Action) -> &'static str {
     match action {
-        Action::Setup => "Setup complete. Your local driver starts after the story introduction.",
+        Action::Setup => "Setup complete. Your local save is ready.",
         Action::Serve => "Server closed. Your local save is kept for next time.",
         Action::Start => "Game and server closed. Your local save is kept for next time.",
     }
