@@ -12,6 +12,7 @@ use std::collections::HashMap;
 
 pub struct Assets {
     pub(crate) scene_cache: crate::graph::scenes::cache::Cache,
+    pub(crate) ai_manager_cache: crate::ai::cache::Cache,
     store: Store,
     index: HashMap<String, Vec<EbxLocation>>,
     by_guid: HashMap<[u8; 16], String>,
@@ -79,6 +80,7 @@ impl Assets {
         }
         Ok(Self {
             scene_cache: Default::default(),
+            ai_manager_cache: Default::default(),
             store,
             index,
             by_guid,

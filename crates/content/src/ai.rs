@@ -12,6 +12,8 @@ use nfs_world::replication::players::ai::State;
 use serde_json::{Value as Json, json};
 use std::collections::BTreeSet;
 
+pub(crate) mod cache;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Links {
     pub initial: u32,
@@ -206,6 +208,10 @@ pub(crate) fn managers(
     actors: &Site,
     ports: Links,
 ) -> Result<nfs_world::replication::players::ai::Managers, Error> {
+    let key = cache::Key::new(lookup, participants, actors, ports);
+    if let Some(managers) = graph.source.ai_manager_cache.get(&key) {
+        return Ok(managers);
+    }
     if graph.object(participants)?.class != "AiParticipantManagerEntityData"
         || graph.object(actors)?.class != "AiActorManagerEntityData"
     {
@@ -216,13 +222,15 @@ pub(crate) fn managers(
     if scene != actor_scene || participant_serializer == actor_serializer {
         return Err(bad("manager scene identity"));
     }
-    Ok(nfs_world::replication::players::ai::Managers {
+    let managers = nfs_world::replication::players::ai::Managers {
         scene,
         participants: participant_serializer,
         actors: actor_serializer,
         alive: resolve(graph, lookup, participants, ports)?,
         reset_volumes: resolve_reset_volumes(graph, lookup, ports)?,
-    })
+    };
+    graph.source.ai_manager_cache.insert(key, managers);
+    Ok(managers)
 }
 
 #[cfg(test)]
