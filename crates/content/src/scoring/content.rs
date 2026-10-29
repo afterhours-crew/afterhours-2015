@@ -40,7 +40,8 @@ pub struct Field {
     pub kind: Kind,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Participant {
     pub blueprint: String,
     pub program: Arc<Program>,
@@ -51,7 +52,8 @@ pub struct Participant {
     pub bus_entities: Vec<Option<u16>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScoringContent {
     pub acquisition: Participant,
     pub scoring: Participant,

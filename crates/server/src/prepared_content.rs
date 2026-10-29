@@ -18,6 +18,7 @@ use std::{
 
 pub(crate) mod parallel;
 pub mod roads;
+pub mod scoring;
 
 pub struct Cache {
     root: PathBuf,

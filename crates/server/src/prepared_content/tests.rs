@@ -10,9 +10,9 @@ use nfs_content::events::Event;
 use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-struct Directory(PathBuf);
+pub(super) struct Directory(PathBuf);
 impl Directory {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
             "afterhours-static-cache-{}-{}-{}",
@@ -26,7 +26,7 @@ impl Directory {
         std::fs::create_dir(&path).unwrap();
         Self(path)
     }
-    fn cache(&self) -> Cache {
+    pub(super) fn cache(&self) -> Cache {
         Cache {
             root: self.0.clone(),
             installation: "a".repeat(64),

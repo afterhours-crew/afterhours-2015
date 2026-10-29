@@ -255,16 +255,24 @@ derive Stats scopes from the installed game modes and use local AllDrive policy:
 time-limited features and recent-player listing are disabled, and no SpeedList
 types are offered. Explicit catalogs retain their configured policies.
 
-Compiled road-routing, road-scoring, normal-sprint and complete-prologue inputs
-are also reused across processes in
+Compiled free-roam scoring, road-routing, road-scoring, normal-sprint and
+complete-prologue inputs are also reused across processes in
 `artifacts/prepared-runtime` under the selected data root. This separate cache
 contains installed static definitions, never player inventory, progression or
 live session state. It belongs on the local machine and is not a distributable
 asset. Keys bind the installation fingerprint, running executable digest and
-scoring categories (sprints) or the parent blueprint (prologue). An installation or executable change causes a new build;
+scoring categories (sprints), the gameplay scene (free-roam scoring), or the
+parent blueprint (prologue). An installation or executable change causes a new build;
 truncated, corrupt or invalid models are rebuilt. Publication is bounded and
 atomic, with one builder per key. Runtime constructors still validate cached
 inputs against the current vehicle/item definitions.
+
+Free-roam scoring caches both compiled programs and their static scene layouts.
+Loading validates interpreter graphs, serializer ordering, catalog bindings and
+the six score categories. Session state, awards, inputs and player identities
+are not serialized. Scene keeper lookup remains separate, preserving its
+existing failure handling. `profile_scoring_cache` compares whole installed
+programs and keeper bindings across uncached, cold and warm preparation.
 
 The road products retain authored node/lane/segment order, lane direction,
 widths, points and speed limits. Reads rebuild spatial indexes through the

@@ -902,7 +902,11 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                 let runtime_cache =
                     nfs_server::prepared_content::Cache::for_index(&prepared_root, &index)?;
                 let stage = std::time::Instant::now();
-                let scoring = index.scoring_content("levels/genesis01/gameplay")?;
+                let scoring = nfs_server::prepared_content::scoring::prepare(
+                    &mut index,
+                    "levels/genesis01/gameplay",
+                    runtime_cache.as_ref(),
+                )?;
                 let keepers = index.score_keepers(
                     "levels/genesis01/gameplay",
                     &scoring.categories.keys().copied().collect(),
