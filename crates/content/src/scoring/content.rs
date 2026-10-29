@@ -33,7 +33,7 @@ pub const SCORING: &str = "gameplay/scoring/drivingstylescoringparticipantlogic"
 pub const EVENT_SCORING: &str = "gameplay/scoring/eventdrivingstylescoringparticipantlogic";
 
 /// One graph node that owns a replicated serializer field.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Field {
     pub node: u16,
     pub serializer: usize,
@@ -99,7 +99,7 @@ impl EventParticipant {
 
 /// The event driving-style participant (#138). The event creates it in its
 /// game mode; `fields` map graph nodes to that layout's serializers.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct EventScoring {
     pub blueprint: String,
     pub program: Arc<Program>,

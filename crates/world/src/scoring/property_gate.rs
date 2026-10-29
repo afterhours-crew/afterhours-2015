@@ -6,7 +6,7 @@
 //! at its publication turn, since earlier callbacks can change later inputs.
 use super::{Error, events::PropertyHandler, properties::Kind, value::Value};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Channel {
     Boolean,
     Integer,
@@ -55,7 +55,7 @@ impl Channel {
         }
     }
 }
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Definition {
     pub open: bool,
     pub write_on_open: bool,

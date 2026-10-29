@@ -3,7 +3,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! Typed graph values. Math programs use separate scalar and Vec3 register banks.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Value {
     Text(Text),
     Integer(i32),
@@ -22,6 +22,19 @@ pub enum Value {
 /// Empty and unready are distinct; embedded terminators are rejected.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Text(std::sync::Arc<str>);
+
+impl serde::Serialize for Text {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Text {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+        Self::new(&value).map_err(|_| serde::de::Error::custom("invalid bounded graph text"))
+    }
+}
 
 impl Text {
     pub fn new(value: &str) -> Result<Self, super::Error> {

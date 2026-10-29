@@ -24,7 +24,7 @@ const TARGET: u32 = 0x856e_2e03;
 pub const MAX_STATES: usize = 256;
 pub const MAX_TRANSITIONS: usize = 256;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum StateKind {
     Participant,
     Updateable,
@@ -54,7 +54,7 @@ fn state_kind(class: &str) -> Option<StateKind> {
     })
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum TransitionKind {
     Completed,
     Triggered,
@@ -75,7 +75,7 @@ fn transition_kind(class: &str) -> Option<TransitionKind> {
     })
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum StateConfiguration {
     Default,
     Updateable {
@@ -95,7 +95,7 @@ pub enum StateConfiguration {
         manager: Property,
     },
 }
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct State {
     pub serializer: usize,
     pub kind: StateKind,
@@ -103,13 +103,15 @@ pub struct State {
     pub handles_marked_for_delete: bool,
     pub send_rpc_to_client: bool,
 }
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
 pub struct Endpoint {
     pub serializer: usize,
     /// Zero for a state, or the authored port of a linked schematic channel.
     pub port: u32,
 }
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum TransitionConfiguration {
     Default,
     FinishLine {
@@ -227,7 +229,7 @@ pub(super) fn resolve_configurations<S: Source>(
     }
     Ok(())
 }
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Transition {
     pub serializer: usize,
     pub kind: TransitionKind,
@@ -236,10 +238,11 @@ pub struct Transition {
     pub target: Option<Endpoint>,
     pub configuration: TransitionConfiguration,
 }
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Lifecycle {
     /// Participant states owned by an enclosing scene, reached through bound
     /// channel references (for example the teleport manager's restart states).
+    #[serde(with = "crate::prepared_cache::ordered_map")]
     pub imports: BTreeMap<Endpoint, Vec<ImportedState>>,
     pub bindings: bindings::Bindings,
     pub initial: usize,
@@ -274,7 +277,7 @@ pub struct Root {
     pub registered_transitions: Vec<usize>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ImportedState {
     pub identity: crate::scoring::events::Identity,
     pub class: String,

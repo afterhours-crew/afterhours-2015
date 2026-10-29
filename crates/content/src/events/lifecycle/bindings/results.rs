@@ -9,14 +9,14 @@ use super::*;
 pub const TRIGGER: u32 = 0x4ab4_7b0b;
 pub const MAX_TAGS: usize = 64;
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize)]
 pub struct Tag {
     pub asset: String,
     pub object: usize,
     pub name: String,
     pub hash: u32,
 }
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Definition {
     pub identity: Identity,
     /// Authored order, including repeated tags. Unconnected sources contribute

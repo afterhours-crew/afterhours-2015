@@ -11,7 +11,7 @@ use crate::{
 pub const MAX_LOCATIONS: usize = 32;
 
 /// The start area's authored teleport location, including all parent transforms.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Destination {
     pub position: [f32; 3],
     pub basis: [[f32; 3]; 3],

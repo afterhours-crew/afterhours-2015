@@ -11,14 +11,16 @@ pub mod requirements;
 pub const MAX_EVENTS: usize = 512;
 
 /// A scene serializer, resolved in its full prefab instance context.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
 pub struct Endpoint {
     pub scene_key: u32,
     pub serializer: usize,
 }
 
 /// One normal start area. Narrative and Prestige variants share its location.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Entry {
     pub id: String,
     pub scene: String,

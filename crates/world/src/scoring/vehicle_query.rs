@@ -19,13 +19,13 @@ pub const DRIFT_ANGLE: u32 = 0xd547_c1b9;
 
 pub const IDENTITY: [[f32; 3]; 4] = [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.], [0., 0., 0.]];
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Query {
     Physics,
     Drift,
     Draft,
 }
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Output {
     pub field: u32,
     pub kind: Kind,
@@ -111,11 +111,38 @@ impl Query {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct Bindings {
     pub(crate) query: Query,
     // None = unbound; Some(bool) = installed equality-suppression flag.
     outputs: [Option<bool>; 7],
+}
+
+impl<'de> serde::Deserialize<'de> for Bindings {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Fields {
+            query: Query,
+            outputs: [Option<bool>; 7],
+        }
+        let f = Fields::deserialize(deserializer)?;
+        if f.outputs[f.query.outputs().len()..]
+            .iter()
+            .any(Option::is_some)
+        {
+            return Err(serde::de::Error::custom("invalid prepared vehicle query"));
+        }
+        let outputs: Vec<_> = f
+            .query
+            .outputs()
+            .iter()
+            .zip(f.outputs)
+            .filter_map(|(output, flag)| flag.map(|flag| (output.field, flag)))
+            .collect();
+        Self::new(f.query, &outputs)
+            .map_err(|_| serde::de::Error::custom("invalid prepared vehicle query"))
+    }
 }
 impl Bindings {
     /// Supply every connected output, with its actual binding flag. Unknown or

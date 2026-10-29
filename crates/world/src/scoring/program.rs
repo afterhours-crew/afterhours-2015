@@ -21,7 +21,7 @@ pub const MAX_KEEPERS: usize = 64;
 
 /// Composition identity of one node occurrence. Repeated prefab instances
 /// have distinct `instances` paths and therefore distinct nodes.
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize)]
 pub struct Identity {
     pub asset: String,
     pub index: u32,
@@ -29,7 +29,7 @@ pub struct Identity {
 }
 
 /// A keeper channel reference resolved at context activation by the runtime.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Keeper {
     /// Channel reference node inside this composition.
     pub node: u16,
@@ -41,7 +41,7 @@ pub struct Keeper {
 /// event forwarding are valid) but have no modeled behavior of their own.
 /// `Unsupported` nodes are modeled as absent behavior with their outputs left
 /// unready, so consumers fall back to authored values; they are logged.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Behavior {
     /// Authored node implemented by the enclosing native event host. Executing
     /// it without that host fails; it is never treated as inert/unsupported.
@@ -229,7 +229,7 @@ pub enum Behavior {
     AccumulatedCollisions,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Node {
     pub identity: Identity,
     pub class: String,
@@ -249,7 +249,7 @@ pub struct Node {
 /// One startup action. The compiler emits the verified native order:
 /// bus construction (forwarders, interface defaults), then per entity bind and
 /// listener registration, then activation in insertion order.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Step {
     Bind(u16),
     Register(Registration),
@@ -270,13 +270,13 @@ pub enum Step {
 /// A property endpoint that has no typed cell in this program because its
 /// value kind is not modeled. Only sink-only endpoints may be unmodeled; the
 /// compiler rejects an untyped cell that any modeled node reads or writes.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Unmodeled {
     pub port: Port,
     pub class: String,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Program {
     pub nodes: Vec<Node>,
     pub cells: Vec<Definition>,

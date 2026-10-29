@@ -9,7 +9,7 @@
 use super::{Error, MAX_PARTICIPANTS, MAX_STATES, Machine, Notification, Participant, StateId};
 use std::collections::BTreeMap;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Definition<T = StateId> {
     List(Vec<T>),
     Range { begin: T, end: T },

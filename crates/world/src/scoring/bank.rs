@@ -13,7 +13,7 @@ pub const SUCCESS: u32 = 0xbb06_a967;
 pub const FAILURE: u32 = 0x3cdc_0924;
 pub const MAX_PENDING: usize = 1024;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Kind {
     Deposit,
     Withdraw,

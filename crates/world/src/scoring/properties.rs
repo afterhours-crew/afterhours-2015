@@ -12,13 +12,17 @@ pub const MAX_PROPERTIES: usize = 16_384;
 pub const MAX_PORTS: usize = 65_536;
 pub const MAX_LISTENERS: usize = 16_384;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
 pub struct Port {
     pub node: u16,
     pub field: u32,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
 pub enum Kind {
     Text,
     Boolean,
@@ -56,7 +60,7 @@ fn validate_components(values: impl IntoIterator<Item = f32>) -> Result<(), Erro
     Ok(())
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Definition {
     pub kind: Kind,
     /// None means bound but not ready. An unbound port is a separate error.
@@ -71,14 +75,14 @@ pub struct Definition {
 
 /// Registration order is significant. Forwarding is a publication into a
 /// distinct cell, not aliasing the producers of a multiple-source input.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Registration {
     Notify(Port),
     Forward { source: Port, target: Port },
 }
 
 /// Interface initialization is distinct from ordinary node publication.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum DefaultMode {
     IfUnready,
     Override,

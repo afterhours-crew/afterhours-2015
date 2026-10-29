@@ -6,7 +6,7 @@
 use super::Destination;
 use crate::replication::Error;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Config {
     pub time_before_corner: f32,
     pub sharp_corner_degrees: f32,

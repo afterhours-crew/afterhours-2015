@@ -10,13 +10,13 @@ pub const OUTPUT: u32 = 0x666e_571b;
 pub const SELECTED: u32 = 0x95cb_806b;
 pub const MAX_ENTRIES: usize = 256;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Entry {
     pub property: u32,
     pub event: u32,
     pub fallback: f32,
 }
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Definition {
     pub entries: Vec<Entry>,
     pub on_change: bool,

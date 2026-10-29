@@ -15,13 +15,13 @@ pub mod distance;
 pub mod mirrors;
 pub mod results;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StateProperty {
     pub identity: Identity,
     pub definition: Definition<Endpoint>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize)]
 pub struct Link {
     pub identity: Identity,
     pub port: u32,
@@ -29,13 +29,13 @@ pub struct Link {
     pub channel: Option<Property>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Controller {
     Boolean(Link),
     Set(Link),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Spawner {
     pub identity: Identity,
     pub blueprint: String,
@@ -45,7 +45,7 @@ pub struct Spawner {
     pub controller: Option<Controller>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StateContext {
     pub identity: Identity,
     pub states: Vec<Endpoint>,
@@ -53,7 +53,7 @@ pub struct StateContext {
     pub categories: Vec<u32>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StateReporter {
     pub identity: Identity,
     pub compound: bool,
@@ -62,26 +62,26 @@ pub struct StateReporter {
     pub states: Vec<Endpoint>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize)]
 pub enum IntegerSource {
     Local(Identity),
     Channel(Property),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IntegerSorter {
     pub identity: Identity,
     pub source: IntegerSource,
     pub order: nfs_world::scoring::rank_sorter::Order,
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
 pub enum SetSource {
     Local(Identity),
     Channel(Property),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SetKind {
     Owned,
     States(Vec<Endpoint>),
@@ -95,31 +95,32 @@ pub enum SetKind {
     },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ParticipantSet {
     pub identity: Identity,
     pub kind: SetKind,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SetCounter {
     pub identity: Identity,
     pub source: Option<SetSource>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RankQuery {
     pub identity: Identity,
     pub sorter: Identity,
     pub index: i32,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Default)]
+#[derive(Clone, Debug, Eq, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Bindings {
     pub channels: Vec<super::channels::Channel>,
     pub set_counters: Vec<SetCounter>,
     pub rank_queries: Vec<RankQuery>,
     pub ai_controls: Vec<ai::Control>,
+    #[serde(with = "crate::prepared_cache::ordered_map")]
     pub ai_commands: BTreeMap<Identity, ai::Command>,
     /// Owned game-clock channel used by countdown states and DNF transitions;
     /// distinct from the process receipt clock used by finish arbitration.
@@ -143,13 +144,15 @@ pub struct Bindings {
     pub sets: Vec<ParticipantSet>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct UpdateManager {
     pub identity: Identity,
     pub sets: Vec<Identity>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
 pub enum Observer {
     SetCounter(usize),
     Ai(usize),
@@ -166,14 +169,14 @@ pub enum Observer {
     Transition(usize),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum BooleanOperation {
     And,
     Or,
     Not,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum PredicateKind {
     Boolean {
         operation: BooleanOperation,
@@ -182,7 +185,7 @@ pub enum PredicateKind {
     Triggered,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Predicate {
     pub identity: Identity,
     pub kind: PredicateKind,

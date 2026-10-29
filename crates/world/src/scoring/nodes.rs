@@ -61,7 +61,7 @@ pub enum Action {
     PropertyChanged(u32),
     Activate,
 }
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Comparison {
     Float,
     Integer,
@@ -69,7 +69,7 @@ pub enum Comparison {
     /// retain their bit pattern. Explicit events forward their input context.
     Unsigned64,
 }
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Definition {
     Cache,
     Accumulator,

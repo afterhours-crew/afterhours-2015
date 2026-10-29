@@ -15,6 +15,7 @@ use std::{
 };
 
 const FORMAT: &str = "afterhours-prepared-static-v1";
+pub(crate) mod ordered_map;
 const MAX_HEADER: usize = 4096;
 pub const MAX_PAYLOAD: usize = 64 * 1024 * 1024;
 

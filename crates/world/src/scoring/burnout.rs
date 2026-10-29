@@ -10,7 +10,7 @@ pub const COUNT: u32 = 0x74b6_ee0e;
 pub const TIME: u32 = 0x536c_f0dc;
 const MPH_TO_MPS: f32 = f32::from_bits(0x3ee4_e26d);
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Configuration {
     pub max_linear_mph: f32,
     pub max_angular: f32,

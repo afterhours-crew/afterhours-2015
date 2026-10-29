@@ -7,18 +7,18 @@ use super::{Error, finite};
 
 pub const MAX_KNOTS: usize = 256;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Knot {
     pub x: f32,
     pub y: f32,
     pub coefficient: f32,
 }
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Interpolation {
     Linear,
     Cubic,
 }
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct Curve {
     x_range: [f32; 2],
     y_range: [f32; 2],
@@ -26,6 +26,32 @@ pub struct Curve {
     output_scale: f32,
     interpolation: Interpolation,
     knots: Vec<Knot>,
+}
+
+impl<'de> serde::Deserialize<'de> for Curve {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Fields {
+            x_range: [f32; 2],
+            y_range: [f32; 2],
+            input_scale: f32,
+            output_scale: f32,
+            interpolation: Interpolation,
+            knots: Vec<Knot>,
+        }
+        let f = Fields::deserialize(deserializer)?;
+        // Keep authored knot order; `new` intentionally has a stronger contract.
+        Self::from_authored(
+            f.x_range,
+            f.y_range,
+            f.input_scale,
+            f.output_scale,
+            f.interpolation,
+            f.knots,
+        )
+        .map_err(|_| serde::de::Error::custom("invalid prepared curve"))
+    }
 }
 impl Curve {
     pub fn new(

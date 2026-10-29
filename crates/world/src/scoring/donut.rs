@@ -20,7 +20,7 @@ use super::{Error, finite};
 /// `OnDonutCompleted` (hash of the name).
 pub const ON_DONUT_COMPLETED: u32 = 0x79b8_a6ed;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Configuration {
     pub min_linear_velocity: f32,
     pub max_linear_velocity: f32,

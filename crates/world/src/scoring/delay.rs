@@ -20,7 +20,7 @@ pub const MAX_PENDING: usize = 4096;
 pub const MAX_PER_NODE: usize = 255;
 pub const MAX_CONTEXT_BYTES: usize = 256;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Definition {
     pub auto_start: bool,
     pub run_once: bool,

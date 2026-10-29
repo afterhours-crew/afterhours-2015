@@ -11,7 +11,7 @@ pub const MAX_REFERENCES: usize = 1024;
 /// Bound of a synced string's 10-bit byte length.
 pub const MAX_STRING_BYTES: usize = 1023;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Kind {
     Root,
     SequenceRoot,

@@ -87,7 +87,7 @@ impl Links {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Persona {
     pub name: String,
     /// Position in the linked PersonaSet, before a specific provider filters it.

@@ -10,14 +10,14 @@ use super::{Error, finite};
 pub const MAX_INSTRUCTIONS: usize = 256;
 pub const REGISTERS: usize = 32;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Type {
     Integer,
     Float,
     Boolean,
     Vec3,
 }
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Register {
     Integer(u8),
     Float(u8),
@@ -34,7 +34,7 @@ impl Register {
         }
     }
 }
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum FloatOp {
     Add,
     Subtract,
@@ -43,19 +43,19 @@ pub enum FloatOp {
     Power,
     Min,
 }
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum IntegerOp {
     Subtract,
     Min,
     Max,
 }
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Comparison {
     Greater,
     GreaterEqual,
     LessEqual,
 }
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Operation {
     Boolean(bool),
     Integer(i32),
@@ -96,14 +96,27 @@ pub enum Operation {
     IntegerFromFloat(u8),
     Return(Register),
 }
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Instruction {
     pub result: u8,
     pub operation: Operation,
 }
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct Program {
     instructions: Vec<Instruction>,
+}
+
+impl<'de> serde::Deserialize<'de> for Program {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Fields {
+            instructions: Vec<Instruction>,
+        }
+        let f = Fields::deserialize(deserializer)?;
+        Self::new(f.instructions)
+            .map_err(|_| serde::de::Error::custom("invalid prepared math program"))
+    }
 }
 impl Program {
     /// Typed input reads in instruction order, including repeated reads. A graph

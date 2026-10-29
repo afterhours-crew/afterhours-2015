@@ -9,7 +9,7 @@ pub mod dynamic;
 
 pub const MAX_VALUES: usize = 1024;
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize)]
 pub struct Property {
     pub channel: String,
     pub port: u32,

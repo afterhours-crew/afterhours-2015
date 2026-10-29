@@ -12,7 +12,7 @@ pub const SORT: u32 = 0x3cc0_d267;
 pub const RANK: u32 = (-892_384_772i32) as u32;
 pub const COUNT: u32 = 208_911_203;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Operation {
     Add,
     Subtract,

@@ -176,7 +176,7 @@ impl Definitions {
 /// Transient spawn modifiers supplied by an authored AI persona. Performance is
 /// added to the installed parts before quantization; grip replaces the driving
 /// settings without changing the items or the transmission selection.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SpawnOverrides {
     pub performance: f32,
     pub grip: Option<u8>,

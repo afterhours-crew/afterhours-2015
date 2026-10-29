@@ -8,7 +8,7 @@ use super::{Error, events::PropertyHandler, properties, value::Value};
 
 pub use super::nodes::{IN, ON_FALSE, ON_TRUE, OUT, SET_FALSE, SET_TRUE, TOGGLE};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Kind {
     Text,
     Boolean,

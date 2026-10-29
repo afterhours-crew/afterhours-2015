@@ -41,13 +41,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("{}", json!({"event":context.game_mode_id, "phase":phase, "elapsed_ms":elapsed.as_millis()}));
         })?;
         let model = format!("{event:?}");
+        let encoded = serde_json::to_vec(&event)?;
+        let decoded: nfs_content::events::Event = serde_json::from_slice(&encoded)?;
+        if format!("{decoded:?}") != model {
+            return Err("compiled event JSON changed the model".into());
+        }
         let hash: String = openssl::sha::sha256(model.as_bytes())
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect();
         println!(
             "{}",
-            json!({"event":context.game_mode_id, "phase":"complete", "elapsed_ms":start.elapsed().as_millis(), "model_debug_sha256":hash, "checkpoints":event.game_mode.checkpoints.len()})
+            json!({"event":context.game_mode_id, "phase":"complete", "elapsed_ms":start.elapsed().as_millis(), "model_debug_sha256":hash, "checkpoints":event.game_mode.checkpoints.len(), "encoded_bytes":encoded.len(), "serialization_preserved_model":true})
         );
     }
     Ok(())

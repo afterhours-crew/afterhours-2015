@@ -13,7 +13,7 @@ pub use goals::GoalChanges;
 
 /// Installed serializer ordinals, supplied by content preparation. They are
 /// distinct from RPC selector numbers and allocated scene ghost IDs.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Managers {
     pub scene: u32,
     pub participants: usize,
@@ -26,7 +26,7 @@ pub struct Managers {
 }
 
 /// Installed participant-state serializer, possibly in a different scene.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct State {
     pub scene: u32,
     pub serializer: usize,

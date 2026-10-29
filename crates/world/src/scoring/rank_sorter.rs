@@ -10,7 +10,7 @@ use super::{Error, rank_query::Row};
 
 pub const MAX_ROWS: usize = 28;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Order {
     Descending,
     Ascending,

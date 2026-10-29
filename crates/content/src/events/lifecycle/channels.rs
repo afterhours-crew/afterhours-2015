@@ -7,14 +7,14 @@
 use super::*;
 use crate::scoring::events::Identity;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Target {
     pub identity: Identity,
     pub class: String,
     pub port: u32,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Channel {
     pub reference: Identity,
     pub definition: Identity,

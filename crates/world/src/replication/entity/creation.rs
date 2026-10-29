@@ -15,7 +15,9 @@ pub const MAX_CATALOGS: usize = 256;
 pub const MAX_PROFILES: usize = MAX_TYPES;
 pub const MAX_TYPES: usize = 4096;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
 pub struct Asset {
     pub bundle: u16,
     pub type_id: u16,

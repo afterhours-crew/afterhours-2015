@@ -13,13 +13,13 @@ pub const MAX_MEMBERS: usize = 128;
 pub const COUNT: u32 = 0xe6d6_7e59;
 pub const MAX_OPERANDS: usize = 32;
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize)]
 pub enum Source {
     Channel(Key),
     Node(u16),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Operation {
     Union,
     Intersection,

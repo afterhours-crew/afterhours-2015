@@ -113,7 +113,9 @@ pub struct Inputs {
 
 /// Reputation category credited by a keeper. Total is separate from the five
 /// categories; the installed graph wires it through its own keeper.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
 pub enum Category {
     Total,
     Build,

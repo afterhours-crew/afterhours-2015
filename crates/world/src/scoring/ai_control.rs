@@ -21,7 +21,7 @@ pub struct Key {
     pub node: u16,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Inclusion {
     Human,
     Ai,

@@ -123,14 +123,14 @@ pub(super) fn bound_values<S: Source>(
     Ok(values)
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Ranking {
     pub node: u16,
     pub property: Property,
     pub descending: bool,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Content {
     pub program: Arc<Program>,
     pub root: u16,

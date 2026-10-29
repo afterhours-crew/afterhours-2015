@@ -39,7 +39,7 @@ pub enum Action {
         context: EntityContext,
     },
 }
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Outputs {
     pub querying: bool,
     pub value: bool,

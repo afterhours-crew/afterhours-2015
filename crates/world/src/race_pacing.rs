@@ -125,7 +125,7 @@ impl Route {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum AiOnlyMode {
     First,
     Last,
@@ -134,21 +134,21 @@ pub enum AiOnlyMode {
 
 /// The command selects drift-train pacing first, otherwise player-relative or
 /// lap pacing according to the authored provider flags.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Mode {
     PlayerRelative,
     Lap,
     DriftTrain,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Schedule {
     /// Empty authored arrays evaluate to zero.
     pub target: Option<Curve>,
     pub skill: Option<Curve>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct Config {
     /// Index count-1 selects the group size; index rank-1 selects its opponent.
     /// The human reference is excluded from both count and rank.
@@ -158,6 +158,49 @@ pub struct Config {
     pub ai_only: AiOnlyMode,
     mode: Mode,
     lap_curve: Option<Curve>,
+}
+
+impl<'de> serde::Deserialize<'de> for Config {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Fields {
+            groups: Vec<Vec<Schedule>>,
+            extra_target_offset: f32,
+            target_offset_scale: f32,
+            ai_only: AiOnlyMode,
+            mode: Mode,
+            lap_curve: Option<Curve>,
+        }
+        let f = Fields::deserialize(deserializer)?;
+        let invalid = || serde::de::Error::custom("invalid prepared pacing configuration");
+        if f.mode == Mode::Lap {
+            if !f.groups.is_empty()
+                || f.extra_target_offset.to_bits() != 0
+                || f.target_offset_scale != 1.
+                || f.ai_only != AiOnlyMode::First
+            {
+                return Err(invalid());
+            }
+            Ok(Self::lap(f.lap_curve))
+        } else {
+            if f.lap_curve.is_some() {
+                return Err(invalid());
+            }
+            let config = Self::new(
+                f.groups,
+                f.extra_target_offset,
+                f.target_offset_scale,
+                f.ai_only,
+            )
+            .map_err(|_| invalid())?;
+            Ok(if f.mode == Mode::DriftTrain {
+                config.with_drift_train()
+            } else {
+                config
+            })
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

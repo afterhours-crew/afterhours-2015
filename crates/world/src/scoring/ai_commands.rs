@@ -12,7 +12,7 @@ pub const ENTERED: u32 = 0xbeec_f8a5;
 pub const NEXT: u32 = 0xb511_f991;
 pub const MAX_COMMANDS: usize = 128;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Enable<T> {
     pub inclusion: Inclusion,
     pub add_on_enable: bool,
@@ -21,7 +21,7 @@ pub struct Enable<T> {
     pub actor_manager: Property,
     pub ai_manager: Property,
 }
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Control<T> {
     pub context_hash: u32,
     pub one_by_one: bool,
@@ -32,7 +32,7 @@ pub struct Control<T> {
     pub actor_manager: Property,
     pub context_manager: Property,
 }
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Scripted {
     pub throttle: f32,
     pub steering: f32,
@@ -48,7 +48,7 @@ impl Scripted {
         Ok(())
     }
 }
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Goto {
     pub location: Option<Property>,
     pub transform: [[f32; 3]; 4],
@@ -56,7 +56,7 @@ pub struct Goto {
     pub stop: bool,
     pub radius: f32,
 }
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Definition<T> {
     State {
         handles_marked_for_delete: bool,

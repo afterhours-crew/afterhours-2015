@@ -865,6 +865,7 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
     let scoring = match (&args.game_dir, garage_logic.is_some()) {
         (Some(game_dir), true) => {
             let game_dir = game_dir.clone();
+            let prepared_root = args.root.clone();
             let event_vehicles = vehicles.as_ref().map(|v| v.vehicles.clone());
             let event_items = args.item_content.as_ref().map(|p| args.root.join(p));
             let intro_parent = progression
@@ -891,6 +892,8 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                     elapsed_ms = started.elapsed().as_millis(),
                     "runtime preparation phase complete"
                 );
+                let runtime_cache =
+                    nfs_server::prepared_content::Cache::for_index(&prepared_root, &index)?;
                 let stage = std::time::Instant::now();
                 let scoring = index.scoring_content("levels/genesis01/gameplay")?;
                 let keepers = index.score_keepers(
@@ -920,11 +923,12 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                             })
                         })
                         .transpose()?;
-                    nfs_server::event_logic::catalog::prepare::sprints(
+                    nfs_server::event_logic::catalog::prepare::sprints_cached(
                         &mut index,
                         &scoring.categories,
                         event_vehicles.as_ref(),
                         items.as_ref(),
+                        runtime_cache.as_ref(),
                     )
                 })();
                 tracing::info!(

@@ -80,6 +80,14 @@ Content loaders use serde_json 1.0.151 (MIT OR Apache-2.0); all registry
 versions and checksums are locked. Main/master/default require pull requests
 and reject force pushes/deletion, including for administrators.
 
+Static compiler products use the already locked serde 1.0.229 (MIT OR
+Apache-2.0), with derive and shared immutable pointer support. JSON uses its
+float-roundtrip parser. Serialize installation definitions only; player/session
+state is not a prepared-content product. Cache readers must preserve private
+constructor invariants and validate compiled models before atomic publication.
+The source fingerprint and running executable digest invalidate incompatible
+products, including locally modified builds.
+
 The launcher uses clap 4.6.7 (MIT OR Apache-2.0) with default features off
 (`std`, `derive`, `help`, `usage`, `error-context`); its tree adds clap_builder,
 clap_derive, clap_lex, anstyle and heck, all MIT OR Apache-2.0. The

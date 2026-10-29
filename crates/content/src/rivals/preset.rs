@@ -14,7 +14,7 @@ use nfs_world_core::items::{
 pub const MAX_PARTS: usize = 128;
 const MAX_PRESET_ITEMS: usize = 4096;
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RimStyle {
     pub selection: Option<u32>,
     pub primary_color: Option<[f32; 3]>,
@@ -25,7 +25,7 @@ pub struct RimStyle {
     pub secondary_material: Option<[f32; 3]>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Style {
     pub parts: Vec<Guid>,
     pub color: Option<[f32; 3]>,
@@ -37,7 +37,7 @@ pub struct Style {
     pub rims: [RimStyle; 2],
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Preset {
     pub vehicle: Guid,
     pub color: Option<[f32; 3]>,

@@ -24,14 +24,14 @@ const EVENT_SPAWNER: u32 = 356_246_362;
 const SPAWNS: u32 = (-2_102_271_509i32) as u32;
 const SPAWN_LOCATION: u32 = (-1_050_389_661i32) as u32;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Completion {
     UnspawnAllAtShutdown,
     GiveAllToDirectorAtShutdown,
     UnspawnIndividualAtCompletion,
     GiveIndividualToDirectorAtCompletion,
 }
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Spawn {
     pub personas: Vec<usize>,
     pub position: [f32; 3],
@@ -41,7 +41,7 @@ pub struct Spawn {
     pub store_participant: bool,
     pub ignore_availability: bool,
 }
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Roster {
     pub managers: Option<nfs_world::replication::players::ai::Managers>,
     pub completion: Option<Completion>,

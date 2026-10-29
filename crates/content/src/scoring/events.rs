@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 /// Its inventory bound is independent of the executable per-graph node bound.
 pub const MAX_SCENE_NODES: usize = crate::scenes::MAX_GRAPH_OBJECTS;
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize)]
 pub struct Identity {
     pub asset: String,
     pub index: usize,

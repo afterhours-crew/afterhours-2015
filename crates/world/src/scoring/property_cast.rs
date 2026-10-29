@@ -5,7 +5,7 @@
 //! Numeric PropertyCast binding. String input/output require a separate model.
 use super::{Error, events::PropertyHandler, properties::Kind};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Channel {
     Boolean,
     Integer,
@@ -37,7 +37,7 @@ impl Channel {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Bindings {
     inputs: [bool; 3],
     outputs: [bool; 3],

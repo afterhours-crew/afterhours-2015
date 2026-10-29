@@ -67,7 +67,9 @@ const MANAGER_CLASSES: [&str; 3] = [
 
 /// Where a channel reference points: a scene serializer or a serializer of the
 /// event's game mode.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(
+    Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
 pub enum Binding {
     Scene {
         content_key: u32,
@@ -82,7 +84,7 @@ pub enum Binding {
     },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Field {
     pub kind: Kind,
     pub class: String,
@@ -96,7 +98,7 @@ pub struct Field {
 }
 
 /// A blueprint instance with its creation asset and serializer layout.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Layout {
     pub blueprint: String,
     pub asset: Asset,
@@ -133,7 +135,7 @@ impl Layout {
 /// The game mode: its layout (owned by the Gameplay game-mode manager), the root's
 /// three Gameplay endpoints (game time, game-mode manager, participant manager), and
 /// the start area's checkpoint route.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GameMode {
     pub lifecycle: lifecycle::Lifecycle,
     pub recovery: Option<nfs_world::crash::route::Config>,
@@ -154,7 +156,7 @@ pub struct GameMode {
     pub laps: u8,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Sequence {
     pub layout: Layout,
     /// The sequence manager endpoint in the manager scene.
@@ -167,7 +169,7 @@ pub struct Sequence {
     pub wander: Option<Wander>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Wander {
     pub urgent: bool,
     pub prefer_straight: bool,
@@ -179,7 +181,7 @@ pub struct Wander {
 /// command linked from the scene channel bound to the sequence, and the reach
 /// radius of the sequence's own precision setting (official intro goal: the
 /// `Sprint_Race_007` locator, radius 150 and limit 22.35).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Goto {
     pub point: [f32; 3],
     pub radius: f32,
@@ -189,17 +191,18 @@ pub struct Goto {
 /// The first-place rewards the start area presents (its `CashReward` and
 /// `RepReward` inputs), evaluated from installed defaults at creation. Server
 /// time-limited bonuses are separate outputs and are not included.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Rewards {
     pub cash: i32,
     pub rep: i32,
 }
 
 /// One event's composition. Logic and sequence names are the caller's selection.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Event {
     /// Snapshot-independent threshold and weight values from this event's
     /// bound award channels, resolved through its own spawner.
+    #[serde(with = "crate::prepared_cache::ordered_map")]
     pub award_values: BTreeMap<Property, nfs_world::scoring::value::Value>,
     pub ai: ai::Roster,
     pub invitations: Invitations,
@@ -234,7 +237,7 @@ pub struct Event {
 
 /// The Events scene's invitation-availability output. Its threshold is authored
 /// against the human participant set after the Prestige-mode exclusion.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Invitations {
     pub scene_content_key: u32,
     pub serializer: usize,
@@ -244,7 +247,7 @@ pub struct Invitations {
 
 /// A logic spawned by a spawner in another startup scene, which owns it and whose
 /// bundle registers its blueprint.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SceneLogic {
     pub scene_content_key: u32,
     pub layout: Layout,
@@ -252,7 +255,7 @@ pub struct SceneLogic {
 
 /// What to resolve. `bundle` is the startup sublevel whose registry holds the
 /// event blueprints; `scene` is the sublevel that places the start area.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Request {
     pub bundle: String,
     pub scene: String,

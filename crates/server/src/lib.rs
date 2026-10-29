@@ -113,3 +113,5 @@ pub fn user_session_failure(error: nfs_services::user_session::Error) -> Failure
 pub fn support_failure(error: Failure) -> Failure {
     error
 }
+
+pub mod prepared_content;

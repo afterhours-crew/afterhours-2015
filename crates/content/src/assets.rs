@@ -41,6 +41,7 @@ pub struct AssetIndex {
     pub(crate) assets: Assets,
     pub(crate) identity: BuildIdentity,
     registries: HashMap<String, Groups>,
+    fingerprint: Option<String>,
 }
 
 impl AssetIndex {
@@ -165,16 +166,22 @@ impl AssetIndex {
             assets,
             identity,
             registries: HashMap::new(),
+            fingerprint: None,
         }
     }
     /// Open and index an installation after checking its executable.
     pub fn open(game_root: &Path, options: &Options) -> Result<Self, Error> {
-        crate::fingerprint(game_root, options)?;
+        let fingerprint = crate::fingerprint(game_root, options)?;
         let install = nfs_frostbite::install::Installation::open(game_root, options.limits)?;
-        Ok(Self::from_assets(
-            Assets::scan(&install)?,
-            options.identity.clone(),
-        ))
+        let mut result = Self::from_assets(Assets::scan(&install)?, options.identity.clone());
+        result.fingerprint = Some(fingerprint.digest);
+        Ok(result)
+    }
+
+    /// Identity verified while opening this immutable installation index.
+    /// Constructed test indexes have no installed source identity.
+    pub fn fingerprint(&self) -> Option<&str> {
+        self.fingerprint.as_deref()
     }
 
     fn groups(&mut self, bundle: &str) -> Result<&Groups, Error> {

@@ -5,7 +5,7 @@
 //! Shared-mode controllers use real lifecycle states, not utility-local states.
 use super::*;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Control {
     pub identity: Identity,
     pub context_hash: u32,
@@ -19,7 +19,7 @@ pub struct Control {
     pub game_mode: Option<Link>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Command {
     Waypoints {
         state: Endpoint,

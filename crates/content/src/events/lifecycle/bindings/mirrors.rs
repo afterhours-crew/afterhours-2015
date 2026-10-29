@@ -5,20 +5,20 @@
 //! Integer mirror identifiers are assets with HashedId, not channel port names.
 use super::*;
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize)]
 pub enum Manager {
     Local(Identity),
     Channel(Property),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Mirror {
     pub identity: Identity,
     pub identifier: u32,
     pub manager: Option<Manager>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Provider {
     pub identity: Identity,
     pub identifier: u32,
