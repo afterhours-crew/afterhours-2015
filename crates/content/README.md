@@ -31,10 +31,13 @@ construction rules; distinct installations own distinct caches. Retention is
 bounded to 64 scenes and 100,000 table rows. The first read still compares graph
 occurrences with the independent scene constructor before publishing a table.
 
-`prepared_cache` supplies a bounded atomic file cache for future static compiled
+`prepared_cache` supplies a bounded atomic file cache for static compiled
 products. Component callers must key every input and compiler revision and
-validate decoded models. It does not cache account/session state and is not yet
-connected to runtime compilation. Startup benchmarks use
+validate decoded models. Local setup uses it to reuse validated garage, challenge
+and world configuration before opening another installation index. Its key covers
+the installation fingerprint, policy, source and packaged build revision; every
+hit passes the consuming loaders. Account/session state is excluded. Sprint and
+prologue runtime programs are not yet persisted. Startup benchmarks use
 `uv run --script tools/benchmark_startup.py` from the repository root with an
 explicit executable, installation and new disposable output directory; they run
 server-only and keep their content, save and logs local.
