@@ -16,6 +16,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub(crate) mod parallel;
+
 pub struct Cache {
     root: PathBuf,
     installation: String,

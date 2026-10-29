@@ -255,6 +255,25 @@ derive Stats scopes from the installed game modes and use local AllDrive policy:
 time-limited features and recent-player listing are disabled, and no SpeedList
 types are offered. Explicit catalogs retain their configured policies.
 
+Compiled normal-sprint inputs are also reused across processes in
+`artifacts/prepared-runtime` under the selected data root. This separate cache
+contains installed static definitions, never player inventory, progression or
+live session state. It belongs on the local machine and is not a distributable
+asset. Keys bind the installation fingerprint, running executable digest and
+scoring categories. An installation or executable change causes a new build;
+truncated, corrupt or invalid models are rebuilt. Publication is bounded and
+atomic, with one builder per key. Runtime constructors still validate cached
+inputs against the current vehicle/item definitions.
+
+Cold sprint preparation initializes shared tables once, then uses at most two
+workers by default (one on a single-CPU host). Workers share immutable content
+and use separate archive handles. Results retain roster order, all workers join
+on failure, and a failed batch publishes no cache entry. For measured diagnostics,
+`AFTERHOURS_PREPARATION_WORKERS=1`, `2`, `3` or `4` selects a bounded worker count.
+Logs report completed/total cold work and whether a static cache was loaded,
+missing or invalid. A warm hit skips sprint compilation. Other runtime preparation
+still runs; this cache alone does not establish a whole-startup latency guarantee.
+
 It also supplies `--reputation-thresholds`, a versioned threshold document built
 from the installed reputation calculator. The garage-logic document can omit its
 `reputation_thresholds` array; this file then supplies the same thresholds to the

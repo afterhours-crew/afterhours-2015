@@ -33,7 +33,7 @@ impl Key {
 
 /// Owned by one immutable installation index. Never shared across installations
 /// or used for live participants, spawn choices or mutable manager state.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct Cache(Vec<(Key, Managers)>);
 
 impl Cache {

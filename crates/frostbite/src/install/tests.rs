@@ -67,6 +67,43 @@ fn base_installation_indexes_and_reads_assets() {
 }
 
 #[test]
+fn worker_readers_share_catalogues_but_never_archive_seek_positions() {
+    let dir = TempDir::new();
+    write_installation(
+        &dir.0,
+        b"exe",
+        &[asset("a/one", 1, 10), asset("b/two", 2, 20)],
+    )
+    .unwrap();
+    let install = Installation::open(&dir.0, Limits::default()).unwrap();
+    let index = install.ebx_index().unwrap();
+    let mut original = Store::open(&install).unwrap();
+    original.objects(&index["a/one"][0].entry).unwrap();
+    let first = original.fork();
+    let second = original.fork();
+    assert!(Arc::ptr_eq(&original.base.1, &first.base.1));
+    assert!(!original.handles.is_empty());
+    assert!(first.handles.is_empty() && second.handles.is_empty());
+    std::thread::scope(|scope| {
+        let read = |mut store: Store, name: &str, expected| {
+            let entry = &index[name][0].entry;
+            for _ in 0..128 {
+                assert_eq!(
+                    value(&store.objects(entry).unwrap()),
+                    Some(&Ebx::Int32(expected))
+                );
+                std::thread::yield_now();
+            }
+        };
+        let a = scope.spawn(move || read(first, "a/one", 10));
+        let b = scope.spawn(move || read(second, "b/two", 20));
+        read(original, "a/one", 10);
+        a.join().unwrap();
+        b.join().unwrap();
+    });
+}
+
+#[test]
 fn size_mismatch_missing_record_and_missing_layout_fail() {
     let dir = TempDir::new();
     write_installation(&dir.0, b"exe", &[asset("a/one", 1, 10)]).unwrap();

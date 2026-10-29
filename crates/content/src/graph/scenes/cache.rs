@@ -10,7 +10,7 @@ use std::sync::Arc;
 const MAX_CACHED_ROWS: usize = 100_000;
 const MAX_CACHED_SCENES: usize = 64;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct Cache {
     entries: BTreeMap<Site, (scenes::Rules, Arc<Prepared>)>,
     rows: usize,

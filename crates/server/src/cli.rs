@@ -1085,7 +1085,7 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                             content = attached;
                             tracing::info!(
                                 playable = catalog.iter().count(),
-                                "normal sprint catalog compiled; progression gating disabled"
+                                "normal sprint catalog ready; progression gating disabled"
                             );
                             events = Some(Arc::new(catalog));
                         }

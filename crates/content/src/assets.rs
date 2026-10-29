@@ -45,6 +45,17 @@ pub struct AssetIndex {
 }
 
 impl AssetIndex {
+    /// An independently positioned reader over the same validated installation.
+    /// Immutable decoded objects and scene tables are shared; new reads and
+    /// additional cache entries stay local to each bounded preparation worker.
+    pub fn fork(&self) -> Self {
+        Self {
+            assets: self.assets.fork(),
+            identity: self.identity.clone(),
+            registries: self.registries.clone(),
+            fingerprint: self.fingerprint.clone(),
+        }
+    }
     /// Challenge enum names and IDs from the installed localization catalog.
     /// Counts, rewards, dates and progression remain server policy.
     pub fn challenge_types(&mut self) -> Result<BTreeMap<String, u32>, Error> {

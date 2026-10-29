@@ -21,12 +21,23 @@ fn digest(bytes: &[u8]) -> String {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args_os().skip(1).map(PathBuf::from).collect();
-    let [game, data, output] = args.as_slice() else {
-        return Err(
-            "usage: profile_sprint_cache <game-directory> <static-content-root> <new-output-root>"
-                .into(),
-        );
-    };
+    if !(3..=4).contains(&args.len()) {
+        return Err("usage: profile_sprint_cache <game-directory> <static-content-root> <new-output-root> [workers 1..4]".into());
+    }
+    let (game, data, output) = (&args[0], &args[1], &args[2]);
+    let workers = args
+        .get(3)
+        .map(|p| {
+            p.to_str()
+                .ok_or("worker count")?
+                .parse::<usize>()
+                .map_err(|_| "worker count")
+        })
+        .transpose()?
+        .unwrap_or(1);
+    if !(1..=4).contains(&workers) {
+        return Err("workers must be 1..4".into());
+    }
     if output.exists() {
         return Err("output root must be new".into());
     }
@@ -49,12 +60,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let installed = index.scoring_content("levels/genesis01/gameplay")?;
         let cache = Cache::for_index(output, &index)?;
         let started = Instant::now();
-        let prepared = prepare::sprints_cached(
+        let prepared = prepare::sprints_with_workers(
             &mut index,
             &installed.categories,
             Some(&vehicles),
             Some(&items),
             cache.as_ref(),
+            workers,
         )?;
         let elapsed = started.elapsed().as_millis();
         let scoring =
@@ -87,7 +99,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         println!(
             "{}",
-            json!({"run":run, "debug_assertions":cfg!(debug_assertions), "elapsed_ms":elapsed,
+            json!({"run":run, "workers":workers, "debug_assertions":cfg!(debug_assertions), "elapsed_ms":elapsed,
             "events":models.len(), "models_sha256":digest(&serde_json::to_vec(&models)?)})
         );
         expected = Some(models);
