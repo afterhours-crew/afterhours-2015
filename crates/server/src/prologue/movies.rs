@@ -16,7 +16,9 @@ use nfs_world::{
     sequences::{Completed, Owner},
 };
 
-#[derive(Clone, Debug)]
+mod prepared;
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "prepared::Source", into = "prepared::Source")]
 pub struct Content {
     pub data: movies::Movie,
     before: Authored,

@@ -12,7 +12,7 @@ use super::{
 use crate::logic::Message;
 use std::collections::BTreeMap;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Binding {
     pub entity: u32,
     pub event: u32,

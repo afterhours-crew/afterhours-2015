@@ -255,15 +255,24 @@ derive Stats scopes from the installed game modes and use local AllDrive policy:
 time-limited features and recent-player listing are disabled, and no SpeedList
 types are offered. Explicit catalogs retain their configured policies.
 
-Compiled normal-sprint inputs are also reused across processes in
+Compiled normal-sprint and complete-prologue inputs are also reused across processes in
 `artifacts/prepared-runtime` under the selected data root. This separate cache
 contains installed static definitions, never player inventory, progression or
 live session state. It belongs on the local machine and is not a distributable
 asset. Keys bind the installation fingerprint, running executable digest and
-scoring categories. An installation or executable change causes a new build;
+scoring categories (sprints) or the parent blueprint (prologue). An installation or executable change causes a new build;
 truncated, corrupt or invalid models are rebuilt. Publication is bounded and
 atomic, with one builder per key. Runtime constructors still validate cached
 inputs against the current vehicle/item definitions.
+
+The prologue snapshot includes both races, movies, garage selection and return,
+sequences, membership and world-volume definitions. A missing required phase or
+empty-volume fallback cannot be published as a complete cache. Reads reconstruct
+codec profiles, lifecycle plans, reporter clocks and queues, opponents and the
+three ephemeral starter previews; no player's car, selection or progress is
+restored from these files. Invalid layouts, clocks or graph references trigger
+rebuilding. `profile_prologue_cache` provides an offline comparison of uncached,
+cold and warm models against an installation, without opening a save or game.
 
 Cold sprint preparation initializes shared tables once, then uses at most two
 workers by default (one on a single-CPU host). Workers share immutable content
@@ -271,7 +280,7 @@ and use separate archive handles. Results retain roster order, all workers join
 on failure, and a failed batch publishes no cache entry. For measured diagnostics,
 `AFTERHOURS_PREPARATION_WORKERS=1`, `2`, `3` or `4` selects a bounded worker count.
 Logs report completed/total cold work and whether a static cache was loaded,
-missing or invalid. A warm hit skips sprint compilation. Other runtime preparation
+missing or invalid. A warm hit skips the corresponding compilation. Other runtime preparation
 still runs; this cache alone does not establish a whole-startup latency guarantee.
 
 It also supplies `--reputation-thresholds`, a versioned threshold document built

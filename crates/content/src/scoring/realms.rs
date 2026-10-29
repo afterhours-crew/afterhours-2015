@@ -6,7 +6,7 @@
 //! object construction or replace event connection delivery modes.
 use crate::{Error, graph::bits32};
 use nfs_frostbite::ebx::{Object, Value};
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Realm {
     Neither,
     Client,
@@ -21,7 +21,7 @@ impl Realm {
         matches!(self, Self::Client | Self::Both)
     }
 }
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Listeners {
     pub events: Realm,
     pub properties: Realm,

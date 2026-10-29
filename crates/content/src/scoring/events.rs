@@ -32,7 +32,7 @@ impl From<&Site> for Identity {
         }
     }
 }
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Node {
     pub identity: Identity,
     pub class: String,
@@ -41,7 +41,7 @@ pub struct Node {
     /// prefab bus. None means the runtime must supply the class's behavior.
     pub forward: Option<u16>,
 }
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Composition {
     /// Indices used by Connection endpoints; independent of network object IDs.
     pub nodes: Vec<Node>,
@@ -62,7 +62,7 @@ pub struct Composition {
     pub links: Vec<DataConnection>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DataConnection {
     pub source: Port,
     pub target: Port,

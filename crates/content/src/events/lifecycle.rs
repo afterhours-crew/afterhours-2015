@@ -260,8 +260,9 @@ pub struct Lifecycle {
 
 /// State/observer content common to a loaded scene and a game-mode instance.
 /// A scene has no invented Initial/Final state or game-mode root membership.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Scope {
+    #[serde(with = "crate::prepared_cache::ordered_map")]
     pub imports: BTreeMap<Endpoint, Vec<ImportedState>>,
     pub bindings: bindings::Bindings,
     pub states: Vec<State>,

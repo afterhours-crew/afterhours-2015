@@ -72,13 +72,13 @@ impl Links {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Pose {
     pub position: [f32; 3],
     /// Right, up and forward axes in the native transform convention.
     pub basis: [[f32; 3]; 3],
 }
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Start {
     pub objective: u64,
     pub vehicle_item: [u8; 16],
@@ -89,7 +89,7 @@ pub struct Start {
 
 /// A story capability with one arrival path. Ambiguous conditional arrivals
 /// require selecting the reached branch before this reader can be used.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Destination {
     pub objective: u64,
     pub opening_blueprint: String,

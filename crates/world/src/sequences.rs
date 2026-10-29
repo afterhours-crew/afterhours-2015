@@ -25,7 +25,7 @@ pub const INTRO_FIRST_READY_MS: u64 = 8_000;
 pub const STREAMING_LOADED: u32 = 3_648_004;
 pub const STREAMING_UNLOADED: u32 = 12_540_227;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Component {
     pub scene_key: u32,
     pub index: usize,

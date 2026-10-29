@@ -11,14 +11,14 @@ use crate::{
 };
 use nfs_frostbite::ebx::{Object, Value};
 use nfs_world::scoring::delay::Definition;
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Configuration {
     pub definition: Definition,
     pub delay: f32,
     pub time_domain: u8,
     pub time_domain_name: String,
 }
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Node {
     pub identity: Identity,
     pub configuration: Configuration,

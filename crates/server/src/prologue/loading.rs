@@ -23,10 +23,22 @@ use nfs_world::{
     sequences::Owner,
 };
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "Layout", into = "Layout")]
 pub struct Loading {
     layout: Layout,
     content: Content,
+}
+impl From<Loading> for Layout {
+    fn from(value: Loading) -> Self {
+        value.layout
+    }
+}
+impl TryFrom<Layout> for Loading {
+    type Error = String;
+    fn try_from(value: Layout) -> Result<Self, Self::Error> {
+        Self::new(value).map_err(|e| format!("prepared garage loading: {e:?}"))
+    }
 }
 impl Loading {
     pub fn prepare(index: &mut AssetIndex) -> Result<Self, nfs_content::Error> {

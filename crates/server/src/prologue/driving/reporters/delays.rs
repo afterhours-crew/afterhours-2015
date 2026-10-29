@@ -4,15 +4,14 @@
 use super::*;
 const MODE_STARTED: u32 = 4_234_712_132;
 type Delays = (BTreeMap<u16, f32>, delay::Manager<Option<u64>>);
-pub(super) fn prepare(
-    index: &mut AssetIndex,
+pub(super) fn from_source(
+    source: &[nfs_content::scoring::delay::Node],
     composition: &nfs_content::scoring::events::Composition,
-    name: &str,
     ids: &BTreeMap<Identity, u16>,
 ) -> Result<Delays, nfs_content::Error> {
     let mut values = BTreeMap::new();
     let mut definitions = vec![];
-    for node in index.scoring_delays(name)? {
+    for node in source {
         let id = *ids
             .get(&node.identity)
             .ok_or_else(|| nfs_content::Error::Content("intro delay occurrence".into()))?;
@@ -22,7 +21,7 @@ pub(super) fn prepare(
         {
             continue;
         }
-        let c = node.configuration;
+        let c = &node.configuration;
         if c.time_domain_name != "TimeDeltaType_World"
             || !c.delay.is_finite()
             || !(0. ..=600.).contains(&c.delay)

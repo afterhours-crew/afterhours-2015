@@ -945,8 +945,6 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                     let items = intro_items.ok_or_else(|| {
                         nfs_content::Error::Content("intro item catalog missing".into())
                     })?;
-                    let prepared =
-                        nfs_server::prologue::Content::prepare(&mut index, parent, &items)?;
                     let vehicles = event_vehicles.clone().ok_or_else(|| {
                         nfs_content::Error::Content("intro vehicle content missing".into())
                     })?;
@@ -957,7 +955,14 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                         nfs_services::item_content::ItemContent::load(path).map_err(|e| {
                             nfs_content::Error::Content(format!("intro AI items: {e:?}"))
                         })?;
-                    prepared.with_opponents(&mut index, vehicles, &ai_items)
+                    nfs_server::prologue::Content::prepare_cached(
+                        &mut index,
+                        parent,
+                        &items,
+                        &vehicles,
+                        &ai_items,
+                        runtime_cache.as_ref(),
+                    )
                 })();
                 tracing::info!(
                     phase = "prologue",

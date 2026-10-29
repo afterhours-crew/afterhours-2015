@@ -8,7 +8,7 @@ use crate::{
     scoring::events::Identity,
 };
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Binding {
     pub objective: u64,
     pub source: Identity,

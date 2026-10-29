@@ -8,7 +8,7 @@ use super::*;
 // VehicleSlotEntity's authored item link in the supported build.
 pub(super) const SLOT_ITEM: u32 = 3_147_314_859;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Slot {
     pub component: usize,
     pub item_component: usize,
@@ -23,7 +23,7 @@ impl Slot {
         std::array::from_fn(|r| std::array::from_fn(|c| f32::from_bits(self.transform[r * 4 + c])))
     }
 }
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Garage {
     pub scene_key: u32,
     pub creation_scene_key: u32,

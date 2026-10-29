@@ -194,6 +194,49 @@ impl Handler for HandlerState {
         self.receive(target, Some(participant), d)
     }
 }
+/// Immutable compiler output only; no dispatch queues, clocks, gate state or players.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Source {
+    composition: nfs_content::scoring::events::Composition,
+    serializers: Vec<Identity>,
+    delays: Vec<nfs_content::scoring::delay::Node>,
+    ai_only: Vec<Identity>,
+    gates: Vec<(Identity, nodes::Definition)>,
+}
+impl Source {
+    pub(super) fn prepare(
+        index: &mut AssetIndex,
+        data: &intro::Mode,
+    ) -> Result<Self, nfs_content::Error> {
+        let name = &data.game_mode.layout.blueprint;
+        Ok(Self {
+            composition: index.scoring_events(name)?,
+            serializers: index
+                .event_serializer_identities(&data.game_mode.layout, "GameModeEntityData")?,
+            delays: index.scoring_delays(name)?,
+            ai_only: index
+                .scoring_ai_inclusions(name)?
+                .into_iter()
+                .filter_map(|(id, inclusion)| {
+                    (inclusion == ai_control::Inclusion::Ai).then_some(id)
+                })
+                .collect(),
+            gates: index
+                .scoring_nodes(name)?
+                .into_iter()
+                .filter_map(|node| {
+                    matches!(
+                        node.configuration.definition,
+                        nodes::Definition::Gate { .. }
+                    )
+                    .then_some((node.identity, node.configuration.definition))
+                })
+                .collect(),
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct Reporters {
     graph: events::Graph,
@@ -205,80 +248,114 @@ pub(super) struct Reporters {
     delay_clock: Option<f64>,
 }
 impl Reporters {
-    pub(super) fn prepare(
-        index: &mut AssetIndex,
+    pub(super) fn from_source(
+        source: &Source,
         data: &intro::Mode,
         plan: &Plan,
     ) -> Result<Self, nfs_content::Error> {
-        let composition = index.scoring_events(&data.game_mode.layout.blueprint)?;
-        let serializers =
-            index.event_serializer_identities(&data.game_mode.layout, "GameModeEntityData")?;
-        let ids = composition
+        let composition = &source.composition;
+        let serializers = &source.serializers;
+        // Validate topology before indexing a cached endpoint, and never narrow
+        // unchecked node counts or recover missing identities by guessing.
+        let graph = composition.dispatcher()?;
+        if serializers.len() != data.game_mode.layout.fields.len()
+            || composition.nodes.len() > usize::from(u16::MAX)
+            || composition.nodes.iter().any(|n| {
+                n.forward
+                    .is_some_and(|f| usize::from(f) >= composition.nodes.len())
+            })
+        {
+            return Err(nfs_content::Error::Cache("intro reporter layout"));
+        }
+        let ids: BTreeMap<_, _> = composition
             .nodes
             .iter()
             .enumerate()
             .map(|(i, n)| (n.identity.clone(), i as u16))
-            .collect::<BTreeMap<_, _>>();
-        let (delay_values, delay_manager) =
-            delays::prepare(index, &composition, &data.game_mode.layout.blueprint, &ids)?;
-        let roots = composition
+            .collect();
+        if ids.len() != composition.nodes.len() {
+            return Err(nfs_content::Error::Cache(
+                "duplicate intro reporter identity",
+            ));
+        }
+        let id = |identity: &Identity| {
+            ids.get(identity)
+                .copied()
+                .ok_or(nfs_content::Error::Cache("missing intro reporter identity"))
+        };
+        let serializer = |s: usize| {
+            serializers
+                .get(s)
+                .ok_or(nfs_content::Error::Cache(
+                    "missing intro reporter serializer",
+                ))
+                .and_then(id)
+        };
+        for identity in serializers {
+            id(identity)?;
+        }
+        if source
+            .gates
+            .iter()
+            .any(|(_, definition)| !matches!(definition, nodes::Definition::Gate { .. }))
+        {
+            return Err(nfs_content::Error::Cache("prepared intro gate definition"));
+        }
+        let (delay_values, delay_manager) = delays::from_source(&source.delays, composition, &ids)?;
+        let roots: Vec<_> = composition
             .nodes
             .iter()
             .enumerate()
             .filter(|(_, n)| n.class == "GameModeEntityData")
             .map(|(i, _)| i as u16)
-            .collect::<Vec<_>>();
-        let [root] = roots.as_slice() else {
-            return Err(nfs_content::Error::Content("intro reporter root".into()));
-        };
-        let mut gates = BTreeMap::new();
-        let ai_only: BTreeSet<_> = index
-            .scoring_ai_inclusions(&data.game_mode.layout.blueprint)?
-            .into_iter()
-            .filter_map(|(identity, inclusion)| {
-                (inclusion == nfs_world::scoring::ai_control::Inclusion::Ai).then(|| ids[&identity])
-            })
             .collect();
-        for node in index.scoring_nodes(&data.game_mode.layout.blueprint)? {
-            if matches!(
-                node.configuration.definition,
-                nodes::Definition::Gate { .. }
-            ) {
-                gates.insert(
-                    ids[&node.identity],
-                    nodes::Node::new(node.configuration.definition)
+        let [root] = roots.as_slice() else {
+            return Err(nfs_content::Error::Cache("intro reporter root"));
+        };
+        let ai_only = source
+            .ai_only
+            .iter()
+            .map(id)
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        let gates = source
+            .gates
+            .iter()
+            .map(|(identity, definition)| {
+                Ok((
+                    id(identity)?,
+                    nodes::Node::new(*definition)
                         .map_err(|e| nfs_content::Error::Content(e.to_string()))?,
-                );
-            }
-        }
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, nfs_content::Error>>()?;
         let transitions = plan
             .data()
             .transitions
             .iter()
             .filter(|t| t.kind == nfs_content::events::lifecycle::TransitionKind::Triggered)
             .map(|t| {
-                (
-                    ids[&serializers[t.serializer]],
+                Ok((
+                    serializer(t.serializer)?,
                     (
                         t.sources.iter().map(|s| s.serializer as u16).collect(),
                         t.target.map(|t| t.serializer as u16),
                     ),
-                )
+                ))
             })
-            .collect();
+            .collect::<Result<_, nfs_content::Error>>()?;
         Ok(Self {
             root: *root,
             started: false,
             delay_clock: None,
-            graph: composition.dispatcher()?,
+            graph,
             countdowns: data
                 .game_mode
                 .lifecycle
                 .states
                 .iter()
                 .filter(|s| s.kind == StateKind::Countdown)
-                .map(|s| (s.serializer as u16, ids[&serializers[s.serializer]]))
-                .collect(),
+                .map(|s| Ok((s.serializer as u16, serializer(s.serializer)?)))
+                .collect::<Result<_, nfs_content::Error>>()?,
             state: HandlerState {
                 forward: composition
                     .nodes
@@ -294,8 +371,8 @@ impl Reporters {
                     .bindings
                     .results
                     .iter()
-                    .map(|r| (ids[&r.identity], r.identity.clone()))
-                    .collect(),
+                    .map(|r| Ok((id(&r.identity)?, r.identity.clone())))
+                    .collect::<Result<_, nfs_content::Error>>()?,
                 ai_controls: ai_only.clone(),
                 ai_only,
                 controls: BTreeMap::new(),
@@ -303,11 +380,7 @@ impl Reporters {
                 owned_filters: data
                     .owned_filters
                     .iter()
-                    .map(|id| {
-                        ids.get(id).copied().ok_or_else(|| {
-                            nfs_content::Error::Content("intro filter occurrence".into())
-                        })
-                    })
+                    .map(id)
                     .collect::<Result<_, _>>()?,
                 delay_values,
                 delay_manager,
@@ -402,6 +475,74 @@ impl Reporters {
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+    #[test]
+    fn mode_snapshot_rebuilds_fresh_reporters_and_rejects_dangling_identities() {
+        let (_, mut mode) = super::super::tests::content(
+            Asset {
+                bundle: 4,
+                type_id: 8,
+                local_index: 0,
+            },
+            nfs_world::sequences::Component {
+                scene_key: 7,
+                index: 2,
+            },
+        );
+        let identities: Vec<_> = (0..mode.data.game_mode.layout.fields.len())
+            .map(|index| Identity {
+                asset: "constructed/mode".into(),
+                index,
+                instances: vec![],
+            })
+            .collect();
+        let source = Source {
+            composition: nfs_content::scoring::events::Composition {
+                nodes: identities
+                    .iter()
+                    .enumerate()
+                    .map(|(index, identity)| nfs_content::scoring::events::Node {
+                        identity: identity.clone(),
+                        class: if index == 0 {
+                            "GameModeEntityData"
+                        } else {
+                            "ConstructedNode"
+                        }
+                        .into(),
+                        listeners: None,
+                        forward: None,
+                    })
+                    .collect(),
+                buses: vec![],
+                bus_entities: vec![],
+                connections: vec![],
+                properties: vec![],
+                links: vec![],
+            },
+            serializers: identities,
+            delays: vec![],
+            ai_only: vec![],
+            gates: vec![],
+        };
+        let mut reporters = Reporters::from_source(&source, &mode.data, &mode.plan).unwrap();
+        reporters.bind_human(88);
+        reporters.start(1.).unwrap();
+        assert!(reporters.started);
+        mode.reporters = Some(reporters);
+        mode.reporter_source = Some(Arc::new(source));
+        let bytes = serde_json::to_vec(&mode).unwrap();
+        let mut restored: Mode = serde_json::from_slice(&bytes).unwrap();
+        let rebuilt = restored.reporters.as_mut().unwrap();
+        assert!(!rebuilt.started);
+        assert_eq!(rebuilt.delay_clock, None);
+        assert_eq!(rebuilt.state.human, None);
+        assert!(rebuilt.state.actions.is_empty() && rebuilt.state.controls.is_empty());
+        rebuilt.bind_human(19);
+        assert_eq!(mode.reporters.as_ref().unwrap().state.human, Some(88));
+        let mut invalid: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        invalid["reporters"]["composition"]["nodes"][0]["identity"]["index"] =
+            serde_json::json!(99999);
+        assert!(serde_json::from_value::<Mode>(invalid).is_err());
+    }
     pub(super) fn fixture(fail: bool) -> Reporters {
         let id = Identity {
             asset: "test".into(),

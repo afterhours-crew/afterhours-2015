@@ -8,7 +8,7 @@ use super::*;
 use crate::{graph::scenes::SceneLookup, scoring::events::Identity};
 use std::collections::BTreeMap;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Composite {
     pub objective: u64,
     pub sequence: movies::Sequence,

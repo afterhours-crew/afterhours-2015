@@ -26,6 +26,7 @@ pub mod driving;
 pub mod loading;
 pub mod membership;
 pub mod movies;
+mod prepared;
 pub mod volumes;
 
 #[derive(Clone, Debug)]
@@ -54,7 +55,7 @@ pub struct Content {
     pub mode_notifications: Vec<(u32, nfs_content::events::intro::ModeNotification)>,
     items: Arc<Collection>,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Race {
     pub destination: nfs_content::prologue::Destination,
     pub arrival: Authored,

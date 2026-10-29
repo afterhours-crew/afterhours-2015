@@ -16,7 +16,7 @@ mod scope;
 pub mod timing;
 pub use parent::Relay;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Sequence {
     pub blueprint: String,
     pub asset: Asset,
@@ -139,7 +139,7 @@ pub fn extract_referenced(
     Ok(extract_bound(index, name, false, Some(reference))?.0)
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ServiceLink {
     /// None is an explicitly identified, non-replicated node in the parent
     /// participant graph. It is not a missing wire endpoint.

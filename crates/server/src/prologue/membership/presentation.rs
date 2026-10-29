@@ -32,10 +32,22 @@ pub(super) const BLUEPRINTS: [&str; 4] = [
     "gameplay/stats/garagestatslogic",
 ];
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "Layout", into = "Layout")]
 pub(crate) struct Definition {
     layout: Layout,
     codec: Codec,
+}
+impl From<Definition> for Layout {
+    fn from(value: Definition) -> Self {
+        value.layout
+    }
+}
+impl TryFrom<Layout> for Definition {
+    type Error = String;
+    fn try_from(value: Layout) -> Result<Self, Self::Error> {
+        Self::new(value).map_err(|e| format!("prepared presentation: {e:?}"))
+    }
 }
 impl Definition {
     pub(crate) fn prepare(

@@ -15,7 +15,7 @@ use nfs_protocol::world::{
     rpc::{Envelope, Limits, RouteProfile},
 };
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Video {
     pub bundle: u16,
     pub index: u16,

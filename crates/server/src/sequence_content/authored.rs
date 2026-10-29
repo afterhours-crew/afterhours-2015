@@ -27,7 +27,10 @@ use nfs_world::{
 };
 use std::collections::BTreeMap;
 
-#[derive(Clone, Debug)]
+mod prepared;
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "prepared::Source", into = "prepared::Source")]
 pub struct Authored {
     data: Sequence,
     channels: BTreeMap<usize, ChannelBinding>,

@@ -5,7 +5,7 @@ use super::*;
 use crate::graph::{Endpoint, bad};
 use crate::scoring::events::{self, Identity};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Relay {
     pub objective: u64,
     pub selected: u32,

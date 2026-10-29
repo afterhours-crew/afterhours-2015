@@ -48,6 +48,47 @@ fn decode(bytes: &[u8]) -> Result<Content, Error> {
 }
 
 #[test]
+fn cached_sequence_reconstructs_wire_profiles_and_rejects_invalid_channels() {
+    use crate::sequence_content::authored::{Authored, Instances, tests::fixture};
+    let dir = Directory::new();
+    let (players, authored, first, second) = fixture();
+    let bytes = serde_json::to_vec(&authored).unwrap();
+    let decode = |bytes: &[u8]| {
+        serde_json::from_slice::<Authored>(bytes).map_err(|_| Error::Cache("prepared sequence"))
+    };
+    let cold = dir
+        .cache()
+        .prepare("sequence", b"parent", decode, || Ok(bytes.clone()))
+        .unwrap();
+    let warm = dir
+        .cache()
+        .prepare("sequence", b"parent", decode, || {
+            panic!("warm sequence rebuilt")
+        })
+        .unwrap();
+    for owner in [first, second] {
+        let original = Instances::default()
+            .start(&authored, &mut players.clone(), owner)
+            .unwrap();
+        let cached = Instances::default()
+            .start(&warm, &mut players.clone(), owner)
+            .unwrap();
+        assert_eq!(format!("{original:?}"), format!("{cached:?}"));
+    }
+    assert_eq!(format!("{cold:?}"), format!("{warm:?}"));
+    let mut invalid: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    invalid["channels"] = serde_json::json!({});
+    assert!(
+        dir.cache()
+            .prepare("invalid-sequence", b"parent", decode, || Ok(
+                serde_json::to_vec(&invalid).unwrap()
+            ))
+            .is_err()
+    );
+    assert!(serde_json::from_slice::<Authored>(&serde_json::to_vec(&invalid).unwrap()).is_err());
+}
+
+#[test]
 fn compiled_event_is_reused_across_cache_instances_and_source_changes_invalidate() {
     let dir = Directory::new();
     let source = event();

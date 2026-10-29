@@ -9,7 +9,7 @@ pub mod results;
 pub mod shutdown;
 mod spawned;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Mode {
     pub game_mode: GameMode,
     pub sequences: Vec<Sequence>,
@@ -50,7 +50,7 @@ pub struct Mode {
 
 /// A networked event on the intro participant logic, by registered bus and
 /// event-table ordinal (the wire identities a logic fire carries).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LaunchEvent {
     pub bus: u32,
     pub ordinal: u32,
@@ -74,7 +74,7 @@ const MAX_TIMED_HOPS: usize = 8;
 /// mode's objective is still active.
 /// A message the host sends `seconds` after the mode's launcher started:
 /// the MessageAsset partition and object.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TimedMessage {
     pub message: (String, usize),
     pub seconds: f32,
@@ -86,7 +86,7 @@ const SENDER_ENABLE: u32 = 1_037_321_618;
 /// BoolEntityData SetTrue event input.
 const BOOL_SET_TRUE: u32 = 2_753_900_881;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TimedEvent {
     pub event: LaunchEvent,
     pub seconds: f32,
@@ -449,7 +449,7 @@ pub(super) fn links<S: Source>(
 /// A scene Boolean notification fed by a participant-in-game-mode property:
 /// true while the participant is in a game mode that has any (or, with
 /// `all`, every) one of `categories` (category hashes).
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ModeNotification {
     pub serializer: usize,
     pub categories: BTreeSet<u32>,

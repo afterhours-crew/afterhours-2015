@@ -8,13 +8,13 @@ use super::*;
 use crate::{graph::scenes::SceneLookup, scoring::events::Identity};
 use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Sequence {
     pub blueprint: String,
     pub reference: Identity,
     pub state: (u32, usize),
 }
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Movie {
     pub objective: u64,
     pub blueprint: String,

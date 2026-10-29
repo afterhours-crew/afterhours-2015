@@ -8,7 +8,7 @@ use super::*;
 use crate::scoring::events::Identity;
 use nfs_world::scoring::events::Delivery;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Completion {
     pub source: Identity,
     pub collector: lifecycle::bindings::Link,

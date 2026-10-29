@@ -24,7 +24,7 @@ pub mod boolean;
 pub mod integer;
 
 /// An explicit owner context, rather than a global search by channel asset.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Owner {
     Scene,
     /// A child spawned by a participant-owned manager binds its parent's channels.
@@ -32,17 +32,17 @@ pub enum Owner {
         blueprint: String,
     },
 }
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Channel {
     Scene { content_key: u32, serializer: usize },
     Participant { serializer: usize },
 }
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Field {
     pub kind: Kind,
     pub channel: Option<Channel>,
 }
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Layout {
     pub asset: Asset,
     pub catalog: Vec<(u32, u32)>,

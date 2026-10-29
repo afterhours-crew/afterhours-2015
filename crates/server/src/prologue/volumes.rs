@@ -43,7 +43,7 @@ const MISSION_SWITCHING: [&str; 2] = [
 const MAX_ENDPOINTS: usize = 1024;
 
 /// One installed scene serializer: its definition's class and prefab asset.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Binding {
     pub endpoint: Endpoint,
     pub class: String,
@@ -52,13 +52,13 @@ pub struct Binding {
 
 /// An event's eligibility notification precedes its participant subscription.
 /// Keep that relationship: independently sorting the two endpoint sets loses it.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EventVolume {
     pub volume: Endpoint,
     pub notifications: Vec<Endpoint>,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct WorldVolumes {
     /// Event start volumes (participant memberships).
     pub events: BTreeSet<Endpoint>,

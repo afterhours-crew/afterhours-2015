@@ -16,7 +16,7 @@ use crate::{
 use nfs_world::scoring::{event_sync::Binding, program::Program};
 use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Service {
     Root,
     ParticipantProvider,
@@ -31,7 +31,7 @@ pub enum Service {
     Console,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Definition {
     pub program: Program,
     pub composition: Composition,

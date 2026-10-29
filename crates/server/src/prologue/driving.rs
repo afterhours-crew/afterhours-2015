@@ -41,11 +41,13 @@ use std::{
 mod arrival;
 mod garage;
 pub(crate) mod opponents;
+mod prepared;
 mod reporters;
 #[cfg(test)]
 pub(crate) mod tests;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "prepared::Source", into = "prepared::Source")]
 pub struct Mode {
     pub data: intro::Mode,
     /// The launcher's timed messages as (seconds after the launch, HashId).
@@ -56,6 +58,7 @@ pub struct Mode {
     sequences: BTreeMap<usize, Authored>,
     timing: BTreeMap<usize, f64>,
     reporters: Option<reporters::Reporters>,
+    reporter_source: Option<Arc<reporters::Source>>,
     opponents: Option<Arc<crate::event_ai::Content>>,
 }
 fn invalid<T>(_: T) -> Error {
@@ -139,9 +142,11 @@ impl Mode {
             .map_err(|e| nfs_content::Error::Content(format!("intro mode: {e:?}")))?;
         mode.timing = timing;
         mode.messages = messages;
-        mode.reporters = Some(reporters::Reporters::prepare(
-            index, &mode.data, &mode.plan,
+        let source = Arc::new(reporters::Source::prepare(index, &mode.data)?);
+        mode.reporters = Some(reporters::Reporters::from_source(
+            &source, &mode.data, &mode.plan,
         )?);
+        mode.reporter_source = Some(source);
         Ok(mode)
     }
     fn new(
@@ -179,6 +184,7 @@ impl Mode {
             sequences,
             timing: BTreeMap::new(),
             reporters: None,
+            reporter_source: None,
             opponents: None,
         })
     }
