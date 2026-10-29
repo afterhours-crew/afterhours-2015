@@ -861,10 +861,17 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                 .map(|b| b.asset());
             let intro_items = inventory.as_ref().map(|i| i.item_catalog());
             let content = tokio::task::spawn_blocking(move || {
+                let started = std::time::Instant::now();
                 let mut index = nfs_content::assets::AssetIndex::open(
                     &game_dir,
                     &nfs_content::Options::default(),
                 )?;
+                tracing::info!(
+                    phase = "asset_index",
+                    elapsed_ms = started.elapsed().as_millis(),
+                    "runtime preparation phase complete"
+                );
+                let stage = std::time::Instant::now();
                 let scoring = index.scoring_content("levels/genesis01/gameplay")?;
                 let keepers = index.score_keepers(
                     "levels/genesis01/gameplay",
@@ -876,6 +883,12 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                 let messages = nfs_server::messages::Content::prepare(&mut index);
                 let tutorials = nfs_server::tutorials::Content::prepare(&mut index);
                 let chapters = nfs_server::chapter_notifications::Content::prepare(&mut index);
+                tracing::info!(
+                    phase = "shared_content",
+                    elapsed_ms = stage.elapsed().as_millis(),
+                    "runtime preparation phase complete"
+                );
+                let stage = std::time::Instant::now();
                 // The owned race event resolves from the same installation; its
                 // failure leaves scoring on and the event off.
                 let event = (|| -> Result<_, nfs_content::Error> {
@@ -894,6 +907,13 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                         items.as_ref(),
                     )
                 })();
+                tracing::info!(
+                    phase = "sprints",
+                    elapsed_ms = stage.elapsed().as_millis(),
+                    success = event.is_ok(),
+                    "runtime preparation phase complete"
+                );
+                let stage = std::time::Instant::now();
                 let story = (|| {
                     let parent = intro_parent.ok_or_else(|| {
                         nfs_content::Error::Content("intro participant content missing".into())
@@ -915,6 +935,13 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                         })?;
                     prepared.with_opponents(&mut index, vehicles, &ai_items)
                 })();
+                tracing::info!(
+                    phase = "prologue",
+                    elapsed_ms = stage.elapsed().as_millis(),
+                    success = story.is_ok(),
+                    total_ms = started.elapsed().as_millis(),
+                    "runtime preparation phase complete"
+                );
                 Ok::<_, nfs_content::Error>((
                     scoring, road, nitrous, event, story, hides, messages, tutorials, chapters,
                     keepers,

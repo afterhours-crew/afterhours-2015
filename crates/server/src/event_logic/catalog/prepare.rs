@@ -11,6 +11,7 @@ use nfs_world::{replication::entity::creation::Asset, scoring::interpreter::Cate
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
+    time::Instant,
 };
 
 pub struct Prepared {
@@ -52,14 +53,18 @@ pub fn sprints(
         let Some(context) = request::sprint(entry) else {
             continue;
         };
+        let started = Instant::now();
         let resolved = index.event_request(&context)?;
         let event = index.event(&resolved)?;
+        let event_ms = started.elapsed().as_millis();
+        let stage = Instant::now();
         let awards_layout = event
             .game_mode_logics
             .iter()
             .find(|l| l.blueprint == request::AWARDS)
             .ok_or_else(|| Error::Content("event awards layout".into()))?;
         let awards = index.event_awards(&event, awards_layout)?;
+        let awards_ms = stage.elapsed().as_millis();
         if categories.get(&awards.keeper) != Some(&Category::Total) {
             return Err(Error::Content("event award keeper category".into()));
         }
@@ -69,12 +74,16 @@ pub fn sprints(
             .find(|l| l.blueprint == request::DRIVING_STYLE)
             .ok_or_else(|| Error::Content("event driving-style layout".into()))?;
         let asset = driving.asset;
+        let stage = Instant::now();
         let program = index.event_scoring(driving)?;
         let category = index.speed_wall_category(&entry.id)?;
+        let scoring_ms = stage.elapsed().as_millis();
+        let stage = Instant::now();
         let content = Content::new(event, category)
             .and_then(|c| c.with_awards(awards))
             .and_then(|c| c.with_navigation(navigation.clone()))
             .map_err(|e| Error::Content(format!("sprint {}: {e:?}", entry.id)))?;
+        let construction_ms = stage.elapsed().as_millis();
         let written: BTreeSet<_> = program.properties.iter().map(|(_, p)| p).collect();
         if !content
             .presented_properties()
@@ -86,6 +95,7 @@ pub fn sprints(
                 entry.id
             )));
         }
+        let stage = Instant::now();
         let content = if content.event().ai.spawns.is_empty() {
             content
         } else {
@@ -102,6 +112,12 @@ pub fn sprints(
             event = entry.id,
             checkpoints = content.event().game_mode.checkpoints.len(),
             opponents = content.event().ai.spawns.len(),
+            event_ms,
+            awards_ms,
+            scoring_ms,
+            construction_ms,
+            opponents_ms = stage.elapsed().as_millis(),
+            total_ms = started.elapsed().as_millis(),
             "sprint content prepared"
         );
         entries.push((content, program, asset));
