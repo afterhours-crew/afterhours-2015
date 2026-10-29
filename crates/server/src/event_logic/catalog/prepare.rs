@@ -55,7 +55,15 @@ pub fn sprints(
         };
         let started = Instant::now();
         let resolved = index.event_request(&context)?;
-        let event = index.event(&resolved)?;
+        let request_ms = started.elapsed().as_millis();
+        let event = index.event_with_progress(&resolved, |phase, elapsed| {
+            tracing::info!(
+                event = entry.id,
+                phase,
+                elapsed_ms = elapsed.as_millis(),
+                "event preparation stage complete"
+            );
+        })?;
         let event_ms = started.elapsed().as_millis();
         let stage = Instant::now();
         let awards_layout = event
@@ -113,6 +121,7 @@ pub fn sprints(
             checkpoints = content.event().game_mode.checkpoints.len(),
             opponents = content.event().ai.spawns.len(),
             event_ms,
+            request_ms,
             awards_ms,
             scoring_ms,
             construction_ms,

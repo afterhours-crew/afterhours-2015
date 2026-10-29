@@ -11,6 +11,7 @@ game content stay local; review outputs before sharing.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import hashlib
 import json
 import os
@@ -31,6 +32,42 @@ def digest(path: Path) -> str:
 
 def read(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8-sig"))
+
+
+class WindowsMemory:
+    """Read the OS peak working set for the receipt's server PID only."""
+    class Counters(ctypes.Structure):
+        _fields_ = [("cb", ctypes.c_ulong), ("faults", ctypes.c_ulong)] + [
+            (name, ctypes.c_size_t) for name in (
+                "peak_working_set", "working_set", "peak_paged_pool", "paged_pool",
+                "peak_nonpaged_pool", "nonpaged_pool", "pagefile", "peak_pagefile",
+            )
+        ]
+
+    def __init__(self) -> None:
+        self.kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        self.memory = ctypes.WinDLL("psapi", use_last_error=True)
+        self.kernel.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+        self.kernel.OpenProcess.restype = ctypes.c_void_p
+        self.kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+        self.kernel.CloseHandle.restype = ctypes.c_int
+        self.memory.GetProcessMemoryInfo.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(self.Counters), ctypes.c_ulong,
+        ]
+        self.memory.GetProcessMemoryInfo.restype = ctypes.c_int
+
+    def peak(self, pid: int) -> int | None:
+        handle = self.kernel.OpenProcess(0x0400 | 0x0010, False, pid)
+        if not handle:
+            return None
+        try:
+            counters = self.Counters()
+            counters.cb = ctypes.sizeof(counters)
+            if not self.memory.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
+                return None
+            return counters.peak_working_set
+        finally:
+            self.kernel.CloseHandle(handle)
 
 
 def main() -> None:
@@ -67,8 +104,10 @@ def main() -> None:
                              check=True, timeout=30, env=env, creationflags=flags)
     report["version"] = json.loads(version.stdout)
     baseline_save = None
+    memory = WindowsMemory() if os.name == "nt" else None
     for number in range(args.runs):
-        row = {"index": number, "started_utc": utc(), "ready": False}
+        row = {"index": number, "started_utc": utc(), "ready": False,
+               "server_peak_working_set_bytes": None}
         report["runs"].append(row)
         previous = read(data / "current-session.json")["id"] if (data / "current-session.json").exists() else None
         started = time.monotonic()
@@ -90,6 +129,11 @@ def main() -> None:
                                 status = read(status_path)
                                 if status.get("game_running") or status.get("game_pid"):
                                     raise RuntimeError("unexpected game in server-only benchmark")
+                                if memory and isinstance(status.get("server_pid"), int):
+                                    peak = memory.peak(status["server_pid"])
+                                    if peak is not None:
+                                        row["server_peak_working_set_bytes"] = max(
+                                            row["server_peak_working_set_bytes"] or 0, peak)
                                 if status["state"] == "ready":
                                     row.update(ready=True, seconds=time.monotonic() - started, session=session)
                                     receipt = read(run / "server-process.json")

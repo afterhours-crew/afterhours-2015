@@ -779,7 +779,7 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
         })
         .transpose()?
         .map(Arc::new);
-    let rivals = if let Some(path) = &args.rival_content {
+    let (rivals, installation_index) = if let Some(path) = &args.rival_content {
         let path = args.root.join(path);
         let item_path = args
             .root
@@ -790,21 +790,35 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
             .vehicles
             .clone();
         let game_dir = args.game_dir.clone();
-        let (content, graph) = tokio::task::spawn_blocking(move || {
+        let (content, graph, index) = tokio::task::spawn_blocking(move || {
             let items = nfs_services::item_content::ItemContent::load(&item_path)
                 .map_err(|_| Failure::ProfileConfig)?;
             let content = nfs_server::rival_content::Content::load(&path, definitions, &items)?;
             // The host simulates rivals on the installed road graph (E987).
+            let started = std::time::Instant::now();
+            let mut index = None;
             let graph = game_dir.ok_or(None).and_then(|dir| {
                 nfs_content::assets::AssetIndex::open(&dir, &nfs_content::Options::default())
-                    .and_then(|mut index| index.road_graph())
+                    .and_then(|mut opened| {
+                        let graph = opened.road_graph();
+                        // Preserve the validated source and its immutable tables
+                        // for scoring, events and story preparation below.
+                        index = Some(opened);
+                        graph
+                    })
                     .map_err(Some)
             });
-            Ok::<_, Failure>((content, graph))
+            tracing::info!(
+                phase = "rival_roads",
+                elapsed_ms = started.elapsed().as_millis(),
+                success = graph.is_ok(),
+                "runtime preparation phase complete"
+            );
+            Ok::<_, Failure>((content, graph, index))
         })
         .await
         .map_err(|_| Failure::Output)??;
-        match graph {
+        let rivals = match graph {
             Ok(graph) => {
                 tracing::info!(
                     nodes = graph.node_count(),
@@ -820,9 +834,10 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                 );
                 None
             }
-        }
+        };
+        (rivals, index)
     } else {
-        None
+        (None, None)
     };
     let default_reputation = args
         .reputation_thresholds
@@ -862,12 +877,17 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
             let intro_items = inventory.as_ref().map(|i| i.item_catalog());
             let content = tokio::task::spawn_blocking(move || {
                 let started = std::time::Instant::now();
-                let mut index = nfs_content::assets::AssetIndex::open(
-                    &game_dir,
-                    &nfs_content::Options::default(),
-                )?;
+                let reused = installation_index.is_some();
+                let mut index = match installation_index {
+                    Some(index) => index,
+                    None => nfs_content::assets::AssetIndex::open(
+                        &game_dir,
+                        &nfs_content::Options::default(),
+                    )?,
+                };
                 tracing::info!(
                     phase = "asset_index",
+                    reused,
                     elapsed_ms = started.elapsed().as_millis(),
                     "runtime preparation phase complete"
                 );

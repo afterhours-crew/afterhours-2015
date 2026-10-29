@@ -502,6 +502,21 @@ impl AssetIndex {
     /// Resolve one event's composition. Ambiguous or missing spawners, channels,
     /// start areas or checkpoints are errors.
     pub fn event(&mut self, request: &Request) -> Result<Event, Error> {
+        self.event_with_progress(request, |_, _| {})
+    }
+
+    /// Same strict preparation with completed-stage timings for startup tools.
+    pub fn event_with_progress(
+        &mut self,
+        request: &Request,
+        mut report: impl FnMut(&'static str, std::time::Duration),
+    ) -> Result<Event, Error> {
+        let mut stage = std::time::Instant::now();
+        let mut phase = |name| {
+            let now = std::time::Instant::now();
+            report(name, now.duration_since(stage));
+            stage = now;
+        };
         let rival_links = self.identity.rival_links;
         let ai_links = self.identity.ai_links;
         let rules = Rules::from_json(&self.identity.participant_logic.to_json())?;
@@ -571,6 +586,7 @@ impl AssetIndex {
             let r = self.reference(&scene_name, &blueprint)?;
             scene_registries.push((scene_name, blueprint, scene_bundle, scene_catalog, r));
         }
+        phase("registries");
         let mut graph = Graph::new(&mut self.assets);
         let mut scenes = SceneLookup {
             roots: scene_roots(&mut graph, &scene_rules.level, &startup)?,
@@ -585,6 +601,7 @@ impl AssetIndex {
             .clone();
         let scene_nodes = graph.read(scene_root)?;
         let (launcher, instance) = request::start_area(&mut graph, &scene_nodes, &game_mode_id)?;
+        phase("start_area");
         let scene_content_key = crate::assets::scene_key(&scene);
         let rewards = {
             let frame = launcher
@@ -691,6 +708,7 @@ impl AssetIndex {
             }
             game_mode_notifications.push((key, serializer));
         }
+        phase("scene_bindings");
         // Checkpoint route: the waypoint-list channel's targets in link order.
         let waypoints = sibling(&scene_nodes, WAYPOINTS_CHANNEL, &launcher)?;
         let laps = route::laps(&mut graph, &waypoints.site)?;
@@ -713,6 +731,7 @@ impl AssetIndex {
         {
             return Err(bad("checkpoint route bound"));
         }
+        phase("route");
         // The game mode.
         let gm_name = request.game_mode.to_lowercase();
         if graph.target_field(&launcher, "GameMode")? != (gm_name.clone(), 0) {
@@ -845,6 +864,7 @@ impl AssetIndex {
             laps,
         };
         game_mode.layout.profile()?;
+        phase("game_mode");
         // Resolve a spawned participant logic's channels against its spawner.
         let spawned = |graph: &mut Graph<Assets>,
                        scenes: &mut SceneLookup<'_>,
@@ -1125,6 +1145,7 @@ impl AssetIndex {
                 wander: sequence::wander(&mut graph, &nodes)?,
             });
         }
+        phase("sequences");
         let mut start_logics = Vec::new();
         for name in &request.start_logics {
             let spawners = spawner_for(&mut graph, &scene_nodes, name, &|s| within(s, &instance))?;
@@ -1172,6 +1193,7 @@ impl AssetIndex {
                 )?);
             }
         }
+        phase("participants");
         // The linked logic in the other start areas joined to this area's external
         // participant set (E996: the variants of one event).
         let mut linked_logics = Vec::new();
@@ -1216,6 +1238,7 @@ impl AssetIndex {
                 }
             }
         }
+        phase("linked_variants");
         let mut scene_logics = Vec::new();
         for (scene_name, blueprint, scene_bundle, scene_catalog, r) in &scene_registries {
             let root = scenes
@@ -1242,6 +1265,7 @@ impl AssetIndex {
                 layout,
             });
         }
+        phase("scene_logics");
         let mut ai = ai::extract(&mut graph, &instance_site, &manager_nodes, rival_links)?;
         if !ai.spawns.is_empty() {
             let unique = |class: &str| -> Result<Site, Error> {
@@ -1262,11 +1286,16 @@ impl AssetIndex {
                 ai_links,
             )?);
         }
+        phase("opponents");
+        let invitations = invitations::extract(&mut graph, &mut scenes)?;
+        phase("invitations");
+        let restart = restart::destinations(&mut graph, &instance_site)?;
+        phase("restart");
         Ok(Event {
             award_values,
             ai,
-            invitations: invitations::extract(&mut graph, &mut scenes)?,
-            restart: restart::destinations(&mut graph, &instance_site)?,
+            invitations,
+            restart,
             scene,
             scene_content_key,
             game_mode_id,
