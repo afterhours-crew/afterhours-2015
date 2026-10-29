@@ -6,6 +6,259 @@ use nfs_world_core::items::{
     Definition, DefinitionClass, DefinitionFlags, Derived, InventoryCatalog, Layout, OwnershipLevel,
 };
 const OBJECTIVE: u64 = 9007199254740993;
+
+#[test]
+fn launcher_skip_grants_the_authored_tree_and_completion_atomically_once() {
+    let repo = MemoryRepository::default();
+    let who = account(35);
+    let other = account(36);
+    let c = catalog();
+    let p = policy(&c);
+    let inv = inventory();
+    let original = init(&repo, who);
+    let other_before = init(&repo, other);
+    repo.apply(
+        who,
+        &Batch {
+            id: 2,
+            expected_generation: original.generation,
+            ops: vec![Op::SetGarage(nfs_storage::GarageSlots::default())],
+        },
+        Timestamp(2),
+    )
+    .unwrap();
+    let before = repo.snapshot(who).unwrap();
+    let operation = p.next_operation(&before).unwrap();
+    let prepared = p
+        .jump_with_vehicle(
+            &before,
+            before.generation,
+            operation,
+            Checkpoint::AfterIntro,
+            Some((&inv, 7, [1; 16])),
+        )
+        .unwrap();
+    // Preparing the edit never performs its first-car grant.
+    assert_eq!(repo.snapshot(who).unwrap(), before);
+    let after = apply(&repo, who, prepared);
+    assert_eq!(after.generation, before.generation + 1);
+    assert_eq!(p.inspect(&after).unwrap().position, 3);
+    let receipt = p.reward(&after, 7).unwrap().unwrap();
+    assert_eq!(after.garage.unwrap().0[0], Some(receipt.item));
+    assert_eq!(after.items[&receipt.item].definition.0, [1; 16]);
+    assert!(
+        after
+            .items
+            .values()
+            .any(|item| item.owner == Some(receipt.item) && item.definition.0 == [2; 16])
+    );
+    for name in ["AfterhoursBank", "Unrelated"] {
+        assert!(before.tables.contains_key(&key(name)));
+        assert_eq!(after.tables.get(&key(name)), before.tables.get(&key(name)));
+    }
+    assert_eq!(repo.snapshot(other).unwrap(), other_before);
+    assert_eq!(
+        p.jump_with_vehicle(
+            &after,
+            before.generation,
+            operation,
+            Checkpoint::AfterIntro,
+            Some((&inv, 7, [1; 16]))
+        )
+        .unwrap(),
+        Prepared::Replayed
+    );
+    assert!(
+        p.jump_with_vehicle(
+            &after,
+            before.generation,
+            operation,
+            Checkpoint::AfterIntro,
+            Some((&inv, 7, [4; 16]))
+        )
+        .is_err()
+    );
+    let rewound = apply(
+        &repo,
+        who,
+        p.jump(
+            &after,
+            after.generation,
+            p.next_operation(&after).unwrap(),
+            Checkpoint::Objective(7),
+        )
+        .unwrap(),
+    );
+    assert!(
+        p.jump_with_vehicle(
+            &rewound,
+            rewound.generation,
+            p.next_operation(&rewound).unwrap(),
+            Checkpoint::AfterIntro,
+            Some((&inv, 7, [1; 16]))
+        )
+        .is_err()
+    );
+    assert_eq!(repo.snapshot(who).unwrap(), rewound);
+}
+
+#[test]
+fn invalid_skip_choice_and_target_leave_the_save_unchanged() {
+    let repo = MemoryRepository::default();
+    let who = account(37);
+    let c = catalog();
+    let p = policy(&c);
+    let inv = inventory();
+    let before = init(&repo, who);
+    for (target, definition) in [
+        (Checkpoint::Objective(7), [1; 16]),
+        (Checkpoint::AfterIntro, [9; 16]),
+    ] {
+        assert!(
+            p.jump_with_vehicle(
+                &before,
+                before.generation,
+                7,
+                target,
+                Some((&inv, 7, definition))
+            )
+            .is_err()
+        );
+        assert_eq!(repo.snapshot(who).unwrap(), before);
+    }
+}
+
+#[test]
+fn replay_selection_uses_the_earned_car_even_when_another_preview_was_chosen() {
+    let repo = MemoryRepository::default();
+    let who = account(38);
+    let c = catalog();
+    let p = policy(&c);
+    let inv = inventory();
+    init(&repo, who);
+    let earned = grant(&repo, who, &p, &inv);
+    let saved = apply(
+        &repo,
+        who,
+        p.complete(
+            &earned,
+            earned.generation,
+            p.next_operation(&earned).unwrap(),
+            OBJECTIVE,
+            vec![],
+        )
+        .unwrap(),
+    );
+    let rewound = apply(
+        &repo,
+        who,
+        p.jump(
+            &saved,
+            saved.generation,
+            p.next_operation(&saved).unwrap(),
+            Checkpoint::Objective(OBJECTIVE),
+        )
+        .unwrap(),
+    );
+    let result = p
+        .claim_selection(&repo, who, OBJECTIVE, [4; 16], &inv, Timestamp(9))
+        .unwrap();
+    assert!(result.replayed);
+    assert_eq!(result.receipt.definition, [1; 16]);
+    assert_eq!(result.snapshot, rewound);
+    assert_eq!(repo.snapshot(who).unwrap(), rewound);
+    // The strict award primitive still rejects a competing first-time choice.
+    assert!(
+        p.claim_vehicle(&repo, who, OBJECTIVE, [4; 16], &inv, Timestamp(10))
+            .is_err()
+    );
+    let mut missing = rewound.clone();
+    missing.items.remove(&result.receipt.item);
+    assert!(
+        p.grant_vehicle(&missing, missing.generation, OBJECTIVE, [1; 16], &inv)
+            .is_err()
+    );
+}
+
+#[test]
+fn legacy_replay_adopts_an_existing_car_without_granting_or_changing_its_parts() {
+    let repo = MemoryRepository::default();
+    let who = account(39);
+    let c = catalog();
+    let p = policy(&c);
+    let inv = inventory();
+    let source = account(40);
+    init(&repo, source);
+    let earned = grant(&repo, source, &p, &inv);
+    let receipt = p.reward(&earned, OBJECTIVE).unwrap().unwrap();
+    let saved = apply(
+        &repo,
+        source,
+        p.complete(
+            &earned,
+            earned.generation,
+            p.next_operation(&earned).unwrap(),
+            OBJECTIVE,
+            vec![],
+        )
+        .unwrap(),
+    );
+    // Construct a legacy save with durable completion but no story ledger/receipt.
+    repo.open(who).unwrap();
+    let mut ops = saved
+        .tables
+        .iter()
+        .filter(|(k, _)| ![key("AfterhoursStory"), key("AfterhoursStoryRewards")].contains(k))
+        .map(|(key, table)| Op::SetTable(*key, table.clone()))
+        .collect::<Vec<_>>();
+    ops.extend(saved.items.values().cloned().map(Op::Insert));
+    ops.push(Op::SetGarage(nfs_storage::GarageSlots([
+        Some(receipt.item),
+        None,
+        None,
+        None,
+        None,
+    ])));
+    repo.apply(
+        who,
+        &Batch {
+            id: 999,
+            expected_generation: 0,
+            ops,
+        },
+        Timestamp(10),
+    )
+    .unwrap();
+    let legacy = repo.snapshot(who).unwrap();
+    let rewound = apply(
+        &repo,
+        who,
+        p.jump(
+            &legacy,
+            legacy.generation,
+            p.next_operation(&legacy).unwrap(),
+            Checkpoint::Objective(OBJECTIVE),
+        )
+        .unwrap(),
+    );
+    let result = p
+        .claim_selection(&repo, who, OBJECTIVE, [4; 16], &inv, Timestamp(11))
+        .unwrap();
+    assert_eq!(result.receipt, receipt);
+    assert_eq!(result.snapshot.items, rewound.items);
+    assert_eq!(result.snapshot.garage, rewound.garage);
+    assert_eq!(
+        Balance::from_snapshot(&result.snapshot).unwrap(),
+        Balance(12345)
+    );
+    assert_eq!(result.snapshot.generation, rewound.generation + 1);
+    assert!(
+        p.claim_selection(&repo, who, OBJECTIVE, [4; 16], &inv, Timestamp(12))
+            .unwrap()
+            .replayed
+    );
+    assert_eq!(repo.snapshot(who).unwrap(), result.snapshot);
+}
 fn inventory() -> InventoryCatalog {
     let car = Definition {
         class: DefinitionClass::RaceVehicleItemData,

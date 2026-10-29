@@ -372,11 +372,49 @@ pub(crate) fn build(index: &mut AssetIndex, fingerprint: &str) -> Result<Vec<u8>
         entities.push(json!({"name":name,"asset":asset,"bus_count":buses,"roles":roles}));
     }
     let source = json!({"path":"installation:ParticipantLogicBlueprint","sha256":fingerprint});
-    let value = json!({"format":super::FORMAT,"version":super::VERSION,"build_sha256":super::BUILD,
+    let mut value = json!({"format":super::FORMAT,"version":super::VERSION,"build_sha256":super::BUILD,
         "sources":[source],"restoration":{"version":1,"build_sha256":super::BUILD,"source":source,"branches":restored},
         "entities":{"content":{"catalogs":[{"bundle":bundle,"entries":catalog}],"profiles":profiles},"branches":entities},
         "settings":{"consumer_beta":false,"enable_speed_lists":false}});
-    Content::from_json(&value).map_err(|_| bad("generated content failed validation"))?;
+    let content =
+        Content::from_json(&value).map_err(|_| bad("generated content failed validation"))?;
+    let order = content
+        .catalog
+        .intro_order(content.settings)
+        .map_err(|_| bad("intro order"))?;
+    // A partial catalog with no car-selection objective remains readable but
+    // cannot advertise editing. Once present, malformed authored data is fatal.
+    if let Some(selection) = order.get(1) {
+        let garage = crate::garage::starter::extract(index)?;
+        let program = crate::prologue::sequences::program::extract(
+            index,
+            "gameplay/progression/intro/introcarselectsequence",
+        )?;
+        let objectives = program
+            .links
+            .values()
+            .flat_map(|links| links.values())
+            .filter_map(|link| link.relay.as_ref().map(|relay| relay.objective))
+            .collect::<std::collections::BTreeSet<_>>();
+        let definitions = program
+            .services
+            .values()
+            .filter_map(|service| match service {
+                crate::prologue::sequences::program::Service::AwardItem { definition } => {
+                    Some(*definition)
+                }
+                _ => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        if objectives != [*selection].into()
+            || definitions != garage.slots.iter().map(|slot| slot.definition).collect()
+        {
+            return Err(bad("starter display/award/objective mismatch"));
+        }
+        value["story_editor"] = json!({"version":1,"selection":selection.to_string(),
+            "starters":garage.slots.iter().map(|s| s.definition.iter().map(|b| format!("{b:02x}")).collect::<String>()).collect::<Vec<_>>()});
+    }
+    Content::from_json(&value).map_err(|_| bad("generated editor content failed validation"))?;
     let bytes = serde_json::to_vec(&value).map_err(|_| bad("encoding"))?;
     if bytes.len() as u64 > super::MAX_BYTES {
         return Err(bad("generated content size bound"));

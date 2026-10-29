@@ -100,12 +100,11 @@ impl State {
     pub(super) fn awarded(
         &mut self,
         node: u16,
+        requested: [u8; 16],
         receipt: Receipt,
         context: &mut Context<'_>,
     ) -> Result<Effects, replication::Error> {
-        if self.choice != Some((node, receipt.definition))
-            || self.receipt.is_some_and(|r| r != receipt)
-        {
+        if self.choice != Some((node, requested)) || self.receipt.is_some_and(|r| r != receipt) {
             return Err(replication::Error::Shape);
         }
         self.receipt = Some(receipt);
@@ -232,7 +231,7 @@ impl State {
                         .slot(0)
                         .ok_or(replication::Error::Shape)?;
                     if source.class != "ItemEntityData"
-                        || source.definition != Some(receipt.definition)
+                        || source.definition != self.choice.map(|(_, definition)| definition)
                         || target.target
                             != Some(Channel::Scene {
                                 content_key: context.vehicles.layout.item_scene_key,

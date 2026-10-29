@@ -68,7 +68,7 @@ impl Record for crate::story::StoryReport {
     const NAME: &'static str = "story";
     const VERSION: u32 = 1;
 }
-impl Record for nfs_services::story::editing::Preview {
+impl Record for crate::story::Preview {
     const NAME: &'static str = "story-preview";
     const VERSION: u32 = 1;
 }
@@ -164,7 +164,7 @@ pub fn records() -> [RecordInfo; 21] {
         info::<sessions::file::SessionFileText>(),
         info::<SettingsReport>(),
         info::<crate::story::StoryReport>(),
-        info::<nfs_services::story::editing::Preview>(),
+        info::<crate::story::Preview>(),
         info::<nfs_services::story::editing::Applied>(),
         info::<StatusReport>(),
         info::<StopReport>(),

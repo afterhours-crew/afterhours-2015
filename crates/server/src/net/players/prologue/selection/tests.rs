@@ -132,6 +132,17 @@ fn choice_waits_for_commit_then_unloads_previews_and_finishes_once() {
 }
 
 pub(in crate::net::players::prologue) fn selected(handoff: bool) -> (PlayerListener, u16) {
+    selected_reward(handoff, false)
+}
+
+#[test]
+fn replay_can_acknowledge_an_earned_car_different_from_the_preview_without_stalling() {
+    crate::net::players::test_wire::with_native_padding(|| {
+        selected_reward(false, true);
+    });
+}
+
+fn selected_reward(handoff: bool, reuse: bool) -> (PlayerListener, u16) {
     let (mut listener, participant, items) = super::super::tests::ready_for_selection(true);
     if handoff {
         let story = Arc::make_mut(listener.prologue.as_mut().unwrap());
@@ -155,6 +166,29 @@ pub(in crate::net::players::prologue) fn selected(handoff: bool) -> (PlayerListe
         });
     }
     let ghost = listener.selection.ghost(participant).unwrap();
+    if reuse {
+        // Same compiled graph, but the player chooses a different authored
+        // preview from the car already held by the persistent inventory.
+        let state = listener.selection_execution.get_mut(&participant).unwrap();
+        let mut definition = state.execution.definition().clone();
+        definition.services.insert(
+            5,
+            Service::AwardItem {
+                definition: [77; 16],
+            },
+        );
+        definition
+            .links
+            .get_mut(&7)
+            .unwrap()
+            .get_mut(&3_339_738_264)
+            .unwrap()
+            .definition = Some([77; 16]);
+        let (execution, output) =
+            Execution::start(Arc::new(definition), ghost, participant, 0, 0.).unwrap();
+        assert!(output.commands.is_empty());
+        *state = State::new(execution);
+    }
     let reached = |event, player| {
         nfs_world::logic::Message::Reached {
             event,
@@ -238,6 +272,13 @@ pub(in crate::net::players::prologue) fn selected(handoff: bool) -> (PlayerListe
     } = request.action
     else {
         panic!()
+    };
+    let definition = if reuse {
+        assert_eq!(definition, [77; 16]);
+        assert_ne!(definition, items.items[&1].definition);
+        items.items[&1].definition
+    } else {
+        definition
     };
     assert!(send(&mut listener, 22, 82, reached(41, 0).span()));
     assert!(listener.story_pending.is_empty());

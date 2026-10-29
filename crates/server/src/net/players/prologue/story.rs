@@ -276,7 +276,6 @@ impl PlayerListener {
                 if owner.participant != request.participant
                     || owner.connection != HOST_SELECTOR as u8
                     || owner.persona != self.persona
-                    || reward.definition != definition
                     || next.slots.values()[0] != Some(reward.item.get())
                 {
                     return Err(replication::Error::Shape);
@@ -333,6 +332,7 @@ impl PlayerListener {
                     .ok_or(replication::Error::UnknownObject)?
                     .awarded(
                         node,
+                        definition,
                         reward,
                         &mut super::selection::Context {
                             content: self

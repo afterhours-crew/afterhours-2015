@@ -87,6 +87,8 @@ impl Fixture {
                     consumer_beta: false,
                 },
                 digest: digest(b"constructed"),
+                options: None,
+                items: None,
             },
             repo,
         }
@@ -97,6 +99,7 @@ impl Fixture {
             account: account(1),
             rules: &self.rules,
             supported,
+            starter: None,
         }
     }
     fn proof(&self, target: Checkpoint) -> Proof {
@@ -262,12 +265,15 @@ fn unsupported_busy_stale_and_mismatched_proofs_never_start_backups() {
         catalog: f.rules.catalog.clone(),
         settings: f.rules.settings,
         digest: digest(b"changed rules"),
+        options: f.rules.options.clone(),
+        items: f.rules.items.clone(),
     };
     let changed_editor = Editor {
         root: &f.root,
         account: account(1),
         rules: &changed,
         supported: true,
+        starter: None,
     };
     assert!(
         changed_editor
@@ -445,6 +451,7 @@ fn production_command_reads_prepared_rules_and_keeps_unvalidated_points_disabled
         rules: rules.clone(),
         target: Checkpoint::AfterIntro,
         proof: None,
+        starter: None,
     };
     let p = run(args()).unwrap();
     assert_eq!(p["can_apply"], false);

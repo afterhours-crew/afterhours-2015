@@ -272,6 +272,9 @@ pub struct ProfileArgs {
 /// Arguments for the story view and server-owned checkpoint commands.
 #[derive(Debug, Clone, Default, Args)]
 pub struct StoryArgs {
+    /// First-car definition returned by this checkpoint's preview.
+    #[arg(long, value_name = "GUID")]
+    pub starter: Option<String>,
     /// Account ID; defaults to the selected driver.
     #[arg(long, value_name = "ID")]
     pub account_id: Option<String>,

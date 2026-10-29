@@ -9,11 +9,77 @@ use crate::{
 };
 use nfs_services::{
     progression::{Catalog, Settings},
-    story::{Policy, View},
+    story::{Policy, View, editing::Options},
 };
 use schemars::JsonSchema;
 use serde::Serialize;
 use std::{io::Read, path::Path};
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct Starter {
+    pub id: String,
+    pub name: Option<String>,
+    pub image: Option<profile::images::CarImages>,
+}
+
+/// The server owns the plan; the launcher adds installed names and cached images.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct Preview {
+    pub version: u32,
+    pub account_id: String,
+    pub generation: String,
+    pub source_checkpoint: String,
+    pub target_checkpoint: String,
+    pub operation_id: String,
+    pub plan_id: String,
+    pub completes: Vec<nfs_services::story::editing::Milestone>,
+    pub reopens: Vec<nfs_services::story::editing::Milestone>,
+    pub can_apply: bool,
+    pub reasons: Vec<String>,
+    pub starters: Vec<Starter>,
+    pub starter: Option<String>,
+    pub car_images: Option<std::path::PathBuf>,
+}
+
+impl Preview {
+    pub fn enrich(
+        plan: nfs_services::story::editing::Preview,
+        content: &profile::content::Content,
+    ) -> Self {
+        let starters = plan
+            .starters
+            .iter()
+            .map(|id| Starter {
+                id: id.clone(),
+                name: profile::content::guid(id)
+                    .and_then(|guid| content.car_names.as_ref()?.get(&guid)?.names.long.clone()),
+                image: content
+                    .car_images
+                    .as_ref()
+                    .and_then(|images| images.get(id)),
+            })
+            .collect();
+        Self {
+            version: plan.version,
+            account_id: plan.account_id,
+            generation: plan.generation,
+            source_checkpoint: plan.source_checkpoint,
+            target_checkpoint: plan.target_checkpoint,
+            operation_id: plan.operation_id,
+            plan_id: plan.plan_id,
+            completes: plan.completes,
+            reopens: plan.reopens,
+            can_apply: plan.can_apply,
+            reasons: plan.reasons,
+            starters,
+            starter: plan.starter,
+            car_images: content
+                .car_images
+                .as_ref()
+                .map(|images| images.directory.clone()),
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct StoryCheckpoint {
@@ -45,7 +111,7 @@ pub struct StoryReport {
     pub warnings: Vec<String>,
 }
 
-fn rules(directory: &Path) -> Result<(Catalog, Settings)> {
+fn rules(directory: &Path) -> Result<(Catalog, Settings, Option<Options>)> {
     let path = directory.join("progression-content.json");
     let metadata = std::fs::symlink_metadata(&path)?;
     if paths::is_link(&metadata) || !metadata.is_file() || metadata.len() > 512 * 1024 {
@@ -61,8 +127,11 @@ fn rules(directory: &Path) -> Result<(Catalog, Settings)> {
         return Err(Failure::refused("Oversized progression content."));
     }
     let value: serde_json::Value = serde_json::from_slice(&bytes)?;
-    nfs_services::progression::checkpoint_rules(&value)
-        .map_err(|_| Failure::refused("Unsupported or invalid progression checkpoint rules."))
+    let (catalog, settings) = nfs_services::progression::checkpoint_rules(&value)
+        .map_err(|_| Failure::refused("Unsupported or invalid progression checkpoint rules."))?;
+    let options = Options::parse(&value, &catalog, settings)
+        .map_err(|_| Failure::refused("Invalid story editor content; run setup again."))?;
+    Ok((catalog, settings, options))
 }
 
 pub fn report(data: &Path, id: Option<&str>, content_dir: Option<&Path>) -> Result<StoryReport> {
@@ -73,7 +142,7 @@ pub fn report(data: &Path, id: Option<&str>, content_dir: Option<&Path>) -> Resu
     let (_, _, inspection) = saves.inspect(id)?;
     let source = profile::content::locate(saves.data(), content_dir)?
         .ok_or_else(|| Failure::no_session("No prepared story content found; run setup first."))?;
-    let (catalog, settings) = rules(&source.directory)?;
+    let (catalog, settings, options) = rules(&source.directory)?;
     let state = Policy {
         catalog: &catalog,
         settings,
@@ -82,10 +151,16 @@ pub fn report(data: &Path, id: Option<&str>, content_dir: Option<&Path>) -> Resu
     .map_err(|_| Failure::refused("Saved story objectives are incomplete or inconsistent."))?;
     let running =
         session::lock_is_held(saves.data())? == Some(true) || saves.writer_is_leased(id)?;
-    Ok(build(id, &catalog, state, running))
+    Ok(build(id, &catalog, state, running, options.as_ref()))
 }
 
-pub(crate) fn build(id: &str, catalog: &Catalog, state: View, running: bool) -> StoryReport {
+pub(crate) fn build(
+    id: &str,
+    catalog: &Catalog,
+    state: View,
+    running: bool,
+    options: Option<&Options>,
+) -> StoryReport {
     let current = state
         .milestones
         .get(state.position)
@@ -94,10 +169,20 @@ pub(crate) fn build(id: &str, catalog: &Catalog, state: View, running: bool) -> 
     let terminal_played = intro_completed && state.milestones.iter().all(|m| m.played);
     let terminal_edited = intro_completed && state.milestones.iter().any(|m| m.edited);
     let terminal_existing = intro_completed && state.milestones.iter().any(|m| m.existing);
+    let supported = state
+        .milestones
+        .iter()
+        .map(|m| {
+            options.is_some_and(|o| {
+                o.supports(nfs_services::story::Checkpoint::Objective(m.id), &state)
+            })
+        })
+        .collect::<Vec<_>>();
     let mut checkpoints = state
         .milestones
         .into_iter()
-        .map(|m| StoryCheckpoint {
+        .enumerate()
+        .map(|(index, m)| StoryCheckpoint {
             id: m.id.to_string(),
             label: catalog
                 .objective_label(m.id)
@@ -109,7 +194,7 @@ pub(crate) fn build(id: &str, catalog: &Catalog, state: View, running: bool) -> 
             edited: m.edited,
             existing: m.existing,
             reward_claimed: m.reward_claimed,
-            selectable: false,
+            selectable: supported[index],
         })
         .collect::<Vec<_>>();
     checkpoints.push(StoryCheckpoint {
@@ -121,10 +206,13 @@ pub(crate) fn build(id: &str, catalog: &Catalog, state: View, running: bool) -> 
         edited: terminal_edited,
         existing: terminal_existing,
         reward_claimed: false,
-        selectable: false,
+        selectable: options.is_some(),
     });
-    let mut warnings =
-        vec!["Story checkpoint editing awaits playable prologue integration.".to_owned()];
+    let mut warnings = if options.is_some() {
+        vec!["Replay starts from the beginning and keeps earned cars and progress. The starter choice reuses your earned car. Middle steps cannot be used as restart points yet.".to_owned()]
+    } else {
+        vec!["Run setup to prepare story editing for this installation.".to_owned()]
+    };
     if !state.stats_consistent {
         warnings.push(
             "Legacy intro summary differs from objective rows; the saved objectives are shown."
@@ -139,7 +227,7 @@ pub(crate) fn build(id: &str, catalog: &Catalog, state: View, running: bool) -> 
         checkpoints,
         intro_completed,
         session_running: running,
-        can_edit: false,
+        can_edit: options.is_some() && !running,
         warnings,
     }
 }

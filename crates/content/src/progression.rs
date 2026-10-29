@@ -50,18 +50,19 @@ impl Content {
         Self::from_json(&serde_json::from_slice(&bytes).map_err(|_| ParseError::Invalid)?)
     }
     pub fn from_json(v: &Json) -> Result<Self, ParseError> {
-        fields(
-            v,
-            &[
-                "format",
-                "version",
-                "build_sha256",
-                "sources",
-                "restoration",
-                "entities",
-                "settings",
-            ],
-        )?;
+        let mut names = vec![
+            "format",
+            "version",
+            "build_sha256",
+            "sources",
+            "restoration",
+            "entities",
+            "settings",
+        ];
+        if v.get("story_editor").is_some() {
+            names.push("story_editor");
+        }
+        fields(v, &names)?;
         if v["format"] != FORMAT || v["version"] != VERSION || v["build_sha256"] != BUILD {
             return Err(ParseError::Invalid);
         }
@@ -84,6 +85,14 @@ impl Content {
         fields(&v["settings"], &["consumer_beta", "enable_speed_lists"])?;
         let setting = |name: &str| v["settings"][name].as_bool().ok_or(ParseError::Invalid);
         let catalog = Catalog::from_json(&v["restoration"])?;
+        nfs_services::story::editing::Options::parse(
+            v,
+            &catalog,
+            Settings {
+                consumer_beta: setting("consumer_beta")?,
+            },
+        )
+        .map_err(|_| ParseError::Invalid)?;
         let construction = entities::Construction::from_json(&v["entities"])?;
         for branch in [Branch::Main, Branch::Intro] {
             construction.check_objectives(branch, &catalog.objective_ids(branch))?;

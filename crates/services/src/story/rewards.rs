@@ -87,6 +87,100 @@ pub(super) fn read(
 }
 
 impl Policy<'_> {
+    /// A launcher skip can cross the first-car award. Prepare the authored tree,
+    /// allocator, selection, objectives and once-only receipt in one transaction.
+    /// No intermediate checkpoint or item grant is persisted.
+    pub fn jump_with_vehicle(
+        &self,
+        snapshot: &Snapshot,
+        expected: u64,
+        operation: u64,
+        target: super::Checkpoint,
+        grant: Option<(&InventoryCatalog, u64, Guid)>,
+    ) -> Result<super::Prepared, inventory::Error> {
+        let prepared = self.jump(snapshot, expected, operation, target)?;
+        if prepared == super::Prepared::Replayed {
+            if let Some((_, objective, definition)) = grant
+                && self
+                    .reward(snapshot, objective)?
+                    .is_none_or(|receipt| receipt.definition != definition)
+            {
+                return Err(Error::Conflict.into());
+            }
+            return Ok(prepared);
+        }
+        let (super::Prepared::Mutation(mut batch), Some((catalog, objective, definition))) =
+            (prepared.clone(), grant)
+        else {
+            return Ok(prepared);
+        };
+        let order = self
+            .catalog
+            .intro_order(self.settings)
+            .map_err(|_| Error::Config)?;
+        let choice = order
+            .iter()
+            .position(|id| *id == objective)
+            .ok_or(Error::Invalid)?;
+        let destination = match target {
+            super::Checkpoint::AfterIntro => order.len(),
+            super::Checkpoint::Objective(id) => order
+                .iter()
+                .position(|item| *item == id)
+                .ok_or(Error::Invalid)?,
+        };
+        if destination <= choice || self.reward(snapshot, objective)?.is_some() {
+            return Err(Error::Invalid.into());
+        }
+        if snapshot.items.values().any(|item| {
+            item.owner.is_none()
+                && catalog
+                    .bindings()
+                    .class(&item.definition.0)
+                    .is_ok_and(|class| {
+                        class == nfs_world_core::items::DefinitionClass::RaceVehicleItemData
+                    })
+        }) {
+            return Err(Error::Conflict.into());
+        }
+        let super::Prepared::Mutation(selection) = self.jump(
+            snapshot,
+            expected,
+            operation,
+            super::Checkpoint::Objective(objective),
+        )?
+        else {
+            return Err(Error::Conflict.into());
+        };
+        let mut at_choice = snapshot.clone();
+        // The shadow represents the result of that edit; its ledger records
+        // the previous generation just as a committed snapshot would.
+        at_choice.generation = expected.checked_add(1).ok_or(Error::Bounds)?;
+        for op in selection.ops {
+            let Op::SetTable(key, table) = op else {
+                return Err(Error::Config.into());
+            };
+            at_choice.tables.insert(key, table);
+        }
+        let grant = self.grant_vehicle(
+            &at_choice,
+            at_choice.generation,
+            objective,
+            definition,
+            catalog,
+        )?;
+        let grant_batch = grant.batch.ok_or(Error::Conflict)?;
+        batch.ops.extend(grant_batch.ops);
+        let mut slots = snapshot.garage.ok_or(Error::Config)?;
+        if slots.0.iter().any(Option::is_some) {
+            return Err(Error::Conflict.into());
+        }
+        slots.0[0] = Some(grant.receipt.item);
+        batch.ops.push(Op::SetGarage(slots));
+        batch.validate()?;
+        Ok(super::Prepared::Mutation(batch))
+    }
+
     /// Finish the authored selection after its grant. The selected slot and
     /// objective commit together. Other owned cars remain available, including
     /// a full garage's former primary car in the warehouse.
@@ -192,6 +286,100 @@ impl Policy<'_> {
     }
     pub fn reward(&self, snapshot: &Snapshot, objective: u64) -> Result<Option<Receipt>, Error> {
         Ok(read(snapshot, self.catalog)?.get(&objective).copied())
+    }
+
+    /// A replay acknowledges the previously earned car, regardless of which
+    /// preview was selected. It never changes its tuning or grants another tree.
+    /// Legacy completed saves adopt their existing primary car as the receipt.
+    /// Normal first-time awards still use `claim_vehicle` and its conflict checks.
+    pub fn claim_selection(
+        &self,
+        repository: &dyn InventoryRepository,
+        account: AccountId,
+        objective: u64,
+        definition: Guid,
+        catalog: &InventoryCatalog,
+        now: Timestamp,
+    ) -> Result<Claimed, inventory::Error> {
+        for _ in 0..8 {
+            let snapshot = repository.snapshot(account)?;
+            let view = self.inspect(&snapshot)?;
+            let milestone = view
+                .milestones
+                .iter()
+                .find(|m| m.id == objective)
+                .ok_or(Error::Invalid)?;
+            let receipt = self.reward(&snapshot, objective)?;
+            if receipt.is_none() && !milestone.existing && !milestone.reward_claimed {
+                return self
+                    .claim_vehicle(repository, account, objective, definition, catalog, now);
+            }
+            if !milestone.completed
+                && (!milestone.active
+                    || view.milestones.get(view.position).map(|m| m.id) != Some(objective))
+            {
+                return Err(Error::Invalid.into());
+            }
+            let item = match receipt {
+                Some(receipt) => snapshot.items.get(&receipt.item),
+                None => snapshot
+                    .garage
+                    .and_then(|s| s.0[0])
+                    .and_then(|id| snapshot.items.get(&id)),
+            }
+            .ok_or(Error::Conflict)?;
+            if item.owner.is_some()
+                || item.state != nfs_world_core::items::OWNED
+                || !catalog
+                    .bindings()
+                    .class(&item.definition.0)
+                    .is_ok_and(|class| {
+                        class == nfs_world_core::items::DefinitionClass::RaceVehicleItemData
+                    })
+                || receipt.is_some_and(|r| r.definition != item.definition.0)
+            {
+                return Err(Error::Conflict.into());
+            }
+            inventory::collection(&snapshot, catalog.bindings())?;
+            let saved = Receipt {
+                definition: item.definition.0,
+                item: item.id,
+            };
+            if receipt.is_some() {
+                return Ok(Claimed {
+                    snapshot,
+                    receipt: saved,
+                    replayed: true,
+                });
+            }
+            let mut table = snapshot
+                .tables
+                .get(&key("AfterhoursStoryRewards"))
+                .cloned()
+                .unwrap_or_else(|| Table {
+                    rows: BTreeMap::from([(0, Row::from([(FORMAT, Value::Int(VERSION))]))]),
+                });
+            table.rows.insert(
+                objective,
+                Row::from([
+                    (DEFINITION, Value::String(text(saved.definition))),
+                    (ITEM, Value::String(saved.item.get().to_string())),
+                ]),
+            );
+            if snapshot.generation >= BATCH_NAMESPACE {
+                return Err(Error::Bounds.into());
+            }
+            let batch = Batch {
+                id: BATCH_NAMESPACE | snapshot.generation,
+                expected_generation: snapshot.generation,
+                ops: vec![Op::SetTable(key("AfterhoursStoryRewards"), table)],
+            };
+            match repository.apply(account, &batch, now) {
+                Ok(_) | Err(Error::Conflict) => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(Error::Conflict.into())
     }
 
     /// The sequence owner supplies the authored award definition, never a raw

@@ -9,7 +9,7 @@ use nfs_services::{
     progression::{Catalog, Settings},
     story::{
         Checkpoint, Policy, Prepared,
-        editing::{Applied, Backup, Milestone, Preview},
+        editing::{Applied, Backup, Milestone, Options, Preview},
     },
 };
 use nfs_storage::{
@@ -27,12 +27,14 @@ use std::{
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const MAX_RULE_BYTES: u64 = 512 * 1024;
-const HELP: &str = "Usage: nfs-server story --root <data-directory> --local-account <id> --progression-content <file> --preview <checkpoint>\nApply: replace --preview with --apply <checkpoint> --expected-generation <generation> --plan-id <preview hash>\nJSON only. Existing local accounts; no listeners or game are started. Unsupported restart points refuse edits. Stop the game/server before applying. Backups are under artifacts/story-backups.";
+const HELP: &str = "Usage: nfs-server story --root <data-directory> --local-account <id> --progression-content <file> --preview <checkpoint> [--starter <definition>]\nApply: replace --preview with --apply <checkpoint> --expected-generation <generation> --plan-id <preview hash>, keeping the same --starter choice.\nJSON only. Existing local accounts; no listeners or game are started. Unsupported restart points refuse edits. Stop the game/server before applying. Backups are under artifacts/story-backups.";
 
 struct Rules {
     catalog: Catalog,
     settings: Settings,
     digest: String,
+    options: Option<Options>,
+    items: Option<nfs_world::items::InventoryCatalog>,
 }
 struct Proof {
     target: Checkpoint,
@@ -44,6 +46,7 @@ struct Editor<'a> {
     account: AccountId,
     rules: &'a Rules,
     supported: bool,
+    starter: Option<String>,
 }
 
 fn digest(bytes: &[u8]) -> String {
@@ -160,13 +163,36 @@ fn file_digest(path: &Path) -> Result<String> {
 impl Rules {
     fn load(path: &Path) -> Result<Self> {
         let bytes = read_bounded(path, MAX_RULE_BYTES)?;
-        let (catalog, settings) =
-            nfs_services::progression::checkpoint_rules(&serde_json::from_slice(&bytes)?)
-                .map_err(|_| "Invalid prepared checkpoint rules.")?;
+        let value = serde_json::from_slice(&bytes)?;
+        let (catalog, settings) = nfs_services::progression::checkpoint_rules(&value)
+            .map_err(|_| "Invalid prepared checkpoint rules.")?;
+        let options = Options::parse(&value, &catalog, settings)?;
+        let mut identity = bytes;
+        let items = if options.is_some() {
+            let item_bytes = read_bounded(
+                &path.with_file_name("item-content.json"),
+                nfs_services::item_content::MAX_STORE_BYTES,
+            )?;
+            let content = nfs_services::item_content::ItemContent::from_json(
+                &serde_json::from_slice(&item_bytes)?,
+            )
+            .map_err(|_| "Invalid item content.")?;
+            identity.extend_from_slice(&item_bytes);
+            Some(
+                content
+                    .inventory()
+                    .ok_or("Missing vehicle definitions.")?
+                    .clone(),
+            )
+        } else {
+            None
+        };
         Ok(Self {
             catalog,
             settings,
-            digest: digest(&bytes),
+            digest: digest(&identity),
+            options,
+            items,
         })
     }
     fn policy(&self) -> Policy<'_> {
@@ -186,8 +212,66 @@ impl Editor<'_> {
         Ok(digest(&serde_json::to_vec(
             &json!({"domain":"afterhours-story-plan-v1","account":self.account.hex(),
             "generation":generation.to_string(),"operation":operation.to_string(),"target":name(target),
-                "rules":self.rules.digest,"supported":self.supported,"save":self.repository()?.path(self.account)}),
+                "rules":self.rules.digest,"supported":self.supported,"starter":self.starter,"save":self.repository()?.path(self.account)}),
         )?))
+    }
+    fn choices(&self, snapshot: &Snapshot, target: Checkpoint) -> Result<Vec<String>> {
+        let Some(options) = &self.rules.options else {
+            if self.starter.is_some() {
+                return Err("First-car selection requires current prepared content.".into());
+            }
+            return Ok(vec![]);
+        };
+        let policy = self.rules.policy();
+        let view = policy.inspect(snapshot)?;
+        let selection = decimal(&options.selection)?;
+        let crosses = match target {
+            Checkpoint::AfterIntro => true,
+            Checkpoint::Objective(id) => {
+                let position = view
+                    .milestones
+                    .iter()
+                    .position(|m| m.id == id)
+                    .ok_or("Unknown checkpoint.")?;
+                position
+                    > view
+                        .milestones
+                        .iter()
+                        .position(|m| m.id == selection)
+                        .ok_or("Unknown first-car objective.")?
+            }
+        };
+        let has_car = snapshot.items.values().any(|item| {
+            item.owner.is_none()
+                && item.state == nfs_world::items::OWNED
+                && self.rules.items.as_ref().is_some_and(|catalog| {
+                    catalog.definition(&item.definition.0).is_ok_and(|d| {
+                        d.class == nfs_world::items::DefinitionClass::RaceVehicleItemData
+                    })
+                })
+        }) || snapshot
+            .garage
+            .is_some_and(|slots| slots.0.iter().any(Option::is_some));
+        let claimed = view
+            .milestones
+            .iter()
+            .find(|m| m.id == selection)
+            .is_some_and(|m| m.existing || m.reward_claimed);
+        let choices = if crosses && !has_car && !claimed {
+            options.starters.clone()
+        } else {
+            vec![]
+        };
+        if self
+            .starter
+            .as_ref()
+            .is_some_and(|car| !choices.contains(car))
+        {
+            return Err(
+                "The first car is not a choice for this checkpoint; refresh the preview.".into(),
+            );
+        }
+        Ok(choices)
     }
     fn project(&self, snapshot: &Snapshot, target: Checkpoint, busy: bool) -> Result<Preview> {
         let policy = self.rules.policy();
@@ -213,8 +297,60 @@ impl Editor<'_> {
                 .map(str::to_owned)
                 .unwrap_or_else(|| format!("Objective {id}")),
         };
+        let starters = self.choices(snapshot, target)?;
         let mut reasons = Vec::new();
-        if !self.supported {
+        if let (Some(options), Some(items)) = (&self.rules.options, &self.rules.items) {
+            nfs_services::inventory::collection(snapshot, items.bindings())?;
+            let selection = decimal(&options.selection)?;
+            let owned = |id| {
+                snapshot.items.get(&id).is_some_and(|item| {
+                    item.owner.is_none()
+                        && item.state == nfs_world::items::OWNED
+                        && items
+                            .bindings()
+                            .class(&item.definition.0)
+                            .is_ok_and(|class| {
+                                class == nfs_world::items::DefinitionClass::RaceVehicleItemData
+                            })
+                })
+            };
+            let primary = snapshot
+                .garage
+                .and_then(|slots| slots.0[0])
+                .filter(|id| owned(*id));
+            if position == 0 {
+                let claimed = state
+                    .milestones
+                    .iter()
+                    .find(|m| m.id == selection)
+                    .is_some_and(|m| m.existing || m.reward_claimed);
+                let receipt = policy.reward(snapshot, selection)?;
+                if claimed
+                    && receipt.map_or(primary.is_none(), |r| {
+                        !owned(r.item) || snapshot.items[&r.item].definition.0 != r.definition
+                    })
+                {
+                    reasons.push(
+                        "The earned starter car is unavailable; restore it before replaying."
+                            .into(),
+                    );
+                }
+            } else if position == state.milestones.len() && starters.is_empty() && primary.is_none()
+            {
+                reasons
+                    .push("Select an owned car in the garage before skipping the prologue.".into());
+            }
+        }
+        if !starters.is_empty() && self.starter.is_none() {
+            reasons.push("Choose your first car before applying this checkpoint.".into());
+        }
+        if !self.supported
+            || self
+                .rules
+                .options
+                .as_ref()
+                .is_some_and(|options| !options.supports(target, &state))
+        {
             reasons.push("This runtime cannot start from that checkpoint yet.".into());
         }
         if busy {
@@ -247,6 +383,8 @@ impl Editor<'_> {
                 .collect(),
             can_apply: reasons.is_empty(),
             reasons,
+            starters,
+            starter: self.starter.clone(),
         })
     }
     fn preview(&self, target: Checkpoint) -> Result<Preview> {
@@ -355,18 +493,50 @@ impl Editor<'_> {
                 target_checkpoint: name(proof.target),
                 replayed: true,
                 backup,
+                starter: self.starter.clone(),
             });
         }
         if before.generation != proof.expected {
             return Err("The save changed; refresh the story preview.".into());
         }
         let preview = self.project(&before, proof.target, false)?;
+        if !preview.can_apply {
+            return Err(preview.reasons.join(" ").into());
+        }
         if preview.plan_id != proof.plan_id {
             return Err("The rules or checkpoint changed; refresh the story preview.".into());
         }
         let operation = decimal(&preview.operation_id)?;
-        let Prepared::Mutation(mut batch) =
-            policy.jump(&before, proof.expected, operation, proof.target)?
+        let Prepared::Mutation(mut batch) = policy.jump_with_vehicle(
+            &before,
+            proof.expected,
+            operation,
+            proof.target,
+            self.starter
+                .as_deref()
+                .map(|car| -> Result<_> {
+                    let mut definition = [0; 16];
+                    for (i, byte) in definition.iter_mut().enumerate() {
+                        *byte = u8::from_str_radix(&car[i * 2..i * 2 + 2], 16)?;
+                    }
+                    Ok((
+                        self.rules
+                            .items
+                            .as_ref()
+                            .ok_or("Missing vehicle definitions.")?,
+                        decimal(
+                            &self
+                                .rules
+                                .options
+                                .as_ref()
+                                .ok_or("Missing story options.")?
+                                .selection,
+                        )?,
+                        definition,
+                    ))
+                })
+                .transpose()?,
+        )?
         else {
             return Err("Missing story edit receipt.".into());
         };
@@ -415,6 +585,7 @@ impl Editor<'_> {
             target_checkpoint: name(proof.target),
             replayed: applied.replayed,
             backup,
+            starter: self.starter.clone(),
         })
     }
 }
@@ -425,6 +596,7 @@ struct Args {
     rules: PathBuf,
     target: Checkpoint,
     proof: Option<Proof>,
+    starter: Option<String>,
 }
 fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args> {
     let mut fields = BTreeMap::new();
@@ -479,6 +651,15 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args> {
     } else {
         None
     };
+    let starter = fields
+        .remove(std::ffi::OsStr::new("--starter"))
+        .map(|s| {
+            s.into_string()
+                .ok()
+                .filter(|s| hex(s, 32) && s != &"0".repeat(32))
+                .ok_or("Invalid first-car identifier.")
+        })
+        .transpose()?;
     if !fields.is_empty() {
         return Err("Unknown or inapplicable story option.".into());
     }
@@ -488,18 +669,20 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args> {
         rules,
         target,
         proof,
+        starter,
     })
 }
 fn run(args: Args) -> Result<serde_json::Value> {
     let root = root(&args.root)?;
     let rules = Rules::load(&args.rules)?;
-    // No restart boundary is enabled before its prologue/runtime acceptance.
-    // Tests inject supported constructed boundaries into Editor directly.
+    // Prepared metadata enables only the complete opening and after-intro paths.
+    // Mid-prologue objectives are progress markers, not supported entry points.
     let editor = Editor {
         root: &root,
         account: args.account,
         rules: &rules,
-        supported: false,
+        supported: rules.options.is_some() && rules.items.is_some(),
+        starter: args.starter,
     };
     match args.proof {
         None => Ok(serde_json::to_value(editor.preview(args.target)?)?),

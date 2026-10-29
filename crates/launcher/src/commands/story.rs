@@ -16,6 +16,9 @@ use std::{
 };
 
 pub fn story(context: &Context, args: &StoryArgs) -> Result<()> {
+    if args.starter.is_some() && args.preview.is_none() && args.apply.is_none() {
+        return Err(Failure::refused("--starter requires --preview or --apply."));
+    }
     if args.preview.is_some() || args.apply.is_some() {
         return edit(context, args);
     }
@@ -127,6 +130,12 @@ fn edit(context: &Context, args: &StoryArgs) -> Result<()> {
         ]);
     }
     let log_root = saves.data().join("story-commands");
+    if let Some(starter) = &args.starter {
+        if profile::content::guid(starter).is_none_or(|id| id == [0; 16]) {
+            return Err(Failure::refused("Invalid first-car identifier."));
+        }
+        arguments.extend(["--starter".into(), starter.clone()]);
+    }
     if !log_root.exists() {
         std::fs::create_dir(&log_root)?;
     }
@@ -158,6 +167,25 @@ fn edit(context: &Context, args: &StoryArgs) -> Result<()> {
         if report.version != 1 || report.account_id != id {
             return Err(Failure::refused("Unsupported story preview result."));
         }
+        let mut details = profile::content(
+            saves.data(),
+            Some(&content.directory),
+            profile::content::Need::Full,
+        )?;
+        if !report.starters.is_empty() {
+            let (install_dir, locale) = platform::game_registration();
+            profile::localize(
+                &mut details,
+                saves.data(),
+                None,
+                None,
+                profile::Registration {
+                    install_dir,
+                    locale,
+                },
+            )?;
+        }
+        let report = story::Preview::enrich(report, &details);
         context.emit(&report, || {
             format!(
                 "{} → {}\n{}",

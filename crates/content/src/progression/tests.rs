@@ -33,6 +33,10 @@ fn defaults_roles_registry_order_and_explicit_channel_targets_come_from_installa
     let (_dir, mut index) = index(vec![]);
     let bytes = build(&mut index, &"a".repeat(64)).unwrap();
     let v: Json = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        v.get("story_editor").is_none(),
+        "a partial catalog must not advertise editable prologue checkpoints"
+    );
     let parsed = Content::from_json(&v).unwrap();
     let main = parsed.construction.blueprint(Branch::Main).unwrap();
     let intro = parsed.construction.blueprint(Branch::Intro).unwrap();

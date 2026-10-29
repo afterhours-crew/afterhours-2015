@@ -85,7 +85,7 @@ impl Profile {
                         ..
                     } => {
                         let claimed = policy
-                            .claim_vehicle(
+                            .claim_selection(
                                 service.repository.as_ref(),
                                 account,
                                 objective,

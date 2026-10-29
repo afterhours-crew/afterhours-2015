@@ -39,6 +39,16 @@ nfs-afterhours schema <RECORD>              print the JSON Schema of one --json 
 nfs-afterhours recover --account-id <ID>    restore account.json for an existing database
 ```
 
+Story editing requires newly prepared installation content. The opening checkpoint
+replays the prologue from its beginning; `after-intro` skips to the ordinary garage.
+Middle objectives remain visible but unselectable. A skip without an owned car
+lists the three authored first-car definitions. Preview again with `--starter`,
+then apply that same choice, generation and plan hash. The car, its authored parts,
+selection and story state commit together after a verified save backup. Replaying
+keeps earned cars, tuning, cash and REP; the first-car scene reuses the previously
+earned car even if another preview is selected. Legacy saves reuse their existing
+primary car. A missing earned car refuses the edit rather than granting it again.
+
 Every subcommand accepts `--data-dir <DIR>` and `--json`. `--help` on any
 subcommand explains it. For installation requirements and the full
 walkthrough see [docs/LOCAL-LAUNCHER.md](../../docs/LOCAL-LAUNCHER.md).
@@ -71,8 +81,8 @@ field and a JSON Schema (draft 7) generated from the Rust type that prints it:
 | `game-endpoints` | the session API's `/v1/game`: where a game reaches the server |
 | `profile`, `profile-list` | `profile --json` (also the session API's `/v1/profile`), `profile --list --json` |
 | `story` | `story --json` and `GET /v1/story`: saved intro position, authored checkpoint order and played, edited or inherited completion |
-| `story-preview` | `story --preview <checkpoint> --json`: exact account, save generation, target, plan hash, objective changes and availability |
-| `story-apply` | `story --apply <checkpoint> --expected-generation <generation> --plan-id <hash> --json`: committed generation and verified backup receipt |
+| `story-preview` | `story --preview <checkpoint> [--starter <definition>] --json`: exact account, save generation, target, plan hash, objective changes, first-car choices and availability |
+| `story-apply` | `story --apply <checkpoint> --expected-generation <generation> --plan-id <hash> [--starter <definition>] --json`: committed generation, selected first car and verified backup receipt |
 | `car-images` | `car-images --json`: the image set, counts per size, formats and unresolved images |
 | `map-images` | `map-images --json`: the tile set, its detail levels, file naming, the world box it covers and any missing tiles |
 | `sessions` | `sessions --json` |
