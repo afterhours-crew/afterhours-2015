@@ -524,27 +524,36 @@ impl Profile {
                 };
                 let before = inventory::collection(&snapshot, service.catalog.bindings())
                     .map_err(Error::Inventory)?;
-                let batch = match &event {
+                let applied = match &event {
                     // An event completion's rewards commit as one transaction.
                     Some(event) => {
-                        let snapshot = nfs_services::awards::ensure_empty(
+                        nfs_services::awards::ensure_empty(
                             service.repository.as_ref(),
                             account,
                             snapshot,
                             now,
                         )
                         .map_err(|_| Error::Inventory(nfs_storage::Error::Config.into()))?;
-                        nfs_services::event_rewards::prepare(&policy, &snapshot, event)
-                            .map_err(Error::Inventory)?
+                        nfs_services::event_rewards::commit(
+                            service.repository.as_ref(),
+                            account,
+                            &policy,
+                            event,
+                            None,
+                            now,
+                        )
+                        .map_err(Error::Inventory)?
                     }
-                    None => policy
-                        .prepare(&snapshot, credit, batch_id)
-                        .map_err(Error::Inventory)?,
+                    None => {
+                        let batch = policy
+                            .prepare(&snapshot, credit, batch_id)
+                            .map_err(Error::Inventory)?;
+                        service
+                            .repository
+                            .apply(account, &batch, now)
+                            .map_err(|e| Error::Inventory(e.into()))?
+                    }
                 };
-                let applied = service
-                    .repository
-                    .apply(account, &batch, now)
-                    .map_err(|e| Error::Inventory(e.into()))?;
                 let snapshot = service
                     .repository
                     .snapshot(account)

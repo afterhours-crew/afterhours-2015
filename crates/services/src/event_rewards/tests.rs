@@ -7,6 +7,7 @@ use nfs_storage::{AccountId, InventoryRepository, MemoryRepository, SqliteReposi
 use nfs_world_core::items::{
     Definition, DefinitionClass, DefinitionFlags, Derived, InventoryCatalog, OwnershipLevel,
 };
+mod story;
 
 fn account(n: u8) -> AccountId {
     AccountId::from_owned_config([n; 16]).unwrap()
@@ -42,6 +43,7 @@ impl Fixture {
     fn new() -> Self {
         let mut data = persistent::tests::content();
         for (name, columns) in [
+            ("ProgressionObjective", &["Active", "Completed"][..]),
             (
                 "RepValuesTable",
                 &[
@@ -77,6 +79,13 @@ impl Fixture {
                 .unwrap();
             table["columns"] = serde_json::json!(columns.iter().map(|c| serde_json::json!({"name":c,"key":key(c),"value_type":"int","default":"0"})).collect::<Vec<_>>());
         }
+        let stats = data["tables"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|t| t["name"] == "ProgressionStats")
+            .unwrap();
+        stats["columns"][0] = serde_json::json!({"name":"IntroCompleted","key":key("IntroCompleted"),"value_type":"int","default":"0"});
         let controller = Definition {
             class: DefinitionClass::CategoryUnlockControllerItemData,
             buy_price: 0,
@@ -313,4 +322,61 @@ fn rewards_and_record_survive_a_restart() {
         assert_eq!(repo.snapshot(who).unwrap(), expected);
     }
     std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn retained_result_receipt_is_read_before_recalculating_a_full_balance() {
+    let f = Fixture::new();
+    let repo = MemoryRepository::new();
+    let who = account(31);
+    f.initialize(&repo, who);
+    commit(
+        &repo,
+        who,
+        &f.policy(),
+        &completion(91, 0),
+        None,
+        Timestamp(10),
+    )
+    .unwrap();
+    let before = repo.snapshot(who).unwrap();
+    repo.apply(
+        who,
+        &Batch {
+            id: 92,
+            expected_generation: before.generation,
+            ops: vec![Balance(u32::MAX).store()],
+        },
+        Timestamp(11),
+    )
+    .unwrap();
+    let full = repo.snapshot(who).unwrap();
+    // Rebuilding the already-applied reward would overflow, despite this
+    // being an exact retry which should never calculate another payment.
+    assert!(prepare(&f.policy(), &full, &completion(91, 0)).is_err());
+    assert!(
+        commit(
+            &repo,
+            who,
+            &f.policy(),
+            &completion(91, 0),
+            None,
+            Timestamp(12)
+        )
+        .unwrap()
+        .replayed
+    );
+    assert_eq!(repo.snapshot(who).unwrap(), full);
+    assert!(
+        commit(
+            &repo,
+            who,
+            &f.policy(),
+            &completion(93, 0),
+            None,
+            Timestamp(12)
+        )
+        .is_err()
+    );
+    assert_eq!(repo.snapshot(who).unwrap(), full);
 }

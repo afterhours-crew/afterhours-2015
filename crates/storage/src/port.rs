@@ -17,6 +17,11 @@ pub trait InventoryRepository: Send + Sync {
     fn open(&self, account: AccountId) -> Result<Snapshot, Error>;
     /// Current state; `Error::Absent` before `open`.
     fn snapshot(&self, account: AccountId) -> Result<Snapshot, Error>;
+    /// Read a retained commit receipt before rebuilding a retry against newer
+    /// state. No account is created or changed. `None` means unknown, including
+    /// an evicted receipt; it is not proof that the operation never ran.
+    /// `apply` still checks the retry key atomically with the commit.
+    fn receipt(&self, account: AccountId, batch_id: u64) -> Result<Option<Applied>, Error>;
     /// Applies one batch atomically at `now`, or replays its recorded result.
     fn apply(&self, account: AccountId, batch: &Batch, now: Timestamp) -> Result<Applied, Error>;
 }

@@ -11,6 +11,52 @@
 use crate::{awards, bank::Balance, inventory, persistent, reputation};
 use nfs_storage::{Batch, Op, Snapshot, tables::Value};
 
+/// An objective already attributed to this owned result by authored conditions.
+/// This service does not decide which race or finishing position completes it.
+pub struct Story<'a> {
+    pub policy: crate::story::Policy<'a>,
+    pub objective: u64,
+}
+
+/// Commit an owned result and its optional story handoff together. Consult the
+/// durable retry receipt before preparing against changed objective/balance
+/// state, including after another objective has completed. Unknown/evicted
+/// receipts do not bypass the story policy's active and unclaimed checks.
+/// Initialization belongs to the caller; this never manufactures an account.
+pub fn commit(
+    repository: &dyn nfs_storage::InventoryRepository,
+    account: nfs_storage::AccountId,
+    policy: &reputation::earned::Policy,
+    completion: &Completion,
+    story: Option<Story<'_>>,
+    now: nfs_storage::Timestamp,
+) -> Result<nfs_storage::Applied, inventory::Error> {
+    if let Some(receipt) = repository.receipt(account, completion.batch_id)? {
+        return Ok(receipt);
+    }
+    let snapshot = repository.snapshot(account)?;
+    let mut batch = prepare(policy, &snapshot, completion)?;
+    if let Some(story) = story {
+        let operation = story.policy.next_operation(&snapshot)?;
+        let crate::story::Prepared::Mutation(mut combined) = story.policy.complete(
+            &snapshot,
+            snapshot.generation,
+            operation,
+            story.objective,
+            batch.ops,
+        )?
+        else {
+            return Err(nfs_storage::Error::Conflict.into());
+        };
+        // The result owner retains the identity of this occurrence. The story
+        // ledger's monotonic operation still records completion provenance.
+        combined.id = completion.batch_id;
+        combined.validate()?;
+        batch = combined;
+    }
+    Ok(repository.apply(account, &batch, now)?)
+}
+
 /// The earned-cash statistic (GameplayStatsTable store `CashEarned`, the 2050/71
 /// `CEAR` value; E995 shows it rise by the event's cash).
 const STATS_TABLE: &str = "GameplayStatsTable";

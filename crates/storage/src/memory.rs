@@ -56,6 +56,19 @@ impl InventoryRepository for MemoryRepository {
         let state = self.account(account, false)?;
         Ok(state.lock().map_err(|_| Error::Storage)?.snapshot.clone())
     }
+    fn receipt(&self, account: AccountId, batch_id: u64) -> Result<Option<Applied>, Error> {
+        if batch_id == 0 {
+            return Err(Error::Invalid);
+        }
+        let state = self.account(account, false)?;
+        let state = state.lock().map_err(|_| Error::Storage)?;
+        Ok(state.history.iter().find_map(|&(id, generation)| {
+            (id == batch_id).then_some(Applied {
+                generation,
+                replayed: true,
+            })
+        }))
+    }
     fn apply(&self, account: AccountId, batch: &Batch, now: Timestamp) -> Result<Applied, Error> {
         let state = self.account(account, false)?;
         let mut state = state.lock().map_err(|_| Error::Storage)?;

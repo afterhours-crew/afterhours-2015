@@ -426,6 +426,13 @@ fn equipment_survives_sqlite_reopen_and_storage_failure_has_no_effect() {
 
     struct Refuses(MemoryRepository);
     impl InventoryRepository for Refuses {
+        fn receipt(
+            &self,
+            account: AccountId,
+            batch_id: u64,
+        ) -> Result<Option<Applied>, nfs_storage::Error> {
+            self.0.receipt(account, batch_id)
+        }
         fn open(&self, account: AccountId) -> Result<Snapshot, nfs_storage::Error> {
             self.0.open(account)
         }

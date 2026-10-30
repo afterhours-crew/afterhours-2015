@@ -11,6 +11,10 @@ async workers. `MemoryRepository` and `SqliteRepository` implement the same
   atomically. Failed batches leave the previous state intact.
 - Batch IDs provide retry detection within a bounded history; generations reject
   stale updates. Callers must keep a batch ID associated with the same operation.
+  `receipt` reads a retained commit without mutation, so a caller can recognize
+  a retry before recalculating effects against newer state. An absent receipt
+  may have been evicted; it does not prove the operation never ran. `apply`
+  remains the atomic check when a new transaction is submitted.
 - SQLite schema version 5 migrates earlier inventory/garage/table layouts. Ownership
   and version checks precede adoption; successful writes commit before returning.
 - Identity, entitlement, kickback, speedwall and settings each have a bounded,

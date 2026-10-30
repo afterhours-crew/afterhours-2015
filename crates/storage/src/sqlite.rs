@@ -516,6 +516,36 @@ impl InventoryRepository for SqliteRepository {
         tx.commit()?;
         Ok(snapshot)
     }
+    fn receipt(&self, account: AccountId, batch_id: u64) -> Result<Option<Applied>, Error> {
+        if batch_id == 0 {
+            return Err(Error::Invalid);
+        }
+        let mut conn = self.connect(account, false)?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        Self::check(&tx, account)?;
+        let (current, _) = Self::read_meta(&tx)?;
+        let recorded: Option<i64> = tx
+            .query_row(
+                "SELECT generation FROM batch WHERE id=?1",
+                params![batch_id.to_be_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let receipt = recorded
+            .map(|generation| {
+                let generation = u64::try_from(generation).map_err(|_| Error::Config)?;
+                if generation == 0 || generation > current {
+                    return Err(Error::Config);
+                }
+                Ok(Applied {
+                    generation,
+                    replayed: true,
+                })
+            })
+            .transpose()?;
+        tx.commit()?;
+        Ok(receipt)
+    }
     fn apply(&self, account: AccountId, batch: &Batch, now: Timestamp) -> Result<Applied, Error> {
         let mut conn = self.connect(account, false)?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;

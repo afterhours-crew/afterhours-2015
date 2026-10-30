@@ -146,6 +146,15 @@ not implement the official prologue award protocol or infer missing menu replies
 `progression` owns the installed objective catalog and activation expressions;
 the content builder reexports these types. `story::Policy` uses that same catalog
 to inspect saved objectives and prepare atomic checkpoint/completion batches.
+`event_rewards::commit` can join an attributed story objective to the same
+transaction as race cash, REP, earned-cash statistics, records and unlocks. It
+reads the result's retained retry receipt before rebuilding effects; a later
+story operation or restart does not make an old result payable again. Missing
+receipts retain the active-objective checks. The caller must establish the owned
+result and its authored completion conditions; this service does not infer a
+mission from a payout or require a win. Result attribution and live acceptance
+remain separate integration work.
+
 Intro ordering must have a single next objective at each step; main-story
 completion preserves independent active objectives and projects their authored
 prerequisites. Checkpoint editing remains limited to the intro. Existing main-story
