@@ -97,6 +97,17 @@ pub fn append(snapshot: &Snapshot, table: &str, hash: u32) -> Result<Option<Batc
 /// Mark the most recent row of a message read: `None` when there is no such
 /// row or it is already read.
 pub fn mark_read(snapshot: &Snapshot, table: &str, hash: u32) -> Result<Option<Batch>, Error> {
+    set_read(snapshot, table, hash, true)
+}
+
+/// Apply the reported read flag, including an unread report. Retries are inert;
+/// an unknown message cannot create a row or unlock a message-dependent gate.
+pub fn set_read(
+    snapshot: &Snapshot,
+    table: &str,
+    hash: u32,
+    read: bool,
+) -> Result<Option<Batch>, Error> {
     let Some(row) = rows(&snapshot.tables, table)?
         .into_iter()
         .rev()
@@ -104,14 +115,14 @@ pub fn mark_read(snapshot: &Snapshot, table: &str, hash: u32) -> Result<Option<B
     else {
         return Ok(None);
     };
-    if row.read {
+    if row.read == read {
         return Ok(None);
     }
     let mut next = snapshot.tables[&key(table)].clone();
     next.rows
         .get_mut(&row.index)
         .ok_or(Error::Invalid)?
-        .insert(key("Read"), Value::Int(1));
+        .insert(key("Read"), Value::Int(i32::from(read)));
     batch(snapshot, table, next).map(Some)
 }
 
@@ -187,6 +198,11 @@ mod tests {
         assert_eq!(table(&batch).rows[&0][&key("Read")], Value::Int(0));
         assert!(mark_read(&held, STATIC, 5).unwrap().is_none());
         assert!(mark_read(&held, STATIC, 77).unwrap().is_none());
+        let batch = set_read(&held, STATIC, 5, false).unwrap().unwrap();
+        assert_eq!(table(&batch).rows[&2][&key("Read")], Value::Int(0));
+        assert_eq!(table(&batch).rows[&2][&key("Asset")], Value::Int(5));
+        assert!(set_read(&held, STATIC, 9, false).unwrap().is_none());
+        assert!(set_read(&held, STATIC, 77, false).unwrap().is_none());
     }
     #[test]
     fn the_underground_table_keeps_its_hash_in_message_hash() {

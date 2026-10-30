@@ -144,3 +144,73 @@ fn a_licensed_message_names_an_installed_message_on_a_known_manager() {
     assert_eq!(Manager::Underground.table(), "UgStaticMessages");
     assert_eq!(Manager::Normal.table(), "StaticMessage");
 }
+
+#[test]
+fn restored_messages_keep_their_read_flags_and_new_announcements_are_unread() {
+    let content = content();
+    let (players, _, _) = world();
+    let row = |hash, read| Row {
+        index: 0,
+        hash,
+        read,
+    };
+    let mut restored = content
+        .session_start(
+            players.objects(),
+            &[row(REMINDER, true)],
+            &[row(PREORDER, false)],
+        )
+        .unwrap();
+    restored.push(
+        content
+            .added(players.objects(), Manager::Normal, REMINDER)
+            .unwrap(),
+    );
+    let flags: Vec<_> = restored
+        .iter()
+        .filter_map(|rpc| {
+            if let HostRpc::GameMode(call) = rpc
+                && let Arguments::Message { flag, .. } = call.arguments
+            {
+                Some((call.method, flag))
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(flags, [(RESTORED, true), (RESTORED, false), (ADDED, false)]);
+}
+
+#[test]
+fn read_reports_preserve_both_flag_values_and_require_the_owned_participant() {
+    use nfs_world::bits::BitWriter;
+    let content = content();
+    let (players, _, _) = world();
+    let world = players.objects();
+    let (scene, selector) = world.scene_endpoint(GAMEPLAY, 3).unwrap();
+    for read in [false, true] {
+        // Construct a client RPC independently of the host message writer.
+        let mut payload = BitWriter::new();
+        payload
+            .put(selector.into(), 9)
+            .put(3, 32)
+            .put(2, 2)
+            .put(3, 11)
+            .put(969, 12)
+            .put(u64::from(read), 1)
+            .align();
+        let mut body = BitWriter::new();
+        body.put(0, 32)
+            .put(0, 32)
+            .put(2, 8)
+            .put(scene.into(), 13)
+            .put(42, 13)
+            .put(payload.bytes().len() as u64, 9)
+            .put_span(payload.span());
+        assert_eq!(
+            content.read(world, body.span(), |p| p == 42).unwrap(),
+            Some((REMINDER, 42, Manager::Normal, read))
+        );
+        assert!(content.read(world, body.span(), |_| false).is_err());
+    }
+}

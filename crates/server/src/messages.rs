@@ -4,11 +4,12 @@
 
 //! Phone messages on the gameplay scene's two message managers. At session
 //! start each manager restores its stored messages (method 0, in message
-//! order, flag false) and then reports itself initiated (method 1; official
+//! order, with the saved read flag) and then reports itself initiated (method 1;
+//! official
 //! E1026 36.220 s, a fresh account: s106 m1, s107 m1; E912: the restores,
 //! then m1). A message the account gains is committed first and then
 //! announced (method 2, toast and inbox; E1026 906.624 s). The client's
-//! messageRead (method 3) marks the stored row read and gets no answer.
+//! messageRead (method 3) applies the reported read flag and gets no answer.
 //! Each manager has its own table, and each restores before its initiation
 //! (E912 32.336 s: s106 restores, s106 m1, s107 restore, s107 m1).
 use crate::event_logic;
@@ -118,6 +119,7 @@ impl Content {
         manager: Manager,
         method: u32,
         hash: u32,
+        read: bool,
     ) -> Result<HostRpc, Error> {
         let message = self.catalog.by_hash(hash).ok_or(Error::Unsupported)?;
         let (scene, selector) = self.endpoint(world, self.serializer(manager))?;
@@ -130,7 +132,7 @@ impl Content {
             Arguments::Message {
                 bundle: self.catalog.bundle,
                 flat: message.flat,
-                flag: false,
+                flag: read,
             },
         )?))
     }
@@ -156,7 +158,7 @@ impl Content {
                     );
                     continue;
                 }
-                out.push(self.message(world, manager, RESTORED, row.hash)?);
+                out.push(self.message(world, manager, RESTORED, row.hash, row.read)?);
             }
             let (scene, selector) = self.endpoint(world, self.serializer(manager))?;
             out.push(HostRpc::GameMode(event_logic::call(
@@ -172,16 +174,16 @@ impl Content {
     }
     /// A committed message's announcement on its manager.
     pub fn added(&self, world: &World, manager: Manager, hash: u32) -> Result<HostRpc, Error> {
-        self.message(world, manager, ADDED, hash)
+        self.message(world, manager, ADDED, hash, false)
     }
-    /// The read message's hash, the reading participant and the manager it
-    /// was read on: `Ok(None)` when the RPC is not a messageRead.
+    /// The message hash, participant, manager and reported read flag:
+    /// `Ok(None)` when the RPC is not a messageRead.
     pub fn read(
         &self,
         world: &World,
         body: nfs_protocol::world::BitSpan<'_>,
         owns: impl Fn(u16) -> bool,
-    ) -> Result<Option<(u32, u16, Manager)>, Error> {
+    ) -> Result<Option<(u32, u16, Manager, bool)>, Error> {
         let scene = |serializer| world.scene_endpoint(self.managers.scene_key, serializer);
         let (Some(normal), Some(underground)) = (
             scene(self.managers.normal),
@@ -207,7 +209,7 @@ impl Content {
         } else {
             Manager::Normal
         };
-        Ok(Some((message.hash, read.participant, manager)))
+        Ok(Some((message.hash, read.participant, manager, read.flag)))
     }
 }
 

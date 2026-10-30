@@ -20,10 +20,11 @@ pub(in crate::net) enum Action {
         hash: u32,
         manager: crate::messages::Manager,
     },
-    /// The client read a stored message.
+    /// The client reported a stored message's read state.
     MessageRead {
         hash: u32,
         manager: crate::messages::Manager,
+        read: bool,
     },
     /// The client accepted a tutorial: its seen value becomes durable.
     Tutorial {
@@ -119,8 +120,8 @@ impl Profile {
                         }
                         result.ok_or(Error::Inventory(nfs_storage::Error::Conflict.into()))?
                     }
-                    Action::Message { hash, manager } | Action::MessageRead { hash, manager } => {
-                        let read = matches!(request.action, Action::MessageRead { .. });
+                    Action::Message { hash, manager }
+                    | Action::MessageRead { hash, manager, .. } => {
                         let mut result = None;
                         for _ in 0..8 {
                             let snapshot = service
@@ -128,8 +129,9 @@ impl Profile {
                                 .snapshot(account)
                                 .map_err(|e| Error::Inventory(e.into()))?;
                             let table = manager.table();
-                            let prepared = if read {
-                                nfs_services::messages::mark_read(&snapshot, table, hash)
+                            let prepared = if let Action::MessageRead { read, .. } = request.action
+                            {
+                                nfs_services::messages::set_read(&snapshot, table, hash, read)
                             } else {
                                 nfs_services::messages::append(&snapshot, table, hash)
                             }
@@ -557,6 +559,7 @@ mod tests {
             action: Action::MessageRead {
                 hash: 1_422_063_331,
                 manager: crate::messages::Manager::Normal,
+                read: true,
             },
             ..request.clone()
         };
@@ -564,6 +567,31 @@ mod tests {
         assert!(rows(&marked.loaded)[0].read);
         let saved = repository.snapshot(account).unwrap();
         profile.story(&read, Timestamp(12)).await.unwrap();
+        assert_eq!(repository.snapshot(account).unwrap(), saved);
+        let unread = Request {
+            action: Action::MessageRead {
+                hash: 1_422_063_331,
+                manager: crate::messages::Manager::Normal,
+                read: false,
+            },
+            ..request.clone()
+        };
+        let changed = profile.story(&unread, Timestamp(13)).await.unwrap();
+        assert!(!rows(&changed.loaded)[0].read);
+        let saved = repository.snapshot(account).unwrap();
+        // A rebound worker reads durable state; duplicates and an unknown row
+        // on the other manager cannot mark this message or invent a new one.
+        let rebound = service.bind(account);
+        rebound.story(&unread, Timestamp(14)).await.unwrap();
+        let other = Request {
+            action: Action::MessageRead {
+                hash: 1_422_063_331,
+                manager: crate::messages::Manager::Underground,
+                read: true,
+            },
+            ..request
+        };
+        rebound.story(&other, Timestamp(15)).await.unwrap();
         assert_eq!(repository.snapshot(account).unwrap(), saved);
     }
     #[tokio::test]

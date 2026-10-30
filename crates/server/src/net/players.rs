@@ -2811,7 +2811,7 @@ impl Listener for PlayerListener {
                 match messages.read(players.objects(), body, |id| {
                     players.owns_participant(HOST_SELECTOR as u8, self.persona, id)
                 }) {
-                    Ok(Some((hash, participant, manager))) => {
+                    Ok(Some((hash, participant, manager, read))) => {
                         let Some(player_index) =
                             players.runtime_index(HOST_SELECTOR as u8, self.persona, participant)
                         else {
@@ -2824,7 +2824,11 @@ impl Listener for PlayerListener {
                             participant,
                             player_index: u32::from(player_index),
                             progression,
-                            action: super::items::story::Action::MessageRead { hash, manager },
+                            action: super::items::story::Action::MessageRead {
+                                hash,
+                                manager,
+                                read,
+                            },
                         });
                         continue;
                     }

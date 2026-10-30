@@ -296,6 +296,13 @@ writers are rejected. Fractional durations and prefab occurrence identities are
 preserved. This static contract does not execute timers or establish story-race
 support; the session owner must connect it to durable objective completion.
 
+`AssetIndex::mission_conditions` compiles explicitly selected mission Boolean
+writers into bounded conditions over objective activity/completion and message
+read state. Message dependencies retain their authored manager and message
+identity, including alternative invitations. Missing facts, ambiguous writers,
+cycles and event-written Boolean state are rejected. This static contract does
+not unlock events itself; the session owner evaluates committed account state.
+
 Vehicle mesh inputs retain front/rear headlight animation extent and spoiler
 extent/animation ID from the installed item definitions. The vehicle model applies
 them to selected mesh variants; non-finite fields and wrong definition classes
