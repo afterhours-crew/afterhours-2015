@@ -6,7 +6,8 @@
 //! branches. Initial expressions are used only when an objective has no save row.
 use super::*;
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StateOwners {
     pub objectives: BTreeMap<u64, crate::progression::Expr>,
     pub integers: BTreeSet<u64>,

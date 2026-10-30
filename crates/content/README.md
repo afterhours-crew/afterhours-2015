@@ -346,6 +346,14 @@ does not supply an arbitrary initializer. The server's read-only condition
 projection shares objective restoration and message-read semantics with story
 result attribution. These definitions do not implement the referenced missions
 or establish in-game map/start eligibility.
+
+The server availability compiler now prepares these immutable definitions as a
+separate cache product. Cache decoding validates condition and membership
+postorder, bounds and referenced owners before construction. A session evaluator
+reconciles the complete player roster and ordered copied-set controls, returning
+notification membership and eligible variant IDs together. Failed projections
+leave copied membership unchanged. Network notification/start/replay integration
+remains pending; component tests do not establish gameplay acceptance.
 Loaded control-channel publishers retain their separate Boolean owners, initial
 configuration and later event commands. Missing publishers and unsupported
 writes are errors; a false initial value is not treated as a constant.

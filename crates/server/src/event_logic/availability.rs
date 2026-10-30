@@ -5,4 +5,8 @@
 //! Session-owned map eligibility. Immutable authored definitions do not store
 //! account or scene membership, and candidate state is committed atomically.
 pub mod channels;
+mod content;
 pub mod copies;
+pub use content::Content;
+mod state;
+pub use state::{Participant, State};

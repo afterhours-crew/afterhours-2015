@@ -7,7 +7,8 @@
 use super::*;
 use crate::scoring::events::Identity;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Store {
     pub table: String,
     pub column: String,

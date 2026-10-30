@@ -87,6 +87,19 @@ impl Restored {
     }
 }
 impl Catalog {
+    pub fn owned_condition_facts(&self) -> BTreeSet<data::conditions::Fact> {
+        use data::conditions::Fact;
+        self.definition
+            .branches()
+            .values()
+            .flat_map(|b| {
+                b.objectives()
+                    .iter()
+                    .flat_map(|(id, _)| [Fact::Active(*id), Fact::Completed(*id)])
+                    .chain(b.ints().iter().copied().map(Fact::PositiveInt))
+            })
+            .collect()
+    }
     pub fn story_policy(&self, settings: Settings) -> nfs_services::story::Policy<'_> {
         nfs_services::story::Policy {
             catalog: &self.definition,

@@ -12,13 +12,14 @@ use crate::scoring::{
 };
 use nfs_world::scoring::{events::Delivery, nodes};
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize)]
 pub struct Signal {
     pub source: Identity,
     pub event: u32,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Publisher {
     pub channel: Identity,
     pub input: Identity,

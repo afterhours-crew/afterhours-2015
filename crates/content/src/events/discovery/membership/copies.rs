@@ -11,7 +11,8 @@ use nfs_world::scoring::{
     nodes,
 };
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Control {
     pub input_owner: Identity,
     pub input: Program,

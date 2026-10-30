@@ -18,7 +18,9 @@ const MAX_NODES: usize = 128;
 const MAX_DEPTH: usize = 24;
 const GAMEPLAY: &str = "levels/genesis01/gameplay";
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
 pub enum Fact {
     Active(u64),
     Completed(u64),
@@ -31,7 +33,7 @@ pub enum Fact {
     },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 enum Op {
     Fact(Fact),
     Not(usize),
@@ -40,7 +42,8 @@ enum Op {
 }
 
 /// Bounded postorder program, compiled from a graph or explicit fact conjunction.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "prepared::Source")]
 pub struct Condition {
     ops: Vec<Op>,
 }
@@ -350,5 +353,6 @@ pub mod owners;
 mod persisted;
 #[cfg(test)]
 mod persisted_tests;
+mod prepared;
 #[cfg(test)]
 mod tests;

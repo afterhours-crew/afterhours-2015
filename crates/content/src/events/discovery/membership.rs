@@ -12,8 +12,9 @@ const MAX_DEPTH: usize = 32;
 mod constant;
 pub mod copies;
 mod owned;
+mod prepared;
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize)]
 pub enum Fact {
     Boolean(String),
     Player(Identity),
@@ -26,21 +27,23 @@ pub enum Fact {
     IntegerRange(Identity),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 enum Operation {
     Difference,
     Union,
     Intersection,
 }
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 enum Op {
     Fact(Fact),
     Combine(Operation, usize, usize),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "prepared::Source")]
 pub struct Program {
     ops: Vec<Op>,
+    #[serde(with = "crate::prepared_cache::ordered_map")]
     ranges: BTreeMap<Identity, IntegerRange>,
     empty_sets: BTreeSet<Identity>,
 }
@@ -48,7 +51,8 @@ pub struct Program {
 /// Authored bounds plus the exact property that supplies the participant's
 /// integer. Linked relays follow their own definition, never a schema-name
 /// search. Static bounds alone never imply participant membership.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IntegerRange {
     pub input: Identity,
     pub input_port: u32,
@@ -96,7 +100,8 @@ impl Program {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Binding {
     pub notification: Endpoint,
     pub program: Program,

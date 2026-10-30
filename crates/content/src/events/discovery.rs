@@ -309,20 +309,26 @@ struct Roster {
     channels: BTreeMap<Property, Vec<channels::Publisher>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Availability {
     pub entries: Vec<Entry>,
     pub memberships: Vec<membership::Binding>,
+    #[serde(with = "crate::prepared_cache::ordered_map")]
     pub integers: BTreeMap<crate::scoring::events::Identity, integers::Store>,
     /// Full positive and negative membership conditions for each variant.
     /// Client-owned presentation channels remain separate from this rule.
     pub visibility: BTreeMap<String, Visibility>,
+    #[serde(with = "crate::prepared_cache::ordered_map")]
     pub copies: BTreeMap<crate::scoring::events::Identity, membership::copies::Control>,
+    #[serde(with = "crate::prepared_cache::ordered_map")]
     pub channels: BTreeMap<Property, Vec<channels::Publisher>>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Visibility {
+    #[serde(with = "crate::prepared_cache::ordered_map")]
     pub conditions: BTreeMap<Endpoint, bool>,
 }
 impl Visibility {
