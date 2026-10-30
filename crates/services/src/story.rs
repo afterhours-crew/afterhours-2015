@@ -2,7 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! Account-owned intro checkpoints and transactional progression plans.
+//! Account-owned story completion, intro checkpoints and transactional plans.
 //!
 //! This module never plays a movie, trusts a client-reported success or invents
 //! rewards. The owning game service validates completion and supplies any reward
@@ -17,7 +17,8 @@ use nfs_storage::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-const VERSION: i32 = 1;
+const VERSION: i32 = 2;
+const INTRO_VERSION: i32 = 1;
 const HEADER: u64 = 0;
 const FORMAT: u32 = 0;
 const OPERATION: u32 = 1;
@@ -128,18 +129,29 @@ impl Policy<'_> {
         };
         table.validate()?;
         let header = table.rows.get(&HEADER).ok_or(Error::Config)?;
-        if header.get(&FORMAT) != Some(&Value::Int(VERSION)) || header.len() != 5 {
+        let Some(Value::Int(version @ (INTRO_VERSION | VERSION))) = header.get(&FORMAT) else {
+            return Err(Error::Config);
+        };
+        if header.len() != 5 {
             return Err(Error::Config);
         }
         let operation = decimal(header, OPERATION)?;
         let before = decimal(header, BEFORE)?;
         let target = decimal(header, TARGET)?;
-        let ids = self.catalog.objective_ids(Branch::Intro);
+        let intro = self.catalog.objective_ids(Branch::Intro);
+        let ids = if *version == INTRO_VERSION {
+            intro.clone()
+        } else {
+            self.objective_ids()
+        };
         if operation == 0
             || operation > OPERATION_MASK
             || before >= snapshot.generation
             || (target != 0 && !ids.contains(&target))
             || (target == 0 && header.get(&ACTION) == Some(&Value::Int(1)))
+            || (target != 0
+                && header.get(&ACTION) == Some(&Value::Int(0))
+                && !intro.contains(&target))
             || !matches!(header.get(&ACTION), Some(Value::Int(0 | 1)))
             || table.rows.len() != ids.len() + 1
         {
@@ -162,6 +174,33 @@ impl Policy<'_> {
             }
         }
         Ok(table.clone())
+    }
+
+    fn objective_ids(&self) -> BTreeSet<u64> {
+        self.catalog
+            .branches()
+            .values()
+            .flat_map(|definition| definition.objectives().iter().map(|(id, _)| *id))
+            .collect()
+    }
+
+    /// Authoritative saved state and completion provenance for either branch.
+    /// Main-story objectives are independent; they have no slider position.
+    pub fn objective(&self, snapshot: &Snapshot, id: u64) -> Result<Milestone, Error> {
+        let ledger = self.ledger(snapshot)?;
+        let objectives = self.objectives(snapshot)?;
+        let &(active, completed) = objectives.get(&id).ok_or(Error::Invalid)?;
+        let rewards = rewards::read(snapshot, self.catalog)?;
+        let row = ledger.rows.get(&id);
+        Ok(Milestone {
+            id,
+            active: active && !completed,
+            completed,
+            played: flag(row, PLAYED)?,
+            edited: flag(row, EDITED)?,
+            existing: flag(row, EXISTING)? || (completed && row.is_none()),
+            reward_claimed: flag(row, CLAIMED)? || rewards.contains_key(&id),
+        })
     }
 
     fn objectives(&self, snapshot: &Snapshot) -> Result<BTreeMap<u64, (bool, bool)>, Error> {
@@ -253,7 +292,12 @@ impl Policy<'_> {
             return Err(Error::Bounds);
         }
         if let Checkpoint::Objective(id) = target
-            && !self.catalog.objective_ids(Branch::Intro).contains(&id)
+            && !(if action == 0 {
+                self.catalog.objective_ids(Branch::Intro)
+            } else {
+                self.objective_ids()
+            })
+            .contains(&id)
         {
             return Err(Error::Invalid);
         }
@@ -334,6 +378,30 @@ impl Policy<'_> {
             return Err(Error::Conflict);
         }
         let view = self.inspect(snapshot)?;
+        if self
+            .catalog
+            .objective_ids(Branch::Main)
+            .contains(&objective)
+        {
+            let state = self.objective(snapshot, objective)?;
+            if !state.active || state.completed {
+                return Err(Error::Invalid);
+            }
+            if !effects.is_empty() && (state.reward_claimed || state.existing) {
+                return Err(Error::Conflict);
+            }
+            return self.prepare(
+                snapshot,
+                Receipt {
+                    operation,
+                    target,
+                    action: 1,
+                },
+                view.position,
+                Some(objective),
+                effects,
+            );
+        }
         let milestone = view
             .milestones
             .get(view.position)
@@ -380,8 +448,21 @@ impl Policy<'_> {
                 ])
             });
         }
-        let mut completed = self
-            .objectives(snapshot)?
+        let objectives = self.objectives(snapshot)?;
+        // Version 1 contained only the intro. Migrate in the same transaction as
+        // the requested mutation, preserving old flags and marking previously
+        // completed main objectives as existing rather than newly earned.
+        for (&id, &(_, completed)) in &objectives {
+            ledger.rows.entry(id).or_insert_with(|| {
+                BTreeMap::from([
+                    (PLAYED, Value::Int(0)),
+                    (EDITED, Value::Int(0)),
+                    (CLAIMED, Value::Int(0)),
+                    (EXISTING, Value::Int(completed.into())),
+                ])
+            });
+        }
+        let mut completed = objectives
             .into_iter()
             .filter_map(|(id, (_, complete))| complete.then_some(id))
             .collect::<BTreeSet<_>>();
@@ -392,13 +473,16 @@ impl Policy<'_> {
                 completed.remove(&milestone.id);
             }
             let row = ledger.rows.get_mut(&milestone.id).ok_or(Error::Config)?;
-            if played == Some(milestone.id) {
-                row.insert(PLAYED, Value::Int(1));
-                if !effects.is_empty() {
-                    row.insert(CLAIMED, Value::Int(1));
-                }
-            } else if index < position && !milestone.completed {
+            if played != Some(milestone.id) && index < position && !milestone.completed {
                 row.insert(EDITED, Value::Int(1));
+            }
+        }
+        if let Some(id) = played {
+            completed.insert(id);
+            let row = ledger.rows.get_mut(&id).ok_or(Error::Config)?;
+            row.insert(PLAYED, Value::Int(1));
+            if !effects.is_empty() {
+                row.insert(CLAIMED, Value::Int(1));
             }
         }
         ledger.rows.insert(

@@ -145,13 +145,20 @@ not implement the official prologue award protocol or infer missing menu replies
 
 `progression` owns the installed objective catalog and activation expressions;
 the content builder reexports these types. `story::Policy` uses that same catalog
-to inspect a saved intro and prepare atomic checkpoint/completion batches. Intro
-ordering must have a single next objective at each step. Existing main-story
+to inspect saved objectives and prepare atomic checkpoint/completion batches.
+Intro ordering must have a single next objective at each step; main-story
+completion preserves independent active objectives and projects their authored
+prerequisites. Checkpoint editing remains limited to the intro. Existing main-story
 completions and unrelated items/tables are retained. A versioned `AfterhoursStory`
 table records played, edited and inherited completion, plus the last monotonic
 operation receipt. Reward operations supplied by the owning domain commit with
 completion, and claimed rewards cannot be granted again after a rewind. Partial
 objectives, malformed receipts, stale generations and reused intents are refused.
+Version2 covers both branches. Version1 intro-only ledgers remain readable and
+migrate atomically on the next mutation; earlier main completions retain existing
+provenance and cannot acquire newly earned rewards. Reading or preparing a plan
+does not mutate the save. `Policy::objective` exposes one objective's flags and
+completion provenance without assigning a linear main-story position.
 The caller must establish objective success and serialize commits; this module
 does not play the intro or validate arbitrary client-reported race results.
 
