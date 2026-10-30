@@ -46,6 +46,7 @@ pub(super) fn inputs() -> Inputs {
         participant: 77,
         vehicle: None,
         others: vec![],
+        participants: vec![],
         road: None,
         stats: None,
         now: 0.0,
@@ -2898,4 +2899,81 @@ fn prefab_forwarding_and_event_realm_gate_delivery() {
         Some(Value::Float(0.0))
     );
     let _ = OUT;
+}
+
+/// Regression (E1130): the drift train counted every replicated car, so a
+/// traffic car beside a solo drift earned Crew REP. The filter reads only the
+/// members of its participant set.
+#[test]
+fn proximity_counts_members_of_its_set_and_ignores_other_cars() {
+    use crate::scoring::proximity::{
+        COUNT, DRIFT_PARTICIPANTS, HIGH_SPEED_PARTICIPANTS, Member, RADIUS,
+    };
+    let mut filter = node(
+        0,
+        Behavior::Proximity {
+            set: DRIFT_PARTICIPANTS,
+        },
+    );
+    filter.defaults = vec![(RADIUS, Value::Float(30.0))];
+    let program = Program {
+        nodes: vec![filter],
+        cells: vec![cell(Kind::Integer, &[port(0, COUNT)])],
+        connections: vec![],
+        startup: vec![Step::Bind(0), Step::Activate(0)],
+        unmodeled: vec![],
+    };
+    let car = |identity: u32, x: f32| draft::Vehicle {
+        identity,
+        position: [x, 0.0, 0.0],
+        velocity: [20.0, 0.0, 0.0],
+    };
+    let mut owned = inputs();
+    owned.vehicle = Some(Vehicle {
+        identity: 1,
+        transform: [[0.0; 3]; 4],
+        velocity: [20.0, 0.0, 0.0],
+        angular_velocity: [0.0; 3],
+        airborne: None,
+        state_3c230e35: None,
+        state_cd5ae2f0: None,
+        max_rpm: None,
+        rpm: None,
+        nos: None,
+    });
+    // Traffic and rival cars alongside: replicated, but in no set.
+    owned.others = vec![car(2, 5.0), car(3, 12.0)];
+    let mut session = Session::new(Arc::new(program)).unwrap();
+    session.start(&owned).unwrap();
+    session.tick(0.1, &owned).unwrap();
+    assert_eq!(
+        session.read(port(0, COUNT)).unwrap(),
+        Some(Value::Integer(0))
+    );
+    // A high-speed member is in the other set; the owner never counts.
+    owned.participants = vec![
+        Member {
+            set: HIGH_SPEED_PARTICIPANTS,
+            vehicle: car(4, 8.0),
+        },
+        Member {
+            set: DRIFT_PARTICIPANTS,
+            vehicle: car(1, 0.0),
+        },
+    ];
+    session.tick(0.1, &owned).unwrap();
+    assert_eq!(
+        session.read(port(0, COUNT)).unwrap(),
+        Some(Value::Integer(0))
+    );
+    // A drifting participant 10 m away joins the train.
+    owned.participants.push(Member {
+        set: DRIFT_PARTICIPANTS,
+        vehicle: car(5, 10.0),
+    });
+    session.tick(0.1, &owned).unwrap();
+    assert_eq!(
+        session.read(port(0, COUNT)).unwrap(),
+        Some(Value::Integer(1))
+    );
 }

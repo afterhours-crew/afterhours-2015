@@ -103,7 +103,11 @@ impl Vehicle {
 pub struct Inputs {
     pub participant: u64,
     pub vehicle: Option<Vehicle>,
+    /// Other cars for the draft query.
     pub others: Vec<draft::Vehicle>,
+    /// Other participants' cars by participant set, for the proximity
+    /// filters. Only set members belong here, never every car (E1130).
+    pub participants: Vec<proximity::Member>,
     pub road: Option<road::Sample>,
     /// Owned vehicle figures for the stats provider; absent publishes nothing.
     pub stats: Option<stats::Stats>,
@@ -378,7 +382,7 @@ impl Session {
                 Behavior::Collision(outputs) => {
                     state.collisions.insert(id, collision::Node::new(*outputs));
                 }
-                Behavior::Proximity => {
+                Behavior::Proximity { .. } => {
                     state.proximity.insert(id, proximity::Node::default());
                 }
                 Behavior::Nos => {
@@ -1880,7 +1884,10 @@ impl Candidate<'_> {
                 self.state.scheduled.push(node);
                 Ok(())
             }
-            Behavior::Road { .. } | Behavior::Proximity | Behavior::Nos | Behavior::Donut(_) => {
+            Behavior::Road { .. }
+            | Behavior::Proximity { .. }
+            | Behavior::Nos
+            | Behavior::Donut(_) => {
                 self.state.scheduled.push(node);
                 Ok(())
             }
@@ -2174,8 +2181,9 @@ impl Candidate<'_> {
         }
         Ok(())
     }
-    /// Participant-proximity count of the other cars inside the bound radius.
-    fn proximity(&mut self, node: u16, dispatch: &mut Dispatch<'_>) -> Result<(), Error> {
+    /// Participant-proximity count of the filtered set's members inside the
+    /// bound radius.
+    fn proximity(&mut self, node: u16, set: u32, dispatch: &mut Dispatch<'_>) -> Result<(), Error> {
         let Some(vehicle) = self.inputs.vehicle else {
             return Ok(());
         };
@@ -2192,7 +2200,7 @@ impl Candidate<'_> {
             position: vehicle.transform[3],
             velocity: vehicle.velocity,
         };
-        let count = proximity::count(own, &self.inputs.others, radius)?;
+        let count = proximity::count(own, &self.inputs.participants, set, radius)?;
         let changed = self
             .state
             .proximity
