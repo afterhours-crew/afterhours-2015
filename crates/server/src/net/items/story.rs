@@ -172,14 +172,15 @@ impl Profile {
                                 .repository
                                 .snapshot(account)
                                 .map_err(|e| Error::Inventory(e.into()))?;
-                            let view = policy
+                            // Keep the intro summary/ledger consistency gate even
+                            // when the requested objective belongs to main story.
+                            policy
                                 .inspect(&snapshot)
                                 .map_err(|e| Error::Inventory(e.into()))?;
-                            if view
-                                .milestones
-                                .iter()
-                                .any(|m| m.id == objective && m.completed)
-                            {
+                            let state = policy
+                                .objective(&snapshot, objective)
+                                .map_err(|e| Error::Inventory(e.into()))?;
+                            if state.completed {
                                 result = Some(snapshot);
                                 break;
                             }
@@ -601,6 +602,66 @@ mod tests {
         let rebound = service.bind(account);
         rebound.story(&request, Timestamp(12)).await.unwrap();
         rebound.story(&next, Timestamp(13)).await.unwrap();
+        assert_eq!(repository.snapshot(account).unwrap(), saved);
+    }
+
+    #[tokio::test]
+    async fn main_completion_returns_its_committed_snapshot_and_retries_across_branches() {
+        let (repository, account, _) = crate::progression::tests::local();
+        let repository = Arc::new(repository);
+        let service = Service::new(
+            repository.clone(),
+            Arc::new(InventoryCatalog::new([], vec![]).unwrap()),
+        )
+        .with_persistent(Arc::new(crate::progression::tests::tables()));
+        let profile = service.bind(account);
+        let mut request = Request {
+            participant: 19,
+            player_index: 4,
+            progression: progression(),
+            action: Action::Complete { objective: 30 },
+        };
+        // A main objective with an unmet prerequisite cannot write anything.
+        let before = repository.snapshot(account).unwrap();
+        assert!(profile.story(&request, Timestamp(8)).await.is_err());
+        assert_eq!(repository.snapshot(account).unwrap(), before);
+        for objective in [10, 20] {
+            request.action = Action::Complete { objective };
+            profile.story(&request, Timestamp(9)).await.unwrap();
+        }
+        let before = repository.snapshot(account).unwrap();
+        request.action = Action::Complete { objective: 30 };
+        let committed = profile.story(&request, Timestamp(10)).await.unwrap();
+        let saved = repository.snapshot(account).unwrap();
+        assert_eq!(committed.loaded.generation(), saved.generation);
+        assert_eq!(saved.generation, before.generation + 1);
+        let policy = request
+            .progression
+            .catalog
+            .story_policy(request.progression.settings);
+        let main = policy.objective(&saved, 30).unwrap();
+        assert!(main.completed && main.played && !main.active);
+        let restored = request
+            .progression
+            .catalog
+            .restore(&committed.loaded, request.progression.settings)
+            .unwrap();
+        assert!(
+            restored
+                .branch(crate::progression::Branch::Main)
+                .objectives()[&30]
+                .completed
+        );
+        // Rebinding and late intro retries must not write again or rewind main.
+        let rebound = service.bind(account);
+        for objective in [30, 10, 20, 30] {
+            request.action = Action::Complete { objective };
+            let retry = rebound.story(&request, Timestamp(11)).await.unwrap();
+            assert_eq!(retry.loaded.generation(), saved.generation);
+            assert_eq!(repository.snapshot(account).unwrap(), saved);
+        }
+        request.action = Action::Complete { objective: 999 };
+        assert!(rebound.story(&request, Timestamp(12)).await.is_err());
         assert_eq!(repository.snapshot(account).unwrap(), saved);
     }
 

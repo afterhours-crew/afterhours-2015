@@ -288,6 +288,14 @@ an explicit `--progression-content` keeps precedence. Account values and runtime
 identities remain owned by the server. Floats in progression persistence and
 unrecognized activation expressions are unsupported.
 
+`AssetIndex::objective_delays` resolves an explicit set of objective timers in
+one chapter. It accepts only the objective's own Activated event through bounded
+server/world-time Delay nodes to its Complete input. Client-only edges, cycles,
+extra reset/abort inputs, dynamic durations, missing objectives and ambiguous
+writers are rejected. Fractional durations and prefab occurrence identities are
+preserved. This static contract does not execute timers or establish story-race
+support; the session owner must connect it to durable objective completion.
+
 Vehicle mesh inputs retain front/rear headlight animation extent and spoiler
 extent/animation ID from the installed item definitions. The vehicle model applies
 them to selected mesh variants; non-finite fields and wrong definition classes
