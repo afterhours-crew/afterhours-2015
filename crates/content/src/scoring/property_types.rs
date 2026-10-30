@@ -385,6 +385,8 @@ pub fn compile(object: &Object) -> Result<Option<Declaration>, Error> {
         }
         "VehicleStatsProviderEntityData" => {
             d.outputs.extend([
+                (world::stats::MAX_HP, Kind::Integer),
+                (world::stats::STOCK_MAX_HP, Kind::Integer),
                 (world::stats::TOP_SPEED, Kind::Integer),
                 (world::stats::STOCK_TOP_SPEED, Kind::Integer),
                 (world::stats::ZERO_TO_SIXTY, Kind::Float),

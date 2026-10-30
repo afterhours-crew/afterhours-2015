@@ -2223,6 +2223,15 @@ impl Candidate<'_> {
             return Ok(());
         }
         *last = Some(figures);
+        let hp = i32::try_from(figures.max_hp).map_err(|_| Error::ConversionRange)?;
+        let stock_hp = i32::try_from(figures.stock_max_hp).map_err(|_| Error::ConversionRange)?;
+        self.publish_bound(node, stats::MAX_HP, Value::Integer(hp), dispatch)?;
+        self.publish_bound(
+            node,
+            stats::STOCK_MAX_HP,
+            Value::Integer(stock_hp),
+            dispatch,
+        )?;
         let top = i32::try_from(figures.top_speed_mph).map_err(|_| Error::ConversionRange)?;
         let stock_top =
             i32::try_from(figures.stock_top_speed_mph).map_err(|_| Error::ConversionRange)?;

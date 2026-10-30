@@ -833,6 +833,7 @@ impl PlayerListener {
                 .items
                 .get(&players.vehicle_item_of(HOST_SELECTOR as u8, self.persona, car)?)?;
         let Derived::RaceVehicle {
+            max_hp,
             zero_to_sixty,
             top_speed_mph,
             ..
@@ -841,6 +842,7 @@ impl PlayerListener {
             return None;
         };
         let Some(Derived::RaceVehicle {
+            max_hp: stock_max_hp,
             zero_to_sixty: stock_zero_to_sixty,
             top_speed_mph: stock_top_speed_mph,
             ..
@@ -853,6 +855,8 @@ impl PlayerListener {
             return None;
         };
         let stats = Stats {
+            max_hp: *max_hp,
+            stock_max_hp: *stock_max_hp,
             top_speed_mph: *top_speed_mph,
             stock_top_speed_mph: *stock_top_speed_mph,
             zero_to_sixty: f32::from_bits(*zero_to_sixty),
