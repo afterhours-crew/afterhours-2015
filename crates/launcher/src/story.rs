@@ -39,6 +39,8 @@ pub struct Preview {
     pub starters: Vec<Starter>,
     pub starter: Option<String>,
     pub car_images: Option<std::path::PathBuf>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub restart: bool,
 }
 
 impl Preview {
@@ -73,6 +75,7 @@ impl Preview {
             reasons: plan.reasons,
             starters,
             starter: plan.starter,
+            restart: plan.restart,
             car_images: content
                 .car_images
                 .as_ref()
@@ -209,7 +212,7 @@ pub(crate) fn build(
         selectable: options.is_some(),
     });
     let mut warnings = if options.is_some() {
-        vec!["Replay starts from the beginning and keeps earned cars and progress. The starter choice reuses your earned car. Middle steps cannot be used as restart points yet.".to_owned()]
+        vec!["Restart story resets the whole career after making a backup. Ordinary checkpoint changes keep earned cars and progress. Middle steps cannot be used as restart points yet.".to_owned()]
     } else {
         vec!["Run setup to prepare story editing for this installation.".to_owned()]
     };

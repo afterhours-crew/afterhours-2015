@@ -272,6 +272,10 @@ pub struct ProfileArgs {
 /// Arguments for the story view and server-owned checkpoint commands.
 #[derive(Debug, Clone, Default, Args)]
 pub struct StoryArgs {
+    /// Start the entire career over at the opening, with a verified backup.
+    /// Pass with both preview and apply; ordinary checkpoint edits keep rewards.
+    #[arg(long)]
+    pub restart: bool,
     /// First-car definition returned by this checkpoint's preview.
     #[arg(long, value_name = "GUID")]
     pub starter: Option<String>,

@@ -6,7 +6,7 @@
 use super::SqliteRepository;
 use crate::{AccountId, Error, Inspection};
 use rusqlite::{
-    Connection, OpenFlags, TransactionBehavior,
+    Connection, OpenFlags, OptionalExtension, TransactionBehavior,
     backup::{Backup, StepResult},
 };
 use std::{fs::File, path::PathBuf};
@@ -34,6 +34,58 @@ pub struct WriterLease {
 }
 
 impl SqliteRepository {
+    /// Replace inventory and persistent progression under an already-held writer
+    /// lease, together with selected domain documents and the restart receipt.
+    /// The generation and batch history stay monotonic. Unmentioned documents
+    /// and user-created livery records are preserved. The caller validates domain
+    /// values and makes a verified standalone backup before invoking this method.
+    pub fn restart_progress(
+        &self,
+        lease: &WriterLease,
+        batch: &crate::Batch,
+        documents: &[(crate::account::Kind, crate::account::Document)],
+        now: crate::Timestamp,
+    ) -> Result<crate::Applied, Error> {
+        if lease.root != self.root
+            || !batch
+                .ops
+                .iter()
+                .any(|op| matches!(op, crate::Op::SetGarage(_)))
+            || batch
+                .ops
+                .iter()
+                .any(|op| matches!(op, crate::Op::Update(_) | crate::Op::Remove(_)))
+        {
+            return Err(Error::Invalid);
+        }
+        batch.validate()?;
+        let account = lease.account;
+        let mut connection = self.connect(account, false)?;
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        Self::check(&tx, account)?;
+        let (generation, _) = Self::read_meta(&tx)?;
+        let recorded: Option<i64> = tx
+            .query_row(
+                "SELECT generation FROM batch WHERE id=?1",
+                [batch.id.to_be_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let recorded = recorded
+            .map(|value| u64::try_from(value).map_err(|_| Error::Config))
+            .transpose()?;
+        if let crate::port::Decision::Replay(applied) =
+            crate::port::decide(generation, recorded, batch, now)?
+        {
+            return Ok(applied);
+        }
+        crate::account::replace_documents(&tx, documents)?;
+        tx.execute_batch("DELETE FROM item; DELETE FROM persistent; UPDATE meta SET garage=NULL WHERE singleton=1;")?;
+        let applied = Self::apply_in(&tx, account, batch, now)?;
+        tx.commit()?;
+        Ok(applied)
+    }
+
     /// Observe ownership without creating a lock file or changing an account.
     pub fn writer_is_leased(&self, account: AccountId) -> Result<bool, Error> {
         let path = self.path(account).with_extension("writer.lock");

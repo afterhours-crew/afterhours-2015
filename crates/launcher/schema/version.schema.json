@@ -50,6 +50,11 @@
           "type": "string"
         },
         {
+          "const": "story-restart",
+          "description": "Explicit full-career restart through preview/apply and a verified backup.",
+          "type": "string"
+        },
+        {
           "const": "map-feed",
           "description": "`map-feed` events with `--events` on `serve` and `start`: live\npositions of the players' cars, traffic and roaming rivals.",
           "type": "string"

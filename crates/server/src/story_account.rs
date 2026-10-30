@@ -35,6 +35,7 @@ struct Rules {
     digest: String,
     options: Option<Options>,
     items: Option<nfs_world::items::InventoryCatalog>,
+    persistent: Option<nfs_services::persistent::Catalog>,
 }
 struct Proof {
     target: Checkpoint,
@@ -47,6 +48,7 @@ struct Editor<'a> {
     rules: &'a Rules,
     supported: bool,
     starter: Option<String>,
+    restart: bool,
 }
 
 fn digest(bytes: &[u8]) -> String {
@@ -187,12 +189,24 @@ impl Rules {
         } else {
             None
         };
+        let persistent_path = path.with_file_name("persistent-content.json");
+        let persistent = if options.is_some() && persistent_path.exists() {
+            let bytes = read_bounded(&persistent_path, 128 * 1024)?;
+            let tables =
+                nfs_services::persistent::Catalog::from_json(&serde_json::from_slice(&bytes)?)
+                    .map_err(|_| "Invalid persistent defaults.")?;
+            identity.extend_from_slice(&bytes);
+            Some(tables)
+        } else {
+            None
+        };
         Ok(Self {
             catalog,
             settings,
             digest: digest(&identity),
             options,
             items,
+            persistent,
         })
     }
     fn policy(&self) -> Policy<'_> {
@@ -212,10 +226,16 @@ impl Editor<'_> {
         Ok(digest(&serde_json::to_vec(
             &json!({"domain":"afterhours-story-plan-v1","account":self.account.hex(),
             "generation":generation.to_string(),"operation":operation.to_string(),"target":name(target),
-                "rules":self.rules.digest,"supported":self.supported,"starter":self.starter,"save":self.repository()?.path(self.account)}),
+                "rules":self.rules.digest,"supported":self.supported,"starter":self.starter,"restart":self.restart,"save":self.repository()?.path(self.account)}),
         )?))
     }
     fn choices(&self, snapshot: &Snapshot, target: Checkpoint) -> Result<Vec<String>> {
+        if self.restart {
+            if self.starter.is_some() {
+                return Err("A fresh career chooses its car in the game.".into());
+            }
+            return Ok(vec![]);
+        }
         let Some(options) = &self.rules.options else {
             if self.starter.is_some() {
                 return Err("First-car selection requires current prepared content.".into());
@@ -318,7 +338,7 @@ impl Editor<'_> {
                 .garage
                 .and_then(|slots| slots.0[0])
                 .filter(|id| owned(*id));
-            if position == 0 {
+            if position == 0 && !self.restart {
                 let claimed = state
                     .milestones
                     .iter()
@@ -343,6 +363,16 @@ impl Editor<'_> {
         }
         if !starters.is_empty() && self.starter.is_none() {
             reasons.push("Choose your first car before applying this checkpoint.".into());
+        }
+        if self.restart {
+            if position != 0 {
+                reasons.push("Restart must begin at the first prologue objective.".into());
+            } else if self.rules.persistent.is_none() {
+                reasons
+                    .push("Run setup to prepare fresh-career defaults before restarting.".into());
+            } else {
+                self.restart_batch(snapshot, operation, target)?;
+            }
         }
         if !self.supported
             || self
@@ -385,6 +415,7 @@ impl Editor<'_> {
             reasons,
             starters,
             starter: self.starter.clone(),
+            restart: self.restart,
         })
     }
     fn preview(&self, target: Checkpoint) -> Result<Preview> {
@@ -494,6 +525,7 @@ impl Editor<'_> {
                 replayed: true,
                 backup,
                 starter: self.starter.clone(),
+                restart: self.restart,
             });
         }
         if before.generation != proof.expected {
@@ -507,37 +539,41 @@ impl Editor<'_> {
             return Err("The rules or checkpoint changed; refresh the story preview.".into());
         }
         let operation = decimal(&preview.operation_id)?;
-        let Prepared::Mutation(mut batch) = policy.jump_with_vehicle(
-            &before,
-            proof.expected,
-            operation,
-            proof.target,
-            self.starter
-                .as_deref()
-                .map(|car| -> Result<_> {
-                    let mut definition = [0; 16];
-                    for (i, byte) in definition.iter_mut().enumerate() {
-                        *byte = u8::from_str_radix(&car[i * 2..i * 2 + 2], 16)?;
-                    }
-                    Ok((
-                        self.rules
-                            .items
-                            .as_ref()
-                            .ok_or("Missing vehicle definitions.")?,
-                        decimal(
-                            &self
-                                .rules
-                                .options
+        let prepared = if self.restart {
+            Prepared::Mutation(self.restart_batch(&before, operation, proof.target)?)
+        } else {
+            policy.jump_with_vehicle(
+                &before,
+                proof.expected,
+                operation,
+                proof.target,
+                self.starter
+                    .as_deref()
+                    .map(|car| -> Result<_> {
+                        let mut definition = [0; 16];
+                        for (i, byte) in definition.iter_mut().enumerate() {
+                            *byte = u8::from_str_radix(&car[i * 2..i * 2 + 2], 16)?;
+                        }
+                        Ok((
+                            self.rules
+                                .items
                                 .as_ref()
-                                .ok_or("Missing story options.")?
-                                .selection,
-                        )?,
-                        definition,
-                    ))
-                })
-                .transpose()?,
-        )?
-        else {
+                                .ok_or("Missing vehicle definitions.")?,
+                            decimal(
+                                &self
+                                    .rules
+                                    .options
+                                    .as_ref()
+                                    .ok_or("Missing story options.")?
+                                    .selection,
+                            )?,
+                            definition,
+                        ))
+                    })
+                    .transpose()?,
+            )?
+        };
+        let Prepared::Mutation(mut batch) = prepared else {
             return Err("Missing story edit receipt.".into());
         };
         let backup_id = digest(format!("{}:{nonce}", proof.plan_id).as_bytes());
@@ -576,7 +612,16 @@ impl Editor<'_> {
             },
         ));
         batch.validate()?;
-        let applied = repo.apply(self.account, &batch, now)?;
+        let applied = if self.restart {
+            let inspection = repo.inspect(self.account)?;
+            let documents = nfs_services::fresh_account::restart_documents(
+                self.account,
+                &inspection.documents,
+            )?;
+            repo.restart_progress(&lease, &batch, &documents, now)?
+        } else {
+            repo.apply(self.account, &batch, now)?
+        };
         Ok(Applied {
             version: 1,
             account_id: self.account.hex(),
@@ -586,6 +631,7 @@ impl Editor<'_> {
             replayed: applied.replayed,
             backup,
             starter: self.starter.clone(),
+            restart: self.restart,
         })
     }
 }
@@ -597,10 +643,19 @@ struct Args {
     target: Checkpoint,
     proof: Option<Proof>,
     starter: Option<String>,
+    restart: bool,
 }
 fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args> {
     let mut fields = BTreeMap::new();
+    let mut restart = false;
     while let Some(key) = args.next() {
+        if key == "--restart" {
+            if restart {
+                return Err("Repeated restart option.".into());
+            }
+            restart = true;
+            continue;
+        }
         let value = args.next().ok_or("Missing story option value.")?;
         if fields.insert(key, value).is_some() {
             return Err("Repeated story option.".into());
@@ -670,6 +725,7 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args> {
         target,
         proof,
         starter,
+        restart,
     })
 }
 fn run(args: Args) -> Result<serde_json::Value> {
@@ -683,6 +739,7 @@ fn run(args: Args) -> Result<serde_json::Value> {
         rules: &rules,
         supported: rules.options.is_some() && rules.items.is_some(),
         starter: args.starter,
+        restart: args.restart,
     };
     match args.proof {
         None => Ok(serde_json::to_value(editor.preview(args.target)?)?),
@@ -712,5 +769,6 @@ pub fn main(args: impl Iterator<Item = OsString>) -> std::process::ExitCode {
     }
 }
 
+mod restart;
 #[cfg(test)]
 mod tests;

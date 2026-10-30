@@ -153,6 +153,9 @@
       },
       "type": "array"
     },
+    "restart": {
+      "type": "boolean"
+    },
     "source_checkpoint": {
       "type": "string"
     },

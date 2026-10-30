@@ -53,6 +53,18 @@ keeps earned cars, tuning, cash and REP; the first-car scene reuses the previous
 earned car even if another preview is selected. Legacy saves reuse their existing
 primary car. A missing earned car refuses the edit rather than granting it again.
 
+For a fresh career, add `--restart` to both the preview and apply at the opening
+checkpoint. This explicit action resets all story progress (including the main
+career), owned cars and parts, money, REP, unlocks, messages, challenges, awards
+and race records to the same defaults as a new account. Driver identity,
+entitlements, settings and user-created media remain. It works even when the
+story is already at its opening. `story-restart` advertises support; the preview
+proof binds that intent and the current initialization content. Omitting the flag
+keeps the ordinary reward-preserving checkpoint behavior described above.
+The complete backup is verified before one atomic reset; a failed transaction
+leaves the old career intact. Storage generations and session identifiers never
+rewind, and repeating the exact successful command does not reset it again.
+
 Every subcommand accepts `--data-dir <DIR>` and `--json`. `--help` on any
 subcommand explains it. For installation requirements and the full
 walkthrough see [docs/LOCAL-LAUNCHER.md](../../docs/LOCAL-LAUNCHER.md).

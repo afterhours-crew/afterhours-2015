@@ -16,6 +16,9 @@ use std::{
 };
 
 pub fn story(context: &Context, args: &StoryArgs) -> Result<()> {
+    if args.restart && args.preview.is_none() && args.apply.is_none() {
+        return Err(Failure::refused("--restart requires --preview or --apply."));
+    }
     if args.starter.is_some() && args.preview.is_none() && args.apply.is_none() {
         return Err(Failure::refused("--starter requires --preview or --apply."));
     }
@@ -130,6 +133,9 @@ fn edit(context: &Context, args: &StoryArgs) -> Result<()> {
         ]);
     }
     let log_root = saves.data().join("story-commands");
+    if args.restart {
+        arguments.push("--restart".into());
+    }
     if let Some(starter) = &args.starter {
         if profile::content::guid(starter).is_none_or(|id| id == [0; 16]) {
             return Err(Failure::refused("Invalid first-car identifier."));
@@ -164,7 +170,7 @@ fn edit(context: &Context, args: &StoryArgs) -> Result<()> {
     )?;
     if args.preview.is_some() {
         let report: Preview = serde_json::from_value(value)?;
-        if report.version != 1 || report.account_id != id {
+        if report.version != 1 || report.account_id != id || report.restart != args.restart {
             return Err(Failure::refused("Unsupported story preview result."));
         }
         let mut details = profile::content(
@@ -196,7 +202,7 @@ fn edit(context: &Context, args: &StoryArgs) -> Result<()> {
         })
     } else {
         let report: Applied = serde_json::from_value(value)?;
-        if report.version != 1 || report.account_id != id {
+        if report.version != 1 || report.account_id != id || report.restart != args.restart {
             return Err(Failure::refused("Unsupported story apply result."));
         }
         context.emit(&report, || {

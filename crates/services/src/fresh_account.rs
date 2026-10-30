@@ -136,6 +136,76 @@ pub struct Prepared {
     batch: Batch,
     now: Timestamp,
 }
+
+/// Build the same inventory, persistent defaults, awards and challenges used at
+/// account creation. Identity, user settings and other account documents are not
+/// part of this state. Callers choose the initial item policy explicitly.
+pub fn initial_state(
+    storage: AccountId,
+    items: &InventoryCatalog,
+    tables: &persistent::Catalog,
+    now: Timestamp,
+) -> Result<nfs_storage::Snapshot, Error> {
+    let memory = MemoryRepository::new();
+    let snapshot =
+        inventory::load(&memory, storage, items, 1, now).map_err(|_| Error::Inventory)?;
+    let (snapshot, _) = tables
+        .ensure_loaded(&memory, storage, snapshot, now)
+        .map_err(|_| Error::Progression)?;
+    let snapshot = crate::awards::ensure_empty(&memory, storage, snapshot, now)
+        .map_err(|_| Error::Progression)?;
+    crate::challenges::ensure_empty(&memory, storage, snapshot, now).map_err(|_| Error::Progression)
+}
+
+/// The opening has no owned race vehicle; the authored first-car choice grants it.
+pub fn prologue_inventory(items: &InventoryCatalog) -> Result<InventoryCatalog, Error> {
+    use nfs_world_core::items::DefinitionClass;
+    let initial = items
+        .initial_definitions()
+        .iter()
+        .copied()
+        .filter(|id| {
+            items
+                .bindings()
+                .class(id)
+                .is_ok_and(|class| class != DefinitionClass::RaceVehicleItemData)
+        })
+        .collect();
+    InventoryCatalog::new(
+        items.definitions().map(|(id, value)| (*id, value.clone())),
+        initial,
+    )
+    .map_err(|_| Error::Inventory)
+}
+
+fn empty_speedwall(account: AccountId) -> Value {
+    json!({"format":"nfs-speedwall-state","version":1,"build_sha256":BUILD,
+        "account":account.hex(),"rows":[]})
+}
+
+/// Career records reset with inventory. Identity, settings, entitlements and
+/// personal media are retained. Domain revisions advance rather than rewind.
+pub fn restart_documents(
+    account: AccountId,
+    previous: &std::collections::BTreeMap<Kind, Document>,
+) -> Result<Vec<(Kind, Document)>, Error> {
+    let kind = Kind::Speedwall;
+    let value = empty_speedwall(account);
+    account_state::validate(kind, &value, account).map_err(|_| Error::Policy)?;
+    let revision = previous
+        .get(&kind)
+        .map_or(0, |doc| doc.revision)
+        .checked_add(1)
+        .ok_or(Error::Bounds)?;
+    Ok(vec![(
+        kind,
+        Document {
+            revision,
+            bytes: serde_json::to_vec(&value).map_err(|_| Error::Policy)?,
+        },
+    )])
+}
+
 impl Prepared {
     /// Construct and validate all state in memory before touching the filesystem.
     /// Positive persona/account IDs use distinct local domains. Item IDs are
@@ -177,10 +247,7 @@ impl Prepared {
                 Kind::Kickback,
                 json!({"format":"nfs-kickback-state","version":1,"build_sha256":BUILD,"account":storage.hex(),"screenshot_count":0,"screenshot_count_max":policy.screenshot_limit,"gallery":"empty","winner":null}),
             ),
-            (
-                Kind::Speedwall,
-                json!({"format":"nfs-speedwall-state","version":1,"build_sha256":BUILD,"account":storage.hex(),"rows":[]}),
-            ),
+            (Kind::Speedwall, empty_speedwall(storage)),
             (Kind::Settings, Settings::default().to_json()),
         ];
         let mut documents = Vec::new();
@@ -192,16 +259,7 @@ impl Prepared {
             }
             documents.push((kind, Document { revision: 1, bytes }));
         }
-        let memory = MemoryRepository::new();
-        let snapshot =
-            inventory::load(&memory, storage, items, 1, now).map_err(|_| Error::Inventory)?;
-        let (snapshot, _) = tables
-            .ensure_loaded(&memory, storage, snapshot, now)
-            .map_err(|_| Error::Progression)?;
-        let snapshot = crate::awards::ensure_empty(&memory, storage, snapshot, now)
-            .map_err(|_| Error::Progression)?;
-        let snapshot = crate::challenges::ensure_empty(&memory, storage, snapshot, now)
-            .map_err(|_| Error::Progression)?;
+        let snapshot = initial_state(storage, items, tables, now)?;
         // Later initializers reread the repository, so write the rows last.
         let mut snapshot = snapshot;
         if !objectives.is_empty() {

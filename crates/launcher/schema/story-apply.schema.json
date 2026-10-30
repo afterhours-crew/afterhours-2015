@@ -40,6 +40,9 @@
     "replayed": {
       "type": "boolean"
     },
+    "restart": {
+      "type": "boolean"
+    },
     "starter": {
       "type": [
         "string",

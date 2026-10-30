@@ -385,6 +385,8 @@ pub enum Capability {
     /// `story --preview` and exact preview proofs for server-owned edits.
     /// Each checkpoint's `can_apply` still gates unsupported restart paths.
     StoryPreview,
+    /// Explicit full-career restart through preview/apply and a verified backup.
+    StoryRestart,
     /// `map-feed` events with `--events` on `serve` and `start`: live
     /// positions of the players' cars, traffic and roaming rivals.
     MapFeed,
@@ -395,7 +397,7 @@ pub enum Capability {
 }
 
 /// Capabilities of this build, in a fixed order.
-pub const CAPABILITIES: [Capability; 11] = [
+pub const CAPABILITIES: [Capability; 12] = [
     Capability::Profile,
     Capability::Sessions,
     Capability::Events,
@@ -407,6 +409,7 @@ pub const CAPABILITIES: [Capability; 11] = [
     Capability::Api,
     Capability::Story,
     Capability::StoryPreview,
+    Capability::StoryRestart,
 ];
 
 /// Identity of the program the launcher library is running in.

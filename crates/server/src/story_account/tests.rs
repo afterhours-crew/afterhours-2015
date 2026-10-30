@@ -3,6 +3,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 use super::*;
 use nfs_storage::{Batch, DefinitionGuid, GarageSlots, ItemId, ItemRecord, Op};
+mod restart;
 
 fn account(n: u8) -> AccountId {
     AccountId::from_owned_config([n; 16]).unwrap()
@@ -89,6 +90,7 @@ impl Fixture {
                 digest: digest(b"constructed"),
                 options: None,
                 items: None,
+                persistent: None,
             },
             repo,
         }
@@ -100,6 +102,7 @@ impl Fixture {
             rules: &self.rules,
             supported,
             starter: None,
+            restart: false,
         }
     }
     fn proof(&self, target: Checkpoint) -> Proof {
@@ -267,6 +270,7 @@ fn unsupported_busy_stale_and_mismatched_proofs_never_start_backups() {
         digest: digest(b"changed rules"),
         options: f.rules.options.clone(),
         items: f.rules.items.clone(),
+        persistent: f.rules.persistent.clone(),
     };
     let changed_editor = Editor {
         root: &f.root,
@@ -274,6 +278,7 @@ fn unsupported_busy_stale_and_mismatched_proofs_never_start_backups() {
         rules: &changed,
         supported: true,
         starter: None,
+        restart: false,
     };
     assert!(
         changed_editor
@@ -452,6 +457,7 @@ fn production_command_reads_prepared_rules_and_keeps_unvalidated_points_disabled
         target: Checkpoint::AfterIntro,
         proof: None,
         starter: None,
+        restart: false,
     };
     let p = run(args()).unwrap();
     assert_eq!(p["can_apply"], false);

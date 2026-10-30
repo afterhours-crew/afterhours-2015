@@ -33,6 +33,10 @@ pub struct Preview {
     pub starters: Vec<String>,
     /// The first-car choice included in this exact preview proof.
     pub starter: Option<String>,
+    /// Explicit destructive intent, bound into the preview proof. Ordinary jumps
+    /// keep their existing reward-preserving behavior for older launchers.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub restart: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -57,6 +61,8 @@ pub struct Applied {
     pub replayed: bool,
     pub backup: Backup,
     pub starter: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub restart: bool,
 }
 
 /// Installation-derived choices shared by the editor and read-only launcher.

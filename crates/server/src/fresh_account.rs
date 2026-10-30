@@ -216,20 +216,7 @@ const TESTER_CASH: u32 = 10_000_000;
 fn prologue_inventory(
     items: &nfs_world::items::InventoryCatalog,
 ) -> Result<nfs_world::items::InventoryCatalog, Box<dyn std::error::Error>> {
-    use nfs_world::items::{DefinitionClass, InventoryCatalog};
-    let initial = items
-        .initial_definitions()
-        .iter()
-        .copied()
-        .filter(|id| {
-            items
-                .bindings()
-                .class(id)
-                .is_ok_and(|c| c != DefinitionClass::RaceVehicleItemData)
-        })
-        .collect();
-    InventoryCatalog::new(items.definitions().map(|(id, d)| (*id, d.clone())), initial)
-        .map_err(|e| format!("prologue inventory: {e:?}").into())
+    Ok(nfs_services::fresh_account::prologue_inventory(items)?)
 }
 
 fn tester_level(thresholds: &nfs_services::reputation::Thresholds) -> Result<u32, &'static str> {
