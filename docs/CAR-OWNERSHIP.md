@@ -57,6 +57,14 @@ cannot acknowledge the new ones. Installed content supplies the GarageEntity
 serializer binding, purchasable offers, stock parts and vehicle profiles,
 including headlight and spoiler animation fields.
 
+Suspension components retain an empty serializer slot even though their initial
+and update callbacks carry no payload. The slot still contributes an update
+presence bit; omitting it shifts the later fields. This corrects the profile
+defect found while investigating the F132 crash in [issue #113][f132]. Content builder28
+automatically regenerates stale caches. Existing saves are retained. Portable
+profile, byte-alignment, initializer and RPC-allocation regressions pass;
+live verification of the correction is pending.
+
 Automated checks cover transaction retries, funds, quantities, the five-slot cap,
 duplicate car models, account isolation, concurrent purchases, SQLite restart,
 selection, sale descendants and wrap retention. The edge test exercises purchase,
@@ -107,4 +115,5 @@ that scale. Other gameplay systems retain their own roadmap issues.
 [tracking]: https://github.com/afterhours-crew/afterhours-2015/issues/52
 [timing]: https://github.com/afterhours-crew/afterhours-2015/issues/96
 [warehouse]: https://github.com/afterhours-crew/afterhours-2015/issues/98
+[f132]: https://github.com/afterhours-crew/afterhours-2015/issues/113
 [roadmap]: https://github.com/afterhours-crew/afterhours-2015/issues/62

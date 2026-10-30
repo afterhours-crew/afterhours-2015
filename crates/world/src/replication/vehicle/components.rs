@@ -17,7 +17,7 @@ pub fn fresh_rpcs(profile: &Profile) -> Vec<Option<Rpc>> {
         .map(|kind| {
             if matches!(
                 kind,
-                Kind::Part { .. } | Kind::Bool | Kind::FourBit | Kind::Mesh(_)
+                Kind::Part { .. } | Kind::Bool | Kind::FourBit | Kind::Mesh(_) | Kind::Empty
             ) {
                 None
             } else {
@@ -93,6 +93,7 @@ mod tests {
             Kind::Bool,
             Kind::Wheel,
             Kind::FourBit,
+            Kind::Empty,
             Kind::Index,
             Kind::Rpc,
         ])
@@ -102,16 +103,7 @@ mod tests {
             r.iter()
                 .map(|v| v.as_ref().map(|r| r.selector))
                 .collect::<Vec<_>>(),
-            vec![
-                Some(0),
-                Some(1),
-                None,
-                None,
-                Some(2),
-                None,
-                Some(3),
-                Some(4)
-            ]
+            vec![Some(0), Some(1), None, None, Some(2), None, None, Some(3), Some(4)]
         );
         assert!(
             r.iter()
