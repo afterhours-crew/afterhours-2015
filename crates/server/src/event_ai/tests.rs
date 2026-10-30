@@ -59,6 +59,49 @@ fn provider_cursor_and_spawn_namespaces_are_session_owned() {
 }
 
 #[test]
+fn fixed_story_persona_can_keep_the_director_completion_policy() {
+    let (ordinary, mut world, mut registry) = event_fixture();
+    let mut roster = ordinary.roster.clone();
+    roster.spawns[0].ignore_availability = true;
+    roster.spawns[0].personas = vec![1];
+    let content = Content::prepared(
+        roster.clone(),
+        ordinary.vehicles.clone(),
+        ordinary.presets.clone(),
+    )
+    .unwrap();
+    let mut cursor = Cursor::default();
+    let selected = cursor.select(&content).unwrap();
+    assert_eq!(
+        selected.iter().map(|s| s.persona).collect::<Vec<_>>(),
+        [1, 0]
+    );
+    let created = content
+        .create(&mut world, &mut registry, 1, 100, &selected)
+        .unwrap();
+    assert_eq!(created.racers.members.len(), 2);
+    for member in created.racers.members {
+        assert_eq!(
+            world.ai_ids(1, 100, member.selection.car_key),
+            Some(member.ids)
+        );
+    }
+    // Availability does not permit an unsupported one-shot or retained pointer.
+    for field in [0, 1] {
+        let mut invalid = roster.clone();
+        if field == 0 {
+            invalid.spawns[0].once = true;
+        } else {
+            invalid.spawns[0].store_participant = true;
+        }
+        assert!(
+            Content::prepared(invalid, ordinary.vehicles.clone(), ordinary.presets.clone())
+                .is_err()
+        );
+    }
+}
+
+#[test]
 fn story_policy_is_explicit_and_shutdown_is_owned_atomic_and_retry_safe() {
     let (ordinary, mut world, mut registry) = event_fixture();
     let mut roster = ordinary.roster.clone();

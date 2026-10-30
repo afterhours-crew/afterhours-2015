@@ -393,3 +393,51 @@ fn directly_linked_narrative_set_preserves_filtering_and_rejects_ambiguity() {
     edges.push(edge(local(5), ports().provider, local(8), 0));
     assert!(read(&mut m).is_err());
 }
+
+const PRIORITY_PORT: u32 = (-1_118_065_650i32) as u32;
+
+#[test]
+fn priority_story_spawns_precede_fill_spawns_independent_of_connection_order() {
+    let mut m = fixture();
+    let expected = read(&mut m).unwrap();
+    let Value::Array(edges) = &mut m.0.get_mut(&("a".into(), 0)).unwrap().fields.0[0].1 else {
+        panic!()
+    };
+    edges.remove(1);
+    edges.push(edge(local(2), PRIORITY_PORT, local(3), 0));
+    assert_eq!(read(&mut m).unwrap(), expected);
+}
+
+#[test]
+fn story_roster_with_only_priority_spawns_keeps_personas_and_grid_policy() {
+    let mut m = fixture();
+    let expected = read(&mut m).unwrap();
+    let Value::Array(edges) = &mut m.0.get_mut(&("a".into(), 0)).unwrap().fields.0[0].1 else {
+        panic!()
+    };
+    edges[1] = edge(local(2), PRIORITY_PORT, local(3), 0);
+    edges[2] = edge(local(2), PRIORITY_PORT, local(4), 0);
+    assert_eq!(read(&mut m).unwrap(), expected);
+}
+
+#[test]
+fn both_spawn_collections_share_identity_type_and_resource_validation() {
+    for extra in [
+        edge(local(2), PRIORITY_PORT, local(3), 0),
+        edge(local(2), PRIORITY_PORT, local(5), 0),
+        edge(local(2), PRIORITY_PORT, local(3), 1),
+    ] {
+        let mut m = fixture();
+        let Value::Array(edges) = &mut m.0.get_mut(&("a".into(), 0)).unwrap().fields.0[0].1 else {
+            panic!()
+        };
+        edges.push(extra);
+        assert!(read(&mut m).is_err());
+    }
+    let mut m = fixture();
+    let Value::Array(edges) = &mut m.0.get_mut(&("a".into(), 0)).unwrap().fields.0[0].1 else {
+        panic!()
+    };
+    edges.extend((0..MAX_SPAWNS).map(|_| edge(local(2), PRIORITY_PORT, local(3), 0)));
+    assert!(read(&mut m).is_err());
+}
