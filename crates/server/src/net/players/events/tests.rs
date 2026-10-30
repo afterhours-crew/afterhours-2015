@@ -9,6 +9,7 @@ use nfs_world::{bits::BitWriter, logic::EntityRef};
 use std::sync::Arc;
 
 mod ai;
+mod availability;
 mod catalog;
 mod recovery;
 mod restart;

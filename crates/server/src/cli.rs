@@ -883,6 +883,7 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                 })
                 .map(|b| b.asset());
             let intro_items = inventory.as_ref().map(|i| i.item_catalog());
+            let map_progression = progression.clone();
             let content = tokio::task::spawn_blocking(move || {
                 let started = std::time::Instant::now();
                 let reused = installation_index.is_some();
@@ -952,8 +953,8 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                     "runtime preparation phase complete"
                 );
                 let stage = std::time::Instant::now();
-                // The owned race event resolves from the same installation; its
-                // failure leaves scoring on and the event off.
+                // Both normal and approved story variants use the same authored
+                // map conditions; missing ownership cannot enable every event.
                 let event = (|| -> Result<_, nfs_content::Error> {
                     let items = event_items
                         .as_ref()
@@ -963,11 +964,25 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                             })
                         })
                         .transpose()?;
-                    nfs_server::event_logic::catalog::prepare::sprints_cached(
+                    let progression = map_progression.as_ref().ok_or_else(|| {
+                        nfs_content::Error::Content("map progression content missing".into())
+                    })?;
+                    let availability =
+                        Arc::new(nfs_server::event_logic::availability::Content::prepare(
+                            &mut index,
+                            &progression.catalog,
+                            runtime_cache.as_ref(),
+                        )?);
+                    nfs_server::event_logic::catalog::prepare::sprints_gated_cached(
                         &mut index,
                         &scoring.categories,
                         event_vehicles.as_ref(),
                         items.as_ref(),
+                        availability,
+                        &std::collections::BTreeSet::from([
+                            "gameplay/gamemodes/sprint_race_007_nar".to_owned(),
+                            "gameplay/gamemodes/sprint_race_034_nar".to_owned(),
+                        ]),
                         runtime_cache.as_ref(),
                     )
                 })();
@@ -1162,12 +1177,13 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                             content = attached;
                             tracing::info!(
                                 playable = catalog.iter().count(),
-                                "normal sprint catalog ready; progression gating disabled"
+                                "sprint catalog ready with authored progression gating"
                             );
                             events = Some(Arc::new(catalog));
                         }
                         Err(error) => {
-                            tracing::warn!(%error,"sprint catalog unavailable; events stay off")
+                            tracing::error!(%error,"required gated sprint catalog unavailable");
+                            return Err(Failure::ProfileConfig);
                         }
                     }
                     match road {

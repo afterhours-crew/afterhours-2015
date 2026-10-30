@@ -20,6 +20,8 @@ pub struct WorldHealth {
     pub unsupported_operations: u64,
     /// Human map sync, rival source collection, rival map sync.
     pub optional_map_failures: [usize; 3],
+    /// Authored event eligibility projection/publication failures, including recovery.
+    pub event_availability_failures: usize,
     pub waiting_fallbacks: usize,
     pub arrival_fallbacks: usize,
     pub crash_fallbacks: usize,

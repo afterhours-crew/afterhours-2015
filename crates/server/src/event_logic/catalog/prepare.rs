@@ -17,6 +17,7 @@ use std::{
 pub struct Prepared {
     entries: Vec<(Content, EventScoring, Asset)>,
     roster: Vec<Entry>,
+    availability: Option<Arc<crate::event_logic::availability::Content>>,
 }
 
 impl Prepared {
@@ -36,7 +37,11 @@ impl Prepared {
             )?;
             contents.push(content);
         }
-        Ok((Catalog::new(contents, &self.roster)?, scoring))
+        let catalog = match self.availability {
+            Some(availability) => Catalog::new_gated(contents, availability)?,
+            None => Catalog::new(contents, &self.roster)?,
+        };
+        Ok((catalog, scoring))
     }
 }
 
@@ -66,6 +71,73 @@ pub fn sprints_cached(
         cache,
         crate::prepared_content::parallel::workers()?,
     )
+}
+
+/// Prepare ordinary sprint support and an explicitly approved narrative set.
+/// Visibility still covers every authored variant independently of playability.
+pub fn sprints_gated_cached(
+    index: &mut AssetIndex,
+    categories: &BTreeMap<u32, Category>,
+    vehicles: Option<&vehicle_content::Content>,
+    items: Option<&ItemContent>,
+    availability: Arc<crate::event_logic::availability::Content>,
+    narrative: &BTreeSet<String>,
+    cache: Option<&crate::prepared_content::Cache>,
+) -> Result<Prepared, Error> {
+    if narrative.len() > 64
+        || narrative.iter().any(|id| {
+            !availability
+                .entries()
+                .iter()
+                .any(|e| &e.id == id && request::sprint(e).is_some())
+        })
+    {
+        return Err(Error::Cache("selected narrative sprint missing"));
+    }
+    let roster: Vec<_> = availability
+        .entries()
+        .iter()
+        .filter(|e| {
+            (!e.id.ends_with("_nar") && !e.id.ends_with("_pres")) || narrative.contains(&e.id)
+        })
+        .cloned()
+        .collect();
+    let navigation = Arc::new(index.road_distance()?);
+    let workers = crate::prepared_content::parallel::workers()?;
+    let finish = |snapshot: Snapshot| {
+        if snapshot.roster.len() != roster.len()
+            || snapshot.roster.iter().zip(&roster).any(|(a, b)| {
+                a.id != b.id
+                    || a.volume != b.volume
+                    || a.scene != b.scene
+                    || a.game_mode != b.game_mode
+                    || a.notifications != b.notifications
+            })
+        {
+            return Err(Error::Cache("selected sprint roster mismatch"));
+        }
+        let mut result = snapshot.finish(categories, vehicles, items, navigation.clone())?;
+        result.availability = Some(availability.clone());
+        Ok(result)
+    };
+    match cache {
+        Some(cache) => cache.prepare(
+            "available-sprints",
+            &serde_json::to_vec(&(categories, &roster))
+                .map_err(|_| Error::Cache("selected sprint identity"))?,
+            |bytes| {
+                finish(
+                    serde_json::from_slice(bytes)
+                        .map_err(|_| Error::Cache("selected sprint snapshot"))?,
+                )
+            },
+            || {
+                serde_json::to_vec(&build_roster(index, workers, roster.clone())?)
+                    .map_err(|_| Error::Cache("selected sprint serialization"))
+            },
+        ),
+        None => finish(build_roster(index, workers, roster.clone())?),
+    }
 }
 
 /// Explicit worker count for bounded offline comparisons and diagnostics.
@@ -120,6 +192,13 @@ struct Snapshot {
 
 fn build(index: &mut AssetIndex, workers: usize) -> Result<Snapshot, Error> {
     let roster = index.event_roster()?;
+    build_roster(index, workers, roster)
+}
+fn build_roster(
+    index: &mut AssetIndex,
+    workers: usize,
+    roster: Vec<Entry>,
+) -> Result<Snapshot, Error> {
     let selected: Vec<_> = roster
         .iter()
         .filter(|entry| request::sprint(entry).is_some())
@@ -309,6 +388,7 @@ impl Snapshot {
         Ok(Prepared {
             entries,
             roster: self.roster,
+            availability: None,
         })
     }
 }

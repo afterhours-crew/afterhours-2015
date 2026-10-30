@@ -74,6 +74,52 @@ fn content() -> Arc<Content> {
     Arc::new(Content::new(source(), &known()).unwrap())
 }
 
+/// Constructed definition for exercising the real listener projection.
+pub(crate) fn gated_fixture(event: &crate::event_logic::Content) -> Arc<Content> {
+    let mut source = source();
+    let e = event.event();
+    let site = |serializer| Endpoint {
+        scene_key: e.scene_content_key,
+        serializer,
+    };
+    let notifications: BTreeSet<_> = e
+        .area_notifications
+        .iter()
+        .chain(&e.scene_notifications)
+        .map(|&s| site(s))
+        .collect();
+    let manager = Identity {
+        asset: "constructed/manager".into(),
+        index: 3,
+        instances: vec![],
+    };
+    let membership = program(json!([
+        {"Fact":{"Player":manager}}, {"Fact":{"Boolean":"story"}},
+        {"Combine":["Intersection",0,1]}
+    ]));
+    source.availability.entries = vec![Entry {
+        id: e.game_mode_id.clone(),
+        scene: e.scene.clone(),
+        game_mode: e.game_mode.layout.blueprint.clone(),
+        volume: site(e.start_volume),
+        notifications: notifications.iter().copied().collect(),
+    }];
+    source.availability.memberships = notifications
+        .iter()
+        .map(|&notification| Binding {
+            notification,
+            program: membership.clone(),
+        })
+        .collect();
+    source.availability.visibility = BTreeMap::from([(
+        e.game_mode_id.clone(),
+        Visibility {
+            conditions: notifications.into_iter().map(|s| (s, true)).collect(),
+        },
+    )]);
+    Arc::new(Content::new(source, &known()).unwrap())
+}
+
 #[test]
 fn eligibility_switches_variants_per_participant_and_requires_negative_inputs() {
     let mut state = State::new(content()).unwrap();

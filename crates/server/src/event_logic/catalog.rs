@@ -19,6 +19,7 @@ pub struct Catalog {
     events: BTreeMap<u32, Arc<Content>>,
     starts: BTreeMap<Endpoint, u32>,
     discovery: BTreeSet<Endpoint>,
+    availability: Option<Arc<super::availability::Content>>,
 }
 
 impl Catalog {
@@ -71,7 +72,21 @@ impl Catalog {
             events,
             starts,
             discovery,
+            availability: None,
         })
+    }
+
+    pub fn new_gated(
+        contents: Vec<Content>,
+        availability: Arc<super::availability::Content>,
+    ) -> Result<Self, Error> {
+        let mut catalog = Self::new(contents, availability.entries())?;
+        catalog.discovery = availability.notifications();
+        catalog.availability = Some(availability);
+        Ok(catalog)
+    }
+    pub fn availability(&self) -> Option<&Arc<super::availability::Content>> {
+        self.availability.as_ref()
     }
 
     pub fn get(&self, id: u32) -> Option<&Content> {
@@ -101,6 +116,7 @@ impl From<Content> for Catalog {
             discovery: content.discovery_notifications().clone(),
             starts: BTreeMap::from([(endpoint, id)]),
             events: BTreeMap::from([(id, Arc::new(content))]),
+            availability: None,
         }
     }
 }

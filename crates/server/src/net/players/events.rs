@@ -585,8 +585,11 @@ impl PlayerListener {
         let mut completions = Vec::new();
         // This event path implements normal-mode humans; AI
         // racers and roaming rivals are outside the authored invitation set.
-        let eligible_humans = players.player_participants().count();
         for content in catalog.iter() {
+            let eligible_humans = players
+                .player_participants()
+                .filter(|&p| self.event_available(content, p))
+                .count();
             if let Some(record) = content.invitation_update(&mut players, eligible_humans)? {
                 out.records.push(record);
             }
@@ -627,14 +630,29 @@ impl PlayerListener {
             out.deleted.extend(gone);
             state.inputs.clear();
         } else {
-            let joined: Vec<u16> = active.difference(&state.active).copied().collect();
             let left: Vec<u16> = state.active.difference(&active).copied().collect();
-            for participant in joined {
-                if state.entries.len() >= MAX_ENTRIES {
+            for &participant in &active {
+                if !state.entries.contains_key(&participant) && state.entries.len() >= MAX_ENTRIES {
                     return Err(replication::Error::Bound);
                 }
                 for content in catalog.iter() {
-                    self.event_join(content, &players, &mut state, participant, &mut out)?;
+                    let subscribed = state
+                        .entries
+                        .get(&participant)
+                        .is_some_and(|e| e.areas.contains_key(&content.record_id()));
+                    match (self.event_available(content, participant), subscribed) {
+                        (true, false) => {
+                            self.event_join(content, &players, &mut state, participant, &mut out)?
+                        }
+                        (false, true) => self.event_unsubscribe(
+                            content,
+                            &mut players,
+                            &mut state,
+                            participant,
+                            &mut out,
+                        )?,
+                        _ => {}
+                    }
                 }
             }
             for participant in left {
@@ -904,6 +922,9 @@ impl PlayerListener {
         if state.eligible.insert((participant, content.record_id())) {
             // Eligibility (E994: set at the participant's start, before free roam).
             for &serializer in &event.area_notifications {
+                if self.map_owns_notification(content, serializer) {
+                    continue;
+                }
                 out.rpcs.push(HostRpc::GameMode(
                     content.scene_call(world, serializer, 0, None)?,
                 ));
@@ -927,6 +948,9 @@ impl PlayerListener {
                 },
             }));
         for &serializer in &event.scene_notifications {
+            if self.map_owns_notification(content, serializer) {
+                continue;
+            }
             out.rpcs.push(HostRpc::GameMode(
                 content.scene_call(world, serializer, 0, None)?,
             ));
@@ -951,7 +975,12 @@ impl PlayerListener {
         participant: u16,
         out: &mut Out,
     ) -> Result<(), replication::Error> {
-        for content in catalog.iter() {
+        for content in catalog.iter().filter(|c| {
+            state
+                .entries
+                .get(&participant)
+                .is_some_and(|e| e.areas.contains_key(&c.record_id()))
+        }) {
             let event = content.event();
             if players.owns_participant(HOST_SELECTOR as u8, self.persona, participant) {
                 let world = players.objects();
@@ -971,6 +1000,9 @@ impl PlayerListener {
                         call: world_activation::Call::Unsubscribe,
                     }));
                 for &serializer in &event.scene_notifications {
+                    if self.map_owns_notification(content, serializer) {
+                        continue;
+                    }
                     out.rpcs.push(HostRpc::GameMode(
                         content.scene_call(world, serializer, 1, None)?,
                     ));
@@ -1018,6 +1050,65 @@ impl PlayerListener {
         state.entries.remove(&participant);
         state.steps.retain(|(_, p, _)| *p != participant);
         tracing::info!(participant, "owned event start volume released");
+        Ok(())
+    }
+
+    /// An unlock change releases only this start area's subscriptions and
+    /// prompts. A running race keeps its independent lifecycle and cleanup.
+    fn event_unsubscribe(
+        &self,
+        content: &event_logic::Content,
+        players: &mut Players,
+        state: &mut State,
+        participant: u16,
+        out: &mut Out,
+    ) -> Result<(), replication::Error> {
+        let Some(area) = state
+            .entries
+            .get_mut(&participant)
+            .and_then(|e| e.areas.remove(&content.record_id()))
+        else {
+            return Ok(());
+        };
+        let event = content.event();
+        if players.owns_participant(HOST_SELECTOR as u8, self.persona, participant) {
+            let world = players.objects();
+            let (scene, selector) = world
+                .scene_endpoint(event.scene_content_key, event.start_volume)
+                .ok_or(replication::Error::UnknownObject)?;
+            let serial =
+                event_logic::call(world, scene, selector, 1, None, Arguments::None)?.serial;
+            out.rpcs
+                .push(HostRpc::WorldActivation(world_activation::Notification {
+                    endpoint: Endpoint {
+                        scene,
+                        selector,
+                        serial,
+                    },
+                    participant: Some(participant),
+                    call: world_activation::Call::Unsubscribe,
+                }));
+            for &serializer in event
+                .scene_notifications
+                .iter()
+                .chain(&event.area_notifications)
+            {
+                if !self.map_owns_notification(content, serializer) {
+                    out.rpcs.push(HostRpc::GameMode(
+                        content.scene_call(world, serializer, 1, None)?,
+                    ));
+                }
+            }
+        }
+        let gone: Vec<_> = area
+            .area
+            .into_iter()
+            .chain(area.filters)
+            .filter(|&g| players.objects().get(g).is_some())
+            .collect();
+        players.remove_entities(&gone)?;
+        out.deleted.extend(gone);
+        state.eligible.remove(&(participant, content.record_id()));
         Ok(())
     }
 
@@ -1361,6 +1452,9 @@ impl PlayerListener {
         now: f64,
         out: &mut Out,
     ) -> Result<(), replication::Error> {
+        if !self.event_available(content, participant) {
+            return Ok(());
+        }
         if self.participants.stage(participant) == Some(nfs_world::participants::Stage::Crashing) {
             return Ok(());
         }
@@ -2355,6 +2449,13 @@ impl PlayerListener {
         now_ms: u64,
         out: &mut Out,
     ) -> Result<(), replication::Error> {
+        // A previously available story variant may have completed since its
+        // restart prompt was created. Finish cleanup without launching it again.
+        let exit = if exit == Exit::Restart && !self.event_available(content, participant) {
+            Exit::Abandon
+        } else {
+            exit
+        };
         let race = state
             .entries
             .get_mut(&participant)

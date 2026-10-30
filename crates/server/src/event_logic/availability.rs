@@ -8,5 +8,8 @@ pub mod channels;
 mod content;
 pub mod copies;
 pub use content::Content;
+mod saved;
 mod state;
+#[cfg(test)]
+pub(crate) use content::tests::gated_fixture;
 pub use state::{Participant, State};
