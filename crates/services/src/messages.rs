@@ -94,6 +94,37 @@ pub fn append(snapshot: &Snapshot, table: &str, hash: u32) -> Result<Option<Batc
     batch(snapshot, table, next).map(Some)
 }
 
+/// A restrictor group permits one durable message across competing requests.
+/// The caller applies this generation-checked batch and reevaluates after any
+/// conflict. An existing member wins even if a later request selects another.
+pub fn append_exclusive(
+    snapshot: &Snapshot,
+    table: &str,
+    hash: u32,
+    group: &[u32],
+) -> Result<Option<Batch>, Error> {
+    if group.is_empty()
+        || group.len() > 16
+        || !group.contains(&hash)
+        || group
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != group.len()
+    {
+        return Err(Error::Invalid);
+    }
+    let held = rows(&snapshot.tables, table)?
+        .iter()
+        .filter(|r| group.contains(&r.hash))
+        .count();
+    match held {
+        0 => append(snapshot, table, hash),
+        1 => Ok(None),
+        _ => Err(Error::Invalid),
+    }
+}
+
 /// Mark the most recent row of a message read: `None` when there is no such
 /// row or it is already read.
 pub fn mark_read(snapshot: &Snapshot, table: &str, hash: u32) -> Result<Option<Batch>, Error> {
@@ -147,6 +178,56 @@ fn batch(
 mod tests {
     use super::*;
     use nfs_storage::tables::Table;
+    #[test]
+    fn exclusive_messages_recheck_after_competing_generation_and_do_not_cross_managers() {
+        use nfs_storage::{AccountId, InventoryRepository, MemoryRepository, Timestamp};
+        let repo = MemoryRepository::default();
+        let account = AccountId::from_owned_config([53; 16]).unwrap();
+        repo.open(account).unwrap();
+        let initial = repo.snapshot(account).unwrap();
+        let group = [101, 102, 103];
+        let first = append_exclusive(&initial, STATIC, 102, &group)
+            .unwrap()
+            .unwrap();
+        let competing = append_exclusive(&initial, STATIC, 103, &group)
+            .unwrap()
+            .unwrap();
+        repo.apply(account, &first, Timestamp(1)).unwrap();
+        // Same-generation retry keys are allowed to resolve to the first
+        // receipt; the worker must reload and reevaluate the semantic group.
+        let _ = repo.apply(account, &competing, Timestamp(2));
+        let saved = repo.snapshot(account).unwrap();
+        assert!(
+            append_exclusive(&saved, STATIC, 103, &group)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            rows(&saved.tables, STATIC)
+                .unwrap()
+                .iter()
+                .map(|r| r.hash)
+                .collect::<Vec<_>>(),
+            [102]
+        );
+        assert!(
+            append_exclusive(&saved, UNDERGROUND, 103, &group)
+                .unwrap()
+                .is_some()
+        );
+        for bad in [vec![], vec![102, 102], vec![101, 103]] {
+            assert!(append_exclusive(&saved, STATIC, 102, &bad).is_err());
+        }
+        let corrupt = snapshot(&[(0, 101, 0), (1, 103, 1)]);
+        assert!(append_exclusive(&corrupt, STATIC, 102, &group).is_err());
+        let other = AccountId::from_owned_config([54; 16]).unwrap();
+        repo.open(other).unwrap();
+        assert!(
+            append_exclusive(&repo.snapshot(other).unwrap(), STATIC, 103, &group)
+                .unwrap()
+                .is_some()
+        );
+    }
     fn snapshot(rows: &[(u64, u32, i32)]) -> Snapshot {
         let mut table = Table::default();
         for &(index, hash, read) in rows {

@@ -16,6 +16,7 @@ use nfs_frostbite::ebx::Value;
 use std::collections::BTreeMap;
 
 pub mod active;
+pub mod power;
 
 const GAMEPLAY: &str = "levels/genesis01/gameplay";
 const MANAGER: &str = "MessageManagerEntityData";

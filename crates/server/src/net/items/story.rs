@@ -20,6 +20,13 @@ pub(in crate::net) enum Action {
         hash: u32,
         manager: crate::messages::Manager,
     },
+    /// One authored conditional invitation. The worker checks the restrictor
+    /// against its latest snapshot, so concurrent sessions cannot send two tiers.
+    PowerMessage {
+        objective: u64,
+        hash: u32,
+        manager: crate::messages::Manager,
+    },
     /// The client reported a stored message's read state.
     MessageRead {
         hash: u32,
@@ -131,6 +138,7 @@ impl Profile {
                         result.ok_or(Error::Inventory(nfs_storage::Error::Conflict.into()))?
                     }
                     Action::Message { hash, manager }
+                    | Action::PowerMessage { hash, manager, .. }
                     | Action::MessageRead { hash, manager, .. } => {
                         let mut result = None;
                         for _ in 0..8 {
@@ -139,8 +147,37 @@ impl Profile {
                                 .snapshot(account)
                                 .map_err(|e| Error::Inventory(e.into()))?;
                             let table = manager.table();
-                            let prepared = if let Action::MessageRead { read, .. } = request.action
+                            let prepared = if let Action::PowerMessage { objective, .. } =
+                                request.action
                             {
+                                let content =
+                                    request.progression.messages.as_ref().ok_or(Error::Worker)?;
+                                let plan = content
+                                    .power
+                                    .iter()
+                                    .find(|p| p.objective() == objective)
+                                    .filter(|p| {
+                                        content.manager(p.manager()) == Some(manager)
+                                            && p.hashes().contains(&hash)
+                                    })
+                                    .ok_or(Error::Worker)?;
+                                let prepared = nfs_services::messages::append_exclusive(
+                                    &snapshot,
+                                    table,
+                                    hash,
+                                    &plan.hashes(),
+                                )
+                                .map_err(|e| Error::Inventory(e.into()))?;
+                                if prepared.is_some()
+                                    && !policy
+                                        .objective(&snapshot, objective)
+                                        .map_err(|e| Error::Inventory(e.into()))?
+                                        .active
+                                {
+                                    return Err(Error::Worker);
+                                }
+                                Ok(prepared)
+                            } else if let Action::MessageRead { read, .. } = request.action {
                                 nfs_services::messages::set_read(&snapshot, table, hash, read)
                             } else {
                                 nfs_services::messages::append(&snapshot, table, hash)

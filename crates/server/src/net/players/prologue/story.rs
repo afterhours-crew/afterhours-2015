@@ -161,17 +161,42 @@ impl PlayerListener {
             &self.players,
             request.participant,
         )?;
-        // A message is announced once, by the commit that stored it.
-        if let crate::net::items::story::Action::Message { hash, manager } = request.action
-            && let Some(messages) = &request.progression.messages
-        {
-            let held = |loaded: &crate::persistent::Loaded| {
-                nfs_services::messages::rows(loaded.tables(), manager.table())
-                    .map(|rows| rows.iter().any(|r| r.hash == hash))
-                    .map_err(|_| replication::Error::Shape)
+        // Announce newly committed state. A competing connection can have
+        // committed another member of the same restrictor while this request
+        // waited; publish that winner, not the losing request's proposed hash.
+        if let Some(messages) = &request.progression.messages {
+            use crate::net::items::story::Action;
+            let announcement = match request.action {
+                Action::Message { hash, manager } => Some((manager, vec![hash])),
+                Action::PowerMessage {
+                    objective, manager, ..
+                } => {
+                    let plan = messages
+                        .power
+                        .iter()
+                        .find(|p| p.objective() == objective)
+                        .filter(|p| messages.manager(p.manager()) == Some(manager))
+                        .ok_or(replication::Error::Shape)?;
+                    Some((manager, plan.hashes().to_vec()))
+                }
+                _ => None,
             };
-            if !held(before)? && held(&committed.loaded)? {
-                calls.push(messages.added(self.players.objects(), manager, hash)?);
+            if let Some((manager, hashes)) = announcement {
+                let held = |loaded: &crate::persistent::Loaded| {
+                    nfs_services::messages::rows(loaded.tables(), manager.table())
+                        .map(|rows| rows.into_iter().map(|r| r.hash).collect::<BTreeSet<_>>())
+                        .map_err(|_| replication::Error::Shape)
+                };
+                let old = held(before)?;
+                let new = held(&committed.loaded)?;
+                if hashes.len() > 1 && hashes.iter().filter(|h| new.contains(h)).count() != 1 {
+                    return Err(replication::Error::Shape);
+                }
+                for hash in hashes {
+                    if !old.contains(&hash) && new.contains(&hash) {
+                        calls.push(messages.added(self.players.objects(), manager, hash)?);
+                    }
+                }
             }
         }
         // A tutorial accept is durable: its logic goes at the next advance.

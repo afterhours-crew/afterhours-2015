@@ -825,7 +825,12 @@ impl PlayerListener {
     /// Current and stock figures of the participant's car (E916): the dyno
     /// cache the client stores on the car item and the item definition's
     /// defaults. Absent without the item catalog, the inventory or a car item.
-    fn vehicle_stats(&self, content: &Content, players: &Players, car: u16) -> Option<Stats> {
+    pub(super) fn vehicle_stats(
+        &self,
+        content: &Content,
+        players: &Players,
+        car: u16,
+    ) -> Option<Stats> {
         let catalog = content.items()?;
         let items = &self.inventory.as_ref()?.items;
         let item =

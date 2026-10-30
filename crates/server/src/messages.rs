@@ -55,6 +55,7 @@ pub struct Content {
     pub licensed: Vec<Licensed>,
     /// Strictly compiled direct Active-property invitations.
     pub active: Vec<nfs_content::messages::active::Invitation>,
+    pub power: Vec<nfs_content::messages::power::Invitation>,
 }
 
 impl Content {
@@ -73,13 +74,18 @@ impl Content {
             managers,
             licensed,
             active: vec![],
+            power: vec![],
         })
     }
     pub fn with_active(
         mut self,
         invitations: Vec<nfs_content::messages::active::Invitation>,
     ) -> Result<Self, nfs_content::Error> {
-        let mut unique = std::collections::BTreeSet::new();
+        let mut unique: std::collections::BTreeSet<_> = self
+            .power
+            .iter()
+            .flat_map(|p| p.hashes().map(|h| (p.manager(), h)))
+            .collect();
         if invitations.len() > 64 {
             return Err(nfs_content::Error::Content(
                 "active invitation bound".into(),
@@ -99,6 +105,32 @@ impl Content {
             }
         }
         self.active = invitations;
+        Ok(self)
+    }
+    pub fn with_power(
+        mut self,
+        invitations: Vec<nfs_content::messages::power::Invitation>,
+    ) -> Result<Self, nfs_content::Error> {
+        let mut objectives = std::collections::BTreeSet::new();
+        let mut hashes: std::collections::BTreeSet<_> =
+            self.active.iter().map(|p| (p.manager, p.hash)).collect();
+        if invitations.len() > 16 {
+            return Err(nfs_content::Error::Content("power invitation bound".into()));
+        }
+        for p in &invitations {
+            if self.manager(p.manager()).is_none()
+                || !objectives.insert(p.objective())
+                || p.hashes().iter().any(|&h| {
+                    !self.catalog.by_hash(h).is_some_and(|m| m.persisted)
+                        || !hashes.insert((p.manager(), h))
+                })
+            {
+                return Err(nfs_content::Error::Content(
+                    "invalid power invitation".into(),
+                ));
+            }
+        }
+        self.power = invitations;
         Ok(self)
     }
     pub(crate) fn manager(&self, serializer: usize) -> Option<Manager> {

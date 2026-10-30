@@ -53,6 +53,7 @@ fn content() -> Content {
         managers,
         licensed,
         active: vec![],
+        power: vec![],
     }
 }
 

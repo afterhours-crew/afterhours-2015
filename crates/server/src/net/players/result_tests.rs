@@ -64,6 +64,7 @@ fn content() -> crate::progression::Content {
             },
             licensed: vec![],
             active: vec![],
+            power: vec![],
         })
         .with_objective_results(vec![rule()])
         .unwrap()
