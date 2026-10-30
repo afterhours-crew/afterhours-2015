@@ -9,6 +9,7 @@ use crate::scoring::events::Identity;
 
 const MAX_NODES: usize = 256;
 const MAX_DEPTH: usize = 32;
+mod constant;
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum Fact {
@@ -38,8 +39,24 @@ enum Op {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Program {
     ops: Vec<Op>,
+    ranges: BTreeMap<Identity, IntegerRange>,
 }
+
+/// Authored bounds plus the exact property that supplies the participant's
+/// integer. Linked relays follow their own definition, never a schema-name
+/// search. Static bounds alone never imply participant membership.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IntegerRange {
+    pub input: Identity,
+    pub input_port: u32,
+    pub minimum: i32,
+    pub maximum: i32,
+}
+
 impl Program {
+    pub fn ranges(&self) -> &BTreeMap<Identity, IntegerRange> {
+        &self.ranges
+    }
     pub fn facts(&self) -> impl Iterator<Item = &Fact> {
         self.ops.iter().filter_map(|op| match op {
             Op::Fact(f) => Some(f),
@@ -81,6 +98,7 @@ struct Compiler<'a> {
     identified: &'a BTreeMap<Site, String>,
     active: BTreeSet<Site>,
     ops: Vec<Op>,
+    ranges: BTreeMap<Identity, IntegerRange>,
 }
 impl Compiler<'_> {
     fn visit<S: Source>(
@@ -161,7 +179,16 @@ impl Compiler<'_> {
             "ParticipantSetCopyEntityData" => Op::Fact(Fact::Copy(Identity::from(&site))),
             "ParticipantSetEntityData" => Op::Fact(Fact::Mutable(Identity::from(&site))),
             "IntPropertyWithinRangeParticipantSetEntityData" => {
-                Op::Fact(Fact::IntegerRange(Identity::from(&site)))
+                let id = Identity::from(&site);
+                let range = integer_range(g, &site)?;
+                if self
+                    .ranges
+                    .insert(id.clone(), range.clone())
+                    .is_some_and(|old| old != range)
+                {
+                    return Err(bad("inconsistent event range owner"));
+                }
+                Op::Fact(Fact::IntegerRange(id))
             }
             _ => {
                 return Err(bad(&format!(
@@ -180,6 +207,77 @@ impl Compiler<'_> {
     }
 }
 
+fn integer_range<S: Source>(g: &mut Graph<S>, site: &Site) -> Result<IntegerRange, Error> {
+    constant::no_events(g, site)?;
+    let ports = g.input_ports(site)?;
+    if ports
+        .iter()
+        .any(|p| *p != name("MinValue") && *p != name("MaxValue"))
+    {
+        return Err(bad("event range unexpected property input"));
+    }
+    for port in [name("MinValue"), name("MaxValue")] {
+        constant::inputs(g, site, port)?;
+    }
+    let inputs = g.links(site, (-620_217_377i32) as u32)?;
+    let [input] = inputs.as_slice() else {
+        return Err(bad("event range property link"));
+    };
+    let input = range_input(g, input.clone(), &mut BTreeSet::new())?;
+    let class = g.object(&input.site)?.class;
+    if (class.as_str(), input.port) != ("IntParticipantPropertyEntityData", 0) {
+        return Err(bad("event range property owner"));
+    }
+    let mut evaluator = Evaluator::new(g);
+    let Number::Integer(minimum) = evaluator.field_or_input(site, name("MinValue"), "MinValue")?
+    else {
+        return Err(bad("event range minimum type"));
+    };
+    let Number::Integer(maximum) = evaluator.field_or_input(site, name("MaxValue"), "MaxValue")?
+    else {
+        return Err(bad("event range maximum type"));
+    };
+    // An inverted authored interval is empty; do not swap its endpoints or
+    // substitute the node defaults for a connected threshold.
+    Ok(IntegerRange {
+        input: Identity::from(&input.site),
+        input_port: input.port,
+        minimum,
+        maximum,
+    })
+}
+
+// A linked relay resolves its actual definition through the authored source
+// link. A matching channel asset elsewhere in a scene is not that binding.
+fn range_input<S: Source>(
+    g: &mut Graph<S>,
+    input: crate::graph::Endpoint,
+    active: &mut BTreeSet<crate::graph::Endpoint>,
+) -> Result<crate::graph::Endpoint, Error> {
+    if active.len() >= MAX_DEPTH || !active.insert(input.clone()) {
+        return Err(bad("event range channel cycle or bound"));
+    }
+    if g.object(&input.site)?.class != "LinkedSchematicChannelRelayEntityData" {
+        return Ok(input);
+    }
+    let sources = g.links(&input.site, 0x2780_2951)?;
+    let [source] = sources.as_slice() else {
+        return Err(bad("event range relay source missing or ambiguous"));
+    };
+    if source.port != 0
+        || g.object(&source.site)?.class != "LinkedSchematicChannelEntityData"
+        || g.target_field(&source.site, "ChannelAsset")?
+            != g.target_field(&input.site, "ChannelAsset")?
+    {
+        return Err(bad("event range relay source class or schema"));
+    }
+    let targets = g.links(&source.site, input.port)?;
+    let [target] = targets.as_slice() else {
+        return Err(bad("event range channel target missing or ambiguous"));
+    };
+    range_input(g, target.clone(), active)
+}
+
 pub(super) fn read<S: Source>(
     g: &mut Graph<S>,
     notification: &Site,
@@ -194,9 +292,13 @@ pub(super) fn read<S: Source>(
         identified,
         active: BTreeSet::new(),
         ops: Vec::new(),
+        ranges: BTreeMap::new(),
     };
     compiler.visit(g, root, endpoint)?;
-    Ok(Program { ops: compiler.ops })
+    Ok(Program {
+        ops: compiler.ops,
+        ranges: compiler.ranges,
+    })
 }
 
 #[cfg(test)]

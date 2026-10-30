@@ -7,6 +7,7 @@
 //! story variants and requires state supplied by their runtime owners.
 use super::*;
 
+pub mod integers;
 pub mod membership;
 pub mod requirements;
 
@@ -54,6 +55,7 @@ impl AssetIndex {
         self.roster(false, true).map(|r| Availability {
             entries: r.entries,
             memberships: r.memberships.into_values().collect(),
+            integers: r.integers,
         })
     }
 
@@ -84,8 +86,8 @@ impl AssetIndex {
         let mut entries = BTreeMap::new();
         let mut requirements = Vec::new();
         let mut memberships = BTreeMap::new();
-        for (scene, root) in roots {
-            let nodes = graph.read(root)?;
+        for (scene, root) in &roots {
+            let nodes = graph.read(root.clone())?;
             for launcher in nodes.iter().filter(|n| n.object.class == LAUNCHER) {
                 let mode = graph.target_field(&launcher.site, "GameMode")?.0;
                 // Automatic speed-run/drift-corner activities have their own
@@ -229,10 +231,21 @@ impl AssetIndex {
                 }
             }
         }
+        let selected = memberships
+            .values()
+            .flat_map(|b| b.program.ranges().values())
+            .map(|r| r.input.clone())
+            .collect();
+        let integers = integers::read(
+            &mut graph,
+            &roots.iter().map(|(_, s)| s.clone()).collect::<Vec<_>>(),
+            &selected,
+        )?;
         Ok(Roster {
             entries: entries.into_values().collect(),
             requirements,
             memberships,
+            integers,
         })
     }
 }
@@ -241,12 +254,14 @@ struct Roster {
     entries: Vec<Entry>,
     requirements: Vec<requirements::Binding>,
     memberships: BTreeMap<Endpoint, membership::Binding>,
+    integers: BTreeMap<crate::scoring::events::Identity, integers::Store>,
 }
 
 #[derive(Clone, Debug)]
 pub struct Availability {
     pub entries: Vec<Entry>,
     pub memberships: Vec<membership::Binding>,
+    pub integers: BTreeMap<crate::scoring::events::Identity, integers::Store>,
 }
 
 /// Follow the authored conjunction/negation gates to the membership notifications.

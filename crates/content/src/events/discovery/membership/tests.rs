@@ -215,6 +215,9 @@ fn event_owned_sets_remain_required_inputs_even_when_another_operand_is_false() 
     ] {
         let mut m = fixture();
         m.put("a", 4, class, &[]);
+        if class == "IntPropertyWithinRangeParticipantSetEntityData" {
+            range_fixture(&mut m);
+        }
         let program = compile(&mut m).unwrap();
         assert!(program.facts().any(|f| *f == expected));
         assert!(
@@ -229,4 +232,170 @@ fn event_owned_sets_remain_required_inputs_even_when_another_operand_is_false() 
                 .unwrap()
         );
     }
+}
+
+fn range_fixture(m: &mut Memory) {
+    m.put(
+        "a",
+        4,
+        "IntPropertyWithinRangeParticipantSetEntityData",
+        &[
+            ("MinValue", Value::Int32(0)),
+            ("MaxValue", Value::Int32(10)),
+        ],
+    );
+    m.put("a", 10, "IntParticipantPropertyEntityData", &[]);
+    let root = m.0.get_mut(&("a".into(), 0)).unwrap();
+    let Value::Array(links) = &mut root
+        .fields
+        .0
+        .iter_mut()
+        .find(|(n, _)| n == "LinkConnections")
+        .unwrap()
+        .1
+    else {
+        panic!()
+    };
+    links.push(edge(local(4), (-620_217_377i32) as u32, local(10), 0));
+    root.fields
+        .0
+        .push(("PropertyConnections".into(), Value::Array(vec![])));
+    root.fields
+        .0
+        .push(("EventConnections".into(), Value::Array(vec![])));
+}
+
+#[test]
+fn event_range_preserves_connected_bounds_and_exact_property_owner() {
+    let mut m = fixture();
+    range_fixture(&mut m);
+    let p = compile(&mut m).unwrap();
+    assert_eq!(
+        p.ranges()[&Identity::from(&site(4))],
+        IntegerRange {
+            input: Identity::from(&site(10)),
+            input_port: 0,
+            minimum: 0,
+            maximum: 10,
+        }
+    );
+    m.put(
+        "a",
+        11,
+        "IntEntityData",
+        &[("DefaultValue", Value::Int32(20))],
+    );
+    let root = m.0.get_mut(&("a".into(), 0)).unwrap();
+    root.fields
+        .0
+        .iter_mut()
+        .find(|(n, _)| n == "PropertyConnections")
+        .unwrap()
+        .1 = Value::Array(vec![edge(
+        local(11),
+        name("Value"),
+        local(4),
+        name("MinValue"),
+    )]);
+    let p = compile(&mut m).unwrap();
+    assert_eq!(
+        (
+            p.ranges()[&Identity::from(&site(4))].minimum,
+            p.ranges()[&Identity::from(&site(4))].maximum
+        ),
+        (20, 10)
+    );
+    assert!(
+        p.evaluate(|f| (!matches!(f, Fact::IntegerRange(_))).then_some(true))
+            .is_err()
+    );
+    m.put("a", 10, "UnrelatedProperty", &[]);
+    assert!(compile(&mut m).is_err());
+    m.put("a", 10, "IntParticipantPropertyEntityData", &[]);
+    m.put(
+        "a",
+        11,
+        "IntEntityData",
+        &[("DefaultValue", Value::Float32(2.))],
+    );
+    assert!(compile(&mut m).is_err());
+    m.put(
+        "a",
+        11,
+        "IntEntityData",
+        &[("DefaultValue", Value::Int32(20))],
+    );
+    let root = m.0.get_mut(&("a".into(), 0)).unwrap();
+    root.fields
+        .0
+        .iter_mut()
+        .find(|(n, _)| n == "EventConnections")
+        .unwrap()
+        .1 = Value::Array(vec![Value::Struct(nfs_frostbite::ebx::Fields(vec![(
+        "Target".into(),
+        local(11),
+    )]))]);
+    assert!(
+        compile(&mut m).is_err(),
+        "event-written literal cannot become a static bound"
+    );
+}
+
+#[test]
+fn range_relay_uses_its_bound_definition_and_rejects_schema_matches_elsewhere() {
+    let mut m = fixture();
+    range_fixture(&mut m);
+    let channel = |m: &mut Memory, index, class, schema| {
+        m.put("a", index, class, &[("ChannelAsset", local(schema))]);
+    };
+    channel(&mut m, 10, "LinkedSchematicChannelRelayEntityData", 20);
+    channel(&mut m, 11, "LinkedSchematicChannelEntityData", 20);
+    channel(&mut m, 12, "LinkedSchematicChannelEntityData", 20);
+    m.put("a", 13, "IntParticipantPropertyEntityData", &[]);
+    m.put("a", 14, "IntParticipantPropertyEntityData", &[]);
+    m.put("a", 20, "SchematicChannelAsset", &[]);
+    m.put("a", 21, "SchematicChannelAsset", &[]);
+    let port = 123;
+    let replace_links = |m: &mut Memory, edges: Vec<Value>| {
+        m.0.get_mut(&("a".into(), 0))
+            .unwrap()
+            .fields
+            .0
+            .iter_mut()
+            .find(|(n, _)| n == "LinkConnections")
+            .unwrap()
+            .1 = Value::Array(edges);
+    };
+    let edges = vec![
+        edge(local(1), 2_664_990_019, local(4), 0),
+        edge(local(4), (-620_217_377i32) as u32, local(10), port),
+        edge(local(10), 0x2780_2951, local(11), 0),
+        edge(local(11), port, local(13), 0),
+        // Identical schema, different definition and participant property.
+        edge(local(12), port, local(14), 0),
+    ];
+    replace_links(&mut m, edges.clone());
+    let program = compile(&mut m).unwrap();
+    assert_eq!(
+        program.ranges()[&Identity::from(&site(4))].input,
+        Identity::from(&site(13))
+    );
+    let mut wrong = edges.clone();
+    wrong.remove(2);
+    replace_links(&mut m, wrong);
+    assert!(
+        compile(&mut m).is_err(),
+        "nearby matching schema cannot replace a missing binding"
+    );
+    let mut wrong = edges.clone();
+    wrong.push(edge(local(10), 0x2780_2951, local(12), 0));
+    replace_links(&mut m, wrong);
+    assert!(compile(&mut m).is_err());
+    let mut cycle = edges.clone();
+    cycle[3] = edge(local(11), port, local(10), port);
+    replace_links(&mut m, cycle);
+    assert!(compile(&mut m).is_err());
+    replace_links(&mut m, edges);
+    channel(&mut m, 11, "LinkedSchematicChannelEntityData", 21);
+    assert!(compile(&mut m).is_err());
 }
