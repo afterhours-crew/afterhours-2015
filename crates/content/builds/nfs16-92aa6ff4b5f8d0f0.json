@@ -1038,6 +1038,10 @@
     "exit_scene": "levels/genesis01/garage",
     "manager_scene": "levels/genesis01/gameplay",
     "classes": {
+      "EventAndGateEntityData": null,
+      "LocalPlayerVehicleInterfaceEntityData": null,
+      "PropertyDebugEntityData": null,
+      "SchematicChannelEntityData": null,
       "AwardItemTransactionEntityData": null,
       "BoolHubEntityData": null,
       "ConsoleCommandEntityData": null,

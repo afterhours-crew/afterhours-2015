@@ -103,12 +103,24 @@ mod tests {
                     Kind::SequenceRoot
                 }
             );
-            for class in ["StringEntityData", "TelemetryHookEntityData"] {
+            for class in [
+                "StringEntityData",
+                "TelemetryHookEntityData",
+                "EventAndGateEntityData",
+                "LocalPlayerVehicleInterfaceEntityData",
+                "PropertyDebugEntityData",
+                "SchematicChannelEntityData",
+            ] {
                 let mut node = nodes[1].clone();
                 node.object.class = class.into();
                 nodes.push(node);
             }
             assert_eq!(shape(&nodes, &rules).unwrap(), (buses, fields));
+            let mut unknown = nodes[1].clone();
+            unknown.object.class = "UnclassifiedEntityData".into();
+            nodes.push(unknown);
+            assert!(shape(&nodes, &rules).is_err());
+            nodes.pop();
             nodes[0].object.class = "OtherBlueprint".into();
             assert!(shape(&nodes, &rules).is_err());
         }
