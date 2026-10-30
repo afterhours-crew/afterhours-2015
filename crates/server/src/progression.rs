@@ -16,6 +16,7 @@ use std::{
 #[cfg(test)]
 const MAX_ENTRIES: usize = 2048;
 pub mod entities;
+pub mod results;
 pub mod timers;
 fn parse_error(e: data::ParseError) -> Failure {
     match e {
@@ -218,6 +219,7 @@ pub struct Content {
     /// Explicitly selected authored main-objective delays. Completion still
     /// goes through the account worker before any new objective is published.
     pub objective_delays: Vec<nfs_content::progression::delays::Delay>,
+    pub objective_results: Vec<nfs_content::progression::results::Completion>,
 }
 /// The shared tutorial content, compared by identity (it holds float delays).
 #[derive(Clone, Debug)]
@@ -283,6 +285,7 @@ impl Content {
             tutorials: None,
             chapter_notifications: None,
             objective_delays: Vec::new(),
+            objective_results: Vec::new(),
         }
     }
 }

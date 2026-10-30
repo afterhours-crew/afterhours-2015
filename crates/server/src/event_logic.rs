@@ -373,7 +373,7 @@ pub fn selector(layout: &Layout, field: usize) -> Result<u16, Error> {
 
 impl Content {
     pub fn new(event: Event, category: String) -> Result<Self, Error> {
-        if category.is_empty() || category.len() > 128 {
+        if category.is_empty() || category.len() > 128 || event.categories.len() > 128 {
             return Err(Error::Shape);
         }
         if event

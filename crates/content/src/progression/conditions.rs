@@ -37,12 +37,28 @@ enum Op {
     Any(Vec<usize>),
 }
 
-/// Bounded postorder program, constructed only from a validated graph.
+/// Bounded postorder program, compiled from a graph or explicit fact conjunction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Condition {
     ops: Vec<Op>,
 }
 impl Condition {
+    /// A bounded conjunction for callers constructing definitions directly.
+    /// Fact identities still have to be resolved against their owning catalog.
+    pub fn all(facts: &[Fact]) -> Result<Self, Error> {
+        if facts.is_empty()
+            || facts.len() >= MAX_NODES
+            || facts.iter().collect::<BTreeSet<_>>().len() != facts.len()
+            || facts
+                .iter()
+                .any(|f| matches!(f, Fact::Active(0) | Fact::Completed(0)))
+        {
+            return Err(bad("explicit mission condition fact bound or identity"));
+        }
+        let mut ops: Vec<_> = facts.iter().copied().map(Op::Fact).collect();
+        ops.push(Op::All((0..facts.len()).collect()));
+        Ok(Self { ops })
+    }
     pub fn facts(&self) -> impl Iterator<Item = Fact> + '_ {
         self.ops.iter().filter_map(|op| match op {
             Op::Fact(f) => Some(*f),
@@ -222,20 +238,15 @@ impl AssetIndex {
                 continue;
             }
             let input = graph.input(&node.site, VALUE)?;
-            let mut compiler = Compiler {
-                stable: rules.ports["stable_id"],
-                world: &world,
-                managers: &managers,
-                active: BTreeSet::new(),
-                ops: Vec::new(),
-            };
-            let last = compiler.visit(&mut graph, input)?;
-            if last + 1 != compiler.ops.len()
-                || out
-                    .insert(identifier, Condition { ops: compiler.ops })
-                    .is_some()
-            {
-                return Err(bad("duplicate mission writer or result"));
+            let condition = from_endpoint(
+                &mut graph,
+                input,
+                rules.ports["stable_id"],
+                &world,
+                &managers,
+            )?;
+            if out.insert(identifier, condition).is_some() {
+                return Err(bad("duplicate mission writer"));
             }
         }
         if out.keys().cloned().collect::<BTreeSet<_>>() != *identifiers {
@@ -243,6 +254,27 @@ impl AssetIndex {
         }
         Ok(out)
     }
+}
+
+pub(crate) fn from_endpoint<S: Source>(
+    graph: &mut Graph<S>,
+    endpoint: Endpoint,
+    stable: u32,
+    world: &[Node],
+    managers: &BTreeMap<Key, usize>,
+) -> Result<Condition, Error> {
+    let mut compiler = Compiler {
+        stable,
+        world,
+        managers,
+        active: BTreeSet::new(),
+        ops: Vec::new(),
+    };
+    let last = compiler.visit(graph, endpoint)?;
+    if last + 1 != compiler.ops.len() {
+        return Err(bad("mission condition result"));
+    }
+    Ok(Condition { ops: compiler.ops })
 }
 
 #[cfg(test)]

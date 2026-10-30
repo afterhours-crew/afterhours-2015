@@ -117,6 +117,25 @@ impl PlayerListener {
         }
         self.story_pending.pop_front()
     }
+    pub(in crate::net::players) fn committed_progression_calls(
+        &self,
+        content: &crate::progression::Content,
+        after: &crate::persistent::Loaded,
+        participant: u16,
+    ) -> Result<Vec<HostRpc>, replication::Error> {
+        if !self
+            .players
+            .owns_participant(HOST_SELECTOR as u8, self.persona, participant)
+        {
+            return Err(replication::Error::UnknownObject);
+        }
+        let before = self
+            .persistent
+            .as_deref()
+            .ok_or(replication::Error::Unsupported)?;
+        progression_calls(content, before, after, &self.players, participant)
+    }
+
     pub(in crate::net) fn story_committed(
         &mut self,
         request: &Request,

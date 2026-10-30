@@ -38,7 +38,7 @@ impl AssetIndex {
 
 /// Keep event delivery in the contract. Graph::event_sources intentionally
 /// omits it for inventory callers, but a client-only edge cannot fire this timer.
-fn server_source<S: Source>(
+pub(super) fn server_source<S: Source>(
     graph: &mut Graph<S>,
     site: &Site,
     port: u32,

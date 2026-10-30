@@ -1,5 +1,12 @@
 # nfs-content
 
+Selected main-story result contracts preserve the direct server completion
+edge, category filter, objective/message-read conditions and participant owner.
+Their scene channel bindings reuse the same occurrence-aware resolver as intro
+logic. Unsupported filtered or event-controlled reporters are rejected. Event
+definitions retain the categories of their exact start-area details; ordinary
+and story variants must not be attributed by display name or payout.
+
 Builds deployment content from a player's own game installation, once, and
 caches it. The server and a launcher call the same library; it distributes no
 game data.

@@ -934,6 +934,11 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                         2_568_254_148_653_413_499,
                     ]),
                 );
+                let objective_results =
+                    index.objective_results(&std::collections::BTreeSet::from([
+                        2_320_741_721_389_474_841,
+                        2_879_990_053_341_782_397,
+                    ]));
                 tracing::info!(
                     phase = "shared_content",
                     elapsed_ms = stage.elapsed().as_millis(),
@@ -1011,6 +1016,7 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                     chapters,
                     keepers,
                     objective_delays,
+                    objective_results,
                 ))
             })
             .await
@@ -1028,9 +1034,14 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                     chapters,
                     keepers,
                     objective_delays,
+                    objective_results,
                 )) => {
                     let objective_delays = objective_delays.map_err(|error| {
                         tracing::error!(%error,"authored story timers unavailable");
+                        Failure::ProfileConfig
+                    })?;
+                    let objective_results = objective_results.map_err(|error| {
+                        tracing::error!(%error,"authored story result contracts unavailable");
                         Failure::ProfileConfig
                     })?;
                     if let Some(current) = progression.take() {
@@ -1039,7 +1050,10 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                             "authored main story timers prepared"
                         );
                         progression = Some(Arc::new(
-                            (*current).clone().with_objective_delays(objective_delays)?,
+                            (*current)
+                                .clone()
+                                .with_objective_delays(objective_delays)?
+                                .with_objective_results(objective_results)?,
                         ));
                     }
                     match chapters {

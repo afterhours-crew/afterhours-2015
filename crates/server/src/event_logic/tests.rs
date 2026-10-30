@@ -475,6 +475,7 @@ pub(crate) fn event() -> Event {
         scene: "race".into(),
         scene_content_key: RACE,
         game_mode_id: "gameplay/gamemodes/sprint_race_007".into(),
+        categories: Default::default(),
         launcher: 1,
         start_volume: 2,
         rewards: Rewards {

@@ -8,6 +8,23 @@ use nfs_frostbite::ebx::Fields;
 const STABLE: u32 = 77;
 const CHANNEL: u32 = 4_117_124_221;
 
+#[test]
+fn explicit_conditions_preserve_unknown_inputs_and_bound_the_program() {
+    let p = Condition::all(&[Fact::Active(1), Fact::Completed(2)]).unwrap();
+    assert!(!p.evaluate(|_| Some(false)).unwrap());
+    assert!(
+        p.evaluate(|f| match f {
+            Fact::Active(_) => Some(false),
+            _ => None,
+        })
+        .is_err()
+    );
+    assert!(Condition::all(&[]).is_err());
+    assert!(Condition::all(&[Fact::Active(0)]).is_err());
+    assert!(Condition::all(&[Fact::Active(1), Fact::Active(1)]).is_err());
+    assert!(Condition::all(&(1..=MAX_NODES as u64).map(Fact::Active).collect::<Vec<_>>()).is_err());
+}
+
 fn fixture() -> Memory {
     let mut m = Memory::default();
     m.put(

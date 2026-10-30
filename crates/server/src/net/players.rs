@@ -40,6 +40,8 @@ mod output;
 mod prologue;
 mod purchases;
 mod refusal;
+#[cfg(test)]
+mod result_tests;
 mod returning;
 mod rivals;
 mod scoring;

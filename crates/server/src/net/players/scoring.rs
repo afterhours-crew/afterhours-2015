@@ -102,6 +102,14 @@ pub(in crate::net) struct AwardRequest {
     /// An owned event completion paid with this credit: its cash, earned-cash
     /// statistic and race-event record join the same transaction.
     pub event: Option<nfs_services::event_rewards::Completion>,
+    /// Authored objective attributed to this owned result before queuing it.
+    pub story: Option<StoryResult>,
+}
+
+#[derive(Clone, Debug)]
+pub(in crate::net) struct StoryResult {
+    pub progression: Arc<crate::progression::Content>,
+    pub objective: u64,
 }
 
 /// A committed credit: the refreshed account view and item collection.
@@ -1651,6 +1659,7 @@ impl PlayerListener {
                     .runtime_index(HOST_SELECTOR as u8, self.persona, participant)
                     .map(u32::from),
                 event: None,
+                story: None,
             });
         }
         if collected.replies.len()
@@ -1799,6 +1808,34 @@ impl PlayerListener {
                 }
             }
         }
+        // Prepare all output and check queue capacity before adopting any of the
+        // refreshed state. A full queue must leave publication retryable.
+        let mut committed_calls = Vec::new();
+        if request.event.is_some()
+            && let Some(bank) = self.bank_notification(credited.loaded.balance().0)?
+        {
+            committed_calls.push(bank);
+        }
+        if let Some(story) = &request.story {
+            committed_calls.extend(self.committed_progression_calls(
+                &story.progression,
+                &credited.loaded,
+                request.participant,
+            )?);
+        }
+        committed_calls.extend(self.keeper_calls(
+            &players,
+            request.participant,
+            scores,
+            request.credit,
+        )?);
+        if committed_calls.len()
+            > nfs_world::session::MAX_RPC_QUEUE
+                .saturating_sub(self.pending_rpcs.len() + self.scoring_state.held_rpcs.len())
+        {
+            return Err(replication::Error::Bound);
+        }
+        let held = self.scoring_state.held.contains(&request.batch_id);
         // Adopt the refreshed collection (unlock grants join a credit) and keep
         // the garage population's spawn snapshot in step with it: the garage
         // return compares the live inventory with that snapshot and refuses a
@@ -1835,15 +1872,6 @@ impl PlayerListener {
                 );
             }
         }
-        // An event completion also paid cash: present the committed balance.
-        if request.event.is_some()
-            && let Some(bank) = self.bank_notification(credited.loaded.balance().0)?
-        {
-            if self.pending_rpcs.len() >= nfs_world::session::MAX_RPC_QUEUE {
-                return Err(replication::Error::Bound);
-            }
-            self.pending_rpcs.push_back(bank);
-        }
         self.persistent = Some(credited.loaded);
         tracing::info!(
             participant = request.participant,
@@ -1855,23 +1883,12 @@ impl PlayerListener {
             fields = changed,
             "owned reputation credit committed"
         );
-        // Each ScoreKeeper hears the award: the participant's committed total
-        // in that keeper and this award's amount (official E1026 911.825 s:
-        // six calls with the award event and the REP update).
-        let keepers = self.keeper_calls(&players, request.participant, scores, request.credit)?;
-        let held = self.scoring_state.held.contains(&request.batch_id);
-        if keepers.len()
-            > nfs_world::session::MAX_RPC_QUEUE
-                .saturating_sub(self.pending_rpcs.len() + self.scoring_state.held_rpcs.len())
-        {
-            return Err(replication::Error::Bound);
-        }
         self.scoring_state.dirty = dirty;
         self.players = players;
         if held {
-            self.scoring_state.held_rpcs.extend(keepers);
+            self.scoring_state.held_rpcs.extend(committed_calls);
         } else {
-            self.pending_rpcs.extend(keepers);
+            self.pending_rpcs.extend(committed_calls);
         }
         if request.event.is_some() {
             self.event_credit_committed(request.participant, request.batch_id);

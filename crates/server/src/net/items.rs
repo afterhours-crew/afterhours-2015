@@ -495,6 +495,14 @@ impl Profile {
         let thresholds = request.thresholds.clone();
         let player_index = request.player_index;
         let event = request.event.clone();
+        let story = request.story.clone();
+        if (story.is_some() && event.is_none())
+            || event
+                .as_ref()
+                .is_some_and(|e| e.batch_id != batch_id || e.rep != credit)
+        {
+            return Err(Error::Inventory(nfs_storage::Error::Invalid.into()));
+        }
         timeout(JOB_TIMEOUT, async move {
             let permit = service
                 .workers
@@ -539,7 +547,10 @@ impl Profile {
                             account,
                             &policy,
                             event,
-                            None,
+                            story.as_ref().map(|s| nfs_services::event_rewards::Story {
+                                policy: s.progression.catalog.story_policy(s.progression.settings),
+                                objective: s.objective,
+                            }),
                             now,
                         )
                         .map_err(Error::Inventory)?
@@ -584,6 +595,16 @@ impl Profile {
         })
         .await
         .map_err(|_| Error::Deadline)?
+    }
+    #[cfg(test)]
+    pub(in crate::net) async fn credit_for_test(
+        &self,
+        request: &AwardRequest,
+        now: Timestamp,
+    ) -> Result<Credited, String> {
+        self.credit(request, now)
+            .await
+            .map_err(|e| format!("{e:?}"))
     }
     async fn answer(&self, request: Vec<u8>, now: Timestamp) -> Result<Option<LoadedReply>, Error> {
         if !supported_request(&request).map_err(|e| Error::Inventory(e.into()))? {

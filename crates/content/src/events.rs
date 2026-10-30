@@ -210,6 +210,8 @@ pub struct Event {
     pub scene: String,
     pub scene_content_key: u32,
     pub game_mode_id: String,
+    /// Categories of this exact start area's authored event details.
+    pub categories: BTreeSet<u32>,
     pub launcher: usize,
     pub start_volume: usize,
     pub rewards: Rewards,
@@ -604,6 +606,16 @@ impl AssetIndex {
             .clone();
         let scene_nodes = graph.read(scene_root)?;
         let (launcher, instance) = request::start_area(&mut graph, &scene_nodes, &game_mode_id)?;
+        let mut details = Vec::new();
+        for node in scene_nodes.iter().filter(|n| n.object.class == DETAILS) {
+            if graph.target_field(&node.site, "Id")? == (game_mode_id.clone(), 0) {
+                details.push(node.site.clone());
+            }
+        }
+        let [details] = details.as_slice() else {
+            return Err(bad("event details identity missing or ambiguous"));
+        };
+        let categories = intro::results::categories(&mut graph, details)?;
         phase("start_area");
         let scene_content_key = crate::assets::scene_key(&scene);
         let rewards = {
@@ -1302,6 +1314,7 @@ impl AssetIndex {
             scene,
             scene_content_key,
             game_mode_id,
+            categories,
             launcher: launcher_serializer,
             start_volume,
             rewards,

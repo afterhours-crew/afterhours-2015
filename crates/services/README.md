@@ -152,8 +152,9 @@ reads the result's retained retry receipt before rebuilding effects; a later
 story operation or restart does not make an old result payable again. Missing
 receipts retain the active-objective checks. The caller must establish the owned
 result and its authored completion conditions; this service does not infer a
-mission from a payout or require a win. Result attribution and live acceptance
-remain separate integration work.
+mission from a payout or require a win. The server's selected result contracts
+carry their attributed objective into this transaction. Portable service and
+worker checks do not establish full mission or live-game acceptance.
 
 Intro ordering must have a single next objective at each step; main-story
 completion preserves independent active objectives and projects their authored

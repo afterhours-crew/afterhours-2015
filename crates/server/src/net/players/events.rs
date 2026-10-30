@@ -2208,7 +2208,7 @@ impl PlayerListener {
     /// The completion's durable rewards as one credit. Its batch ID takes the
     /// session's credit base with bit 19 set and the session's completion ordinal,
     /// apart from the driving credits' sequence.
-    fn event_completion(
+    pub(super) fn event_completion(
         &self,
         content: &event_logic::Content,
         participant: u16,
@@ -2236,6 +2236,32 @@ impl PlayerListener {
             };
         };
         let batch_id = self.scoring_state.batch_base | (1 << 19) | ordinal;
+        let story = if let Some(progression) = &self.progression {
+            if progression.objective_results.is_empty() {
+                None
+            } else {
+                let loaded = self
+                    .persistent
+                    .as_deref()
+                    .ok_or(replication::Error::Shape)?;
+                progression
+                    .result_objective(&content.event().categories, loaded)
+                    .map_err(|_| replication::Error::Shape)?
+                    .map(|objective| super::scoring::StoryResult {
+                        progression: progression.clone(),
+                        objective,
+                    })
+            }
+        } else {
+            None
+        };
+        if story.is_some()
+            && !self
+                .players
+                .owns_participant(HOST_SELECTOR as u8, self.persona, participant)
+        {
+            return Err(replication::Error::Shape);
+        }
         Ok(Some(AwardRequest {
             participant,
             credit: nfs_services::reputation::Scores {
@@ -2247,6 +2273,7 @@ impl PlayerListener {
                 style: 0,
             },
             batch_id,
+            story,
             thresholds,
             player_index: self
                 .players
