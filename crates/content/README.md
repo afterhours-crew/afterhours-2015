@@ -337,6 +337,9 @@ controller definitions retain the independent input, comparison configuration an
 declared control channel. Unknown writers, changed command order, open initial
 gates and unresolved server listeners are rejected. Reading these definitions
 does not execute their controllers or publish map membership.
+Loaded control-channel publishers retain their separate Boolean owners, initial
+configuration and later event commands. Missing publishers and unsupported
+writes are errors; a false initial value is not treated as a constant.
 
 Vehicle mesh inputs retain front/rear headlight animation extent and spoiler
 extent/animation ID from the installed item definitions. The vehicle model applies

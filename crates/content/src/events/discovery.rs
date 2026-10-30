@@ -7,6 +7,7 @@
 //! story variants and requires state supplied by their runtime owners.
 use super::*;
 
+pub mod channels;
 pub mod integers;
 pub mod membership;
 pub mod requirements;
@@ -58,6 +59,7 @@ impl AssetIndex {
             integers: r.integers,
             visibility: r.visibility,
             copies: r.copies,
+            channels: r.channels,
         })
     }
 
@@ -280,6 +282,11 @@ impl AssetIndex {
                 })
             },
         )?;
+        let channels = channels::read(
+            &mut graph,
+            &roots.iter().map(|(_, s)| s.clone()).collect::<Vec<_>>(),
+            &copies.values().map(|c| c.channel.clone()).collect(),
+        )?;
         Ok(Roster {
             entries: entries.into_values().collect(),
             requirements,
@@ -287,6 +294,7 @@ impl AssetIndex {
             integers,
             visibility: visibility_rules,
             copies,
+            channels,
         })
     }
 }
@@ -298,6 +306,7 @@ struct Roster {
     integers: BTreeMap<crate::scoring::events::Identity, integers::Store>,
     visibility: BTreeMap<String, Visibility>,
     copies: BTreeMap<crate::scoring::events::Identity, membership::copies::Control>,
+    channels: BTreeMap<Property, Vec<channels::Publisher>>,
 }
 
 #[derive(Clone, Debug)]
@@ -309,6 +318,7 @@ pub struct Availability {
     /// Client-owned presentation channels remain separate from this rule.
     pub visibility: BTreeMap<String, Visibility>,
     pub copies: BTreeMap<crate::scoring::events::Identity, membership::copies::Control>,
+    pub channels: BTreeMap<Property, Vec<channels::Publisher>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

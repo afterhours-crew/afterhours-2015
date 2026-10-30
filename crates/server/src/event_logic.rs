@@ -28,6 +28,7 @@ use nfs_world::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+pub mod availability;
 pub mod catalog;
 pub mod lifecycle;
 pub mod request;

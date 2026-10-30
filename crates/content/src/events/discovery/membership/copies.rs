@@ -13,6 +13,7 @@ use nfs_world::scoring::{
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Control {
+    pub input_owner: Identity,
     pub input: Program,
     pub comparison: Identity,
     pub comparison_config: scalar::Configuration,
@@ -254,6 +255,7 @@ pub(in crate::events::discovery) fn read<S: Source>(
                 return Err(bad("copy state owner class"));
             }
             let input = link(g, &node.site, name("ParticipantSet"))?;
+            let input_owner = Identity::from(&input);
             let input = read_set(g, input, identified, endpoint)?;
             if input
                 .facts()
@@ -265,6 +267,7 @@ pub(in crate::events::discovery) fn read<S: Source>(
             result.insert(
                 identity,
                 Control {
+                    input_owner,
                     input,
                     comparison,
                     comparison_config,
