@@ -244,7 +244,7 @@ impl PlayerListener {
     }
 
     /// Participants whose logic batch exists (after the progression restore).
-    fn entered(&self, participant: u16) -> bool {
+    pub(super) fn entered(&self, participant: u16) -> bool {
         !matches!(
             self.participants.stage(participant),
             None | Some(

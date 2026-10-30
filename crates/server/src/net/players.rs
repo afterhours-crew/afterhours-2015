@@ -34,6 +34,7 @@ pub(super) use scoring::{AwardRequest, Credited};
 mod launchers;
 mod licensed;
 mod map_feed;
+mod objective_timers;
 mod output;
 mod prologue;
 mod purchases;
@@ -110,6 +111,7 @@ pub(super) struct PlayerListener {
     selection: crate::sequence_content::authored::Instances,
     selection_execution: BTreeMap<u16, prologue::selection::State>,
     story_pending: VecDeque<super::items::story::Request>,
+    objective_timers: BTreeMap<u16, crate::progression::timers::State>,
     intro_composites: prologue::finale::Composites,
     intro_modes: prologue::Modes,
     intro_movies: prologue::movies::Movies,
@@ -983,6 +985,7 @@ impl PlayerListener {
             selection: crate::sequence_content::authored::Instances::default(),
             selection_execution: BTreeMap::new(),
             story_pending: VecDeque::new(),
+            objective_timers: BTreeMap::new(),
             intro_composites: BTreeMap::new(),
             intro_modes: BTreeMap::new(),
             intro_movies: BTreeMap::new(),

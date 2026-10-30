@@ -920,6 +920,14 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                 let messages = nfs_server::messages::Content::prepare(&mut index);
                 let tutorials = nfs_server::tutorials::Content::prepare(&mut index);
                 let chapters = nfs_server::chapter_notifications::Content::prepare(&mut index);
+                let objective_delays = index.objective_delays(
+                    "gameplay/progression/missionchapters/build01",
+                    &std::collections::BTreeSet::from([
+                        2_448_038_077_392_274_584,
+                        2_782_020_775_968_532_496,
+                        2_568_254_148_653_413_499,
+                    ]),
+                );
                 tracing::info!(
                     phase = "shared_content",
                     elapsed_ms = stage.elapsed().as_millis(),
@@ -986,8 +994,17 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                     "runtime preparation phase complete"
                 );
                 Ok::<_, nfs_content::Error>((
-                    scoring, road, nitrous, event, story, hides, messages, tutorials, chapters,
+                    scoring,
+                    road,
+                    nitrous,
+                    event,
+                    story,
+                    hides,
+                    messages,
+                    tutorials,
+                    chapters,
                     keepers,
+                    objective_delays,
                 ))
             })
             .await
@@ -1004,7 +1021,21 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                     tutorials,
                     chapters,
                     keepers,
+                    objective_delays,
                 )) => {
+                    let objective_delays = objective_delays.map_err(|error| {
+                        tracing::error!(%error,"authored story timers unavailable");
+                        Failure::ProfileConfig
+                    })?;
+                    if let Some(current) = progression.take() {
+                        tracing::info!(
+                            objectives = objective_delays.len(),
+                            "authored main story timers prepared"
+                        );
+                        progression = Some(Arc::new(
+                            (*current).clone().with_objective_delays(objective_delays)?,
+                        ));
+                    }
                     match chapters {
                         Ok(chapters) => {
                             if let Some(current) = progression.take() {

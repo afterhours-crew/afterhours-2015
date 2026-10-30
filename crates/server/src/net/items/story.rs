@@ -47,6 +47,16 @@ pub(in crate::net) struct Committed {
 }
 
 impl Profile {
+    #[cfg(test)]
+    pub(in crate::net) async fn story_for_test(
+        &self,
+        request: &Request,
+        now: Timestamp,
+    ) -> Result<Committed, String> {
+        self.story(request, now)
+            .await
+            .map_err(|error| format!("{error:?}"))
+    }
     pub(super) async fn story(
         &self,
         request: &Request,

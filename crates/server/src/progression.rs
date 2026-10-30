@@ -16,6 +16,7 @@ use std::{
 #[cfg(test)]
 const MAX_ENTRIES: usize = 2048;
 pub mod entities;
+pub mod timers;
 fn parse_error(e: data::ParseError) -> Failure {
     match e {
         data::ParseError::Invalid => Failure::ProfileConfig,
@@ -214,6 +215,9 @@ pub struct Content {
     /// Installed mission-chapter values on scene notifications (markers,
     /// entrance prompt gate, car-selection camera).
     pub chapter_notifications: Option<std::sync::Arc<crate::chapter_notifications::Content>>,
+    /// Explicitly selected authored main-objective delays. Completion still
+    /// goes through the account worker before any new objective is published.
+    pub objective_delays: Vec<nfs_content::progression::delays::Delay>,
 }
 /// The shared tutorial content, compared by identity (it holds float delays).
 #[derive(Clone, Debug)]
@@ -225,6 +229,14 @@ impl PartialEq for Tutorials {
 }
 impl Eq for Tutorials {}
 impl Content {
+    pub fn with_objective_delays(
+        mut self,
+        delays: Vec<nfs_content::progression::delays::Delay>,
+    ) -> Result<Self, Failure> {
+        timers::validate(&delays, &self.catalog.objective_ids(Branch::Main))?;
+        self.objective_delays = delays;
+        Ok(self)
+    }
     pub fn with_chapter_notifications(
         mut self,
         notifications: crate::chapter_notifications::Content,
@@ -270,6 +282,7 @@ impl Content {
             messages: None,
             tutorials: None,
             chapter_notifications: None,
+            objective_delays: Vec::new(),
         }
     }
 }

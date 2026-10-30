@@ -293,8 +293,12 @@ one chapter. It accepts only the objective's own Activated event through bounded
 server/world-time Delay nodes to its Complete input. Client-only edges, cycles,
 extra reset/abort inputs, dynamic durations, missing objectives and ambiguous
 writers are rejected. Fractional durations and prefab occurrence identities are
-preserved. This static contract does not execute timers or establish story-race
-support; the session owner must connect it to durable objective completion.
+preserved. The server's selected main-objective timers reconcile committed
+activation state against the session world clock and queue completion through
+the account worker. Queue pressure defers work; retries do not restart a timer
+or publish completion twice. Restart creates a new session activation clock
+for still-active delay objectives. These component checks do not establish
+complete story-race support or qualify the exact live timing boundary.
 
 `AssetIndex::mission_conditions` compiles explicitly selected mission Boolean
 writers into bounded conditions over objective activity/completion and message

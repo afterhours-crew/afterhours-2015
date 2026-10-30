@@ -414,7 +414,7 @@ pub(in crate::net::players) fn tick_with_normal_presentation(
     crate::net::players::test_wire::assert_wire_ready(listener, before);
     Ok(())
 }
-pub(super) fn setup() -> (PlayerListener, u16, Arc<nfs_world::items::Collection>) {
+pub(in crate::net::players) fn setup() -> (PlayerListener, u16, Arc<nfs_world::items::Collection>) {
     let _ = tracing_subscriber::fmt()
         .with_test_writer()
         .without_time()

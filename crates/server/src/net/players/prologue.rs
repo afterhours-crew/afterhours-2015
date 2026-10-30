@@ -31,7 +31,7 @@ pub(super) mod presentation;
 pub(super) mod selection;
 mod story;
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
 pub(super) mod volumes;
 
 pub(super) fn retirement(
