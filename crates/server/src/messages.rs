@@ -24,7 +24,7 @@ const RESTORED: u32 = 0;
 const INITIATED: u32 = 1;
 const ADDED: u32 = 2;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Ord, PartialOrd)]
 pub enum Manager {
     Normal,
     Underground,
@@ -53,6 +53,8 @@ pub struct Content {
     pub catalog: Catalog,
     pub managers: Managers,
     pub licensed: Vec<Licensed>,
+    /// Strictly compiled direct Active-property invitations.
+    pub active: Vec<nfs_content::messages::active::Invitation>,
 }
 
 impl Content {
@@ -70,7 +72,43 @@ impl Content {
             catalog,
             managers,
             licensed,
+            active: vec![],
         })
+    }
+    pub fn with_active(
+        mut self,
+        invitations: Vec<nfs_content::messages::active::Invitation>,
+    ) -> Result<Self, nfs_content::Error> {
+        let mut unique = std::collections::BTreeSet::new();
+        if invitations.len() > 64 {
+            return Err(nfs_content::Error::Content(
+                "active invitation bound".into(),
+            ));
+        }
+        for invitation in &invitations {
+            if self.manager(invitation.manager).is_none()
+                || !self
+                    .catalog
+                    .by_hash(invitation.hash)
+                    .is_some_and(|m| m.persisted)
+                || !unique.insert((invitation.manager, invitation.hash))
+            {
+                return Err(nfs_content::Error::Content(
+                    "invalid active invitation".into(),
+                ));
+            }
+        }
+        self.active = invitations;
+        Ok(self)
+    }
+    pub(crate) fn manager(&self, serializer: usize) -> Option<Manager> {
+        if serializer == self.managers.normal {
+            Some(Manager::Normal)
+        } else if serializer == self.managers.underground {
+            Some(Manager::Underground)
+        } else {
+            None
+        }
     }
     fn licensed_from(
         catalog: &Catalog,

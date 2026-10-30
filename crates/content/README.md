@@ -307,6 +307,15 @@ identity, including alternative invitations. Missing facts, ambiguous writers,
 cycles and event-written Boolean state are rejected. This static contract does
 not unlock events itself; the session owner evaluates committed account state.
 
+`AssetIndex::active_objective_messages` resolves explicitly selected durable
+invitations whose only trigger is an objective's Active property. Restricted,
+delayed, ambiguous and event-driven senders fail this reader; they cannot be
+reduced to direct activation. The server queues selected invitations from the
+committed main-objective state, stores each unique message through the account
+worker and announces it only after commit. Backpressure and repeated ticks
+preserve pending work; a restarted session restores existing messages. This
+direct-trigger path does not implement conditional or delayed invitations.
+
 `AssetIndex::event_availability` retains normal, narrative and Prestige start
 areas and compiles the membership expressions behind their map notifications.
 Set union, difference and intersection preserve exact Boolean identifiers,

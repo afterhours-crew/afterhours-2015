@@ -15,6 +15,8 @@ use crate::{Error, assets::AssetIndex, graph::*, world::StartupKind};
 use nfs_frostbite::ebx::Value;
 use std::collections::BTreeMap;
 
+pub mod active;
+
 const GAMEPLAY: &str = "levels/genesis01/gameplay";
 const MANAGER: &str = "MessageManagerEntityData";
 /// MessageManager link to its attachment handlers.

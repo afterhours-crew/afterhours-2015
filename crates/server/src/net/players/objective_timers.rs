@@ -22,6 +22,10 @@ impl PlayerListener {
         let owners: Vec<_> = self
             .players
             .player_participants()
+            .filter(|&p| {
+                self.players
+                    .owns_participant(HOST_SELECTOR as u8, self.persona, p)
+            })
             .filter(|&p| self.entered(p))
             .collect();
         let needs_snapshot = owners.iter().any(|p| {

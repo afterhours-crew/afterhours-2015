@@ -52,6 +52,7 @@ fn content() -> Content {
         catalog,
         managers,
         licensed,
+        active: vec![],
     }
 }
 

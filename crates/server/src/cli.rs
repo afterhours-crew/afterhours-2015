@@ -917,7 +917,13 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                 );
                 let nitrous = index.nitrous_configurations()?;
                 let hides = index.progression_debug_hides();
-                let messages = nfs_server::messages::Content::prepare(&mut index);
+                let messages = (|| {
+                    let invitations =
+                        index.active_objective_messages(&std::collections::BTreeSet::from([
+                            "gameplay/progression/messages/build_01_obj01_pho_invite_01".to_owned(),
+                        ]))?;
+                    nfs_server::messages::Content::prepare(&mut index)?.with_active(invitations)
+                })();
                 let tutorials = nfs_server::tutorials::Content::prepare(&mut index);
                 let chapters = nfs_server::chapter_notifications::Content::prepare(&mut index);
                 let objective_delays = index.objective_delays(
@@ -1077,10 +1083,10 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                                     Some(Arc::new((*current).clone().with_messages(messages)));
                             }
                         }
-                        Err(error) => tracing::warn!(
-                            %error,
-                            "phone messages unavailable; message managers stay uninitiated"
-                        ),
+                        Err(error) => {
+                            tracing::error!(%error, "required phone messages unavailable");
+                            return Err(Failure::ProfileConfig);
+                        }
                     }
                     match hides {
                         Ok(hides) => {

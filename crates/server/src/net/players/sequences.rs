@@ -35,6 +35,9 @@ impl PlayerListener {
             .inspect_err(|error| {
                 tracing::warn!(?error, world_ms, "objective timer update rejected");
             })?;
+        self.advance_active_invitations().inspect_err(|error| {
+            tracing::warn!(?error, world_ms, "active story invitation update rejected");
+        })?;
         self.advance_crashes(world_ms).inspect_err(|error| {
             tracing::warn!(?error, world_ms, "crash recovery update rejected");
         })?;

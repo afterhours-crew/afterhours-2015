@@ -31,6 +31,7 @@ mod recommendations;
 pub(super) use equipment::EquipmentRequest;
 pub(super) use garage::{GarageOperation, GarageRequest};
 pub(super) use scoring::{AwardRequest, Credited};
+mod active_invitations;
 mod launchers;
 mod licensed;
 mod map_feed;
@@ -112,6 +113,7 @@ pub(super) struct PlayerListener {
     selection_execution: BTreeMap<u16, prologue::selection::State>,
     story_pending: VecDeque<super::items::story::Request>,
     objective_timers: BTreeMap<u16, crate::progression::timers::State>,
+    active_invitations: active_invitations::State,
     intro_composites: prologue::finale::Composites,
     intro_modes: prologue::Modes,
     intro_movies: prologue::movies::Movies,
@@ -986,6 +988,7 @@ impl PlayerListener {
             selection_execution: BTreeMap::new(),
             story_pending: VecDeque::new(),
             objective_timers: BTreeMap::new(),
+            active_invitations: active_invitations::State::default(),
             intro_composites: BTreeMap::new(),
             intro_modes: BTreeMap::new(),
             intro_movies: BTreeMap::new(),
