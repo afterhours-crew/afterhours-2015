@@ -22,6 +22,8 @@ const GAMEPLAY: &str = "levels/genesis01/gameplay";
 pub enum Fact {
     Active(u64),
     Completed(u64),
+    /// A positive value in the authored, stable-ID integer persistence owner.
+    PositiveInt(u64),
     /// HashId in the resolved gameplay message manager's table.
     MessageRead {
         hash: u32,
@@ -49,9 +51,12 @@ impl Condition {
         if facts.is_empty()
             || facts.len() >= MAX_NODES
             || facts.iter().collect::<BTreeSet<_>>().len() != facts.len()
-            || facts
-                .iter()
-                .any(|f| matches!(f, Fact::Active(0) | Fact::Completed(0)))
+            || facts.iter().any(|f| {
+                matches!(
+                    f,
+                    Fact::Active(0) | Fact::Completed(0) | Fact::PositiveInt(0)
+                )
+            })
         {
             return Err(bad("explicit mission condition fact bound or identity"));
         }
@@ -106,6 +111,10 @@ impl Compiler<'_> {
         let object = graph.object(&endpoint.site)?;
         let site = &endpoint.site;
         let op = match (object.class.as_str(), endpoint.port) {
+            ("BoolEntityData", VALUE) => {
+                let id = persisted::positive_integer(graph, site, self.stable)?;
+                Op::Fact(Fact::PositiveInt(id))
+            }
             ("RaceObjectiveEntityData", ACTIVE | COMPLETED) => {
                 let id = crate::chapter_notifications::stable(graph, self.stable, site)?;
                 Op::Fact(if endpoint.port == ACTIVE {
@@ -212,6 +221,25 @@ impl AssetIndex {
         &mut self,
         identifiers: &BTreeSet<String>,
     ) -> Result<BTreeMap<String, Condition>, Error> {
+        self.read_mission_conditions(identifiers, false)
+    }
+
+    /// Map conditions can be owned by any participant-logic spawner in the
+    /// progression scene. Resolve those authored owners rather than treating a
+    /// writer absent from the main-story branch as false. This reads conditions;
+    /// it does not implement or activate the other branches' gameplay.
+    pub fn scene_mission_conditions(
+        &mut self,
+        identifiers: &BTreeSet<String>,
+    ) -> Result<BTreeMap<String, Condition>, Error> {
+        self.read_mission_conditions(identifiers, true)
+    }
+
+    fn read_mission_conditions(
+        &mut self,
+        identifiers: &BTreeSet<String>,
+        scene_owners: bool,
+    ) -> Result<BTreeMap<String, Condition>, Error> {
         if identifiers.is_empty()
             || identifiers.len() > 256
             || identifiers.iter().any(|id| id.is_empty() || id.len() > 512)
@@ -226,7 +254,19 @@ impl AssetIndex {
             .map(|b| ((b.asset.to_lowercase(), b.object), b.serializer))
             .collect();
         let mut graph = Graph::new(&mut self.assets);
-        let nodes = graph.read(Site::root(&rules.main))?;
+        let roots = owner_roots(
+            &mut graph,
+            &rules.main,
+            scene_owners.then_some(rules.scene.as_str()),
+        )?;
+        let mut nodes = Vec::new();
+        for root in roots {
+            let branch = graph.read(Site::root(&root))?;
+            if nodes.len() + branch.len() > crate::scenes::MAX_GRAPH_OBJECTS {
+                return Err(bad("mission condition owners node bound"));
+            }
+            nodes.extend(branch);
+        }
         let world = graph.read(Site::root(GAMEPLAY))?;
         let mut out = BTreeMap::new();
         for node in nodes
@@ -256,6 +296,35 @@ impl AssetIndex {
     }
 }
 
+fn owner_roots<S: Source>(
+    graph: &mut Graph<S>,
+    main: &str,
+    scene: Option<&str>,
+) -> Result<BTreeSet<String>, Error> {
+    let mut roots = BTreeSet::from([main.to_owned()]);
+    if let Some(scene) = scene {
+        for node in graph.read(Site::root(scene))? {
+            if node.object.class == "ParticipantLogicSpawnerEntityData" {
+                let (asset, object) =
+                    graph.target_field(&node.site, "ParticipantLogicBlueprint")?;
+                if object != 0 {
+                    return Err(bad("mission condition owner root"));
+                }
+                roots.insert(asset);
+                if roots.len() > 16 {
+                    return Err(bad("mission condition owner bound"));
+                }
+            }
+        }
+    }
+    for root in &roots {
+        if graph.object(&Site::root(root))?.class != "ParticipantLogicBlueprint" {
+            return Err(bad("mission condition owner class"));
+        }
+    }
+    Ok(roots)
+}
+
 pub(crate) fn from_endpoint<S: Source>(
     graph: &mut Graph<S>,
     endpoint: Endpoint,
@@ -277,5 +346,8 @@ pub(crate) fn from_endpoint<S: Source>(
     Ok(Condition { ops: compiler.ops })
 }
 
+mod persisted;
+#[cfg(test)]
+mod persisted_tests;
 #[cfg(test)]
 mod tests;

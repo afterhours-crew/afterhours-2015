@@ -106,7 +106,7 @@ fn fixture() -> Memory {
     m.put("a", 11, "MessageManagerEntityData", &[]);
     m
 }
-fn program(m: &mut Memory, node: usize, port: u32) -> Result<Condition, Error> {
+pub(super) fn program(m: &mut Memory, node: usize, port: u32) -> Result<Condition, Error> {
     let mut graph = Graph::new(m);
     let world = graph.read(Site::root("a"))?;
     let managers = BTreeMap::from([(("a".into(), 11), 4)]);
@@ -129,7 +129,7 @@ fn program(m: &mut Memory, node: usize, port: u32) -> Result<Condition, Error> {
     )?;
     Ok(Condition { ops: compiler.ops })
 }
-fn rows<'a>(m: &'a mut Memory, field: &str) -> &'a mut Vec<Value> {
+pub(super) fn rows<'a>(m: &'a mut Memory, field: &str) -> &'a mut Vec<Value> {
     let Value::Array(rows) = &mut m
         .0
         .get_mut(&("a".into(), 0))

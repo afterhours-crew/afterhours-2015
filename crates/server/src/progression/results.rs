@@ -23,6 +23,12 @@ impl Content {
                     || !r.enabled.facts().any(|f| f == Fact::Active(r.objective))
                     || r.enabled.facts().any(|f| match f {
                         Fact::Active(id) | Fact::Completed(id) => !all.contains(&id),
+                        Fact::PositiveInt(id) => !self
+                            .catalog
+                            .definition
+                            .branches()
+                            .values()
+                            .any(|b| b.ints().contains(&id)),
                         Fact::MessageRead { .. } => false,
                     })
             })
@@ -86,6 +92,13 @@ impl Content {
                         .find(|row| row.hash == hash)
                         .is_some_and(|row| row.read)
                 }
+                Fact::PositiveInt(id) => {
+                    *[Branch::Intro, Branch::Main]
+                        .into_iter()
+                        .find_map(|b| restored.branch(b).ints().get(&id))
+                        .ok_or(Failure::ProfileConfig)?
+                        > 0
+                }
             };
             facts.insert(fact, value);
         }
@@ -97,5 +110,53 @@ impl Content {
             return Err(Failure::ProfileConfig);
         }
         Ok(Some(rule.objective))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::progression::tests::{combined, local, tables};
+    use nfs_content::progression::conditions::Condition;
+    #[test]
+    fn integer_condition_reads_only_known_saved_values_and_preserves_sign() {
+        let make = |id| {
+            Content::from_json(&combined())
+                .unwrap()
+                .with_objective_results(vec![Completion {
+                    objective: 30,
+                    categories: BTreeSet::from([71]),
+                    enabled: Condition::all(&[Fact::Active(30), Fact::PositiveInt(id)]).unwrap(),
+                }])
+        };
+        assert!(make(99).is_err());
+        let content = make(42).unwrap();
+        for value in [None, Some(-1), Some(0), Some(1), Some(i32::MAX)] {
+            let (_, _, mut snapshot) = local();
+            for id in [10, 20, 30] {
+                snapshot.tables.get_mut(&OBJECTIVES).unwrap().rows.insert(
+                    id,
+                    BTreeMap::from([
+                        (ACTIVE, Value::Int(i32::from(id == 30))),
+                        (COMPLETED, Value::Int(i32::from(id != 30))),
+                    ]),
+                );
+            }
+            if let Some(value) = value {
+                snapshot
+                    .tables
+                    .get_mut(&VALUES)
+                    .unwrap()
+                    .rows
+                    .insert(42, BTreeMap::from([(INTS, Value::Int(value))]));
+            }
+            let loaded = tables().view(&snapshot).unwrap();
+            let result = content.result_objective(&BTreeSet::from([71]), &loaded);
+            if value.is_some_and(|v| v > 0) {
+                assert_eq!(result.unwrap(), Some(30));
+            } else {
+                assert!(result.is_err());
+            }
+        }
     }
 }
