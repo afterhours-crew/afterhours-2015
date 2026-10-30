@@ -33,6 +33,14 @@ pub(super) fn is_read_only<S: Source>(g: &mut Graph<S>, site: &Site) -> Result<b
             return Ok(false);
         }
     }
+    known_consumers(g, site, &BTreeSet::new())
+}
+
+pub(super) fn known_consumers<S: Source>(
+    g: &mut Graph<S>,
+    site: &Site,
+    accessors: &BTreeSet<Identity>,
+) -> Result<bool, Error> {
     consumers(
         g,
         Link {
@@ -41,6 +49,7 @@ pub(super) fn is_read_only<S: Source>(g: &mut Graph<S>, site: &Site) -> Result<b
         },
         &mut BTreeSet::new(),
         &mut 0,
+        accessors,
     )
 }
 
@@ -49,6 +58,7 @@ fn consumers<S: Source>(
     target: Link,
     active: &mut BTreeSet<Link>,
     steps: &mut usize,
+    accessors: &BTreeSet<Identity>,
 ) -> Result<bool, Error> {
     *steps += 1;
     if *steps > MAX_CONSUMERS || active.len() >= MAX_DEPTH || !active.insert(target.clone()) {
@@ -69,7 +79,7 @@ fn consumers<S: Source>(
                 };
                 source.site.key = frame.reference;
                 source.site.bus = frame.bus;
-                read_only &= consumers(g, source, active, steps)?;
+                read_only &= consumers(g, source, active, steps, accessors)?;
             }
             "ReferenceObjectData"
             | "LogicPrefabReferenceObjectData"
@@ -96,7 +106,7 @@ fn consumers<S: Source>(
                 source.site.key = child.clone();
                 source.site.bus = child;
                 source.site.key = g.target_field(&source.site, "Interface")?;
-                read_only &= consumers(g, source, active, steps)?;
+                read_only &= consumers(g, source, active, steps, accessors)?;
             }
             "ParticipantSetPredicateEntityData" => {
                 let count = object
@@ -108,6 +118,10 @@ fn consumers<S: Source>(
                     })
                     .ok_or_else(|| bad("owned membership consumer operand count"))?;
                 read_only &= (0..count).any(|i| name(&i.to_string()) == source.port);
+            }
+            "ParticipantSetAccessorEntityData" => {
+                read_only &= source.port == name("ParticipantSet")
+                    && accessors.contains(&Identity::from(&source.site));
             }
             // Accessors and channels can mutate or expose the set. Keep its
             // runtime owner required, even if no current event appears to fire.

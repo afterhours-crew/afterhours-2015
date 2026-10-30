@@ -56,6 +56,8 @@ impl AssetIndex {
             entries: r.entries,
             memberships: r.memberships.into_values().collect(),
             integers: r.integers,
+            visibility: r.visibility,
+            copies: r.copies,
         })
     }
 
@@ -86,6 +88,7 @@ impl AssetIndex {
         let mut entries = BTreeMap::new();
         let mut requirements = Vec::new();
         let mut memberships = BTreeMap::new();
+        let mut visibility_rules = BTreeMap::new();
         for (scene, root) in &roots {
             let nodes = graph.read(root.clone())?;
             for launcher in nodes.iter().filter(|n| n.object.class == LAUNCHER) {
@@ -163,6 +166,7 @@ impl AssetIndex {
                 )
                 .map_err(|e| bad(&format!("event {id} visibility: {e}")))?;
                 let mut resolved = Vec::new();
+                let mut conditions = BTreeMap::new();
                 for (site, enabled) in notifications {
                     if !enabled && !include_memberships {
                         continue;
@@ -172,6 +176,13 @@ impl AssetIndex {
                         scene_key,
                         serializer,
                     };
+                    if include_memberships
+                        && conditions
+                            .insert(endpoint, enabled)
+                            .is_some_and(|old| old != enabled)
+                    {
+                        return Err(bad("conflicting resolved visibility notification"));
+                    }
                     if include_memberships && !memberships.contains_key(&endpoint) {
                         let program =
                             membership::read(&mut graph, &site, &identified, &mut |g, s| {
@@ -198,6 +209,13 @@ impl AssetIndex {
                 resolved.dedup();
                 if resolved.is_empty() || resolved.len() > 16 {
                     return Err(bad("event map notification count"));
+                }
+                if include_memberships {
+                    let rule = Visibility { conditions };
+                    rule.validate()?;
+                    if visibility_rules.insert(id.clone(), rule).is_some() {
+                        return Err(bad("duplicate event visibility identity"));
+                    }
                 }
                 let (scene_key, serializer) = scenes.endpoint(&mut graph, &volume)?;
                 let entry = Entry {
@@ -241,11 +259,34 @@ impl AssetIndex {
             &roots.iter().map(|(_, s)| s.clone()).collect::<Vec<_>>(),
             &selected,
         )?;
+        let selected_copies = memberships
+            .values()
+            .flat_map(|b| b.program.facts())
+            .filter_map(|f| match f {
+                membership::Fact::Copy(id) => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        let copies = membership::copies::read(
+            &mut graph,
+            &roots.iter().map(|(_, s)| s.clone()).collect::<Vec<_>>(),
+            &selected_copies,
+            &identified,
+            &mut |g, s| {
+                let (scene_key, serializer) = scenes.endpoint(g, s)?;
+                Ok(Endpoint {
+                    scene_key,
+                    serializer,
+                })
+            },
+        )?;
         Ok(Roster {
             entries: entries.into_values().collect(),
             requirements,
             memberships,
             integers,
+            visibility: visibility_rules,
+            copies,
         })
     }
 }
@@ -255,6 +296,8 @@ struct Roster {
     requirements: Vec<requirements::Binding>,
     memberships: BTreeMap<Endpoint, membership::Binding>,
     integers: BTreeMap<crate::scoring::events::Identity, integers::Store>,
+    visibility: BTreeMap<String, Visibility>,
+    copies: BTreeMap<crate::scoring::events::Identity, membership::copies::Control>,
 }
 
 #[derive(Clone, Debug)]
@@ -262,6 +305,40 @@ pub struct Availability {
     pub entries: Vec<Entry>,
     pub memberships: Vec<membership::Binding>,
     pub integers: BTreeMap<crate::scoring::events::Identity, integers::Store>,
+    /// Full positive and negative membership conditions for each variant.
+    /// Client-owned presentation channels remain separate from this rule.
+    pub visibility: BTreeMap<String, Visibility>,
+    pub copies: BTreeMap<crate::scoring::events::Identity, membership::copies::Control>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Visibility {
+    pub conditions: BTreeMap<Endpoint, bool>,
+}
+impl Visibility {
+    fn validate(&self) -> Result<(), Error> {
+        if self.conditions.is_empty()
+            || self.conditions.len() > 16
+            || self.conditions.keys().any(|s| s.scene_key == 0)
+        {
+            return Err(bad("event visibility condition bound or identity"));
+        }
+        Ok(())
+    }
+    /// Require all memberships, including a negative or currently unselected
+    /// branch. Missing state is not evidence that a variant is unavailable.
+    pub fn evaluate(
+        &self,
+        mut member: impl FnMut(Endpoint) -> Option<bool>,
+    ) -> Result<bool, Error> {
+        self.validate()?;
+        let mut eligible = true;
+        for (&site, &required) in &self.conditions {
+            eligible &=
+                member(site).ok_or_else(|| bad("event visibility membership missing"))? == required;
+        }
+        Ok(eligible)
+    }
 }
 
 /// Follow the authored conjunction/negation gates to the membership notifications.
@@ -409,6 +486,46 @@ mod tests {
     use super::*;
     use crate::graph::tests::{Memory, edge, local};
     use nfs_frostbite::ebx::Fields;
+
+    #[test]
+    fn shared_location_variants_retain_both_sides_of_selection_and_require_all_state() {
+        let unlocked = Endpoint {
+            scene_key: 3,
+            serializer: 1,
+        };
+        let selected = Endpoint {
+            scene_key: 3,
+            serializer: 2,
+        };
+        let normal = Visibility {
+            conditions: BTreeMap::from([(unlocked, true), (selected, false)]),
+        };
+        let story = Visibility {
+            conditions: BTreeMap::from([(unlocked, true), (selected, true)]),
+        };
+        for (open, selection, normal_expected, story_expected) in [
+            (false, false, false, false),
+            (true, false, true, false),
+            (true, true, false, true),
+            (false, true, false, false),
+        ] {
+            let state = |s| Some(if s == unlocked { open } else { selection });
+            assert_eq!(normal.evaluate(state).unwrap(), normal_expected);
+            assert_eq!(story.evaluate(state).unwrap(), story_expected);
+        }
+        assert!(
+            normal
+                .evaluate(|s| (s == unlocked).then_some(false))
+                .is_err()
+        );
+        assert!(
+            Visibility {
+                conditions: BTreeMap::new()
+            }
+            .evaluate(|_| Some(true))
+            .is_err()
+        );
+    }
 
     fn fixture() -> Memory {
         let mut m = Memory::default();

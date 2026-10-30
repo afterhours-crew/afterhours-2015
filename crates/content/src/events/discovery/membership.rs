@@ -10,6 +10,7 @@ use crate::scoring::events::Identity;
 const MAX_NODES: usize = 256;
 const MAX_DEPTH: usize = 32;
 mod constant;
+pub mod copies;
 mod owned;
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -310,6 +311,15 @@ pub(super) fn read<S: Source>(
         return Err(bad("event membership notification class"));
     }
     let root = link(g, notification, 2_664_990_019)?;
+    read_set(g, root, identified, endpoint)
+}
+
+fn read_set<S: Source>(
+    g: &mut Graph<S>,
+    root: Site,
+    identified: &BTreeMap<Site, String>,
+    endpoint: &mut impl FnMut(&mut Graph<S>, &Site) -> Result<Endpoint, Error>,
+) -> Result<Program, Error> {
     let mut compiler = Compiler {
         identified,
         active: BTreeSet::new(),

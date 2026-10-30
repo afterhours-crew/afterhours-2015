@@ -39,7 +39,11 @@ pub struct Definition {
     pub reference_properties: Vec<u32>,
 }
 
-fn property_ids(object: &Object, schema: &Object, field: &str) -> Result<Vec<u32>, Error> {
+pub(crate) fn property_ids(
+    object: &Object,
+    schema: &Object,
+    field: &str,
+) -> Result<Vec<u32>, Error> {
     let properties = schema
         .fields
         .get("Properties")

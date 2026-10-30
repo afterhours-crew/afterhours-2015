@@ -331,6 +331,12 @@ and integer-range sets remain explicit inputs from their state owners; no input
 is assumed empty or equal to another set. Missing state fails evaluation even
 on an unselected Boolean branch. Resolving this topology does not establish
 runtime support for those state owners or change the normal-only roster API.
+The availability result also preserves each variant's positive and negative
+notification conditions, including variants sharing a start area. Its copied-set
+controller definitions retain the independent input, comparison configuration and
+declared control channel. Unknown writers, changed command order, open initial
+gates and unresolved server listeners are rejected. Reading these definitions
+does not execute their controllers or publish map membership.
 
 Vehicle mesh inputs retain front/rear headlight animation extent and spoiler
 extent/animation ID from the installed item definitions. The vehicle model applies

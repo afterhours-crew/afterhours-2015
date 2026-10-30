@@ -147,9 +147,74 @@ fn event_writes_scalar_inputs_and_exposed_boundaries_remain_owned() {
         site: selected(),
         port: 0,
     };
-    assert!(!consumers(&mut Graph::new(&mut m), target.clone(), &mut active, &mut 0).unwrap());
+    assert!(
+        !consumers(
+            &mut Graph::new(&mut m),
+            target.clone(),
+            &mut active,
+            &mut 0,
+            &BTreeSet::new()
+        )
+        .unwrap()
+    );
     assert!(active.is_empty());
-    assert!(!consumers(&mut Graph::new(&mut m), target, &mut active, &mut 0).unwrap());
+    assert!(
+        !consumers(
+            &mut Graph::new(&mut m),
+            target,
+            &mut active,
+            &mut 0,
+            &BTreeSet::new()
+        )
+        .unwrap()
+    );
+}
+
+#[test]
+fn accessor_permission_requires_the_exact_instance_and_set_port() {
+    let mut m = fixture();
+    m.put("a", 5, "ParticipantSetAccessorEntityData", &[]);
+    rows(
+        &mut m,
+        "a",
+        "LinkConnections",
+        vec![edge(local(5), name("ParticipantSet"), local(2), 0)],
+    );
+    let accessor = Site {
+        key: ("a".into(), 5),
+        ..Site::root("a")
+    };
+    let allowed = BTreeSet::from([Identity::from(&accessor)]);
+    assert!(known_consumers(&mut Graph::new(&mut m), &selected(), &allowed).unwrap());
+    assert!(!known_consumers(&mut Graph::new(&mut m), &selected(), &BTreeSet::new()).unwrap());
+    let mut other = Identity::from(&accessor);
+    other.instances.push(("another".into(), 9));
+    assert!(
+        !known_consumers(
+            &mut Graph::new(&mut m),
+            &selected(),
+            &BTreeSet::from([other])
+        )
+        .unwrap()
+    );
+    rows(
+        &mut m,
+        "a",
+        "LinkConnections",
+        vec![edge(local(5), 10, local(2), 0)],
+    );
+    assert!(!known_consumers(&mut Graph::new(&mut m), &selected(), &allowed).unwrap());
+    rows(
+        &mut m,
+        "a",
+        "LinkConnections",
+        vec![
+            edge(local(5), name("ParticipantSet"), local(2), 0),
+            edge(local(3), 10, local(2), 0),
+        ],
+    );
+    m.put("b", 2, "ParticipantSetAccessorEntityData", &[]);
+    assert!(!known_consumers(&mut Graph::new(&mut m), &selected(), &allowed).unwrap());
 }
 
 #[test]
