@@ -25,6 +25,13 @@ Follow CONTRIBUTING.md for architecture, ownership, dependency and testing rules
 Run all three listed Cargo gates for code changes. State exactly what has been
 tested; passing library tests does not establish game or offline-play acceptance.
 
+For story work, follow [STORY-WORKFLOW](docs/STORY-WORKFLOW.md). Present a bounded
+gameplay batch for owner approval before implementation; after approval, complete
+its research, implementation, checks and review preparation autonomously. Routine
+fixes within that scope do not need repeated approval. Keep new scope, live
+acceptance, merging and releases distinct. Do not copy private capture material
+into public plans or tests.
+
 Remaining gameplay systems are tracked in GitHub issues, not in docs. The pinned
 [gameplay roadmap][roadmap] holds the priority order; each system has a
 `kind:tracking` issue with a `system:` label that owns its acceptance list.

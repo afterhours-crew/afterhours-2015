@@ -133,6 +133,10 @@ remain at the socket/diagnostic edge rather than in the sans-IO service models.
 
 ## Compatibility regressions
 
+Story changes also follow the [story batch workflow](docs/STORY-WORKFLOW.md):
+approved scope, evidence-grounded transitions, exact durable results and an
+end-to-end handoff/restart check. The existing Cargo gates still apply.
+
 Compatibility fixes retain the original failing control and a related case
 exercising the shared mechanism. For transitions affected by message timing,
 include valid order variations, bounded retries and the subsequent transition.
