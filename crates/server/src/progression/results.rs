@@ -59,49 +59,11 @@ impl Content {
                 Err(Failure::ProfileConfig)
             };
         };
-        let restored = self.catalog.restore(loaded, self.settings)?;
-        let mut facts = BTreeMap::new();
-        for fact in rule.enabled.facts() {
-            let value = match fact {
-                Fact::Active(id) | Fact::Completed(id) => {
-                    let state = [Branch::Intro, Branch::Main]
-                        .into_iter()
-                        .find_map(|b| restored.branch(b).objectives().get(&id))
-                        .ok_or(Failure::ProfileConfig)?;
-                    match fact {
-                        Fact::Active(_) => state.active && !state.completed,
-                        _ => state.completed,
-                    }
-                }
-                Fact::MessageRead { hash, manager } => {
-                    let content = self.messages.as_ref().ok_or(Failure::ProfileConfig)?;
-                    if !content.catalog.by_hash(hash).is_some_and(|m| m.persisted) {
-                        return Err(Failure::ProfileConfig);
-                    }
-                    let manager = content.manager(manager).ok_or(Failure::ProfileConfig)?;
-                    if !loaded
-                        .tables()
-                        .contains_key(&crate::persistent::key(manager.table()))
-                    {
-                        return Err(Failure::ProfileConfig);
-                    }
-                    let rows = nfs_services::messages::rows(loaded.tables(), manager.table())
-                        .map_err(|_| Failure::ProfileConfig)?;
-                    rows.iter()
-                        .rev()
-                        .find(|row| row.hash == hash)
-                        .is_some_and(|row| row.read)
-                }
-                Fact::PositiveInt(id) => {
-                    *[Branch::Intro, Branch::Main]
-                        .into_iter()
-                        .find_map(|b| restored.branch(b).ints().get(&id))
-                        .ok_or(Failure::ProfileConfig)?
-                        > 0
-                }
-            };
-            facts.insert(fact, value);
-        }
+        let facts = self.condition_facts(
+            &rule.enabled.facts().collect(),
+            &nfs_content::progression::conditions::owners::StateOwners::default(),
+            loaded,
+        )?;
         if !rule
             .enabled
             .evaluate(|fact| facts.get(&fact).copied())

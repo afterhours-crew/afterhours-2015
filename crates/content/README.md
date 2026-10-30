@@ -337,6 +337,15 @@ controller definitions retain the independent input, comparison configuration an
 declared control channel. Unknown writers, changed command order, open initial
 gates and unresolved server listeners are rejected. Reading these definitions
 does not execute their controllers or publish map membership.
+
+Map conditions can also reference persisted objectives outside the active
+gameplay branches. `condition_state_owners` resolves their persistence links,
+stable IDs and connected initial activation expressions. Missing or ambiguous
+required owners fail preparation; an unrelated channel with multiple writers
+does not supply an arbitrary initializer. The server's read-only condition
+projection shares objective restoration and message-read semantics with story
+result attribution. These definitions do not implement the referenced missions
+or establish in-game map/start eligibility.
 Loaded control-channel publishers retain their separate Boolean owners, initial
 configuration and later event commands. Missing publishers and unsupported
 writes are errors; a false initial value is not treated as a constant.

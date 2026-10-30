@@ -15,6 +15,7 @@ use std::{
 };
 #[cfg(test)]
 const MAX_ENTRIES: usize = 2048;
+pub mod conditions;
 pub mod entities;
 pub mod results;
 pub mod timers;
@@ -129,20 +130,7 @@ impl Catalog {
             }
             state.pending.push(Output::ValuesRestored);
             for (id, expr) in definition.objectives() {
-                let initial = Objective {
-                    active: expr.initial(settings),
-                    completed: false,
-                };
-                let restored = match (
-                    int_cell(loaded, OBJECTIVES, *id, ACTIVE)?,
-                    int_cell(loaded, OBJECTIVES, *id, COMPLETED)?,
-                ) {
-                    (Some(active), Some(completed)) => Objective {
-                        active: active > 0,
-                        completed: completed > 0,
-                    },
-                    _ => initial,
-                };
+                let restored = restore_objective(loaded, *id, expr, settings)?;
                 state.objectives.insert(*id, restored);
                 state.pending.push(Output::StartObjective { id: *id });
             }
@@ -291,6 +279,28 @@ impl Content {
 }
 /// Bound on debug-print Hide events (the supported build has 113).
 const MAX_DEBUG_HIDES: usize = 1024;
+fn restore_objective(
+    loaded: &Loaded,
+    id: u64,
+    initial: &data::Expr,
+    settings: Settings,
+) -> Result<Objective, Failure> {
+    Ok(
+        match (
+            int_cell(loaded, OBJECTIVES, id, ACTIVE)?,
+            int_cell(loaded, OBJECTIVES, id, COMPLETED)?,
+        ) {
+            (Some(active), Some(completed)) => Objective {
+                active: active > 0,
+                completed: completed > 0,
+            },
+            _ => Objective {
+                active: initial.initial(settings),
+                completed: false,
+            },
+        },
+    )
+}
 fn int_cell(loaded: &Loaded, table: u32, id: u64, column: u32) -> Result<Option<i32>, Failure> {
     if !loaded.has_cell(table, id, column) {
         return Ok(None);

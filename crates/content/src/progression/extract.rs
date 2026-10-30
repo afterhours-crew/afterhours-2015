@@ -42,7 +42,7 @@ fn stable<S: Source>(graph: &mut Graph<S>, rules: &Rules, site: &Site) -> Result
     }
     Ok(id)
 }
-type Publishers = BTreeMap<(Key, u32), Site>;
+type Publishers = BTreeMap<(Key, u32), Vec<Site>>;
 fn registered_bus(value: Option<&Value>) -> Result<bool, Error> {
     let flags = match value {
         Some(Value::UInt16(value)) => u32::from(*value),
@@ -72,7 +72,18 @@ fn publishers<S: Source>(
     rules: &Rules,
     branches: &[Vec<Node>],
 ) -> Result<Publishers, Error> {
-    let mut out = BTreeMap::new();
+    let out = publisher_candidates(graph, rules, branches)?;
+    if out.values().any(|sites| sites.len() != 1) {
+        return Err(bad("ambiguous participant property publisher"));
+    }
+    Ok(out)
+}
+fn publisher_candidates<S: Source>(
+    graph: &mut Graph<S>,
+    rules: &Rules,
+    branches: &[Vec<Node>],
+) -> Result<Publishers, Error> {
+    let mut out = Publishers::new();
     for node in branches
         .iter()
         .flatten()
@@ -85,9 +96,7 @@ fn publishers<S: Source>(
             continue;
         }
         let key = participant_channel(graph, rules, &node.site)?;
-        if out.insert(key, node.site.clone()).is_some() {
-            return Err(bad("ambiguous participant property publisher"));
-        }
+        out.entry(key).or_default().push(node.site.clone());
     }
     Ok(out)
 }
@@ -151,11 +160,14 @@ impl<S: Source> Expressions<'_, '_, S> {
             }
             "BoolParticipantPropertyAccessorEntityData" if port == p["participant_output"] => {
                 let key = participant_channel(self.graph, self.rules, site)?;
-                let publisher = self
+                let candidates = self
                     .publishers
                     .get(&key)
-                    .ok_or_else(|| bad("missing participant property publisher"))?
-                    .clone();
+                    .ok_or_else(|| bad("missing participant property publisher"))?;
+                let [publisher] = candidates.as_slice() else {
+                    return Err(bad("ambiguous participant property publisher"));
+                };
+                let publisher = publisher.clone();
                 self.input(&publisher, p["bool_value"])?
             }
             _ => {
@@ -233,6 +245,80 @@ fn restoration<S: Source>(
         out.push(json!({"name":name,"objectives":rows,"ints":ints}));
     }
     Ok(out)
+}
+
+pub(super) fn condition_owners<S: Source>(
+    graph: &mut Graph<S>,
+    rules: &Rules,
+    branches: &[Vec<Node>],
+    facts: &BTreeSet<super::conditions::Fact>,
+) -> Result<super::conditions::owners::StateOwners, Error> {
+    use super::{
+        Expr,
+        conditions::{Fact, owners::StateOwners},
+    };
+    if facts.len() > 4096 {
+        return Err(bad("map progression fact bound"));
+    }
+    let mut objectives = BTreeSet::new();
+    let mut integers = BTreeSet::new();
+    for fact in facts {
+        match fact {
+            Fact::Active(id) | Fact::Completed(id) => {
+                objectives.insert(*id);
+            }
+            Fact::PositiveInt(id) => {
+                integers.insert(*id);
+            }
+            Fact::MessageRead { .. } => return Err(bad("message state has a separate owner")),
+        }
+    }
+    // Other loaded branches may publish the same channel dynamically. Only a
+    // demanded initializer needs a unique publisher; never select an arbitrary
+    // writer when that initializer actually depends on an ambiguous channel.
+    let publishers = publisher_candidates(graph, rules, branches)?;
+    let mut expressions = Expressions {
+        graph,
+        rules,
+        publishers: &publishers,
+        active: BTreeSet::new(),
+        count: 0,
+    };
+    let mut result = StateOwners {
+        objectives: BTreeMap::new(),
+        integers: BTreeSet::new(),
+    };
+    for node in branches.iter().flatten() {
+        let (port, class, is_objective) = match node.object.class.as_str() {
+            "ObjectivePersistenceEntityData" => {
+                (rules.ports["objectives"], "RaceObjectiveEntityData", true)
+            }
+            "ValuesPersistenceEntityData" => (rules.ports["ints"], "IntValueData", false),
+            _ => continue,
+        };
+        for endpoint in expressions.graph.links(&node.site, port)? {
+            if endpoint.port != 0 || expressions.graph.object(&endpoint.site)?.class != class {
+                return Err(bad("map progression persistence endpoint"));
+            }
+            let id = stable(expressions.graph, rules, &endpoint.site)?;
+            if is_objective && objectives.contains(&id) {
+                let raw = expressions.input(&endpoint.site, rules.ports["active"])?;
+                let initial =
+                    Expr::from_json(&raw).map_err(|_| bad("map objective initial expression"))?;
+                if result.objectives.insert(id, initial).is_some() {
+                    return Err(bad("map objective has multiple persistence owners"));
+                }
+            } else if !is_objective && integers.contains(&id) && !result.integers.insert(id) {
+                return Err(bad("map integer has multiple persistence owners"));
+            }
+        }
+    }
+    if result.objectives.keys().copied().collect::<BTreeSet<_>>() != objectives
+        || result.integers != integers
+    {
+        return Err(bad("map progression persistence owner missing"));
+    }
+    Ok(result)
 }
 
 type SceneBindings = BTreeMap<Site, (u32, usize)>;

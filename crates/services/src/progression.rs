@@ -117,6 +117,11 @@ fn expression(
     })
 }
 impl Expr {
+    /// Parse one bounded authored activation expression independently of the
+    /// two gameplay branches. Callers still validate its state ownership.
+    pub fn from_json(value: &Json) -> Result<Self, ParseError> {
+        expression(value, 0, &mut 0, &mut BTreeSet::new())
+    }
     /// The activation value with no objective completed yet.
     pub fn initial(&self, settings: Settings) -> bool {
         self.evaluate(settings, &BTreeSet::new())

@@ -346,6 +346,7 @@ pub(crate) fn from_endpoint<S: Source>(
     Ok(Condition { ops: compiler.ops })
 }
 
+pub mod owners;
 mod persisted;
 #[cfg(test)]
 mod persisted_tests;
