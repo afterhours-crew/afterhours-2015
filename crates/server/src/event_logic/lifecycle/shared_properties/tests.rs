@@ -160,6 +160,7 @@ fn fixture(ready: Option<bool>) -> (Instance, Registry, BTreeMap<Identity, Servi
                 participant: 99,
                 vehicle: None,
                 others: vec![],
+                participants: vec![],
                 road: None,
                 stats: None,
                 now: 0.,

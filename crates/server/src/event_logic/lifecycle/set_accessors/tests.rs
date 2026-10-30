@@ -136,6 +136,7 @@ fn fixture() -> (Instance, Registry) {
                 participant: 7,
                 vehicle: None,
                 others: vec![],
+                participants: vec![],
                 road: None,
                 stats: None,
                 now: 0.,

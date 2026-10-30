@@ -197,6 +197,7 @@ fn fixture(fail: bool) -> Runtime<Edge> {
                         participant: 7,
                         vehicle: None,
                         others: vec![],
+                        participants: vec![],
                         road: None,
                         stats: None,
                         now: 0.,

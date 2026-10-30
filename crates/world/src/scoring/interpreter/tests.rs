@@ -2940,6 +2940,7 @@ fn proximity_counts_members_of_its_set_and_ignores_other_cars() {
         max_rpm: None,
         rpm: None,
         nos: None,
+        burnout: None,
     });
     // Traffic and rival cars alongside: replicated, but in no set.
     owned.others = vec![car(2, 5.0), car(3, 12.0)];

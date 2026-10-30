@@ -239,6 +239,7 @@ fn runtime(mutation: Option<Mutation>) -> Runtime<Owner> {
             participant: 7,
             vehicle: None,
             others: vec![],
+            participants: vec![],
             road: None,
             stats: None,
             now: 0.,

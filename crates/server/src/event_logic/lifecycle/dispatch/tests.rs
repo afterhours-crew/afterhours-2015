@@ -374,6 +374,7 @@ fn lifecycle_reporter_reenters_the_real_graph_and_preserves_participant_context(
                         participant: 7,
                         vehicle: None,
                         others: vec![],
+                        participants: vec![],
                         road: None,
                         stats: None,
                         now: 0.,
