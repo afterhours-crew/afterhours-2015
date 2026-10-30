@@ -217,6 +217,10 @@ fn event_owned_sets_remain_required_inputs_even_when_another_operand_is_false() 
         m.put("a", 4, class, &[]);
         if class == "IntPropertyWithinRangeParticipantSetEntityData" {
             range_fixture(&mut m);
+        } else {
+            let fields = &mut m.0.get_mut(&("a".into(), 0)).unwrap().fields.0;
+            fields.push(("PropertyConnections".into(), Value::Array(vec![])));
+            fields.push(("EventConnections".into(), Value::Array(vec![])));
         }
         let program = compile(&mut m).unwrap();
         assert!(program.facts().any(|f| *f == expected));
@@ -398,4 +402,77 @@ fn range_relay_uses_its_bound_definition_and_rejects_schema_matches_elsewhere() 
     replace_links(&mut m, edges);
     channel(&mut m, 11, "LinkedSchematicChannelEntityData", 21);
     assert!(compile(&mut m).is_err());
+}
+
+#[test]
+fn integer_membership_is_signed_inclusive_and_keeps_inverted_intervals_empty() {
+    let mut range = IntegerRange {
+        input: Identity::from(&site(10)),
+        input_port: 0,
+        minimum: -3,
+        maximum: 2,
+    };
+    for (value, expected) in [
+        (i32::MIN, false),
+        (-4, false),
+        (-3, true),
+        (0, true),
+        (2, true),
+        (3, false),
+        (i32::MAX, false),
+    ] {
+        assert_eq!(range.contains(value), expected);
+    }
+    range.minimum = 4;
+    assert!(!range.contains(2) && !range.contains(3) && !range.contains(4));
+    range.maximum = 4;
+    assert!(range.contains(4) && !range.contains(3) && !range.contains(5));
+    range.minimum = i32::MIN;
+    range.maximum = i32::MAX;
+    assert!(range.contains(i32::MIN) && range.contains(i32::MAX));
+}
+
+#[test]
+fn empty_owner_evidence_is_explicit_and_never_supplies_missing_runtime_facts() {
+    let mut m = fixture();
+    m.put("a", 4, "ParticipantSetEntityData", &[]);
+    let root = &mut m.0.get_mut(&("a".into(), 0)).unwrap().fields.0;
+    root.push(("PropertyConnections".into(), Value::Array(vec![])));
+    root.push(("EventConnections".into(), Value::Array(vec![])));
+    let Value::Array(links) = &mut root
+        .iter_mut()
+        .find(|(n, _)| n == "LinkConnections")
+        .unwrap()
+        .1
+    else {
+        panic!()
+    };
+    links.pop(); // Remove the old Boolean adapter's provider link.
+    let program = compile(&mut m).unwrap();
+    let owner = Identity::from(&site(4));
+    assert_eq!(program.empty_sets(), &BTreeSet::from([owner.clone()]));
+    assert!(
+        program
+            .evaluate(|f| (!matches!(f, Fact::Mutable(_))).then_some(true))
+            .is_err()
+    );
+    assert!(!program.evaluate(|_| Some(false)).unwrap());
+    let events = &mut m
+        .0
+        .get_mut(&("a".into(), 0))
+        .unwrap()
+        .fields
+        .0
+        .iter_mut()
+        .find(|(n, _)| n == "EventConnections")
+        .unwrap()
+        .1;
+    *events = Value::Array(vec![Value::Struct(nfs_frostbite::ebx::Fields(vec![(
+        "Target".into(),
+        local(4),
+    )]))]);
+    let mutable = compile(&mut m).unwrap();
+    assert!(mutable.empty_sets().is_empty());
+    assert!(mutable.facts().any(|f| *f == Fact::Mutable(owner.clone())));
+    assert_eq!(program.empty_sets(), &BTreeSet::from([owner]));
 }

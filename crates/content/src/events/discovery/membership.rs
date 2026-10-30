@@ -10,6 +10,7 @@ use crate::scoring::events::Identity;
 const MAX_NODES: usize = 256;
 const MAX_DEPTH: usize = 32;
 mod constant;
+mod owned;
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum Fact {
@@ -40,6 +41,7 @@ enum Op {
 pub struct Program {
     ops: Vec<Op>,
     ranges: BTreeMap<Identity, IntegerRange>,
+    empty_sets: BTreeSet<Identity>,
 }
 
 /// Authored bounds plus the exact property that supplies the participant's
@@ -53,7 +55,20 @@ pub struct IntegerRange {
     pub maximum: i32,
 }
 
+impl IntegerRange {
+    /// Signed, inclusive bounds. An inverted interval contains no value.
+    pub fn contains(&self, value: i32) -> bool {
+        self.minimum <= value && value <= self.maximum
+    }
+}
+
 impl Program {
+    /// Owned sets whose constructor is empty and whose complete consumer graph
+    /// contains only read-only predicates. Other mutable facts still need an
+    /// explicit runtime owner; this does not fill missing state with false.
+    pub fn empty_sets(&self) -> &BTreeSet<Identity> {
+        &self.empty_sets
+    }
     pub fn ranges(&self) -> &BTreeMap<Identity, IntegerRange> {
         &self.ranges
     }
@@ -99,6 +114,7 @@ struct Compiler<'a> {
     active: BTreeSet<Site>,
     ops: Vec<Op>,
     ranges: BTreeMap<Identity, IntegerRange>,
+    empty_sets: BTreeSet<Identity>,
 }
 impl Compiler<'_> {
     fn visit<S: Source>(
@@ -177,7 +193,13 @@ impl Compiler<'_> {
                 Op::Fact(Fact::States(states.into_iter().collect()))
             }
             "ParticipantSetCopyEntityData" => Op::Fact(Fact::Copy(Identity::from(&site))),
-            "ParticipantSetEntityData" => Op::Fact(Fact::Mutable(Identity::from(&site))),
+            "ParticipantSetEntityData" => {
+                let id = Identity::from(&site);
+                if owned::is_read_only(g, &site)? {
+                    self.empty_sets.insert(id.clone());
+                }
+                Op::Fact(Fact::Mutable(id))
+            }
             "IntPropertyWithinRangeParticipantSetEntityData" => {
                 let id = Identity::from(&site);
                 let range = integer_range(g, &site)?;
@@ -293,11 +315,13 @@ pub(super) fn read<S: Source>(
         active: BTreeSet::new(),
         ops: Vec::new(),
         ranges: BTreeMap::new(),
+        empty_sets: BTreeSet::new(),
     };
     compiler.visit(g, root, endpoint)?;
     Ok(Program {
         ops: compiler.ops,
         ranges: compiler.ranges,
+        empty_sets: compiler.empty_sets,
     })
 }
 

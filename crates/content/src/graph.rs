@@ -284,6 +284,22 @@ impl<'a, S: Source> Graph<'a, S> {
             })
             .collect())
     }
+    /// Immediate consumers of one exact provider output. Unlike link_sources,
+    /// this preserves the target port when following an interface boundary.
+    pub fn link_sources_at(&mut self, site: &Site, port: u32) -> Result<Vec<Endpoint>, Error> {
+        Ok(self
+            .edges(&site.bus, Connections::Link)?
+            .iter()
+            .filter(|e| e.target == site.key && e.target_port == port)
+            .map(|e| Endpoint {
+                site: Site {
+                    key: e.source.clone(),
+                    ..site.clone()
+                },
+                port: e.source_port,
+            })
+            .collect())
+    }
     /// Follow an incoming object link through prefab interfaces. Used for a
     /// statically wired schematic channel reference, never asset-name lookup.
     pub fn linked_source(&mut self, site: &Site, port: u32) -> Result<Endpoint, Error> {
