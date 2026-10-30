@@ -615,9 +615,10 @@ fn remote_fires(
     (fires, skipped)
 }
 
-/// Every other replicated car with decodable chassis physics, for the draft,
-/// proximity and speed-match queries. Other participants' cars are
-/// replicated into this world, including client-simulated traffic.
+/// Every other replicated car with decodable chassis physics, for the draft
+/// query. Other participants' cars are replicated into this world, including
+/// client-simulated traffic. The proximity filters (drift train, speed match)
+/// never read these: they count participant-set members only (E1130).
 fn other_vehicles(players: &Players, own: u16) -> Vec<nfs_world::scoring::draft::Vehicle> {
     let mut others = Vec::new();
     for (id, object) in players.objects().iter() {
@@ -656,6 +657,7 @@ fn idle_inputs(persona: u64, now_ms: u64) -> Inputs {
         participant: persona,
         vehicle: None,
         others: Vec::new(),
+        participants: Vec::new(),
         road: None,
         stats: None,
         now: now_ms as f64 / 1000.0,
@@ -782,6 +784,12 @@ impl PlayerListener {
             vehicle: Some(vehicle),
             road,
             others: other_vehicles(players, car),
+            // The drift and high-speed participant sets hold participants
+            // whose own scoring sets that property: other players and AI
+            // racers, never traffic (E1130). This host scores only its own
+            // player and its rivals run no scoring, so no other participant
+            // is a member.
+            participants: Vec::new(),
             stats: self.vehicle_stats(content, players, car),
             ..idle_inputs(self.persona, now_ms)
         })

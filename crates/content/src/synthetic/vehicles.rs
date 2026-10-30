@@ -41,6 +41,7 @@ pub fn rules() -> Rules {
         ("RaceWheelComponentData", "wheel"),
         ("NOSComponentData", "index"),
         ("WheelCustomizationComponentData", "tuning"),
+        ("SuspensionComponentData", "empty"),
         ("RaceVehicleCustomizationComponentData", "appearance"),
         ("AuthoritativeComponentData", "four_bit"),
         ("LockOnComponentData", "tagged"),

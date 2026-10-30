@@ -466,7 +466,7 @@ impl Content {
                     }
                     Some(audio.update(true))
                 }
-                Kind::FourBit | Kind::Rpc => Some(Update::Noop),
+                Kind::FourBit | Kind::Rpc | Kind::Empty => Some(Update::Noop),
                 Kind::Appearance => Some(appearance.update(63)?),
                 Kind::Mesh(_) => Some(mesh.update(true)),
                 Kind::GuidFloat => Some(d.health.update(3)?),

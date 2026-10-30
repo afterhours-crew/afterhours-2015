@@ -115,7 +115,7 @@ impl Candidate<'_> {
                     };
                     dispatch.road(self, node, frame, self.inputs.road)?;
                 }
-                Behavior::Proximity => self.proximity(node, dispatch)?,
+                Behavior::Proximity { set } => self.proximity(node, *set, dispatch)?,
                 Behavior::Stats => self.stats(node, dispatch)?,
                 Behavior::RaceTime => self.race_time(node, dispatch)?,
                 Behavior::Nos => self.nos(node, dispatch)?,

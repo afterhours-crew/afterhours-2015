@@ -546,6 +546,44 @@ fn vehicle_profiles_follow_components_links_and_installed_defaults() {
 }
 
 #[test]
+fn vehicle_profile_retains_suspension_serializer_between_nested_components() {
+    use synthetic::{Field, vehicles};
+    let replacement = vehicles::assets_with(|_, objects| {
+        let suspension = objects.len() as u32 + 2;
+        objects.push(("SuspensionComponentData", vec![]));
+        let Field::RawPointers(components) = &mut objects[0].1[1].1 else {
+            panic!()
+        };
+        // Wheel customization is pointer12. An empty serializer must retain its
+        // place before appearance instead of silently dropping that component.
+        let after_wheels = components.iter().position(|id| *id == 12).unwrap() + 1;
+        components.insert(after_wheels, suspension);
+    });
+    let mut fixture = assets();
+    fixture.retain(|a| !replacement.iter().any(|b| a.name == b.name));
+    fixture.extend(replacement);
+    let install = install_with(&fixture);
+    let prepared = install.prepare().unwrap();
+    let json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(prepared.path(Kind::VehicleProfiles)).unwrap())
+            .unwrap();
+    let definition = vehicle_profiles::Definition::from_json(&json["vehicles"][0]).unwrap();
+    use nfs_world::replication::vehicle::Kind as V;
+    assert_eq!(
+        &definition.profile.kinds()[10..13],
+        &[V::Tuning, V::Empty, V::Appearance]
+    );
+    assert_eq!(definition.profile.kinds().len(), 18);
+    assert_eq!(json["vehicles"][0]["profile"][11]["kind"], "empty");
+    let rules =
+        vehicle_profiles::Rules::from_json(&crate::synthetic::vehicles::rules().to_json()).unwrap();
+    assert_eq!(
+        rules.classes["SuspensionComponentData"].as_deref(),
+        Some("empty")
+    );
+}
+
+#[test]
 fn vehicle_profiles_reject_ambiguous_missing_and_cyclic_graphs() {
     use synthetic::{Field, vehicles};
     for case in 0..7 {

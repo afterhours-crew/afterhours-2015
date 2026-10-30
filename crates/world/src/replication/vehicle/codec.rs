@@ -288,7 +288,7 @@ pub(super) fn initial_read(r: &mut Reader<'_>, k: &Kind) -> Result<Initial, Erro
             custom: custom_read(r)?,
         })),
         Kind::Part { .. } => Initial::Part(r.bit()?),
-        Kind::Bool | Kind::Mesh(_) => Initial::Empty,
+        Kind::Bool | Kind::Mesh(_) | Kind::Empty => Initial::Empty,
         Kind::Wheel => Initial::Wheel {
             rpc: read_rpc(r)?,
             flag: r.bit()?,
@@ -342,7 +342,7 @@ pub(super) fn initial_write(w: &mut Writer, k: &Kind, v: &Initial) -> Result<(),
             custom_write(w, &v.custom)?;
         }
         (Kind::Part { .. }, Initial::Part(value)) => w.bit(*value)?,
-        (Kind::Bool | Kind::Mesh(_), Initial::Empty) => (),
+        (Kind::Bool | Kind::Mesh(_) | Kind::Empty, Initial::Empty) => (),
         (Kind::Wheel, Initial::Wheel { rpc, flag }) => {
             write_rpc(w, rpc)?;
             w.bit(*flag)?;
@@ -427,7 +427,7 @@ pub(super) fn update_read(r: &mut Reader<'_>, k: &Kind) -> Result<Update, Error>
                 tail: bytes(r, 4)?,
             })
         })?),
-        Kind::FourBit | Kind::Rpc => Update::Noop,
+        Kind::FourBit | Kind::Rpc | Kind::Empty => Update::Noop,
         Kind::Appearance => Update::Appearance(Box::new(appearance_read(r)?)),
         Kind::Mesh(profile) => Update::Mesh(r.optional(|r| mesh_read(r, profile))?),
         Kind::GuidFloat => Update::GuidFloat {
@@ -493,7 +493,7 @@ pub(super) fn update_write(w: &mut Writer, k: &Kind, v: &Update) -> Result<(), E
             put_dwords(w, &n.guid)?;
             put_bytes(w, &n.tail, 4)
         })?,
-        (Kind::FourBit | Kind::Rpc, Update::Noop) => (),
+        (Kind::FourBit | Kind::Rpc | Kind::Empty, Update::Noop) => (),
         (Kind::Appearance, Update::Appearance(a)) => appearance_write(w, a)?,
         (Kind::Mesh(profile), Update::Mesh(v)) => {
             w.optional(v, |w, m| mesh_write(w, profile, m))?
@@ -508,8 +508,48 @@ pub(super) fn update_write(w: &mut Writer, k: &Kind, v: &Update) -> Result<(), E
 }
 
 #[cfg(test)]
-mod mesh_tests {
+mod codec_tests {
     use super::*;
+    #[test]
+    fn empty_serializer_keeps_its_presence_bit_and_has_no_payload() {
+        let profile = Profile::new(vec![
+            Kind::Root {
+                property_owner: false,
+            },
+            Kind::Empty,
+            Kind::Bool,
+        ])
+        .unwrap();
+        let body = Body {
+            creation: None,
+            updates: vec![
+                Some(Update::Root(None)),
+                Some(Update::Noop),
+                Some(Update::Bool(Some(true))),
+            ],
+        };
+        // Root present, no root value; empty present; bool present, value present, true.
+        let bytes = [0xbc]; // 10 1 111
+        let span = BitSpan::new(&bytes, 0, 6).unwrap();
+        assert_eq!(body.encode(&profile).unwrap().bytes(), bytes);
+        let decoded = Body::decode(span, &profile, false).unwrap();
+        assert_eq!(decoded.body, body);
+        assert_eq!(decoded.bits, 6);
+        for bits in 0..6 {
+            assert_eq!(
+                Body::decode(BitSpan::new(&bytes, 0, bits).unwrap(), &profile, false),
+                Err(Error::Truncated)
+            );
+        }
+        let mut writer = Writer(BitWriter::new());
+        initial_write(&mut writer, &Kind::Empty, &Initial::Empty).unwrap();
+        update_write(&mut writer, &Kind::Empty, &Update::Noop).unwrap();
+        assert_eq!(writer.0.len(), 0);
+        assert_eq!(
+            initial_write(&mut writer, &Kind::Empty, &Initial::FourBit(0)),
+            Err(Error::TypeMismatch)
+        );
+    }
     #[test]
     fn spoiler_packed_value_preserves_alignment_and_rejects_truncation() {
         // Five unrelated bits, signed 3-bit index -1, normalized u16 0x1234,

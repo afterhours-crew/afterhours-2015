@@ -157,6 +157,7 @@ impl Execution {
             participant: u64::from(self.participant),
             vehicle: None,
             others: vec![],
+            participants: vec![],
             road: None,
             stats: None,
             now,

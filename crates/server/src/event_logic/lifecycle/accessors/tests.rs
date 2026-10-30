@@ -36,6 +36,7 @@ fn input() -> Inputs {
         participant: 7,
         vehicle: None,
         others: vec![],
+        participants: vec![],
         road: None,
         stats: None,
         now: 0.,

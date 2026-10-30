@@ -403,6 +403,7 @@ impl Content {
             participant,
             vehicle: None,
             others: vec![],
+            participants: vec![],
             road: None,
             stats: None,
             now: 0.0,

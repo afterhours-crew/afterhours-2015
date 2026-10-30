@@ -105,6 +105,7 @@ fn scoring_cache_restores_programs_and_bindings_but_never_live_sessions() {
                 participant: 1,
                 vehicle: None,
                 others: vec![],
+                participants: vec![],
                 road: None,
                 stats: None,
                 now: 0.0,

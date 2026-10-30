@@ -66,6 +66,8 @@ pub enum Kind {
     Tuning,
     Tagged,
     NibblesGuid,
+    /// A serializer with empty initial/update payloads, retaining its update bit.
+    Empty,
     FourBit,
     Appearance,
     Mesh(Vec<MeshKind>),
