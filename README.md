@@ -106,8 +106,10 @@ cargo test --workspace --locked
 Once the toolchain and dependencies are cached, add `--offline` to Cargo build,
 Clippy and test commands. No private repository, account profile or recording is
 needed. Passing these tests establishes the covered component behavior, not
-offline play or launcher independence. New local accounts start after the
-unsupported scripted prologue; story progression remains unfinished. Car ownership,
+offline play or launcher independence. Current source starts new local accounts
+with the restored prologue; the complete journey and saved-car restart have been
+owner-accepted. Later story progression remains unfinished. Published packages
+retain their own version and validation scope. Car ownership,
 five garage slots and warehouse storage have passed their documented live checks.
 The [garage customization guide](docs/GARAGE-UPGRADES.md)
 records supported purchases, tuning, appearance, wraps and resets. A guarded
