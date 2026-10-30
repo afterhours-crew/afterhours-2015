@@ -171,5 +171,60 @@ impl Host {
     }
 }
 
+impl Observers {
+    pub(super) fn copy_set(
+        &mut self,
+        plan: &Plan,
+        identity: &Identity,
+        event: u32,
+    ) -> Result<Vec<Action>, Error> {
+        let i = *plan.sets.get(identity).ok_or(Error::Invalid)?;
+        let SetKind::Copy { source } = &plan.data.bindings.sets[i].kind else {
+            return Err(Error::Invalid);
+        };
+        let clear = event == 0x0cac_9f9c;
+        let desired = match event {
+            0x7c81_3ec0 => {
+                // The native source pointer is acquired at activation. Copy
+                // with no source leaves even accessor-written members intact.
+                if !self.enabled.contains(&Observer::Set(i)) {
+                    return Ok(vec![]);
+                }
+                let Some(source) = source else {
+                    return Ok(vec![]);
+                };
+                self.source_members(plan, source)
+                    .cloned()
+                    .unwrap_or_default()
+            }
+            0x0cac_9f9c => BTreeSet::new(),
+            _ => return Ok(vec![]),
+        };
+        if desired.len() > states::MAX_PARTICIPANTS {
+            return Err(Error::Bound);
+        }
+        let source = SetSource::Local(identity.clone());
+        let mut work: Vec<_> = desired
+            .difference(&self.sets[i])
+            .map(|&p| Work::SetDelta(source.clone(), p, true))
+            .chain(
+                self.sets[i]
+                    .difference(&desired)
+                    .map(|&p| Work::SetDelta(source.clone(), p, false)),
+            )
+            .collect();
+        // Publish only after the complete replacement, additions before
+        // removals. Copy never emits Empty. Clear emits it even if the set
+        // was already empty or a removal callback adds a member back.
+        self.sets[i] = desired;
+        if clear {
+            work.push(Work::SetEmpty(source));
+        }
+        self.enqueue(work)
+    }
+}
+
+#[cfg(test)]
+mod copy_tests;
 #[cfg(test)]
 mod tests;

@@ -137,9 +137,30 @@ impl Content {
 pub struct Session {
     host: WorldHost,
     instance: Instance,
+    scene_key: u32,
     ghosts: BTreeMap<(usize, u16), u16>,
 }
 impl Session {
+    /// Read the committed scene owner using its authored serializer identity.
+    /// A missing scene/state is not an empty set. Candidate sessions can use
+    /// the same query without exposing their transitions to the committed one.
+    pub fn contains_at(
+        &self,
+        endpoint: nfs_content::events::discovery::Endpoint,
+        participant: u16,
+    ) -> Result<bool, Error> {
+        if endpoint.scene_key != self.scene_key {
+            return Err(Error::UnknownObject);
+        }
+        let state = u16::try_from(endpoint.serializer).map_err(|_| Error::Bound)?;
+        Ok(self
+            .host
+            .view(self.instance)
+            .map_err(invalid)?
+            .members(state)
+            .map_err(invalid)?
+            .contains(&participant.into()))
+    }
     #[cfg(test)]
     pub(crate) fn contains(&self, serializer: u16, participant: u16) -> bool {
         self.host
@@ -173,6 +194,7 @@ impl Session {
         Ok(Self {
             host,
             instance,
+            scene_key: content.key,
             ghosts: BTreeMap::new(),
         })
     }
@@ -315,4 +337,106 @@ pub fn stage(
     }
     output.session = Some(next);
     Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn authored_queries_observe_only_their_owner_and_committed_candidate() {
+        use nfs_content::events::discovery::Endpoint as Site;
+        let content = Content::for_test(14, [3, 7]);
+        let committed = Session::new(&content).unwrap();
+        let site = Site {
+            scene_key: 14,
+            serializer: 3,
+        };
+        let mut candidate = committed.clone();
+        candidate
+            .host
+            .dispatch(
+                vec![Scoped {
+                    instance: candidate.instance,
+                    value: Command::State(Action::Enter {
+                        state: 3,
+                        participant: 9,
+                    }),
+                }],
+                &mut |_, _| Ok(vec![]),
+            )
+            .unwrap();
+        assert!(candidate.contains_at(site, 9).unwrap());
+        assert!(!candidate.contains_at(site, 10).unwrap());
+        assert!(!committed.contains_at(site, 9).unwrap());
+        assert!(
+            candidate
+                .contains_at(
+                    Site {
+                        scene_key: 15,
+                        ..site
+                    },
+                    9
+                )
+                .is_err()
+        );
+        assert!(
+            candidate
+                .contains_at(
+                    Site {
+                        serializer: 4,
+                        ..site
+                    },
+                    9
+                )
+                .is_err()
+        );
+        assert!(
+            candidate
+                .contains_at(
+                    Site {
+                        serializer: u16::MAX as usize + 1,
+                        ..site
+                    },
+                    9
+                )
+                .is_err()
+        );
+        candidate
+            .host
+            .dispatch(
+                vec![Scoped {
+                    instance: candidate.instance,
+                    value: Command::State(Action::Move {
+                        source: 3,
+                        target: Some(7),
+                        participant: 9,
+                    }),
+                }],
+                &mut |_, _| Ok(vec![]),
+            )
+            .unwrap();
+        assert!(!candidate.contains_at(site, 9).unwrap());
+        assert!(
+            candidate
+                .contains_at(
+                    Site {
+                        serializer: 7,
+                        ..site
+                    },
+                    9
+                )
+                .unwrap()
+        );
+        assert!(
+            !committed
+                .contains_at(
+                    Site {
+                        serializer: 7,
+                        ..site
+                    },
+                    9
+                )
+                .unwrap()
+        );
+    }
 }

@@ -127,6 +127,98 @@ fn fixture() -> (Bindings, Registry, Arc<Composition>) {
 }
 
 #[test]
+fn copied_set_events_dispatch_to_the_matching_lifecycle_owner() {
+    use nfs_content::events::lifecycle::bindings::{ParticipantSet, SetKind, SetSource};
+    let (_, _, original) = fixture();
+    let mut d = definition();
+    d.bindings.sets = vec![
+        ParticipantSet {
+            identity: identity(5),
+            kind: SetKind::Owned,
+        },
+        ParticipantSet {
+            identity: identity(6),
+            kind: SetKind::Copy {
+                source: Some(SetSource::Local(identity(5))),
+            },
+        },
+    ];
+    d.bindings.order = vec![Observer::Set(0), Observer::Set(1), Observer::Transition(4)];
+    let p = plan(d);
+    let mut c = (*original).clone();
+    c.nodes.truncate(7);
+    c.nodes[5].class = "ParticipantSetEntityData".into();
+    c.nodes[6].class = "ParticipantSetCopyEntityData".into();
+    c.connections.clear();
+    c.links = vec![DataConnection {
+        source: Port {
+            node: 6,
+            field: 0x2e0d_19d8,
+        },
+        target: Port { node: 5, field: 0 },
+        bus: 0,
+        index: 0,
+        flags: None,
+    }];
+    let c = Arc::new(c);
+    let mut links = Registry::default();
+    links.install(1, c.clone(), &BTreeMap::new()).unwrap();
+    let b = Bindings::new(
+        1,
+        p.clone(),
+        &c,
+        &(0..7).map(identity).collect::<Vec<_>>(),
+        &links,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    let mut h = Host::prepare(p, SceneInputs::default()).unwrap();
+    h.dispatch(
+        vec![Command::Set {
+            source: SetSource::Local(identity(5)),
+            participant: 9,
+            member: true,
+        }],
+        &mut |_, _| Ok(vec![]),
+    )
+    .unwrap();
+    for call in [
+        Call::Activate,
+        Call::Event {
+            event: 0x7c81_3ec0,
+            context: None,
+        },
+    ] {
+        let request = Request {
+            instance: 1,
+            node: 6,
+            call,
+        };
+        assert!(
+            b.invoke(
+                &Request {
+                    instance: 2,
+                    ..request.clone()
+                },
+                &links
+            )
+            .unwrap()
+            .is_none()
+        );
+        let mut steps = b.invoke(&request, &links).unwrap().unwrap();
+        assert_eq!(steps.len(), 1);
+        let Step::Lifecycle(commands) = steps.remove(0) else {
+            panic!("not lifecycle")
+        };
+        h.dispatch(commands, &mut |_, _| Ok(vec![])).unwrap();
+    }
+    assert_eq!(
+        h.source_members(&SetSource::Local(identity(6))).unwrap(),
+        std::collections::BTreeSet::from([9])
+    );
+}
+
+#[test]
 fn request_to_final_excludes_final_and_preserves_registration_order() {
     let (mut bindings, _, _) = fixture();
     Arc::make_mut(&mut bindings.plan)

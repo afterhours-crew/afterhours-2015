@@ -66,6 +66,7 @@ pub fn compile(object: &Object) -> Result<Option<Realm>, Error> {
         | "ParticipantEventToParticipantProviderEntityData"
         | "ParticipantSetBoolPropertyAdapterEntityData"
         | "ParticipantSetEntityData"
+        | "ParticipantSetCopyEntityData"
         | "ParticipantSetPlayerAdapterEntityData"
         | "ParticipantSetStateAdapterEntityData"
         | "ParticipantStateListBoolParticipantPropertyEntityData"

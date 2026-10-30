@@ -255,6 +255,17 @@ impl Bindings {
                         identity: self.plan.data.bindings.ai_controls[i].identity.clone(),
                         event: *event,
                     }),
+                    Some(Observer::Set(i))
+                        if matches!(
+                            self.plan.data.bindings.sets[i].kind,
+                            nfs_content::events::lifecycle::bindings::SetKind::Copy { .. }
+                        ) =>
+                    {
+                        Some(Command::CopySet {
+                            identity: self.plan.data.bindings.sets[i].identity.clone(),
+                            event: *event,
+                        })
+                    }
                     _ => self
                         .plan
                         .data
