@@ -2,10 +2,12 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! The installed normal-event roster, independently of playable game modes.
-//! Visibility is an explicit free-roam policy; story eligibility is not evaluated.
+//! Authored event rosters and membership dependencies, independently of playable
+//! game modes. The compatibility roster remains normal-only; availability keeps
+//! story variants and requires state supplied by their runtime owners.
 use super::*;
 
+pub mod membership;
 pub mod requirements;
 
 pub const MAX_EVENTS: usize = 512;
@@ -19,7 +21,7 @@ pub struct Endpoint {
     pub serializer: usize,
 }
 
-/// One normal start area. Narrative and Prestige variants share its location.
+/// One start area. Narrative and Prestige variants can share its location.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Entry {
     pub id: String,
@@ -34,7 +36,7 @@ impl AssetIndex {
     /// Resolve normal authored start areas in loaded scenes. This does not imply
     /// support for starting or completing each of their game modes.
     pub fn event_roster(&mut self) -> Result<Vec<Entry>, Error> {
-        self.roster(false).map(|(entries, _)| entries)
+        self.roster(false, false).map(|r| r.entries)
     }
 
     /// Include notification-backed start requirements, preserving their own
@@ -42,13 +44,24 @@ impl AssetIndex {
     pub fn event_roster_with_requirements(
         &mut self,
     ) -> Result<(Vec<Entry>, Vec<requirements::Binding>), Error> {
-        self.roster(true)
+        self.roster(true, false)
+            .map(|r| (r.entries, r.requirements))
+    }
+
+    /// All authored variants with exact map-membership expressions. Unlike
+    /// the normal-only compatibility roster, no story selection is pre-applied.
+    pub fn event_availability(&mut self) -> Result<Availability, Error> {
+        self.roster(false, true).map(|r| Availability {
+            entries: r.entries,
+            memberships: r.memberships.into_values().collect(),
+        })
     }
 
     fn roster(
         &mut self,
         include_requirements: bool,
-    ) -> Result<(Vec<Entry>, Vec<requirements::Binding>), Error> {
+        include_memberships: bool,
+    ) -> Result<Roster, Error> {
         let rules = self.identity.scenes.clone();
         let startup = self.startup_entries(&rules.level)?;
         let mut graph = Graph::new(&mut self.assets);
@@ -63,13 +76,14 @@ impl AssetIndex {
             .iter()
             .map(|(n, s)| (n.clone(), s.clone()))
             .collect();
-        let identified = if include_requirements {
+        let identified = if include_requirements || include_memberships {
             requirements::identified_bools(&mut graph, &roots)?
         } else {
             BTreeMap::new()
         };
         let mut entries = BTreeMap::new();
         let mut requirements = Vec::new();
+        let mut memberships = BTreeMap::new();
         for (scene, root) in roots {
             let nodes = graph.read(root)?;
             for launcher in nodes.iter().filter(|n| n.object.class == LAUNCHER) {
@@ -120,8 +134,7 @@ impl AssetIndex {
                 }
                 let id = graph.target_field(details, "Id")?.0;
                 if !id.starts_with("gameplay/gamemodes/")
-                    || id.ends_with("_nar")
-                    || id.ends_with("_pres")
+                    || (!include_memberships && (id.ends_with("_nar") || id.ends_with("_pres")))
                 {
                     continue;
                 }
@@ -149,14 +162,35 @@ impl AssetIndex {
                 .map_err(|e| bad(&format!("event {id} visibility: {e}")))?;
                 let mut resolved = Vec::new();
                 for (site, enabled) in notifications {
-                    if !enabled {
+                    if !enabled && !include_memberships {
                         continue;
                     }
                     let (scene_key, serializer) = scenes.endpoint(&mut graph, &site)?;
-                    resolved.push(Endpoint {
+                    let endpoint = Endpoint {
                         scene_key,
                         serializer,
-                    });
+                    };
+                    if include_memberships && !memberships.contains_key(&endpoint) {
+                        let program =
+                            membership::read(&mut graph, &site, &identified, &mut |g, s| {
+                                let (scene_key, serializer) = scenes.endpoint(g, s)?;
+                                Ok(Endpoint {
+                                    scene_key,
+                                    serializer,
+                                })
+                            })
+                            .map_err(|e| bad(&format!("event {id} membership: {e}")))?;
+                        memberships.insert(
+                            endpoint,
+                            membership::Binding {
+                                notification: endpoint,
+                                program,
+                            },
+                        );
+                    }
+                    if enabled {
+                        resolved.push(endpoint);
+                    }
                 }
                 resolved.sort();
                 resolved.dedup();
@@ -195,8 +229,24 @@ impl AssetIndex {
                 }
             }
         }
-        Ok((entries.into_values().collect(), requirements))
+        Ok(Roster {
+            entries: entries.into_values().collect(),
+            requirements,
+            memberships,
+        })
     }
+}
+
+struct Roster {
+    entries: Vec<Entry>,
+    requirements: Vec<requirements::Binding>,
+    memberships: BTreeMap<Endpoint, membership::Binding>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Availability {
+    pub entries: Vec<Entry>,
+    pub memberships: Vec<membership::Binding>,
 }
 
 /// Follow the authored conjunction/negation gates to the membership notifications.

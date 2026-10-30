@@ -303,6 +303,15 @@ identity, including alternative invitations. Missing facts, ambiguous writers,
 cycles and event-written Boolean state are rejected. This static contract does
 not unlock events itself; the session owner evaluates committed account state.
 
+`AssetIndex::event_availability` retains normal, narrative and Prestige start
+areas and compiles the membership expressions behind their map notifications.
+Set union, difference and intersection preserve exact Boolean identifiers,
+participant-manager identities and transition-state endpoints. Copy, mutable
+and integer-range sets remain explicit inputs from their state owners; no input
+is assumed empty or equal to another set. Missing state fails evaluation even
+on an unselected Boolean branch. Resolving this topology does not establish
+runtime support for those state owners or change the normal-only roster API.
+
 Vehicle mesh inputs retain front/rear headlight animation extent and spoiler
 extent/animation ID from the installed item definitions. The vehicle model applies
 them to selected mesh variants; non-finite fields and wrong definition classes
