@@ -1,0 +1,202 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "CarImage": {
+      "description": "One cached image for `profile`.",
+      "properties": {
+        "file": {
+          "description": "The file below the server's content folder,\n`car-images/<fingerprint>/<name>.png`, as the session API's\n`GET /v1/content/<file>` serves it to a client on any computer.",
+          "type": "string"
+        },
+        "height": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "description": "Absolute path of the PNG file.",
+          "type": "string"
+        },
+        "source_format": {
+          "description": "The source texture's `RenderFormat` name, such as `BC1_UNORM`.",
+          "type": "string"
+        },
+        "width": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "file",
+        "width",
+        "height",
+        "source_format"
+      ],
+      "type": "object"
+    },
+    "CarImages": {
+      "description": "A car's cached images; a size is `null` when the car names none or it\ncould not be decoded.",
+      "properties": {
+        "large": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CarImage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "medium": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CarImage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "medium",
+        "large"
+      ],
+      "type": "object"
+    },
+    "Milestone": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "label"
+      ],
+      "type": "object"
+    },
+    "Starter": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "image": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CarImages"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "image"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "The server owns the plan; the launcher adds installed names and cached images.",
+  "properties": {
+    "account_id": {
+      "type": "string"
+    },
+    "can_apply": {
+      "type": "boolean"
+    },
+    "car_images": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "completes": {
+      "items": {
+        "$ref": "#/definitions/Milestone"
+      },
+      "type": "array"
+    },
+    "generation": {
+      "type": "string"
+    },
+    "operation_id": {
+      "type": "string"
+    },
+    "plan_id": {
+      "type": "string"
+    },
+    "reasons": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "reopens": {
+      "items": {
+        "$ref": "#/definitions/Milestone"
+      },
+      "type": "array"
+    },
+    "restart": {
+      "type": "boolean"
+    },
+    "source_checkpoint": {
+      "type": "string"
+    },
+    "starter": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "starters": {
+      "items": {
+        "$ref": "#/definitions/Starter"
+      },
+      "type": "array"
+    },
+    "target_checkpoint": {
+      "type": "string"
+    },
+    "version": {
+      "const": 1,
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version",
+    "account_id",
+    "generation",
+    "source_checkpoint",
+    "target_checkpoint",
+    "operation_id",
+    "plan_id",
+    "completes",
+    "reopens",
+    "can_apply",
+    "reasons",
+    "starters",
+    "starter",
+    "car_images"
+  ],
+  "title": "Preview",
+  "type": "object"
+}

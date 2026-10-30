@@ -69,8 +69,7 @@ impl PlayerListener {
             if sections.len() > MAX_PENDING.saturating_sub(self.pending_entries.len()) {
                 break;
             }
-            self.pending_entries
-                .extend(sections.into_iter().map(|section| (section, Vec::new())));
+            self.queue_entries(sections.into_iter().map(|section| (section, Vec::new())));
             self.pending_binding_refreshes.pop_front();
             tracing::info!(participant, "owned driving handoff bindings refreshed");
         }
@@ -210,6 +209,7 @@ impl PlayerListener {
             vehicle,
             position: destination.locator(),
             basis: destination.basis(),
+            speed: 0.,
         })
     }
     /// Assignments due by `world_ms`, oldest first. Official hosts send the

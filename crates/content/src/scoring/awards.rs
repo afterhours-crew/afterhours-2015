@@ -100,6 +100,9 @@ fn read<S: Source>(
     }
     let mut graph = Graph::new(source);
     let nodes = graph.read(Site::root(blueprint))?;
+    if !nodes.iter().any(|n| n.object.class == "ScoreEntityData") {
+        return Ok(Vec::new());
+    }
     let roots: Vec<_> = nodes
         .iter()
         .filter(|n| n.object.class == "ParticipantLogicEntityData")

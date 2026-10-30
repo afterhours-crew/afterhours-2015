@@ -8,6 +8,77 @@ use crate::{crypto::session_key, handshake::Cursors};
 const HOST_INDEX: u16 = 0;
 const CLIENT_INDEX: u16 = 9;
 
+fn peer_cursors() -> Cursors {
+    let c = cursors();
+    Cursors {
+        rx: c.tx,
+        tx: c.rx,
+        client_index: c.host_index,
+        host_index: c.client_index,
+        token: c.token,
+    }
+}
+
+#[test]
+fn responder_acknowledges_received_sync_then_exchanges_real_application_datagrams() {
+    let (mut host, first) = Link::start(codec(), cursors(), 100).unwrap();
+    let (mut peer, response) = Link::respond(codec(), peer_cursors(), &first, 103).unwrap();
+    assert!(!peer.running());
+    let decoded = codec().decode(&response).unwrap();
+    let parsed = parse(&decoded.parts[0].bytes).unwrap();
+    assert_eq!(parsed.acknowledgement, MIN_RELIABLE);
+    let sync = parsed.envelopes[0].sync.unwrap();
+    assert_eq!((sync.echo, sync.sent), (100, 103));
+    let acknowledged = host.receive(&response, 105).unwrap();
+    assert!(host.running());
+    assert_eq!(acknowledged.send.len(), 1);
+    let confirmation = peer.receive(&acknowledged.send[0], 107).unwrap();
+    assert!(peer.running());
+    for wire in confirmation.send {
+        host.receive(&wire, 109).unwrap();
+    }
+    let from_host = host.send_application(b"host", 110).unwrap();
+    assert_eq!(
+        peer.receive(&from_host, 111).unwrap().applications,
+        [b"host"]
+    );
+    let from_peer = peer.send_application(b"peer", 112).unwrap();
+    assert_eq!(
+        host.receive(&from_peer, 113).unwrap().applications,
+        [b"peer"]
+    );
+    assert_eq!(host.receive(&from_peer, 114).unwrap().duplicates, 1);
+    assert_eq!(peer.cursors().rx, host.cursors().tx);
+    assert_eq!(host.cursors().rx, peer.cursors().tx);
+}
+
+#[test]
+fn responder_refuses_corrupt_foreign_or_noninitial_input() {
+    let (mut host, first) = Link::start(codec(), cursors(), 0).unwrap();
+    let mut corrupt = first.clone();
+    *corrupt.last_mut().unwrap() ^= 1;
+    assert!(matches!(
+        Link::respond(codec(), peer_cursors(), &corrupt, 1),
+        Err(Error::Transport(transport::Error::Authentication))
+    ));
+    let mut foreign = peer_cursors();
+    foreign.host_index += 1;
+    assert!(matches!(
+        Link::respond(codec(), foreign, &first, 1),
+        Err(Error::Framing)
+    ));
+    let application = host.send_application(b"not a first sync", 1).unwrap();
+    assert!(matches!(
+        Link::respond(codec(), peer_cursors(), &application, 2),
+        Err(Error::Framing)
+    ));
+    let empty = host.datagram(MIN_RELIABLE, MAX_RELIABLE, &[]).unwrap();
+    assert!(matches!(
+        Link::respond(codec(), peer_cursors(), &empty, 2),
+        Err(Error::Framing)
+    ));
+}
+
 fn codec() -> Codec {
     let key = session_key(
         "11111111-2222-3333-4444-555555555555",

@@ -2,7 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-use super::{Error, Initial, Kind, MAX_OBJECTS, Record, entity, sublevel};
+use super::{Error, Initial, Kind, MAX_OBJECTS, Record, direct_entity, entity, sublevel};
 use crate::bits::BitWriter;
 pub use nfs_protocol::world::ghost::Setup;
 use nfs_protocol::world::{
@@ -52,12 +52,16 @@ pub struct Partial {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Bindings {
+    client_info_slots: Option<usize>,
     objects: BTreeMap<u16, Kind>,
     splines: Option<super::spline::Content>,
     scenes: BTreeMap<u16, sublevel::Profile>,
     content: Option<std::sync::Arc<sublevel::Content>>,
     entities: BTreeMap<u16, std::sync::Arc<entity::creation::Binding>>,
     entity_content: Option<std::sync::Arc<entity::creation::Content>>,
+    direct_entities: BTreeMap<u16, std::sync::Arc<direct_entity::Binding>>,
+    direct_content: Option<std::sync::Arc<direct_entity::Content>>,
+    waypoint_progress: BTreeMap<u16, bool>,
 }
 
 fn id_valid(id: u16) -> Result<(), Error> {
@@ -69,6 +73,25 @@ fn id_valid(id: u16) -> Result<(), Error> {
 }
 
 impl Bindings {
+    /// Client-originated replication has no receive-side packed setup. Its
+    /// information record takes its slot count from connection context.
+    pub fn from_client(slots: usize) -> Result<Self, Error> {
+        if slots == 0 || slots > super::client_info::MAX_SLOTS {
+            return Err(Error::Bound);
+        }
+        Ok(Self {
+            client_info_slots: Some(slots),
+            ..Self::default()
+        })
+    }
+
+    fn setup_profile(&self) -> SetupProfile {
+        if self.client_info_slots.is_some() {
+            SetupProfile::ClientSend
+        } else {
+            SetupProfile::ClientReceivePacked
+        }
+    }
     pub fn with_splines(mut self, content: super::spline::Content) -> Self {
         self.splines = Some(content);
         self
@@ -79,6 +102,9 @@ impl Bindings {
         id: u16,
         bound: Option<Kind>,
     ) -> Result<Decoded_, Error> {
+        if let Some(slots) = self.client_info_slots {
+            return Record::decode_client_info(span, bound, slots);
+        }
         let create = span.read_u32(13, 1).map_err(|_| Error::Truncated)? != 0;
         let kind = if create {
             Kind::from_index(span.read_u32(14, 5).map_err(|_| Error::Truncated)? as u8)?
@@ -90,6 +116,28 @@ impl Bindings {
         }
         if kind == Kind::TrafficGoal {
             return Record::decode_traffic(span, bound, self.splines.as_ref());
+        }
+        if kind == Kind::GotoWaypointGoal {
+            return Record::decode_goto_waypoint(
+                span,
+                bound,
+                self.waypoint_progress.get(&id).copied(),
+            );
+        }
+        if kind == Kind::Entity
+            && (if create {
+                span.read_u32(19, 1).map_err(|_| Error::Truncated)? == 0
+            } else {
+                self.direct_entities.contains_key(&id)
+            })
+        {
+            return Record::decode_direct_entity(
+                span,
+                id,
+                create,
+                self.direct_content.as_deref(),
+                self.direct_entities.get(&id),
+            );
         }
         Record::decode_context(
             span,
@@ -120,6 +168,10 @@ impl Bindings {
         self.entity_content = Some(std::sync::Arc::new(content));
         self
     }
+    pub fn with_direct_entities(mut self, content: direct_entity::Content) -> Self {
+        self.direct_content = Some(std::sync::Arc::new(content));
+        self
+    }
     pub fn len(&self) -> usize {
         self.objects.len()
     }
@@ -134,17 +186,16 @@ impl Bindings {
             .get(&id)
             .is_some_and(|binding| binding.vehicle_profile().is_ok())
     }
+    /// Whether the entity is a state sequence: its blueprint's first serializer is
+    /// the sequence root (garage and event sequences alike; E996 refused an event
+    /// intro's Stop when only the garage layouts were accepted).
     pub fn is_sequence(&self, id: u16) -> bool {
         self.entities.get(&id).is_some_and(|binding| {
             binding.profile().is_ok_and(|profile| {
-                [
-                    crate::sequences::Layout::Waiting,
-                    crate::sequences::Layout::GarageExit,
-                    crate::sequences::Layout::GarageEntry,
-                ]
-                .into_iter()
-                .any(|layout| profile == &layout.profile())
-                    || profile == &crate::crash::profile()
+                matches!(
+                    profile.kinds().first(),
+                    Some(entity::Kind::SequenceRoot | entity::Kind::VehicleSequenceRoot)
+                )
             })
         })
     }
@@ -152,8 +203,13 @@ impl Bindings {
         self.objects.clear();
         self.scenes.clear();
         self.entities.clear();
+        self.direct_entities.clear();
+        self.waypoint_progress.clear();
     }
 
+    /// Decode received operations transactionally. A deletion of an already
+    /// absent object is accepted by the native reader; updates still require a
+    /// binding. Locally generated operations use the stricter `apply` contract.
     pub fn decode(&mut self, input: BitSpan<'_>) -> Result<Decoded, Error> {
         if input.len() > MAX_SECTION_BITS {
             return Err(Error::Bound);
@@ -173,13 +229,15 @@ impl Bindings {
         for &id in prefix.deleted() {
             let id = id as u16;
             id_valid(id)?;
-            next.objects.remove(&id).ok_or(Error::UnknownObject)?;
+            next.objects.remove(&id);
             next.scenes.remove(&id);
             next.entities.remove(&id);
+            next.direct_entities.remove(&id);
+            next.waypoint_progress.remove(&id);
             deleted.push(id);
         }
         let first = prefix
-            .first_record(SetupProfile::ClientReceivePacked)
+            .first_record(self.setup_profile())
             .map_err(|_| Error::Truncated)?;
         let mut cursor = first
             .as_ref()
@@ -201,11 +259,18 @@ impl Bindings {
             let kind = decoded.record.update.kind();
             if create {
                 next.objects.insert(id, kind);
+                if let Some(Initial::GotoWaypointGoal(goal)) = &decoded.record.initial {
+                    next.waypoint_progress.insert(id, goal.progress_updates);
+                }
                 if let Some(profile) = decoded.record.scene_profile() {
                     next.scenes.insert(id, profile.clone());
                 }
                 if let Some(binding) = decoded.record.entity_binding() {
                     next.entities.insert(id, std::sync::Arc::clone(binding));
+                }
+                if let Some(binding) = decoded.record.direct_entity_binding() {
+                    next.direct_entities
+                        .insert(id, std::sync::Arc::clone(binding));
                 }
             }
             boundaries.push(Boundary {
@@ -252,9 +317,11 @@ impl Bindings {
             next.objects.remove(&id);
             next.scenes.remove(&id);
             next.entities.remove(&id);
+            next.direct_entities.remove(&id);
+            next.waypoint_progress.remove(&id);
         }
         let first = prefix
-            .first_record(SetupProfile::ClientReceivePacked)
+            .first_record(self.setup_profile())
             .map_err(|_| Error::Truncated)?;
         let mut cursor = first
             .as_ref()
@@ -281,11 +348,19 @@ impl Bindings {
                     let kind = decoded.record.update.kind();
                     if decoded.record.initial.is_some() {
                         next.objects.insert(decoded.record.id, kind);
+                        if let Some(Initial::GotoWaypointGoal(goal)) = &decoded.record.initial {
+                            next.waypoint_progress
+                                .insert(decoded.record.id, goal.progress_updates);
+                        }
                         if let Some(profile) = decoded.record.scene_profile() {
                             next.scenes.insert(decoded.record.id, profile.clone());
                         }
                         if let Some(binding) = decoded.record.entity_binding() {
                             next.entities
+                                .insert(decoded.record.id, std::sync::Arc::clone(binding));
+                        }
+                        if let Some(binding) = decoded.record.direct_entity_binding() {
+                            next.direct_entities
                                 .insert(decoded.record.id, std::sync::Arc::clone(binding));
                         }
                     }
@@ -321,12 +396,18 @@ impl Bindings {
             next.objects.remove(&id).ok_or(Error::UnknownObject)?;
             next.scenes.remove(&id);
             next.entities.remove(&id);
+            next.direct_entities.remove(&id);
+            next.waypoint_progress.remove(&id);
         }
         for record in &section.records {
             let kind = record.update.kind();
             if let Some(initial) = &record.initial {
                 if next.objects.insert(record.id, kind).is_some() {
                     return Err(Error::DuplicateObject);
+                }
+                if let Initial::GotoWaypointGoal(goal) = initial {
+                    next.waypoint_progress
+                        .insert(record.id, goal.progress_updates);
                 }
                 if let Some(profile) = record.scene_profile() {
                     if let (Some(content), Initial::SubLevel { prefix, .. }) =
@@ -346,14 +427,32 @@ impl Bindings {
                     next.entities
                         .insert(record.id, std::sync::Arc::clone(binding));
                 }
+                if let Some(binding) = record.direct_entity_binding() {
+                    if let Some(content) = &next.direct_content
+                        && content.binding(binding.asset())? != **binding
+                    {
+                        return Err(Error::TypeMismatch);
+                    }
+                    next.direct_entities
+                        .insert(record.id, std::sync::Arc::clone(binding));
+                }
             } else {
                 if next.get(record.id).ok_or(Error::UnknownObject)? != kind {
+                    return Err(Error::TypeMismatch);
+                }
+                if let super::Update::GotoWaypointGoal(update) = record.update
+                    && next.waypoint_progress.get(&record.id).copied()
+                        != Some(update.progress_updates())
+                {
                     return Err(Error::TypeMismatch);
                 }
                 if record.scene_profile() != next.scenes.get(&record.id) {
                     return Err(Error::TypeMismatch);
                 }
                 if record.entity_binding() != next.entities.get(&record.id) {
+                    return Err(Error::TypeMismatch);
+                }
+                if record.direct_entity_binding() != next.direct_entities.get(&record.id) {
                     return Err(Error::TypeMismatch);
                 }
             }
@@ -375,6 +474,14 @@ impl Section {
         }
         if self.records.is_empty() != self.setup.is_none() {
             return Err(Error::Shape);
+        }
+        let client = matches!(self.setup, Some(Setup::ContextOnly));
+        if self
+            .records
+            .iter()
+            .any(|r| (r.update.kind() == Kind::ClientToServerInfo) != client)
+        {
+            return Err(Error::Unsupported);
         }
         let mut w = BitWriter::new();
         w.put_bool(self.float_bits.is_some());
@@ -467,6 +574,7 @@ fn split(records: Vec<Record>, max_frame_bits: usize, timed: bool) -> Result<Vec
 
 fn encode_setup(w: &mut BitWriter, setup: Setup) -> Result<(), Error> {
     match setup {
+        Setup::ContextOnly => {}
         Setup::RawEscape(words) => {
             w.put_bool(true).put(0, 3);
             for word in words {
@@ -504,3 +612,6 @@ fn encode_setup(w: &mut BitWriter, setup: Setup) -> Result<(), Error> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

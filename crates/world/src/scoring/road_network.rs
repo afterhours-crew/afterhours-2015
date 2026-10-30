@@ -120,8 +120,12 @@ impl Network {
             }
         }
         let origin = [min[0] - CELL, min[1] - CELL];
-        let columns = (((max[0] - origin[0]) / CELL).floor() as usize) + 2;
-        let rows = (((max[1] - origin[1]) / CELL).floor() as usize) + 2;
+        let columns = (((max[0] - origin[0]) / CELL).floor() as usize)
+            .checked_add(2)
+            .ok_or(Error::Bound)?;
+        let rows = (((max[1] - origin[1]) / CELL).floor() as usize)
+            .checked_add(2)
+            .ok_or(Error::Bound)?;
         if columns.saturating_mul(rows) > 1 << 22 {
             return Err(Error::Bound);
         }

@@ -139,6 +139,7 @@ impl World {
                 entity::state::State::new(creation, &content, |id| self.objects.contains_key(&id))?;
             let before = state.clone();
             state.apply(fields.clone())?;
+            state.validate_sequence_references(|id| self.objects.contains_key(&id))?;
             if state == before {
                 return Ok(None);
             }
@@ -208,6 +209,34 @@ impl World {
         current: &Update,
         removed: Option<u16>,
     ) -> Result<(), Error> {
+        let target = match initial {
+            Initial::FollowTargetGoal(goal) => Some(goal.target),
+            Initial::ChaseTargetGoal(goal) => Some(goal.target),
+            Initial::LookForLawbreakersGoal(goal) => Some(goal.target),
+            _ => None,
+        };
+        if let Some(target) = target
+            && target != 0
+            && (removed == Some(target) || !self.objects.contains_key(&target))
+        {
+            return Err(Error::UnknownObject);
+        }
+        if let Initial::AiPacingGroup = initial {
+            let Update::AiPacingGroup(group) = current else {
+                return Err(Error::TypeMismatch);
+            };
+            for entry in group.entries.iter().flatten() {
+                if removed == Some(entry.participant)
+                    || self
+                        .objects
+                        .get(&entry.participant)
+                        .map(|o| o.initial.kind())
+                        != Some(Kind::Participant)
+                {
+                    return Err(Error::UnknownObject);
+                }
+            }
+        }
         if let Initial::ParticipantLocationMap = initial {
             let Update::ParticipantLocationMap(map) = current else {
                 return Err(Error::TypeMismatch);
@@ -477,8 +506,21 @@ impl World {
         };
         for (id, object) in &self.objects {
             if Some(*id) != removed && object.initial.kind() == Kind::SubLevel {
-                let (creation, content) = scene(object)?;
-                sublevel::state::State::new(creation, &content, bindings)?;
+                let (
+                    Initial::SubLevel {
+                        prefix,
+                        fields: initial,
+                    },
+                    Update::SubLevel { fields, .. },
+                ) = (&object.initial, &object.current)
+                else {
+                    return Err(Error::TypeMismatch);
+                };
+                // Stored scenes passed full shape/encoding checks on creation
+                // and mutation. Removing an object or level only changes which
+                // references resolve; rebuilding every scene here made event
+                // teardown serialize the entire world once per removed object.
+                sublevel::state::validate_references(prefix, initial, fields, bindings)?;
             }
         }
         Ok(())
@@ -495,12 +537,19 @@ impl Update {
         match (self, new) {
             (Self::PlayerManager(a), Self::PlayerManager(b)) => a.merge(b)?,
             (Self::PlayerView(a), Self::PlayerView(b)) => a.merge(b),
+            (Self::AiPacingGroup(a), Self::AiPacingGroup(b)) => replace(&mut a.entries, &b.entries),
             (Self::ParticipantLocationMap(a), Self::ParticipantLocationMap(b)) => {
                 replace(&mut a.groups, &b.groups)
             }
             (Self::ScriptedSplineGoal, Self::ScriptedSplineGoal) => {}
             (Self::TrafficGoal, Self::TrafficGoal) => {}
             (Self::WanderGoal, Self::WanderGoal) => {}
+            (Self::GotoWaypointGoal(a), Self::GotoWaypointGoal(b)) => a.merge(*b)?,
+            (Self::SpeedLimitGoal, Self::SpeedLimitGoal) => {}
+            (Self::ScriptedInputGoal, Self::ScriptedInputGoal) => {}
+            (Self::FollowTargetGoal, Self::FollowTargetGoal)
+            | (Self::ChaseTargetGoal, Self::ChaseTargetGoal)
+            | (Self::LookForLawbreakersGoal, Self::LookForLawbreakersGoal) => {}
             (Self::Participant(a), Self::Participant(b)) => {
                 replace(&mut a.player, &b.player);
                 replace(&mut a.entity, &b.entity);

@@ -246,3 +246,37 @@ fn static_bindings_are_bounded_unique_and_resolve_real_assets() {
         Err(Error::Bound)
     );
 }
+
+#[test]
+fn a_session_table_holds_more_profiles_than_one_scene_and_stays_bounded() {
+    let count = 1_500u16;
+    let catalog = Catalog::new(3, &[(12, count)]).unwrap();
+    let p = Profile::new(&[Kind::Root]).unwrap();
+    let profiles = |n: u16| {
+        (0..n)
+            .map(|local_index| {
+                (
+                    Asset {
+                        local_index,
+                        ..asset()
+                    },
+                    p.clone(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let content = Content::new(vec![catalog], profiles(count)).unwrap();
+    assert!(
+        content
+            .profile(Asset {
+                local_index: count - 1,
+                ..asset()
+            })
+            .is_ok()
+    );
+    let big = Catalog::new(3, &[(12, MAX_PROFILES as u16 + 1)]).unwrap();
+    assert_eq!(
+        Content::new(vec![big], profiles(MAX_PROFILES as u16 + 1)),
+        Err(Error::Bound)
+    );
+}

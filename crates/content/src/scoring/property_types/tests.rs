@@ -14,6 +14,55 @@ fn object(class: &str, fields: Vec<(&str, Ebx)>) -> Object {
 }
 
 #[test]
+fn channels_declare_types_without_values_and_keep_unknown_hashes_untyped() {
+    let row = |id, hash, value, name: &str| {
+        Ebx::Struct(Fields(vec![
+            ("Id".into(), Ebx::UInt32(id)),
+            ("FieldTypeHash".into(), Ebx::UInt32(hash)),
+            (
+                "Realm".into(),
+                Ebx::Enum {
+                    value,
+                    name: Some(name.into()),
+                },
+            ),
+        ]))
+    };
+    let rows = vec![
+        row(1, 0x7f39_a7b4, 2, "Realm_ClientAndServer"),
+        row(2, 0x0cc9_7257, 1, "Realm_Server"),
+        row(3, 0x9638_b221, 0, "Realm_Client"),
+        row(4, 99, 1, "Realm_Server"),
+    ];
+    let declaration = channel_declaration(&object(
+        "SchematicChannelAsset",
+        vec![("Properties", Ebx::Array(rows.clone()))],
+    ))
+    .unwrap();
+    assert_eq!(declaration.inputs, [(1, Kind::Float), (2, Kind::Integer)]);
+    assert_eq!(declaration.outputs, declaration.inputs);
+    let mut duplicate = rows;
+    duplicate.push(row(1, 0x0cc9_7257, 1, "Realm_Server"));
+    assert!(
+        channel_declaration(&object(
+            "SchematicChannelAsset",
+            vec![("Properties", Ebx::Array(duplicate))]
+        ))
+        .is_err()
+    );
+    assert!(
+        channel_declaration(&object(
+            "SchematicChannelAsset",
+            vec![(
+                "Properties",
+                Ebx::Array(vec![row(1, 0x7f39_a7b4, 1, "Realm_Client")])
+            )]
+        ))
+        .is_err()
+    );
+}
+
+#[test]
 fn owned_vehicle_queries_declare_only_the_verified_output_types() {
     use nfs_world::scoring::vehicle_query as q;
     for (class, query) in [

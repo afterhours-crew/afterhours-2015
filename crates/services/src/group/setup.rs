@@ -37,6 +37,7 @@ impl Config {
         body: &[u8],
         identity: &Identity,
         generated: &Generated,
+        session: &[u8],
     ) -> Result<(Vec<u8>, Vec<u8>), Error> {
         let q = CreateGameRequest::decode(body, body_limits()).map_err(|_| Error::Ineligible)?;
         if q.unknown_field_count() != 0
@@ -61,7 +62,7 @@ impl Config {
         {
             return Err(Error::Ineligible);
         }
-        self.validate_request(&q)?;
+        self.validate_request(&q, session)?;
         let common = q.common_game_data.ok_or(Error::Ineligible)?;
         let creation = q.game_creation_data.ok_or(Error::Ineligible)?;
         let join = q.player_join_data.ok_or(Error::Ineligible)?;

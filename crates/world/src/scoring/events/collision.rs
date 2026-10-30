@@ -64,7 +64,7 @@ impl Dispatch<'_> {
                     if !matches!(previous, None | Some(Value::Boolean(_))) {
                         return Err(Error::InvalidGraph);
                     }
-                    if !outputs.suppress_equal_querying || previous != Some(value) {
+                    if !outputs.suppress_equal_querying || previous.as_ref() != Some(&value) {
                         self.publish(state, port, value)?;
                     }
                 }

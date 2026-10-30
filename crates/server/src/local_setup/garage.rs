@@ -21,6 +21,86 @@ const REP: &str = "gameplay/scoring/replevelcalculationlogic";
 const FREE: &str = "gameplay/driverdetails/freeroamstatslogic";
 const DRIVER: &str = "gameplay/driverdetails/driverdetailslogic";
 const SESSION: &str = "gameplay/stats/sessionstatslogic";
+const DRIVING_TIMER: &str = "gameplay/stats/cardrivingtelemetrytimerprefab";
+
+fn driving_timer(
+    composition: &nfs_content::scoring::events::Composition,
+    signals: &[nfs_world::scoring::event_sync::Binding],
+    nodes: &[nfs_content::scoring::nodes::Node],
+) -> Result<crate::driving_timer::Binding> {
+    use crate::driving_timer::{Binding, Signal};
+    use nfs_world::scoring::nodes::{CLOSE, Definition, IN, LOAD, OPEN, OUT};
+    let candidates = |port| {
+        composition
+            .connections
+            .iter()
+            .filter_map(|edge| {
+                let target = composition.nodes.get(usize::from(edge.target.node))?;
+                let source = composition.nodes.get(usize::from(edge.source.node))?;
+                if target.identity.asset != DRIVING_TIMER
+                    || target.class != "EventGateEntityData"
+                    || source.identity.asset != DRIVING_TIMER
+                    || source.identity.instances != target.identity.instances
+                    || edge.source.event != OUT
+                    || edge.target.event != port
+                {
+                    return None;
+                }
+                let signal = signals.iter().find(|s| s.node == edge.source.node)?;
+                Some((edge.target.node, *signal))
+            })
+            .collect::<Vec<_>>()
+    };
+    let start = candidates(OPEN);
+    let stop = candidates(IN);
+    let ([(gate, start)], [(stop_gate, stop)]) = (start.as_slice(), stop.as_slice()) else {
+        return Err("ambiguous driving timer input topology".into());
+    };
+    let gate_identity = &composition.nodes[usize::from(*gate)].identity;
+    let cache = |source| {
+        composition
+            .connections
+            .iter()
+            .filter_map(|e| {
+                let n = composition.nodes.get(usize::from(e.target.node))?;
+                (e.source.node == source
+                    && e.source.event == OUT
+                    && e.target.event == LOAD
+                    && n.class == "FloatCacheEntityData"
+                    && n.identity.asset == DRIVING_TIMER
+                    && n.identity.instances == gate_identity.instances)
+                    .then_some(e.target.node)
+            })
+            .collect::<Vec<_>>()
+    };
+    if gate != stop_gate
+        || start == stop
+        || !nodes.iter().any(|n| {
+            n.identity == *gate_identity
+                && n.configuration.definition == (Definition::Gate { open: false })
+        })
+        || composition
+            .connections
+            .iter()
+            .any(|e| e.target.node == *gate && e.target.event == CLOSE)
+        || cache(start.node).len() != 1
+        || cache(*gate).len() != 1
+        || cache(start.node) == cache(*gate)
+    {
+        return Err("unsupported driving timer gate/cache behavior".into());
+    }
+    Ok(Binding {
+        role: 3,
+        start: Signal {
+            entity: start.entity,
+            event: start.event,
+        },
+        stop: Signal {
+            entity: stop.entity,
+            event: stop.event,
+        },
+    })
+}
 
 fn boolean_state(name: &str, input: &Input) -> Option<bool> {
     match (name, input) {
@@ -148,6 +228,32 @@ fn event(id: u16, event: &nfs_content::logic_events::Event) -> Json {
     json!({"target":{"capture_id":id},"entity":event.bus,"event":event.ordinal})
 }
 
+fn return_confirmation(
+    composition: &nfs_content::scoring::events::Composition,
+    signals: &[nfs_world::scoring::event_sync::Binding],
+    request: &nfs_content::logic_events::Event,
+) -> Result<nfs_world::scoring::event_sync::Binding> {
+    let candidates: Vec<_> = signals
+        .iter()
+        .filter(|signal| {
+            composition
+                .nodes
+                .get(usize::from(signal.node))
+                .is_some_and(|node| {
+                    node.class == "EventSyncEntityData"
+                        && node.identity.instances.iter().any(|(asset, index)| {
+                            asset == &request.target.asset && *index == request.target.index
+                        })
+                })
+        })
+        .copied()
+        .collect();
+    let [signal] = candidates.as_slice() else {
+        return Err("ambiguous garage return confirmation".into());
+    };
+    Ok(*signal)
+}
+
 pub(super) fn build(index: &mut AssetIndex, thresholds: &Json) -> Result<Json> {
     let definitions = [
         (1, GAMEPLAY, FADE),
@@ -204,6 +310,14 @@ pub(super) fn build(index: &mut AssetIndex, thresholds: &Json) -> Result<Json> {
             GAMEPLAY,
             "presentation/resetloadingscreenstatepresentationblueprint",
         ),
+        // Lives with DriverDetailsLogic (official E1026 122.317, 572.121,
+        // 756.224, 891.324 s; E912 75.249 s): its server property gates the
+        // driving-style scoring spawner; the client holds nothing for it.
+        (
+            27,
+            GAMEPLAY,
+            "gameplay/isparticipantinfreedriveparticipantlogic",
+        ),
     ];
     let mut doc = json!({"format":"nfs-garage-logic","version":1,"build_sha256":nfs_services::SUPPORTED_BUILD_SHA256,
         "reputation_thresholds":thresholds});
@@ -218,6 +332,8 @@ pub(super) fn build(index: &mut AssetIndex, thresholds: &Json) -> Result<Json> {
         "world_spawn",
         "world_settled",
         "free_roam",
+        "in_world_teleport",
+        "in_world_arrival",
         "return_requested",
         "returning",
         "returned",
@@ -247,13 +363,27 @@ pub(super) fn build(index: &mut AssetIndex, thresholds: &Json) -> Result<Json> {
         profiles.insert((layout.asset.bundle,layout.asset.type_id,layout.asset.local_index),json!({"asset":asset,"serializers":layout.fields.iter().map(|f|kind(f.kind)).collect::<Result<Vec<_>>>()?}));
         entities.insert(id, entity);
     }
+    // A prologue participant's spawn adds the career-start logic outside the
+    // garage presentation (official E1026 34.631-34.919 s: unlocks 518,
+    // achievements 515, reputation 481, free-roam statistics 527). Reputation
+    // shares the session statistics' installed spawner predicate (PSM range
+    // 25..52). The tutorials and challenges of this batch are not intro spawns.
+    doc["intro_spawn"] = batch();
+    for id in [2, 9, 10, 21] {
+        push(&mut doc, "intro_spawn", "entities", entities[&id].clone());
+    }
+    // Challenges start with the handoff to normal play (official E1026
+    // 1247.825 s: the challenge root with the event canceller's shutdown).
+    doc["intro_handoff"] = batch();
+    push(&mut doc, "intro_handoff", "entities", entities[&11].clone());
     for (phase, ids) in [
         ("spawn", (1..=16).collect::<Vec<_>>()),
         ("entry", vec![17]),
         ("exit", vec![18, 19, 20, 21]),
-        ("arrived", vec![22, 23, 24]),
+        ("in_world_teleport", vec![18, 19, 20, 21]),
+        ("arrived", vec![22, 23, 24, 27]),
         ("crashed", vec![25]),
-        ("recovered", vec![21, 22, 23, 24]),
+        ("recovered", vec![21, 22, 23, 24, 27]),
         ("resetting", vec![26]),
         ("returning", vec![20]),
         ("returned", vec![13, 14, 15, 16]),
@@ -267,8 +397,10 @@ pub(super) fn build(index: &mut AssetIndex, thresholds: &Json) -> Result<Json> {
         ("exit", vec![16, 17]),
         ("arrive", vec![18, 19]),
         ("arrived", vec![20]),
-        ("returning", vec![23, 22, 21, 24]),
-        ("crashed", vec![23, 22, 21, 24]),
+        ("in_world_teleport", vec![21, 22, 23, 24, 27]),
+        ("in_world_arrival", vec![18, 19]),
+        ("returning", vec![23, 22, 21, 24, 27]),
+        ("crashed", vec![23, 22, 21, 24, 27]),
         ("recovered", vec![25]),
         ("reset_arrived", vec![26]),
         ("returned", vec![20]),
@@ -322,6 +454,11 @@ pub(super) fn build(index: &mut AssetIndex, thresholds: &Json) -> Result<Json> {
             ],
         ),
         ("world_spawn", vec![("BlackScreen", true)]),
+        (
+            "in_world_teleport",
+            vec![("ViewWorld", false), ("BlackScreen", true)],
+        ),
+        ("in_world_arrival", vec![("BlackScreen", false)]),
         ("returning", vec![("ViewWorld", false)]),
     ] {
         for (key, active) in events {
@@ -330,6 +467,7 @@ pub(super) fn build(index: &mut AssetIndex, thresholds: &Json) -> Result<Json> {
     }
     for (phase, id, name) in [
         ("spawn", 3, SESSION),
+        ("intro_spawn", 21, FREE),
         ("world_settled", 21, FREE),
         ("recovered", 21, FREE),
         ("free_roam", 24, DRIVER),
@@ -385,6 +523,18 @@ pub(super) fn build(index: &mut AssetIndex, thresholds: &Json) -> Result<Json> {
         return Err("ambiguous garage return event".into());
     }
     push(&mut doc, "return_requested", "events", event(22, &alive[0]));
+    let composition = index.scoring_events(ALIVE)?;
+    let signals = index.scoring_event_sync(ALIVE, &composition)?;
+    let confirmation = return_confirmation(&composition, &signals, &alive[0])?;
+    doc["return_confirmation"] = json!({"capture_id":22,
+        "entity":confirmation.entity,"event":confirmation.event});
+    let composition = index.scoring_events(SESSION)?;
+    let signals = index.scoring_event_sync(SESSION, &composition)?;
+    let nodes = index.scoring_nodes(SESSION)?;
+    let timer = driving_timer(&composition, &signals, &nodes)?;
+    doc["driving_timer"] = json!({"role":timer.role,
+        "start":{"entity":timer.start.entity,"event":timer.start.event},
+        "stop":{"entity":timer.stop.entity,"event":timer.stop.event}});
     doc["content"] = json!({"catalogs":catalogs.into_values().collect::<Vec<_>>(),"profiles":profiles.into_values().collect::<Vec<_>>()});
     crate::garage_logic::GarageLogic::from_json(&doc)
         .map_err(|_| "generated garage lifecycle failed validation")?;
@@ -394,6 +544,164 @@ pub(super) fn build(index: &mut AssetIndex, thresholds: &Json) -> Result<Json> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn driving_timer_binds_authored_routes_and_rejects_changed_gate_behavior() {
+        use nfs_content::scoring::{
+            events::{Composition, Identity, Node},
+            nodes::Configuration,
+        };
+        use nfs_world::scoring::{
+            event_sync::Binding,
+            events::{Connection, Delivery, Endpoint},
+            nodes::{CLOSE, Definition, IN, LOAD, OPEN, OUT},
+        };
+        let nodes = [
+            "EventSyncEntityData",
+            "FloatCacheEntityData",
+            "EventGateEntityData",
+            "EventSyncEntityData",
+            "FloatCacheEntityData",
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, class)| Node {
+            identity: Identity {
+                asset: DRIVING_TIMER.into(),
+                index,
+                instances: vec![(SESSION.into(), 42)],
+            },
+            class: class.into(),
+            listeners: None,
+            forward: None,
+        })
+        .collect::<Vec<_>>();
+        let configurations = vec![nfs_content::scoring::nodes::Node {
+            identity: nodes[2].identity.clone(),
+            configuration: Configuration {
+                definition: Definition::Gate { open: false },
+                defaults: vec![],
+            },
+        }];
+        let edge = |from, to, event| Connection {
+            source: Endpoint {
+                node: from,
+                event: OUT,
+            },
+            target: Endpoint { node: to, event },
+            delivery: Delivery::Local,
+        };
+        let mut graph = Composition {
+            nodes,
+            buses: vec![],
+            bus_entities: vec![],
+            connections: vec![
+                edge(0, 2, OPEN),
+                edge(0, 1, LOAD),
+                edge(3, 2, IN),
+                edge(2, 4, LOAD),
+            ],
+            properties: vec![],
+            links: vec![],
+        };
+        let signals = vec![
+            Binding {
+                node: 0,
+                entity: 5,
+                event: 71,
+            },
+            Binding {
+                node: 3,
+                entity: 5,
+                event: 72,
+            },
+        ];
+        let binding = driving_timer(&graph, &signals, &configurations).unwrap();
+        assert_eq!(
+            binding.start,
+            crate::driving_timer::Signal {
+                entity: 5,
+                event: 71
+            }
+        );
+        assert_eq!(
+            binding.stop,
+            crate::driving_timer::Signal {
+                entity: 5,
+                event: 72
+            }
+        );
+        graph.connections.push(edge(3, 2, CLOSE));
+        assert!(driving_timer(&graph, &signals, &configurations).is_err());
+        graph.connections.pop();
+        let mut open = configurations.clone();
+        open[0].configuration.definition = Definition::Gate { open: true };
+        assert!(driving_timer(&graph, &signals, &open).is_err());
+        graph.nodes[3].identity.instances[0].1 += 1;
+        assert!(driving_timer(&graph, &signals, &configurations).is_err());
+        graph.nodes[3].identity.instances[0].1 -= 1;
+        graph.connections.remove(1);
+        assert!(driving_timer(&graph, &signals, &configurations).is_err());
+    }
+    #[test]
+    fn return_confirmation_selects_the_requested_prefab_instance() {
+        use nfs_content::{
+            logic_events::{Delivery, Endpoint, Event},
+            scoring::events::{Composition, Identity, Node},
+        };
+        use nfs_world::scoring::event_sync::Binding;
+        let endpoint = Endpoint {
+            asset: "owner".into(),
+            index: 7,
+            class: "PrefabReferenceObjectData".into(),
+            port: 1,
+            blueprint: Some("transition".into()),
+            presentation_key: None,
+        };
+        let request = Event {
+            bus: 1,
+            ordinal: 2,
+            delivery: Delivery::Client,
+            source: endpoint.clone(),
+            target: endpoint,
+        };
+        let node = |instance| Node {
+            identity: Identity {
+                asset: "transition".into(),
+                index: 2,
+                instances: vec![("owner".into(), instance)],
+            },
+            class: "EventSyncEntityData".into(),
+            listeners: None,
+            forward: None,
+        };
+        let mut composition = Composition {
+            nodes: vec![node(8), node(7)],
+            buses: vec![],
+            bus_entities: vec![],
+            connections: vec![],
+            properties: vec![],
+            links: vec![],
+        };
+        let bindings = [
+            Binding {
+                entity: 2,
+                event: 30,
+                node: 0,
+            },
+            Binding {
+                entity: 3,
+                event: 31,
+                node: 1,
+            },
+        ];
+        assert_eq!(
+            return_confirmation(&composition, &bindings, &request).unwrap(),
+            bindings[1]
+        );
+        assert!(return_confirmation(&composition, &bindings[..1], &request).is_err());
+        composition.nodes[0] = node(7);
+        assert!(return_confirmation(&composition, &bindings, &request).is_err());
+    }
     #[test]
     fn unknown_state_and_reputation_inputs_are_not_replaced_with_defaults() {
         let input = Input::ParticipantSetContains(nfs_content::participant_logic::boolean::Port {

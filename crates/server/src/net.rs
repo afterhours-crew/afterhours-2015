@@ -16,6 +16,7 @@ use crate::{world_handshake, world_readiness};
 use nfs_server_support::{discovery, qos_tls};
 use nfs_world::{
     application::{self, Policy},
+    replication::section::Section,
     session::{Event, Host, Ids, StageName},
     transport::Codec,
 };
@@ -35,7 +36,7 @@ use tokio::{
     task::JoinSet,
     time::timeout,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 pub const READ_CHUNK: usize = 8192;
 pub const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -58,12 +59,15 @@ pub struct Config {
     pub world_content: Option<Arc<crate::content::WorldContent>>,
     pub inventory: Option<InventoryProfile>,
     pub progression: Option<Arc<crate::progression::Content>>,
+    pub prologue: Option<Arc<crate::prologue::Content>>,
     pub vehicles: Option<Arc<crate::vehicle_content::GarageContent>>,
     pub sequences: Option<Arc<crate::sequence_content::SequenceContent>>,
     pub traffic: Option<Arc<nfs_content::traffic::Content>>,
     pub rivals: Option<Arc<crate::rival_content::Content>>,
     pub garage_logic: Option<Arc<crate::garage_logic::GarageLogic>>,
     pub scoring: Option<Arc<crate::scoring::Content>>,
+    /// The owned race event, compiled from the installation (with scoring).
+    pub events: Option<Arc<crate::event_logic::catalog::Catalog>>,
     pub user_settings: Option<Arc<crate::user_settings::Store>>,
     pub catalogs: Option<Arc<nfs_services::control_catalogs::Catalog>>,
     pub entitlements: Option<(
@@ -88,6 +92,7 @@ pub struct AccountServices {
     pub settings: Option<Arc<crate::user_settings::Store>>,
     pub stats: Option<(InventoryProfile, nfs_services::reputation::Thresholds)>,
     pub challenges: Option<InventoryProfile>,
+    pub speedwall: Option<InventoryProfile>,
 }
 #[derive(Clone)]
 pub struct WorldServe {
@@ -95,23 +100,28 @@ pub struct WorldServe {
     pub content: Option<Arc<crate::content::WorldContent>>,
     pub persona: i64,
     pub inventory: Option<InventoryProfile>,
+    pub challenges: Option<Arc<nfs_services::challenges::Catalog>>,
     pub progression: Option<Arc<crate::progression::Content>>,
+    pub prologue: Option<Arc<crate::prologue::Content>>,
     pub vehicles: Option<Arc<crate::vehicle_content::GarageContent>>,
     pub sequences: Option<Arc<crate::sequence_content::SequenceContent>>,
     pub traffic: Option<Arc<nfs_content::traffic::Content>>,
     pub rivals: Option<Arc<crate::rival_content::Content>>,
     pub garage_logic: Option<Arc<crate::garage_logic::GarageLogic>>,
     pub scoring: Option<Arc<crate::scoring::Content>>,
+    pub events: Option<Arc<crate::event_logic::catalog::Catalog>>,
     pub ai: crate::ai_settings::Live,
     pub map_feed: Option<crate::map_feed::Board>,
 }
 
 mod items;
+mod observation;
 mod players;
+pub use observation::{ParticipantObservation, WorldHealth, WorldObservation};
 mod qos;
 #[cfg(feature = "network-test")]
 mod test_loss;
-pub use items::{Profile as InventoryProfile, Service as InventoryService};
+pub use items::{Profile as InventoryProfile, Service as InventoryService, story::Resume};
 const FILE_RECEIVE_MS: u64 = 60_000;
 #[derive(Debug, Default)]
 pub struct Accepting {
@@ -216,6 +226,10 @@ impl application::Listener for Accepting {
     }
 }
 pub trait FrameHandler: Send {
+    fn needs_speedwall_view(&self, _wire: &[u8]) -> bool {
+        false
+    }
+    fn speedwall_view(&mut self, _current: nfs_services::speedwall::Current) {}
     fn needs_challenges_view(&self, _wire: &[u8]) -> bool {
         false
     }
@@ -256,6 +270,12 @@ pub trait FrameHandler: Send {
 }
 
 impl FrameHandler for ControlSession<'_> {
+    fn needs_speedwall_view(&self, wire: &[u8]) -> bool {
+        ControlSession::needs_speedwall_view(self, wire)
+    }
+    fn speedwall_view(&mut self, current: nfs_services::speedwall::Current) {
+        ControlSession::speedwall_view(self, current);
+    }
     fn needs_challenges_view(&self, wire: &[u8]) -> bool {
         ControlSession::needs_challenges_view(self, wire)
     }
@@ -399,6 +419,28 @@ pub async fn run_control(
                     }
                     Err(error) => {
                         warn!(connection, ?route, ?error, "account challenges unavailable");
+                        return End::Internal;
+                    }
+                }
+            } else if handler.needs_speedwall_view(&frame)
+                && services.as_ref().is_some_and(|s| s.speedwall.is_some())
+            {
+                let Some(profile) = services.as_ref().and_then(|s| s.speedwall.as_ref()) else {
+                    return End::Internal;
+                };
+                let now = nfs_storage::Timestamp(u64::try_from(unix_micros() / 1000).unwrap_or(0));
+                match profile.current_speedwall(now).await {
+                    Ok(current) => {
+                        info!(
+                            connection,
+                            ?route,
+                            generation = current.generation,
+                            "current account Speedwall prepared"
+                        );
+                        handler.speedwall_view(current);
+                    }
+                    Err(error) => {
+                        warn!(connection, ?route, ?error, "account Speedwall unavailable");
                         return End::Internal;
                     }
                 }
@@ -724,6 +766,8 @@ pub async fn serve(
                 let map_feed = config.map_feed.clone();
                 let garage_logic = config.garage_logic.clone();
                 let scoring = config.scoring.clone();
+                let events = config.events.clone();
+                let prologue = config.prologue.clone();
                 let catalogs = config.catalogs.clone();
                 let entitlements = config.entitlements.clone();
                 let user_settings = config.user_settings.clone();
@@ -765,6 +809,7 @@ pub async fn serve(
                     let account_services = AccountServices {
                         settings: user_settings.clone(),
                         challenges: challenges.as_ref().and(inventory.clone()),
+                        speedwall: speedwall.as_ref().and(inventory.clone()),
                         stats: if stats.is_some() || owned_menu_awards {
                             inventory.clone().zip(garage_logic.as_ref().and_then(|l| l.reputation_thresholds()).cloned())
                         } else { None },
@@ -785,13 +830,16 @@ pub async fn serve(
                             content: world_content.clone(),
                             persona: profiles.persona,
                             inventory,
+                            challenges: challenges.clone(),
                             progression,
+                            prologue,
                             vehicles,
                             sequences,
                             traffic,
                             rivals,
                             garage_logic,
                             scoring,
+                            events,
                             ai,
                             map_feed,
                         },
@@ -843,6 +891,122 @@ pub async fn serve(
     qos.await.map_err(|_| Failure::Io)??;
     Ok(())
 }
+
+/// An owned queue the session refused, for the world loop's log.
+#[derive(Debug)]
+struct Refused {
+    queue: &'static str,
+    error: Option<nfs_world::session::Error>,
+    entry: Option<Box<(Section, Vec<nfs_world::participants::HostRpc>)>>,
+}
+
+/// Move the listener's owned output into the session in client order:
+/// content, replication, notifications, then entries. A full session window
+/// pauses a queue until a later pass; any other refusal is final, because the
+/// client cannot continue without the refused output. The world loop and the
+/// listener tests share this code.
+fn flush_owned(
+    listener: &mut players::PlayerListener,
+    host: &mut Host,
+    connection: u32,
+) -> Result<(), Refused> {
+    while let Some(message) = listener.pending_content.front() {
+        let Ok(bytes) = message.encode() else {
+            return Err(Refused {
+                queue: "content",
+                error: None,
+                entry: None,
+            });
+        };
+        match host.queue_content(message.target(), &bytes) {
+            Ok(chunks) => {
+                info!(connection, chunks, "owned content queued");
+                listener.pending_content.pop_front();
+            }
+            Err(nfs_world::session::Error::Application(application::Error::Window)) => break,
+            Err(error) => {
+                return Err(Refused {
+                    queue: "content",
+                    error: Some(error),
+                    entry: None,
+                });
+            }
+        }
+    }
+    while listener.pending_content.is_empty() {
+        let Some(section) = listener.pending.front() else {
+            break;
+        };
+        match host.queue_replication(section.clone()) {
+            Ok(()) => {
+                info!(
+                    connection,
+                    records = section.records.len(),
+                    "owned replication queued"
+                );
+                listener.pending.pop_front();
+            }
+            Err(nfs_world::session::Error::Application(application::Error::Window)) => break,
+            Err(error) => {
+                return Err(Refused {
+                    queue: "replication",
+                    error: Some(error),
+                    entry: Some(Box::new((section.clone(), Vec::new()))),
+                });
+            }
+        }
+    }
+    while listener.pending_content.is_empty() && listener.pending.is_empty() {
+        let Some(&reply) = listener.pending_rpcs.front() else {
+            break;
+        };
+        match host.queue_rpc(reply) {
+            Ok(()) => listener.rpc_sent(),
+            Err(nfs_world::session::Error::Application(application::Error::Window)) => break,
+            Err(error) => {
+                return Err(Refused {
+                    queue: "RPC notification",
+                    error: Some(error),
+                    entry: None,
+                });
+            }
+        }
+    }
+    while listener.pending_content.is_empty()
+        && listener.pending.is_empty()
+        && listener.pending_rpcs.is_empty()
+    {
+        let Some((section, before)) = listener.pending_entries.front() else {
+            break;
+        };
+        match host.queue_replication_after(section.clone(), before.clone()) {
+            Ok(()) => {
+                info!(
+                    connection,
+                    notifications = before.len(),
+                    records = section.records.len(),
+                    deleted = section.deleted.len(),
+                    calls = ?before
+                        .iter()
+                        .map(players::describe_host_rpc)
+                        .collect::<Vec<_>>(),
+                    "owned entry notifications and replication queued together"
+                );
+                listener.entry_sent();
+            }
+            Err(nfs_world::session::Error::Application(application::Error::Window)) => break,
+            Err(error) => {
+                return Err(Refused {
+                    queue: "entry transition",
+                    error: Some(error),
+                    entry: Some(Box::new((section.clone(), before.clone()))),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 pub async fn world_host(
     socket: UdpSocket,
     mut start: mpsc::Receiver<world_handshake::Binding>,
@@ -851,60 +1015,293 @@ pub async fn world_host(
     connection: u32,
     recorder: Recorder,
 ) {
+    let Some(binding) = start.recv().await else {
+        return;
+    };
+    let mut io = LiveWorld {
+        socket,
+        #[cfg(feature = "network-test")]
+        test_loss: test_loss::Loss::new(recorder.loss_trigger(connection)),
+        recorder,
+        connection,
+        started: Instant::now(),
+        unix_origin_micros: 0,
+        peer: None,
+        last_input: Instant::now(),
+        tick: tokio::time::interval(WORLD_TICK),
+        buffer: vec![0; 2048],
+    };
+    let end = run_world(&mut io, binding, proof, serve, connection).await;
+    debug!(connection, ?end, "world host ended");
+}
+
+/// Why [`run_world`] stopped.
+#[derive(Debug)]
+pub enum WorldEnd {
+    /// Setup or a world step failed; the warning before it says which.
+    Stopped,
+    /// The session refused owned output: the client loses its connection.
+    Refused {
+        queue: &'static str,
+        error: Option<nfs_world::session::Error>,
+        /// The refused entry or section, as the flush held it.
+        entry: Option<Box<(Section, Vec<nfs_world::participants::HostRpc>)>>,
+    },
+    /// The session closed or the client went idle.
+    Closed,
+    /// The input ended (live: the recorder failed; replay: the run ended).
+    Ended,
+}
+
+/// What the world loop does with an input once [`WorldIo::admit`] saw it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Admit {
+    Process,
+    /// Recorded but not for the session (diagnostic loss).
+    Skip,
+    /// Recording failed: stop.
+    Ended,
+}
+
+/// One input for the world loop.
+#[derive(Debug)]
+pub enum WorldInput {
+    Datagram(Vec<u8>),
+    /// A timer pass without input.
+    Tick,
+    /// Nothing for the session (another address, a receive error).
+    Ignore,
+    /// No client input for [`WORLD_IDLE`].
+    Idle,
+    Ended,
+}
+
+/// What the world loop reads, sends and timestamps with: the UDP socket and
+/// the wall clock live, a recorded run in the reference harness.
+pub trait WorldIo: Send {
+    /// Opt in to read-only validation snapshots. Live sockets avoid this work.
+    fn observes_world(&self) -> bool {
+        false
+    }
+    /// Called before waiting for input, after receiving it, and after flushing
+    /// output. An early Stopped/Refused result is still a failed run even if its
+    /// final snapshot predates the error. Snapshots do not certify gameplay.
+    fn observe(&mut self, observation: WorldObservation) {
+        let _ = observation;
+    }
+    /// Milliseconds on the world clock.
+    fn now_ms(&self) -> u64;
+    /// Microseconds since the Unix epoch, for durable timestamps.
+    fn unix_micros(&self) -> i64;
+    /// Start the world clock: the host is about to serve.
+    fn start_clock(&mut self);
+    /// Offline drivers need no receipt; live recording durably binds its clock.
+    fn preserve_clock(&mut self) -> impl std::future::Future<Output = Result<(), String>> + Send {
+        std::future::ready(Ok(()))
+    }
+    /// The source of the session's fresh words.
+    fn random(&mut self) -> Box<dyn nfs_world::application::Random + Send>;
+    /// The session's application policy.
+    fn policy(&self) -> Policy {
+        Policy::default()
+    }
+    /// The next input. `items_working` is true while inventory work is in
+    /// flight; a deterministic source waits for it before moving on. The loop
+    /// races this against inventory completions, so it must be cancel safe:
+    /// once it has consumed an input it returns without awaiting again.
+    fn next(&mut self, items_working: bool)
+    -> impl std::future::Future<Output = WorldInput> + Send;
+    /// Account for an input the loop has taken, outside the cancellable wait
+    /// (the live socket records each received datagram here).
+    fn admit(&mut self, input: &WorldInput) -> impl std::future::Future<Output = Admit> + Send {
+        let _ = input;
+        async { Admit::Process }
+    }
+    /// Send (and record) one pass's datagrams; false ends the session.
+    fn send(&mut self, wires: &[Vec<u8>]) -> impl std::future::Future<Output = bool> + Send;
+}
+
+struct LiveWorld {
+    socket: UdpSocket,
+    recorder: Recorder,
+    connection: u32,
+    started: Instant,
+    unix_origin_micros: i64,
+    peer: Option<SocketAddr>,
+    last_input: Instant,
+    tick: tokio::time::Interval,
+    buffer: Vec<u8>,
+    #[cfg(feature = "network-test")]
+    test_loss: test_loss::Loss,
+}
+
+impl WorldIo for LiveWorld {
+    fn now_ms(&self) -> u64 {
+        self.started.elapsed().as_millis() as u64
+    }
+    fn unix_micros(&self) -> i64 {
+        self.unix_origin_micros
+            .saturating_add(self.started.elapsed().as_micros().min(i64::MAX as u128) as i64)
+    }
+    fn start_clock(&mut self) {
+        self.started = Instant::now();
+        self.unix_origin_micros = unix_micros();
+    }
+    async fn preserve_clock(&mut self) -> Result<(), String> {
+        match timeout(
+            Duration::from_secs(5),
+            self.recorder
+                .world_clock(self.connection, self.started, self.unix_origin_micros),
+        )
+        .await
+        {
+            Ok(Ok(())) => Ok(()),
+            _ => Err("world clock receipt was not durably recorded".into()),
+        }
+    }
+    fn random(&mut self) -> Box<dyn nfs_world::application::Random + Send> {
+        Box::new(OsRandom)
+    }
+    async fn next(&mut self, _items_working: bool) -> WorldInput {
+        let connection = self.connection;
+        tokio::select! {
+            received = self.socket.recv_from(&mut self.buffer) => {
+                let Ok((n, from)) = received else {
+                    return WorldInput::Ignore;
+                };
+                match self.peer {
+                    None => {
+                        self.peer = Some(from);
+                        info!(connection, %from, "world client");
+                    }
+                    Some(p) if p != from => {
+                        debug!(connection, %from, "datagram from another address ignored");
+                        return WorldInput::Ignore;
+                    }
+                    _ => {}
+                }
+                self.last_input = Instant::now();
+                // No await after the read: recording happens in `admit`.
+                WorldInput::Datagram(self.buffer[..n].to_vec())
+            }
+            _ = self.tick.tick() => {
+                if self.last_input.elapsed() > WORLD_IDLE {
+                    return WorldInput::Idle;
+                }
+                WorldInput::Tick
+            }
+        }
+    }
+    async fn admit(&mut self, input: &WorldInput) -> Admit {
+        match input {
+            WorldInput::Datagram(raw) => {
+                #[cfg(feature = "network-test")]
+                let dropped = self.test_loss.drop_input(self.now_ms());
+                #[cfg(not(feature = "network-test"))]
+                let dropped = false;
+                let note = dropped.then_some("diagnostic packet loss before transport");
+                if self
+                    .recorder
+                    .chunk("world", self.connection, Direction::In, raw, note)
+                    .await
+                    .is_err()
+                {
+                    return Admit::Ended;
+                }
+                if dropped { Admit::Skip } else { Admit::Process }
+            }
+            WorldInput::Tick => {
+                #[cfg(feature = "network-test")]
+                self.test_loss.poll(self.now_ms()).await;
+                Admit::Process
+            }
+            _ => Admit::Process,
+        }
+    }
+    async fn send(&mut self, wires: &[Vec<u8>]) -> bool {
+        let Some(peer) = self.peer else {
+            return true;
+        };
+        for wire in wires {
+            if self.socket.send_to(wire, peer).await.is_err() {
+                warn!(connection = self.connection, "world send failed");
+            }
+            if self
+                .recorder
+                .chunk("world", self.connection, Direction::Out, wire, None)
+                .await
+                .is_err()
+            {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// Serve one world session over `io` until it stops: the world loop of
+/// [`world_host`], with the socket, clock and fresh words injected.
+pub async fn run_world<I: WorldIo>(
+    io: &mut I,
+    binding: world_handshake::Binding,
+    proof: watch::Sender<Option<Option<world_readiness::Binding>>>,
+    serve: WorldServe,
+    connection: u32,
+) -> WorldEnd {
     let WorldServe {
         mac_template: template,
         content,
         persona,
         inventory,
+        challenges,
         progression,
+        prologue,
         vehicles,
         sequences,
         traffic,
         rivals,
         garage_logic,
         scoring,
+        events,
         mut ai,
         map_feed,
     } = serve;
-    let Some(binding) = start.recv().await else {
-        return;
-    };
     let Some(template) = template else {
         warn!(connection, "world host needs the MAC template; not serving");
-        return;
+        return WorldEnd::Stopped;
     };
     let Ok(codec) = Codec::new(binding.key(), template) else {
         warn!(connection, "world host: bad session key");
-        return;
+        return WorldEnd::Stopped;
     };
     let ids = Ids {
         client: binding.client(),
         host: binding.host(),
         host_index: 0,
     };
-    let Some(mut host) = Host::new(codec, ids, Policy::default(), Box::new(OsRandom)) else {
+    let Some(mut host) = Host::new(codec, ids, io.policy(), io.random()) else {
         warn!(connection, "world host: unusable connection ids");
-        return;
+        return WorldEnd::Stopped;
     };
     if let Some(content) = &content {
         let messages = match content.generate() {
             Ok(messages) => messages,
             Err(_) => {
                 warn!(connection, "invalid local world content");
-                return;
+                return WorldEnd::Stopped;
             }
         };
         let mut chunks = 0;
         for message in &messages {
             let target = message.target();
             let Ok(bytes) = message.encode() else {
-                return;
+                return WorldEnd::Stopped;
             };
             match host.queue_content(target, &bytes) {
                 Ok(n) => chunks += n,
                 Err(error) => {
                     warn!(connection, target, ?error, "world content rejected");
-                    return;
+                    return WorldEnd::Stopped;
                 }
             }
         }
@@ -916,10 +1313,14 @@ pub async fn world_host(
         );
     }
     let readiness = binding.readiness();
-    let started = Instant::now();
-    let now_ms = || started.elapsed().as_millis() as u64;
+    io.start_clock();
+    if let Err(error) = io.preserve_clock().await {
+        // Recording limits must not stop play. Missing provenance instead makes
+        // this connection ineligible for a verified offline replay.
+        warn!(connection, %error, "world recording provenance failed");
+    }
     let Ok(persona) = u64::try_from(persona) else {
-        return;
+        return WorldEnd::Stopped;
     };
     // Leaves the map when this world host returns.
     let mut map_feed = map_feed.map(|board| board.publisher(connection, persona));
@@ -927,7 +1328,7 @@ pub async fn world_host(
         Ok(arrivals) => arrivals,
         Err(error) => {
             warn!(connection, ?error, "arrive sequence configuration rejected");
-            return;
+            return WorldEnd::Stopped;
         }
     };
     let returns = match sequences.as_ref().and_then(|c| c.returns()).transpose() {
@@ -938,14 +1339,14 @@ pub async fn world_host(
                 ?error,
                 "garage return sequence configuration rejected"
             );
-            return;
+            return WorldEnd::Stopped;
         }
     };
     let crashes = match sequences.as_ref().and_then(|c| c.crashes()).transpose() {
         Ok(crashes) => crashes,
         Err(error) => {
             warn!(connection, ?error, "crash sequence configuration rejected");
-            return;
+            return WorldEnd::Stopped;
         }
     };
     if crashes.is_some()
@@ -957,18 +1358,20 @@ pub async fn world_host(
             connection,
             "crash sequence requires paired crash/recovery presentation"
         );
-        return;
+        return WorldEnd::Stopped;
     }
     let sequences = match sequences.as_ref().map(|c| c.instance()).transpose() {
         Ok(owner) => owner,
         Err(error) => {
             warn!(connection, ?error, "sequence configuration rejected");
-            return;
+            return WorldEnd::Stopped;
         }
     };
     let mut listener = players::PlayerListener::new(persona)
         .with_connection(connection)
+        .with_challenges(challenges)
         .with_progression(progression)
+        .with_prologue(prologue)
         .with_vehicles(vehicles)
         .with_sequences(sequences)
         .with_traffic(traffic)
@@ -979,34 +1382,32 @@ pub async fn world_host(
         .with_returns(returns)
         .with_crashes(crashes)
         .with_garage_logic(garage_logic)
-        .with_scoring(scoring, unix_micros().max(0) as u64);
+        .with_scoring(scoring, io.unix_micros().max(0) as u64)
+        .with_events(events);
     let mut items = items::Exchanges::new(inventory, connection);
     if let Some(content) = &content
         && let Err(error) = listener.initialize_world(content)
     {
         warn!(connection, ?error, "owned world initialization rejected");
-        return;
+        return WorldEnd::Stopped;
     }
-    let mut peer: Option<SocketAddr> = None;
-    let mut buffer = vec![0; 2048];
     let mut proof_sent = false;
-    let mut last_input = Instant::now();
-    let mut tick = tokio::time::interval(WORLD_TICK);
-    #[cfg(feature = "network-test")]
-    let mut test_loss = test_loss::Loss::new(recorder.loss_trigger(connection));
+    let mut delay_reported = None;
     info!(connection, "world host ready");
     loop {
-        if let Err(error) = listener.advance_sequences(now_ms()) {
+        let advance_started = Instant::now();
+        listener.release_intro_presentation(&host);
+        if let Err(error) = listener.advance_sequences(io.now_ms()) {
             warn!(connection, ?error, "sequence world clock rejected");
-            return;
+            return WorldEnd::Stopped;
         }
-        if let Err(error) = listener.advance_level_poll(now_ms()) {
+        if let Err(error) = listener.advance_level_poll(io.now_ms()) {
             warn!(connection, ?error, "level poll rejected");
-            return;
+            return WorldEnd::Stopped;
         }
-        if let Err(error) = listener.advance_settled(now_ms()) {
+        if let Err(error) = listener.advance_settled(io.now_ms()) {
             warn!(connection, ?error, "world car settlement rejected");
-            return;
+            return WorldEnd::Stopped;
         }
         // Settings the player saved while this session runs.
         if let Some(settings) = ai.changed() {
@@ -1019,7 +1420,7 @@ pub async fn world_host(
             );
         }
         listener.session_backlog = host.replication_progress().1;
-        if let Err(error) = listener.advance_traffic(now_ms())
+        if let Err(error) = listener.advance_traffic(io.now_ms())
             && listener.disable_traffic()
         {
             warn!(
@@ -1028,7 +1429,7 @@ pub async fn world_host(
                 "owned traffic rejected; spawning disabled for this session"
             );
         }
-        if let Err(error) = listener.advance_rivals(now_ms())
+        if let Err(error) = listener.advance_rivals(io.now_ms())
             && listener.disable_rivals()
         {
             warn!(
@@ -1037,7 +1438,7 @@ pub async fn world_host(
                 "owned rivals rejected; spawning disabled for this session"
             );
         }
-        if let Err(error) = listener.advance_scoring(now_ms()) {
+        if let Err(error) = listener.advance_scoring(io.now_ms()) {
             // Scoring is best effort: a fault disables it for this session
             // and never closes the world host.
             warn!(
@@ -1049,26 +1450,97 @@ pub async fn world_host(
         }
         // Read-only: what the launcher's map shows, after this tick's AI.
         if let Some(feed) = &mut map_feed
-            && feed.due(now_ms())
+            && feed.due(io.now_ms())
         {
-            feed.publish(listener.map_snapshot(now_ms()));
+            feed.publish(listener.map_snapshot(io.now_ms()));
         }
-        if !listener.files_alive(now_ms()) {
+        listener.replication_origin_ms = host.application().and_then(|a| a.origin_ms());
+        if let Err(error) = listener.advance_events(io.now_ms()) {
+            // A first fault stages event teardown while retaining delegation.
+            // If teardown itself fails, dropping this session owns all cleanup.
+            if !listener.disable_events() {
+                warn!(
+                    connection,
+                    ?error,
+                    "owned event teardown rejected; closing world"
+                );
+                return WorldEnd::Stopped;
+            }
+            warn!(
+                connection,
+                ?error,
+                "owned event rejected; scheduling event teardown"
+            );
+        }
+        if !listener.files_alive(io.now_ms()) {
             warn!(
                 connection,
                 "incoming File or MessageEX deadline; closing world"
             );
-            return;
+            return WorldEnd::Stopped;
         }
-        while let Some(command) = listener.due_teleport(now_ms()) {
+        if let Err(error) = host.set_movement(listener.movement_objects()) {
+            warn!(connection, ?error, "movement grants rejected");
+            return WorldEnd::Stopped;
+        }
+        let advance_ms = advance_started.elapsed().as_millis() as u64;
+        observe_world(io, &listener, &host, items.working());
+        let receive_started = Instant::now();
+        let working = items.working();
+        let output = tokio::select! {
+            success = items.completed(&mut listener), if working => {
+                if !success { return WorldEnd::Stopped; }
+                host.poll(io.now_ms())
+            }
+            input = io.next(working) => match (io.admit(&input).await, input) {
+                (Admit::Skip, _) => continue,
+                (Admit::Ended, _) => return WorldEnd::Ended,
+                (Admit::Process, WorldInput::Datagram(raw)) => host.receive(&raw, io.now_ms(), &mut listener),
+                (Admit::Process, WorldInput::Tick) => host.poll(io.now_ms()),
+                (Admit::Process, WorldInput::Ignore) => continue,
+                (Admit::Process, WorldInput::Idle) => {
+                    info!(connection, "world host idle; closing");
+                    return WorldEnd::Closed;
+                }
+                (Admit::Process, WorldInput::Ended) => return WorldEnd::Ended,
+            }
+        };
+        let receive_or_poll_ms = receive_started.elapsed().as_millis() as u64;
+        observe_world(io, &listener, &host, items.working());
+        let queue_started = Instant::now();
+        if !items.advance(&mut host, &output.events, io.now_ms()) {
+            return WorldEnd::Stopped;
+        }
+        items.start(
+            &mut listener,
+            io.now_ms(),
+            nfs_storage::Timestamp(io.unix_micros().max(0) as u64 / 1_000),
+        );
+        if let Err(refused) = flush_owned(&mut listener, &mut host, connection) {
+            // Loud on purpose: the client never receives the refused output
+            // and loses its connection without a reason (E1188).
+            error!(
+                connection,
+                queue = refused.queue,
+                error = ?refused.error,
+                "owned output rejected; world host stopped, the client will lose its connection"
+            );
+            return WorldEnd::Refused {
+                queue: refused.queue,
+                error: refused.error,
+                entry: refused.entry,
+            };
+        }
+        while let Some(command) = listener.due_teleport(io.now_ms()) {
             let bytes = match command.encode() {
                 Ok(bytes) => bytes,
                 Err(error) => {
                     warn!(connection, ?error, "owned car teleport rejected");
-                    return;
+                    return WorldEnd::Stopped;
                 }
             };
-            match host.queue_content(nfs_world::teleport::CONTENT_TARGET, &bytes) {
+            match host.queue_content_after_replication(nfs_world::teleport::CONTENT_TARGET, &bytes)
+            {
                 Ok(chunks) => {
                     info!(
                         connection,
@@ -1082,151 +1554,58 @@ pub async fn world_host(
                 Err(nfs_world::session::Error::Application(application::Error::Window)) => break,
                 Err(error) => {
                     warn!(connection, ?error, "owned car teleport rejected");
-                    return;
+                    return WorldEnd::Stopped;
                 }
             }
         }
-        if let Err(error) = host.set_movement(listener.movement_objects()) {
-            warn!(connection, ?error, "movement grants rejected");
-            return;
-        }
-        let output = tokio::select! {
-            success = items.completed(&mut listener), if items.working() => {
-                if !success { return; }
-                host.poll(now_ms())
-            }
-            received = socket.recv_from(&mut buffer) => {
-                let (n, from) = match received {
-                    Ok(r) => r,
-                    Err(_) => continue,
-                };
-                match peer {
-                    None => {
-                        peer = Some(from);
-                        info!(connection, %from, "world client");
-                    }
-                    Some(p) if p != from => {
-                        debug!(connection, %from, "datagram from another address ignored");
-                        continue;
-                    }
-                    _ => {}
-                }
-                last_input = Instant::now();
-                let raw = buffer[..n].to_vec();
-                #[cfg(feature = "network-test")]
-                let dropped = test_loss.drop_input(now_ms());
-                #[cfg(not(feature = "network-test"))]
-                let dropped = false;
-                let note = dropped.then_some("diagnostic packet loss before transport");
-                if recorder.chunk("world", connection, Direction::In, &raw, note).await.is_err() {
-                    return;
-                }
-                if dropped { continue; }
-                host.receive(&raw, now_ms(), &mut listener)
-            }
-            _ = tick.tick() => {
-                #[cfg(feature = "network-test")]
-                test_loss.poll(now_ms()).await;
-                if last_input.elapsed() > WORLD_IDLE {
-                    info!(connection, "world host idle; closing");
-                    return;
-                }
-                host.poll(now_ms())
-            }
-        };
-        if !items.advance(&mut host, &output.events, now_ms()) {
-            return;
-        }
-        items.start(
-            &mut listener,
-            now_ms(),
-            nfs_storage::Timestamp(unix_micros().max(0) as u64 / 1_000),
-        );
-        while let Some(message) = listener.pending_content.front() {
-            let Ok(bytes) = message.encode() else {
-                warn!(connection, "owned content invalid");
-                return;
-            };
-            match host.queue_content(message.target(), &bytes) {
-                Ok(chunks) => {
-                    info!(connection, chunks, "owned content queued");
-                    listener.pending_content.pop_front();
-                }
-                Err(nfs_world::session::Error::Application(application::Error::Window)) => break,
-                Err(error) => {
-                    warn!(connection, ?error, "owned content rejected");
-                    return;
-                }
-            }
-        }
-        while listener.pending_content.is_empty() {
-            let Some(section) = listener.pending.front() else {
-                break;
-            };
-            match host.queue_replication(section.clone()) {
-                Ok(()) => {
-                    info!(
-                        connection,
-                        records = section.records.len(),
-                        "owned replication queued"
-                    );
-                    listener.pending.pop_front();
-                }
-                Err(nfs_world::session::Error::Application(application::Error::Window)) => break,
-                Err(error) => {
-                    warn!(connection, ?error, "owned replication rejected");
-                    return;
-                }
-            }
-        }
-        while listener.pending_content.is_empty() && listener.pending.is_empty() {
-            let Some(&reply) = listener.pending_rpcs.front() else {
-                break;
-            };
-            match host.queue_rpc(reply) {
-                Ok(()) => {
-                    listener.pending_rpcs.pop_front();
-                }
-                Err(nfs_world::session::Error::Application(application::Error::Window)) => break,
-                Err(error) => {
-                    warn!(connection, ?error, "owned RPC notification rejected");
-                    return;
-                }
-            }
-        }
+        // A reliable boundary after result reporting prevents a later mode
+        // deletion from overtaking its Speedwall handoff under queue pressure.
         while listener.pending_content.is_empty()
             && listener.pending.is_empty()
             && listener.pending_rpcs.is_empty()
+            && listener.pending_entries.is_empty()
         {
-            let Some((section, before)) = listener.pending_entries.front() else {
+            let Some(progress) = listener.pending_speedwalls.front() else {
                 break;
             };
-            match host.queue_replication_after(section.clone(), before.clone()) {
-                Ok(()) => {
+            let bytes = match progress.encode() {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    warn!(connection, ?error, "owned Speedwall progress rejected");
+                    return WorldEnd::Stopped;
+                }
+            };
+            match host.queue_content_after_replication(nfs_world::speedwall::CONTENT_TARGET, &bytes)
+            {
+                Ok(chunks) => {
                     info!(
                         connection,
-                        notifications = before.len(),
-                        records = section.records.len(),
-                        deleted = section.deleted.len(),
-                        calls = ?before
-                            .iter()
-                            .map(players::describe_host_rpc)
-                            .collect::<Vec<_>>(),
-                        "owned entry notifications and replication queued together"
+                        chunks,
+                        event = progress.event_id,
+                        "owned Speedwall progress queued"
                     );
-                    listener.pending_entries.pop_front();
+                    listener.pending_speedwalls.pop_front();
                 }
                 Err(nfs_world::session::Error::Application(application::Error::Window)) => break,
                 Err(error) => {
-                    warn!(connection, ?error, "owned entry transition rejected");
-                    return;
+                    warn!(connection, ?error, "owned Speedwall handoff rejected");
+                    return WorldEnd::Stopped;
                 }
             }
         }
+        let queue_ms = queue_started.elapsed().as_millis() as u64;
+        let send_started = Instant::now();
         for event in &output.events {
             match event {
                 Event::Application(application::Event::UnknownControl(subtype)) => {
                     listener.unsupported_control(*subtype);
+                }
+                Event::ApplicationError(error) => {
+                    warn!(
+                        connection,
+                        ?error,
+                        "world session application operation failed"
+                    );
                 }
                 Event::Application(application::Event::Queued { .. })
                 | Event::Application(application::Event::Duplicate) => {
@@ -1235,19 +1614,18 @@ pub async fn world_host(
                 other => info!(connection, event = ?other, "world"),
             }
         }
-        if let Some(p) = peer {
-            for wire in &output.send {
-                if socket.send_to(wire, p).await.is_err() {
-                    warn!(connection, "world send failed");
-                }
-                if recorder
-                    .chunk("world", connection, Direction::Out, wire, None)
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-            }
+        observe_world(io, &listener, &host, items.working());
+        if !io.send(&output.send).await {
+            return WorldEnd::Ended;
+        }
+        let send_and_record_ms = send_started.elapsed().as_millis() as u64;
+        if (advance_ms + queue_ms + send_and_record_ms >= 100 || receive_or_poll_ms >= 250)
+            && delay_reported.is_none_or(|last| io.now_ms().saturating_sub(last) >= 1000)
+        {
+            delay_reported = Some(io.now_ms());
+            warn!(connection, advance_ms, receive_or_poll_ms, queue_ms, send_and_record_ms,
+                replication = ?host.replication_progress(), content = ?host.content_progress(),
+                "world loop delay");
         }
         if !proof_sent && host.link().is_some_and(|l| l.running()) {
             proof_sent = true;
@@ -1269,8 +1647,31 @@ pub async fn world_host(
                 replication = ?host.replication_progress(),
                 "world host closed"
             );
-            return;
+            return WorldEnd::Closed;
         }
+    }
+}
+
+fn observe_world<I: WorldIo>(
+    io: &mut I,
+    listener: &players::PlayerListener,
+    host: &Host,
+    items_working: bool,
+) {
+    if io.observes_world() {
+        let mut observation = listener.observation(
+            io.now_ms(),
+            host.replication_progress().1,
+            host.content_progress().1,
+            items_working,
+        );
+        observation.rpc_pending = host.rpc_progress().1;
+        observation.files_pending = host.files_pending();
+        observation.health.include_session(host.failures());
+        if let Some(application) = host.application() {
+            observation.health.include_application(application.stats());
+        }
+        io.observe(observation);
     }
 }
 
@@ -1317,6 +1718,62 @@ async fn redirector(
         .chunk("redirector", n, Direction::Out, &response, None)
         .await;
     info!(connection = n, %peer, accepted, written, "redirector request");
+}
+
+#[cfg(test)]
+mod live_world_tests {
+    use super::*;
+
+    /// The world loop races `next` against inventory completions. A datagram
+    /// `next` has read must reach the loop even when the recorder is full and
+    /// the other branch wins: reading and recording are separate steps.
+    #[tokio::test]
+    async fn a_read_datagram_survives_a_cancelled_wait_on_a_full_recorder() {
+        let (recorder, _queue) = crate::record::full_for_tests();
+        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = socket.local_addr().unwrap();
+        let client = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let far = tokio::time::Instant::now() + Duration::from_secs(3600);
+        let mut io = LiveWorld {
+            socket,
+            #[cfg(feature = "network-test")]
+            test_loss: test_loss::Loss::new(None),
+            recorder,
+            connection: 1,
+            started: Instant::now(),
+            unix_origin_micros: 0,
+            peer: None,
+            last_input: Instant::now(),
+            tick: tokio::time::interval_at(far, Duration::from_secs(3600)),
+            buffer: vec![0; 2048],
+        };
+        client.send_to(b"world", address).unwrap();
+        let mut received = None;
+        for _ in 0..200 {
+            // Biased: `next` is polled first; the ready branch stands for an
+            // inventory completion that wins whenever `next` is pending.
+            tokio::select! {
+                biased;
+                input = io.next(false) => {
+                    received = Some(input);
+                    break;
+                }
+                () = std::future::ready(()) => {}
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let Some(input) = received else {
+            panic!("the datagram was read and lost");
+        };
+        assert!(matches!(&input, WorldInput::Datagram(raw) if raw.as_slice() == b"world"));
+        // Recording waits for room in the full queue; the loop still holds it.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), io.admit(&input))
+                .await
+                .is_err()
+        );
+        assert!(matches!(input, WorldInput::Datagram(_)));
+    }
 }
 
 #[cfg(test)]

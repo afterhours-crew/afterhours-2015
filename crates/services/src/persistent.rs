@@ -83,7 +83,11 @@ pub struct Loaded {
     stores: BTreeMap<(u32, u32), i32>,
     garage: [Option<u64>; 5],
     balance: crate::bank::Balance,
+    /// Afterhours-owned tables the server reads; never sent to the client.
+    owned: BTreeMap<u32, Table>,
 }
+/// Afterhours-owned tables a loaded view carries beside the schema tables.
+const OWNED: [&str; 1] = [crate::tutorials::TABLE];
 impl std::fmt::Debug for Loaded {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LoadedTables")
@@ -96,6 +100,10 @@ impl std::fmt::Debug for Loaded {
 impl Loaded {
     pub fn balance(&self) -> crate::bank::Balance {
         self.balance
+    }
+    /// An Afterhours-owned table (`OWNED`), when written.
+    pub fn owned(&self, name: &str) -> Option<&Table> {
+        self.owned.get(&key(name))
     }
     pub fn generation(&self) -> u64 {
         self.generation
@@ -400,6 +408,13 @@ impl Catalog {
             table.validate()?;
             tables.insert(table_key, table);
         }
+        let mut owned = BTreeMap::new();
+        for name in OWNED {
+            if let Some(table) = snapshot.tables.get(&key(name)) {
+                table.validate()?;
+                owned.insert(key(name), table.clone());
+            }
+        }
         Ok(Loaded {
             generation: snapshot.generation,
             tables,
@@ -407,6 +422,7 @@ impl Catalog {
             stores,
             garage,
             balance: crate::bank::Balance::from_snapshot(snapshot)?,
+            owned,
         })
     }
 }

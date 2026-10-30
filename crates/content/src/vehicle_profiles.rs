@@ -12,6 +12,7 @@ mod defaults;
 mod extract;
 mod fields;
 mod graph;
+mod info;
 mod parse;
 mod rules;
 pub mod traffic;
@@ -37,6 +38,8 @@ pub struct Definition {
     pub appearance: appearance::Defaults,
     pub meshes: Vec<mesh::Component>,
     pub health: health::State,
+    /// Installed vehicle identity for event records; absent in older profiles.
+    pub info: Option<nfs_world::scoring::vehicle_info::Sample>,
 }
 
 impl Definition {

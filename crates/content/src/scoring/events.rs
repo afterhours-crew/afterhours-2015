@@ -13,7 +13,11 @@ use nfs_world::scoring::events::{self, Connection, Delivery, Endpoint, Remote};
 use nfs_world::scoring::properties::Port;
 use std::collections::BTreeMap;
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+/// Scene topology includes linked shape data and client-only reference nodes.
+/// Its inventory bound is independent of the executable per-graph node bound.
+pub const MAX_SCENE_NODES: usize = crate::scenes::MAX_GRAPH_OBJECTS;
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize)]
 pub struct Identity {
     pub asset: String,
     pub index: usize,
@@ -28,7 +32,7 @@ impl From<&Site> for Identity {
         }
     }
 }
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Node {
     pub identity: Identity,
     pub class: String,
@@ -37,7 +41,7 @@ pub struct Node {
     /// prefab bus. None means the runtime must supply the class's behavior.
     pub forward: Option<u16>,
 }
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Composition {
     /// Indices used by Connection endpoints; independent of network object IDs.
     pub nodes: Vec<Node>,
@@ -58,7 +62,7 @@ pub struct Composition {
     pub links: Vec<DataConnection>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DataConnection {
     pub source: Port,
     pub target: Port,
@@ -110,12 +114,16 @@ fn insert<S: Source>(
     site: Site,
     sites: &mut BTreeMap<Site, u16>,
     nodes: &mut Vec<Node>,
+    limit: usize,
 ) -> Result<u16, Error> {
     if let Some(&id) = sites.get(&site) {
         return Ok(id);
     }
-    if nodes.len() >= events::MAX_NODES {
-        return Err(bad("event node bound"));
+    if nodes.len() >= limit {
+        return Err(bad(&format!(
+            "event node bound {limit} at {}:{}",
+            site.key.0, site.key.1
+        )));
     }
     let id = nodes.len() as u16;
     let object = graph.object(&site)?;
@@ -141,15 +149,12 @@ fn data_connections<S: Source>(
     bus_index: u16,
     fields: &Fields,
     name: &str,
-    visited: &mut usize,
+    budget: &mut ConnectionBudget,
 ) -> Result<Vec<DataConnection>, Error> {
     let rows = field(fields, name)?
         .as_array()
         .ok_or_else(|| bad("data connection array"))?;
-    *visited = visited
-        .checked_add(rows.len())
-        .filter(|n| *n <= events::MAX_CONNECTIONS)
-        .ok_or_else(|| bad("composition connection bound"))?;
+    budget.visit(rows.len())?;
     rows.iter()
         .enumerate()
         .map(|(index, row)| {
@@ -163,9 +168,12 @@ fn data_connections<S: Source>(
                     .target(&bus.key.0, pointer)?
                     .ok_or_else(|| bad("null data endpoint"))?;
                 let site = Site { key, ..bus.clone() };
-                let &node = sites
-                    .get(&site)
-                    .ok_or_else(|| bad("data endpoint outside composition"))?;
+                let &node = sites.get(&site).ok_or_else(|| {
+                    bad(&format!(
+                        "{name} row {index} {side} outside composition: {}:{} in {}:{}",
+                        site.key.0, site.key.1, bus.key.0, bus.key.1
+                    ))
+                })?;
                 Ok(Port {
                     node,
                     field: bits32(field(fields, port)?)?,
@@ -185,20 +193,68 @@ fn data_connections<S: Source>(
         })
         .collect()
 }
+struct ConnectionBudget {
+    visited: usize,
+    limit: usize,
+}
+impl ConnectionBudget {
+    fn visit(&mut self, count: usize) -> Result<(), Error> {
+        // Authored row indexes and bus indexes are transmitted as u16 values.
+        // The total may span many buses; no individual array may wrap its index.
+        if count > usize::from(u16::MAX) + 1 {
+            return Err(bad("connection row index bound"));
+        }
+        self.visited = self
+            .visited
+            .checked_add(count)
+            .filter(|n| *n <= self.limit)
+            .ok_or_else(|| bad(&format!("composition connection bound {}", self.limit)))?;
+        Ok(())
+    }
+}
 pub(crate) fn read<S: Source>(source: &mut S, blueprint: &str) -> Result<Composition, Error> {
     if blueprint.is_empty() || blueprint.len() > 512 {
         return Err(bad("scoring blueprint name"));
     }
+    read_at(source, Site::root(blueprint))
+}
+
+/// A separately owned scene retains its enclosing subworld occurrence path.
+/// Its root interface has no local parent; the scene owner binds that boundary.
+pub(crate) fn read_at<S: Source>(source: &mut S, root: Site) -> Result<Composition, Error> {
+    read_scoped(source, root, false)
+}
+
+/// Scene links can address data that is not constructed from Objects (for
+/// example checkpoint OBBData). Expose those identities to the service owner,
+/// without adding them to any constructor or activation list.
+pub(crate) fn read_scene<S: Source>(source: &mut S, root: Site) -> Result<Composition, Error> {
+    read_scoped(
+        &mut crate::graph::scenes::ServerScene { source },
+        root,
+        true,
+    )
+}
+
+fn read_scoped<S: Source>(source: &mut S, root: Site, scene: bool) -> Result<Composition, Error> {
+    let limit = if scene {
+        MAX_SCENE_NODES
+    } else {
+        events::MAX_NODES
+    };
     let mut graph = Graph::new(source);
-    let rows = graph.read(Site::root(blueprint))?;
+    let rows = graph.read(root.clone())?;
     let mut sites = BTreeMap::new();
     let mut nodes = Vec::new();
     let mut buses = Vec::new();
     for row in &rows {
-        insert(&mut graph, row.site.clone(), &mut sites, &mut nodes)?;
+        insert(&mut graph, row.site.clone(), &mut sites, &mut nodes, limit)?;
         if row.site.key == row.site.bus {
             if buses.contains(&row.site) {
-                return Err(bad("duplicate event bus"));
+                return Err(bad(&format!(
+                    "duplicate event bus {}:{} ({:?}) in {}",
+                    row.site.key.0, row.site.key.1, row.site.parents, root.key.0
+                )));
             }
             buses.push(row.site.clone());
         }
@@ -211,20 +267,21 @@ pub(crate) fn read<S: Source>(source: &mut S, blueprint: &str) -> Result<Composi
             .as_pointer()
             .ok_or_else(|| bad("event interface pointer"))?;
         let Some(key) = graph.source.target(&bus.key.0, pointer)? else {
-            if !bus.parents.is_empty() {
-                return Err(bad("nested event bus has no interface"));
-            }
+            // An absent authored interface supplies no forwarding endpoint.
+            // Internal rows are still checked below; a row targeting a missing
+            // interface cannot silently disappear from the graph.
             continue;
         };
         let interface = Site { key, ..bus.clone() };
         if graph.object(&interface)?.class != "InterfaceDescriptorData" {
             return Err(bad("event interface class"));
         }
-        let interface_id = insert(&mut graph, interface, &mut sites, &mut nodes)?;
-        if let Some(Frame {
-            bus: parent_bus,
-            reference,
-        }) = bus.parents.last()
+        let interface_id = insert(&mut graph, interface, &mut sites, &mut nodes, limit)?;
+        if *bus != root
+            && let Some(Frame {
+                bus: parent_bus,
+                reference,
+            }) = bus.parents.last()
         {
             let mut parents = bus.parents.clone();
             parents.pop();
@@ -249,9 +306,43 @@ pub(crate) fn read<S: Source>(source: &mut S, blueprint: &str) -> Result<Composi
     let mut connections = Vec::new();
     let mut properties = Vec::new();
     let mut links = Vec::new();
-    let mut visited_rows = 0usize;
+    let mut budget = ConnectionBudget {
+        visited: 0,
+        limit: if scene {
+            events::MAX_TOPOLOGY_CONNECTIONS
+        } else {
+            events::MAX_CONNECTIONS
+        },
+    };
     for (bus_index, bus) in buses.iter().enumerate() {
         let object = graph.object(bus)?;
+        if scene {
+            let rows = field(&object.fields, "LinkConnections")?
+                .as_array()
+                .ok_or_else(|| bad("scene link array"))?;
+            if rows.len() > usize::from(u16::MAX) + 1 {
+                return Err(bad("scene link count bound"));
+            }
+            for row in rows {
+                let fields = row.as_fields().ok_or_else(|| bad("scene link row"))?;
+                for side in ["Source", "Target"] {
+                    let pointer = field(fields, side)?
+                        .as_pointer()
+                        .ok_or_else(|| bad("scene link pointer"))?;
+                    let key = graph
+                        .source
+                        .target(&bus.key.0, pointer)?
+                        .ok_or_else(|| bad("null scene link"))?;
+                    insert(
+                        &mut graph,
+                        Site { key, ..bus.clone() },
+                        &mut sites,
+                        &mut nodes,
+                        limit,
+                    )?;
+                }
+            }
+        }
         properties.extend(data_connections(
             &mut graph,
             &sites,
@@ -259,7 +350,7 @@ pub(crate) fn read<S: Source>(source: &mut S, blueprint: &str) -> Result<Composi
             bus_index as u16,
             &object.fields,
             "PropertyConnections",
-            &mut visited_rows,
+            &mut budget,
         )?);
         links.extend(data_connections(
             &mut graph,
@@ -268,15 +359,12 @@ pub(crate) fn read<S: Source>(source: &mut S, blueprint: &str) -> Result<Composi
             bus_index as u16,
             &object.fields,
             "LinkConnections",
-            &mut visited_rows,
+            &mut budget,
         )?);
         let rows = field(&object.fields, "EventConnections")?
             .as_array()
             .ok_or_else(|| bad("event connection array"))?;
-        visited_rows = visited_rows
-            .checked_add(rows.len())
-            .filter(|n| *n <= events::MAX_CONNECTIONS)
-            .ok_or_else(|| bad("event connection bound"))?;
+        budget.visit(rows.len())?;
         for (index, row) in rows.iter().enumerate() {
             let fields = row.as_fields().ok_or_else(|| bad("event connection row"))?;
             let kind = target_type(fields)?;
@@ -289,9 +377,12 @@ pub(crate) fn read<S: Source>(source: &mut S, blueprint: &str) -> Result<Composi
                     .target(&bus.key.0, pointer)?
                     .ok_or_else(|| bad("null event endpoint"))?;
                 let site = Site { key, ..bus.clone() };
-                let &node = sites
-                    .get(&site)
-                    .ok_or_else(|| bad("event endpoint outside composition"))?;
+                let &node = sites.get(&site).ok_or_else(|| {
+                    bad(&format!(
+                        "event row {index} {side} outside composition: {}:{} in {}:{}",
+                        site.key.0, site.key.1, bus.key.0, bus.key.1
+                    ))
+                })?;
                 Ok(Endpoint {
                     node,
                     event: event(fields, port)?,
@@ -342,7 +433,8 @@ pub(crate) fn read<S: Source>(source: &mut S, blueprint: &str) -> Result<Composi
         properties,
         links,
     };
-    result.dispatcher()?;
+    events::validate_connections(result.nodes.len(), &result.connections)
+        .map_err(|e| bad(&e.to_string()))?;
     Ok(result)
 }
 impl AssetIndex {

@@ -41,9 +41,21 @@ pub struct AssetIndex {
     pub(crate) assets: Assets,
     pub(crate) identity: BuildIdentity,
     registries: HashMap<String, Groups>,
+    fingerprint: Option<String>,
 }
 
 impl AssetIndex {
+    /// An independently positioned reader over the same validated installation.
+    /// Immutable decoded objects and scene tables are shared; new reads and
+    /// additional cache entries stay local to each bounded preparation worker.
+    pub fn fork(&self) -> Self {
+        Self {
+            assets: self.assets.fork(),
+            identity: self.identity.clone(),
+            registries: self.registries.clone(),
+            fingerprint: self.fingerprint.clone(),
+        }
+    }
     /// Challenge enum names and IDs from the installed localization catalog.
     /// Counts, rewards, dates and progression remain server policy.
     pub fn challenge_types(&mut self) -> Result<BTreeMap<String, u32>, Error> {
@@ -90,12 +102,37 @@ impl AssetIndex {
         Ok(result)
     }
 
-    /// Exact object identities of a non-blueprint class in registry order.
-    /// Embedded objects may share a partition and have no asset name of their own.
-    pub(crate) fn registered_objects(
+    /// Exact object identities of a class in registry order, including classes
+    /// outside the Blueprint catalog. Each pair is a partition name and object
+    /// ordinal; embedded objects need not have an asset name of their own.
+    /// A valid registry without that class returns an empty list. A missing or
+    /// malformed registry is an error, not an empty catalog.
+    pub fn registered_objects(
         &mut self,
         bundle: &str,
         class: &str,
+    ) -> Result<Vec<(String, usize)>, Error> {
+        self.registered_matching(bundle, |candidate| candidate == class)
+    }
+
+    /// Exact class counts across a registry, including non-Blueprint objects.
+    /// This reports installed composition, not inheritance or wire class IDs.
+    pub fn registered_class_counts(
+        &mut self,
+        bundle: &str,
+    ) -> Result<BTreeMap<String, usize>, Error> {
+        let mut counts = BTreeMap::new();
+        self.registered_matching(bundle, |class| {
+            *counts.entry(class.to_owned()).or_default() += 1;
+            true
+        })?;
+        Ok(counts)
+    }
+
+    fn registered_matching(
+        &mut self,
+        bundle: &str,
+        mut include: impl FnMut(&str) -> bool,
     ) -> Result<Vec<(String, usize)>, Error> {
         let registry = format!(
             "{}{REGISTRY_SUFFIX}",
@@ -126,7 +163,7 @@ impl AssetIndex {
                         .ok_or_else(|| Error::Content("registry pointer".into()))?,
                 )?
                 .ok_or_else(|| Error::Content("null registry object".into()))?;
-            if self.assets.objects(&key.0)?[key.1].class == class {
+            if include(&self.assets.objects(&key.0)?[key.1].class) {
                 if !seen.insert(key.clone()) {
                     return Err(Error::Content("duplicate registered object".into()));
                 }
@@ -140,16 +177,22 @@ impl AssetIndex {
             assets,
             identity,
             registries: HashMap::new(),
+            fingerprint: None,
         }
     }
     /// Open and index an installation after checking its executable.
     pub fn open(game_root: &Path, options: &Options) -> Result<Self, Error> {
-        crate::fingerprint(game_root, options)?;
+        let fingerprint = crate::fingerprint(game_root, options)?;
         let install = nfs_frostbite::install::Installation::open(game_root, options.limits)?;
-        Ok(Self::from_assets(
-            Assets::scan(&install)?,
-            options.identity.clone(),
-        ))
+        let mut result = Self::from_assets(Assets::scan(&install)?, options.identity.clone());
+        result.fingerprint = Some(fingerprint.digest);
+        Ok(result)
+    }
+
+    /// Identity verified while opening this immutable installation index.
+    /// Constructed test indexes have no installed source identity.
+    pub fn fingerprint(&self) -> Option<&str> {
+        self.fingerprint.as_deref()
     }
 
     fn groups(&mut self, bundle: &str) -> Result<&Groups, Error> {
@@ -370,6 +413,42 @@ mod tests {
                         local_index: 2
                     }
                 )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn registered_objects_include_non_blueprints_and_preserve_registry_order() {
+        let (_dir, mut index) = index();
+        let bundle = synthetic::REGISTRY_BUNDLE;
+        assert_eq!(
+            index.registered_class_counts(bundle).unwrap(),
+            BTreeMap::from([
+                ("LogicPrefabBlueprint".into(), 2),
+                ("RaceVehicleBlueprint".into(), 1),
+                ("ItemSystemData".into(), 1),
+            ])
+        );
+        assert!(index.registered_class_counts("levels/absent").is_err());
+        assert_eq!(
+            index
+                .registered_objects(bundle, "LogicPrefabBlueprint")
+                .unwrap(),
+            [("prefabs/first".into(), 0), ("prefabs/second".into(), 0)]
+        );
+        assert_eq!(
+            index.registered_objects(bundle, "ItemSystemData").unwrap(),
+            [(crate::items::ITEM_SYSTEM.into(), 0)]
+        );
+        assert!(
+            index
+                .registered_objects(bundle, "AbsentClass")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            index
+                .registered_objects("levels/absent", "ItemSystemData")
                 .is_err()
         );
     }

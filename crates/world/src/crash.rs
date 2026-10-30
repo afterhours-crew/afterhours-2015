@@ -15,6 +15,7 @@ use crate::{
 use nfs_protocol::world::rpc::Serial;
 use std::collections::BTreeMap;
 mod reset;
+pub mod route;
 mod trail;
 pub use reset::ResetBindings;
 pub use trail::Destination;
@@ -102,6 +103,8 @@ struct Entry {
     vehicle: Option<u16>,
     destination: Option<Destination>,
     relocation_sent: bool,
+    route: route::Cache,
+    recovery: Option<(route::Key, route::Recovery)>,
 }
 #[derive(Clone, Debug)]
 pub struct Crashes {
@@ -179,6 +182,8 @@ impl Crashes {
                     vehicle: None,
                     destination: None,
                     relocation_sent: false,
+                    route: route::Cache::default(),
+                    recovery: None,
                 },
             );
         }
@@ -193,13 +198,14 @@ impl Crashes {
         vehicle: u16,
         sample: &crate::replication::vehicle::movement::Sample,
         eligible: bool,
+        route: Option<route::Sample>,
     ) -> Result<(), Error> {
-        let item = players
-            .vehicle_item_of(owner.connection, owner.persona, vehicle)
-            .ok_or(Error::UnknownObject)?;
-        if players.owned_vehicle(owner.connection, owner.persona, owner.participant, item)
-            != Some(vehicle)
-        {
+        if !players.owns_participant_vehicle(
+            owner.connection,
+            owner.persona,
+            owner.participant,
+            vehicle,
+        ) {
             return Err(Error::UnknownObject);
         }
         let revision = sample.physics.identity_words[2];
@@ -237,11 +243,28 @@ impl Crashes {
         entry.vehicle = Some(vehicle);
         if arming {
             entry.destination = entry.trail.destination(seconds);
+            entry.recovery =
+                route.and_then(|sample| entry.route.recovery(sample.key).map(|r| (sample.key, r)));
         }
-        if eligible && !signal {
+        if eligible && !signal && matches!(entry.phase, Phase::Idle | Phase::Complete) {
             entry
                 .trail
                 .observe(&motion, sample.physics.controls.values[0] == 0, false)?;
+            if let Some(route) = route {
+                if sample.physics.controls.values[0] != 1 {
+                    let speed = motion
+                        .velocity
+                        .into_iter()
+                        .map(|v| v * v)
+                        .sum::<f32>()
+                        .sqrt();
+                    entry
+                        .route
+                        .observe(route.key, route.config, route.geometry, speed, seconds)?;
+                }
+            } else {
+                entry.route = route::Cache::default();
+            }
         }
         Ok(())
     }
@@ -252,6 +275,36 @@ impl Crashes {
         let entry = self.entries.get(&participant)?;
         (entry.phase == Phase::Complete && entry.signal)
             .then_some((entry.vehicle?, entry.destination))
+    }
+
+    pub fn vehicle(&self, participant: u16) -> Option<u16> {
+        self.entries.get(&participant)?.vehicle
+    }
+
+    /// A valid route provider supplies a moving recovery even when the crash
+    /// signal clears during the cinematic. The caller verifies the active race.
+    pub fn event_relocation(
+        &self,
+        participant: u16,
+        key: route::Key,
+    ) -> Option<(u16, route::Recovery)> {
+        let entry = self.entries.get(&participant)?;
+        let (saved, recovery) = entry.recovery?;
+        (entry.phase == Phase::Complete && saved.game_mode == key.game_mode)
+            .then_some((entry.vehicle?, recovery))
+    }
+
+    pub fn route_is_current(&self, participant: u16, key: Option<route::Key>) -> bool {
+        self.entries
+            .get(&participant)
+            .and_then(|e| e.recovery)
+            .is_none_or(|(saved, _)| {
+                key.is_some_and(|current| current.game_mode == saved.game_mode)
+            })
+    }
+
+    pub fn fallback_destination(&self, participant: u16) -> Option<Destination> {
+        self.entries.get(&participant)?.destination
     }
 
     pub fn begin_relocation(&mut self, owner: Owner) -> Result<(), Error> {
@@ -296,6 +349,8 @@ impl Crashes {
         entry.phase = Phase::Complete;
         entry.destination = None;
         entry.trail = trail::Trail::default();
+        entry.route = route::Cache::default();
+        entry.recovery = None;
         Ok(true)
     }
     pub fn pending(&self) -> Vec<Owner> {

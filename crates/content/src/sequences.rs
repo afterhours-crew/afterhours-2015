@@ -8,6 +8,7 @@ pub enum ParseError {
     Limit,
     Io,
 }
+pub(crate) mod authored;
 mod extract;
 mod rules;
 pub(crate) use extract::build;

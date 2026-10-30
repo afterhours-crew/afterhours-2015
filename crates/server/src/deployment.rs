@@ -47,6 +47,12 @@ impl Deployment {
     pub fn new() -> Self {
         Self::default()
     }
+    /// What a world session takes from the deployment: the local persona and
+    /// the world MAC template.
+    pub fn world_identity(&self) -> Option<(i64, Option<[u8; 64]>)> {
+        let (_, identity) = self.authentication.as_ref()?;
+        Some((identity.persona_id(), self.mac_template))
+    }
     pub fn with_bootstrap(mut self, config: nfs_services::bootstrap::Config) -> Self {
         self.bootstrap = Some(config);
         self
@@ -149,6 +155,7 @@ impl Deployment {
                 self.group.as_ref().ok_or(Failure::ProfileConfig)?.clone(),
                 group,
             )?
+            .with_group_renewal(fresh::<{ nfs_services::group::SEED_BYTES }>(seeds)?)
             .with_owned_matchmaking(
                 self.admission
                     .as_ref()

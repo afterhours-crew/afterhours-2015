@@ -5,6 +5,82 @@
 use super::*;
 
 impl Players {
+    /// Set or clear only the owned car's burnout tendency override. None resets
+    /// the native mask-8 pair to (0, false); finite values are not clamped.
+    pub fn set_vehicle_burnout_tendency(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        id: u16,
+        value: Option<f32>,
+    ) -> Result<Option<Record>, Error> {
+        if !self.owned_vehicles(connection, persona).contains(&id) {
+            return Err(Error::UnknownObject);
+        }
+        self.change_vehicle_burnout_tendency(id, value)
+    }
+
+    /// Resolve an AI car through the host-issued lifetime key before applying
+    /// an event's burnout override. This grants no inventory authority.
+    pub fn set_ai_vehicle_burnout_tendency(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        key: u64,
+        value: Option<f32>,
+    ) -> Result<Option<Record>, Error> {
+        let id = self
+            .ai_ids(connection, persona, key)
+            .ok_or(Error::UnknownObject)?
+            .vehicle;
+        self.change_vehicle_burnout_tendency(id, value)
+    }
+
+    fn change_vehicle_burnout_tendency(
+        &mut self,
+        id: u16,
+        value: Option<f32>,
+    ) -> Result<Option<Record>, Error> {
+        if value.is_some_and(|v| !v.is_finite()) {
+            return Err(Error::Bound);
+        }
+        let Some(state::Object {
+            current: Update::Vehicle { binding, fields },
+            ..
+        }) = self.objects.get(id)
+        else {
+            return Err(Error::TypeMismatch);
+        };
+        if fields
+            .iter()
+            .filter(|f| matches!(f, Some(vehicle::Update::Chassis(_))))
+            .count()
+            != 1
+        {
+            return Err(Error::Shape);
+        }
+        let updates = fields
+            .iter()
+            .map(|field| {
+                matches!(field, Some(vehicle::Update::Chassis(_))).then(|| {
+                    vehicle::Update::Chassis(Box::new(vehicle::ChassisUpdate {
+                        physics: None,
+                        flag: None,
+                        custom: None,
+                        pair: Some((value.unwrap_or(0.).to_bits(), value.is_some())),
+                    }))
+                })
+            })
+            .collect();
+        self.objects.change(
+            id,
+            Update::Vehicle {
+                binding: binding.clone(),
+                fields: updates,
+            },
+        )
+    }
+
     /// Publish the owned nitrous runtime's mode and/or level (0–255) on the car's
     /// nitrous field. `None` leaves that part of the field unchanged.
     pub fn set_vehicle_nitrous(
@@ -446,8 +522,27 @@ impl Players {
         )
     }
 
-    /// Vehicles of the participants owned by `connection` and `persona`: the
-    /// cars that connection's client simulates.
+    pub(super) fn participant_has_vehicle(&self, participant: u16, vehicle: u16) -> bool {
+        self.vehicles
+            .iter()
+            .any(|(&(p, _), &id)| p == participant && id == vehicle)
+            || self.temporary_vehicles.get(&participant) == Some(&vehicle)
+    }
+    /// Simulation ownership covers both an inventory car and a session-only car.
+    /// This check grants no item, equipment or purchase authority.
+    pub fn owns_participant_vehicle(
+        &self,
+        connection: u8,
+        persona: u64,
+        participant: u16,
+        vehicle: u16,
+    ) -> bool {
+        self.owns_participant(connection, persona, participant)
+            && self.participant_has_vehicle(participant, vehicle)
+    }
+    /// Vehicles this connection's client simulates, including temporary cars.
+    /// Temporary and display cars carry simulation ownership but no item identity;
+    /// display cars remain excluded from participant driving assignments.
     pub fn owned_vehicles(&self, connection: u8, persona: u64) -> std::collections::BTreeSet<u16> {
         self.vehicles
             .iter()
@@ -456,6 +551,22 @@ impl Players {
                 self.owns_participant(connection, persona, *participant)
             })
             .map(|(_, id)| *id)
+            .chain(
+                self.temporary_vehicles
+                    .iter()
+                    .filter(|(participant, _)| {
+                        self.owns_participant(connection, persona, **participant)
+                    })
+                    .map(|(_, id)| *id),
+            )
+            .chain(
+                self.preview_vehicles
+                    .iter()
+                    .filter(|((participant, _), _)| {
+                        self.owns_participant(connection, persona, *participant)
+                    })
+                    .map(|(_, id)| *id),
+            )
             .collect()
     }
     /// The item of a live car owned through this connection and persona.
@@ -510,6 +621,12 @@ impl Players {
             .vehicles
             .get(&(participant, item))
             .ok_or(Error::UnknownObject)?;
+        self.remove_unbound_vehicle(participant, id)?;
+        self.vehicles.remove(&(participant, item));
+        Ok(id)
+    }
+
+    fn remove_unbound_vehicle(&mut self, participant: u16, id: u16) -> Result<(), Error> {
         // A caller must publish the detach before deleting a referenced car.
         if matches!(self.objects.get(participant).map(|o| &o.current),
             Some(Update::Participant(p)) if p.entity == Some(id))
@@ -522,7 +639,54 @@ impl Players {
             return Err(Error::TypeMismatch);
         }
         self.objects = next;
-        self.vehicles.remove(&(participant, item));
+        Ok(())
+    }
+
+    /// Create one session-only car for this participant, without assigning a
+    /// persistent item ID. It shares normal player seats and simulation authority
+    /// but cannot be addressed by inventory purchase/equipment operations.
+    pub fn create_temporary_vehicle(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        participant: u16,
+        creation: vehicle::EntityCreation,
+        content: &entity::creation::Content,
+    ) -> Result<Record, Error> {
+        if self.owned_actor(connection, persona, participant).is_none() {
+            return Err(Error::UnknownObject);
+        }
+        if self.temporary_vehicles.contains_key(&participant) {
+            return Err(Error::DuplicateObject);
+        }
+        if creation
+            .body
+            .creation
+            .as_ref()
+            .is_none_or(|c| c.connection_id != u16::from(connection))
+        {
+            return Err(Error::Shape);
+        }
+        let record = self.objects.spawn_vehicle(creation, content)?;
+        self.temporary_vehicles.insert(participant, record.id);
+        Ok(record)
+    }
+    pub fn temporary_vehicle(&self, connection: u8, persona: u64, participant: u16) -> Option<u16> {
+        self.owns_participant(connection, persona, participant)
+            .then(|| self.temporary_vehicles.get(&participant).copied())
+            .flatten()
+    }
+    pub fn remove_temporary_vehicle(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        participant: u16,
+    ) -> Result<u16, Error> {
+        let id = self
+            .temporary_vehicle(connection, persona, participant)
+            .ok_or(Error::UnknownObject)?;
+        self.remove_unbound_vehicle(participant, id)?;
+        self.temporary_vehicles.remove(&participant);
         Ok(id)
     }
     pub fn create_vehicle(
@@ -546,6 +710,69 @@ impl Players {
         let record = self.objects.spawn_vehicle(creation, content)?;
         self.vehicles.insert((participant, item), record.id);
         Ok(record)
+    }
+
+    pub fn create_preview_vehicle(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        participant: u16,
+        slot: u16,
+        creation: vehicle::EntityCreation,
+        content: &entity::creation::Content,
+    ) -> Result<Record, Error> {
+        if self.owned_actor(connection, persona, participant).is_none() {
+            return Err(Error::UnknownObject);
+        }
+        if slot > 511
+            || self
+                .preview_vehicles
+                .keys()
+                .filter(|(p, _)| *p == participant)
+                .count()
+                >= 16
+        {
+            return Err(Error::Bound);
+        }
+        if self.preview_vehicles.contains_key(&(participant, slot)) {
+            return Err(Error::DuplicateObject);
+        }
+        if creation
+            .body
+            .creation
+            .as_ref()
+            .is_none_or(|c| c.connection_id != u16::from(connection))
+        {
+            return Err(Error::Shape);
+        }
+        let record = self.objects.spawn_vehicle(creation, content)?;
+        self.preview_vehicles.insert((participant, slot), record.id);
+        Ok(record)
+    }
+    pub fn preview_vehicle(
+        &self,
+        connection: u8,
+        persona: u64,
+        participant: u16,
+        slot: u16,
+    ) -> Option<u16> {
+        self.owns_participant(connection, persona, participant)
+            .then(|| self.preview_vehicles.get(&(participant, slot)).copied())
+            .flatten()
+    }
+    pub fn remove_preview_vehicle(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        participant: u16,
+        slot: u16,
+    ) -> Result<u16, Error> {
+        let id = self
+            .preview_vehicle(connection, persona, participant, slot)
+            .ok_or(Error::UnknownObject)?;
+        self.remove_unbound_vehicle(participant, id)?;
+        self.preview_vehicles.remove(&(participant, slot));
+        Ok(id)
     }
 
     pub fn staged_vehicle(

@@ -17,6 +17,203 @@ const CLIENT_FRESH: u32 = 0x5555_5555;
 const CLIENT_SELECTOR: u16 = 7;
 
 #[test]
+fn admitted_connection_accepts_unsequenced_disconnect() {
+    let (mut host, _) = admitted(0);
+    let mut listener = Retain::default();
+    // Constructed native close shape: envelope, reason byte, u16 byte count.
+    let mut wire = BitWriter::new();
+    wire.put(4, 3)
+        .put(0, 3)
+        .put(u64::from(HOST_SELECTOR), 14)
+        .put(14, 8)
+        .put(0, 8)
+        .put(0, 16)
+        .align();
+    let wire = wire.into_bytes();
+    let mut frame = BitWriter::new();
+    frame.put(0, 8);
+    let (ticket, _) = host.send_tracked_frame(frame.span(), 8).unwrap();
+    let frontier = host.receive_history();
+    let stats = host.stats();
+    let mut foreign = wire.clone();
+    foreign[2] ^= 0x10;
+    assert_eq!(
+        host.receive(&foreign, 4, &mut listener),
+        Err(Error::Selector)
+    );
+    let mut short = wire.clone();
+    short[5] = 1;
+    assert_eq!(host.receive(&short, 5, &mut listener), Err(Error::Shape));
+    assert_eq!(host.phase_name(), PhaseName::Sequenced);
+    assert_eq!(host.receive_history(), frontier);
+    assert_eq!(host.stats(), stats);
+    assert_eq!(
+        host.delivery_status(ticket),
+        Some(delivery::Status::Pending)
+    );
+    for (i, padding) in [0, 15, 7, 1].into_iter().enumerate() {
+        let mut retry = wire.clone();
+        *retry.last_mut().unwrap() |= padding;
+        let result = host.receive(&retry, 10 + i as u64, &mut listener).unwrap();
+        assert_eq!(
+            result.event,
+            Some(Event::Disconnected {
+                reason: 0,
+                repeated: i != 0
+            })
+        );
+        assert!(result.send.is_empty());
+    }
+    assert_eq!(host.phase_name(), PhaseName::Closed);
+    assert_eq!(host.disconnect().unwrap().reason, 0);
+    assert_eq!(host.delivery_status(ticket), None);
+    assert_eq!(host.receive_history(), None);
+    assert!(host.poll(100_000).unwrap().is_empty());
+    assert_eq!(host.send_frame(frame.span()), Err(Error::Phase));
+    assert_eq!(listener.frames, 0);
+    assert_eq!(
+        host.receive(&foreign, 100_001, &mut listener),
+        Err(Error::Selector)
+    );
+    let mut changed = wire.clone();
+    changed[3] |= 1;
+    host.receive(&changed, 100_002, &mut listener).unwrap();
+    assert_eq!(
+        host.disconnect().unwrap().reason,
+        0,
+        "first reason is retained"
+    );
+    let (mut other, _) = admitted(0);
+    assert_eq!(other.phase_name(), PhaseName::Sequenced);
+    assert!(other.send_frame(frame.span()).is_ok());
+}
+
+#[test]
+fn negotiated_peer_reports_actual_complete_rejected_and_missing_fragment_delivery() {
+    use delivery::Status;
+    struct Check {
+        accept: bool,
+        calls: usize,
+    }
+    impl Listener for Check {
+        fn frame(&mut self, frame: Queued<'_>) -> bool {
+            self.calls += 1;
+            assert_eq!(frame.data.len(), 24);
+            assert_eq!(frame.data.read_u32(0, 24).unwrap(), 0xabcdef);
+            self.accept
+        }
+    }
+    for (accept, drop_middle, expected) in [
+        (true, false, Status::Accepted),
+        (false, false, Status::Rejected),
+        (true, true, Status::Rejected),
+    ] {
+        let (mut host, _) = admitted(0);
+        let mut peer =
+            Application::negotiated(Policy::default(), CLIENT_SELECTOR, HOST_SELECTOR, 3).unwrap();
+        let mut bits = BitWriter::new();
+        bits.put(0xabcdef, 24);
+        let (ticket, wires) = host.send_tracked_frame(bits.span(), 8).unwrap();
+        let mut check = Check { accept, calls: 0 };
+        let mut host_listener = Retain::default();
+        for (index, body) in wires.iter().enumerate() {
+            if index == 1 && drop_middle {
+                continue;
+            }
+            let received = peer.receive(body, 10 + index as u64, &mut check).unwrap();
+            for reply in received.send {
+                host.receive(&reply, 10 + index as u64, &mut host_listener)
+                    .unwrap();
+            }
+        }
+        assert_eq!(check.calls, usize::from(!drop_middle));
+        assert_eq!(host.delivery_status(ticket), Some(Status::Pending));
+        // Actual peer-generated history reports the final fragment's outcome.
+        let report = peer.send_frame(bits.span()).unwrap();
+        host.receive(&report, 20, &mut host_listener).unwrap();
+        assert_eq!(host.release_delivery(ticket), Some(expected));
+    }
+}
+
+#[test]
+fn negotiated_peer_rejects_corrupt_or_foreign_input_without_acknowledging_it() {
+    let (mut host, _) = admitted(0);
+    let mut peer =
+        Application::negotiated(Policy::default(), CLIENT_SELECTOR, HOST_SELECTOR, 3).unwrap();
+    let mut bits = BitWriter::new();
+    bits.put(0, 8);
+    let wire = host.send_frame(bits.span()).unwrap();
+    let mut corrupt = wire.clone();
+    *corrupt.last_mut().unwrap() ^= 1;
+    let mut listener = Retain::default();
+    assert_eq!(peer.receive(&corrupt, 4, &mut listener), Err(Error::Shape));
+    let wrong = sequenced(8, 1, 0, 0, &control_payload(CONTROL_EMPTY, &[]));
+    assert_eq!(peer.receive(&wrong, 4, &mut listener), Err(Error::Selector));
+    assert_eq!(peer.receive(&[], 4, &mut listener), Err(Error::Shape));
+    assert_eq!(peer.receive_history(), Some((0, 0)));
+    assert_eq!(listener.frames, 0);
+    let received = peer.receive(&wire, 5, &mut listener).unwrap();
+    assert!(matches!(
+        received.event,
+        Some(Event::Queued {
+            accepted: false,
+            ..
+        })
+    ));
+    assert_eq!(peer.receive_history(), Some((1, 0)));
+    assert_eq!(
+        peer.receive(&wire, 6, &mut listener).unwrap().event,
+        Some(Event::Duplicate)
+    );
+    assert_eq!(listener.frames, 1, "duplicate must not deliver twice");
+    assert_eq!(peer.receive(&wire, 5, &mut listener), Err(Error::Clock));
+}
+
+#[test]
+fn negotiated_endpoint_bounds_and_delivery_policy_are_explicit() {
+    for (inbound, outbound) in [(0, 4), (1, 0), (0x4000, 4), (1, 0x4000)] {
+        assert!(matches!(
+            Application::negotiated(Policy::default(), inbound, outbound, 0),
+            Err(Error::Selector)
+        ));
+    }
+    assert!(matches!(
+        Application::negotiated(
+            Policy {
+                assume_delivered: true,
+                ..Policy::default()
+            },
+            1,
+            4,
+            0
+        ),
+        Err(Error::Shape)
+    ));
+    assert!(matches!(
+        Application::negotiated(
+            Policy {
+                max_frame_bits: usize::MAX,
+                ..Policy::default()
+            },
+            1,
+            4,
+            0
+        ),
+        Err(Error::Bound)
+    ));
+    let mut peer = Application::negotiated(Policy::default(), 1, 4, 91).unwrap();
+    assert_eq!(peer.selectors(), Some((1, 4)));
+    assert_eq!(peer.origin_ms(), Some(91));
+    let mut bits = BitWriter::new();
+    bits.put(0, 1);
+    for _ in 0..WINDOW - 1 {
+        peer.send_frame(bits.span()).unwrap();
+    }
+    assert_eq!(peer.send_frame(bits.span()), Err(Error::Window));
+    assert_eq!(peer.stats().sent, usize::from(WINDOW - 1));
+}
+
+#[test]
 fn tracked_frames_require_every_fragment_and_ignore_future_reports() {
     use delivery::Status;
     let (mut a, _) = admitted(0);
@@ -736,4 +933,41 @@ fn send_frame_fragments_splits_at_the_e101_size_and_needs_window_room() {
         app().send_frame_fragments(span, DEFAULT_FRAGMENT_BITS),
         Err(Error::Phase)
     );
+}
+
+#[test]
+fn an_empty_control_acknowledges_received_frames_without_a_handler_frame() {
+    use delivery::Status;
+    struct Accept;
+    impl Listener for Accept {
+        fn frame(&mut self, _: Queued<'_>) -> bool {
+            true
+        }
+    }
+    let (mut host, _) = admitted(0);
+    let mut peer =
+        Application::negotiated(Policy::default(), CLIENT_SELECTOR, HOST_SELECTOR, 3).unwrap();
+    let mut bits = BitWriter::new();
+    bits.put(0x5a, 8);
+    let (ticket, wires) = host.send_tracked_frame(bits.span(), 64).unwrap();
+    // Whatever the peer answers on its own is not delivered: only the empty
+    // control below reaches the host.
+    for body in &wires {
+        peer.receive(body, 10, &mut Accept).unwrap();
+    }
+    assert_eq!(host.delivery_status(ticket), Some(Status::Pending));
+    let control = peer.empty_control(20).unwrap();
+    let mut host_listener = Retain::default();
+    let received = host.receive(&control, 20, &mut host_listener).unwrap();
+    assert_eq!(received.event, Some(Event::EmptyControl));
+    assert!(received.send.is_empty());
+    assert_eq!(host.release_delivery(ticket), Some(Status::Accepted));
+    assert_eq!(peer.stats().empty_controls_sent, 1);
+    // Unacknowledged own sends still bound it like any other send.
+    let frame = [0xaa; 29];
+    while peer
+        .send_frame(BitSpan::new(&frame, 0, 232).unwrap())
+        .is_ok()
+    {}
+    assert_eq!(peer.empty_control(30), Err(Error::Window));
 }

@@ -156,3 +156,132 @@ fn query_state_validates_every_reference_and_rejects_typed_updates_atomically() 
         snapshot
     );
 }
+
+fn sorter_wire(value: Option<(u16, i32)>) -> BitWriter {
+    let mut wire = BitWriter::new();
+    // Root, query RPC, optional (13-bit participant, signed 32-bit score),
+    // following Boolean property, and three update flags.
+    wire.put(2, 16).put(0, 9).put(7, 10).put(5, 13);
+    wire.put(1, 9).put(7, 10).put(u64::from(value.is_some()), 1);
+    if let Some((reference, score)) = value {
+        wire.put(u64::from(reference), 13)
+            .put(u64::from(score as u32), 32);
+    }
+    wire.put(1, 1).put(1, 1).put(1, 1).put(1, 1).put(0, 1);
+    wire
+}
+
+#[test]
+fn sorter_optional_result_preserves_signed_score_and_record_boundary() {
+    let profile = Profile::new(&[
+        Kind::Root,
+        Kind::RpcOptionalReferenceI32,
+        Kind::BoolProperty,
+    ])
+    .unwrap();
+    for value in [
+        None,
+        Some((0, 0)),
+        Some((7, -1)),
+        Some((8191, i32::MIN)),
+        Some((1, i32::MAX)),
+    ] {
+        let wire = sorter_wire(value);
+        let decoded = Body::decode(wire.span(), &profile, true).unwrap();
+        assert_eq!(decoded.bits, if value.is_some() { 118 } else { 73 });
+        assert_eq!(decoded.initial_bits, Some(decoded.bits - 3));
+        assert_eq!(
+            decoded.body.initial.as_ref().unwrap()[1],
+            Initial::RpcOptionalReferenceI32 {
+                rpc: Rpc {
+                    selector: 1,
+                    serial: Serial::new(7).unwrap()
+                },
+                value,
+            }
+        );
+        assert_eq!(
+            decoded.body.initial.as_ref().unwrap()[2],
+            Initial::BoolProperty(Some(true))
+        );
+        assert_eq!(decoded.body.encode(&profile).unwrap(), wire);
+        for end in 0..wire.len() {
+            assert!(Body::decode(wire.span().slice(0, end).unwrap(), &profile, true).is_err());
+        }
+        let mut concatenated = wire.clone();
+        concatenated.put(0xabc, 12);
+        assert_eq!(
+            Body::decode(concatenated.span(), &profile, true).unwrap(),
+            decoded
+        );
+    }
+}
+
+#[test]
+fn sorter_result_checks_references_and_has_no_property_update_body() {
+    let profile = Profile::new(&[
+        Kind::Root,
+        Kind::RpcOptionalReferenceI32,
+        Kind::BoolProperty,
+    ])
+    .unwrap();
+    let asset = Asset {
+        bundle: 2,
+        type_id: 7,
+        local_index: 0,
+    };
+    let content = Content::new(
+        vec![Catalog::new(2, &[(7, 1)]).unwrap()],
+        vec![(asset, profile.clone())],
+    )
+    .unwrap();
+    let mut creation = Creation {
+        prefix: Prefix {
+            parent: None,
+            blueprint: 3,
+            sub_id: 1,
+            owner: Some(5),
+            asset,
+        },
+        body: Body::decode(sorter_wire(Some((7, -100))).span(), &profile, true)
+            .unwrap()
+            .body,
+    };
+    assert_eq!(
+        state::State::new(creation.clone(), &content, |id| [3, 5].contains(&id)),
+        Err(Error::UnknownObject)
+    );
+    let mut state =
+        state::State::new(creation.clone(), &content, |id| [3, 5, 7].contains(&id)).unwrap();
+    let before = state.clone();
+    assert_eq!(
+        state.apply(vec![None, Some(Update::I32Property(Some(8))), None]),
+        Err(Error::TypeMismatch)
+    );
+    assert_eq!(state, before);
+    state.apply(vec![None, Some(Update::Noop), None]).unwrap();
+    assert_eq!(state, before);
+    let snapshot = state.snapshot();
+    assert_eq!(
+        Creation::decode(snapshot.encode(&content).unwrap().span(), &content)
+            .unwrap()
+            .creation,
+        snapshot
+    );
+    creation.body.initial.as_mut().unwrap()[1] = Initial::RpcOptionalReferenceI32 {
+        rpc: Rpc {
+            selector: 1,
+            serial: Serial::new(7).unwrap(),
+        },
+        value: Some((8192, 0)),
+    };
+    assert!(creation.encode(&content).is_err());
+    creation.body.initial.as_mut().unwrap()[1] = Initial::RpcOptionalReferenceI32 {
+        rpc: Rpc {
+            selector: 1,
+            serial: Serial::new(7).unwrap(),
+        },
+        value: None,
+    };
+    assert!(state::State::new(creation, &content, |id| [3, 5].contains(&id)).is_ok());
+}

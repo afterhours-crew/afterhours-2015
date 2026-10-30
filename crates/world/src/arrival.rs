@@ -247,13 +247,37 @@ impl Arrivals {
         Ok(Some(record))
     }
 
+    /// An arrival report belongs to this lifetime even after the first report
+    /// has queued its stop. Dispatch must consume repeats while the stop and
+    /// completion travel in the opposite direction. Reset retires this identity.
+    pub fn recognizes_arrival(
+        &self,
+        players: &Players,
+        connection: u8,
+        persona: u64,
+        message: &Message,
+    ) -> bool {
+        matches!(message, Message::Reached { event, target, player }
+            if self.definition.layout == Layout::GarageExit
+                && *event == ARRIVED && target.entity == 1
+                && self.entries.values().any(|i| i.ghost == target.ghost
+                    && i.owner.connection == connection && i.owner.persona == persona
+                    && players.local_slot(connection, persona, i.owner.participant) == Some(*player)))
+    }
+
     /// The client's [`ARRIVED`] event: the sequence has played; stop it.
     /// `Ok(None)` for other messages and repeats.
-    pub fn arrived(&mut self, message: &Message) -> Result<Option<Stop>, Error> {
-        let Message::Reached { event, target, .. } = message else {
+    pub fn arrived(
+        &mut self,
+        players: &Players,
+        connection: u8,
+        persona: u64,
+        message: &Message,
+    ) -> Result<Option<Stop>, Error> {
+        let Message::Reached { target, .. } = message else {
             return Ok(None);
         };
-        if self.definition.layout != Layout::GarageExit || *event != ARRIVED || target.entity != 1 {
+        if !self.recognizes_arrival(players, connection, persona, message) {
             return Ok(None);
         }
         let Some(instance) = self.entries.values_mut().find(|i| i.ghost == target.ghost) else {

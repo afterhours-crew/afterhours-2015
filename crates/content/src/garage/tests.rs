@@ -7,6 +7,14 @@ use crate::synthetic::{self, Asset, Field};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 fn build_assets(assets: Vec<Asset>) -> Result<serde_json::Value, Error> {
+    read_assets(assets, |index| {
+        build(index).map(|bytes| serde_json::from_slice(&bytes).unwrap())
+    })
+}
+fn read_assets<T>(
+    assets: Vec<Asset>,
+    read: impl FnOnce(&mut AssetIndex) -> Result<T, Error>,
+) -> Result<T, Error> {
     static NEXT: AtomicU32 = AtomicU32::new(0);
     let path = std::env::temp_dir().join(format!(
         "nfs-garage-content-{}-{}",
@@ -15,10 +23,90 @@ fn build_assets(assets: Vec<Asset>) -> Result<serde_json::Value, Error> {
     ));
     let (options, _) = synthetic::write(&path, &assets).unwrap();
     let mut index = AssetIndex::open(&path, &options).unwrap();
-    let result = build(&mut index).map(|bytes| serde_json::from_slice(&bytes).unwrap());
+    let result = read(&mut index);
     drop(index);
     std::fs::remove_dir_all(path).unwrap();
     result
+}
+
+fn starter_assets(case: usize) -> Vec<Asset> {
+    let mut assets = synthetic::garage_layout_with(|g, objects, _, _| {
+        rows(g, "LinkConnections").truncate(3);
+        for i in 0..3 {
+            let (partition, guid) = synthetic::reference(60 + i);
+            objects.push((
+                "ItemEntityData",
+                vec![("Item", Field::Import(partition, guid))],
+            ));
+            if let Field::RawPointers(v) = field(g, "Objects") {
+                v.push(13 + u32::from(i));
+            }
+            rows(g, "LinkConnections").push(vec![
+                ("Source", Field::RawPointer(3 + u32::from(i))),
+                ("SourceFieldId", Field::UInt(starter::SLOT_ITEM)),
+                ("Target", Field::RawPointer(13 + u32::from(i))),
+                ("TargetFieldId", Field::UInt(0)),
+            ]);
+        }
+        match case {
+            1 => {
+                rows(g, "LinkConnections").swap(1, 2);
+            }
+            2 => {
+                rows(g, "LinkConnections").remove(3);
+            }
+            3 => {
+                *field(&mut rows(g, "LinkConnections")[4], "Target") = Field::RawPointer(13);
+            }
+            4 => {
+                *field(&mut rows(g, "LinkConnections")[4], "Target") = Field::RawPointer(8);
+            }
+            5 => {
+                *field(&mut rows(g, "LinkConnections")[1], "Target") = Field::RawPointer(3);
+            }
+            6 => {
+                rows(g, "PropertyConnections").remove(1);
+            }
+            7 => {
+                *field(&mut rows(g, "PropertyConnections")[1], "Flags") = Field::UInt(2);
+            }
+            8 => {
+                if let Field::RawPointers(v) = field(g, "Objects") {
+                    v.push(13);
+                }
+            }
+            _ => {}
+        }
+    });
+    assets.extend(
+        (60..63).map(|i| synthetic::item(i, "RaceVehicleItemData", vec![], vec![], vec![])),
+    );
+    assets
+}
+
+#[test]
+fn starter_slots_follow_their_own_items_and_locators() {
+    let garage = read_assets(starter_assets(0), starter::extract).unwrap();
+    assert_eq!(
+        garage
+            .slots
+            .map(|s| (s.component, s.item_component, s.definition, s.locator())),
+        std::array::from_fn(|i| (
+            6 - i,
+            7 + i,
+            synthetic::reference(60 + i as u8).1,
+            [i as f32 * 7., 2., -3.]
+        ))
+    );
+    let reordered = read_assets(starter_assets(1), starter::extract).unwrap();
+    assert_eq!(reordered.slots[1].definition, synthetic::reference(62).1);
+    for case in 2..9 {
+        assert!(
+            read_assets(starter_assets(case), starter::extract).is_err(),
+            "case {case}"
+        );
+    }
+    assert!(read_assets(synthetic::garage_layout(), starter::extract).is_err());
 }
 fn field<'a>(fields: &'a mut [(&str, Field)], name: &str) -> &'a mut Field {
     &mut fields.iter_mut().find(|(n, _)| *n == name).unwrap().1

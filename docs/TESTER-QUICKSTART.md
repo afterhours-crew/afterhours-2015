@@ -20,10 +20,11 @@ Blue headings show the current stage; green **OK** means it completed. Yellow
 why a step stopped. Text labels remain readable without color. Redirected output
 and `NO_COLOR=1` use plain text; JSON output never includes color codes.
 
-New local tester accounts start at **REP level 69** (one below the installed cap
-of 70) with **$10,000,000** for trying cars and upgrades. This is a one-time
-starting balance, not money or REP earned by driving. Existing saves keep their
-current level and balance; updates and repeat launches never top them up.
+New local accounts start at the **beginning of the prologue**, with the installed
+game's standard resources. Choose your first car during the introduction.
+Existing saves keep their story progress, cars, level and balance; setup and
+repeat launches never reset or top them up. Older tester accounts keep their
+original tester resources.
 
 ## Activation and installation requirements
 

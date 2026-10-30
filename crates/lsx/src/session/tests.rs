@@ -221,11 +221,11 @@ fn full_startup_exchange_as_the_game_runs_it() {
         Some("false")
     );
     // Unknown requests are reported, not answered; a stray response is ignored.
-    let out = launcher.receive(&game.send("EbisuSDK", Element::new("QueryImage")));
+    let out = launcher.receive(&game.send("EbisuSDK", Element::new("UnmodeledQuery")));
     assert_eq!(
         out.events,
         vec![Event::Unsupported {
-            name: "QueryImage".into(),
+            name: "UnmodeledQuery".into(),
             id: 7
         }]
     );
@@ -274,6 +274,83 @@ fn concatenated_and_fragmented_frames_after_the_handshake() {
     let replies = game.read(&frames);
     assert_eq!(replies.len(), 2);
     assert_eq!(replies[1].payload.attr("Setting"), Some("en_US"));
+}
+
+#[test]
+fn local_collections_complete_without_network_services_or_invented_entries() {
+    let (mut launcher, mut game, read) = started();
+    let key = read[0].payload.attr("key").unwrap();
+    let out = launcher.receive(&game.challenge_response(key));
+    let reply = game.read(&out.send)[0].clone();
+    game.accept(&reply);
+    for (request, reply_name) in [
+        (Element::new("GetBlockList"), "GetBlockListResponse"),
+        (
+            Element::new("QueryFriends").attribute("UserId", "536870913"),
+            "QueryFriendsResponse",
+        ),
+        (
+            Element::new("QueryImage")
+                .attribute("ImageId", "local-avatar")
+                .attribute("Width", "64")
+                .attribute("Height", "64"),
+            "QueryImageResponse",
+        ),
+        (
+            Element::new("QueryAchievements")
+                .attribute("UserId", "536870913")
+                .attribute("PersonaId", "268435457")
+                .attribute("All", "true")
+                .child(Element::new("GameId").text("local-title")),
+            "AchievementSets",
+        ),
+    ] {
+        let wire = game.send("EbisuSDK", request);
+        let out = launcher.receive(&wire);
+        assert_eq!(out.send.len(), 1, "{reply_name}");
+        let reply = &game.read(&out.send)[0];
+        assert_eq!(reply.payload.name, reply_name);
+        assert!(reply.payload.children.is_empty());
+        assert!(matches!(out.events.as_slice(), [Event::Answered { .. }]));
+    }
+    assert_eq!(launcher.stats().unsupported, 0);
+    // The same query is safe to retry; another user's records are not ours.
+    for user in ["536870913", "536870914"] {
+        let out = launcher.receive(&game.send(
+            "EbisuSDK",
+            Element::new("QueryFriends").attribute("UserId", user),
+        ));
+        assert_eq!(out.send.len(), usize::from(user == "536870913"));
+    }
+    let out = launcher.receive(
+        &game.send(
+            "EbisuSDK",
+            Element::new("QueryAchievements")
+                .attribute("UserId", "536870913")
+                .attribute("PersonaId", "99")
+                .attribute("All", "false"),
+        ),
+    );
+    assert!(matches!(out.events.as_slice(), [Event::Unsupported { .. }]));
+    for request in [
+        Element::new("QueryImage")
+            .attribute("ImageId", "x")
+            .attribute("Width", "4097")
+            .attribute("Height", "64"),
+        Element::new("QueryImage")
+            .attribute("ImageId", "x")
+            .attribute("Width", "-1")
+            .attribute("Height", "64"),
+        Element::new("QueryFriends"),
+        Element::new("QueryAchievements")
+            .attribute("UserId", "536870913")
+            .attribute("PersonaId", "268435457")
+            .attribute("All", "maybe"),
+    ] {
+        let out = launcher.receive(&game.send("EbisuSDK", request));
+        assert!(out.send.is_empty());
+        assert!(matches!(out.events.as_slice(), [Event::Malformed(_)]));
+    }
 }
 
 #[test]

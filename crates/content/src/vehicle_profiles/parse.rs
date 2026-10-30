@@ -101,6 +101,8 @@ pub(super) fn profile(v: &Value) -> Result<Profile, ParseError> {
             Some("triple_nibbles") => (Kind::TripleNibbles, None),
             Some("bool") => (Kind::Bool, None),
             Some("wheel") => (Kind::Wheel, None),
+            Some("search_light") => (Kind::SearchLight, None),
+            Some("siren") => (Kind::Siren, None),
             Some("index") => (Kind::Index, None),
             Some("tuning") => (Kind::Tuning, None),
             Some("tagged") => (Kind::Tagged, None),
@@ -136,7 +138,7 @@ pub(super) fn definition(v: &Value) -> Result<Definition, ParseError> {
             "meshes",
             "health",
         ],
-        &[],
+        &["vehicle_info"],
     )?;
     let profile = profile(&v["profile"])?;
     for kind in [
@@ -246,6 +248,18 @@ pub(super) fn definition(v: &Value) -> Result<Definition, ParseError> {
         },
         meshes,
         health: health(&v["health"])?,
+        info: v
+            .get("vehicle_info")
+            .map(|v| {
+                keys(v, &["bundle", "short_name"], &[])?;
+                let name = v["short_name"].as_str().ok_or(ParseError::Invalid)?;
+                Ok(nfs_world::scoring::vehicle_info::Sample {
+                    bundle: uint(&v["bundle"])?,
+                    short_name: nfs_world::scoring::value::Text::new(name)
+                        .map_err(|_| ParseError::Invalid)?,
+                })
+            })
+            .transpose()?,
     })
 }
 pub(super) fn resting(v: &Value) -> Result<placement::RestingConfig, ParseError> {

@@ -17,6 +17,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// One EBX entry of a bundle manifest.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -531,10 +532,12 @@ fn ebx_entry(value: &Value) -> Result<EbxEntry, Error> {
     })
 }
 
+type SharedCatalog = (PathBuf, Arc<HashMap<[u8; 20], Record>>);
+
 /// Record lookup over both catalogues with lazily opened archives.
 pub struct Store {
-    base: (PathBuf, HashMap<[u8; 20], Record>),
-    patch: Option<(PathBuf, HashMap<[u8; 20], Record>)>,
+    base: SharedCatalog,
+    patch: Option<SharedCatalog>,
     handles: HashMap<PathBuf, File>,
     limits: Limits,
 }
@@ -547,7 +550,7 @@ impl Store {
                 &read_bounded(&dir.join("cas.cat"), limits.max_container_bytes)?,
                 &limits,
             )?;
-            Ok((dir, entries))
+            Ok((dir, Arc::new(entries)))
         };
         let root = installation.root();
         let patch_dir = root.join("Update/Patch/Data");
@@ -561,6 +564,17 @@ impl Store {
             handles: HashMap::new(),
             limits,
         })
+    }
+
+    /// Share immutable catalogues, but open independent archive handles on the
+    /// worker's first read. Cloning a File would share its seek position.
+    pub fn fork(&self) -> Self {
+        Self {
+            base: self.base.clone(),
+            patch: self.patch.clone(),
+            handles: HashMap::new(),
+            limits: self.limits,
+        }
     }
 
     fn locate(&self, sha1: &[u8; 20]) -> Option<(PathBuf, Record)> {

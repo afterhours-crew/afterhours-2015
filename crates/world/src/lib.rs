@@ -12,24 +12,32 @@ pub mod actors;
 pub mod arrival;
 pub mod bank;
 pub mod crash;
+pub mod fmv;
 pub mod frame;
+pub mod game_mode;
 pub mod garage;
 pub mod launchers;
 pub mod level_poll;
 pub mod logic;
+pub mod messages;
 pub mod nitrous_fuel;
+pub mod participant_states;
 pub mod participants;
+pub mod race_pacing;
+pub mod race_progress;
 pub mod replication;
+pub mod road_distance;
 pub mod road_graph;
 pub mod road_wander;
 pub mod scoring;
 pub mod sequences;
 pub mod session;
 pub mod spawn_points;
+pub mod speedwall;
 pub mod teleport;
 
 pub use nfs_world_core::{
-    application, bits, content, crypto, files, handshake, items, link, transport,
+    application, bits, content, crypto, files, handshake, items, link, rpc, transport,
 };
 
 #[cfg(test)]
@@ -43,4 +51,5 @@ pub mod vehicle_chassis;
 pub mod vehicle_nitrous;
 pub mod vehicle_reports;
 pub mod vehicle_wheels;
+pub mod volume_filter;
 pub mod world_activation;

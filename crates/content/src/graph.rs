@@ -17,6 +17,16 @@ pub(crate) fn bad(message: &str) -> Error {
 pub(crate) trait Source {
     fn object(&mut self, key: &Key) -> Result<Object, Error>;
     fn target(&mut self, source: &str, pointer: Pointer) -> Result<Option<Key>, Error>;
+    /// A reader may delegate selected entities to another owner. Traversal and
+    /// link resolution still see the complete composition and original objects.
+    fn include_node(&self, _site: &Site) -> bool {
+        true
+    }
+    /// A realm-specific owner may retain an object reference without creating
+    /// its child graph. This does not change the full serializer census walk.
+    fn expand_node(&self, _site: &Site, _object: &Object) -> bool {
+        true
+    }
 }
 impl Source for Assets {
     fn object(&mut self, key: &Key) -> Result<Object, Error> {
@@ -103,6 +113,7 @@ impl<'a, S: Source> Graph<'a, S> {
     pub fn read(&mut self, root: Site) -> Result<Vec<Node>, Error> {
         let mut rows = Vec::new();
         self.visit(root, &mut BTreeSet::new(), &mut rows)?;
+        rows.retain(|row| self.source.include_node(&row.site));
         Ok(rows)
     }
     fn visit(
@@ -127,6 +138,10 @@ impl<'a, S: Source> Graph<'a, S> {
             site: site.clone(),
             object: object.clone(),
         });
+        if !self.source.expand_node(&site, &object) {
+            active.remove(&site.key);
+            return Ok(());
+        }
         for field in ["Objects", "Object", "Components", "Blueprint"] {
             let Some(value) = object.fields.get(field) else {
                 continue;
@@ -221,6 +236,177 @@ impl<'a, S: Source> Graph<'a, S> {
             .map(|e| e.target_port)
             .collect())
     }
+    /// The immediate property sources of `site`'s field `port` in its own bus,
+    /// without following prefab boundaries.
+    pub fn property_sources(&mut self, site: &Site, port: u32) -> Result<Vec<Endpoint>, Error> {
+        Ok(self
+            .edges(&site.bus, Connections::Property)?
+            .iter()
+            .filter(|e| e.target == site.key && e.target_port == port)
+            .map(|e| Endpoint {
+                site: Site {
+                    key: e.source.clone(),
+                    ..site.clone()
+                },
+                port: e.source_port,
+            })
+            .collect())
+    }
+    /// The immediate link targets of `site`'s `port` in its own bus (no
+    /// prefab interface following).
+    pub fn link_targets(&mut self, site: &Site, port: u32) -> Result<Vec<Endpoint>, Error> {
+        Ok(self
+            .edges(&site.bus, Connections::Link)?
+            .iter()
+            .filter(|e| e.source == site.key && e.source_port == port)
+            .map(|e| Endpoint {
+                site: Site {
+                    key: e.target.clone(),
+                    ..site.clone()
+                },
+                port: e.target_port,
+            })
+            .collect())
+    }
+    /// The immediate link sources into `site` in its own bus, with their
+    /// source ports (no prefab interface following).
+    pub fn link_sources(&mut self, site: &Site) -> Result<Vec<Endpoint>, Error> {
+        Ok(self
+            .edges(&site.bus, Connections::Link)?
+            .iter()
+            .filter(|e| e.target == site.key)
+            .map(|e| Endpoint {
+                site: Site {
+                    key: e.source.clone(),
+                    ..site.clone()
+                },
+                port: e.source_port,
+            })
+            .collect())
+    }
+    /// Follow an incoming object link through prefab interfaces. Used for a
+    /// statically wired schematic channel reference, never asset-name lookup.
+    pub fn linked_source(&mut self, site: &Site, port: u32) -> Result<Endpoint, Error> {
+        self.linked_source_inner(site, port, &mut BTreeSet::new())
+    }
+    fn linked_source_inner(
+        &mut self,
+        site: &Site,
+        port: u32,
+        active: &mut BTreeSet<Endpoint>,
+    ) -> Result<Endpoint, Error> {
+        if active.len() >= MAX_GRAPH_DEPTH
+            || !active.insert(Endpoint {
+                site: site.clone(),
+                port,
+            })
+        {
+            return Err(bad("incoming link cycle or depth"));
+        }
+        let rows: Vec<_> = self
+            .edges(&site.bus, Connections::Link)?
+            .iter()
+            .filter(|e| e.target == site.key && e.target_port == port)
+            .map(|e| Endpoint {
+                site: Site {
+                    key: e.source.clone(),
+                    ..site.clone()
+                },
+                port: e.source_port,
+            })
+            .collect();
+        let [mut source] = <[Endpoint; 1]>::try_from(rows).map_err(|_| {
+            bad(&format!(
+                "incoming link count {}:{} field {port}",
+                site.key.0, site.key.1
+            ))
+        })?;
+        let class = self.object(&source.site)?.class;
+        if class == "InterfaceDescriptorData" {
+            let frame = source
+                .site
+                .parents
+                .pop()
+                .ok_or_else(|| bad("incoming root interface link"))?;
+            source.site.key = frame.reference;
+            source.site.bus = frame.bus;
+            self.linked_source_inner(&source.site, source.port, active)
+        } else if class.ends_with("ReferenceObjectData") {
+            let child = self.target_field(&source.site, "Blueprint")?;
+            source.site.parents.push(Frame {
+                bus: source.site.bus.clone(),
+                reference: source.site.key.clone(),
+            });
+            source.site.key = child.clone();
+            source.site.bus = child;
+            source.site.key = self.target_field(&source.site, "Interface")?;
+            self.linked_source_inner(&source.site, source.port, active)
+        } else {
+            Ok(source)
+        }
+    }
+    /// Event connections of `site`'s bus that end at `site`'s event `event`, as
+    /// (source site, source event).
+    pub fn event_sources(&mut self, site: &Site, event: u32) -> Result<Vec<(Site, u32)>, Error> {
+        let object = self.source.object(&site.bus)?;
+        let rows = object
+            .fields
+            .get("EventConnections")
+            .and_then(Value::as_array)
+            .ok_or_else(|| bad("event connection table missing"))?;
+        if rows.len() > MAX_GRAPH_OBJECTS {
+            return Err(bad("event connection count bound"));
+        }
+        let id = |fields: &nfs_frostbite::ebx::Fields, name: &str| -> Option<u32> {
+            fields
+                .get(name)
+                .and_then(Value::as_fields)
+                .and_then(|f| f.get("Id"))
+                .and_then(Value::bits32)
+        };
+        let mut out = Vec::new();
+        for row in rows {
+            let fields = row.as_fields().ok_or_else(|| bad("event connection row"))?;
+            if id(fields, "TargetEvent") != Some(event) {
+                continue;
+            }
+            let pointer = |name: &str| {
+                fields
+                    .get(name)
+                    .and_then(Value::as_pointer)
+                    .ok_or_else(|| bad("event connection pointer"))
+            };
+            let target = self.source.target(&site.bus.0, pointer("Target")?)?;
+            if target.as_ref() != Some(&site.key) {
+                continue;
+            }
+            let source = self
+                .source
+                .target(&site.bus.0, pointer("Source")?)?
+                .ok_or_else(|| bad("null event source"))?;
+            let source_event = id(fields, "SourceEvent").ok_or_else(|| bad("event source id"))?;
+            out.push((
+                Site {
+                    key: source,
+                    ..site.clone()
+                },
+                source_event,
+            ));
+        }
+        Ok(out)
+    }
+    /// Distinct ports of the link connections leaving `site` in its own bus.
+    pub fn link_ports(&mut self, site: &Site) -> Result<Vec<u32>, Error> {
+        let mut ports: Vec<u32> = self
+            .edges(&site.bus, Connections::Link)?
+            .iter()
+            .filter(|e| e.source == site.key)
+            .map(|e| e.source_port)
+            .collect();
+        ports.sort_unstable();
+        ports.dedup();
+        Ok(ports)
+    }
     pub fn links(&mut self, site: &Site, port: u32) -> Result<Vec<Endpoint>, Error> {
         let mut out = Vec::new();
         self.resolve(
@@ -229,6 +415,21 @@ impl<'a, S: Source> Graph<'a, S> {
                 port,
             },
             Connections::Link,
+            &mut BTreeSet::new(),
+            &mut out,
+            &mut 0,
+        )?;
+        Ok(out)
+    }
+    /// Every resolved source of one property input (empty when unconnected).
+    pub fn inputs(&mut self, site: &Site, port: u32) -> Result<Vec<Endpoint>, Error> {
+        let mut out = Vec::new();
+        self.resolve(
+            Endpoint {
+                site: site.clone(),
+                port,
+            },
+            Connections::Property,
             &mut BTreeSet::new(),
             &mut out,
             &mut 0,
@@ -343,6 +544,7 @@ impl<'a, S: Source> Graph<'a, S> {
             } else if kind == Connections::Property
                 || port == 0
                 || object.class == "LinkedSchematicChannelReferenceEntityData"
+                || object.class == "LinkedSchematicChannelRelayEntityData"
             {
                 out.push(next);
             } else {

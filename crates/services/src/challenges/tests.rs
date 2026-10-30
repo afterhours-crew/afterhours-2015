@@ -75,6 +75,76 @@ fn populated() -> State {
 }
 
 #[test]
+fn specific_reads_select_current_period_without_modifying_saved_history() {
+    let catalog = Catalog::from_json(&content()).unwrap();
+    let query = Query {
+        day_id: 7,
+        monthly_start: -11,
+        ids: vec![9],
+    };
+    let current = Current {
+        generation: 41,
+        state: populated(),
+    };
+    let before = current.state.clone();
+    let selected = current.specific(&catalog, &query).unwrap();
+    assert_eq!(selected.generation, 41);
+    assert_eq!(selected.monthly_rank, 1);
+    assert_eq!(selected.entries.len(), 1);
+    let entry = &selected.entries[&9];
+    assert_eq!(entry.definition.car_id, 2);
+    assert_eq!(entry.progress, before.progress[&(7, 9)]);
+    assert_eq!(entry.obtained, BTreeSet::from([u64::MAX]));
+    for _ in 0..10 {
+        assert_eq!(current.specific(&catalog, &query).unwrap(), selected);
+    }
+    assert_eq!(current.state, before);
+    let empty = Current {
+        generation: 2,
+        state: State::default(),
+    };
+    let other = empty.specific(&catalog, &query).unwrap();
+    assert_eq!(other.entries[&9].progress, Progress::default());
+    assert!(other.entries[&9].obtained.is_empty());
+    assert_eq!(other.monthly_rank, 0);
+    let empty_query = Query {
+        ids: vec![],
+        ..query.clone()
+    };
+    assert!(
+        current
+            .specific(&catalog, &empty_query)
+            .unwrap()
+            .entries
+            .is_empty()
+    );
+    for bad in [
+        Query {
+            day_id: 8,
+            ..query.clone()
+        },
+        Query {
+            monthly_start: 0,
+            ..query.clone()
+        },
+        Query {
+            ids: vec![8],
+            ..query.clone()
+        },
+        Query {
+            ids: vec![9, 9],
+            ..query.clone()
+        },
+        Query {
+            ids: vec![9; 65],
+            ..query.clone()
+        },
+    ] {
+        assert_eq!(current.specific(&catalog, &bad), Err(Error::Ineligible));
+    }
+}
+
+#[test]
 fn reads_current_account_and_explicit_period_without_grants_or_rotation() {
     let repo = MemoryRepository::default();
     let who = AccountId::from_owned_config([1; 16]).unwrap();

@@ -2,7 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! Instance-aware interface fields and the supported scalar default grammar.
+//! Instance-aware interface fields and the supported typed default grammar.
 //! This preserves declarations; it does not choose aliases or initialization order.
 use super::{events::Identity, field};
 use crate::{
@@ -27,6 +27,9 @@ pub struct Field {
     pub access: Access,
     /// Empty authored text means no default, not a zero or a ready value.
     pub default: Option<Scalar>,
+    /// Valid authored data whose type the runtime does not execute. Retain it;
+    /// a property layout that uses this port must reject the unsupported type.
+    pub opaque_default: Option<String>,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct Interface {
@@ -49,6 +52,47 @@ fn default(value: &str) -> Result<Option<Scalar>, Error> {
     let scalar = match (kind, text) {
         ("Boolean", "False") => Scalar::Boolean(false),
         ("Boolean", "True") => Scalar::Boolean(true),
+        ("CString", "\"\"") => {
+            Scalar::Text(nfs_world::scoring::value::Text::new("").map_err(|e| bad(&e.to_string()))?)
+        }
+        ("LinearTransform", text) => {
+            let inner = text
+                .strip_prefix('(')
+                .and_then(|s| s.strip_suffix(')'))
+                .ok_or_else(|| bad("interface transform"))?;
+            let rows = inner.split("),(").collect::<Vec<_>>();
+            if rows.len() != 4 {
+                return Err(bad("interface transform rows"));
+            }
+            let mut transform = [[0.0; 3]; 4];
+            for (i, row) in rows.iter().enumerate() {
+                let row = if i == 0 {
+                    row.strip_prefix('(')
+                        .ok_or_else(|| bad("interface transform start"))?
+                } else {
+                    row
+                };
+                let row = if i == 3 {
+                    row.strip_suffix(')')
+                        .ok_or_else(|| bad("interface transform end"))?
+                } else {
+                    row
+                };
+                transform[i] = components(row)?;
+            }
+            Scalar::Transform(transform)
+        }
+        ("Int32", text)
+            if !text.is_empty()
+                && text
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || b"+-".contains(&b)) =>
+        {
+            Scalar::Integer(
+                text.parse()
+                    .map_err(|_| bad("interface signed integer default"))?,
+            )
+        }
         ("Float32", text)
             if !text.is_empty()
                 && text
@@ -67,8 +111,34 @@ fn default(value: &str) -> Result<Option<Scalar>, Error> {
     Ok(Some(scalar))
 }
 
-/// Read the supported empty/Boolean/Float32 subset. Unknown types, reference
-/// defaults, malformed enums and duplicate IDs fail rather than gaining a value.
+fn components<const N: usize>(text: &str) -> Result<[f32; N], Error> {
+    let mut values = [0.0; N];
+    let mut count = 0;
+    for (i, part) in text.split(',').enumerate() {
+        if i >= N
+            || part.is_empty()
+            || !part
+                .bytes()
+                .all(|b| b.is_ascii_digit() || b".+-eE".contains(&b))
+        {
+            return Err(bad("interface vector components"));
+        }
+        values[i] = part
+            .parse::<f32>()
+            .ok()
+            .filter(|v| v.is_finite())
+            .ok_or_else(|| bad("interface finite vector"))?;
+        count += 1;
+    }
+    if count != N {
+        return Err(bad("interface vector size"));
+    }
+    Ok(values)
+}
+
+/// Read supported scalar, empty-text and transform defaults. Valid Vec2 defaults
+/// remain opaque and cannot feed an executed property cell. Unknown types,
+/// references, malformed enums and duplicate IDs fail rather than gaining a value.
 pub fn compile(object: &Object) -> Result<Vec<Field>, Error> {
     if object.class != "InterfaceDescriptorData" {
         return Err(bad("scoring interface class"));
@@ -102,10 +172,28 @@ pub fn compile(object: &Object) -> Result<Vec<Field>, Error> {
             let Value::String(text) = field(fields, "Value")? else {
                 return Err(bad("interface default text"));
             };
+            let opaque_default = if let Some(vector) = text.strip_prefix("Vec2 ") {
+                if text.len() > MAX_DEFAULT_BYTES {
+                    return Err(bad("interface default bound"));
+                }
+                let inner = vector
+                    .strip_prefix('(')
+                    .and_then(|s| s.strip_suffix(')'))
+                    .ok_or_else(|| bad("interface Vec2"))?;
+                components::<2>(inner)?;
+                Some(text.clone())
+            } else {
+                None
+            };
             Ok(Field {
                 id,
                 access,
-                default: default(text)?,
+                default: if opaque_default.is_some() {
+                    None
+                } else {
+                    default(text)?
+                },
+                opaque_default,
             })
         })
         .collect()

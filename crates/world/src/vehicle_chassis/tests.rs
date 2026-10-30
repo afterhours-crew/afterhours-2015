@@ -19,6 +19,41 @@ struct Fixture {
     delegated: BTreeMap<u16, u64>,
 }
 
+#[test]
+fn absent_tire_measurements_preserve_owned_slip_without_rewriting_the_delta() {
+    let mut f = fixture();
+    let pairs = [[23, 3], [24, 4], [91, 5], [92, 6]];
+    let mut physics = f.players.vehicle_physics(1, 101, f.owned).unwrap();
+    physics.controls.wheel_pairs = Some(pairs);
+    f.players
+        .set_vehicle_physics(1, 101, f.owned, physics.clone())
+        .unwrap();
+    physics.controls.wheel_pairs = None;
+    physics.controls.values[8] = 7;
+    let delta = f
+        .players
+        .set_vehicle_physics(1, 101, f.owned, physics)
+        .unwrap()
+        .unwrap();
+    let Update::Vehicle { fields, .. } = delta.update else {
+        panic!()
+    };
+    let Some(vehicle::Update::Chassis(chassis)) = &fields[1] else {
+        panic!()
+    };
+    assert_eq!(chassis.physics.as_ref().unwrap().controls.wheel_pairs, None);
+    let current = f.players.vehicle_physics(1, 101, f.owned).unwrap();
+    assert_eq!(current.controls.wheel_pairs, Some(pairs));
+    assert_eq!(current.controls.values[8], 7);
+    let controls = crate::scoring::burnout::Controls::from_wire(&current.controls, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(controls.throttle, 1.);
+    assert!(controls.slip[2] > controls.slip[0]);
+    let foreign = f.players.vehicle_physics(2, 202, f.foreign).unwrap();
+    assert_ne!(foreign.controls.wheel_pairs, Some(pairs));
+}
+
 fn car() -> (vehicle::EntityCreation, entity::creation::Content) {
     use entity::creation::{Asset, Catalog, Content, Prefix};
     let asset = Asset {
@@ -195,6 +230,85 @@ fn wire(refs: &[u16], selector: u16, method: u32, value: u64, bits: usize) -> Bi
     body.put((payload.len() / 8) as u64, 9)
         .put_span(payload.span());
     body
+}
+
+#[test]
+fn burnout_override_is_scoped_to_owned_or_ai_lifetimes_and_preserves_other_fields() {
+    let mut f = fixture();
+    let foreign = f.players.objects().get(f.foreign).unwrap().clone();
+    for id in [f.owned, f.ai.vehicle] {
+        let before = f.players.objects().get(id).unwrap().clone();
+        for (value, changed) in [
+            (Some(0.75), true),
+            (Some(0.75), false),
+            (Some(2.), true),
+            (None, true),
+            (None, false),
+        ] {
+            let record = if id == f.owned {
+                f.players.set_vehicle_burnout_tendency(1, 101, id, value)
+            } else {
+                f.players.set_ai_vehicle_burnout_tendency(1, 101, 77, value)
+            }
+            .unwrap();
+            assert_eq!(record.is_some(), changed);
+            if let Some(record) = record {
+                record.encode().unwrap();
+                let Update::Vehicle { fields, .. } = record.update else {
+                    panic!()
+                };
+                assert!(fields[0].is_none() && fields[2..].iter().all(Option::is_none));
+                assert_eq!(
+                    fields[1],
+                    Some(vehicle::Update::Chassis(Box::new(vehicle::ChassisUpdate {
+                        physics: None,
+                        flag: None,
+                        custom: None,
+                        pair: Some((value.unwrap_or(0.).to_bits(), value.is_some())),
+                    })))
+                );
+            }
+        }
+        let mut cleared = before;
+        let Update::Vehicle { fields, .. } = &mut cleared.current else {
+            panic!()
+        };
+        let Some(vehicle::Update::Chassis(chassis)) = &mut fields[1] else {
+            panic!()
+        };
+        // Fixture begins with a different active override. Native release
+        // clears it; it does not restore that previous value.
+        chassis.pair = Some((0, false));
+        assert_eq!(f.players.objects().get(id), Some(&cleared));
+    }
+    assert_eq!(
+        f.players
+            .set_vehicle_burnout_tendency(1, 101, f.ai.vehicle, Some(1.)),
+        Err(Error::UnknownObject)
+    );
+    assert_eq!(
+        f.players
+            .set_vehicle_burnout_tendency(1, 101, f.foreign, Some(1.)),
+        Err(Error::UnknownObject)
+    );
+    assert_eq!(
+        f.players
+            .set_ai_vehicle_burnout_tendency(2, 202, 77, Some(1.)),
+        Err(Error::UnknownObject)
+    );
+    assert_eq!(
+        f.players
+            .set_ai_vehicle_burnout_tendency(1, 101, 79, Some(1.)),
+        Err(Error::UnknownObject)
+    );
+    let before = f.players.objects().snapshot();
+    assert_eq!(
+        f.players
+            .set_vehicle_burnout_tendency(1, 101, f.owned, Some(f32::NAN)),
+        Err(Error::Bound)
+    );
+    assert_eq!(f.players.objects().snapshot(), before);
+    assert_eq!(f.players.objects().get(f.foreign), Some(&foreign));
 }
 
 #[test]

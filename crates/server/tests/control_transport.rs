@@ -215,6 +215,7 @@ async fn settings_ack_is_durable_and_reads_refresh_across_connections() {
                 settings: Some(server_store),
                 stats: None,
                 challenges: None,
+                speedwall: None,
             }),
         )
         .await;
@@ -294,6 +295,7 @@ async fn settings_persistence_failure_sends_no_success_reply() {
                 settings: Some(store),
                 stats: None,
                 challenges: None,
+                speedwall: None,
             }),
         )
         .await;

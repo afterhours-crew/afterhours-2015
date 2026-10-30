@@ -19,6 +19,247 @@ fn content() -> WorldContent {
 }
 
 #[test]
+fn garage_livery_cache_update_uses_owned_scene_and_reliable_reply_queue() {
+    use nfs_protocol::world::rpc::Serial;
+    use nfs_world::{bits::BitWriter, replication::sublevel};
+    let (mut listener, _) = binding_refresh_listener();
+    let mut kinds = vec![Kind::Noop; 9];
+    kinds[8] = Kind::Rpc;
+    let scenes = Content::new(vec![(101, Profile::new(false, &kinds).unwrap())]).unwrap();
+    let creation = sublevel::ordinary::creation(
+        1,
+        101,
+        None,
+        Serial::new(7).unwrap(),
+        &sublevel::ordinary::unpopulated(scenes.profile(101).unwrap()).unwrap(),
+        &scenes,
+    )
+    .unwrap();
+    listener
+        .players
+        .create_scenes(&[1], vec![creation], &scenes)
+        .unwrap();
+    let scene = listener.players.objects().scene(101).unwrap();
+    let mut roles = content().roles.unwrap();
+    roles.garage = 101;
+    listener.roles = Some(roles);
+    let key = b"BakedLivery_0X0123456789ABCDEF";
+    let mut payload = BitWriter::new();
+    payload
+        .put(0, 9)
+        .put(0, 32)
+        .put(101, 32)
+        .put(0, 32)
+        .put(key.len() as u64, 10);
+    for byte in key {
+        payload.put(u64::from(*byte), 8);
+    }
+    payload.put(5, 5);
+    let mut rpc = BitWriter::new();
+    rpc.put(0, 32)
+        .put(0, 32)
+        .put(1, 8)
+        .put(scene.into(), 13)
+        .put(payload.bytes().len() as u64, 9)
+        .put_span(payload.span());
+    let send = |listener: &mut PlayerListener, sequence| {
+        let wire = frame::Builder::new()
+            .messages(
+                None,
+                vec![frame::Group {
+                    channel: 0,
+                    sequence: Some(sequence),
+                    messages: vec![frame::Message::Opaque {
+                        index: 47,
+                        body: rpc.span(),
+                    }],
+                }],
+            )
+            .build()
+            .unwrap();
+        listener.frame(Queued {
+            advertised: None,
+            frame: 0,
+            data: wire.span(),
+        })
+    };
+    assert!(send(&mut listener, 1));
+    assert_eq!(listener.unsupported_rpcs, 0);
+    assert_eq!(listener.pending_rpcs.len(), 1);
+    assert!(send(&mut listener, 1));
+    assert_eq!(
+        listener.pending_rpcs.len(),
+        1,
+        "same reliable message is not applied twice"
+    );
+    assert!(send(&mut listener, 2));
+    assert_eq!(
+        listener.pending_rpcs.len(),
+        2,
+        "a later update invalidates again"
+    );
+    let notification = listener.pending_rpcs[0];
+    listener
+        .pending_rpcs
+        .resize(nfs_world::session::MAX_RPC_QUEUE, notification);
+    assert!(!send(&mut listener, 3));
+    assert_eq!(
+        listener.pending_rpcs.len(),
+        nfs_world::session::MAX_RPC_QUEUE
+    );
+    listener.pending_rpcs.clear();
+    assert!(
+        send(&mut listener, 3),
+        "capacity refusal must preserve the input for retry"
+    );
+    assert_eq!(listener.pending_rpcs.len(), 1);
+}
+
+#[test]
+fn owned_driving_timer_signals_are_consumed_by_the_configured_lifetime() {
+    use crate::garage_logic::{GarageLogic, Which};
+    use nfs_protocol::world::rpc::Serial;
+    use nfs_world::{
+        logic::{EntityRef, Message},
+        replication::sublevel,
+    };
+    let (mut listener, participant) = binding_refresh_listener();
+    let scenes = Content::new(vec![(101, sublevel::gameplay::profile().unwrap())]).unwrap();
+    let creation = sublevel::ordinary::creation(
+        1,
+        101,
+        None,
+        Serial::new(0).unwrap(),
+        &sublevel::ordinary::unpopulated(scenes.profile(101).unwrap()).unwrap(),
+        &scenes,
+    )
+    .unwrap();
+    listener
+        .players
+        .create_scenes(&[1], vec![creation], &scenes)
+        .unwrap();
+    let mut policy = crate::garage_logic::tests::content_json();
+    let definition = policy["spawn"]["entities"][3].clone();
+    let role = definition["capture_id"].as_u64().unwrap() as u16;
+    let empty = serde_json::json!({"scene_updates":[],"entities":[],"events":[]});
+    policy["spawn"] = empty.clone();
+    policy["spawn"]["entities"] = serde_json::json!([definition]);
+    policy["entry"] = empty.clone();
+    policy["vehicles"] = empty;
+    policy["driving_timer"] = serde_json::json!({"role":role,"start":{"entity":2,"event":37},"stop":{"entity":2,"event":38}});
+    for (path, value) in [
+        ("/driving_timer/role", serde_json::json!(999)),
+        ("/driving_timer/start/entity", serde_json::json!(3)),
+        ("/driving_timer/stop/event", serde_json::json!(37)),
+        ("/driving_timer/stop/event", serde_json::json!(0x200_0000)),
+    ] {
+        let mut invalid = policy.clone();
+        *invalid.pointer_mut(path).unwrap() = value;
+        assert!(GarageLogic::from_json(&invalid).is_err(), "{path}");
+    }
+    let logic = GarageLogic::from_json(&policy).unwrap();
+    let mut ghosts = BTreeMap::new();
+    logic
+        .produce(
+            Which::Spawn,
+            &mut listener.players,
+            participant,
+            &mut ghosts,
+        )
+        .unwrap();
+    let ghost = ghosts[&role];
+    listener.logic_ghosts.insert(participant, ghosts);
+    listener.logic = Some(std::sync::Arc::new(logic));
+    let message = Message::Reached {
+        target: EntityRef { ghost, entity: 2 },
+        event: 37,
+        player: 0,
+    };
+    let logic = listener.logic.as_ref().unwrap();
+    assert!(
+        logic
+            .driving_timer_owner(
+                &listener.players,
+                &listener.logic_ghosts,
+                HOST_SELECTOR as u8,
+                listener.persona,
+                &message
+            )
+            .is_ok()
+    );
+    for (connection, persona, message) in [
+        (HOST_SELECTOR as u8, listener.persona + 1, message.clone()),
+        (HOST_SELECTOR as u8 + 1, listener.persona, message.clone()),
+        (
+            HOST_SELECTOR as u8,
+            listener.persona,
+            Message::Reached {
+                target: EntityRef { ghost, entity: 2 },
+                event: 37,
+                player: 1,
+            },
+        ),
+        (
+            HOST_SELECTOR as u8,
+            listener.persona,
+            Message::Reached {
+                target: EntityRef {
+                    ghost: ghost + 1,
+                    entity: 2,
+                },
+                event: 37,
+                player: 0,
+            },
+        ),
+    ] {
+        assert!(
+            logic
+                .driving_timer_owner(
+                    &listener.players,
+                    &listener.logic_ghosts,
+                    connection,
+                    persona,
+                    &message
+                )
+                .is_err()
+        );
+    }
+    for (sequence, event) in [(1, 38), (2, 37), (3, 38), (4, 38)] {
+        let body = Message::Reached {
+            target: EntityRef { ghost, entity: 2 },
+            event,
+            player: 0,
+        }
+        .encode()
+        .unwrap();
+        let wire = frame::Builder::new()
+            .messages(
+                None,
+                vec![frame::Group {
+                    channel: 0,
+                    sequence: Some(sequence),
+                    messages: vec![frame::Message::Opaque {
+                        index: 82,
+                        body: body.span(),
+                    }],
+                }],
+            )
+            .build()
+            .unwrap();
+        listener.world_ms = u64::from(sequence) * 1000;
+        assert!(listener.frame(Queued {
+            advertised: None,
+            frame: 0,
+            data: wire.span()
+        }));
+    }
+    assert_eq!(listener.unsupported_logic, 0);
+    let state = listener.driving_time.state(participant).unwrap();
+    assert_eq!(state.completed, 0, "no owned world vehicle in this fixture");
+    assert!(state.last.is_none());
+}
+
+#[test]
 fn nitrous_acknowledgements_commit_with_the_reliable_queue_and_roll_back_when_full() {
     use crate::vehicle_content::population::{Owner, tests as population_tests};
     use nfs_world::{
@@ -295,6 +536,20 @@ fn sustained_driving_keeps_physics_and_minimap_in_one_bounded_frame() {
     // would grow the queue even with a conservative ten-frame/second drain.
     let mut previous = None;
     for step in 0..600u32 {
+        // A missing optional map binding must neither reject valid movement
+        // nor partially change the map. Repeated failure stays diagnosable;
+        // restoring the service must recover without reconnecting.
+        let map_missing = (100..150).contains(&step);
+        listener
+            .roles
+            .as_mut()
+            .unwrap()
+            .free_roam
+            .as_mut()
+            .unwrap()
+            .location
+            .serializer = if map_missing { 9999 } else { 3 };
+        let map_before = listener.players.objects().get(map).unwrap().current.clone();
         listener.world_ms = u64::from(step) * 100;
         let x = step as f32 * 8.;
         sample.physics.identity_words = [(5f64.to_bits() >> 32) as u32, 0, step + 150];
@@ -343,7 +598,13 @@ fn sustained_driving_keeps_physics_and_minimap_in_one_bounded_frame() {
                 <= nfs_world::application::OUTBOUND_FRAME_BITS
         );
         assert!(section.records.iter().any(|r| r.id == car));
-        if step > 0 {
+        if map_missing {
+            assert!(!section.records.iter().any(|r| r.id == map));
+            assert_eq!(
+                listener.players.objects().get(map).unwrap().current,
+                map_before
+            );
+        } else if step > 0 {
             assert!(section.records.iter().any(|r| r.id == map));
             let Update::ParticipantLocationMap(location) =
                 &listener.players.objects().get(map).unwrap().current
@@ -358,6 +619,7 @@ fn sustained_driving_keeps_physics_and_minimap_in_one_bounded_frame() {
         assert_eq!(listener.refused, usize::from(step >= 300));
         previous = Some(section);
     }
+    assert_eq!(listener.optional_map_failures, [50, 0, 50]);
     // Clearing world ownership still sends map removal and service unbinding
     // without relying on another movement report.
     listener.world_cars.clear();
@@ -445,6 +707,7 @@ fn spawn_presentation_waits_for_capacity_with_poll_and_rejects_foreign_owner() {
         participant,
         vehicle,
         position: [1.0, 2.0, 3.0],
+        speed: 0.,
         basis: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
     };
     listener
@@ -471,6 +734,20 @@ fn spawn_presentation_waits_for_capacity_with_poll_and_rejects_foreign_owner() {
     assert_eq!(listener.pending_rpcs.len(), 2);
     assert!(listener.pending_spawns.is_empty());
     assert_eq!(listener.due_teleport(100), None);
+    assert_eq!(
+        listener.due_teleport(101),
+        None,
+        "pending assignment must reach the host queue first"
+    );
+    listener.pending_rpcs.clear();
+    assert_eq!(
+        listener.due_teleport(101),
+        None,
+        "bootstrap content and scenes also precede the command"
+    );
+    listener.pending_content.clear();
+    listener.pending.clear();
+    listener.pending_entries.clear();
     assert_eq!(listener.due_teleport(101), Some(teleport(participant, 300)));
     listener.teleport_sent();
     listener
@@ -785,6 +1062,9 @@ fn leaving_free_roam_clears_the_spawn_assignment_once() {
     );
     // The clear is idempotent at the model level and the counter continues.
     assert_eq!(listener.spawn_points.next_value(40), 2);
+    // The lifetime ended: the intro transfer car is assigned again (career
+    // start: 1 at 38618, Leave at 298117, 2 at 563021 ms).
+    assert!(!listener.spawn_points.subscribed(40));
     let mut unbound = PlayerListener::new(101);
     unbound.initialize_world(&content_with(None)).unwrap();
     assert!(unbound.spawn_clear(40).unwrap().is_empty());
@@ -1158,8 +1438,27 @@ fn recreated_customization_timer_accepts_new_lifetime_without_reusing_old_measur
             .unwrap();
         listener.logic_ghosts.insert(participant, ghosts.clone());
         assert_ne!(ghosts[&295], current);
-        assert!(!deliver(&mut listener, current, timer::STOP));
+        // The replaced timer's late stop names no owned timer: consumed and
+        // logged, never refused (a refused reliable message is resent forever,
+        // E1252). It measures nothing, and the committed frame drops the old
+        // lifetime's measurement with its entity.
+        assert!(deliver(&mut listener, current, timer::STOP));
+        assert!(listener.customization.state(participant).is_none());
     }
+    // A live timer the garage logic did not record (the intro's final garage
+    // presentation creates it, E1252) is owned through its root participant
+    // and measures like any other.
+    listener.logic_ghosts.remove(&participant);
+    let current = ghosts[&295];
+    listener.world_ms = 40_000;
+    assert!(deliver(&mut listener, current, timer::STOP));
+    assert!(deliver(&mut listener, current, timer::START));
+    listener.world_ms += 6_000;
+    assert!(deliver(&mut listener, current, timer::STOP));
+    assert_eq!(
+        listener.customization.state(participant).unwrap().completed,
+        1
+    );
 }
 
 #[test]
@@ -1623,4 +1922,35 @@ fn settled_logic_precedes_glass_atomically_for_three_new_lifetimes() {
     );
     assert_eq!(listener.pending_settled.len(), 1);
     assert!(listener.pending_rpcs.is_empty());
+}
+#[test]
+fn debug_hides_fire_on_the_main_root_in_installed_order_or_not_at_all() {
+    use nfs_world::logic::{EntityRef, Fire};
+    use nfs_world::participants::HostRpc;
+    let fires = super::debug_hide_fires(361, &[(2, 9), (1, 4)]).unwrap();
+    assert_eq!(
+        fires,
+        vec![
+            HostRpc::Event(Fire {
+                event: 9,
+                player: None,
+                target: EntityRef {
+                    ghost: 361,
+                    entity: 2
+                },
+            }),
+            HostRpc::Event(Fire {
+                event: 4,
+                player: None,
+                target: EntityRef {
+                    ghost: 361,
+                    entity: 1
+                },
+            }),
+        ]
+    );
+    assert!(super::debug_hide_fires(361, &[]).unwrap().is_empty());
+    // A root that cannot be addressed refuses the whole set.
+    assert!(super::debug_hide_fires(0, &[(1, 4)]).is_err());
+    assert!(super::debug_hide_fires(8192, &[(1, 4)]).is_err());
 }

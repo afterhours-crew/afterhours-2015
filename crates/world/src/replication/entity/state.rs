@@ -13,6 +13,9 @@ pub struct State {
     prefix: Prefix,
     profile: Profile,
     initial: Vec<Initial>,
+    /// The last set update of each `RpcSet64` field, by serializer index.
+    sets: std::collections::BTreeMap<usize, Option<crate::replication::sublevel::Set64>>,
+    sequence_references: std::collections::BTreeMap<usize, super::VehicleSequenceUpdate>,
 }
 impl State {
     pub fn new(
@@ -38,6 +41,9 @@ impl State {
                 Initial::RpcOptionalReference { reference, .. } => {
                     reference.is_some_and(|id| !valid(id))
                 }
+                Initial::RpcOptionalReferenceI32 { value, .. } => {
+                    value.is_some_and(|(id, _)| !valid(id))
+                }
                 Initial::RpcReferences { references, .. } => {
                     references.iter().any(|id| !valid(*id))
                 }
@@ -45,7 +51,27 @@ impl State {
                     manager,
                     participants,
                     ..
+                }
+                | Initial::VehicleSequenceRoot {
+                    manager,
+                    participants,
+                    ..
                 } => !valid(*manager) || participants.iter().any(|id| !valid(*id)),
+                Initial::GameModeRoot(root) => {
+                    root.bindings.iter().any(|(id, _)| !valid(*id))
+                        || root
+                            .participants
+                            .iter()
+                            .chain(&root.others)
+                            .any(|id| !valid(*id))
+                }
+                Initial::CountdownState { references, .. }
+                | Initial::WaypointsState { references, .. } => {
+                    references.iter().any(|id| !valid(*id))
+                }
+                Initial::WaypointList { waypoints, .. } => {
+                    waypoints.iter().any(|(id, _)| !valid(*id))
+                }
                 _ => false,
             })
         {
@@ -56,9 +82,29 @@ impl State {
             prefix,
             profile,
             initial,
+            sets: Default::default(),
+            sequence_references: Default::default(),
         };
         result.apply(creation.body.updates)?;
+        result.validate_sequence_references(known)?;
         Ok(result)
+    }
+
+    /// Check retained references after a tentative update, before the owner
+    /// publishes it. Removed goals are checked through the same snapshot path.
+    pub(crate) fn validate_sequence_references(
+        &self,
+        known: impl Fn(u16) -> bool,
+    ) -> Result<(), Error> {
+        if self
+            .sequence_references
+            .values()
+            .flat_map(super::VehicleSequenceUpdate::references)
+            .any(|id| id != 0 && !known(id))
+        {
+            return Err(Error::UnknownObject);
+        }
+        Ok(())
     }
 
     pub fn apply(&mut self, updates: Vec<Option<Update>>) -> Result<(), Error> {
@@ -71,8 +117,16 @@ impl State {
         }
         .encode(&self.profile)?;
         let mut initial = self.initial.clone();
-        for (value, update) in initial.iter_mut().zip(updates) {
+        let mut sets = self.sets.clone();
+        let mut sequence_references = self.sequence_references.clone();
+        for (index, (value, update)) in initial.iter_mut().zip(updates).enumerate() {
             match (value, update) {
+                (Initial::VehicleSequenceRoot { .. }, Some(Update::VehicleSequence(next))) => {
+                    sequence_references.entry(index).or_default().merge(next);
+                }
+                (Initial::RpcSet64(_), Some(Update::Set64(next))) => {
+                    sets.insert(index, next);
+                }
                 (Initial::BoolProperty(value), Some(Update::BoolProperty(Some(next)))) => {
                     *value = Some(next)
                 }
@@ -90,6 +144,8 @@ impl State {
             }
         }
         self.initial = initial;
+        self.sets = sets;
+        self.sequence_references = sequence_references;
         Ok(())
     }
 
@@ -98,7 +154,8 @@ impl State {
             .profile
             .kinds()
             .iter()
-            .map(|kind| {
+            .enumerate()
+            .map(|(index, kind)| {
                 Some(match kind {
                     Kind::Root
                     | Kind::SequenceRoot
@@ -108,11 +165,26 @@ impl State {
                     | Kind::RpcBool
                     | Kind::RpcReferences
                     | Kind::RpcVariant
-                    | Kind::RpcOptionalReference => Update::Noop,
+                    | Kind::RpcOptionalReference
+                    | Kind::RpcOptionalReferenceI32
+                    | Kind::GameModeRoot
+                    | Kind::CountdownState
+                    | Kind::WaypointsState
+                    | Kind::DnfTransition
+                    | Kind::WaypointList
+                    | Kind::RpcGuid => Update::Noop,
+                    Kind::RpcSet64 => Update::Set64(self.sets.get(&index).cloned().flatten()),
+                    Kind::VehicleSequenceRoot => Update::VehicleSequence(
+                        self.sequence_references
+                            .get(&index)
+                            .cloned()
+                            .unwrap_or_default(),
+                    ),
                     Kind::RpcGhostReference => Update::GhostReference(None),
                     Kind::BoolProperty => Update::BoolProperty(None),
                     Kind::FloatProperty => Update::FloatProperty(None),
                     Kind::I32Property => Update::I32Property(None),
+                    Kind::StringProperty => Update::StringProperty(None),
                 })
             })
             .collect();

@@ -6,7 +6,7 @@
 //! traffic's road sampling and distance policy.
 use crate::Error;
 
-mod extract;
+pub(crate) mod extract;
 mod json;
 pub mod preset;
 pub use extract::extract;
@@ -87,7 +87,7 @@ impl Links {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Persona {
     pub name: String,
     /// Position in the linked PersonaSet, before a specific provider filters it.

@@ -347,10 +347,9 @@ struct Streams {
 }
 
 impl Link {
-    /// Take over an established handshake and produce the initial host sync.
-    pub fn start(codec: Codec, cursors: Cursors, now_ms: u64) -> Result<(Self, Vec<u8>), Error> {
+    fn new(codec: Codec, cursors: Cursors, now_ms: u64) -> Result<Self, Error> {
         let tick = now_ms as u32;
-        let mut link = Self {
+        Ok(Self {
             streams: Box::new(Streams {
                 receive: codec.stream(cursors.rx).map_err(Error::Transport)?,
                 send: codec.stream(cursors.tx).map_err(Error::Transport)?,
@@ -366,22 +365,64 @@ impl Link {
                 last_sync: tick,
                 ..Clock::default()
             },
-        };
+        })
+    }
+
+    /// Take over an established handshake and produce the initial host sync.
+    pub fn start(codec: Codec, cursors: Cursors, now_ms: u64) -> Result<(Self, Vec<u8>), Error> {
+        let mut link = Self::new(codec, cursors, now_ms)?;
+        let tick = now_ms as u32;
         let initial = SyncFields {
             echo: tick,
             sent: tick,
             ..SyncFields::default()
         }
         .encode(0);
-        let wire = link.datagram(MIN_RELIABLE, MAX_RELIABLE, &initial)?;
-        link.outstanding = Some(Outstanding {
+        let wire = link.initial_sync(&initial, MAX_RELIABLE, now_ms)?;
+        Ok((link, wire))
+    }
+
+    /// Answer the first reliable sync after externally validated admission.
+    /// `cursors` is relative to this endpoint: `host_index` is our receiving
+    /// index, `client_index` is the peer's, and rx/tx are our cipher positions.
+    /// This is a fresh link, not a restore API. The supplied datagram must contain
+    /// exactly the peer's initial reliable sync; application data is rejected.
+    pub fn respond(
+        codec: Codec,
+        cursors: Cursors,
+        first_sync: &[u8],
+        now_ms: u64,
+    ) -> Result<(Self, Vec<u8>), Error> {
+        let mut link = Self::new(codec, cursors, now_ms)?;
+        // Consume the peer's sync before building ours, so the first outbound
+        // reliable packet acknowledges what was actually received. Suppress the
+        // host-only initial empty ACK until our own sync has been acknowledged.
+        link.phase = Phase::Running;
+        let received = link.receive(first_sync, now_ms)?;
+        if received.closed
+            || received.duplicates != 0
+            || !received.applications.is_empty()
+            || !received.other.is_empty()
+            || link.expected_reliable != next_reliable(MIN_RELIABLE)
+        {
+            return Err(Error::Framing);
+        }
+        link.phase = Phase::AwaitPeerSync;
+        let body = link.clock.fields(now_ms as u32).encode(0);
+        let wire = link.initial_sync(&body, link.acknowledgement(), now_ms)?;
+        Ok((link, wire))
+    }
+
+    fn initial_sync(&mut self, body: &[u8], ack: u32, now_ms: u64) -> Result<Vec<u8>, Error> {
+        let wire = self.datagram(MIN_RELIABLE, ack, body)?;
+        self.outstanding = Some(Outstanding {
             sequence: MIN_RELIABLE,
-            body: initial.to_vec(),
+            body: body.to_vec(),
             sent_ms: now_ms,
         });
-        link.next_reliable = next_reliable(MIN_RELIABLE);
-        link.clock.sent = 1;
-        Ok((link, wire))
+        self.next_reliable = next_reliable(MIN_RELIABLE);
+        self.clock.sent = 1;
+        Ok(wire)
     }
 
     pub fn cursors(&self) -> Cursors {

@@ -122,6 +122,7 @@ fn run(cache: &Path, game: &Path) -> Result<serde_json::Value, String> {
                     now: now * 50,
                     focus: &focus,
                     random: now as u32,
+                    preserved: &[],
                 },
             )
             .map_err(|e| format!("population tick {now}: {e:?}"))?;
@@ -169,6 +170,7 @@ fn run(cache: &Path, game: &Path) -> Result<serde_json::Value, String> {
                 now: (expected as u64 + 21) * 50,
                 focus: &[],
                 random: 0,
+                preserved: &[],
             },
         )
         .map_err(error)?;

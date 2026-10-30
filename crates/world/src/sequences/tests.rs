@@ -207,6 +207,17 @@ fn completion_rejects_truncation_extra_bytes_wrong_route_and_reserved_words() {
     let wire = call.encode().unwrap();
     assert_eq!(wire.len(), 155);
     assert_eq!(Completed::decode(wire.span()), Ok(call));
+    for padding in 0..128 {
+        let mut native = BitWriter::new();
+        native
+            .put_span(wire.span().slice(0, 148).unwrap())
+            .put(padding, 7);
+        assert_eq!(
+            Completed::decode(native.span()),
+            Ok(call),
+            "padding {padding}"
+        );
+    }
     for cut in 0..155 {
         assert!(Completed::decode(wire.span().slice(0, cut).unwrap()).is_err());
     }
@@ -261,9 +272,9 @@ fn sequence_resource_limit_is_transactional() {
                 phase: Phase::Running {
                     fallback_at: FALLBACK_MS,
                 },
-                streaming: None,
                 garage_loaded: false,
                 ready_at: None,
+                first_ready_ms: FIRST_READY_MS,
             },
         );
     }
@@ -427,6 +438,45 @@ fn readiness_requires_streaming_and_every_slot_and_does_not_reset_on_repeats() {
 }
 
 #[test]
+fn streaming_reports_before_sequence_creation_are_owned_and_remembered() {
+    let (mut players, mut sequences) = setup();
+    let owner = join(&mut players, 1, 10);
+    let other = join(&mut players, 2, 20);
+    let ghost = streaming(&mut players, owner);
+    assert!(
+        sequences
+            .bind_streaming(&players, other, ghost, STREAMING_ASSET)
+            .is_err()
+    );
+    sequences
+        .bind_streaming(&players, owner, ghost, STREAMING_ASSET)
+        .unwrap();
+    assert!(
+        sequences
+            .streaming_event(&reached(ghost, STREAMING_LOADED, 1))
+            .is_err()
+    );
+    assert!(
+        sequences
+            .streaming_event(&reached(ghost, STREAMING_LOADED, 0))
+            .unwrap()
+    );
+    assert!(sequences.poll(90_000, 1).unwrap().is_empty());
+    let sequence = sequences.start(&mut players, owner).unwrap().unwrap().id;
+    sequences.garage_loaded(owner, true).unwrap();
+    assert!(
+        sequences
+            .poll(90_000 + FIRST_READY_MS - 1, 1)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        sequences.poll(90_000 + FIRST_READY_MS, 1).unwrap()[0].sequence,
+        sequence
+    );
+}
+
+#[test]
 fn streaming_checks_current_asset_participant_local_slot_and_transactional_errors() {
     let (mut players, mut sequences) = setup();
     let a = join(&mut players, 1, 10);
@@ -543,4 +593,51 @@ fn removed_ghosts_stay_retired_because_ids_are_never_reallocated() {
     assert!(players.objects().retired(first));
     assert!(!players.objects().retired(other.participant));
     assert!(!players.objects().retired(other.participant + 1));
+}
+
+/// Prologue garage waits stop 8 s after readiness (E1026 298.018 -> 306.0),
+/// ordinary ones 16 s; each instance keeps the delay it started with.
+#[test]
+fn intro_waits_use_their_own_ready_delay_and_ordinary_waits_keep_sixteen_seconds() {
+    let (mut players, mut sequences) = setup();
+    let intro = join(&mut players, 1, 10);
+    let ordinary = join(&mut players, 2, 20);
+    let intro_sequence = sequences
+        .start_with_delay(&mut players, intro, INTRO_FIRST_READY_MS)
+        .unwrap()
+        .unwrap()
+        .id;
+    let ordinary_sequence = sequences.start(&mut players, ordinary).unwrap().unwrap().id;
+    for owner in [intro, ordinary] {
+        let ghost = streaming(&mut players, owner);
+        sequences
+            .bind_streaming(&players, owner, ghost, STREAMING_ASSET)
+            .unwrap();
+        sequences.poll(1_000, 0).unwrap();
+        sequences
+            .streaming_event(&reached(ghost, STREAMING_LOADED, 0))
+            .unwrap();
+        sequences.garage_loaded(owner, true).unwrap();
+    }
+    assert!(
+        sequences
+            .poll(1_000 + INTRO_FIRST_READY_MS - 1, 2)
+            .unwrap()
+            .is_empty()
+    );
+    let stopped = sequences.poll(1_000 + INTRO_FIRST_READY_MS, 2).unwrap();
+    assert_eq!(
+        stopped.iter().map(|s| s.sequence).collect::<Vec<_>>(),
+        [intro_sequence]
+    );
+    assert!(
+        sequences
+            .poll(1_000 + FIRST_READY_MS - 1, 2)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        sequences.poll(1_000 + FIRST_READY_MS, 2).unwrap()[0].sequence,
+        ordinary_sequence
+    );
 }

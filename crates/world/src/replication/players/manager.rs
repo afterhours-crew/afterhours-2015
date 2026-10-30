@@ -128,11 +128,7 @@ impl Players {
             return Err(Error::UnknownObject);
         }
         if let Some(car) = vehicle {
-            if !self
-                .vehicles
-                .iter()
-                .any(|(&(p, _), &id)| p == participant && id == car)
-            {
+            if !self.participant_has_vehicle(participant, car) {
                 return Err(Error::UnknownObject);
             }
             if !matches!(

@@ -9,7 +9,7 @@
           "type": "string"
         },
         "progression": {
-          "description": "Story progression the account was created with, `post-intro`.",
+          "description": "Initial story mode: `fresh` for new drivers, `post-intro` for older profiles.",
           "type": "string"
         },
         "version": {

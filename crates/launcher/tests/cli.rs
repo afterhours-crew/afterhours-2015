@@ -193,7 +193,10 @@ fn version_reports_records_and_capabilities_and_schema_prints_each_one() {
             "map-images",
             "world-settings",
             "map-feed",
-            "api"
+            "api",
+            "story",
+            "story-preview",
+            "story-restart"
         ])
     );
     assert_eq!(report["os"], std::env::consts::OS);

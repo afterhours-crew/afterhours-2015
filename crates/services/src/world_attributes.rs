@@ -214,6 +214,13 @@ impl Session {
         self.closed = true;
         self.pending = None;
     }
+    /// The world leave batch was committed by the session owner. The old
+    /// continuation permit cannot associate a group with that departed world.
+    pub fn retire(&mut self) {
+        self.abort_write();
+        self.binding = None;
+        self.committed = false;
+    }
 }
 
 #[cfg(test)]

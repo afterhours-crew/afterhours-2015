@@ -8,8 +8,8 @@ use crate::{
     cipher::{self, Aes128},
     frame::{self, Frames},
     message::{
-        Envelope, Facility, GameInfo, Incoming, Kind, PresenceState, PresenceUpdate, Profile,
-        SDK_SERVICE, Setting,
+        Envelope, Facility, GameInfo, Incoming, Kind, LocalCollection, PresenceState,
+        PresenceUpdate, Profile, SDK_SERVICE, Setting,
     },
 };
 use std::fmt;
@@ -327,6 +327,69 @@ impl Launcher {
                 "GetInternetConnectedState",
                 Envelope::internet_connected(kind, &sender, id, self.config.connected),
             ),
+            Incoming::GetBlockList => (
+                "GetBlockList",
+                Envelope::empty_collection(kind, &sender, id, LocalCollection::Blocked),
+            ),
+            Incoming::QueryFriends { user_id } => {
+                if user_id != self.config.profile.user_id {
+                    self.unsupported("QueryFriends".into(), id, out);
+                    return;
+                }
+                (
+                    "QueryFriends",
+                    Envelope::empty_collection(kind, &sender, id, LocalCollection::Friends),
+                )
+            }
+            Incoming::QueryImage {
+                image_id,
+                width,
+                height,
+            } => {
+                if image_id.len() > 1024
+                    || image_id.chars().any(char::is_control)
+                    || width > 4096
+                    || height > 4096
+                {
+                    self.stats.malformed += 1;
+                    out.events.push(Event::Malformed(Malformed::Message(
+                        crate::message::Error::Field,
+                    )));
+                    return;
+                }
+                (
+                    "QueryImage",
+                    Envelope::empty_collection(kind, &sender, id, LocalCollection::Images),
+                )
+            }
+            Incoming::QueryAchievements {
+                user_id,
+                persona_id,
+                game_ids,
+                ..
+            } => {
+                if user_id != self.config.profile.user_id
+                    || persona_id != self.config.profile.persona_id
+                {
+                    self.unsupported("QueryAchievements".into(), id, out);
+                    return;
+                }
+                if game_ids.len() > 32
+                    || game_ids
+                        .iter()
+                        .any(|s| s.len() > 256 || s.chars().any(char::is_control))
+                {
+                    self.stats.malformed += 1;
+                    out.events.push(Event::Malformed(Malformed::Message(
+                        crate::message::Error::Field,
+                    )));
+                    return;
+                }
+                (
+                    "QueryAchievements",
+                    Envelope::empty_collection(kind, &sender, id, LocalCollection::Achievements),
+                )
+            }
             Incoming::GetPresence { user_id } => {
                 if user_id != self.config.profile.user_id {
                     self.unsupported("GetPresence".into(), id, out);

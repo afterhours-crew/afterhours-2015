@@ -269,6 +269,39 @@ pub struct ProfileArgs {
     pub language: Option<String>,
 }
 
+/// Arguments for the story view and server-owned checkpoint commands.
+#[derive(Debug, Clone, Default, Args)]
+pub struct StoryArgs {
+    /// Start the entire career over at the opening, with a verified backup.
+    /// Pass with both preview and apply; ordinary checkpoint edits keep rewards.
+    #[arg(long)]
+    pub restart: bool,
+    /// First-car definition returned by this checkpoint's preview.
+    #[arg(long, value_name = "GUID")]
+    pub starter: Option<String>,
+    /// Account ID; defaults to the selected driver.
+    #[arg(long, value_name = "ID")]
+    pub account_id: Option<String>,
+    /// Prepared installation content; defaults to the current session's cache.
+    #[arg(long, value_name = "DIR")]
+    pub content_dir: Option<PathBuf>,
+    /// Preview a checkpoint using the server's current save and rules.
+    #[arg(long, value_name = "CHECKPOINT", conflicts_with = "apply")]
+    pub preview: Option<String>,
+    /// Apply a supported checkpoint from an exact preview. Stop the game/server first.
+    #[arg(long, value_name = "CHECKPOINT", requires_all = ["expected_generation", "plan_id"])]
+    pub apply: Option<String>,
+    /// Save generation returned by the preview, as an exact decimal string.
+    #[arg(long, value_name = "GENERATION", requires = "apply")]
+    pub expected_generation: Option<String>,
+    /// Preview hash; rejects changes to the save, checkpoint or prepared rules.
+    #[arg(long, value_name = "HASH", requires = "apply")]
+    pub plan_id: Option<String>,
+    /// Standalone server executable; defaults to the bundled server.
+    #[arg(long, value_name = "PATH")]
+    pub server: Option<PathBuf>,
+}
+
 /// Arguments for `settings`.
 #[derive(Debug, Clone, Args)]
 pub struct SettingsArgs {
@@ -362,6 +395,15 @@ pub enum Command {
     /// distances, times and speeds are not confirmed. Exits with code 4
     /// when there is no saved account to show.
     Profile(ProfileArgs),
+
+    /// Show saved story checkpoints, or preview a server-owned checkpoint edit.
+    ///
+    /// Reads the account and its prepared progression content without changing
+    /// the save. Reports each intro objective, the current checkpoint and whether
+    /// completion was played, edited or inherited from an existing save.
+    /// --preview returns the exact save generation and plan hash; --apply needs
+    /// both. Unsupported restart points remain unavailable.
+    Story(StoryArgs),
 
     /// Decode each car's in-game images from the installation for `profile`.
     ///

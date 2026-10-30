@@ -117,6 +117,14 @@ pub fn assets_with(edit: impl FnOnce(&mut ObjectFields, &mut SceneObjects)) -> V
                     "Components",
                     Field::RawPointers((3..=21).filter(|i| *i != 4).collect()),
                 ),
+                (
+                    "VehicleBundleHash",
+                    Field::Struct("BundleIdHash", vec![("Hash", Field::UInt(0xf123_4567))]),
+                ),
+                (
+                    "RaceVehicleShortNameId",
+                    Field::CString("ID_CAR_SYNTHETIC_SHORT_NAME".into()),
+                ),
             ],
         ),
         (

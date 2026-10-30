@@ -43,8 +43,7 @@ fn entry_setup() -> (Host, Client, AcceptSignals, u64, Output) {
     );
     host.queue_replication(section).unwrap();
     let now = now + REPORT_TIMEOUT_MS;
-    host.poll(now);
-    host.poll(now + STATE_WAIT_MS);
+    loading::after_exchange(&mut host, now);
     let now = now + 2 * STATE_WAIT_MS;
     let sent = host.poll(now);
     assert!(matches!(
@@ -106,36 +105,22 @@ fn first_player_entry_needs_linked_client_and_accepted_owned_creation_then_sends
     );
     let now = now + REPLICATION_INTERVAL_MS;
     acknowledge_entry(&mut host, &mut client, &mut listener, &sent, now + 2, true);
-    host.poll(now + REPLICATION_INTERVAL_MS);
-    let Stage::Running { world, .. } = &host.stage else {
-        panic!()
-    };
-    assert!(matches!(
-        world.player_entry,
-        entry::Entry::Ready { player: 1 }
-    ));
-    assert_eq!(host.application().unwrap().delivery_status(ticket), None);
     let t = now + REPLICATION_INTERVAL_MS + 1;
-    host.receive(
-        &client.app(&message_frame(4, frame::EX_STATE, 4, 1)),
-        t,
-        &mut listener,
-    );
-    assert!(
-        !host
-            .poll(t + 1)
-            .events
-            .iter()
-            .any(|e| matches!(e, Event::FirstPlayerEntered { .. }))
-    );
-    host.receive(
-        &client.app(&message_frame(5, frame::EX_STATE, 4, 0)),
-        t + 2,
-        &mut listener,
-    );
-    let out = host.poll(t + 3);
+    let out = host.poll(t);
     assert_eq!(out.events, vec![Event::FirstPlayerEntered { player: 1 }]);
-    let decoded = host_frames(&client, &out.send);
+    assert_eq!(host.application().unwrap().delivery_status(ticket), None);
+    let decoded = host_frames(&client, &out.send)
+        .into_iter()
+        .filter(|(bytes, bits)| {
+            frame::parse(
+                BitSpan::new(bytes, 0, *bits).unwrap(),
+                frame::Direction::FromHost,
+            )
+            .unwrap()
+            .messages
+            .is_some()
+        })
+        .collect::<Vec<_>>();
     assert_eq!(decoded.len(), 1);
     let frame = frame::parse(
         BitSpan::new(&decoded[0].0, 0, decoded[0].1).unwrap(),
@@ -147,7 +132,7 @@ fn first_player_entry_needs_linked_client_and_accepted_owned_creation_then_sends
         vec![frame::Message::Empty]
     );
     host.receive(
-        &client.app(&message_frame(6, frame::EX_STATE, 4, 1)),
+        &client.app(&loading::state_response(4, 1, 1)),
         t + 4,
         &mut listener,
     );
@@ -169,11 +154,6 @@ fn first_player_entry_needs_linked_client_and_accepted_owned_creation_then_sends
 fn rejected_creation_and_other_players_do_not_enter_and_disconnect_releases_receipt() {
     let (mut host, mut client, mut listener, now, sent) = entry_setup();
     acknowledge_entry(&mut host, &mut client, &mut listener, &sent, now + 1, false);
-    host.receive(
-        &client.app(&message_frame(4, frame::EX_STATE, 4, 1)),
-        now + 2,
-        &mut listener,
-    );
     assert!(
         !host
             .poll(now + REPLICATION_INTERVAL_MS + 3)
@@ -204,19 +184,57 @@ fn rejected_creation_and_other_players_do_not_enter_and_disconnect_releases_rece
 }
 
 #[test]
+fn application_close_ends_session_releases_receipts_and_repeats_are_inert() {
+    let (mut host, mut client, mut listener, now, _) = entry_setup();
+    let Stage::Running { world, .. } = &host.stage else {
+        panic!()
+    };
+    let entry::Entry::Pending { ticket, .. } = world.player_entry else {
+        panic!()
+    };
+    let mut close = crate::bits::BitWriter::new();
+    close
+        .put(4, 3)
+        .put(0, 3)
+        .put(u64::from(HOST_SELECTOR), 14)
+        .put(14, 8)
+        .put(0, 8)
+        .put(0, 16)
+        .align();
+    let wire = client.app(&close.into_bytes());
+    let out = host.receive(&wire, now + 1, &mut listener);
+    assert_eq!(
+        out.events,
+        vec![
+            Event::Application(App::Disconnected {
+                reason: 0,
+                repeated: false
+            }),
+            Event::Closed,
+        ]
+    );
+    assert_eq!(host.stage(), StageName::Closed);
+    assert_eq!(host.application().unwrap().delivery_status(ticket), None);
+    for delay in [2, 5, 9] {
+        assert!(
+            host.receive(&wire, now + delay, &mut listener)
+                .events
+                .is_empty()
+        );
+    }
+    assert!(
+        host.receive(&client.close(), now + 43, &mut listener)
+            .events
+            .is_empty()
+    );
+    assert_eq!(host.failures(), Failures::default());
+    assert!(host.poll(now + 10_000).send.is_empty());
+}
+
+#[test]
 fn first_player_entry_preserves_ready_state_when_application_window_is_full() {
     let (mut host, mut client, mut listener, now, sent) = entry_setup();
     acknowledge_entry(&mut host, &mut client, &mut listener, &sent, now + 1, true);
-    host.receive(
-        &client.app(&message_frame(4, frame::EX_STATE, 4, 1)),
-        now + 2,
-        &mut listener,
-    );
-    host.receive(
-        &client.app(&message_frame(5, frame::EX_STATE, 4, 0)),
-        now + 3,
-        &mut listener,
-    );
     let Stage::Running { application, .. } = &mut host.stage else {
         panic!()
     };
@@ -320,6 +338,92 @@ fn file_deadline_releases_receipt_and_other_connection_is_unchanged() {
     );
     assert!(a.files[0].is_none());
     assert!(b.files[1].is_some());
+    assert_eq!(a.failures().file, 1);
+    assert_eq!(b.failures(), Failures::default());
+    a.poll(now + sender::Policy::default().deadline_ms + 1);
+    assert_eq!(a.failures().file, 1);
+}
+
+#[test]
+fn session_failures_count_errors_before_delivery_and_poll_early_returns_once() {
+    let (mut host, mut client, mut listener, now) = established_with_content();
+    assert_eq!(host.failures(), Failures::default());
+    let before = host.application().unwrap().stats().frames_complete;
+    let mut control = crate::bits::BitWriter::new();
+    control.put(1, 1).put(1, 4);
+    let invalid = application::sequenced(HOST_SELECTOR + 1, 3, 0, 0, &control);
+    let out = host.receive(&client.app(&invalid), now + 1, &mut listener);
+    assert_eq!(
+        out.events,
+        vec![Event::ApplicationError(application::Error::Selector)]
+    );
+    assert_eq!(host.application().unwrap().stats().frames_complete, before);
+    assert_eq!(
+        host.failures(),
+        Failures {
+            application: 1,
+            ..Default::default()
+        }
+    );
+    let valid = application::sequenced(HOST_SELECTOR, 3, 0, 0, &control);
+    let out = host.receive(&client.app(&valid), now + 2, &mut listener);
+    assert!(out.events.contains(&Event::Application(App::EmptyControl)));
+    let out = host.receive(&client.app(&valid), now + 3, &mut listener);
+    assert!(out.events.contains(&Event::Application(App::Duplicate)));
+    let outside = application::sequenced(HOST_SELECTOR, 40, 0, 0, &control);
+    let out = host.receive(&client.app(&outside), now + 4, &mut listener);
+    assert!(out.events.contains(&Event::Application(App::OutOfWindow)));
+    assert_eq!(
+        host.failures(),
+        Failures {
+            application: 1,
+            ..Default::default()
+        }
+    );
+    let out = host.poll(now + 3);
+    assert_eq!(
+        out.events
+            .iter()
+            .filter(|e| matches!(e, Event::ApplicationError(_)))
+            .count(),
+        1
+    );
+    assert!(
+        out.events
+            .contains(&Event::ApplicationError(application::Error::Clock))
+    );
+    assert_eq!(host.failures().application, 2);
+    host.poll(now + 5);
+    assert_eq!(host.failures().application, 2);
+    let out = host.receive(&[0], now + 6, &mut listener);
+    assert_eq!(
+        out.events
+            .iter()
+            .filter(|e| matches!(e, Event::Link(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        host.failures(),
+        Failures {
+            application: 2,
+            link: 1,
+            file: 0
+        }
+    );
+    host.receive(&client.close(), now + 7, &mut listener);
+    assert_eq!(host.stage(), StageName::Closed);
+    host.poll(now + 8);
+    host.receive(&[0], now + 9, &mut listener);
+    assert_eq!(
+        host.failures(),
+        Failures {
+            application: 2,
+            link: 1,
+            file: 0
+        }
+    );
+    assert_eq!(entry_setup().0.failures(), Failures::default());
 }
 
 #[test]
@@ -332,6 +436,7 @@ fn file_queue_uses_current_receipts_retries_and_cleans_up_on_close() {
     };
     assert!(host.queue_file(3, &data, now).is_err());
     host.queue_file(4, &data, now).unwrap();
+    assert_eq!(host.files_pending(), 1);
     assert!(host.queue_file(4, &data, now).is_err());
     let mut receiver = Receiver::default();
     let mut rejected_start = false;
@@ -341,9 +446,11 @@ fn file_queue_uses_current_receipts_retries_and_cleans_up_on_close() {
         let t = now + step * 2 + 1;
         let out = host.poll(t);
         if out.events.contains(&Event::FileComplete { handler: 4 }) {
+            assert_eq!(host.files_pending(), 0);
             complete = true;
             break;
         }
+        assert_eq!(host.files_pending(), 1);
         assert!(
             !out.events
                 .iter()
@@ -503,25 +610,24 @@ fn typed_scene_queue_tracks_lifecycle_and_preserves_failed_queue_state() {
 
 #[test]
 fn typed_sections_wait_for_state_time_then_fragment_without_template_inputs() {
-    let (mut host, client, _, now) = established_with_content();
+    let (mut host, mut client, mut listener, now) = established_with_content();
     let section = owned_section(16);
     assert!(section.frame().unwrap().len() > DEFAULT_FRAGMENT_BITS);
     host.queue_replication(section.clone()).unwrap();
     assert_eq!(host.replication_progress(), (0, 1));
     assert!(host.poll(now + REPORT_TIMEOUT_MS - 1).events.is_empty());
-    let t = now + REPORT_TIMEOUT_MS;
-    assert!(matches!(host.poll(t).events[..], [Event::StateSent { .. }]));
-    assert_eq!(host.poll(t + STATE_WAIT_MS).events, vec![Event::TimeSent]);
-    assert!(host.poll(t + 2 * STATE_WAIT_MS - 1).events.is_empty());
-    let mut expected_section = section;
-    expected_section.float_bits = Some(
-        ((t + 2 * STATE_WAIT_MS - host.application().unwrap().origin_ms().unwrap()) as f32
-            / 1000.0)
-            .to_bits(),
+    let t = loading::exchange(
+        &mut host,
+        &mut client,
+        &mut listener,
+        now + REPORT_TIMEOUT_MS,
     );
+    let mut expected_section = section;
+    expected_section.float_bits =
+        Some(((t - host.application().unwrap().origin_ms().unwrap()) as f32 / 1000.0).to_bits());
     expected_section.flag = true;
     let expected = expected_section.frame().unwrap();
-    let out = host.poll(t + 2 * STATE_WAIT_MS);
+    let out = host.poll(t);
     assert_eq!(
         out.events,
         vec![Event::Replication {
@@ -574,16 +680,20 @@ fn launcher_notifications_follow_creations_and_advance_reliable_sequence_in_boun
         Err(Error::Application(application::Error::Window))
     );
     let t = now + REPORT_TIMEOUT_MS;
-    host.poll(t);
-    host.poll(t + STATE_WAIT_MS);
+    loading::after_exchange(&mut host, t);
     assert!(matches!(
         host.poll(t + 2 * STATE_WAIT_MS).events[..],
         [Event::Replication { .. }]
     ));
     assert_eq!(host.rpc_queue.len(), MAX_RPC_QUEUE);
+    assert_eq!(host.rpc_progress(), (0, MAX_RPC_QUEUE));
     let mut previous = None;
     for step in 1..=2 {
         let out = host.poll(t + 2 * STATE_WAIT_MS + step * REPLICATION_INTERVAL_MS);
+        assert_eq!(
+            host.rpc_progress(),
+            (step as usize * 15, MAX_RPC_QUEUE - step as usize * 15)
+        );
         assert_eq!(
             out.events,
             vec![Event::RpcNotifications {
@@ -663,8 +773,7 @@ fn scene_dependencies_wait_for_exact_observer_reports_without_timeout_bypass() {
     host.queue_replication(player).unwrap();
     let t = now + REPORT_TIMEOUT_MS;
     for observer in [&mut host, &mut other] {
-        observer.poll(t);
-        observer.poll(t + STATE_WAIT_MS);
+        loading::after_exchange(observer, t);
         assert_eq!(
             observer.poll(t + 2 * STATE_WAIT_MS).events,
             vec![Event::ReplicationWaiting { level: 175 }]
@@ -832,6 +941,58 @@ fn actor_rpc_requires_all_three_typed_ghosts_in_the_same_observer_queue() {
 }
 
 #[test]
+fn sequence_stop_accepts_any_sequence_root_entity_and_refuses_other_entities() {
+    use crate::{
+        participants::HostRpc,
+        replication::entity::{
+            Kind, Profile,
+            creation::{Asset, Catalog, Content},
+        },
+        sequences::Stop,
+    };
+    use nfs_protocol::world::rpc::Serial;
+    let asset = |local_index| Asset {
+        bundle: 3,
+        type_id: 4,
+        local_index,
+    };
+    // An event intro's layout (E995): sequence root, optional reference, five
+    // channel references and a reference list; and a plain logic layout.
+    let intro = Profile::new(&[
+        Kind::SequenceRoot,
+        Kind::RpcOptionalReference,
+        Kind::RpcReference,
+        Kind::RpcReference,
+        Kind::RpcReference,
+        Kind::RpcReference,
+        Kind::RpcReference,
+        Kind::RpcReferences,
+    ])
+    .unwrap();
+    let logic = Profile::new(&[Kind::Root, Kind::Rpc]).unwrap();
+    let content = Content::new(
+        vec![Catalog::new(3, &[(4, 2)]).unwrap()],
+        vec![(asset(0), intro), (asset(1), logic)],
+    )
+    .unwrap();
+    let mut host = host();
+    host.replication_bindings = Bindings::default().with_entities(content);
+    host.replication_bindings.bind_entity(7, asset(0)).unwrap();
+    host.replication_bindings.bind_entity(8, asset(1)).unwrap();
+    let stop = |sequence| {
+        HostRpc::SequenceStop(Stop {
+            sequence,
+            serial: Serial::new(1).unwrap(),
+        })
+    };
+    host.queue_rpc(stop(7)).unwrap();
+    assert_eq!(host.rpc_queue.len(), 1);
+    assert!(host.queue_rpc(stop(8)).is_err());
+    assert!(host.queue_rpc(stop(9)).is_err());
+    assert_eq!(host.rpc_queue.len(), 1);
+}
+
+#[test]
 fn typed_queue_limits_and_rejections_preserve_observer_bindings() {
     let mut host = host();
     let section = owned_section(1);
@@ -914,8 +1075,7 @@ fn entry_messages_precede_deletion_in_one_frame_with_atomic_backpressure() {
     );
     assert!(host.replication_bindings.get(1).is_some());
     let t = now + REPORT_TIMEOUT_MS;
-    host.poll(t);
-    host.poll(t + STATE_WAIT_MS);
+    loading::after_exchange(&mut host, t);
     let t = t + 2 * STATE_WAIT_MS;
     host.poll(t);
     host.poll(t + REPLICATION_INTERVAL_MS);
@@ -1008,6 +1168,10 @@ fn refused_frames_do_not_commit_world_pacing_signals() {
     let mut observing = Observing {
         inner: &mut retain,
         seen: Seen::default(),
+        waiting_level: None,
+        messages: Default::default(),
+        now_ms: 0,
+        invalid: false,
     };
     assert!(!observing.frame(application::Queued {
         advertised: None,
@@ -1026,11 +1190,214 @@ fn refused_frames_do_not_commit_world_pacing_signals() {
 }
 
 #[test]
+fn a_blocked_scene_can_learn_its_load_confirmation_without_accepting_gameplay() {
+    use crate::replication::{Record, sublevel::root};
+    for level in [175, 206, 511] {
+        let (mut host, mut client, _, now) = established_with_content();
+        let content = root::traffic_content(&crate::test_data::TRAFFIC_KEYS).unwrap();
+        let mut section = owned_section(1);
+        section.records = vec![
+            Record::from_scene(
+                1,
+                root::traffic_creation(&crate::test_data::TRAFFIC_KEYS, 0, level).unwrap(),
+                &content,
+            )
+            .unwrap(),
+        ];
+        host.queue_replication(section).unwrap();
+        let now = now + REPORT_TIMEOUT_MS;
+        loading::after_exchange(&mut host, now);
+        let now = now + 2 * STATE_WAIT_MS;
+        assert_eq!(
+            host.poll(now).events,
+            vec![Event::ReplicationWaiting { level }]
+        );
+
+        // A load confirmation shares the reliable frame with gameplay which
+        // cannot commit while its resulting output queue is full. Learning
+        // unrelated load IDs or pacing signals must still wait for acceptance.
+        let mut report = crate::bits::BitWriter::new();
+        report
+            .put(1, 32)
+            .put(2, 32)
+            .put(level.into(), 16)
+            .put(600, 16);
+        let frame = frame::Builder::new()
+            .messages(
+                None,
+                vec![frame::Group {
+                    channel: 0,
+                    sequence: Some(1),
+                    messages: vec![
+                        frame::Message::State(7),
+                        frame::Message::Opaque {
+                            index: frame::EX_SUBLEVEL_REPORT,
+                            body: report.span(),
+                        },
+                    ],
+                }],
+            )
+            .build()
+            .unwrap();
+        let input = |number| {
+            let mut queued = crate::bits::BitWriter::new();
+            queued
+                .put(0, 1)
+                .put(0, 1)
+                .put(number, 16)
+                .put(0, 6)
+                .put(frame.len() as u64, 15)
+                .put(1, 1)
+                .put_span(frame.span());
+            application::sequenced(HOST_SELECTOR, number as u16, 0, 0, &queued)
+        };
+        let accepted = host.application().unwrap().stats().frames_accepted;
+        let state_reports = match &host.stage {
+            Stage::Running { world, .. } => world.state_reports,
+            _ => panic!(),
+        };
+        let mut backpressure = Retain::default();
+        host.receive(&client.app(&input(3)), now + 1, &mut backpressure);
+        assert_eq!(backpressure.frames, 1);
+        assert_eq!(
+            host.application().unwrap().stats().frames_accepted,
+            accepted,
+            "readiness must not acknowledge rejected gameplay"
+        );
+        let Stage::Running { world, .. } = &host.stage else {
+            panic!()
+        };
+        assert!(
+            world.reported.contains(&level),
+            "refusing the confirmation deadlocks the queue that needs it"
+        );
+        assert!(!world.reported.contains(&600));
+        assert_eq!(world.state_reports, state_reports);
+        assert!(host.poll(now + 2).events.iter().any(|e| matches!(
+            e,
+            Event::Replication {
+                records: 1,
+                remaining: 0,
+                ..
+            }
+        )));
+
+        // The rejected gameplay remains available in a later handler frame's
+        // retry, with the same MessageEX sequence, after the output drains.
+        let mut accept = AcceptSignals;
+        host.receive(&client.app(&input(4)), now + 3, &mut accept);
+        assert_eq!(
+            host.application().unwrap().stats().frames_accepted,
+            accepted + 1
+        );
+        let Stage::Running { world, .. } = &host.stage else {
+            panic!()
+        };
+        assert!(world.reported.contains(&600));
+        assert_eq!(world.state_reports, state_reports + 1);
+    }
+}
+
+#[test]
+fn learning_a_blocked_load_does_not_skip_reliable_gaps_or_repeat_gameplay() {
+    #[derive(Default)]
+    struct Ordered {
+        receiver: frame::receive::Receiver,
+        allowed: bool,
+        committed: usize,
+    }
+    impl Listener for Ordered {
+        fn frame(&mut self, queued: application::Queued<'_>) -> bool {
+            let parsed = frame::parse_prefix(queued.data, frame::Direction::FromClient).unwrap();
+            let Ok((next, messages)) = self.receiver.prepare(parsed.messages.as_ref().unwrap(), 1)
+            else {
+                return false;
+            };
+            if !self.allowed {
+                return false;
+            }
+            self.committed += messages.len();
+            self.receiver = next;
+            true
+        }
+    }
+    let group = |sequence, messages| frame::Group {
+        channel: 0,
+        sequence: Some(sequence),
+        messages,
+    };
+    let mut gameplay = Ordered::default();
+    let (receiver, _) = gameplay
+        .receiver
+        .prepare(
+            &frame::Messages {
+                state: None,
+                groups: vec![group(57, vec![frame::Message::State(1)])],
+            },
+            0,
+        )
+        .unwrap();
+    gameplay.receiver = receiver;
+    let mut load = crate::bits::BitWriter::new();
+    load.put(1, 32).put(1, 32).put(206, 16);
+    let future = frame::Builder::new()
+        .messages(
+            None,
+            vec![group(
+                73,
+                vec![
+                    frame::Message::Opaque {
+                        index: frame::EX_SUBLEVEL_REPORT,
+                        body: load.span(),
+                    },
+                    frame::Message::State(7),
+                ],
+            )],
+        )
+        .build()
+        .unwrap();
+    let missing = frame::Builder::new()
+        .messages(None, vec![group(58, vec![frame::Message::State(2); 15])])
+        .build()
+        .unwrap();
+    let mut observing = Observing {
+        inner: &mut gameplay,
+        seen: Seen::default(),
+        waiting_level: Some(206),
+        messages: Default::default(),
+        now_ms: 0,
+        invalid: false,
+    };
+    assert!(!observing.frame(application::Queued {
+        advertised: None,
+        frame: 1,
+        data: future.span(),
+    }));
+    assert_eq!(observing.seen.reported, [206]);
+    assert_eq!(observing.seen.state_reports, 0);
+    assert_eq!(gameplay.committed, 0);
+
+    // Resource readiness releases output capacity. Fill the original gap first,
+    // then accept its successor, and suppress an old reliable-message retry.
+    gameplay.allowed = true;
+    for (number, data) in [missing.span(), future.span(), missing.span()]
+        .into_iter()
+        .enumerate()
+    {
+        assert!(gameplay.frame(application::Queued {
+            advertised: None,
+            frame: number as u16 + 2,
+            data,
+        }));
+    }
+    assert_eq!(gameplay.committed, 17);
+}
+
+#[test]
 fn typed_dispatch_retains_the_section_under_application_backpressure() {
     let (mut host, mut client, mut listener, now) = established_with_content();
     let t = now + REPORT_TIMEOUT_MS;
-    host.poll(t);
-    host.poll(t + STATE_WAIT_MS);
+    loading::after_exchange(&mut host, t);
     host.queue_replication(owned_section(1)).unwrap();
     let empty = frame::Builder::new().build().unwrap();
     let mut last = 0;
@@ -1218,6 +1585,60 @@ fn adjacent_car_motion_shares_one_bounded_frame_and_preserves_barriers() {
     };
     c.flag = Some(true);
     assert!(super::motion::combine(&section(1), &changed).is_none());
+}
+
+#[test]
+fn waiting_rpc_preserves_its_motion_boundary_without_disabling_later_coalescing() {
+    use crate::{
+        logic::{EntityRef, Fire},
+        participants::HostRpc,
+    };
+    let (mut host, snapshot) = motion_fixture();
+    let callback = HostRpc::Event(Fire {
+        target: EntityRef {
+            ghost: 1,
+            entity: 0,
+        },
+        event: 7,
+        player: None,
+    });
+    host.queue_replication(snapshot(1, 1)).unwrap();
+    host.queue_rpc(callback).unwrap();
+    // The first snapshot after a callback cannot replace one queued before it.
+    host.queue_replication(snapshot(1, 2)).unwrap();
+    assert_eq!(host.replication_progress(), (0, 2));
+    // The callback may await an unsent creation or a blocked transport. Later
+    // absolute snapshots can still supersede each other on this side of it.
+    for revision in 3..=120 {
+        for id in 1..=3 {
+            host.queue_replication(snapshot(id, revision)).unwrap();
+        }
+        assert_eq!(host.replication_progress(), (0, 2));
+    }
+    assert_eq!(host.replication_queue[0].0.records, snapshot(1, 1).records);
+    for id in 1..=3 {
+        assert_eq!(
+            host.replication_queue[1]
+                .0
+                .records
+                .iter()
+                .find(|r| r.id == id),
+            snapshot(id, 120).records.first()
+        );
+    }
+    host.queue_rpc(callback).unwrap();
+    host.queue_replication(snapshot(1, 121)).unwrap();
+    host.queue_replication(snapshot(1, 122)).unwrap();
+    assert_eq!(host.replication_progress(), (0, 3));
+    assert_eq!(host.rpc_queue, [callback, callback]);
+    assert_eq!(
+        host.replication_queue[2].0.records,
+        snapshot(1, 122).records
+    );
+    assert_eq!(
+        host.replication_bits,
+        host.replication_queue.iter().map(|(_, bits, _)| bits).sum()
+    );
 }
 
 #[test]
@@ -1680,7 +2101,7 @@ fn queued_content_follows_the_client_signals_and_inputs_get_empty_frames() {
             .put(0, 1)
             .put(1, 1)
             .put(0, 3)
-            .put(0, 7);
+            .put(u64::from(number.saturating_sub(2) & 127), 7);
         w.put(u64::from(index), 7).put(value, width).put(0, 1);
         w.align();
         let mut queued = crate::bits::BitWriter::new();
@@ -1962,7 +2383,7 @@ fn message_frame(number: u16, index: u8, width: usize, value: u64) -> Vec<u8> {
         .put(0, 1)
         .put(1, 1)
         .put(0, 3)
-        .put(0, 7);
+        .put(u64::from(number.saturating_sub(2) & 127), 7);
     w.put(u64::from(index), 7).put(value, width).put(0, 1);
     w.align();
     let mut queued = crate::bits::BitWriter::new();
@@ -2003,21 +2424,15 @@ fn host_frames(client: &Client, wires: &[Vec<u8>]) -> Vec<(Vec<u8>, usize)> {
 
 #[test]
 fn state_exchange_does_not_require_queued_replication() {
-    let (mut host, _client, _listener, now) = established_with_content();
+    let (mut host, mut client, mut listener, now) = established_with_content();
     assert!(host.poll(now + REPORT_TIMEOUT_MS - 1).events.is_empty());
-    assert!(matches!(
-        host.poll(now + REPORT_TIMEOUT_MS).events[..],
-        [Event::StateSent { .. }]
-    ));
-    assert_eq!(
-        host.poll(now + REPORT_TIMEOUT_MS + STATE_WAIT_MS).events,
-        vec![Event::TimeSent]
+    let t = loading::exchange(
+        &mut host,
+        &mut client,
+        &mut listener,
+        now + REPORT_TIMEOUT_MS,
     );
-    assert!(
-        host.poll(now + REPORT_TIMEOUT_MS + 2 * STATE_WAIT_MS)
-            .events
-            .is_empty()
-    );
+    assert!(host.poll(t).events.is_empty());
 }
 
 fn collection_bytes(handles: &[u16]) -> Vec<u8> {
@@ -2048,7 +2463,7 @@ fn report_frame(number: u16, id: u16) -> Vec<u8> {
         .put(0, 1)
         .put(1, 1)
         .put(0, 3)
-        .put(0, 7);
+        .put(u64::from(number.saturating_sub(2) & 127), 7);
     w.put(u64::from(crate::frame::EX_SUBLEVEL_REPORT), 7)
         .put(1, 32)
         .put(1, 32)
@@ -2155,14 +2570,23 @@ fn replication_starts_when_the_reports_cover_the_registered_handles() {
             .any(|e| matches!(e, Event::StateSent { .. }))
     );
     host.receive(&client.app(&report_frame(6, 4)), 2_800, &mut listener);
-    let out = host.poll(2_850);
+    assert!(
+        host.poll(2_850).events.is_empty(),
+        "coverage alone is insufficient"
+    );
+    host.receive(
+        &client.app(&loading::acknowledge_level(7, 5)),
+        2_851,
+        &mut listener,
+    );
+    let out = host.poll(2_852);
     assert_eq!(
         out.events,
         vec![Event::StateSent {
             registered: 4,
             reported: 4
         }],
-        "coverage reached: state 7 at once"
+        "coverage and accepted level acknowledgement permit state 7"
     );
     assert_eq!(host.registration_progress(), (4, 4));
 }
@@ -2308,6 +2732,212 @@ fn clock_header_reservation_and_backpressure_leave_state_unchanged() {
 }
 
 #[test]
+fn time_sample_survives_window_pressure_and_sends_once_after_real_ack() {
+    let (mut host, mut client, mut listener, now, _) = entry_setup();
+    let sample = 97_228;
+    let mut frame = crate::bits::BitWriter::new();
+    frame.put(1, 6).put(sample, 38).align();
+    let mut queued = crate::bits::BitWriter::new();
+    queued
+        .put(0, 1)
+        .put(0, 1)
+        .put(4, 16)
+        .put(0, 6)
+        .put(frame.len() as u64, 15)
+        .put(1, 1)
+        .put_span(frame.span());
+    let body = application::sequenced(HOST_SELECTOR, 3, 0, 0, &queued);
+    let received_at = now + 1;
+    host.receive(&client.app(&body), received_at, &mut listener);
+    let Stage::Running {
+        application, world, ..
+    } = &mut host.stage
+    else {
+        panic!()
+    };
+    assert_eq!(world.time_sample, Some((sample, received_at)));
+    let origin = application.origin_ms().unwrap();
+    let empty = crate::frame::Builder::new().build().unwrap();
+    let mut latest = None;
+    loop {
+        match application.send_frame(empty.span()) {
+            Ok(body) => {
+                latest = nfs_protocol::world::envelope::ZeroTail::new(1600)
+                    .unwrap()
+                    .decode(&body)
+                    .unwrap()
+                    .sequence()
+                    .map(|s| s.number().value())
+            }
+            Err(application::Error::Window) => break,
+            other => panic!("{other:?}"),
+        }
+    }
+    for offset in 2..=4 {
+        let out = host.poll(now + offset);
+        assert!(
+            !out.events
+                .iter()
+                .any(|event| matches!(event, Event::TimeSynced | Event::ApplicationError(_)))
+        );
+        let Stage::Running { world, .. } = &host.stage else {
+            panic!()
+        };
+        assert_eq!(world.time_sample, Some((sample, received_at)));
+    }
+    let mut control = crate::bits::BitWriter::new();
+    control.put(1, 1).put(1, 4);
+    let body = application::sequenced(HOST_SELECTOR, 4, latest.unwrap(), u32::MAX, &control);
+    host.receive(&client.app(&body), now + 5, &mut listener);
+    let sent_at = now + 6;
+    let out = host.poll(sent_at);
+    assert_eq!(
+        out.events
+            .iter()
+            .filter(|e| **e == Event::TimeSynced)
+            .count(),
+        1
+    );
+    let times = host_frames(&client, &out.send)
+        .into_iter()
+        .filter_map(|(bytes, bits)| {
+            crate::frame::parse(
+                BitSpan::new(&bytes, 0, bits).unwrap(),
+                crate::frame::Direction::FromHost,
+            )
+            .unwrap()
+            .time_sync
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        times,
+        vec![crate::frame::TimeSync::Times([
+            sample,
+            (received_at - origin) * 1024 / 1000,
+            (sent_at - origin) * 1024 / 1000,
+        ])]
+    );
+    let Stage::Running { world, .. } = &host.stage else {
+        panic!()
+    };
+    assert_eq!(world.time_sample, None);
+    assert!(!host.poll(now + 7).events.contains(&Event::TimeSynced));
+    assert_eq!(host.failures(), Failures::default());
+}
+
+#[test]
+fn deferred_rpc_window_pressure_retains_order_and_sends_once_after_real_ack() {
+    use crate::replication::{
+        Record,
+        sublevel::{Rpc, root},
+    };
+    use nfs_protocol::world::rpc::Serial;
+    let (mut host, mut client, mut listener, now) = established_with_content();
+    let content = root::content().unwrap();
+    let creation = root::creation(
+        Rpc {
+            selector: 0,
+            serial: Serial::new(0).unwrap(),
+        },
+        [None; root::REFERENCES],
+    )
+    .unwrap();
+    let mut section = owned_section(1);
+    section.records = vec![Record::from_scene(1, creation, &content).unwrap()];
+    host.queue_replication(section).unwrap();
+    let now = now + REPORT_TIMEOUT_MS;
+    loading::after_exchange(&mut host, now);
+    let now = now + 2 * STATE_WAIT_MS;
+    assert!(
+        host.poll(now)
+            .events
+            .iter()
+            .any(|event| matches!(event, Event::Replication { records: 1, .. }))
+    );
+    let rpc = crate::participants::HostRpc::Event(crate::logic::Fire {
+        target: crate::logic::EntityRef {
+            ghost: 1,
+            entity: 1,
+        },
+        event: 123,
+        player: None,
+    });
+    host.queue_rpc(rpc).unwrap();
+    let Stage::Running {
+        application, world, ..
+    } = &mut host.stage
+    else {
+        panic!()
+    };
+    let sequence = world.next_ex_sequence;
+    let empty = frame::Builder::new().build().unwrap();
+    let mut latest = None;
+    loop {
+        match application.send_frame(empty.span()) {
+            Ok(body) => {
+                latest = nfs_protocol::world::envelope::ZeroTail::new(1600)
+                    .unwrap()
+                    .decode(&body)
+                    .unwrap()
+                    .sequence()
+                    .map(|s| s.number().value())
+            }
+            Err(application::Error::Window) => break,
+            other => panic!("{other:?}"),
+        }
+    }
+    let now = now + REPLICATION_INTERVAL_MS;
+    let out = host.poll(now);
+    assert!(!out.events.iter().any(|event| matches!(
+        event,
+        Event::RpcNotifications { .. } | Event::ApplicationError(_)
+    )));
+    assert_eq!(host.rpc_progress(), (0, 1));
+    let Stage::Running { world, .. } = &host.stage else {
+        panic!()
+    };
+    assert_eq!(world.next_ex_sequence, sequence);
+    let mut control = crate::bits::BitWriter::new();
+    control.put(1, 1).put(1, 4);
+    let body = application::sequenced(HOST_SELECTOR, 3, latest.unwrap(), u32::MAX, &control);
+    host.receive(&client.app(&body), now + 1, &mut listener);
+    let out = host.poll(now + 2);
+    assert!(out.events.contains(&Event::RpcNotifications {
+        count: 1,
+        remaining: 0
+    }));
+    let mut messages = vec![];
+    for (bytes, bits) in host_frames(&client, &out.send) {
+        let parsed = frame::parse(
+            BitSpan::new(&bytes, 0, bits).unwrap(),
+            frame::Direction::FromHost,
+        )
+        .unwrap();
+        if let Some(groups) = parsed.messages {
+            for group in groups.groups {
+                for message in group.messages {
+                    if let frame::Message::Opaque { index: 86, body } = message {
+                        let mut owned = crate::bits::BitWriter::new();
+                        owned.put_span(body);
+                        messages.push((group.sequence, owned));
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(messages, vec![(Some(sequence), rpc.encode().unwrap())]);
+    assert_eq!(host.rpc_progress(), (1, 0));
+    assert!(
+        !host
+            .poll(now + REPLICATION_INTERVAL_MS + 3)
+            .events
+            .iter()
+            .any(|event| matches!(event, Event::RpcNotifications { .. }))
+    );
+    assert_eq!(host.failures(), Failures::default());
+}
+
+#[test]
 fn timed_split_keeps_full_record_batches_inside_session_frame_bound() {
     use crate::replication::section::{split_records, split_timed_records};
     let records = owned_section(2).records;
@@ -2377,8 +3007,7 @@ fn queued_notifications_for_sent_objects_ride_ahead_of_the_next_replication_fram
     };
     host.queue_replication(scene(1)).unwrap();
     let t = now + REPORT_TIMEOUT_MS;
-    host.poll(t);
-    host.poll(t + STATE_WAIT_MS);
+    loading::after_exchange(&mut host, t);
     let t = t + 2 * STATE_WAIT_MS;
     assert!(matches!(
         host.poll(t).events[..],
@@ -2462,3 +3091,318 @@ fn queued_notifications_for_sent_objects_ride_ahead_of_the_next_replication_fram
         }]
     );
 }
+
+#[test]
+fn ordered_content_cannot_overtake_notifications_under_a_full_send_window() {
+    ordered_content_barrier(47, &[0x88; 50]);
+}
+
+#[test]
+fn a_multiframe_publication_keeps_rpc_order_across_early_creations_and_queue_pressure() {
+    use crate::{
+        participants::HostRpc,
+        replication::{
+            Record,
+            sublevel::{Rpc, root},
+        },
+    };
+    use nfs_protocol::world::rpc::Serial;
+    let (mut host, mut client, mut listener, now) = established_with_content();
+    let content = root::content().unwrap();
+    let scene = |id| {
+        let creation = root::creation(
+            Rpc {
+                selector: 0,
+                serial: Serial::new(0).unwrap(),
+            },
+            [None; root::REFERENCES],
+        )
+        .unwrap();
+        let mut section = owned_section(1);
+        section.records = vec![Record::from_scene(id, creation, &content).unwrap()];
+        section
+    };
+    host.queue_replication(scene(1)).unwrap();
+    let t = now + REPORT_TIMEOUT_MS;
+    loading::after_exchange(&mut host, t);
+    let t = t + 2 * STATE_WAIT_MS;
+    host.poll(t);
+    assert!(host.sent_objects.contains(&1));
+    host.queue_replication(scene(2)).unwrap();
+    let calls: Vec<_> = (0..MAX_RPC_QUEUE + 1)
+        .map(|index| {
+            HostRpc::Event(crate::logic::Fire {
+                target: crate::logic::EntityRef {
+                    ghost: if index == 20 { 2 } else { 1 },
+                    entity: 1,
+                },
+                event: index as u32,
+                player: None,
+            })
+        })
+        .collect();
+    for &call in &calls[..MAX_RPC_QUEUE] {
+        host.queue_rpc(call).unwrap();
+    }
+    assert_eq!(
+        host.queue_rpc(calls[MAX_RPC_QUEUE]),
+        Err(Error::Application(application::Error::Window))
+    );
+    let mut decoded = Vec::new();
+    for pass in 1..=calls.len().div_ceil(MAX_EAGER_NOTIFICATIONS) as u64 {
+        let out = host.poll(t + pass * REPLICATION_INTERVAL_MS);
+        for (bytes, bits) in host_frames(&client, &out.send) {
+            let parsed = frame::parse(
+                BitSpan::new(&bytes, 0, bits).unwrap(),
+                frame::Direction::FromHost,
+            )
+            .unwrap();
+            if let Some(messages) = parsed.messages {
+                for group in messages.groups {
+                    for message in group.messages {
+                        if let frame::Message::Opaque { index: 86, body } = message {
+                            // The parsed span borrows the complete frame at a
+                            // bit offset; compare only this message's own bits.
+                            let mut owned = crate::bits::BitWriter::new();
+                            owned.put_span(body);
+                            decoded.push((owned.bytes().to_vec(), owned.len()));
+                        }
+                    }
+                }
+            }
+        }
+        if pass == 1 {
+            // The early creation rides with the first prefix, while its
+            // callback stays at its causal position in the later prefix.
+            assert!(host.sent_objects.contains(&2));
+            assert_eq!(decoded.len(), MAX_EAGER_NOTIFICATIONS);
+            host.queue_rpc(calls[MAX_RPC_QUEUE]).unwrap();
+        }
+        // Acknowledge the actual transport output so the later mode-callback
+        // positions and the final retried call pass through serialization too.
+        let last = out
+            .send
+            .iter()
+            .filter_map(|wire| client.open(wire))
+            .filter_map(|body| {
+                nfs_protocol::world::envelope::ZeroTail::new(1600)
+                    .unwrap()
+                    .decode(&body)
+                    .unwrap()
+                    .sequence()
+                    .map(|s| s.number().value())
+            })
+            .next_back()
+            .expect("a published frame");
+        let mut control = crate::bits::BitWriter::new();
+        control.put(1, 1).put(1, 4);
+        let ack = application::sequenced(HOST_SELECTOR, 3 + pass as u16, last, u32::MAX, &control);
+        let receipt = host.receive(
+            &client.app(&ack),
+            t + pass * REPLICATION_INTERVAL_MS + 1,
+            &mut listener,
+        );
+        assert!(
+            !receipt
+                .events
+                .iter()
+                .any(|event| matches!(event, Event::ApplicationError(_) | Event::Closed))
+        );
+    }
+    assert_eq!(decoded.len(), calls.len());
+    let expected: Vec<_> = calls
+        .iter()
+        .map(|call| {
+            let wire = call.encode().unwrap();
+            (wire.bytes().to_vec(), wire.len())
+        })
+        .collect();
+    for (index, (actual, expected)) in decoded.iter().zip(&expected).enumerate() {
+        assert_eq!(actual, expected, "publication RPC {index}");
+    }
+    assert!(host.rpc_queue.is_empty());
+}
+
+#[test]
+fn speedwall_progress_keeps_its_reliable_finish_boundary_under_pressure() {
+    let progress = crate::speedwall::Progress {
+        score_bits: 0,
+        time_ms_bits: 123_000f32.to_bits(),
+        rep_bits: 9000f32.to_bits(),
+        position: 2,
+        event_id: 0xf123_4567,
+        vehicle: b"ID_CAR_TEST".to_vec(),
+    };
+    ordered_content_barrier(
+        crate::speedwall::CONTENT_TARGET,
+        &progress.encode().unwrap(),
+    );
+}
+
+fn ordered_content_barrier(target: u8, payload: &[u8]) {
+    use crate::{
+        logic::{EntityRef, Fire},
+        participants::HostRpc,
+        replication::{
+            Record,
+            sublevel::{Rpc, root},
+        },
+    };
+    use nfs_protocol::world::rpc::Serial;
+    let (mut host, mut client, mut listener, now) = established_with_content();
+    let content = root::content().unwrap();
+    let creation = root::creation(
+        Rpc {
+            selector: 0,
+            serial: Serial::new(0).unwrap(),
+        },
+        [None; root::REFERENCES],
+    )
+    .unwrap();
+    let mut initial = owned_section(0);
+    initial
+        .records
+        .push(Record::from_scene(1, creation, &content).unwrap());
+    host.queue_replication(initial).unwrap();
+    let t = now + REPORT_TIMEOUT_MS;
+    loading::after_exchange(&mut host, t);
+    let t = t + 2 * STATE_WAIT_MS;
+    host.poll(t);
+    assert_eq!(host.replication_progress(), (1, 0));
+    let event = |event| {
+        HostRpc::Event(Fire {
+            target: EntityRef {
+                ghost: 1,
+                entity: 1,
+            },
+            event,
+            player: None,
+        })
+    };
+    let empty_section = || Section {
+        float_bits: None,
+        flag: false,
+        deleted: vec![],
+        setup: None,
+        records: vec![],
+    };
+    host.queue_replication_after(empty_section(), vec![event(3), event(4)])
+        .unwrap();
+    host.queue_rpc(event(5)).unwrap();
+    assert_eq!(
+        host.queue_content_after_replication(target, payload)
+            .unwrap(),
+        2
+    );
+    // Work queued after the command must not move its publication boundary.
+    for _ in 0..4 {
+        host.queue_replication(empty_section()).unwrap();
+    }
+    let Stage::Running {
+        application, world, ..
+    } = &mut host.stage
+    else {
+        panic!()
+    };
+    world.client_level_ready = true;
+    let empty = frame::Builder::new().build().unwrap();
+    let mut latest = None;
+    loop {
+        match application.send_frame(empty.span()) {
+            Ok(body) => {
+                latest = nfs_protocol::world::envelope::ZeroTail::new(1600)
+                    .unwrap()
+                    .decode(&body)
+                    .unwrap()
+                    .sequence()
+                    .map(|s| s.number().value())
+            }
+            Err(application::Error::Window) => break,
+            other => panic!("{other:?}"),
+        }
+    }
+    let out = host.poll(t + 500);
+    assert!(!out.events.iter().any(|e| matches!(
+        e,
+        Event::Content { .. } | Event::Replication { .. } | Event::RpcNotifications { .. }
+    )));
+    assert_eq!(host.content_progress(), (3, 2));
+    assert_eq!(host.replication_progress(), (1, 5));
+    let mut control = crate::bits::BitWriter::new();
+    control.put(1, 1).put(1, 4);
+    let body = application::sequenced(HOST_SELECTOR, 3, latest.unwrap(), u32::MAX, &control);
+    host.receive(&client.app(&body), t + 501, &mut listener);
+    let mut order = Vec::new();
+    let mut content_chunks: Vec<frame::Message<'static>> = Vec::new();
+    for step in 1..=4 {
+        let out = host.poll(t + 501 + step * REPLICATION_INTERVAL_MS);
+        for (bytes, bits) in host_frames(&client, &out.send) {
+            let parsed = frame::parse(
+                BitSpan::new(&bytes, 0, bits).unwrap(),
+                frame::Direction::FromHost,
+            )
+            .unwrap();
+            if let Some(messages) = parsed.messages {
+                for group in messages.groups {
+                    for message in group.messages {
+                        match message {
+                            frame::Message::Opaque { index: 86, .. } => order.push("state"),
+                            frame::Message::Chunk {
+                                ordinal,
+                                target,
+                                last,
+                                bytes,
+                            } => {
+                                order.push("teleport");
+                                content_chunks.push(frame::Message::Chunk {
+                                    ordinal,
+                                    target,
+                                    last,
+                                    bytes,
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        if host.content_progress().1 == 0 {
+            assert!(
+                host.replication_progress().1 > 0,
+                "later work cannot starve the command"
+            );
+            break;
+        }
+    }
+    assert_eq!(order, ["state", "state", "state", "teleport", "teleport"]);
+    assert_eq!(host.content_progress(), (5, 0));
+    let references = content_chunks.iter().collect::<Vec<_>>();
+    assert_eq!(
+        frame::reassemble(&references),
+        Some((target, payload.to_vec()))
+    );
+}
+
+#[test]
+fn queued_replication_bits_measure_what_the_host_admits() {
+    // Sized without the host's timestamp, a section can fit the frame and
+    // still be refused once queued.
+    let section = owned_section(2);
+    let raw = replication_frame(&section, &[], 0).unwrap().len();
+    let queued = queued_replication_bits(&section, &[]).unwrap();
+    assert!(queued > raw, "{queued} <= {raw}");
+    let mut host = host();
+    host.max_replication_frame_bits = queued - 1;
+    assert!(matches!(
+        host.queue_replication(section.clone()),
+        Err(Error::Application(application::Error::Bound))
+    ));
+    assert_eq!(host.replication_progress(), (0, 0));
+    host.max_replication_frame_bits = queued;
+    host.queue_replication(section).unwrap();
+    assert_eq!(host.replication_bits, queued);
+    const { assert!(MAX_REPLICATION_FRAME_BITS <= application::OUTBOUND_FRAME_BITS) };
+}
+
+mod loading;

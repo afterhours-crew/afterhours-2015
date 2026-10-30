@@ -9,7 +9,20 @@ use nfs_protocol::world::{
 };
 use std::fmt;
 
+mod challenges;
+mod loading;
+mod performance;
 pub mod receive;
+mod recommendations;
+mod rewrite;
+pub use challenges::{
+    ChallengeAwards, ChallengeFull, ChallengeFullEntry, ChallengePlayerSync, EX_CHALLENGE_AWARDS,
+    EX_CHALLENGE_FULL, EX_CHALLENGE_PLAYER_SYNC, MAX_CHALLENGE_SYNC_ENTRIES,
+};
+pub use loading::{EX_LEVEL_LOADED_ACK, LevelLoadedAck, MAX_SUBLEVEL_REPORTS, SubLevelReport};
+pub use performance::{EX_PERFORMANCE_PROFILE, PerformanceProfile};
+pub use recommendations::{EX_RECOMMENDATION_SYNC, RecommendationEntry, RecommendationSync};
+pub use rewrite::with_client_movement_ids;
 
 pub const HANDLERS: usize = 6;
 pub const TIME_SYNC: u8 = 0;
@@ -32,6 +45,15 @@ pub const MAX_GHOST_DELETIONS: usize = 1024;
 pub const MAX_COLLECTION_RECORDS: usize = 1024;
 pub const EX_STATE: u8 = 88;
 pub const EX_COLLECTION: u8 = 63;
+/// `RaceNetworkSpeedWallsToServerDataSyncMessage` (registry key djb2-xor of its
+/// name; E997): the client sends it once SpeedWall data has loaded.
+pub const EX_SPEED_WALLS_TO_SERVER: u8 = 103;
+/// `RaceNetworkChallengeProgressDataSyncMessage` in the supported registry.
+pub const EX_CHALLENGE_PROGRESS: u8 = 76;
+/// Local allocation bound, independent of the native 32-bit count field.
+pub const MAX_CHALLENGE_PROGRESS_ENTRIES: usize = 1024;
+/// Entries one SpeedWall or recommendations sync message may carry (local bound).
+pub const MAX_SPEED_WALL_ENTRIES: usize = 4096;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -87,6 +109,20 @@ pub enum TimeSync {
     Times([u64; 3]),
 }
 
+/// Native challenge-progress entry. Word meanings remain unassigned; preserve
+/// their exact bit patterns rather than treating them as inferred game values.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChallengeProgressEntry {
+    pub words: [u32; 3],
+    pub flag: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChallengeProgress {
+    pub entries: Vec<ChallengeProgressEntry>,
+    pub trailing_word: u32,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Message<'a> {
     Chunk {
@@ -114,12 +150,23 @@ pub enum Message<'a> {
     ActorBinding(crate::actors::Binding),
     VehicleBinding(crate::garage::vehicle::Binding),
     GaragePresence(crate::garage::presence::Notification),
+    LiveryInvalidation(crate::garage::livery::Invalidation),
     SequenceStop(crate::sequences::Stop),
     LogicEvent(crate::logic::Fire),
     WorldActivation(crate::world_activation::Notification),
     BankBalance(crate::bank::Balance),
     /// Host control call on a scoring query serializer of an owned entity.
     QueryControl(crate::participants::EntityCall),
+    /// An owned event's game-mode, logic or scene call.
+    GameModeCall(crate::game_mode::Call),
+    Movie(crate::fmv::Play),
+    ChallengeProgress(ChallengeProgress),
+    ChallengePlayerSync(ChallengePlayerSync),
+    ChallengeFull(ChallengeFull),
+    ChallengeAwards(ChallengeAwards),
+    LevelLoadedAck(LevelLoadedAck),
+    PerformanceProfile(PerformanceProfile),
+    RecommendationSync(RecommendationSync),
     Opaque {
         index: u8,
         body: BitSpan<'a>,
@@ -142,10 +189,20 @@ impl Message<'_> {
             | Self::ActorBinding(_)
             | Self::VehicleBinding(_)
             | Self::GaragePresence(_)
+            | Self::LiveryInvalidation(_)
             | Self::SequenceStop(_)
             | Self::WorldActivation(_)
-            | Self::QueryControl(_) => 47,
+            | Self::QueryControl(_)
+            | Self::GameModeCall(_)
+            | Self::Movie(_) => 47,
             Self::LogicEvent(v) => v.index(),
+            Self::ChallengeProgress(_) => EX_CHALLENGE_PROGRESS,
+            Self::ChallengePlayerSync(_) => EX_CHALLENGE_PLAYER_SYNC,
+            Self::ChallengeFull(_) => EX_CHALLENGE_FULL,
+            Self::ChallengeAwards(_) => EX_CHALLENGE_AWARDS,
+            Self::LevelLoadedAck(_) => EX_LEVEL_LOADED_ACK,
+            Self::PerformanceProfile(_) => EX_PERFORMANCE_PROFILE,
+            Self::RecommendationSync(_) => EX_RECOMMENDATION_SYNC,
             Self::Opaque { index, .. } => *index,
         }
     }
@@ -178,6 +235,8 @@ pub struct Movement<'a> {
 }
 
 pub struct Ghost<'a> {
+    /// Bit offset of the section prefix in its enclosing frame.
+    pub start: usize,
     pub prefix: Prefix<'a>,
     pub records: BitSpan<'a>,
 }
@@ -200,7 +259,55 @@ pub struct Frame<'a> {
     pub ghost: Option<Ghost<'a>>,
     pub files: Vec<(u8, crate::files::Record)>,
     pub complete: bool,
+    /// End of all decoded handlers, before byte-alignment padding. Absent when
+    /// parsing stopped at a prefix or a nonempty object section.
+    pub consumed_bits: Option<usize>,
     pub rest: usize,
+}
+
+impl Frame<'_> {
+    /// Resume the handlers after a canonically decoded nonempty Ghost section.
+    /// `ghost_bits` includes its section prefix. Validate the remainder through
+    /// byte alignment; do not silently lose a File start beside object records.
+    /// File state is returned only after the entire tail decodes successfully.
+    pub fn finish_ghost(
+        &mut self,
+        data: BitSpan<'_>,
+        ghost_bits: usize,
+        sizes: [Option<usize>; 2],
+    ) -> Result<usize, Error> {
+        let ghost = self.ghost.as_ref().ok_or(Error::Shape)?;
+        if ghost.prefix.remaining_records() == 0 || !self.files.is_empty() {
+            return Err(Error::Shape);
+        }
+        let pos = ghost.start.checked_add(ghost_bits).ok_or(Error::Shape)?;
+        let minimum = ghost
+            .records
+            .start()
+            .checked_sub(data.start())
+            .ok_or(Error::Shape)?;
+        if pos < minimum || pos > data.len() {
+            return Err(Error::Shape);
+        }
+        let mut r = Reader { span: data, pos };
+        let mut files = Vec::new();
+        for handler in 4..=5 {
+            if self.mask & (1 << handler) != 0 {
+                let (record, consumed) =
+                    crate::files::decode(r.rest()?, sizes[usize::from(handler - 4)])
+                        .map_err(Error::File)?;
+                r.pos += consumed;
+                files.push((handler, record));
+            }
+        }
+        if r.rest()?.len() >= 8 {
+            return Err(Error::Shape);
+        }
+        self.files = files;
+        self.complete = true;
+        self.consumed_bits = Some(r.pos);
+        Ok(r.pos)
+    }
 }
 
 struct Reader<'a> {
@@ -287,12 +394,7 @@ fn message<'a>(r: &mut Reader<'a>, index: u8) -> Result<Message<'a>, Error> {
         },
         8 | 60 | 95 => {
             let start = r.pos;
-            r.take(32)?;
-            let count = r.take(32)? as usize;
-            if count > MAX_MESSAGES * 64 {
-                return Err(Error::Bound);
-            }
-            r.slice(count * 16)?;
+            SubLevelReport::read(r)?;
             let body = r.span.slice(start, r.pos - start)?;
             Message::Opaque { index, body }
         }
@@ -344,12 +446,46 @@ fn message<'a>(r: &mut Reader<'a>, index: u8) -> Result<Message<'a>, Error> {
             let body = r.span.slice(start, r.pos - start)?;
             Message::Opaque { index, body }
         }
-        89 => {
+        EX_CHALLENGE_PLAYER_SYNC => Message::ChallengePlayerSync(ChallengePlayerSync::read(r)?),
+        EX_LEVEL_LOADED_ACK => Message::LevelLoadedAck(LevelLoadedAck::read(r)?),
+        EX_PERFORMANCE_PROFILE => Message::PerformanceProfile(PerformanceProfile::read(r)?),
+        EX_CHALLENGE_FULL => Message::ChallengeFull(ChallengeFull::read(r)?),
+        EX_CHALLENGE_AWARDS => Message::ChallengeAwards(ChallengeAwards::read(r)?),
+        // Paired reader 0x554ccd0 / writer 0x554d0f0: count, three words and
+        // one Boolean per entry, then one final word. Check the whole extent
+        // before allocating, including the required trailing word.
+        EX_CHALLENGE_PROGRESS => {
+            let count = r.take(32)? as usize;
+            if count > MAX_CHALLENGE_PROGRESS_ENTRIES {
+                return Err(Error::Bound);
+            }
+            if r.rest()?.len() < count * 97 + 32 {
+                return Err(Error::Truncated);
+            }
+            let mut entries = Vec::with_capacity(count);
+            for _ in 0..count {
+                entries.push(ChallengeProgressEntry {
+                    words: [r.take(32)?, r.take(32)?, r.take(32)?],
+                    flag: r.take(1)? != 0,
+                });
+            }
+            Message::ChallengeProgress(ChallengeProgress {
+                entries,
+                trailing_word: r.take(32)?,
+            })
+        }
+        EX_RECOMMENDATION_SYNC => Message::RecommendationSync(RecommendationSync::read(r)?),
+        // Parser `0x5555a70`: a 64-bit value, a 32-bit count and that many
+        // (u32, f32, f32) entries. Kept opaque: the host does not act on it, but
+        // an undecodable copy would block the reliable channel behind it (E998).
+        EX_SPEED_WALLS_TO_SERVER => {
             let start = r.pos;
             r.take64(64)?;
-            if r.take(32)? != 0 {
-                return Err(Error::Unsupported(index));
+            let count = r.take(32)? as usize;
+            if count > MAX_SPEED_WALL_ENTRIES {
+                return Err(Error::Bound);
             }
+            r.slice(count * 96)?;
             let body = r.span.slice(start, r.pos - start)?;
             Message::Opaque { index, body }
         }
@@ -525,6 +661,7 @@ fn parse_inner(
         ghost: None,
         files: Vec::new(),
         complete: true,
+        consumed_bits: None,
         rest: 6,
     };
     for handler in 0..HANDLERS as u8 {
@@ -564,6 +701,7 @@ fn parse_inner(
             }
             MOVEMENT => frame.movement = Some(movement(&mut r, direction)?),
             GHOST => {
+                let start = r.pos;
                 let rest = r.rest()?;
                 let prefix = Prefix::decode(
                     rest,
@@ -579,12 +717,17 @@ fn parse_inner(
                 if prefix.remaining_records() == 0 {
                     r.pos += rest.len() - records.len();
                     frame.ghost = Some(Ghost {
+                        start,
                         prefix,
                         records: records.slice(0, 0)?,
                     });
                     continue;
                 }
-                frame.ghost = Some(Ghost { prefix, records });
+                frame.ghost = Some(Ghost {
+                    start,
+                    prefix,
+                    records,
+                });
                 frame.complete = mask >> (handler + 1) == 0;
                 return Ok(frame);
             }
@@ -601,6 +744,7 @@ fn parse_inner(
     if !frame.files.is_empty() && r.rest()?.len() >= 8 {
         return Err(Error::Shape);
     }
+    frame.consumed_bits = Some(r.pos);
     Ok(frame)
 }
 
@@ -658,12 +802,9 @@ pub const EX_LEVEL_READY: u8 = 70;
 pub const EX_SUBLEVEL_REPORT: u8 = 8;
 
 pub fn sublevel_report_ids(body: BitSpan<'_>) -> Vec<u16> {
-    let Ok(count) = body.read_u32(32, 32) else {
-        return Vec::new();
-    };
-    (0..count as usize)
-        .filter_map(|i| body.read_u32(64 + 16 * i, 16).ok().map(|v| v as u16))
-        .collect()
+    SubLevelReport::decode(body)
+        .map(|report| report.levels)
+        .unwrap_or_default()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -676,7 +817,13 @@ pub enum TimeSyncOut {
 pub struct Builder<'a> {
     time_sync: Option<TimeSyncOut>,
     messages: Option<(Option<u16>, Vec<Group<'a>>)>,
-    movement: Option<Vec<(u16, Vec<u8>)>>,
+    movement: Option<MovementOut<'a>>,
+}
+
+#[derive(Clone, Debug)]
+enum MovementOut<'a> {
+    Grants(Vec<(u16, Vec<u8>)>),
+    Reports(Movement<'a>),
 }
 
 impl<'a> Builder<'a> {
@@ -704,7 +851,15 @@ impl<'a> Builder<'a> {
     /// selector 0 in each regular frame; the client starts its movement records
     /// for an object 13-16 ms after the object's first listing (E101).
     pub fn movement(mut self, grants: Vec<(u16, Vec<u8>)>) -> Self {
-        self.movement = Some(grants);
+        self.movement = Some(MovementOut::Grants(grants));
+        self
+    }
+
+    /// Client AuthoritativeMove section. The frame clock is exactly 96 bits;
+    /// each component body retains its own explicit bit length. This encodes
+    /// the wire layout only, without granting ownership or interpreting bodies.
+    pub fn client_movement(mut self, reports: Movement<'a>) -> Self {
+        self.movement = Some(MovementOut::Reports(reports));
         self
     }
 
@@ -759,6 +914,25 @@ impl<'a> Builder<'a> {
             Message::Opaque { body, .. } => {
                 w.put_span(*body);
             }
+            Message::ChallengePlayerSync(value) => value.write(w)?,
+            Message::ChallengeFull(value) => value.write(w)?,
+            Message::ChallengeAwards(value) => value.write(w)?,
+            Message::LevelLoadedAck(value) => value.write(w)?,
+            Message::PerformanceProfile(value) => value.write(w)?,
+            Message::RecommendationSync(value) => value.write(w)?,
+            Message::ChallengeProgress(value) => {
+                if value.entries.len() > MAX_CHALLENGE_PROGRESS_ENTRIES {
+                    return Err(Error::Bound);
+                }
+                w.put(value.entries.len() as u64, 32);
+                for entry in &value.entries {
+                    for word in entry.words {
+                        w.put(u64::from(word), 32);
+                    }
+                    w.put_bool(entry.flag);
+                }
+                w.put(u64::from(value.trailing_word), 32);
+            }
             Message::LauncherEnabled(value) => {
                 w.put_span(value.encode().map_err(|_| Error::Shape)?.span());
             }
@@ -777,6 +951,9 @@ impl<'a> Builder<'a> {
             Message::GaragePresence(value) => {
                 w.put_span(value.encode().map_err(|_| Error::Shape)?.span());
             }
+            Message::LiveryInvalidation(value) => {
+                w.put_span(value.encode().map_err(|_| Error::Shape)?.span());
+            }
             Message::BankBalance(value) => {
                 w.put_span(value.encode().map_err(|_| Error::Shape)?.span());
             }
@@ -784,6 +961,12 @@ impl<'a> Builder<'a> {
                 w.put_span(value.encode().map_err(|_| Error::Shape)?.span());
             }
             Message::QueryControl(value) => {
+                w.put_span(value.encode().map_err(|_| Error::Shape)?.span());
+            }
+            Message::GameModeCall(value) => {
+                w.put_span(value.encode().map_err(|_| Error::Shape)?.span());
+            }
+            Message::Movie(value) => {
                 w.put_span(value.encode().map_err(|_| Error::Shape)?.span());
             }
             Message::SequenceStop(value) => {
@@ -852,7 +1035,7 @@ impl<'a> Builder<'a> {
                 }
             }
         }
-        if let Some(grants) = &self.movement {
+        if let Some(MovementOut::Grants(grants)) = &self.movement {
             if grants.len() > MAX_MOVEMENT_RECORDS {
                 return Err(Error::Bound);
             }
@@ -866,6 +1049,22 @@ impl<'a> Builder<'a> {
                 for selector in selectors {
                     w.put(u64::from(*selector), 4);
                 }
+            }
+        }
+        if let Some(MovementOut::Reports(reports)) = &self.movement {
+            let header = reports.header.ok_or(Error::Shape)?;
+            if header.len() != 96 || reports.records.len() > 63 {
+                return Err(Error::Bound);
+            }
+            w.put_span(header).put(reports.records.len() as u64, 6);
+            for record in &reports.records {
+                if record.component > 15 || record.data.len() > u16::MAX as usize {
+                    return Err(Error::Bound);
+                }
+                w.put(u64::from(record.id), 16)
+                    .put(u64::from(record.component), 4)
+                    .put(record.data.len() as u64, 16)
+                    .put_span(record.data);
             }
         }
         Ok(())

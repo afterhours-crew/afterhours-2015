@@ -112,6 +112,18 @@ fn association_publishes_after_full_pair_and_retries_only_ack() {
     s.commit_after_write().unwrap();
     assert_eq!(s.association(), Some((100, 300)));
 }
+
+#[test]
+fn committed_departure_retires_the_old_association_and_continuation() {
+    let mut s = session();
+    let q = query(100, b"300", 51);
+    s.response(&q).unwrap();
+    s.commit_after_write().unwrap();
+    s.retire();
+    assert_eq!(s.association(), None);
+    assert!(!s.is_enabled());
+    assert_eq!(s.response(&q), Err(Error::Closed));
+}
 #[test]
 fn absent_foreign_and_duplicate_permits_cannot_authorize() {
     let q = query(100, b"300", 1);

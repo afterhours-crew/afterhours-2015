@@ -247,6 +247,12 @@ pub trait Control: Send + Sync + 'static {
     -> Result<SettingsReport>;
     /// `profile --json`: the selected save.
     fn profile(&self) -> Result<Profile>;
+    /// Read the selected account's story checkpoints.
+    fn story(&self) -> Result<crate::story::StoryReport> {
+        Err(Failure::refused(
+            "Story content is not configured for this session.",
+        ))
+    }
     /// Where a game reaches the server, once it is ready.
     fn game(&self) -> Result<GameEndpoints>;
     /// `profile --list --json`.
@@ -624,6 +630,7 @@ fn serve(mut stream: TcpStream, shared: &Shared) {
         ("GET", "/v1/settings") => answer(&mut stream, control.settings()),
         ("PUT", "/v1/settings") => save_settings(&mut stream, &head, length, control.as_ref()),
         ("GET", "/v1/profile") => answer(&mut stream, control.profile()),
+        ("GET", "/v1/story") => answer(&mut stream, control.story()),
         ("GET", "/v1/game") => answer(&mut stream, control.game()),
         ("GET", "/v1/profiles") => answer(&mut stream, control.profiles()),
         ("GET", path) if path.starts_with("/v1/profiles/") => answer(
@@ -649,8 +656,8 @@ fn serve(mut stream: TcpStream, shared: &Shared) {
         }
         (
             _,
-            "/v1/info" | "/v1/status" | "/v1/events" | "/v1/profile" | "/v1/game" | "/v1/profiles"
-            | "/v1/sessions",
+            "/v1/info" | "/v1/status" | "/v1/events" | "/v1/profile" | "/v1/story" | "/v1/game"
+            | "/v1/profiles" | "/v1/sessions",
         ) => refuse(
             &mut stream,
             405,
@@ -769,6 +776,10 @@ impl Control for LiveControl {
     fn profile(&self) -> Result<Profile> {
         self.here()?;
         crate::commands::profile::profile_report(&self.data, &crate::cli::ProfileArgs::default())
+    }
+    fn story(&self) -> Result<crate::story::StoryReport> {
+        self.here()?;
+        crate::story::report(&self.data, None, None)
     }
     fn profiles(&self) -> Result<crate::profile::Listing> {
         self.here()?;

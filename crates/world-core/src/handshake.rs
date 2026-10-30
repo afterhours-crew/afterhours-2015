@@ -18,6 +18,9 @@
 //! stale or foreign datagrams are ignored rather than ending the session.
 use crate::transport::{self, Codec, Header, Part};
 
+mod client;
+pub use client::ClientHandshake;
+
 /// Largest forward jump of the client's cipher cursor accepted (lost datagrams).
 pub const MAX_FORWARD_UNITS: u16 = 128;
 
@@ -328,6 +331,67 @@ mod tests {
             panic!()
         };
         assert_eq!(h.receive(&request(0, 5)), Step::Send(first));
+    }
+
+    #[test]
+    fn both_transport_endpoints_negotiate_without_prescribed_reply_bytes() {
+        let mut host = HostHandshake::new(codec(), CLIENT, HOST, 3).unwrap();
+        let mut peer = ClientHandshake::new(codec(), CLIENT, HOST, 9, 77).unwrap();
+        assert_eq!(peer.request(), request(0, 77));
+        let Step::Send(reply) = host.receive(peer.request()) else {
+            panic!("host reply")
+        };
+        let Step::Send(confirmation) = peer.receive(&reply) else {
+            panic!("peer confirmation")
+        };
+        assert_eq!(confirmation, confirm(4, 77, 3));
+        assert!(peer.is_established());
+        assert_eq!(peer.receive(&reply), Step::Send(confirmation.clone()));
+        assert_eq!(host.receive(&confirmation), Step::Established);
+        let (host_codec, host_cursors) = host.established().unwrap();
+        let (peer_codec, peer_cursors) = peer.established().unwrap();
+        assert_eq!(
+            (peer_cursors.rx, peer_cursors.tx),
+            (host_cursors.tx, host_cursors.rx)
+        );
+        let (mut host, sync) = crate::link::Link::start(host_codec, host_cursors, 10).unwrap();
+        let (mut peer, answer) =
+            crate::link::Link::respond(peer_codec, peer_cursors, &sync, 11).unwrap();
+        let confirmation = host.receive(&answer, 12).unwrap();
+        peer.receive(&confirmation.send[0], 13).unwrap();
+        assert!(host.running() && peer.running());
+        let message = peer.send_application(b"application", 14).unwrap();
+        assert_eq!(
+            host.receive(&message, 15).unwrap().applications,
+            [b"application"]
+        );
+    }
+
+    #[test]
+    fn requesting_endpoint_rejects_foreign_reply_without_losing_retry_state() {
+        assert!(ClientHandshake::new(codec(), HOST, HOST, 9, 77).is_none());
+        assert!(ClientHandshake::new(codec(), 0, HOST, 9, 77).is_none());
+        assert!(ClientHandshake::new(codec(), CLIENT, HOST, 0x8000, 77).is_none());
+        let mut peer = ClientHandshake::new(codec(), CLIENT, HOST, 9, 77).unwrap();
+        let mut other = HostHandshake::new(codec(), CLIENT, HOST, 3).unwrap();
+        let Step::Send(foreign) = other.receive(&request(0, 78)) else {
+            panic!("other reply")
+        };
+        assert_eq!(peer.receive(&foreign), Step::Ignored(Ignored::Identity));
+        assert!(!peer.is_established());
+        let mut host = HostHandshake::new(codec(), CLIENT, HOST, 3).unwrap();
+        let Step::Send(reply) = host.receive(peer.request()) else {
+            panic!("host reply")
+        };
+        let mut corrupt = reply.clone();
+        *corrupt.last_mut().unwrap() ^= 1;
+        assert!(matches!(
+            peer.receive(&corrupt),
+            Step::Ignored(Ignored::Transport(_))
+        ));
+        assert!(!peer.is_established());
+        assert!(matches!(peer.receive(&reply), Step::Send(_)));
+        assert_eq!(peer.receive(&foreign), Step::Ignored(Ignored::Unexpected));
     }
 
     #[test]

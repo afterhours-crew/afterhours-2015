@@ -40,6 +40,44 @@ fn math_object(rows: Vec<Value>, calls: Vec<Value>) -> Object {
         ]),
     }
 }
+
+#[test]
+fn drag_gear_condition_compiles_integer_equality_and_boolean_selection() {
+    let obj = math_object(
+        vec![
+            instruction("InputI", 4, 0, 11, 0),
+            instruction("ConstI", 1, 1, 1, 0),
+            instruction("EqI", 23, 0, 0, 1),
+            instruction("ConstB", 0, 1, 0x100, 0),
+            instruction("ConstB", 0, 2, 0, 0),
+            instruction("Func", 66, 0, 193_418_248, 0),
+            instruction("Return", 67, 0, 1, 0),
+        ],
+        vec![structure(&[(
+            "Parameters",
+            Value::Array(vec![Value::UInt32(0), Value::UInt32(1), Value::UInt32(2)]),
+        )])],
+    );
+    let Calculation::Math { program, .. } = compile(&obj).unwrap() else {
+        panic!()
+    };
+    for gear in [0, 1, 2, -1] {
+        assert_eq!(
+            program.evaluate(|_, _| Some(Scalar::Integer(gear))),
+            Ok(Some(Scalar::Boolean(gear == 1)))
+        );
+    }
+    assert!(
+        compile(&math_object(
+            vec![
+                instruction("EqI", 24, 0, 0, 1),
+                instruction("Return", 67, 0, 1, 0)
+            ],
+            vec![]
+        ))
+        .is_err()
+    );
+}
 #[test]
 fn compile_function_arguments_and_return_register_from_installed_fields() {
     let calls = vec![structure(&[(
@@ -63,6 +101,64 @@ fn compile_function_arguments_and_return_register_from_installed_fields() {
     };
     assert!(evaluate_on_event);
     assert_eq!(program.evaluate(|_, _| None), Ok(Some(Scalar::Float(9.0))));
+}
+
+#[test]
+fn event_vector_distance_integer_bounds_and_boolean_bytecode_are_typed() {
+    let args = |values: &[u32]| {
+        structure(&[(
+            "Parameters",
+            Value::Array(values.iter().copied().map(Value::UInt32).collect()),
+        )])
+    };
+    let obj = math_object(
+        vec![
+            instruction("InputV3", 7, 0, 11, 0),
+            instruction("InputV3", 7, 1, 12, 0),
+            instruction("Func", 66, 0, 3_975_427_555, 0),
+            instruction("ConstF", 2, 1, 13.0f32.to_bits(), 0),
+            instruction("GreaterEqF", 15, 0, 0, 1),
+            instruction("LessEqF", 19, 1, 0, 1),
+            instruction("AndB", 11, 0, 0, 1),
+            instruction("Return", 67, 0, 1, 0),
+        ],
+        vec![args(&[0, 1])],
+    );
+    let Calculation::Math { program, .. } = compile(&obj).unwrap() else {
+        panic!()
+    };
+    assert_eq!(
+        program.evaluate(|id, _| Some(Scalar::Vec3(if id == 11 {
+            [0.; 3]
+        } else {
+            [3., 4., 12.]
+        }))),
+        Ok(Some(Scalar::Boolean(true)))
+    );
+    let obj = math_object(
+        vec![
+            instruction("ConstI", 1, 0, 19, 0),
+            instruction("ConstI", 1, 1, 2, 0),
+            instruction("SubI", 31, 0, 0, 1),
+            instruction("ConstI", 1, 2, 10, 0),
+            instruction("Func", 66, 0, 1_543_335_391, 0),
+            instruction("Return", 67, 0, 2, 0),
+        ],
+        vec![args(&[0, 1, 2])],
+    );
+    let Calculation::Math { program, .. } = compile(&obj).unwrap() else {
+        panic!()
+    };
+    assert_eq!(program.evaluate(|_, _| None), Ok(Some(Scalar::Integer(10))));
+    let bad = math_object(
+        vec![
+            instruction("InputF", 5, 0, 11, 0),
+            instruction("Func", 66, 0, 1_648_243_358, 0),
+            instruction("Return", 67, 0, 4, 0),
+        ],
+        vec![args(&[0])],
+    );
+    assert!(compile(&bad).is_err());
 }
 #[test]
 fn reject_unknown_or_mismatched_instructions_calls_and_registers() {

@@ -309,6 +309,42 @@ fn reports_are_owned_monotonic_isolated_and_never_invent_host_replies() {
     assert!(other.members.is_empty());
     assert_eq!(a.members.len(), 1);
 }
+
+#[test]
+fn crossing_codec_preserves_generation_clock_order_and_nonzero_padding() {
+    let crossing = client(101, 71, 19, 2, Some(123.75), 0x89ab_cdef);
+    assert_eq!(
+        Crossing::decode(crossing.span()).unwrap(),
+        Some(Crossing {
+            object: 101,
+            selector: 19,
+            participant: 71,
+            token: 0x89ab_cdef,
+            seconds: 123.75,
+            inside: true,
+        })
+    );
+    let leaving = client(101, 71, 19, 3, Some(5.), u32::MAX);
+    assert!(!Crossing::decode(leaving.span()).unwrap().unwrap().inside);
+    let location = client(101, 71, 19, 0, None, 0);
+    assert_eq!(Crossing::decode(location.span()).unwrap(), None);
+    // The native mode-filter handler ignores this clock. The ordinary world
+    // activation receiver separately imposes its finite/monotonic policy.
+    let nan = client(101, 71, 19, 2, Some(f64::NAN), 7);
+    assert!(
+        Crossing::decode(nan.span())
+            .unwrap()
+            .unwrap()
+            .seconds
+            .is_nan()
+    );
+    let mut trailing = crossing.clone();
+    trailing.put(1, 1);
+    assert_eq!(Crossing::decode(trailing.span()), Err(Error::Shape));
+    let truncated =
+        nfs_protocol::world::BitSpan::new(crossing.bytes(), 0, crossing.span().len() - 1).unwrap();
+    assert_eq!(Crossing::decode(truncated), Err(Error::Shape));
+}
 #[test]
 fn malformed_reports_and_unbound_routes_do_not_mutate_state() {
     let (mut a, r, _) = bound(1);

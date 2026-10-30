@@ -117,6 +117,57 @@ fn request(items: &Collection) -> Request<'_> {
 }
 
 #[test]
+fn opening_car_uses_world_motion_with_separate_nitrous_and_audio_state() {
+    let (document, classes, items) = fixture();
+    let content = Content::from_json(&document, &classes).unwrap();
+    let before = items.clone();
+    let construct = |placement| {
+        let mut input = request(&items);
+        input.placement = placement;
+        content
+            .construct(input, &mut authority::Registry::default(), |_| Some(12))
+            .unwrap()
+    };
+    let normal = construct(Placement::PlayerWorld);
+    let opening = construct(Placement::IntroWorld);
+    assert_eq!(normal.creation, opening.creation);
+    let profile = &content.definition(&[1; 16]).unwrap().profile;
+    for (kind, (normal, opening)) in profile
+        .kinds()
+        .iter()
+        .zip(normal.updates.iter().zip(&opening.updates))
+    {
+        match kind {
+            Kind::Index => {
+                assert_eq!(
+                    normal,
+                    &Some(Update::Index {
+                        index: Some(0),
+                        value: Some(255)
+                    })
+                );
+                assert_eq!(
+                    opening,
+                    &Some(Update::Index {
+                        index: Some(0),
+                        value: Some(0)
+                    })
+                );
+            }
+            Kind::NibblesGuid => {
+                assert!(matches!(normal, Some(Update::NibblesGuid(Some(v))) if v.tail==[0;6]));
+                assert!(
+                    matches!(opening, Some(Update::NibblesGuid(Some(v))) if v.tail==INTRO_AUDIO_TAIL)
+                );
+            }
+            _ => assert_eq!(normal, opening),
+        }
+    }
+    assert_eq!(items, before);
+    assert_eq!(normal, construct(Placement::PlayerWorld));
+}
+
+#[test]
 fn equipment_presentation_matches_fresh_inventory_components_and_registers_new_meshes() {
     let (document, classes, mut items) = fixture();
     let content = Content::from_json(&document, &classes).unwrap();
@@ -185,6 +236,27 @@ fn equipment_presentation_matches_fresh_inventory_components_and_registers_new_m
     let mut invalid = document;
     invalid["vehicles"][0]["meshes"][0]["variants"][0]["bundle"] = json!("");
     assert!(Content::from_json(&invalid, &classes).is_err());
+}
+
+#[test]
+fn installed_vehicle_identity_is_retained_and_older_profiles_stay_readable() {
+    let (mut document, classes, _) = fixture();
+    assert!(
+        Content::from_json(&document, &classes)
+            .unwrap()
+            .definition(&[1; 16])
+            .unwrap()
+            .info
+            .is_none()
+    );
+    document["vehicles"][0]["vehicle_info"] =
+        json!({"bundle":0xf1234567u32,"short_name":"ID_CAR_CONSTRUCTED_SHORT_NAME"});
+    let content = Content::from_json(&document, &classes).unwrap();
+    let info = content.definition(&[1; 16]).unwrap().info.as_ref().unwrap();
+    assert_eq!(info.bundle, 0xf1234567);
+    assert_eq!(info.short_name.as_str(), "ID_CAR_CONSTRUCTED_SHORT_NAME");
+    document["vehicles"][0]["vehicle_info"]["short_name"] = json!("invalid\0token");
+    assert!(Content::from_json(&document, &classes).is_err());
 }
 
 #[test]

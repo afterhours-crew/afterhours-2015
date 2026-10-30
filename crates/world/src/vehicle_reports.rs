@@ -25,8 +25,8 @@ enum Target {
     Ai(u64),
 }
 impl Reports {
-    /// Publish the stored initial chassis once the newly created world car is
-    /// reporting, then retain and echo its current client-authoritative state.
+    /// Retain and echo the current client-authoritative chassis, including the
+    /// first report, which may already reflect a teleport or driving transition.
     /// Clock/revision words always come from the accepted report's header.
     /// The caller commits this clone together with its frame and output queue.
     pub fn receive(
@@ -95,20 +95,22 @@ impl Reports {
                 return Err(Error::Shape);
             }
             let sample = Sample::decode(header, record.data)?;
-            let current = match target {
+            // Validate ownership and the chassis shape before staging any
+            // reports. The stored pose is not a substitute for client state.
+            match target {
                 Target::Player => players.vehicle_physics(connection, persona, record.id)?,
                 Target::Ai(key) => players.ai_vehicle_physics(connection, persona, key)?,
             };
-            reports.push((record.id, target, sample, current));
+            reports.push((record.id, target, sample));
         }
         let mut next = self.clone();
         let mut world = players.clone();
         next.entries
             .retain(|id, entry| cars.get(id) == Some(&entry.target));
         let mut output = Vec::new();
-        for (id, target, sample, initial) in reports {
+        for (id, target, sample) in reports {
             let stamp = sample.physics.identity_words;
-            let mut physics = sample.physics;
+            let physics = sample.physics;
             if let Some(entry) = next.entries.get_mut(&id) {
                 if now_ms < entry.sent_ms {
                     return Err(Error::Shape);
@@ -122,13 +124,6 @@ impl Reports {
                 }
                 entry.sent_ms = now_ms;
             } else {
-                // The player-car handoff preserves its intended starting mode.
-                // AI constructors are idle: their first client report contains
-                // the actual transition into driving and must be accepted.
-                if matches!(target, Target::Player) {
-                    physics = initial;
-                    physics.identity_words = stamp;
-                }
                 next.entries.insert(
                     id,
                     Entry {

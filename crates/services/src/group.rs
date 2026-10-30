@@ -206,6 +206,9 @@ pub struct Session {
     input_bytes: usize,
     matchmaking_context: Option<Context>,
     pending_write: bool,
+    /// The expected `gameSessionId` of the create: "0", or the world game.
+    session: Vec<u8>,
+    renewed: bool,
 }
 fn frame(bytes: &[u8], category: u8) -> Result<Frame<'_>, Error> {
     let d = nfs_fire2::decode(bytes, frame_limits())
@@ -268,7 +271,31 @@ impl Session {
             input_bytes: 0,
             matchmaking_context: None,
             pending_write: false,
+            session: b"0".to_vec(),
+            renewed: false,
         })
+    }
+    /// After leaving its group in the world the client creates a new one
+    /// (official E1026 1311.173-1311.806 s: leave, createGame for a group
+    /// whose `gameSessionId` names the world game, mesh, finalize, advance).
+    /// Once per session, from a committed initialized group, with
+    /// identifiers of its own.
+    pub fn renew(&mut self, generated: Generated, world_game: u64) -> Result<(), Error> {
+        if self.renewed
+            || self.pending_write
+            || self.state != State::Initialized
+            || world_game == 0
+            || generated.game_id == self.generated.game_id
+        {
+            return Err(Error::Ineligible);
+        }
+        generated.validate()?;
+        self.generated = generated;
+        self.session = world_game.to_string().into_bytes();
+        self.state = State::AwaitCreate;
+        self.prior = None;
+        self.renewed = true;
+        Ok(())
     }
     pub fn state(&self) -> State {
         self.state
@@ -341,9 +368,9 @@ impl Session {
         }
         match (self.state, f.fields.routing_b) {
             (State::AwaitCreate, CREATE_GAME) => {
-                let (reply, setup) = self
-                    .config
-                    .create(f.body, &self.identity, &self.generated)?;
+                let (reply, setup) =
+                    self.config
+                        .create(f.body, &self.identity, &self.generated, &self.session)?;
                 let output = vec![ack(f, &reply)?, notify(NOTIFY_GAME_SETUP, &setup)?];
                 let context = Context::from_create(
                     self.generated.game_id,

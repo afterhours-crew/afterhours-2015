@@ -160,6 +160,63 @@ pub fn records(collection: &Collection, catalog: &Catalog) -> Result<Vec<ItemRec
     Ok(stored.into_values().collect())
 }
 
+/// Construct the stock tree and missing account wraps for an authorized car
+/// acquisition. The caller owns authorization, identity reservation and commit.
+pub(crate) fn vehicle_grant(
+    snapshot: &Snapshot,
+    catalog: &InventoryCatalog,
+    guid: items::Guid,
+    first: u64,
+) -> Result<items::InitialInventory, Error> {
+    collection(snapshot, catalog.bindings())?;
+    let mut built = catalog.instantiate_vehicle(guid, first)?;
+    let definition = catalog.definition(&guid)?;
+    let mut grants = std::collections::BTreeSet::new();
+    for guid in &definition.additional_items {
+        let d = catalog.definition(guid)?;
+        if d.class != items::DefinitionClass::LiveryCustomizationItemData
+            || d.flags.requires_owner
+            || d.flags.deprecated
+            || !d.sub_items.is_empty()
+            || !d.additional_items.is_empty()
+        {
+            return Err(nfs_storage::Error::Config.into());
+        }
+        if !grants.insert(*guid)
+            || snapshot
+                .items
+                .values()
+                .any(|r| r.definition.0 == *guid && r.owner.is_none() && r.state == items::OWNED)
+        {
+            continue;
+        }
+        built.collection.items.insert(
+            built.next_id,
+            Item {
+                id: built.next_id,
+                definition: *guid,
+                owner: 0,
+                defaults: vec![],
+                children: vec![],
+                state: items::OWNED,
+                buy_price: d.buy_price,
+                sell_price: d.sell_price,
+                derived: d
+                    .default_derived
+                    .clone()
+                    .ok_or(nfs_storage::Error::Config)?,
+            },
+        );
+        built.next_id = built
+            .next_id
+            .checked_add(1)
+            .ok_or(nfs_storage::Error::Bounds)?;
+    }
+    built.collection.roots = built.collection.items.keys().copied().collect();
+    built.collection.encode(catalog.bindings())?;
+    Ok(built)
+}
+
 /// Initialize only generation-zero empty state. An intentionally emptied
 /// inventory at a later generation stays empty. Racing first loads converge
 /// on the committed repository state, without replacing existing progress.

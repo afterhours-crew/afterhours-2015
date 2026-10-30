@@ -120,17 +120,35 @@ pub(crate) fn fixture() -> Sources {
         },
     };
     Sources {
+        ai: vec![],
+        burnout_overrides: vec![],
+        burnouts: vec![],
+        item_info: vec![],
+        vehicle_info: vec![],
+        teleport_locations: vec![],
+        vehicle_tuning: vec![],
+        context_reporters: vec![],
+        transitions: vec![],
+        linked_curves: vec![],
+        event_details: vec![],
+        sets: vec![],
+        rank_queries: vec![],
+        banks: vec![],
+        participant_sets: vec![],
+        participant_event_providers: vec![],
         interfaces: vec![Interface {
             identity: child(4),
             bus: child(0),
             fields: vec![
                 Field {
                     id: 500,
+                    opaque_default: None,
                     access: Access::Target,
                     default: None,
                 },
                 Field {
                     id: 600,
+                    opaque_default: None,
                     access: Access::Target,
                     default: Some(Value::Float(4.0)),
                 },
@@ -375,6 +393,14 @@ fn untyped_cells_reaching_modeled_nodes_and_unknown_classes_fail() {
     let program = compile(&sources).unwrap();
     assert_eq!(program.nodes[9].behavior, Behavior::Inert);
     assert!(!program.nodes[9].created);
+    // Authored server eligibility cannot supply a missing native factory.
+    sources
+        .creation
+        .push(created(identity("root", 5, &[]), "PropertyDebugEntityData"));
+    // Use the occurrence's actual composition identity, independent of order.
+    sources.creation.last_mut().unwrap().identity = sources.composition.nodes[9].identity.clone();
+    let program = compile(&sources).unwrap();
+    assert!(!program.nodes[9].created);
 }
 
 #[test]
@@ -385,4 +411,220 @@ fn duplicate_or_foreign_reader_identities_fail() {
     let mut sources = fixture();
     sources.synced[0].identity = identity("elsewhere", 1, &[]);
     assert!(compile(&sources).is_err());
+}
+
+#[test]
+fn integer_participant_property_accessors_compile_only_when_written() {
+    let root = |i| identity("root", i, &[]);
+    let mut sources = fixture();
+    // An integer (11) writes the accessor's (12) Value.
+    sources
+        .composition
+        .nodes
+        .push(event_node(root(6), "IntEntityData", server(), None));
+    sources.composition.nodes.push(event_node(
+        root(7),
+        "IntParticipantPropertyAccessorEntityData",
+        server(),
+        None,
+    ));
+    sources
+        .composition
+        .properties
+        .push(row(0, 3, port(11, FLOAT_VALUE), port(12, FLOAT_VALUE), 3));
+    sources.declarations.extend([
+        declaration(
+            root(6),
+            "IntEntityData",
+            &[],
+            &[(FLOAT_VALUE, Kind::Integer)],
+        ),
+        declaration(
+            root(7),
+            "IntParticipantPropertyAccessorEntityData",
+            &[(FLOAT_VALUE, Kind::Integer)],
+            &[(nfs_world::scoring::nodes::OUTPUT_VALUE, Kind::Integer)],
+        ),
+    ]);
+    sources.creation.extend([
+        created(root(6), "IntEntityData"),
+        created(root(7), "IntParticipantPropertyAccessorEntityData"),
+    ]);
+    sources.scalars.extend([
+        nodes::Node {
+            identity: root(6),
+            configuration: nodes::Configuration {
+                definition: Scalar::Integer {
+                    default: 5,
+                    step: 1,
+                },
+                defaults: vec![],
+            },
+        },
+        nodes::Node {
+            identity: root(7),
+            configuration: nodes::Configuration {
+                definition: Scalar::IntegerParticipantProperty,
+                defaults: vec![(FLOAT_VALUE, Value::Integer(0))],
+            },
+        },
+    ]);
+    let program = compile(&sources).unwrap();
+    assert_eq!(
+        program.nodes[12].behavior,
+        Behavior::Scalar(Scalar::IntegerParticipantProperty)
+    );
+    // An accessor whose Value nothing writes would read the store: refused.
+    let mut reading = sources.clone();
+    reading.composition.properties.pop();
+    assert!(compile(&reading).is_err());
+    let property = super::super::participant_properties::Property {
+        channel: "test/race".into(),
+        port: 77,
+    };
+    let bindings = BTreeMap::from([(root(7), property.clone())]);
+    let program = compile_with_properties(&reading, &bindings).unwrap();
+    assert_eq!(
+        program.nodes[12].behavior,
+        Behavior::ParticipantProperty {
+            kind: Kind::Integer,
+            property: property.clone(),
+            write: false
+        }
+    );
+    let program = compile_with_properties(&sources, &bindings).unwrap();
+    assert_eq!(
+        program.nodes[12].behavior,
+        Behavior::ParticipantProperty {
+            kind: Kind::Integer,
+            property: property.clone(),
+            write: true
+        }
+    );
+    assert!(
+        compile_with_properties(&sources, &BTreeMap::from([(root(6), property.clone())])).is_err()
+    );
+    assert!(
+        compile_with_properties(
+            &sources,
+            &BTreeMap::from([(identity("foreign", 7, &[]), property)])
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn native_bindings_keep_typed_cells_and_cannot_replace_an_ordinary_reader() {
+    let mut sources = fixture();
+    let key = sources.scalars[0].identity.clone();
+    let native = BTreeSet::from([key.clone()]);
+    assert!(compile_with_native(&sources, &BTreeMap::new(), &native).is_err());
+    sources.scalars.remove(0);
+    let program = compile_with_native(&sources, &BTreeMap::new(), &native).unwrap();
+    let node = program
+        .nodes
+        .iter()
+        .position(|n| n.identity == super::identity(&key))
+        .unwrap();
+    assert_eq!(program.nodes[node].behavior, Behavior::Native);
+    assert!(
+        program
+            .cells
+            .iter()
+            .any(|c| c.ports.iter().any(|p| usize::from(p.node) == node))
+    );
+    assert!(
+        compile_with_native(
+            &sources,
+            &BTreeMap::new(),
+            &BTreeSet::from([identity("foreign", 1, &[])])
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn selected_reader_keeps_traversal_and_links_through_excluded_nodes() {
+    use crate::graph::{
+        Graph, Site,
+        tests::{Memory, edge, local, ptr},
+    };
+    use nfs_frostbite::ebx::Value as Ebx;
+    let mut source = Memory::default();
+    source.put(
+        "r",
+        0,
+        "LogicPrefabBlueprint",
+        &[
+            ("Objects", Ebx::Array(vec![local(1), local(2)])),
+            (
+                "LinkConnections",
+                Ebx::Array(vec![edge(local(0), 17, local(2), 0)]),
+            ),
+        ],
+    );
+    source.put(
+        "r",
+        1,
+        "LogicPrefabReferenceObjectData",
+        &[("Blueprint", ptr("c", 0))],
+    );
+    source.put("r", 2, "ParticipantSetEntityData", &[]);
+    source.put(
+        "c",
+        0,
+        "LogicPrefabBlueprint",
+        &[("Objects", Ebx::Array(vec![local(1)]))],
+    );
+    source.put("c", 1, "ParticipantSetEntityData", &[]);
+    let native = BTreeSet::from([identity("r", 1, &[]), identity("r", 2, &[])]);
+    let mut selected = Selected {
+        source: &mut source,
+        native: &native,
+    };
+    let mut graph = Graph::new(&mut selected);
+    let rows = graph.read(Site::root("r")).unwrap();
+    assert!(
+        !rows
+            .iter()
+            .any(|n| Identity::from(&n.site) == identity("r", 1, &[]))
+    );
+    assert!(
+        rows.iter()
+            .any(|n| Identity::from(&n.site) == identity("c", 1, &[("r", 1)]))
+    );
+    let links = graph.links(&Site::root("r"), 17).unwrap();
+    assert_eq!(
+        graph.object(&links[0].site).unwrap().class,
+        "ParticipantSetEntityData"
+    );
+}
+
+#[test]
+fn explicit_native_selection_excludes_scalar_configuration_only_for_that_occurrence() {
+    use crate::graph::tests::{Memory, local};
+    use nfs_frostbite::ebx::Value as Ebx;
+    let mut source = Memory::default();
+    source.put(
+        "r",
+        0,
+        "LogicPrefabBlueprint",
+        &[("Objects", Ebx::Array(vec![local(1), local(2)]))],
+    );
+    for i in 1..=2 {
+        source.put(
+            "r",
+            i,
+            "BoolParticipantPropertyAccessorEntityData",
+            &[("Value", Ebx::Bool(false))],
+        );
+    }
+    let native = BTreeSet::from([identity("r", 1, &[])]);
+    let mut selected = Selected {
+        source: &mut source,
+        native: &native,
+    };
+    let nodes = super::super::nodes::read(&mut selected, "r").unwrap();
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0].identity, identity("r", 2, &[]));
 }

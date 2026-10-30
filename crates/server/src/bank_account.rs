@@ -74,6 +74,10 @@ fn run(args: &Args, now: Timestamp) -> Result<serde_json::Value, nfs_storage::Er
         return Err(nfs_storage::Error::Config);
     }
     let repo = SqliteRepository::open_owned_directory(&args.directory)?;
+    let _lease = args
+        .set
+        .map(|_| repo.writer_lease(args.account))
+        .transpose()?;
     let before = repo.snapshot(args.account)?;
     let old = Balance::from_snapshot(&before)?;
     let saved = if let Some((amount, generation)) = args.set {
@@ -177,6 +181,13 @@ mod tests {
         assert!(run(&args, Timestamp(1)).is_err());
         assert!(!repo.path(account).exists());
         let before = repo.open(account).unwrap();
+        let lease = repo.writer_lease(account).unwrap();
+        assert_eq!(run(&args, Timestamp(1)).unwrap()["balance"], 0);
+        args.set = Some((2500, 0));
+        assert_eq!(run(&args, Timestamp(1)), Err(nfs_storage::Error::Busy));
+        assert_eq!(repo.snapshot(account).unwrap(), before);
+        drop(lease);
+        args.set = None;
         assert_eq!(run(&args, Timestamp(1)).unwrap()["balance"], 0);
         assert_eq!(repo.snapshot(account).unwrap(), before);
         args.set = Some((2500, 0));

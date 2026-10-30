@@ -5,7 +5,63 @@ use super::*;
 use crate::rival_content::population::{Focus, Input};
 use nfs_world::application::Random;
 
+type MapError = (&'static str, Option<u16>, replication::Error);
+
 impl PlayerListener {
+    fn map_failure(&mut self, slot: usize, (source, participant, error): MapError) {
+        let count = &mut self.optional_map_failures[slot];
+        *count = count.saturating_add(1);
+        if super::refusal::logged(*count) {
+            tracing::warn!(
+                connection = self.unsupported.connection(),
+                source,
+                ?participant,
+                ?error,
+                optional_sync_failures = *count,
+                "optional location sync dropped; movement remains eligible"
+            );
+        }
+    }
+
+    /// Each map API validates and commits atomically. Preserve a successful
+    /// human update even if an unrelated rival update fails, with its records.
+    pub(super) fn sync_optional_maps(
+        &mut self,
+        players: &mut Players,
+        intro_modes: &prologue::Modes,
+        cars: &BTreeMap<u16, u16>,
+        site: nfs_world::world_activation::Site,
+    ) -> Vec<replication::Record> {
+        let mut records = match players.sync_location_service(
+            HOST_SELECTOR as u8,
+            self.persona,
+            cars,
+            [0.; 3],
+            site,
+        ) {
+            Ok(records) => records,
+            Err(error) => {
+                self.map_failure(0, ("human location map", None, error));
+                Vec::new()
+            }
+        };
+        match self.rival_map(players, intro_modes) {
+            Ok(Some(rivals)) => match players.sync_rival_locations(
+                HOST_SELECTOR as u8,
+                self.persona,
+                &rivals,
+                site,
+                self.world_ms,
+            ) {
+                Ok(batch) => records.extend(batch),
+                Err(error) => self.map_failure(2, ("rival location map", None, error)),
+            },
+            Ok(None) => {}
+            Err(error) => self.map_failure(1, error),
+        }
+        records
+    }
+
     pub(super) fn rival_glass_owner(
         &self,
         players: &Players,
@@ -13,10 +69,15 @@ impl PlayerListener {
         local_slot: u8,
     ) -> Option<crate::glass::Owner> {
         let connection = HOST_SELECTOR as u8;
-        let delegated =
-            self.rival_population
-                .as_ref()?
-                .delegated(players, connection, self.persona);
+        let mut delegated = self
+            .rival_population
+            .as_ref()
+            .map(|r| r.delegated(players, connection, self.persona))
+            .unwrap_or_default();
+        delegated.extend(self.event_state.delegated(players, self.persona));
+        for (active, _, _) in self.intro_modes.values() {
+            delegated.extend(active.delegated(players));
+        }
         let ids = players.ai_ids(connection, self.persona, *delegated.get(&vehicle)?)?;
         Some(crate::glass::Owner {
             vehicle,
@@ -33,17 +94,38 @@ impl PlayerListener {
     pub(super) fn rival_map(
         &self,
         players: &Players,
-    ) -> Result<Option<Vec<crate::rival_content::population::Location>>, replication::Error> {
+        intro_modes: &prologue::Modes,
+    ) -> Result<Option<Vec<crate::rival_content::population::Location>>, MapError> {
         if !self.pending_entries.is_empty() {
             return Ok(None);
         }
-        Ok(Some(
-            self.rival_population
-                .as_ref()
-                .map(|r| r.locations(players, HOST_SELECTOR as u8, self.persona))
-                .transpose()?
-                .unwrap_or_default(),
-        ))
+        // Return context to the single bounded logger; do not log every frame.
+        let failed = |source: &'static str, participant: Option<u16>| {
+            move |error| (source, participant, error)
+        };
+        let mut locations = self
+            .rival_population
+            .as_ref()
+            .map(|r| r.locations(players, HOST_SELECTOR as u8, self.persona))
+            .transpose()
+            .map_err(failed("roaming rivals", None))?
+            .unwrap_or_default();
+        locations.extend(
+            self.event_state
+                .locations(players, self.persona)
+                .map_err(failed("event racers", None))?,
+        );
+        // A client frame can retire a story roster before committing either
+        // snapshot. Read the modes staged with these players, not self's old
+        // roster against the new object registry.
+        for (&participant, (active, _, _)) in intro_modes {
+            locations.extend(
+                active
+                    .locations(players)
+                    .map_err(failed("intro race opponents", Some(participant)))?,
+            );
+        }
+        Ok(Some(locations))
     }
 
     pub(in crate::net) fn advance_rivals(&mut self, now: u64) -> Result<(), replication::Error> {
@@ -69,6 +151,10 @@ impl PlayerListener {
                 .collect()
         };
         let mut players = self.players.clone();
+        let mut preserved = self.event_state.preserved(&players, self.persona);
+        for (active, _, _) in self.intro_modes.values() {
+            preserved.extend(active.locations(&players)?.into_iter().map(|(p, _)| p));
+        }
         let changes = rivals.advance(
             &mut players,
             &mut registrations,
@@ -78,6 +164,7 @@ impl PlayerListener {
                 now,
                 focus: &focus,
                 random: crate::seeds::OsRandom.next_u32(),
+                preserved: &preserved,
             },
         )?;
         let mut entries: Vec<_> = split_scenes(
@@ -125,7 +212,7 @@ impl PlayerListener {
         // The edge drains content before these creation sections, so the client
         // knows every selected part's mesh identity before it constructs the car.
         self.pending_content.extend(changes.messages);
-        self.pending_entries.extend(entries);
+        self.queue_entries(entries);
         Ok(())
     }
     pub(in crate::net) fn disable_rivals(&mut self) -> bool {
@@ -427,18 +514,12 @@ mod tests {
                 })
                 .to_vec();
             if foreign {
-                events.push(
-                    Message::Reached {
-                        event: 28_404_286,
-                        target: EntityRef {
-                            ghost: ids.actor,
-                            entity: 2,
-                        },
-                        player: 0,
-                    }
-                    .encode()
-                    .unwrap(),
-                );
+                // A malformed logic body: the whole frame is refused. (A
+                // well-formed report on an unowned object is consumed
+                // instead, E1252.)
+                let mut malformed = nfs_world::bits::BitWriter::new();
+                malformed.put(1, 3);
+                events.push(malformed);
             }
             let messages = frame::Builder::new().messages(
                 None,
@@ -473,7 +554,7 @@ mod tests {
                 data: wire.span(),
             })
         };
-        // A later invalid event must roll back the earlier valid glass and motion.
+        // A later malformed event must roll back the earlier valid glass and motion.
         assert!(!deliver(&mut listener, &make_frame(0, true)));
         assert!(listener.glass.state(ids.vehicle).is_none());
         assert_eq!(
@@ -740,16 +821,22 @@ mod tests {
         .spawned
         .unwrap();
         let mut listener = PlayerListener::new(100);
-        assert_eq!(listener.rival_map(&world), Ok(Some(vec![])));
+        assert_eq!(
+            listener.rival_map(&world, &listener.intro_modes),
+            Ok(Some(vec![]))
+        );
         listener.rival_population = Some(rivals);
         // A client frame may be handled before the creation entries drain;
         // frame records would then reach the client ahead of the participant.
         listener
             .pending_entries
             .push_back((returning::empty_section(), Vec::new()));
-        assert_eq!(listener.rival_map(&world), Ok(None));
+        assert_eq!(listener.rival_map(&world, &listener.intro_modes), Ok(None));
         listener.pending_entries.clear();
-        let entries = listener.rival_map(&world).unwrap().unwrap();
+        let entries = listener
+            .rival_map(&world, &listener.intro_modes)
+            .unwrap()
+            .unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].0, ids.participant);
     }

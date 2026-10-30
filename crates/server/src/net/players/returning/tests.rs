@@ -19,7 +19,7 @@ fn request(scene: u16, participant: u16, selector: u16, method: u32) -> BitWrite
     payload
         .put(selector.into(), 9)
         .put(method.into(), 32)
-        .align();
+        .put(crate::net::players::test_wire::client_padding(), 7);
     let mut out = BitWriter::new();
     out.put(0, 32)
         .put(0, 32)
@@ -66,366 +66,128 @@ fn transport_with_snapshot(players: &Players) -> nfs_world::session::Host {
 
 #[test]
 fn return_handlers_publish_valid_frames_restore_loading_and_allow_three_exits() {
-    let (mut population, mut players, vehicles, layout, items, _) =
-        crate::vehicle_content::population::tests::fixture();
-    let content = GarageContent {
-        vehicles,
-        layout: crate::vehicle_content::population::tests::world_layout(&layout),
-    };
-    let inventory = crate::vehicle_content::population::tests::inventory(items);
-    let persona = 101;
-    let player = players
-        .create(
-            HOST_SELECTOR as u8,
-            persona,
-            Request {
-                name: b"RoundTrip".to_vec(),
-                flag: false,
-                slot: 0,
-            },
-        )
-        .unwrap()
-        .unwrap()
-        .id;
-    let participant = players
-        .join(HOST_SELECTOR as u8, persona, player)
-        .unwrap()
-        .unwrap()
-        .id;
-    players
-        .create_actor(HOST_SELECTOR as u8, persona, participant)
-        .unwrap();
-    players.enable_player_manager().unwrap();
-    players.sync_player_views().unwrap();
-    let owner = Owner {
-        connection: HOST_SELECTOR as u8,
-        persona,
-        participant,
-    };
-    let car_owner = || crate::vehicle_content::population::Owner {
-        connection: owner.connection,
-        persona,
-        participant,
-    };
-    let mut startup = vec![sublevel::Kind::RpcReferences; 117];
-    startup[0] = sublevel::Kind::Noop;
-    let mut garage = vec![sublevel::Kind::Rpc; 28];
-    garage[0] = sublevel::Kind::Noop;
-    garage[24] = sublevel::Kind::RpcBool;
-    let scenes = sublevel::Content::new(vec![
-        (5001, sublevel::Profile::new(false, &startup).unwrap()),
-        (5002, sublevel::Profile::new(false, &garage).unwrap()),
-    ])
-    .unwrap();
-    let creations = [5001, 5002]
-        .into_iter()
-        .enumerate()
-        .map(|(i, key)| {
-            sublevel::ordinary::creation(
-                i as u16 + 70,
-                key,
-                None,
-                Serial::new(0).unwrap(),
-                &sublevel::ordinary::unpopulated(scenes.profile(key).unwrap()).unwrap(),
-                &scenes,
+    crate::net::players::test_wire::with_native_padding(|| {
+        let (mut population, mut players, vehicles, layout, items, _) =
+            crate::vehicle_content::population::tests::fixture();
+        let content = GarageContent {
+            vehicles,
+            layout: crate::vehicle_content::population::tests::world_layout(&layout),
+        };
+        let inventory = crate::vehicle_content::population::tests::inventory(items);
+        let persona = 101;
+        let player = players
+            .create(
+                HOST_SELECTOR as u8,
+                persona,
+                Request {
+                    name: b"RoundTrip".to_vec(),
+                    flag: false,
+                    slot: 0,
+                },
             )
             .unwrap()
-        })
-        .collect();
-    players
-        .create_scenes(&[70, 71], creations, &scenes)
-        .unwrap();
-    let records = players.objects().snapshot();
-    let mut lifecycle = Lifecycle::default();
-    lifecycle
-        .bind(&records, content.layout.item_scene_key, 5001)
-        .unwrap();
-    lifecycle.bind_exit(&records, 5001, 5002).unwrap();
-    lifecycle.bind_return(&records, 5001).unwrap();
-    let scene = players.objects().scene(5001).unwrap();
-    lifecycle.begin(participant).unwrap();
-    lifecycle.set_garage(inventory.slots.values()).unwrap();
-    lifecycle
-        .receive(request(scene, participant, 10, 3).span(), |p| {
-            p == participant
-        })
-        .unwrap();
-    lifecycle.take_garage_bindings();
-    lifecycle.finish_persistent(|_| true);
-    lifecycle.begin_progression(participant);
-    lifecycle.enter_garage_loading(participant);
-    let definition = |layout, local_index| Definition {
-        presentation: (layout == Layout::GarageEntry).then_some(Component {
-            scene_key: 5002,
-            index: 13,
-        }),
-        layout,
-        asset: Asset {
-            bundle: 30,
-            type_id: 42,
-            local_index,
-        },
-        manager: Component {
-            scene_key: content.layout.item_scene_key,
-            index: 3,
-        },
-        channel: Component {
-            scene_key: 5002,
-            index: 12,
-        },
-        embedded_bus: 2,
-    };
-    let entity_content = |d: Definition| {
-        Content::new(
-            vec![Catalog::new(30, &[(42, 3)]).unwrap()],
-            vec![(d.asset, d.layout.profile())],
-        )
-        .unwrap()
-    };
-    let waiting = definition(Layout::Waiting, 0);
-    let mut sequences = Sequences::new(waiting, entity_content(waiting)).unwrap();
-    let seq = sequences.start(&mut players, owner).unwrap().unwrap().id;
-    sequences
-        .poll(nfs_world::sequences::FALLBACK_MS, 1)
-        .unwrap();
-    sequences
-        .complete(
-            &players,
-            owner,
-            Completed {
-                sequence: seq,
-                participant,
-            },
-        )
-        .unwrap();
-    players.remove_entities(&[seq]).unwrap();
-    lifecycle.enter_customization(participant);
-    let initial = population
-        .spawn(
-            &mut players,
-            car_owner(),
-            inventory.clone(),
-            &content.vehicles,
-            &content.layout,
-            [0.; 3],
-        )
-        .unwrap();
-    for b in initial.bindings {
-        population
-            .acknowledge(&players, car_owner(), b.expected())
-            .unwrap();
-    }
-    let entry = definition(Layout::GarageEntry, 2);
-    let mut returns = Arrivals::returning(entry, entity_content(entry), 7500)
-        .unwrap()
-        .with_spline(spline::Definition {
-            asset: Asset {
-                bundle: 31,
-                type_id: 43,
-                local_index: 0,
-            },
-            catalog: Catalog::new(31, &[(43, 1)]).unwrap(),
-            flag: false,
-        })
-        .unwrap();
-    let dummy = Asset {
-        bundle: 1,
-        type_id: 1,
-        local_index: 0,
-    };
-    let roles = crate::scene_roles::SceneRoles {
-        level: b"test".to_vec(),
-        gameplay: content.layout.item_scene_key,
-        startup: 5001,
-        garage: 5002,
-        progression: 5003,
-        traffic: [0; 10],
-        customization_timer: dummy,
-        streaming_gate: dummy,
-        spawn_points: None,
-        free_roam: None,
-        bank: None,
-    };
-    let mut ghosts = BTreeMap::new();
-    let mut presence = nfs_world::garage::presence::Presence::default();
-    let count = players.objects().len();
-    for cycle in 0..3 {
-        lifecycle
-            .receive(request(scene, participant, 96, 0).span(), |_| true)
-            .unwrap();
-        lifecycle.take_exited();
-        let car = population
-            .spawn_world(
-                &mut players,
-                car_owner(),
-                &inventory,
-                &content.vehicles,
-                &content.layout,
-            )
             .unwrap()
-            .records[0]
+            .id;
+        let participant = players
+            .join(HOST_SELECTOR as u8, persona, player)
+            .unwrap()
+            .unwrap()
             .id;
         players
-            .bind_player_vehicle(owner.connection, persona, participant, Some(car))
+            .create_actor(HOST_SELECTOR as u8, persona, participant)
             .unwrap();
-        lifecycle
-            .receive(request(scene, participant, 76, 3).span(), |_| true)
-            .unwrap();
-        lifecycle
-            .receive(request(scene, participant, 80, 0).span(), |_| true)
-            .unwrap();
-        lifecycle.take_arriving();
-        lifecycle.arrived(participant);
-        // The first request shows the prompt and starts nothing; the repeated
-        // request (PageDown) begins the return.
-        assert_eq!(
-            lifecycle
-                .receive(request(scene, participant, 100, 0).span(), |_| true)
-                .unwrap(),
-            Outcome::Advanced(Vec::new())
-        );
-        assert_eq!(lifecycle.take_prompted(), [participant]);
-        assert!(lifecycle.take_returning().is_empty());
-        let Outcome::Advanced(chain) = lifecycle
-            .receive(request(scene, participant, 100, 0).span(), |_| true)
-            .unwrap()
-        else {
-            panic!()
+        players.enable_player_manager().unwrap();
+        players.sync_player_views().unwrap();
+        let owner = Owner {
+            connection: HOST_SELECTOR as u8,
+            persona,
+            participant,
         };
-        lifecycle.take_returning();
-        returns.poll(cycle * 8000).unwrap();
-        // Exercise the production queue's reference validation, not only wire
-        // encoding: a slot binding must follow its replacement car's creation.
-        // The stages run through the listener's scheduler at the official
-        // delays (E921).
-        let mut transport = transport_with_snapshot(&players);
-        let (slots, chain): (Vec<_>, Vec<_>) = chain
+        let car_owner = || crate::vehicle_content::population::Owner {
+            connection: owner.connection,
+            persona,
+            participant,
+        };
+        let mut startup = vec![sublevel::Kind::RpcReferences; 117];
+        startup[0] = sublevel::Kind::Noop;
+        let mut garage = vec![sublevel::Kind::Rpc; 28];
+        garage[0] = sublevel::Kind::Noop;
+        garage[24] = sublevel::Kind::RpcBool;
+        let scenes = sublevel::Content::new(vec![
+            (5001, sublevel::Profile::new(false, &startup).unwrap()),
+            (5002, sublevel::Profile::new(false, &garage).unwrap()),
+        ])
+        .unwrap();
+        let creations = [5001, 5002]
             .into_iter()
-            .map(HostRpc::Participant)
-            .partition(|rpc| {
-                matches!(rpc, HostRpc::Participant(n)
-                    if matches!(n.call, Call::GarageItem(_) | Call::NotifyTagged(_)))
-            });
-        let mut listener = PlayerListener::new(persona);
-        listener.players = players.clone();
-        listener.population = Some(population.clone());
-        listener.inventory = Some(inventory.clone());
-        listener.vehicles = Some(std::sync::Arc::new(content.clone()));
-        listener.returns = Some(returns.clone());
-        listener.logic_ghosts = ghosts.clone();
-        // Stage 1 inside the request's transaction: without garage logic, no event.
-        let first = PlayerListener::begin_return(
-            &mut listener.players,
-            listener.returns.as_mut().unwrap(),
-            None,
-            &listener.logic_ghosts,
-            persona,
-            participant,
-        )
-        .unwrap();
-        assert!(first.is_empty());
-        let requested_ms = cycle * 10_000;
-        listener.pending_returns.push_back(PendingReturn {
-            participant,
-            requested_ms,
-            torn_down: false,
-            chain,
-            slots,
-        });
-        listener.advance_returns(requested_ms + RETURN_TEARDOWN_DELAY_MS - 1);
-        assert!(listener.pending_entries.is_empty());
-        listener.advance_returns(requested_ms + RETURN_TEARDOWN_DELAY_MS);
-        assert_eq!(listener.pending_entries.len(), 1);
-        assert!(listener.pending_returns[0].torn_down);
-        // The entry sequence exists before the car is staged.
-        assert!(
-            listener
-                .returns
-                .as_ref()
+            .enumerate()
+            .map(|(i, key)| {
+                sublevel::ordinary::creation(
+                    i as u16 + 70,
+                    key,
+                    None,
+                    Serial::new(0).unwrap(),
+                    &sublevel::ordinary::unpopulated(scenes.profile(key).unwrap()).unwrap(),
+                    &scenes,
+                )
                 .unwrap()
-                .ghost(participant)
-                .is_some()
-        );
-        listener.advance_returns(requested_ms + RETURN_STAGING_DELAY_MS - 1);
-        assert_eq!(listener.pending_entries.len(), 1);
-        listener.advance_returns(requested_ms + RETURN_STAGING_DELAY_MS);
-        assert!(listener.pending_returns.is_empty());
-        // A car already shown in the garage needs no new content on its return.
-        assert!(listener.pending_content.is_empty());
-        let entries: Vec<_> = listener.pending_entries.drain(..).collect();
-        assert!(entries.len() >= 3, "{}", entries.len());
-        players = listener.players.clone();
-        population = listener.population.clone().unwrap();
-        returns = listener.returns.clone().unwrap();
-        ghosts = listener.logic_ghosts.clone();
-        for (section, rpcs) in &entries {
-            transport
-                .queue_replication_after(section.clone(), rpcs.clone())
-                .unwrap();
-            assert!(
-                nfs_world::session::replication_frame(section, rpcs, 0)
-                    .is_ok_and(|wire| wire.len() <= nfs_world::application::OUTBOUND_FRAME_BITS)
-            );
-            for rpc in rpcs {
-                if let HostRpc::Vehicle(b) = rpc {
-                    population
-                        .acknowledge(&players, car_owner(), b.expected())
-                        .unwrap();
-                }
-            }
-        }
-        let stops = returns.poll(cycle * 8000 + 7500).unwrap();
-        assert_eq!(stops.len(), 1);
-        // The timed Stop must pass the same endpoint validation as creation.
-        for stop in &stops {
-            transport
-                .queue_replication_after(empty_section(), vec![HostRpc::SequenceStop(*stop)])
-                .unwrap();
-        }
-        let completion = Completed {
-            sequence: returns.ghost(participant).unwrap(),
-            participant,
-        }
-        .encode()
-        .unwrap();
-        let ((section, rpcs), removed) = PlayerListener::finish_return_call(
-            completion.span(),
-            &mut returns,
-            &mut players,
-            &mut lifecycle,
-            &mut population,
-            &inventory,
-            &content,
-            &mut sequences,
-            None,
-            None,
-            &mut ghosts,
-            &mut presence,
-            Some(&roles),
-            persona,
-        )
-        .unwrap()
-        .unwrap()
-        .unwrap();
-        assert_eq!(removed, car);
-        transport
-            .queue_replication_after(section.clone(), rpcs.clone())
+            })
+            .collect();
+        players
+            .create_scenes(&[70, 71], creations, &scenes)
             .unwrap();
-        assert!(
-            nfs_world::session::replication_frame(&section, &rpcs, 0)
-                .is_ok_and(|wire| wire.len() <= nfs_world::application::OUTBOUND_FRAME_BITS)
-        );
-        assert_eq!(
-            transport.queue_rpc(HostRpc::SequenceStop(stops[0])),
-            Err(nfs_world::session::Error::Replication(
-                replication::Error::UnknownObject
-            ))
-        );
-        assert_eq!(lifecycle.stage(participant), Some(Stage::LoadingGarage));
-        assert_eq!(players.objects().len(), count);
+        let records = players.objects().snapshot();
+        let mut lifecycle = Lifecycle::default();
+        lifecycle
+            .bind(&records, content.layout.item_scene_key, 5001)
+            .unwrap();
+        lifecycle.bind_exit(&records, 5001, 5002).unwrap();
+        lifecycle.bind_return(&records, 5001).unwrap();
+        let scene = players.objects().scene(5001).unwrap();
+        lifecycle.begin(participant).unwrap();
+        lifecycle.set_garage(inventory.slots.values()).unwrap();
+        lifecycle
+            .receive(request(scene, participant, 10, 3).span(), |p| {
+                p == participant
+            })
+            .unwrap();
+        lifecycle.take_garage_bindings();
+        lifecycle.finish_persistent(|_| true);
+        lifecycle.begin_progression(participant);
+        lifecycle.enter_garage_loading(participant);
+        let definition = |layout, local_index| Definition {
+            presentation: (layout == Layout::GarageEntry).then_some(Component {
+                scene_key: 5002,
+                index: 13,
+            }),
+            layout,
+            asset: Asset {
+                bundle: 30,
+                type_id: 42,
+                local_index,
+            },
+            manager: Component {
+                scene_key: content.layout.item_scene_key,
+                index: 3,
+            },
+            channel: Component {
+                scene_key: 5002,
+                index: 12,
+            },
+            embedded_bus: 2,
+        };
+        let entity_content = |d: Definition| {
+            Content::new(
+                vec![Catalog::new(30, &[(42, 3)]).unwrap()],
+                vec![(d.asset, d.layout.profile())],
+            )
+            .unwrap()
+        };
+        let waiting = definition(Layout::Waiting, 0);
+        let mut sequences = Sequences::new(waiting, entity_content(waiting)).unwrap();
         let seq = sequences.start(&mut players, owner).unwrap().unwrap().id;
         sequences
-            .poll((cycle + 2) * nfs_world::sequences::FALLBACK_MS, 1)
+            .poll(nfs_world::sequences::FALLBACK_MS, 1)
             .unwrap();
         sequences
             .complete(
@@ -439,5 +201,355 @@ fn return_handlers_publish_valid_frames_restore_loading_and_allow_three_exits() 
             .unwrap();
         players.remove_entities(&[seq]).unwrap();
         lifecycle.enter_customization(participant);
+        let initial = population
+            .spawn(
+                &mut players,
+                car_owner(),
+                inventory.clone(),
+                &content.vehicles,
+                &content.layout,
+                [0.; 3],
+            )
+            .unwrap();
+        for b in initial.bindings {
+            population
+                .acknowledge(&players, car_owner(), b.expected())
+                .unwrap();
+        }
+        let entry = definition(Layout::GarageEntry, 2);
+        let mut returns = Arrivals::returning(entry, entity_content(entry), 7500)
+            .unwrap()
+            .with_spline(spline::Definition {
+                asset: Asset {
+                    bundle: 31,
+                    type_id: 43,
+                    local_index: 0,
+                },
+                catalog: Catalog::new(31, &[(43, 1)]).unwrap(),
+                flag: false,
+            })
+            .unwrap();
+        let dummy = Asset {
+            bundle: 1,
+            type_id: 1,
+            local_index: 0,
+        };
+        let roles = crate::scene_roles::SceneRoles {
+            level: b"test".to_vec(),
+            gameplay: content.layout.item_scene_key,
+            startup: 5001,
+            garage: 5002,
+            progression: 5003,
+            traffic: [0; 10],
+            customization_timer: dummy,
+            streaming_gate: dummy,
+            spawn_points: None,
+            free_roam: None,
+            bank: None,
+        };
+        let mut ghosts = BTreeMap::new();
+        let mut presence = nfs_world::garage::presence::Presence::default();
+        let count = players.objects().len();
+        for cycle in 0..3 {
+            lifecycle
+                .receive(request(scene, participant, 96, 0).span(), |_| true)
+                .unwrap();
+            lifecycle.take_exited();
+            let car = population
+                .spawn_world(
+                    &mut players,
+                    car_owner(),
+                    &inventory,
+                    &content.vehicles,
+                    &content.layout,
+                )
+                .unwrap()
+                .records[0]
+                .id;
+            players
+                .bind_player_vehicle(owner.connection, persona, participant, Some(car))
+                .unwrap();
+            lifecycle
+                .receive(request(scene, participant, 76, 3).span(), |_| true)
+                .unwrap();
+            lifecycle
+                .receive(request(scene, participant, 80, 0).span(), |_| true)
+                .unwrap();
+            lifecycle.take_arriving();
+            lifecycle.arrived(participant);
+            // The first request shows the prompt and starts nothing; the repeated
+            // request (PageDown) begins the return.
+            assert_eq!(
+                lifecycle
+                    .receive(request(scene, participant, 100, 0).span(), |_| true)
+                    .unwrap(),
+                Outcome::Advanced(Vec::new())
+            );
+            assert_eq!(lifecycle.take_prompted(), [participant]);
+            assert!(lifecycle.take_returning().is_empty());
+            let Outcome::Advanced(chain) = lifecycle
+                .receive(request(scene, participant, 100, 0).span(), |_| true)
+                .unwrap()
+            else {
+                panic!()
+            };
+            lifecycle.take_returning();
+            returns.poll(cycle * 8000).unwrap();
+            // Exercise the production queue's reference validation, not only wire
+            // encoding: a slot binding must follow its replacement car's creation.
+            // The stages run through the listener's scheduler at the official
+            // delays (E921).
+            let mut transport = transport_with_snapshot(&players);
+            let (slots, chain): (Vec<_>, Vec<_>) = chain
+                .into_iter()
+                .map(HostRpc::Participant)
+                .partition(|rpc| {
+                    matches!(rpc, HostRpc::Participant(n)
+                    if matches!(n.call, Call::GarageItem(_) | Call::NotifyTagged(_)))
+                });
+            let mut listener = PlayerListener::new(persona);
+            listener.players = players.clone();
+            listener.population = Some(population.clone());
+            listener.inventory = Some(inventory.clone());
+            listener.vehicles = Some(std::sync::Arc::new(content.clone()));
+            listener.returns = Some(returns.clone());
+            listener.logic_ghosts = ghosts.clone();
+            // Stage 1 inside the request's transaction: without garage logic, no event.
+            let first = PlayerListener::begin_return(
+                &mut listener.players,
+                listener.returns.as_mut().unwrap(),
+                None,
+                &listener.logic_ghosts,
+                persona,
+                participant,
+            )
+            .unwrap();
+            assert!(first.is_empty());
+            let requested_ms = cycle * 10_000;
+            listener.pending_returns.push_back(PendingReturn {
+                participant,
+                intro: false,
+                requested_ms,
+                torn_down: false,
+                confirmation: Some(nfs_world::logic::Fire {
+                    event: 33,
+                    player: None,
+                    target: nfs_world::logic::EntityRef {
+                        ghost: scene,
+                        entity: 1,
+                    },
+                }),
+                confirmed: false,
+                chain,
+                slots,
+            });
+            listener.advance_returns(requested_ms + RETURN_TEARDOWN_DELAY_MS - 1);
+            assert!(listener.pending_entries.is_empty());
+            listener.advance_returns(requested_ms + RETURN_TEARDOWN_DELAY_MS);
+            assert!(
+                listener.pending_entries.is_empty(),
+                "teardown must await the owned confirmation"
+            );
+            let reached = nfs_world::logic::Message::Reached {
+                event: 33,
+                player: 0,
+                target: nfs_world::logic::EntityRef {
+                    ghost: scene,
+                    entity: 1,
+                },
+            }
+            .encode()
+            .unwrap();
+            for sequence in 0..2 {
+                let wire = frame::Builder::new()
+                    .messages(
+                        None,
+                        vec![frame::Group {
+                            channel: 0,
+                            sequence: Some(sequence),
+                            messages: vec![frame::Message::Opaque {
+                                index: 82,
+                                body: reached.span(),
+                            }],
+                        }],
+                    )
+                    .build()
+                    .unwrap();
+                assert!(listener.frame(Queued {
+                    advertised: None,
+                    frame: sequence.into(),
+                    data: wire.span()
+                }));
+                assert!(listener.pending_returns[0].confirmed);
+                assert_eq!(
+                    listener
+                        .observation(0, 0, 0, false)
+                        .health
+                        .unsupported_operations,
+                    0
+                );
+                crate::net::players::test_wire::flush(&mut listener, &mut transport).unwrap();
+            }
+            listener.advance_returns(requested_ms + RETURN_TEARDOWN_DELAY_MS);
+            assert_eq!(listener.pending_entries.len(), 1);
+            assert!(listener.pending_returns[0].torn_down);
+            // The entry sequence exists before the car is staged.
+            assert!(
+                listener
+                    .returns
+                    .as_ref()
+                    .unwrap()
+                    .ghost(participant)
+                    .is_some()
+            );
+            listener.advance_returns(requested_ms + RETURN_STAGING_DELAY_MS - 1);
+            assert_eq!(listener.pending_entries.len(), 1);
+            listener.advance_returns(requested_ms + RETURN_STAGING_DELAY_MS);
+            assert!(listener.pending_returns.is_empty());
+            // A car already shown in the garage needs no new content on its return.
+            assert!(listener.pending_content.is_empty());
+            let entries: Vec<_> = listener.pending_entries.drain(..).collect();
+            assert!(entries.len() >= 3, "{}", entries.len());
+            players = listener.players.clone();
+            population = listener.population.clone().unwrap();
+            returns = listener.returns.clone().unwrap();
+            ghosts = listener.logic_ghosts.clone();
+            for (section, rpcs) in &entries {
+                transport
+                    .queue_replication_after(section.clone(), rpcs.clone())
+                    .unwrap();
+                assert!(
+                nfs_world::session::replication_frame(section, rpcs, 0)
+                    .is_ok_and(|wire| wire.len() <= nfs_world::application::OUTBOUND_FRAME_BITS)
+            );
+                for rpc in rpcs {
+                    if let HostRpc::Vehicle(b) = rpc {
+                        population
+                            .acknowledge(&players, car_owner(), b.expected())
+                            .unwrap();
+                    }
+                }
+            }
+            let stops = returns.poll(cycle * 8000 + 7500).unwrap();
+            assert_eq!(stops.len(), 1);
+            // The timed Stop must pass the same endpoint validation as creation.
+            for stop in &stops {
+                transport
+                    .queue_replication_after(empty_section(), vec![HostRpc::SequenceStop(*stop)])
+                    .unwrap();
+            }
+            let completion = Completed {
+                sequence: returns.ghost(participant).unwrap(),
+                participant,
+            }
+            .encode()
+            .unwrap();
+            let ((section, rpcs), removed) = PlayerListener::finish_return_call(
+                completion.span(),
+                &mut returns,
+                &mut players,
+                &mut lifecycle,
+                &mut population,
+                &inventory,
+                &content,
+                &mut sequences,
+                None,
+                None,
+                &mut ghosts,
+                &mut presence,
+                Some(&roles),
+                persona,
+            )
+            .unwrap()
+            .unwrap()
+            .unwrap();
+            assert_eq!(removed, car);
+            transport
+                .queue_replication_after(section.clone(), rpcs.clone())
+                .unwrap();
+            assert!(
+                nfs_world::session::replication_frame(&section, &rpcs, 0)
+                    .is_ok_and(|wire| wire.len() <= nfs_world::application::OUTBOUND_FRAME_BITS)
+            );
+            assert_eq!(
+                transport.queue_rpc(HostRpc::SequenceStop(stops[0])),
+                Err(nfs_world::session::Error::Replication(
+                    replication::Error::UnknownObject
+                ))
+            );
+            assert_eq!(lifecycle.stage(participant), Some(Stage::LoadingGarage));
+            assert_eq!(players.objects().len(), count);
+            let seq = sequences.start(&mut players, owner).unwrap().unwrap().id;
+            sequences
+                .poll((cycle + 2) * nfs_world::sequences::FALLBACK_MS, 1)
+                .unwrap();
+            sequences
+                .complete(
+                    &players,
+                    owner,
+                    Completed {
+                        sequence: seq,
+                        participant,
+                    },
+                )
+                .unwrap();
+            players.remove_entities(&[seq]).unwrap();
+            lifecycle.enter_customization(participant);
+        }
+    });
+}
+
+#[test]
+fn return_confirmation_rejects_foreign_slots_accounts_and_identities() {
+    let (players, _, participant) = crate::event_logic::tests::world();
+    let persona = crate::event_logic::tests::PERSONA;
+    let expected = nfs_world::logic::Fire {
+        event: 33,
+        player: None,
+        target: nfs_world::logic::EntityRef {
+            ghost: 100,
+            entity: 3,
+        },
+    };
+    let mut pending = PendingReturn {
+        participant,
+        intro: false,
+        requested_ms: 0,
+        torn_down: false,
+        confirmation: Some(expected),
+        confirmed: false,
+        chain: vec![],
+        slots: vec![],
+    };
+    let reached = |ghost, entity, event, player| nfs_world::logic::Message::Reached {
+        event,
+        player,
+        target: nfs_world::logic::EntityRef { ghost, entity },
+    };
+    for message in [
+        reached(101, 3, 33, 0),
+        reached(100, 2, 33, 0),
+        reached(100, 3, 34, 0),
+        reached(100, 3, 33, 1),
+        reached(100, 3, 33, 255),
+    ] {
+        assert!(!pending.confirm(&players, persona, &message));
+        assert!(!pending.confirmed);
     }
+    let message = reached(100, 3, 33, 0);
+    assert!(!pending.confirm(&players, persona + 1, &message));
+    assert!(pending.confirm(&players, persona, &message));
+    pending.torn_down = true;
+    assert!(
+        pending.confirm(&players, persona, &message),
+        "in-flight retry after teardown"
+    );
+    pending.confirmation.as_mut().unwrap().target.ghost = 101;
+    pending.confirmed = false;
+    assert!(
+        !pending.confirm(&players, persona, &message),
+        "previous return cannot confirm the next instance"
+    );
+    assert!(!pending.confirmed);
+    assert!(pending.confirm(&players, persona, &reached(101, 3, 33, 0)));
 }

@@ -6,6 +6,7 @@
 //! Account creation is a separate transaction and existing accounts are preserved.
 mod garage;
 mod policy;
+mod prepared;
 use serde_json::{Value, json};
 use std::{
     ffi::OsString,
@@ -39,7 +40,7 @@ fn write_new(path: &Path, value: &Value) -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
-fn linked(meta: &std::fs::Metadata) -> bool {
+pub(crate) fn linked(meta: &std::fs::Metadata) -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
@@ -119,8 +120,16 @@ pub fn prepare(root: &Path, game: &Path) -> Result<Value, Box<dyn std::error::Er
         &nfs_content::Options::default(),
         &mut |progress| eprintln!("[content] {progress}"),
     )?;
+    let documents = prepared::documents(&root, &generated, || build_documents(&game, &generated))?;
+    publish_documents(&root, &generated, &documents)
+}
+
+fn build_documents(
+    game: &Path,
+    generated: &crate::install_content::Generated,
+) -> Result<std::collections::BTreeMap<String, Value>, Box<dyn std::error::Error>> {
     eprintln!("[setup] Reading garage, challenge and world settings...");
-    let mut index = nfs_content::assets::AssetIndex::open(&game, &nfs_content::Options::default())?;
+    let mut index = nfs_content::assets::AssetIndex::open(game, &nfs_content::Options::default())?;
     let thresholds: Value =
         serde_json::from_slice(&std::fs::read(&generated.reputation_thresholds)?)?;
     eprintln!("[setup] Preparing garage entry, exit and upgrades...");
@@ -138,6 +147,17 @@ pub fn prepare(root: &Path, game: &Path) -> Result<Value, Box<dyn std::error::Er
     let site = |s: nfs_world::world_activation::Site| json!({"scene_key":s.scene_key,"serializer":s.serializer});
     world["roles"]["free_roam"] = json!({"volumes":[],"presence":site(services.presence),"streamed":site(services.streamed),"location":site(services.location)});
     documents.insert("world-content", world);
+    Ok(documents
+        .into_iter()
+        .map(|(name, value)| (name.to_owned(), value))
+        .collect())
+}
+
+fn publish_documents(
+    root: &Path,
+    generated: &crate::install_content::Generated,
+    documents: &std::collections::BTreeMap<String, Value>,
+) -> Result<Value, Box<dyn std::error::Error>> {
     // A digest identifies this exact generated policy, including derived layouts.
 
     let digest: String = openssl::sha::sha256(&serde_json::to_vec(&documents)?)
@@ -147,24 +167,30 @@ pub fn prepare(root: &Path, game: &Path) -> Result<Value, Box<dyn std::error::Er
     let directory = root.join("artifacts/local-config").join(digest);
     if directory.exists() {
         eprintln!("[setup] Checking and reusing your local server settings...");
-        for (name, value) in &documents {
-            let path = directory.join(format!("{name}.json"));
-            let expected = serde_json::to_vec(value)?;
-            if std::fs::metadata(&path)?.len() != expected.len() as u64
-                || std::fs::read(path)? != expected
-            {
-                return Err("existing local configuration was modified".into());
-            }
-        }
+        verify_documents(&directory, documents)?;
     } else {
         eprintln!("[setup] Saving your local server settings...");
         std::fs::create_dir_all(directory.parent().ok_or("configuration parent")?)?;
-        let temporary = directory.with_extension(format!("partial-{}", std::process::id()));
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos();
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let temporary =
+            directory.with_extension(format!("partial-{}-{nonce}-{serial}", std::process::id()));
         std::fs::create_dir(&temporary)?;
-        for (name, value) in &documents {
-            write_new(&temporary.join(format!("{name}.json")), value)?;
+        let temporary = PendingDirectory(temporary);
+        for (name, value) in documents {
+            write_new(&temporary.0.join(format!("{name}.json")), value)?;
         }
-        std::fs::rename(&temporary, &directory)?;
+        if let Err(error) = std::fs::rename(&temporary.0, &directory) {
+            if !directory.exists() {
+                return Err(error.into());
+            }
+            // Another process may have published the same immutable generation
+            // while this one wrote its private staging directory.
+            verify_documents(&directory, documents)?;
+        }
     }
     let files: serde_json::Map<String, Value> = documents
         .keys()
@@ -179,6 +205,36 @@ pub fn prepare(root: &Path, game: &Path) -> Result<Value, Box<dyn std::error::Er
     Ok(
         json!({"prepared":true,"policy_revision":1,"install_content":generated.summary(),"files":files}),
     )
+}
+
+struct PendingDirectory(PathBuf);
+impl Drop for PendingDirectory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn verify_documents(
+    directory: &Path,
+    documents: &std::collections::BTreeMap<String, Value>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let metadata = std::fs::symlink_metadata(directory)?;
+    if !metadata.is_dir() || linked(&metadata) {
+        return Err("invalid local configuration directory".into());
+    }
+    for (name, value) in documents {
+        let path = directory.join(format!("{name}.json"));
+        let expected = serde_json::to_vec(value)?;
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if !metadata.is_file()
+            || linked(&metadata)
+            || metadata.len() != expected.len() as u64
+            || std::fs::read(path)? != expected
+        {
+            return Err("existing local configuration was modified".into());
+        }
+    }
+    Ok(())
 }
 pub fn main(args: impl Iterator<Item = OsString>) -> std::process::ExitCode {
     let mut args = args.peekable();

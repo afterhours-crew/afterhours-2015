@@ -105,6 +105,60 @@ fn car_creation(c: u8) -> (vehicle::EntityCreation, entity::creation::Content) {
     (creation, content)
 }
 
+#[test]
+fn previews_are_owned_displays_without_inventory_or_driving_authority() {
+    let mut world = Players::default();
+    let (player_id, one) = player(&mut world, 1, 101);
+    let (_, two) = player(&mut world, 2, 202);
+    let owned = car(&mut world, 1, 101, one, 1);
+    let (creation, content) = car_creation(1);
+    let preview = world
+        .create_preview_vehicle(1, 101, one, 17, creation.clone(), &content)
+        .unwrap()
+        .id;
+    assert_eq!(world.preview_vehicle(1, 101, one, 17), Some(preview));
+    assert_eq!(
+        world.owned_vehicles(1, 101),
+        [owned, preview].into_iter().collect()
+    );
+    assert_eq!(world.player_vehicle_item(1, 101, player_id, preview), None);
+    assert!(!world.owns_participant_vehicle(1, 101, one, preview));
+    assert!(
+        world
+            .bind_player_vehicle(1, 101, one, Some(preview))
+            .is_err()
+    );
+    let before = world.objects().snapshot();
+    assert!(
+        world
+            .create_preview_vehicle(1, 101, one, 17, creation.clone(), &content)
+            .is_err()
+    );
+    assert!(
+        world
+            .create_preview_vehicle(1, 101, two, 17, creation.clone(), &content)
+            .is_err()
+    );
+    let mut wrong = creation.clone();
+    wrong.body.creation.as_mut().unwrap().connection_id = 2;
+    assert!(
+        world
+            .create_preview_vehicle(1, 101, one, 18, wrong, &content)
+            .is_err()
+    );
+    assert!(world.remove_preview_vehicle(2, 202, one, 17).is_err());
+    assert_eq!(world.objects().snapshot(), before);
+    let (creation, other_content) = car_creation(2);
+    let other = world
+        .create_preview_vehicle(2, 202, two, 17, creation, &other_content)
+        .unwrap()
+        .id;
+    assert_eq!(world.remove_preview_vehicle(1, 101, one, 17), Ok(preview));
+    assert!(world.objects().get(preview).is_none());
+    assert_eq!(world.preview_vehicle(2, 202, two, 17), Some(other));
+    assert_eq!(world.owned_vehicle(1, 101, one, 1), Some(owned));
+}
+
 fn entries(record: &Record) -> Vec<Entry> {
     let Update::ParticipantLocationMap(map) = &record.update else {
         panic!()
@@ -114,6 +168,146 @@ fn entries(record: &Record) -> Vec<Entry> {
         .flatten()
         .flat_map(|g| g.entries.clone())
         .collect()
+}
+
+#[test]
+fn temporary_player_car_has_seats_physics_and_map_but_no_inventory_identity() {
+    let mut world = Players::default();
+    world.enable_player_manager().unwrap();
+    let (_, one) = player(&mut world, 1, 101);
+    let (_, two) = player(&mut world, 2, 202);
+    world.sync_player_manager().unwrap();
+    let owned = car(&mut world, 1, 101, one, 1);
+    let (creation, content) = car_creation(1);
+    let temporary = world
+        .create_temporary_vehicle(1, 101, one, creation.clone(), &content)
+        .unwrap()
+        .id;
+    assert_eq!(world.owned_vehicle(1, 101, one, 1), Some(owned));
+    assert_eq!(world.temporary_vehicle(1, 101, one), Some(temporary));
+    assert_eq!(world.temporary_vehicle(2, 202, one), None);
+    assert_eq!(world.vehicle_item_of(1, 101, temporary), None);
+    assert!(world.owns_participant_vehicle(1, 101, one, temporary));
+    assert!(world.owns_participant_vehicle(1, 101, one, owned));
+    assert!(!world.owns_participant_vehicle(2, 202, two, temporary));
+    assert!(!world.owns_participant_vehicle(1, 202, one, temporary));
+    assert!(!world.owns_participant_vehicle(2, 101, one, temporary));
+    assert_eq!(
+        world.owned_vehicles(1, 101),
+        [owned, temporary].into_iter().collect()
+    );
+    assert!(world.owned_vehicles(2, 202).is_empty());
+    assert!(
+        !world
+            .bind_player_vehicle(1, 101, one, Some(temporary))
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        world
+            .bind_player_vehicle(2, 202, two, Some(temporary))
+            .is_err()
+    );
+    assert_eq!(
+        world.remove_temporary_vehicle(1, 101, one),
+        Err(Error::Shape)
+    );
+    assert!(world.vehicle_physics(1, 101, temporary).is_ok());
+    assert!(world.vehicle_physics(2, 202, temporary).is_err());
+    let mut physics = world.vehicle_physics(1, 101, temporary).unwrap();
+    physics.position = vehicle::Vector::from_position([80., 2., -80.], [0.; 3], 7).unwrap();
+    world
+        .set_vehicle_physics(1, 101, temporary, physics)
+        .unwrap();
+    let map = world
+        .sync_location_map(1, 101, &BTreeMap::from([(one, temporary)]), [0.; 3])
+        .unwrap()
+        .unwrap();
+    assert_eq!(entries(&map).len(), 1);
+    assert_eq!(entries(&map)[0].participant, one);
+    assert!(
+        world
+            .sync_location_map(2, 202, &BTreeMap::from([(two, temporary)]), [0.; 3])
+            .is_err()
+    );
+    assert!(
+        world
+            .create_temporary_vehicle(1, 101, one, creation.clone(), &content)
+            .is_err()
+    );
+    world.bind_player_vehicle(1, 101, one, None).unwrap();
+    assert_eq!(world.remove_temporary_vehicle(1, 101, one), Ok(temporary));
+    assert_eq!(world.temporary_vehicle(1, 101, one), None);
+    assert!(!world.owns_participant_vehicle(1, 101, one, temporary));
+    assert!(world.vehicle_physics(1, 101, temporary).is_err());
+    assert_eq!(world.owned_vehicle(1, 101, one, 1), Some(owned));
+    assert!(world.objects().get(owned).is_some());
+    assert!(
+        world
+            .bind_player_vehicle(1, 101, one, Some(temporary))
+            .is_err()
+    );
+    let replacement = world
+        .create_temporary_vehicle(1, 101, one, creation, &content)
+        .unwrap()
+        .id;
+    assert_ne!(replacement, temporary);
+}
+
+#[test]
+fn failed_or_foreign_temporary_creation_keeps_both_owners_and_allocator_unchanged() {
+    let mut world = Players::default();
+    let (_, one) = player(&mut world, 1, 101);
+    let (_, two) = player(&mut world, 2, 202);
+    let (creation, content) = car_creation(1);
+    let mut control = world.clone();
+    let before = world.objects().len();
+    assert!(
+        world
+            .create_temporary_vehicle(2, 202, one, creation.clone(), &content)
+            .is_err()
+    );
+    assert!(
+        world
+            .create_temporary_vehicle(1, 101, two, creation.clone(), &content)
+            .is_err()
+    );
+    let mut invalid = creation.clone();
+    invalid.prefix.asset.bundle = 999;
+    assert!(
+        world
+            .create_temporary_vehicle(1, 101, one, invalid, &content)
+            .is_err()
+    );
+    let mut foreign = creation.clone();
+    foreign.body.creation.as_mut().unwrap().connection_id = 2;
+    assert!(
+        world
+            .create_temporary_vehicle(1, 101, one, foreign, &content)
+            .is_err()
+    );
+    assert_eq!(world.objects().len(), before);
+    assert_eq!(world.temporary_vehicle(1, 101, one), None);
+    let expected = control
+        .create_temporary_vehicle(1, 101, one, creation.clone(), &content)
+        .unwrap();
+    assert_eq!(
+        world
+            .create_temporary_vehicle(1, 101, one, creation, &content)
+            .unwrap(),
+        expected
+    );
+    let (other, content) = car_creation(2);
+    let other = world
+        .create_temporary_vehicle(2, 202, two, other, &content)
+        .unwrap()
+        .id;
+    assert_eq!(world.owned_vehicles(2, 202), [other].into_iter().collect());
+    assert_eq!(
+        world.remove_temporary_vehicle(1, 101, two),
+        Err(Error::UnknownObject)
+    );
+    assert_eq!(world.temporary_vehicle(2, 202, two), Some(other));
 }
 
 #[test]

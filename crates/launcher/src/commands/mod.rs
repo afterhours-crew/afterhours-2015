@@ -15,6 +15,7 @@ mod relay;
 pub(crate) mod sessions;
 pub(crate) mod settings;
 pub(crate) mod status;
+mod story;
 mod version;
 
 use crate::{
@@ -143,6 +144,7 @@ fn dispatch(cli: Cli, bundled_server: Option<PathBuf>, build: Build) -> Result<(
         Command::Play => status::play(&context),
         Command::Api => status::api(&context),
         Command::Profile(args) => profile::profile(&context, &args),
+        Command::Story(args) => story::story(&context, &args),
         Command::CarImages(args) => profile::car_images(&context, &args),
         Command::MapImages(args) => map::map_images(&context, &args),
         Command::Sessions(args) => sessions::sessions(&context, &args),

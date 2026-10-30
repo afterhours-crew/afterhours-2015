@@ -12,15 +12,20 @@ use nfs_protocol::world::{
     rpc::{Envelope, Limits, RouteProfile, Serial},
 };
 use std::collections::BTreeMap;
+pub mod authored;
 
 pub const MAX_INSTANCES: usize = 128;
 pub const FALLBACK_MS: u64 = 300_000;
 pub const FIRST_READY_MS: u64 = 16_000;
+/// Prologue garage waits: the official host stopped both intro waiting
+/// sequences 8.0 s after creation (career start 298.018 -> 306.0 and
+/// 1126.827 -> 1134.82; E1026), against 16 s for the ordinary garage load.
+pub const INTRO_FIRST_READY_MS: u64 = 8_000;
 
 pub const STREAMING_LOADED: u32 = 3_648_004;
 pub const STREAMING_UNLOADED: u32 = 12_540_227;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Component {
     pub scene_key: u32,
     pub index: usize,
@@ -206,6 +211,8 @@ impl Stop {
     }
 }
 
+/// A parameterless native completion RPC. The seven bits after its method
+/// are byte alignment, not an argument; their values are unspecified.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Completed {
     pub sequence: u16,
@@ -267,13 +274,30 @@ struct Instance {
     owner: Owner,
     ghost: u16,
     phase: Phase,
-    streaming: Option<Streaming>,
     garage_loaded: bool,
     ready_at: Option<u64>,
+    /// Delay from readiness to the Stop.
+    first_ready_ms: u64,
+}
+
+/// A running waiting instance's readiness. Its Stop is due at `ready_at`
+/// (set once the streaming gate reported loaded and the garage cars loaded);
+/// reaching `fallback_at` first means readiness never held.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Readiness {
+    pub participant: u16,
+    pub sequence: u16,
+    /// The bound streaming gate entity, if one exists for the participant.
+    pub streaming_gate: Option<u16>,
+    pub streaming_loaded: bool,
+    pub garage_loaded: bool,
+    pub ready_at: Option<u64>,
+    pub fallback_at: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
 struct Streaming {
+    owner: Owner,
     ghost: u16,
     slot: u8,
     loaded: bool,
@@ -286,7 +310,9 @@ impl Instance {
             && garage
         {
             Ok(Some(
-                world_ms.checked_add(FIRST_READY_MS).ok_or(Error::Bound)?,
+                world_ms
+                    .checked_add(self.first_ready_ms)
+                    .ok_or(Error::Bound)?,
             ))
         } else {
             Ok(self.ready_at)
@@ -307,6 +333,7 @@ pub struct Sequences {
     definition: Definition,
     content: Content,
     entries: BTreeMap<u16, Instance>,
+    streaming: BTreeMap<u16, Streaming>,
     world_ms: u64,
 }
 impl Sequences {
@@ -340,14 +367,24 @@ impl Sequences {
             definition,
             content,
             entries: BTreeMap::new(),
+            streaming: BTreeMap::new(),
             world_ms: 0,
         })
     }
     pub fn start(&mut self, players: &mut Players, owner: Owner) -> Result<Option<Record>, Error> {
+        self.start_with_delay(players, owner, FIRST_READY_MS)
+    }
+    /// Start with an explicit readiness-to-Stop delay (prologue garage waits
+    /// use [`INTRO_FIRST_READY_MS`]).
+    pub fn start_with_delay(
+        &mut self,
+        players: &mut Players,
+        owner: Owner,
+        first_ready_ms: u64,
+    ) -> Result<Option<Record>, Error> {
         if !players.owns_participant(owner.connection, owner.persona, owner.participant) {
             return Err(Error::UnknownObject);
         }
-        let mut streaming = None;
         if let Some(old) = self.entries.get(&owner.participant) {
             if old.owner != owner {
                 return Err(Error::DuplicateObject);
@@ -355,7 +392,6 @@ impl Sequences {
             if old.phase != Phase::ReadyForRestart {
                 return Ok(None);
             }
-            streaming = old.streaming;
         }
         if !self.entries.contains_key(&owner.participant) && self.entries.len() >= MAX_INSTANCES {
             return Err(Error::Bound);
@@ -375,9 +411,9 @@ impl Sequences {
                 owner,
                 ghost: record.id,
                 phase: Phase::Running { fallback_at },
-                streaming,
                 garage_loaded: false,
                 ready_at: None,
+                first_ready_ms,
             },
         );
         Ok(Some(record))
@@ -401,25 +437,25 @@ impl Sequences {
         {
             return Err(Error::TypeMismatch);
         }
-        let instance = self
-            .entries
-            .get_mut(&owner.participant)
-            .ok_or(Error::UnknownObject)?;
-        if instance.owner != owner {
-            return Err(Error::UnknownObject);
-        }
-        if let Some(old) = instance.streaming {
-            return if old.ghost == ghost && old.slot == slot {
+        if let Some(old) = self.streaming.get(&owner.participant) {
+            return if old.owner == owner && old.ghost == ghost && old.slot == slot {
                 Ok(())
             } else {
                 Err(Error::DuplicateObject)
             };
         }
-        instance.streaming = Some(Streaming {
-            ghost,
-            slot,
-            loaded: false,
-        });
+        if self.streaming.len() >= MAX_INSTANCES {
+            return Err(Error::Bound);
+        }
+        self.streaming.insert(
+            owner.participant,
+            Streaming {
+                owner,
+                ghost,
+                slot,
+                loaded: false,
+            },
+        );
         Ok(())
     }
     pub fn streaming_event(&mut self, message: &crate::logic::Message) -> Result<bool, Error> {
@@ -431,25 +467,53 @@ impl Sequences {
         else {
             return Ok(false);
         };
-        let Some(instance) = self
-            .entries
+        let Some(streaming) = self
+            .streaming
             .values_mut()
-            .find(|i| i.streaming.is_some_and(|s| s.ghost == target.ghost))
+            .find(|s| s.ghost == target.ghost)
         else {
             return Ok(false);
         };
         if target.entity != 1 || !matches!(*event, STREAMING_LOADED | STREAMING_UNLOADED) {
             return Ok(false);
         }
-        let streaming = instance.streaming.as_ref().expect("matched binding");
         if *player != streaming.slot {
             return Err(Error::UnknownObject);
         }
         let loaded = *event == STREAMING_LOADED;
-        let ready_at = instance.deadline(self.world_ms, loaded, instance.garage_loaded)?;
-        instance.streaming.as_mut().expect("matched binding").loaded = loaded;
-        instance.ready_at = ready_at;
+        if let Some(instance) = self.entries.get_mut(&streaming.owner.participant) {
+            if instance.owner != streaming.owner {
+                return Err(Error::UnknownObject);
+            }
+            instance.ready_at = instance.deadline(self.world_ms, loaded, instance.garage_loaded)?;
+        }
+        streaming.loaded = loaded;
         Ok(true)
+    }
+    /// What each running waiting instance has and still needs before its
+    /// authored ready delay starts; for diagnostics and acceptance checks.
+    pub fn readiness(&self) -> Vec<Readiness> {
+        self.entries
+            .iter()
+            .filter_map(|(&participant, instance)| {
+                let Phase::Running { fallback_at } = instance.phase else {
+                    return None;
+                };
+                let streaming = self
+                    .streaming
+                    .get(&participant)
+                    .filter(|s| s.owner == instance.owner);
+                Some(Readiness {
+                    participant,
+                    sequence: instance.ghost,
+                    streaming_gate: streaming.map(|s| s.ghost),
+                    streaming_loaded: streaming.is_some_and(|s| s.loaded),
+                    garage_loaded: instance.garage_loaded,
+                    ready_at: instance.ready_at,
+                    fallback_at,
+                })
+            })
+            .collect()
     }
     pub fn garage_loaded(&mut self, owner: Owner, loaded: bool) -> Result<(), Error> {
         let instance = self
@@ -461,7 +525,9 @@ impl Sequences {
         }
         let ready_at = instance.deadline(
             self.world_ms,
-            instance.streaming.is_some_and(|s| s.loaded),
+            self.streaming
+                .get(&owner.participant)
+                .is_some_and(|s| s.owner == owner && s.loaded),
             loaded,
         )?;
         instance.garage_loaded = loaded;

@@ -88,7 +88,7 @@ fn garage_loading_chain_follows_persistent_loaded_once_in_captured_order() {
         assert!(n.encode().is_ok());
     }
 }
-fn ready() -> Lifecycle {
+pub(super) fn ready() -> Lifecycle {
     Lifecycle {
         bindings: Some(bindings()),
         stages: BTreeMap::new(),
@@ -488,11 +488,12 @@ fn exit_bindings() -> ExitBindings {
 }
 fn request(scene: u16, participant: u16, selector: u16, method: u32, bits: usize) -> BitWriter {
     let mut payload = BitWriter::new();
-    payload
-        .put(selector.into(), 9)
-        .put(method.into(), 32)
-        .put(0, bits);
-    payload.align();
+    payload.put(selector.into(), 9).put(method.into(), 32);
+    if bits == 0 || bits == 7 {
+        payload.put(0b0110010, 7);
+    } else {
+        payload.put(0, bits).align();
+    }
     let mut body = BitWriter::new();
     body.put(0, 32)
         .put(0, 32)
@@ -725,6 +726,31 @@ fn garage_exit_and_world_entry_follow_the_official_order() {
 }
 
 #[test]
+fn relocation_reserves_only_free_roam_and_is_isolated_and_repeat_safe() {
+    let mut model = in_customization(8);
+    let before = model.clone();
+    assert_eq!(model.begin_relocation(8), Err(Error::Shape));
+    assert_eq!(model.begin_relocation(9), Err(Error::UnknownObject));
+    assert_eq!(model, before);
+    for (selector, method) in [(96, 0), (76, 3), (80, 0)] {
+        model
+            .receive(request(4, 8, selector, method, 7).span(), |p| p == 8)
+            .unwrap();
+    }
+    model.take_arriving();
+    model.arrived(8);
+    model.begin_relocation(8).unwrap();
+    assert!(model.in_free_roam().is_empty());
+    let reserved = model.clone();
+    assert_eq!(model.begin_relocation(8), Err(Error::Shape));
+    assert_eq!(model.finish_relocation(9), Err(Error::UnknownObject));
+    assert_eq!(model, reserved);
+    model.finish_relocation(8).unwrap();
+    assert_eq!(model.in_free_roam(), vec![8]);
+    assert_eq!(model.finish_relocation(8), Err(Error::Shape));
+}
+
+#[test]
 fn exit_requests_out_of_order_foreign_or_malformed_change_nothing() {
     let model = in_customization(8);
     for early in [request(4, 8, 76, 3, 7), request(4, 8, 80, 0, 7)] {
@@ -925,6 +951,19 @@ fn arrival_requests_carry_the_prompt_into_free_roam_across_three_lifetimes() {
     assert!(model.take_prompted().is_empty());
     return_chain(&mut model);
     assert_eq!(model.stage(9), Some(Stage::Customization));
+    // Lifetime 4: with the entry box disabled the client sends a request
+    // only for the player's accept, and the first one returns.
+    exit_to_arriving(&mut model, false);
+    assert_eq!(calls(model.arrived(8)).len(), 2);
+    model.set_entry_box(8, false);
+    return_chain(&mut model);
+    // Lifetime 5: an enabled box again prompts first.
+    exit_to_arriving(&mut model, false);
+    assert_eq!(calls(model.arrived(8)).len(), 2);
+    model.set_entry_box(8, true);
+    assert_eq!(model.receive(route.span(), owns).unwrap(), prompt_only);
+    assert_eq!(model.take_prompted(), [8]);
+    return_chain(&mut model);
 }
 
 #[test]

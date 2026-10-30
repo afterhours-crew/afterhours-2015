@@ -48,7 +48,8 @@ fn declarations_preserve_order_signed_ids_empty_and_typed_defaults() {
         Field {
             id: (-3i32) as u32,
             access: Access::Source,
-            default: None
+            default: None,
+            opaque_default: None,
         }
     );
     assert_eq!(fields[1].default, Some(Scalar::Boolean(false)));
@@ -66,6 +67,13 @@ fn declarations_preserve_order_signed_ids_empty_and_typed_defaults() {
         Some(Scalar::Float(0.25))
     );
     assert!(compile(&object(vec![])).unwrap().is_empty());
+    for value in [i32::MIN, -1, 0, 1, i32::MAX] {
+        assert_eq!(
+            default(&format!("Int32 {value}")).unwrap(),
+            Some(Scalar::Integer(value))
+        );
+    }
+    assert_eq!(default("Int32 +17").unwrap(), Some(Scalar::Integer(17)));
 }
 
 #[test]
@@ -85,7 +93,19 @@ fn unknown_malformed_nonfinite_and_reference_defaults_fail_closed() {
         "Float64 1",
         "Boolean false",
         "Boolean 0",
-        "Int32 4",
+        "Int32 2147483648",
+        "Int32 -2147483649",
+        "Int32 4.0",
+        "Int32 --4",
+        "Int32  4",
+        "Int32 4\n",
+        "LinearTransform ((1,0,0),(0,1,0),(0,0,1))",
+        "LinearTransform ((1,0,0),(0,1,0),(0,0,1),(1,2,NaN))",
+        "LinearTransform ((1,0,0),(0,1,0),(0,0,1),(1,2,3)))",
+        "Vec2 (1)",
+        "Vec2 (1,2,3)",
+        "Vec2 (1,inf)",
+        "Vec2 ((1,2))",
     ] {
         assert!(
             compile(&object(vec![row(1, Access::Target, text)])).is_err(),
@@ -143,6 +163,37 @@ fn unknown_malformed_nonfinite_and_reference_defaults_fail_closed() {
     let mut wrong = object(vec![]);
     wrong.class = "Other".into();
     assert!(compile(&wrong).is_err());
+}
+
+#[test]
+fn transform_defaults_keep_basis_order_and_unsupported_vectors_remain_explicit() {
+    let fields = compile(&object(vec![
+        row(
+            1,
+            Access::Target,
+            "LinearTransform ((1,0,0),(0,1,0),(0,0,1),(-2.5,3,4))",
+        ),
+        row(2, Access::Target, "CString \"\""),
+        row(3, Access::Target, "Vec2 (1,2)"),
+    ]))
+    .unwrap();
+    assert_eq!(
+        fields[0].default,
+        Some(Scalar::Transform([
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [-2.5, 3.0, 4.0]
+        ]))
+    );
+    assert_eq!(
+        fields[1].default,
+        Some(Scalar::Text(
+            nfs_world::scoring::value::Text::new("").unwrap()
+        ))
+    );
+    assert_eq!(fields[2].default, None);
+    assert_eq!(fields[2].opaque_default.as_deref(), Some("Vec2 (1,2)"));
 }
 
 fn prefabs() -> Memory {

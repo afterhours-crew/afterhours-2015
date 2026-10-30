@@ -14,3 +14,4 @@ workspace = true
 [dependencies]
 nfs-protocol = { path = "../protocol" }
 nfs-world-core = { path = "../world-core" }
+serde = { version = "=1.0.229", features = ["derive", "rc"] }

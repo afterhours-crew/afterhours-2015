@@ -21,9 +21,22 @@ impl PlayerListener {
         if world_ms < self.world_ms {
             return Err(replication::Error::Shape);
         }
-        self.advance_binding_refreshes(world_ms)?;
-        self.advance_crashes(world_ms)?;
-        self.advance_world_activation()?;
+        self.advance_binding_refreshes(world_ms)
+            .inspect_err(|error| {
+                tracing::warn!(?error, world_ms, "binding refresh update rejected");
+            })?;
+        self.advance_prologue().inspect_err(|error| {
+            tracing::warn!(?error, world_ms, "prologue update rejected");
+        })?;
+        self.advance_tutorials().inspect_err(|error| {
+            tracing::warn!(?error, world_ms, "tutorial update rejected");
+        })?;
+        self.advance_crashes(world_ms).inspect_err(|error| {
+            tracing::warn!(?error, world_ms, "crash recovery update rejected");
+        })?;
+        self.advance_world_activation().inspect_err(|error| {
+            tracing::warn!(?error, world_ms, "world activation update rejected");
+        })?;
         self.advance_returns(world_ms);
         if let Some(returns) = &mut self.returns {
             let capacity =
@@ -39,7 +52,8 @@ impl PlayerListener {
         }
         if let Some(arrivals) = self.arrivals.as_mut() {
             for stop in arrivals.poll(world_ms)? {
-                tracing::info!(
+                self.sequence_fallbacks[1] = self.sequence_fallbacks[1].saturating_add(1);
+                tracing::warn!(
                     sequence = stop.sequence,
                     world_ms,
                     "owned arrive sequence not reported; Stop queued after the fallback"
@@ -52,23 +66,54 @@ impl PlayerListener {
             self.world_ms = world_ms;
             return Ok(());
         };
+        // Readiness observed this tick starts its delay on this tick's clock.
+        sequences.poll(world_ms, 0)?;
         Self::refresh_readiness(
             self.roles.as_ref(),
             &mut sequences,
             &self.players,
             &self.participants,
             self.population.as_ref(),
-            &self.logic_ghosts,
             self.persona,
         )?;
+        let readiness = sequences.readiness();
+        for now in &readiness {
+            if self.sequence_readiness.get(&now.participant) != Some(now) {
+                tracing::info!(
+                    participant = now.participant,
+                    sequence = now.sequence,
+                    streaming_gate = ?now.streaming_gate,
+                    streaming_loaded = now.streaming_loaded,
+                    garage_loaded = now.garage_loaded,
+                    ready_at = ?now.ready_at,
+                    world_ms,
+                    "waiting sequence readiness"
+                );
+            }
+        }
+        self.sequence_readiness = readiness.iter().map(|r| (r.participant, *r)).collect();
         let capacity = nfs_world::session::MAX_RPC_QUEUE.saturating_sub(self.pending_rpcs.len());
         let stops = sequences.poll(world_ms, capacity)?;
         for stop in &stops {
-            tracing::info!(
-                sequence = stop.sequence,
-                world_ms,
-                "owned waiting sequence Stop queued"
-            );
+            let state = readiness.iter().find(|r| r.sequence == stop.sequence);
+            if state.is_some_and(|r| r.ready_at.is_some_and(|at| world_ms >= at)) {
+                tracing::info!(
+                    sequence = stop.sequence,
+                    world_ms,
+                    "owned waiting sequence Stop queued: ready"
+                );
+            } else {
+                // The emergency path: readiness never held. Acceptance fails.
+                self.sequence_fallbacks[0] = self.sequence_fallbacks[0].saturating_add(1);
+                tracing::warn!(
+                    sequence = stop.sequence,
+                    world_ms,
+                    streaming_gate = ?state.and_then(|r| r.streaming_gate),
+                    streaming_loaded = state.is_some_and(|r| r.streaming_loaded),
+                    garage_loaded = state.is_some_and(|r| r.garage_loaded),
+                    "owned waiting sequence Stop queued by FALLBACK; readiness never held"
+                );
+            }
         }
         self.pending_rpcs.extend(
             stops
@@ -175,34 +220,51 @@ impl PlayerListener {
         players: &Players,
         participants: &Lifecycle,
         population: Option<&Population>,
-        logic_ghosts: &BTreeMap<u16, BTreeMap<u16, u16>>,
         persona: u64,
     ) -> Result<(), replication::Error> {
-        for participant in participants.waiting_garage() {
-            if sequences.ghost(participant).is_none() {
-                continue;
-            }
+        let Some(roles) = roles else {
+            return Ok(());
+        };
+        for participant in players.player_participants() {
             let owner = Owner {
                 connection: HOST_SELECTOR as u8,
                 persona,
                 participant,
             };
-            if let Some(ghosts) = logic_ghosts.get(&participant) {
-                let asset = roles.ok_or(replication::Error::Unsupported)?.streaming_gate;
-                let mut candidates = ghosts.values().copied().filter(|ghost| {
-                    matches!(
-                    players.objects().get(*ghost).map(|o| &o.initial),
-                    Some(replication::Initial::Entity { prefix, .. }) if prefix.asset == asset)
-                });
-                if let Some(ghost) = candidates.next() {
-                    if candidates.next().is_some() {
-                        return Err(replication::Error::DuplicateObject);
-                    }
-                    sequences.bind_streaming(players, owner, ghost, asset)?;
-                }
+            if !players.owns_participant(owner.connection, owner.persona, participant) {
+                continue;
             }
-            sequences
-                .garage_loaded(owner, population.is_some_and(|p| p.all_loaded(participant)))?;
+            let asset = roles.streaming_gate;
+            let mut candidates = players.objects().iter().filter_map(|(ghost, object)| {
+                matches!(&object.initial,
+                    replication::Initial::Entity { prefix, fields } if prefix.asset == asset
+                    && matches!(fields.first(), Some(replication::entity::Initial::Root {reference,..}) if *reference == participant)
+                ).then_some(ghost)
+            });
+            if let Some(ghost) = candidates.next() {
+                if candidates.next().is_some() {
+                    return Err(replication::Error::DuplicateObject);
+                }
+                sequences.bind_streaming(players, owner, ghost, asset)?;
+            }
+            if sequences.ghost(participant).is_some() {
+                let loaded = population.is_some_and(|p| match participants.stage(participant) {
+                    Some(nfs_world::participants::Stage::IntroLoadingGarage) => {
+                        if participants.intro_chapter(participant)
+                            == Some(nfs_world::participants::intro::Chapter::ReturnDrive)
+                        {
+                            p.all_loaded(participant)
+                        } else {
+                            p.previews_loaded(participant)
+                        }
+                    }
+                    Some(nfs_world::participants::Stage::LoadingGarage) => {
+                        p.all_loaded(participant)
+                    }
+                    _ => false,
+                });
+                sequences.garage_loaded(owner, loaded)?;
+            }
         }
         Ok(())
     }
@@ -217,13 +279,20 @@ impl PlayerListener {
         };
         let mut records = Vec::new();
         for participant in participants.waiting_garage() {
-            if let Some(record) = sequences.start(
+            // The prologue's garage waits follow the official intro timing.
+            let delay = if participants.intro_chapter(participant).is_some() {
+                nfs_world::sequences::INTRO_FIRST_READY_MS
+            } else {
+                nfs_world::sequences::FIRST_READY_MS
+            };
+            if let Some(record) = sequences.start_with_delay(
                 players,
                 Owner {
                     connection: HOST_SELECTOR as u8,
                     persona,
                     participant,
                 },
+                delay,
             )? {
                 records.push(record);
             }
@@ -489,4 +558,107 @@ pub(super) fn arrival_section(
             records: Vec::new(),
         }),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nfs_world::{
+        logic::{EntityRef, Message},
+        participants::HostRpc,
+        replication::entity::creation::{Asset, Catalog, Content},
+        sequences::{Component, Definition, Layout},
+    };
+
+    #[test]
+    fn repeated_arrival_reports_are_consumed_without_repeating_the_stop() {
+        let (mut players, _, participant) = crate::event_logic::tests::world();
+        let persona = crate::event_logic::tests::PERSONA;
+        let component = Component {
+            scene_key: crate::event_logic::tests::GAMEPLAY,
+            index: 1,
+        };
+        let definition = Definition {
+            presentation: None,
+            layout: Layout::GarageExit,
+            asset: Asset {
+                bundle: 30,
+                type_id: 42,
+                local_index: 0,
+            },
+            manager: component,
+            channel: component,
+            embedded_bus: 2,
+        };
+        let content = Content::new(
+            vec![Catalog::new(30, &[(42, 1)]).unwrap()],
+            vec![(definition.asset, definition.layout.profile())],
+        )
+        .unwrap();
+        let mut arrivals = Arrivals::new(definition, content).unwrap();
+        let owner = Owner {
+            connection: HOST_SELECTOR as u8,
+            persona,
+            participant,
+        };
+        let ghost = arrivals.start(&mut players, owner).unwrap().unwrap().id;
+        let mut host = crate::net::players::test_wire::session_host();
+        for section in split_scenes(
+            players.objects().snapshot(),
+            nfs_world::application::OUTBOUND_FRAME_BITS,
+        )
+        .unwrap()
+        {
+            host.queue_replication(section).unwrap();
+        }
+        let mut listener = PlayerListener::new(persona);
+        listener.players = players;
+        listener.arrivals = Some(arrivals);
+        let message = Message::Reached {
+            event: nfs_world::arrival::ARRIVED,
+            player: 0,
+            target: EntityRef { ghost, entity: 1 },
+        }
+        .encode()
+        .unwrap();
+        for sequence in 0..3 {
+            let wire = frame::Builder::new()
+                .messages(
+                    None,
+                    vec![frame::Group {
+                        channel: 0,
+                        sequence: Some(sequence),
+                        messages: vec![frame::Message::Opaque {
+                            index: 82,
+                            body: message.span(),
+                        }],
+                    }],
+                )
+                .build()
+                .unwrap();
+            assert!(listener.frame(Queued {
+                advertised: None,
+                frame: sequence.into(),
+                data: wire.span(),
+            }));
+            assert_eq!(
+                listener
+                    .pending_rpcs
+                    .iter()
+                    .filter(
+                        |call| matches!(call, HostRpc::SequenceStop(stop) if stop.sequence == ghost)
+                    )
+                    .count(),
+                usize::from(sequence == 0)
+            );
+            assert_eq!(
+                listener
+                    .observation(0, 0, 0, false)
+                    .health
+                    .unsupported_operations,
+                0
+            );
+            crate::net::players::test_wire::flush(&mut listener, &mut host).unwrap();
+        }
+    }
 }

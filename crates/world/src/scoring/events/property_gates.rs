@@ -30,7 +30,7 @@ impl Dispatch<'_> {
                 for channel in channels {
                     self.step()?;
                     if let Some(value) = state.property_gate_input(node, channel)? {
-                        channel.kind().validate(value)?;
+                        channel.kind().validate(&value)?;
                         self.publish(
                             state,
                             Port {

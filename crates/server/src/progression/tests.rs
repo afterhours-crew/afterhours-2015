@@ -26,6 +26,13 @@ pub(crate) fn tables() -> persistent::Catalog {
         {"name":"ints","key":INTS,"value_type":"int","default":"0"},
         {"name":"dynamicKeyFloats","key":persistent::key("dynamicKeyFloats"),"value_type":"float","default":""}
     ]);
+    let stats = v["tables"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|t| t["name"] == "ProgressionStats")
+        .unwrap();
+    stats["columns"][0] = json!({"name":"IntroCompleted","key":persistent::key("IntroCompleted"),"value_type":"int","default":"0"});
     persistent::Catalog::from_json(&v).unwrap()
 }
 fn empty(repo: &dyn InventoryRepository, who: AccountId) -> Snapshot {
@@ -47,6 +54,16 @@ fn empty(repo: &dyn InventoryRepository, who: AccountId) -> Snapshot {
 }
 pub(crate) fn local() -> (MemoryRepository, AccountId, Snapshot) {
     let repo = MemoryRepository::default();
+    let who = AccountId::from_owned_config([41; 16]).unwrap();
+    let snapshot = empty(&repo, who);
+    (repo, who, snapshot)
+}
+/// The same empty save in a real SQLite account directory under `root`, so
+/// store constraints the memory repository does not model are exercised.
+pub(crate) fn local_sqlite(
+    root: &std::path::Path,
+) -> (nfs_storage::SqliteRepository, AccountId, Snapshot) {
+    let repo = nfs_storage::SqliteRepository::open_owned_directory(root).unwrap();
     let who = AccountId::from_owned_config([41; 16]).unwrap();
     let snapshot = empty(&repo, who);
     (repo, who, snapshot)
@@ -272,12 +289,15 @@ fn dispatch_consumes_link_order_once_and_readiness_needs_both_branches() {
     assert!(ready(&partial, true));
     assert!(!ready(&partial, false));
 }
-#[test]
-fn combined_content_checks_objective_roles_against_the_restoration_catalog() {
-    let valid = json!({"format":FORMAT,"version":VERSION,"build_sha256":BUILD,
+pub(crate) fn combined() -> Json {
+    json!({"format":FORMAT,"version":VERSION,"build_sha256":BUILD,
         "sources":[{"path":"redacted","sha256":"00".repeat(32)}],
         "restoration":content(),"entities":entities::tests::construction_json(),
-        "settings":{"consumer_beta":false,"enable_speed_lists":false}});
+        "settings":{"consumer_beta":false,"enable_speed_lists":false}})
+}
+#[test]
+fn combined_content_checks_objective_roles_against_the_restoration_catalog() {
+    let valid = combined();
     let loaded = Content::from_json(&valid).unwrap();
     assert!(!loaded.speed_list_bypass);
     assert!(!loaded.settings.consumer_beta);
@@ -382,4 +402,23 @@ fn post_intro_rows_restore_as_intro_complete_with_the_activated_main_objective()
     assert!(dispatched[&Branch::Intro].activated.is_empty());
     assert_eq!(dispatched[&Branch::Main].activated, [30]);
     assert!(ready(&dispatched, false));
+}
+#[test]
+fn debug_hides_are_bounded_and_kept_in_installed_order() {
+    let content = Content::from_json(&combined()).unwrap();
+    assert!(content.debug_hides.is_empty());
+    let hides = vec![(2, 9), (1, 4), (2, 3)];
+    assert_eq!(
+        content
+            .clone()
+            .with_debug_hides(hides.clone())
+            .unwrap()
+            .debug_hides,
+        hides
+    );
+    assert!(
+        content
+            .with_debug_hides(vec![(1, 0); super::MAX_DEBUG_HIDES + 1])
+            .is_err()
+    );
 }

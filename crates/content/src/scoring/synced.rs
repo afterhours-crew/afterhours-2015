@@ -20,6 +20,7 @@ pub struct Node {
 
 fn kind(class: &str) -> Option<Kind> {
     match class {
+        "SyncedStringEntityData" => Some(Kind::Text),
         "SyncedBoolEntityData" => Some(Kind::Boolean),
         "SyncedFloatEntityData" => Some(Kind::Float),
         "SyncedIntEntityData" => Some(Kind::Integer),
@@ -33,7 +34,7 @@ pub fn compile(object: &Object) -> Result<Kind, Error> {
 }
 
 impl AssetIndex {
-    /// Read all occurrences of the three supported scalar classes. Other classes
+    /// Read all occurrences of the supported scalar classes. Other classes
     /// are outside this reader's scope, not silently implemented behavior.
     pub fn scoring_synchronized(&mut self, blueprint: &str) -> Result<Vec<Node>, Error> {
         if blueprint.is_empty() || blueprint.len() > 512 {
@@ -59,6 +60,7 @@ mod tests {
     #[test]
     fn synchronized_kind_has_no_guessed_authored_default_or_realm() {
         for (class, expected) in [
+            ("SyncedStringEntityData", Kind::Text),
             ("SyncedBoolEntityData", Kind::Boolean),
             ("SyncedFloatEntityData", Kind::Float),
             ("SyncedIntEntityData", Kind::Integer),

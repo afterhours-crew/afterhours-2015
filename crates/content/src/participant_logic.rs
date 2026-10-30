@@ -19,11 +19,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod rules;
 pub use rules::Rules;
+pub mod activation;
 pub mod boolean;
 pub mod integer;
 
 /// An explicit owner context, rather than a global search by channel asset.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Owner {
     Scene,
     /// A child spawned by a participant-owned manager binds its parent's channels.
@@ -31,17 +32,17 @@ pub enum Owner {
         blueprint: String,
     },
 }
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Channel {
     Scene { content_key: u32, serializer: usize },
     Participant { serializer: usize },
 }
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Field {
     pub kind: Kind,
     pub channel: Option<Channel>,
 }
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Layout {
     pub asset: Asset,
     pub catalog: Vec<(u32, u32)>,
@@ -57,7 +58,7 @@ impl Layout {
     }
 }
 
-fn shape(nodes: &[Node], rules: &Rules) -> Result<(u16, Vec<(Site, Kind)>), Error> {
+pub(crate) fn shape(nodes: &[Node], rules: &Rules) -> Result<(u16, Vec<(Site, Kind)>), Error> {
     if nodes
         .first()
         .is_none_or(|n| n.object.class != "ParticipantLogicBlueprint")
@@ -146,7 +147,41 @@ pub(crate) fn bind<S: Source>(
     Ok(bound)
 }
 
+/// One composition node of an installed blueprint and the participant serializer
+/// its class constructs under the build profile: `Some(Some(kind))`, `Some(None)` for
+/// a known class without a serializer, `None` for a class the profile does not list.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ShapeNode {
+    pub class: String,
+    pub asset: String,
+    pub object: usize,
+    pub depth: usize,
+    pub kind: Option<Option<Kind>>,
+}
+
 impl AssetIndex {
+    /// Composition order of a blueprint with each class's serializer rule, for
+    /// inspecting compositions the layout builder does not support yet. Unknown
+    /// classes are reported, not accepted: [`Self::participant_layout`] still fails.
+    pub fn blueprint_shape(&mut self, blueprint: &str) -> Result<Vec<ShapeNode>, Error> {
+        let blueprint = blueprint.to_lowercase();
+        if blueprint.is_empty() || blueprint.len() > 512 {
+            return Err(bad("blueprint asset name bound"));
+        }
+        let rules = Rules::from_json(&self.identity.participant_logic.to_json())?;
+        let mut graph = Graph::new(&mut self.assets);
+        let nodes = graph.read(Site::root(&blueprint))?;
+        Ok(nodes
+            .into_iter()
+            .map(|n| ShapeNode {
+                kind: rules.classes.get(&n.object.class).copied(),
+                class: n.object.class,
+                asset: n.site.key.0,
+                object: n.site.key.1,
+                depth: n.site.parents.len(),
+            })
+            .collect())
+    }
     /// Resolve a registered blueprint through its scene spawner or explicit
     /// participant parent. No values, phases, event decisions or Ghost IDs are
     /// inferred from the layout. Ambiguous spawners and bindings are rejected.

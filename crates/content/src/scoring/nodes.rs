@@ -7,7 +7,7 @@ use super::{boolean, field, scalar};
 use crate::{
     Error,
     assets::AssetIndex,
-    graph::{Graph, Site, bad},
+    graph::{Graph, Site, Source, bad},
 };
 use nfs_frostbite::ebx::{Fields, Object, Value};
 use nfs_world::scoring::{
@@ -34,16 +34,24 @@ pub(super) fn supported(class: &str) -> bool {
             | "FloatAccumulatorEntityData"
             | "FloatEntityData"
             | "EventGateEntityData"
+            | "EventAndGateEntityData"
             | "EventSplitterEntityData"
             | "CompareFloatEntityData"
             | "CompareIntEntityData"
+            | "CompareIntRangeEntityData"
+            | "CompareUInt64EntityData"
             | "BoolEntityData"
             | "IntEntityData"
             | "IntCacheEntityData"
             | "BoolCacheEntityData"
             | "CompareBoolEntityData"
             | "ConditionalFloatEntityData"
+            | "ConditionalIntEntityData"
             | "BoolParticipantPropertyAccessorEntityData"
+            | "IntParticipantPropertyAccessorEntityData"
+            | "FloatParticipantPropertyAccessorEntityData"
+            | "NotEntityData"
+            | "ClampEntityData"
     )
 }
 fn integer(fields: &Fields, name: &str) -> Result<i32, Error> {
@@ -58,6 +66,17 @@ pub fn compile(object: &Object) -> Result<Configuration, Error> {
     let fields = &object.fields;
     let mut defaults = vec![];
     let definition = match object.class.as_str() {
+        "NotEntityData" => {
+            defaults.push((nodes::IN, Scalar::Boolean(boolean(fields, "In")?)));
+            Definition::Not
+        }
+        "ClampEntityData" => {
+            defaults.push((nodes::IN, Scalar::Float(scalar(fields, "In")?)));
+            Definition::Clamp {
+                min: scalar(fields, "Min")?,
+                max: scalar(fields, "Max")?,
+            }
+        }
         "FloatCacheEntityData" => {
             defaults.push((
                 nodes::CACHE_INPUT,
@@ -76,28 +95,46 @@ pub fn compile(object: &Object) -> Result<Configuration, Error> {
         "EventGateEntityData" => Definition::Gate {
             open: boolean(fields, "Default")?,
         },
+        "EventAndGateEntityData" => Definition::AllEvents {
+            count: field(fields, "EventCount")?
+                .bits32()
+                .filter(|n| (1..=16).contains(n))
+                .ok_or_else(|| bad("event-and gate count"))? as u8,
+        },
         "EventSplitterEntityData" => Definition::Splitter {
             run_once: boolean(fields, "RunOnce")?,
         },
         "BoolEntityData" => Definition::Boolean {
             default: boolean(fields, "DefaultValue")?,
         },
-        "BoolParticipantPropertyAccessorEntityData" => Definition::ParticipantProperty {
-            value: boolean(fields, "Value")?,
-        },
+        "BoolParticipantPropertyAccessorEntityData" => {
+            let value = boolean(fields, "Value")?;
+            defaults.push((nodes::FLOAT_VALUE, Scalar::Boolean(value)));
+            Definition::ParticipantProperty { value }
+        }
+        "FloatParticipantPropertyAccessorEntityData" => {
+            defaults.push((nodes::FLOAT_VALUE, Scalar::Float(scalar(fields, "Value")?)));
+            Definition::FloatParticipantProperty
+        }
+        "IntParticipantPropertyAccessorEntityData" => {
+            defaults.push((
+                nodes::FLOAT_VALUE,
+                Scalar::Integer(integer(fields, "Value")?),
+            ));
+            Definition::IntegerParticipantProperty
+        }
         "IntEntityData" => Definition::Integer {
             default: integer(fields, "DefaultValue")?,
             step: integer(fields, "IncDecValue")?,
         },
         "IntCacheEntityData" => {
-            if !boolean(fields, "LoadOnCreate")? {
-                return Err(bad("unsupported uninitialized integer cache"));
-            }
             defaults.push((
                 nodes::CACHE_INPUT,
                 Scalar::Integer(integer(fields, "InValue")?),
             ));
-            Definition::IntegerCache
+            Definition::IntegerCache {
+                load_on_create: boolean(fields, "LoadOnCreate")?,
+            }
         }
         "BoolCacheEntityData" => {
             defaults.push((
@@ -108,6 +145,19 @@ pub fn compile(object: &Object) -> Result<Configuration, Error> {
                 load_on_create: boolean(fields, "LoadOnCreate")?,
             }
         }
+        "CompareIntRangeEntityData" => {
+            for (port, name) in [
+                (nodes::FLOAT_VALUE, "Value"),
+                (nodes::RANGE_MIN, "Min"),
+                (nodes::RANGE_MAX, "Max"),
+            ] {
+                defaults.push((port, Scalar::Integer(integer(fields, name)?)));
+            }
+            Definition::CompareIntegerRange {
+                on_change: boolean(fields, "TriggerOnPropertyChange")?,
+                on_start: boolean(fields, "TriggerOnStart")?,
+            }
+        }
         "CompareBoolEntityData" => {
             defaults.push((nodes::BOOL, Scalar::Boolean(boolean(fields, "Bool")?)));
             Definition::CompareBoolean {
@@ -116,7 +166,8 @@ pub fn compile(object: &Object) -> Result<Configuration, Error> {
                 always_send: boolean(fields, "AlwaysSend")?,
             }
         }
-        "ConditionalFloatEntityData" => {
+        "ConditionalFloatEntityData" | "ConditionalIntEntityData" => {
+            let is_integer = object.class == "ConditionalIntEntityData";
             defaults.extend([
                 (
                     nodes::CONDITION,
@@ -124,20 +175,32 @@ pub fn compile(object: &Object) -> Result<Configuration, Error> {
                 ),
                 (
                     nodes::VALUE_IF_TRUE,
-                    Scalar::Float(scalar(fields, "ValueIfTrue")?),
+                    if is_integer {
+                        Scalar::Integer(integer(fields, "ValueIfTrue")?)
+                    } else {
+                        Scalar::Float(scalar(fields, "ValueIfTrue")?)
+                    },
                 ),
                 (
                     nodes::VALUE_IF_FALSE,
-                    Scalar::Float(scalar(fields, "ValueIfFalse")?),
+                    if is_integer {
+                        Scalar::Integer(integer(fields, "ValueIfFalse")?)
+                    } else {
+                        Scalar::Float(scalar(fields, "ValueIfFalse")?)
+                    },
                 ),
             ]);
-            Definition::ConditionalFloat
-        }
-        "CompareFloatEntityData" | "CompareIntEntityData" => {
-            let kind = if object.class == "CompareFloatEntityData" {
-                Comparison::Float
+            if is_integer {
+                Definition::ConditionalInteger
             } else {
-                Comparison::Integer
+                Definition::ConditionalFloat
+            }
+        }
+        "CompareFloatEntityData" | "CompareIntEntityData" | "CompareUInt64EntityData" => {
+            let kind = match object.class.as_str() {
+                "CompareFloatEntityData" => Comparison::Float,
+                "CompareUInt64EntityData" => Comparison::Unsigned64,
+                _ => Comparison::Integer,
             };
             for (port, name) in [(nodes::A, "A"), (nodes::B, "B")] {
                 let value = match kind {
@@ -145,6 +208,10 @@ pub fn compile(object: &Object) -> Result<Configuration, Error> {
                     Comparison::Integer => match field(fields, name)? {
                         Value::Int32(value) => Scalar::Integer(*value),
                         _ => return Err(bad("scoring signed integer field")),
+                    },
+                    Comparison::Unsigned64 => match field(fields, name)? {
+                        Value::Int64(value) => Scalar::Unsigned64(*value as u64),
+                        _ => return Err(bad("scoring uint64 default bits")),
                     },
                 };
                 defaults.push((port, value));
@@ -167,23 +234,26 @@ impl AssetIndex {
     /// Read the supported subset, preserving each prefab occurrence. Other
     /// classes are outside this method's scope, not silently supported nodes.
     pub fn scoring_nodes(&mut self, blueprint: &str) -> Result<Vec<Node>, Error> {
-        if blueprint.is_empty() || blueprint.len() > 512 {
-            return Err(bad("scoring blueprint name"));
-        }
-        Graph::new(&mut self.assets)
-            .read(Site::root(blueprint))?
-            .into_iter()
-            .filter(|node| supported(&node.object.class))
-            .map(|node| {
-                Ok(Node {
-                    identity: super::events::Identity::from(&node.site),
-                    configuration: compile(&node.object).map_err(|e| {
-                        bad(&format!("{}:{}: {e}", node.site.key.0, node.site.key.1))
-                    })?,
-                })
-            })
-            .collect()
+        read(&mut self.assets, blueprint)
     }
+}
+
+pub(crate) fn read<S: Source>(source: &mut S, blueprint: &str) -> Result<Vec<Node>, Error> {
+    if blueprint.is_empty() || blueprint.len() > 512 {
+        return Err(bad("scoring blueprint name"));
+    }
+    Graph::new(source)
+        .read(Site::root(blueprint))?
+        .into_iter()
+        .filter(|node| supported(&node.object.class))
+        .map(|node| {
+            Ok(Node {
+                identity: super::events::Identity::from(&node.site),
+                configuration: compile(&node.object)
+                    .map_err(|e| bad(&format!("{}:{}: {e}", node.site.key.0, node.site.key.1)))?,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]

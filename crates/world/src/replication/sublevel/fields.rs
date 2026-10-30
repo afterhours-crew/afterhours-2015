@@ -93,7 +93,7 @@ pub(super) fn read_initial(r: &mut Reader<'_>, kind: Kind) -> Result<Initial, Er
                 Ok(bytes)
             })?,
         },
-        Kind::RpcBool | Kind::RpcTriggerVolume => Initial::RpcBool {
+        Kind::RpcBool | Kind::RpcTriggerVolume | Kind::RpcWaypoint => Initial::RpcBool {
             rpc: rpc(r)?,
             value: r.bit()?,
         },
@@ -151,7 +151,10 @@ pub(super) fn write_initial(w: &mut Writer, kind: Kind, value: &Initial) -> Resu
                 Ok(())
             })
         }
-        (Kind::RpcBool | Kind::RpcTriggerVolume, Initial::RpcBool { rpc, value }) => {
+        (
+            Kind::RpcBool | Kind::RpcTriggerVolume | Kind::RpcWaypoint,
+            Initial::RpcBool { rpc, value },
+        ) => {
             put_rpc(w, rpc)?;
             w.bit(*value)
         }
@@ -203,6 +206,7 @@ pub(super) fn read_update(r: &mut Reader<'_>, kind: Kind) -> Result<Update, Erro
         | Kind::RpcGuid
         | Kind::RpcBool
         | Kind::RpcTriggerVolume
+        | Kind::RpcWaypoint
         | Kind::RpcSpawn => Update::Noop,
     })
 }
@@ -254,6 +258,7 @@ pub(super) fn write_update(w: &mut Writer, kind: Kind, value: &Update) -> Result
             | Kind::RpcGuid
             | Kind::RpcBool
             | Kind::RpcTriggerVolume
+            | Kind::RpcWaypoint
             | Kind::RpcSpawn,
             Update::Noop,
         ) => Ok(()),

@@ -10,6 +10,7 @@ use nfs_world::{
 use serde_json::Value;
 use std::{collections::BTreeMap, fs::File, io::Read, path::Path, sync::Arc};
 
+pub(crate) mod ai;
 pub mod layout;
 mod parse;
 
@@ -41,13 +42,20 @@ pub struct Content {
 /// creation carries 2 in the second tail nibble, and most carry this exact
 /// state (E981, E990). Observed constant; its meaning is not traced.
 const RIVAL_AUDIO_TAIL: [u8; 6] = [0, 2, 0, 0, 0, 0];
+// Native temporary opening-car flags. Their individual audio meanings have
+// not been traced; keep the opening state separate from owned and rival cars.
+const INTRO_AUDIO_TAIL: [u8; 6] = [0, 0, 0, 0, 0, 1];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Placement {
     /// Garage locator, axle-weighted resting height and installed reset mode.
     Garage,
+    /// Authored starter display: garage placement with an empty nitrous tank.
+    IntroGarage,
     /// Exact world root position and the official player start state (E748).
     PlayerWorld,
+    /// Temporary opening car: world pose, empty nitrous and intro audio flags.
+    IntroWorld,
     /// Authored spawner transform, mean suspension offset and reset mode.
     Rival,
 }
@@ -343,9 +351,13 @@ impl Content {
         if request.customization_attached {
             root.attach_customization();
         }
+        let player_world = matches!(
+            request.placement,
+            Placement::PlayerWorld | Placement::IntroWorld
+        );
         let position = match request.placement {
-            Placement::PlayerWorld => request.locator,
-            Placement::Garage => d
+            Placement::PlayerWorld | Placement::IntroWorld => request.locator,
+            Placement::Garage | Placement::IntroGarage => d
                 .resting
                 .position_at(request.locator)?
                 .map(|v| v.map_or(0., f32::from_bits)),
@@ -383,14 +395,10 @@ impl Content {
         let mut chassis = chassis::State::new(
             position,
             orientation::quaternion_from_basis(request.basis)?,
-            if request.placement == Placement::PlayerWorld {
-                WORLD_MODE
-            } else {
-                d.mode
-            },
+            if player_world { WORLD_MODE } else { d.mode },
             custom,
         )?;
-        if request.placement == Placement::PlayerWorld {
+        if player_world {
             let mut controls = chassis::Controls::new(WORLD_MODE)?;
             controls.mode_time = WORLD_MODE_TIME;
             chassis.set_motion(chassis.motion().clone(), controls)?;
@@ -424,6 +432,13 @@ impl Content {
             wheels.tire_indices(),
             resolve_level,
         )?;
+        let mut nitrous = nos::Runtime::new(1.)?;
+        if matches!(
+            request.placement,
+            Placement::IntroWorld | Placement::IntroGarage
+        ) {
+            nitrous.set_amount(0.)?;
+        }
         let mut updates = Vec::with_capacity(d.profile.kinds().len());
         for (ordinal, kind) in d.profile.kinds().iter().enumerate() {
             let update = match kind {
@@ -434,13 +449,20 @@ impl Content {
                 Kind::TripleNibbles => Some(lifecycle::Effects::default().update(true)),
                 Kind::Bool => Some(lifecycle::PlayerEntry::default().update(true)),
                 Kind::Wheel => Some(components::Wheel::default().update(true)),
-                Kind::Index => Some(nos::Runtime::new(1.)?.update(3)?),
+                Kind::SearchLight => Some(Update::SearchLight(Some(false))),
+                Kind::Siren => Some(Update::Siren {
+                    flags: [Some(false); 2],
+                    trigger: false,
+                }),
+                Kind::Index => Some(nitrous.update(3)?),
                 Kind::Tuning => Some(wheels.update(true)),
                 Kind::Tagged => Some(lifecycle::LockOn::default().update(true)),
                 Kind::NibblesGuid => {
                     let mut audio = lifecycle::Audio::default();
                     if request.placement == Placement::Rival {
                         audio.set([0; 3], [0; 4], RIVAL_AUDIO_TAIL)?;
+                    } else if request.placement == Placement::IntroWorld {
+                        audio.set([0; 3], [0; 4], INTRO_AUDIO_TAIL)?;
                     }
                     Some(audio.update(true))
                 }

@@ -26,6 +26,7 @@ impl PlayerListener {
     }
     pub(super) fn ai_focus(&self) -> Result<Vec<Focus>, replication::Error> {
         let mut focus = Vec::new();
+        let arriving: BTreeSet<_> = self.event_state.restart_arrivals().collect();
         let participants: BTreeSet<_> = self
             .world_cars
             .values()
@@ -38,6 +39,7 @@ impl PlayerListener {
                 Some(Stage::Crashing) => {}
                 Some(Stage::FreeRoam | Stage::ReturnPrompted)
                     if self.free_roam_presented.contains(&participant) => {}
+                _ if arriving.contains(&participant) => {}
                 _ => continue,
             }
             let Some((&car, _)) = self
@@ -131,7 +133,7 @@ impl PlayerListener {
         }
         self.players = players;
         self.traffic_population = Some(population);
-        self.pending_entries.extend(entries);
+        self.queue_entries(entries);
         Ok(())
     }
 
@@ -145,6 +147,179 @@ impl PlayerListener {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn unpublished_traffic() -> (
+        PlayerListener,
+        nfs_world::session::Host,
+        u16,
+        nfs_world::replication::vehicle::movement::Sample,
+        nfs_world::bits::BitWriter,
+    ) {
+        use nfs_world::replication::vehicle::{chassis, movement::Sample};
+        let connection = HOST_SELECTOR as u8;
+        let (mut population, mut world, content) =
+            crate::traffic_content::population::tests::fixture_with(connection);
+        let mut host = test_wire::session_host();
+        for section in split_scenes(
+            world.objects().snapshot(),
+            nfs_world::application::OUTBOUND_FRAME_BITS,
+        )
+        .unwrap()
+        {
+            host.queue_replication(section).unwrap();
+        }
+        let changes = crate::traffic_content::population::tests::spawn(
+            &mut population,
+            &mut world,
+            &content,
+            connection,
+        );
+        let ids = changes.spawned.unwrap();
+        let mut motion = world
+            .ai_vehicle_physics(connection, 100, 1)
+            .unwrap()
+            .decode([0.; 3])
+            .unwrap();
+        motion.identity = 100f64.to_bits();
+        motion.position[0] += 10.;
+        motion.velocity = [5., 0., 0.];
+        let sample = Sample {
+            physics: motion
+                .encode([0.; 3], &chassis::Controls::new(4).unwrap())
+                .unwrap(),
+            flag: false,
+        };
+        let mut listener = PlayerListener::new(100);
+        listener.players = world;
+        listener.traffic_population = Some(population);
+        // The scheduler has committed its owned state; its creation is still
+        // behind the session window when the next client frame arrives.
+        let mut entries: Vec<_> = split_scenes(
+            changes.records,
+            nfs_world::application::OUTBOUND_FRAME_BITS - 104,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|mut section| {
+            section.setup = Some(Setup::RawEscape([0; 3]));
+            (section, Vec::new())
+        })
+        .collect();
+        entries.push((returning::empty_section(), changes.calls));
+        listener.queue_entries(entries);
+        let (header, body) = sample.encode().unwrap();
+        let mut wire = nfs_world::bits::BitWriter::new();
+        wire.put(1 << frame::MOVEMENT, 6)
+            .put_span(header.span())
+            .put(1, 6)
+            .put(ids.vehicle.into(), 16)
+            .put(0, 4)
+            .put(body.len() as u64, 16)
+            .put_span(body.span())
+            .align();
+        (listener, host, ids.vehicle, sample, wire)
+    }
+
+    #[test]
+    fn client_motion_cannot_overtake_queued_traffic_creation() {
+        let (mut listener, mut host, _, sample, wire) = unpublished_traffic();
+        assert!(listener.frame(Queued {
+            advertised: None,
+            frame: 0,
+            data: wire.span()
+        }));
+        assert_eq!(
+            listener
+                .players
+                .ai_vehicle_physics(HOST_SELECTOR as u8, 100, 1)
+                .unwrap(),
+            sample.physics
+        );
+        test_wire::flush(&mut listener, &mut host).unwrap();
+        assert!(listener.pending.is_empty() && listener.pending_entries.is_empty());
+    }
+
+    #[test]
+    fn unpublished_traffic_backpressure_rolls_back_and_retry_keeps_creation_first() {
+        let (mut listener, mut host, _, sample, wire) = unpublished_traffic();
+        let queued = listener.pending_entries.clone();
+        let before = listener.players.objects().snapshot();
+        listener
+            .pending_entries
+            .resize(MAX_PENDING, (returning::empty_section(), Vec::new()));
+        let blocked = listener.pending_entries.clone();
+        assert!(!listener.frame(Queued {
+            advertised: None,
+            frame: 0,
+            data: wire.span()
+        }));
+        assert_eq!(listener.players.objects().snapshot(), before);
+        assert_eq!(listener.pending_entries, blocked);
+        assert!(listener.pending.is_empty() && listener.pending_rpcs.is_empty());
+        listener.pending_entries = queued.clone();
+        assert!(listener.frame(Queued {
+            advertised: None,
+            frame: 0,
+            data: wire.span()
+        }));
+        assert_eq!(
+            listener
+                .pending_entries
+                .iter()
+                .take(queued.len())
+                .collect::<Vec<_>>(),
+            queued.iter().collect::<Vec<_>>()
+        );
+        test_wire::flush(&mut listener, &mut host).unwrap();
+        // A repeated sample after publication follows the ordinary queue path.
+        assert!(listener.frame(Queued {
+            advertised: None,
+            frame: 0,
+            data: wire.span()
+        }));
+        test_wire::flush(&mut listener, &mut host).unwrap();
+        assert_eq!(
+            listener
+                .players
+                .ai_vehicle_physics(HOST_SELECTOR as u8, 100, 1)
+                .unwrap(),
+            sample.physics
+        );
+        assert!(listener.pending.is_empty() && listener.pending_entries.is_empty());
+    }
+
+    #[test]
+    fn older_notifications_stay_ahead_of_queued_deletion() {
+        use nfs_world::{
+            logic::{EntityRef, Fire},
+            participants::HostRpc,
+        };
+        let (mut listener, mut host, car, _, _) = unpublished_traffic();
+        test_wire::flush(&mut listener, &mut host).unwrap();
+        let older = HostRpc::Event(Fire {
+            event: 7,
+            player: Some(0),
+            target: EntityRef {
+                ghost: car,
+                entity: 1,
+            },
+        });
+        listener.pending_rpcs.push_back(older);
+        let mut deletion = returning::empty_section();
+        deletion.deleted.push(car);
+        listener.queue_entries([(deletion, Vec::new())]);
+        let mut empty = nfs_world::bits::BitWriter::new();
+        empty.put(0, 6).align();
+        assert!(listener.frame(Queued {
+            advertised: None,
+            frame: 0,
+            data: empty.span()
+        }));
+        assert_eq!(listener.pending_rpcs.front(), Some(&older));
+        test_wire::flush(&mut listener, &mut host).unwrap();
+        assert!(listener.pending_rpcs.is_empty() && listener.pending_entries.is_empty());
+    }
+
     #[test]
     fn full_population_departures_fit_reliable_groups_and_frame_budget() {
         use nfs_world::participants::{Call, Endpoint, HostRpc, Notification};

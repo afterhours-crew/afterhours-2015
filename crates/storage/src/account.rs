@@ -69,6 +69,28 @@ fn validate(kind: Kind, revision: u64, bytes: &[u8]) -> Result<(), Error> {
     }
     Ok(())
 }
+
+pub(crate) fn replace_documents(
+    tx: &Transaction<'_>,
+    documents: &[(Kind, Document)],
+) -> Result<(), Error> {
+    let mut kinds = BTreeSet::new();
+    for (kind, document) in documents {
+        if !kinds.insert(*kind) {
+            return Err(Error::Invalid);
+        }
+        validate(*kind, document.revision, &document.bytes)?;
+        let previous = read_in(tx, *kind)?.map_or(0, |value| value.revision);
+        if previous.checked_add(1) != Some(document.revision) {
+            return Err(Error::Conflict);
+        }
+        tx.execute(
+            &format!("INSERT INTO {} VALUES(1,?1,?2) ON CONFLICT(singleton) DO UPDATE SET revision=excluded.revision,value=excluded.value", kind.table()),
+            params![document.revision as i64, document.bytes],
+        )?;
+    }
+    Ok(())
+}
 pub(crate) fn create_tables(tx: &Transaction<'_>) -> Result<(), Error> {
     for kind in Kind::ALL {
         tx.execute_batch(&format!("CREATE TABLE {}(singleton INTEGER PRIMARY KEY CHECK(singleton=1), revision INTEGER NOT NULL CHECK(revision>0), value BLOB NOT NULL CHECK(length(value)>0 AND length(value)<={})) STRICT;", kind.table(), kind.max_bytes()))?;

@@ -5,6 +5,7 @@ use super::*;
 use crate::scoring::events::{
     Connection, Delivery, Dispatch, Endpoint, Graph, Handler, PropertyHandler, Remote,
 };
+use std::collections::BTreeSet;
 
 fn port(node: u16) -> Port {
     Port { node, field: 7 }
@@ -19,6 +20,143 @@ fn isolated(initial: Option<f32>, ports: Vec<Port>) -> Definition {
         ports,
         listeners: vec![],
     }
+}
+
+#[test]
+fn grouped_outputs_retain_all_values_before_ordered_notifications_and_roll_back() {
+    #[derive(Clone)]
+    struct Batch {
+        store: Store,
+        trace: Vec<(u16, [Value; 2])>,
+    }
+    impl Handler for Batch {
+        fn handle(&mut self, _: Endpoint, _: &mut Dispatch<'_>) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+    impl PropertyHandler for Batch {
+        fn properties(&mut self) -> &mut Store {
+            &mut self.store
+        }
+        fn property_changed(
+            &mut self,
+            target: Port,
+            _: bool,
+            d: &mut Dispatch<'_>,
+        ) -> Result<(), Error> {
+            self.trace.push((
+                target.node,
+                [
+                    self.store.read(port(0))?.unwrap(),
+                    self.store.read(port(1))?.unwrap(),
+                ],
+            ));
+            if target.node == 0 {
+                d.register(self, Registration::Notify(port(1)))?;
+            }
+            Ok(())
+        }
+    }
+    let original = Batch {
+        store: Store::with_registrations(
+            2,
+            vec![isolated(None, vec![port(0)]), isolated(None, vec![port(1)])],
+            &[Registration::Notify(port(0))],
+        )
+        .unwrap(),
+        trace: vec![],
+    };
+    let graph = Graph::new(2, vec![]).unwrap();
+    let values = [(port(0), Value::Float(2.0)), (port(1), Value::Float(3.0))];
+    let (next, _) = graph
+        .transaction(&original, |s, d| d.publish_together(s, &values))
+        .unwrap();
+    assert_eq!(
+        next.trace,
+        [
+            (0, [Value::Float(2.0), Value::Float(3.0)]),
+            (1, [Value::Float(2.0), Value::Float(3.0)])
+        ]
+    );
+    for invalid in [
+        vec![values[0].clone(), (port(1), Value::Boolean(true))],
+        vec![values[0].clone(), values[0].clone()],
+    ] {
+        assert!(
+            graph
+                .transaction(&original, |s, d| {
+                    let _ = d.publish_together(s, &invalid);
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert_eq!(original.store.read(port(0)).unwrap(), None);
+    }
+}
+
+#[test]
+fn grouped_publication_respects_bindings_removed_before_and_during_notification() {
+    #[derive(Clone)]
+    struct Retiring {
+        store: Store,
+        disabled: BTreeSet<u16>,
+        notifications: Vec<u32>,
+    }
+    impl Handler for Retiring {
+        fn enabled(&self, node: u16) -> bool {
+            !self.disabled.contains(&node)
+        }
+        fn handle(&mut self, _: Endpoint, _: &mut Dispatch<'_>) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+    impl PropertyHandler for Retiring {
+        fn properties(&mut self) -> &mut Store {
+            &mut self.store
+        }
+        fn property_changed(
+            &mut self,
+            target: Port,
+            _: bool,
+            _: &mut Dispatch<'_>,
+        ) -> Result<(), Error> {
+            self.notifications.push(target.field);
+            self.disabled.insert(1);
+            Ok(())
+        }
+    }
+    let first = Port { node: 2, field: 1 };
+    let second = Port { node: 2, field: 2 };
+    let graph = Graph::new(3, vec![]).unwrap();
+    let original = Retiring {
+        store: Store::with_registrations(
+            3,
+            vec![
+                isolated(None, vec![port(0), first]),
+                isolated(None, vec![port(1), second]),
+            ],
+            &[Registration::Notify(first), Registration::Notify(second)],
+        )
+        .unwrap(),
+        disabled: BTreeSet::new(),
+        notifications: vec![],
+    };
+    let values = [(port(0), Value::Float(2.)), (port(1), Value::Float(3.))];
+    let (next, _) = graph
+        .transaction(&original, |s, d| d.publish_together(s, &values))
+        .unwrap();
+    // Both cells are retained before the first callback. That callback removes
+    // source 1's binding, so its subsequent notification no longer runs, even
+    // though the observer (node 2) remains active.
+    assert_eq!(next.notifications, [1]);
+    assert_eq!(next.store.read(port(1)).unwrap(), Some(Value::Float(3.)));
+    let (last, _) = graph
+        .transaction(&next, |s, d| {
+            d.publish_together(s, &[(port(1), Value::Float(9.))])
+        })
+        .unwrap();
+    assert_eq!(last.notifications, [1]);
+    assert_eq!(last.store.read(port(1)).unwrap(), Some(Value::Float(3.)));
 }
 fn forward(source: u16, target: u16) -> Registration {
     Registration::Forward {

@@ -125,14 +125,20 @@ fn activation_uses_first_ready_type_and_never_invents_zero_for_unready_inputs() 
         Some(Value::Float(-2.5)),
     ];
     for (initial, expected) in [
-        (values, expected(0.0, 0, false, true)),
-        ([None, values[1], values[2]], expected(7.0, 7, true, true)),
-        ([None, None, values[2]], expected(-2.5, -2, true, true)),
+        (values.clone(), expected(0.0, 0, false, true)),
+        (
+            [None, values[1].clone(), values[2].clone()],
+            expected(7.0, 7, true, true),
+        ),
+        (
+            [None, None, values[2].clone()],
+            expected(-2.5, -2, true, true),
+        ),
     ] {
         let s = state(initial, &property_cast::CHANNELS);
         assert_eq!(apply(&s, Action::Activate).unwrap().trace, expected);
     }
-    let unready = state([None; 3], &property_cast::CHANNELS);
+    let unready = state([const { None }; 3], &property_cast::CHANNELS);
     assert_eq!(apply(&unready, Action::Activate).unwrap(), unready);
     let mut unbound = state(values, &property_cast::CHANNELS);
     unbound.bindings = Bindings::new(&[], &property_cast::CHANNELS.map(Channel::output)).unwrap();
@@ -189,7 +195,7 @@ fn optional_outputs_keep_order_and_invalid_or_missing_inputs_fail_atomically() {
     );
     let empty = state([Some(Value::Boolean(true)), None, None], &[]);
     assert!(apply(&empty, Action::Activate).unwrap().trace.is_empty());
-    let missing = state([None; 3], &property_cast::CHANNELS);
+    let missing = state([const { None }; 3], &property_cast::CHANNELS);
     assert_eq!(
         apply(&missing, Action::PropertyChanged(Channel::Float.input())),
         Err(Error::MissingInput)

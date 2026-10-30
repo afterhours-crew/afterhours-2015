@@ -154,8 +154,9 @@ fn reconstructed_known_message_validates_exact_extent_and_partial_byte() {
     assert!(frame::assembled_message(frame::EX_STATE, &[0, 0]).is_err());
     assert!(frame::assembled_message(frame::EX_TIME, &[0]).is_err());
     assert!(frame::assembled_message(EX_CHUNK, &[0]).is_err());
+    assert!(frame::assembled_message(frame::EX_CHALLENGE_PLAYER_SYNC, &[1, 2]).is_err());
     assert!(matches!(
-        frame::assembled_message(23, &[1, 2]).unwrap(),
-        Message::Opaque { index: 23, .. }
+        frame::assembled_message(106, &[1, 2]).unwrap(),
+        Message::Opaque { index: 106, .. }
     ));
 }

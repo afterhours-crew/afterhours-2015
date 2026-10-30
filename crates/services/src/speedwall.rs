@@ -4,31 +4,38 @@
 
 //! Speed-wall brief information (`2050/79`, `getSpeedWallBriefInfo`) for one
 //! durable local account: the account's own row on each configured wall and
-//! stat type, with the rank, rating and total count of that wall.
+//! stat type, with the rank, rating and total count of that wall; and the
+//! in-game speed walls (`2050/20`, `getInGameSpeedWalls`): for both stat types,
+//! each requested wall with the account's own row when it has one (E997: the
+//! official reply lists a wall without rows when there is none).
 //!
 //! Rows are named values of a versioned state document. The reply names the
 //! current persona and display name of the connection, never a stored
 //! identity. A supported query without an owned row answers `AUTOLOG_ERR_NOT_FOUND`.
 //! Unknown stat types and queries for other personas remain unsupported.
-//! Score accrual and wall
-//! membership changes are outside this read-only subset.
+//! Completed sprint records overlay the optional imported baseline from the
+//! current account snapshot, so queries never retain a startup-only result view.
 use crate::{ContentError, SUPPORTED_BUILD_SHA256};
 use nfs_fire2::{Fields, Frame};
 use nfs_protocol::autolog::{
-    BlazeUser, COMPONENT, GET_SPEED_WALL_BRIEF_INFO, InGameSpeedWallResponseRow, RatingBits,
-    RowIntegers, RowStrings, SettingsFloatBits, SpeedWallBriefInfoRequest,
-    SpeedWallBriefInfoResponse,
+    BlazeUser, COMPONENT, GET_IN_GAME_SPEED_WALLS, GET_SPEED_WALL_BRIEF_INFO,
+    InGameSpeedWallResponse, InGameSpeedWallResponseRow, InGameSpeedWallResponseSpeedWall,
+    InGameSpeedWallsRequest, MAX_SPEED_WALLS, RatingBits, RowIntegers, RowStrings,
+    SettingsFloatBits, SpeedWallBriefInfoRequest, SpeedWallBriefInfoResponse, SpeedWallRows,
+    SpeedWallsByStat,
 };
 use nfs_storage::AccountId;
 use serde_json::Value as Json;
 use std::{collections::BTreeSet, fs::File, io::Read, path::Path};
 
 pub const MAX_STATE_BYTES: usize = 64 * 1024;
-pub const MAX_ROWS: usize = 16;
+pub const MAX_ROWS: usize = 256;
 pub const MAX_ENTRIES: usize = 16;
 pub const MAX_KEY_BYTES: usize = 64;
 pub const MAX_VALUE_BYTES: usize = 256;
 pub const MAX_NAME_BYTES: usize = 32;
+pub mod records;
+pub use records::{Current, Sprint};
 pub const MAX_BODY_BYTES: usize = 4096;
 /// The observed relation of the account's own row.
 pub const SELF_RELATION: i32 = 1;
@@ -57,8 +64,93 @@ pub fn frame_limits() -> nfs_fire2::Limits {
     nfs_fire2::Limits::new(MAX_BODY_BYTES + nfs_fire2::HEADER_LEN, 0, MAX_BODY_BYTES)
         .expect("constant limits")
 }
+/// In-game speed-wall replies nest rows inside walls inside the stat-type map.
+pub const MAX_WALLS_BODY_BYTES: usize = 16 * 1024;
+pub fn walls_limits() -> nfs_heat2::Limits {
+    nfs_heat2::Limits {
+        max_bytes: MAX_WALLS_BODY_BYTES,
+        max_depth: 8,
+        max_values: 1024,
+        max_collection: MAX_SPEED_WALLS.max(MAX_ENTRIES),
+        max_byte_string: MAX_VALUE_BYTES + 1,
+    }
+}
+pub fn walls_frame_limits() -> nfs_fire2::Limits {
+    nfs_fire2::Limits::new(
+        MAX_WALLS_BODY_BYTES + nfs_fire2::HEADER_LEN,
+        0,
+        MAX_WALLS_BODY_BYTES,
+    )
+    .expect("constant limits")
+}
 pub fn owns(component: u16, command: u16) -> bool {
     (component, command) == (COMPONENT, GET_SPEED_WALL_BRIEF_INFO)
+}
+pub fn owns_walls(component: u16, command: u16) -> bool {
+    (component, command) == (COMPONENT, GET_IN_GAME_SPEED_WALLS)
+}
+/// The stat types every in-game reply lists, in the official order.
+const STAT_TYPES: [i32; 2] = [0, 1];
+
+/// The account's own row as the client reads it: the connection's persona and
+/// display name with the stored stat maps.
+fn own_row<'a>(row: &'a Row, persona: i64, name: &'a [u8]) -> InGameSpeedWallResponseRow<'a> {
+    InGameSpeedWallResponseRow {
+        blaze_user: Some(BlazeUser {
+            blaze_id: Some(persona),
+            persona_name: Some(name),
+            relation_type: Some(SELF_RELATION),
+            ..Default::default()
+        }),
+        stats_flt: Some(SettingsFloatBits(
+            row.floats.iter().map(|(k, v)| (k.as_bytes(), *v)).collect(),
+        )),
+        stats_int: Some(RowIntegers(
+            row.integers
+                .iter()
+                .map(|(k, v)| (k.as_bytes(), *v))
+                .collect(),
+        )),
+        stats_str: row.strings.as_ref().map(|strings| {
+            RowStrings(
+                strings
+                    .iter()
+                    .map(|(k, v)| (k.as_bytes(), v.as_bytes()))
+                    .collect(),
+            )
+        }),
+        ..Default::default()
+    }
+}
+fn request_frame(wire: &[u8], command: u16) -> Result<Frame<'_>, Error> {
+    let d = nfs_fire2::decode(wire, frame_limits())
+        .map_err(|_| Error::Ineligible)?
+        .ok_or(Error::Ineligible)?;
+    let f = d.frame;
+    if d.consumed != wire.len()
+        || (f.fields.routing_a, f.fields.routing_b) != (COMPONENT, command)
+        || f.fields.category != 0
+        || f.fields.slot != 0
+        || f.fields.reserved != [0, 0]
+        || !f.metadata.is_empty()
+    {
+        return Err(Error::Ineligible);
+    }
+    Ok(f)
+}
+fn reply_frame(f: &Frame<'_>, body: &[u8], limits: nfs_fire2::Limits) -> Result<Vec<u8>, Error> {
+    nfs_fire2::encode(
+        Frame {
+            fields: Fields {
+                category: 1,
+                ..f.fields
+            },
+            metadata: &[],
+            body,
+        },
+        limits,
+    )
+    .map_err(|_| Error::Encode)
 }
 
 /// The account's row on one wall and stat type.
@@ -83,6 +175,7 @@ impl std::fmt::Debug for Row {
     }
 }
 
+#[derive(Clone)]
 pub struct State {
     account: AccountId,
     rows: Vec<Row>,
@@ -144,6 +237,25 @@ fn bits(v: &Json) -> Result<u32, ContentError> {
 }
 
 impl State {
+    /// Overlay current owned records while retaining unrelated imported walls.
+    pub fn with_current(&self, current: &Current) -> Result<Self, ContentError> {
+        if self.account != current.account {
+            return Err(ContentError::Invalid);
+        }
+        let mut rows = self.rows.clone();
+        for row in &current.rows {
+            if let Some(old) = rows
+                .iter_mut()
+                .find(|r| r.speed_wall_id == row.speed_wall_id && r.stat_type == row.stat_type)
+            {
+                *old = records::combine(old, row)?;
+            } else {
+                rows.push(row.clone());
+            }
+        }
+        Self::new(self.account, rows)
+    }
+
     pub fn new(account: AccountId, rows: Vec<Row>) -> Result<Self, ContentError> {
         if rows.len() > MAX_ROWS {
             return Err(ContentError::TooLarge);
@@ -256,19 +368,7 @@ impl State {
         persona: i64,
         name: &[u8],
     ) -> Result<Vec<u8>, Error> {
-        let d = nfs_fire2::decode(wire, frame_limits())
-            .map_err(|_| Error::Ineligible)?
-            .ok_or(Error::Ineligible)?;
-        let f = d.frame;
-        if d.consumed != wire.len()
-            || !owns(f.fields.routing_a, f.fields.routing_b)
-            || f.fields.category != 0
-            || f.fields.slot != 0
-            || f.fields.reserved != [0, 0]
-            || !f.metadata.is_empty()
-        {
-            return Err(Error::Ineligible);
-        }
+        let f = request_frame(wire, GET_SPEED_WALL_BRIEF_INFO)?;
         let limits = body_limits();
         let q = SpeedWallBriefInfoRequest::decode(f.body, limits).map_err(|_| Error::Ineligible)?;
         if q.unknown_field_count() != 0
@@ -301,32 +401,7 @@ impl State {
         let body = SpeedWallBriefInfoResponse {
             rank: Some(row.rank),
             rating: Some(RatingBits(row.rating_bits)),
-            speed_wall: Some(InGameSpeedWallResponseRow {
-                blaze_user: Some(BlazeUser {
-                    blaze_id: Some(persona),
-                    persona_name: Some(name),
-                    relation_type: Some(SELF_RELATION),
-                    ..Default::default()
-                }),
-                stats_flt: Some(SettingsFloatBits(
-                    row.floats.iter().map(|(k, v)| (k.as_bytes(), *v)).collect(),
-                )),
-                stats_int: Some(RowIntegers(
-                    row.integers
-                        .iter()
-                        .map(|(k, v)| (k.as_bytes(), *v))
-                        .collect(),
-                )),
-                stats_str: row.strings.as_ref().map(|strings| {
-                    RowStrings(
-                        strings
-                            .iter()
-                            .map(|(k, v)| (k.as_bytes(), v.as_bytes()))
-                            .collect(),
-                    )
-                }),
-                ..Default::default()
-            }),
+            speed_wall: Some(own_row(row, persona, name)),
             speed_wall_id: Some(row.speed_wall_id),
             speed_wall_stat_type: Some(row.stat_type),
             total_count: Some(row.total_count),
@@ -334,17 +409,70 @@ impl State {
         }
         .encode(limits)
         .map_err(|_| Error::Encode)?;
-        nfs_fire2::encode(
-            Frame {
-                fields: Fields {
-                    category: 1,
-                    ..f.fields
-                },
-                metadata: &[],
-                body: &body,
-            },
-            frame_limits(),
-        )
-        .map_err(|_| Error::Encode)
+        reply_frame(&f, &body, frame_limits())
+    }
+
+    /// Answer one in-game speed-wall request for the authenticated connection:
+    /// both stat types, each listing the requested walls in request order with
+    /// the account's own row where it has one. Requests naming another persona,
+    /// no or too many walls, or nonzero options are "not mine".
+    pub fn reply_walls(
+        &self,
+        wire: &[u8],
+        account: AccountId,
+        persona: i64,
+        name: &[u8],
+    ) -> Result<Vec<u8>, Error> {
+        let f = request_frame(wire, GET_IN_GAME_SPEED_WALLS)?;
+        let limits = walls_limits();
+        let q = InGameSpeedWallsRequest::decode(f.body, limits).map_err(|_| Error::Ineligible)?;
+        if q.unknown_field_count() != 0
+            || q.encode(limits).map_err(|_| Error::Ineligible)? != f.body
+        {
+            return Err(Error::Ineligible);
+        }
+        if account != self.account
+            || persona <= 0
+            || q.blaze_id != Some(persona)
+            || name.is_empty()
+            || name.len() > MAX_NAME_BYTES
+            || name.contains(&0)
+        {
+            return Err(Error::Identity);
+        }
+        let ids = q.speed_wall_ids.as_ref().map(|l| l.0.as_slice());
+        // The observed requests set both options to zero; other values are not
+        // interpreted.
+        let Some(ids) = ids.filter(|ids| !ids.is_empty() && ids.len() <= MAX_SPEED_WALLS) else {
+            return Err(Error::Unsupported);
+        };
+        if q.usge != Some(0) || q.uspg != Some(0) {
+            return Err(Error::Unsupported);
+        }
+        let walls = STAT_TYPES
+            .iter()
+            .map(|&stat| {
+                let walls = ids
+                    .iter()
+                    .map(|&id| InGameSpeedWallResponseSpeedWall {
+                        rows: self
+                            .rows
+                            .iter()
+                            .find(|r| r.speed_wall_id == id && r.stat_type == stat)
+                            .map(|row| SpeedWallRows(vec![own_row(row, persona, name)])),
+                        speed_wall_id: Some(id),
+                        ..Default::default()
+                    })
+                    .collect();
+                (stat as u32, walls)
+            })
+            .collect();
+        let body = InGameSpeedWallResponse {
+            speed_walls: Some(SpeedWallsByStat(walls)),
+            ..Default::default()
+        }
+        .encode(limits)
+        .map_err(|_| Error::Encode)?;
+        reply_frame(&f, &body, walls_frame_limits())
     }
 }

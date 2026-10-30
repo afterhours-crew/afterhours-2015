@@ -7,18 +7,18 @@ use super::{Error, finite};
 
 pub const MAX_KNOTS: usize = 256;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Knot {
     pub x: f32,
     pub y: f32,
     pub coefficient: f32,
 }
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Interpolation {
     Linear,
     Cubic,
 }
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct Curve {
     x_range: [f32; 2],
     y_range: [f32; 2],
@@ -27,8 +27,59 @@ pub struct Curve {
     interpolation: Interpolation,
     knots: Vec<Knot>,
 }
+
+impl<'de> serde::Deserialize<'de> for Curve {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Fields {
+            x_range: [f32; 2],
+            y_range: [f32; 2],
+            input_scale: f32,
+            output_scale: f32,
+            interpolation: Interpolation,
+            knots: Vec<Knot>,
+        }
+        let f = Fields::deserialize(deserializer)?;
+        // Keep authored knot order; `new` intentionally has a stronger contract.
+        Self::from_authored(
+            f.x_range,
+            f.y_range,
+            f.input_scale,
+            f.output_scale,
+            f.interpolation,
+            f.knots,
+        )
+        .map_err(|_| serde::de::Error::custom("invalid prepared curve"))
+    }
+}
 impl Curve {
     pub fn new(
+        x_range: [f32; 2],
+        y_range: [f32; 2],
+        input_scale: f32,
+        output_scale: f32,
+        interpolation: Interpolation,
+        knots: Vec<Knot>,
+    ) -> Result<Self, Error> {
+        let curve = Self::from_authored(
+            x_range,
+            y_range,
+            input_scale,
+            output_scale,
+            interpolation,
+            knots,
+        )?;
+        if curve.knots.windows(2).any(|pair| pair[0].x >= pair[1].x) {
+            return Err(Error::InvalidCurve);
+        }
+        Ok(curve)
+    }
+
+    /// Preserve installed knot order, including duplicate or decreasing entries.
+    /// The native evaluator bisects that exact array; sorting it changes results.
+    /// Counts, scalar bounds and finite values are still checked.
+    pub fn from_authored(
         x_range: [f32; 2],
         y_range: [f32; 2],
         input_scale: f32,
@@ -59,9 +110,6 @@ impl Curve {
                 return Err(Error::InvalidCurve);
             }
         }
-        if knots.windows(2).any(|pair| pair[0].x >= pair[1].x) {
-            return Err(Error::InvalidCurve);
-        }
         Ok(Self {
             x_range,
             y_range,
@@ -81,12 +129,22 @@ impl Curve {
             / (self.x_range[1] - self.x_range[0]);
         // Knots need not cover the complete normalized domain. The outer
         // segments extrapolate to the header bounds before output clamping.
-        let right = self
-            .knots
-            .partition_point(|knot| knot.x <= x)
-            .clamp(1, self.knots.len() - 1);
-        let (left, right) = (self.knots[right - 1], self.knots[right]);
+        let (mut left, mut right) = (0, self.knots.len() - 1);
+        while right - left > 1 {
+            let middle = (left + right) / 2;
+            if x < self.knots[middle].x {
+                right = middle;
+            } else {
+                left = middle;
+            }
+        }
+        let (left, right) = (self.knots[left], self.knots[right]);
         let width = right.x - left.x;
+        // The native function returns zero before range restoration when the
+        // selected segment has no positive width.
+        if width <= 0. {
+            return Ok(0.);
+        }
         let value = match self.interpolation {
             Interpolation::Linear => {
                 let slope = (right.y - left.y) / width;

@@ -2,8 +2,10 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! Owned observations from enabled client trigger volumes. Crossing callbacks
-//! are local to the client; accepting a report does not synthesize a finish event.
+//! Owned observations from client trigger volumes and waypoints. Crossing
+//! callbacks are local to the client; accepting a report does not synthesize a
+//! finish event or activate an unrelated route. Active races handle their own
+//! waypoints before dispatch falls back to these observations.
 use crate::replication::{Error, Initial, Record, Update, sublevel};
 use nfs_protocol::world::{
     BitSpan,
@@ -36,14 +38,20 @@ struct Observation {
     seconds: f64,
     entered: bool,
 }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Endpoint {
+    Trigger { enabled: bool },
+    Waypoint,
+}
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Volumes {
-    endpoints: BTreeMap<(u16, u16), bool>,
+    endpoints: BTreeMap<(u16, u16), Endpoint>,
     observations: BTreeMap<(u16, u16, u16), Observation>,
 }
 impl Volumes {
-    /// Bind only serializers explicitly classified as trigger volumes. Plain
-    /// Boolean endpoints retain their own behavior and are never activated here.
+    /// Bind only serializers classified as trigger volumes or waypoints. Plain
+    /// Boolean endpoints retain their own behavior. A waypoint's Boolean is a
+    /// route presentation flag, not a reason to reject geometric crossings.
     pub fn bind(&mut self, records: &[Record]) -> Result<(), Error> {
         let mut next = self.clone();
         for record in records {
@@ -53,7 +61,10 @@ impl Volumes {
                 continue;
             };
             for (index, kind) in profile.kinds().iter().enumerate() {
-                if *kind != sublevel::Kind::RpcTriggerVolume {
+                if !matches!(
+                    kind,
+                    sublevel::Kind::RpcTriggerVolume | sublevel::Kind::RpcWaypoint
+                ) {
                     continue;
                 }
                 let Some(sublevel::Initial::RpcBool { rpc, value }) = fields.get(index) else {
@@ -62,9 +73,14 @@ impl Volumes {
                 if record.id == 0 || record.id > 8191 || rpc.selector > 511 {
                     return Err(Error::Bound);
                 }
+                let endpoint = if *kind == sublevel::Kind::RpcWaypoint {
+                    Endpoint::Waypoint
+                } else {
+                    Endpoint::Trigger { enabled: *value }
+                };
                 if next
                     .endpoints
-                    .insert((record.id, rpc.selector), *value)
+                    .insert((record.id, rpc.selector), endpoint)
                     .is_some()
                 {
                     return Err(Error::DuplicateObject);
@@ -117,7 +133,7 @@ impl Volumes {
         let Some(scene) = envelope.references().first().copied() else {
             return Ok(None);
         };
-        let Some(enabled) = self.endpoints.get(&(scene, route.selector())) else {
+        let Some(endpoint) = self.endpoints.get(&(scene, route.selector())) else {
             return Ok(None);
         };
         if !matches!(route.method_index(), 2 | 3) {
@@ -151,7 +167,7 @@ impl Volumes {
                 Err(Error::UnknownObject)
             };
         }
-        if !enabled {
+        if *endpoint == (Endpoint::Trigger { enabled: false }) {
             return Err(Error::Shape);
         }
         let key = (scene, route.selector(), vehicle);
@@ -192,7 +208,13 @@ mod tests {
             77,
             Profile::new(
                 false,
-                &[Kind::Noop, Kind::RpcBool, Kind::RpcTriggerVolume, Kind::Rpc],
+                &[
+                    Kind::Noop,
+                    Kind::RpcBool,
+                    Kind::RpcTriggerVolume,
+                    Kind::Rpc,
+                    Kind::RpcWaypoint,
+                ],
             )
             .unwrap(),
         )])
@@ -200,6 +222,7 @@ mod tests {
         let values = ordinary::unpopulated(content.profile(77).unwrap()).unwrap();
         assert_eq!(values[1], ordinary::Value::Boolean(false));
         assert_eq!(values[2], ordinary::Value::Boolean(true));
+        assert_eq!(values[4], ordinary::Value::Boolean(false));
         let creation =
             ordinary::creation(5, 77, None, Serial::new(9).unwrap(), &values, &content).unwrap();
         let wire = creation.encode(&content).unwrap();
@@ -281,6 +304,38 @@ mod tests {
         let before = v.clone();
         assert!(v.bind(&[r]).is_err());
         assert_eq!(v, before);
+    }
+    #[test]
+    fn inactive_waypoints_record_crossings_without_enabling_the_route() {
+        let (mut v, record) = bound();
+        let scene = record.id;
+        let cross = call(scene, 31, 3, 2, 1.);
+        let before = v.clone();
+        assert_eq!(
+            v.receive(cross.span(), |_| false),
+            Err(Error::UnknownObject)
+        );
+        assert_eq!(v, before);
+        let report = v.receive(cross.span(), |car| car == 31).unwrap().unwrap();
+        assert!(report.entered && report.changed);
+        assert!(!v.receive(cross.span(), |_| true).unwrap().unwrap().changed);
+        assert!(
+            !v.receive(call(scene, 31, 3, 3, 2.).span(), |_| true)
+                .unwrap()
+                .unwrap()
+                .entered
+        );
+        // Other Boolean RPCs and unrelated methods remain unclaimed.
+        assert!(
+            v.receive(call(scene, 31, 0, 2, 3.).span(), |_| true)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            v.receive(call(scene, 31, 3, 0, 3.).span(), |_| true)
+                .unwrap()
+                .is_none()
+        );
     }
     #[test]
     fn malformed_clocks_lengths_and_capacity_do_not_mutate() {

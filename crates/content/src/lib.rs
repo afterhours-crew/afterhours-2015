@@ -19,7 +19,9 @@ pub mod ai;
 pub mod assets;
 pub mod builds;
 mod cache;
+pub mod chapter_notifications;
 mod control;
+pub mod events;
 mod executable;
 mod fingerprint;
 pub mod garage;
@@ -27,10 +29,13 @@ mod graph;
 mod items;
 mod licenses;
 pub mod logic_events;
+pub mod messages;
 pub mod nitrous;
 pub mod participant_logic;
+pub mod prepared_cache;
 mod progress;
 pub mod progression;
+pub mod prologue;
 mod reputation;
 pub mod rivals;
 pub mod road_network;
@@ -38,12 +43,14 @@ mod scan;
 pub mod scenes;
 pub mod scoring;
 pub mod sequences;
+mod serializers;
 mod startup;
 mod stats;
 #[cfg(any(test, feature = "synthetic"))]
 pub mod synthetic;
 mod tables;
 pub mod traffic;
+pub mod tutorials;
 pub use progress::Progress;
 pub mod vehicle_parts;
 pub mod vehicle_profiles;
@@ -61,7 +68,7 @@ pub const FORMAT: &str = "nfs-install-content";
 pub const VERSION: u64 = 1;
 /// Increment whenever a builder's output for an unchanged installation changes,
 /// so existing cache entries are rebuilt.
-pub const BUILDER_REVISION: u64 = 36;
+pub const BUILDER_REVISION: u64 = 41;
 /// Executable file name relative to the installation root.
 pub const EXECUTABLE: &str = "NFS16.exe";
 
@@ -72,13 +79,17 @@ pub struct BuildIdentity {
     /// Relative virtual address of the 64-byte world MAC template.
     pub mac_template_rva: u32,
     pub mac_template_sha256: String,
-    /// Runtime class IDs of Blueprint classes, by class name.
+    /// Runtime class IDs of Blueprint classes, by class name. The catalog uses them
+    /// only to order a bundle registry; they are never sent. All are observed except
+    /// SpatialPrefabBlueprint, whose ID is inferred from that order (E995: every
+    /// decoded asset index puts it between LogicPrefab and GameMode).
     pub blueprint_class_ids: BTreeMap<String, u32>,
     /// Server scene construction rules tied to this executable.
     pub scenes: scenes::Rules,
     pub garage_links: garage::Links,
     pub vehicles: vehicle_profiles::Rules,
     pub progression: progression::Rules,
+    pub prologue_links: prologue::Links,
     pub sequences: sequences::Rules,
     pub participant_logic: participant_logic::Rules,
     pub traffic_spline_class_id: u16,

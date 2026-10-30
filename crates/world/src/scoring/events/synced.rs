@@ -55,16 +55,16 @@ impl Dispatch<'_> {
                 }),
                 Action::Event(_) => return Ok(false),
             };
-            kind.validate(value)?;
+            kind.validate(&value)?;
             if let Some(previous) = state.properties().read(output)? {
-                kind.validate(previous)?;
+                kind.validate(&previous)?;
                 if previous == value {
                     return Ok(false);
                 }
             }
             self.depth += 1;
             let result = (|| {
-                self.publish(state, output, value)?;
+                self.publish(state, output, value.clone())?;
                 state.synchronized_node(node)?.mark_dirty();
                 if kind == Kind::Boolean {
                     let current = if from_input {

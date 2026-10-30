@@ -51,7 +51,7 @@ impl Dispatch<'_> {
                     field: channel.input(),
                 })? {
                     Some(value) => {
-                        channel.kind().validate(value)?;
+                        channel.kind().validate(&value)?;
                         selected = Some(value);
                         break;
                     }

@@ -78,6 +78,88 @@ fn assert_ack(frame_bytes: &[u8], command: u16, correlation: u32) {
     assert!(f.body.is_empty());
 }
 
+fn clear_group(group: u64, value: &[u8], correlation: u32) -> Vec<u8> {
+    let body = SetGameAttributesRequest {
+        game_id: Some(group),
+        game_attribs: Some(nfs_protocol::util::ConfigEntries(vec![(
+            b"gameSessionId",
+            value,
+        )])),
+        ..Default::default()
+    }
+    .encode(body_limits())
+    .unwrap();
+    wire(
+        &body,
+        Fields {
+            routing_a: 4,
+            routing_b: SET_GAME_ATTRIBUTES,
+            correlation,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn departing_world_clears_only_the_current_group_after_committed_leave() {
+    let mut d = departure();
+    let q = clear_group(100, b"0", 90);
+    assert!(owns(&q));
+    assert!(matches!(d.reply(&q), Err(Error::Ineligible)));
+    d.reply(&leave(89)).unwrap();
+    d.committed().unwrap();
+    let out = d.reply(&q).unwrap();
+    assert_ack(&out[0], SET_GAME_ATTRIBUTES, 90);
+    assert_eq!(
+        frame(&out[1], NOTIFY_GAME_ATTRIB_CHANGE, 2).unwrap().body,
+        frame(&q, SET_GAME_ATTRIBUTES, 0).unwrap().body
+    );
+    assert!(d.pending());
+    d.committed().unwrap();
+    let retry = d.reply(&clear_group(100, b"0", 91)).unwrap();
+    assert_eq!(retry.len(), 1);
+    assert_ack(&retry[0], SET_GAME_ATTRIBUTES, 91);
+    d.committed().unwrap();
+    for q in [
+        clear_group(101, b"0", 92),
+        clear_group(100, b"300", 92),
+        clear_group(100, b"00", 92),
+    ] {
+        assert!(matches!(d.reply(&q), Err(Error::Ineligible)));
+    }
+    let mesh = d.reply(&mesh(93, 300, 29, 0, 0)).unwrap();
+    assert_ack(&mesh[0], UPDATE_MESH_CONNECTION, 93);
+    d.committed().unwrap();
+}
+
+#[test]
+fn clear_after_renewal_and_partial_write_keeps_current_group_ownership() {
+    let mut d = departure();
+    d.reply(&leave_with(1, |q| q.game_id = Some(100))).unwrap();
+    d.committed().unwrap();
+    d.rebind_group(500).unwrap();
+    d.reply(&leave(2)).unwrap();
+    d.committed().unwrap();
+    assert!(matches!(
+        d.reply(&clear_group(100, b"0", 3)),
+        Err(Error::Ineligible)
+    ));
+    let out = d.reply(&clear_group(500, b"0", 4)).unwrap();
+    assert_eq!(out.len(), 2);
+    d.abort_write();
+    assert!(!d.association_cleared);
+    assert_eq!(d.reply(&clear_group(500, b"0", 5)), Err(Error::Closed));
+    let mut d = departure();
+    d.reply(&leave(1)).unwrap();
+    d.committed().unwrap();
+    for n in 0..MAX_MESH_REPORTS {
+        d.reply(&clear_group(100, b"0", n as u32 + 2)).unwrap();
+        d.committed().unwrap();
+    }
+    assert_eq!(d.reply(&clear_group(100, b"0", 99)), Err(Error::Bound));
+}
+
 #[test]
 fn leave_acknowledges_then_notifies_player_left_after_the_write() {
     let mut d = departure();
@@ -194,4 +276,123 @@ fn mesh_reports_are_bounded_and_bindings_validated() {
     bad = binding();
     bad.baseline_join_micros = 0;
     assert!(Departure::new(bad).is_err());
+}
+
+/// The client leaves its group in the world and creates a new one (official
+/// E1026 1311.173-1311.367 s): ACK, player removed for the group with `LFPJ`
+/// 1, the old group's disconnected report to no connection; then the new
+/// group can be left as well (1972.342 s) and the world game stays bound.
+#[test]
+fn the_group_is_left_and_rebound_to_the_new_group() {
+    let mut d = departure();
+    let b = binding();
+    let q = leave_with(275, |q| q.game_id = Some(b.group));
+    assert!(owns(&q));
+    // The old group's disconnected report to no connection is not mine
+    // while the group is current.
+    assert_eq!(
+        d.reply(&mesh(5, b.group, 0, DISCONNECTED, 0)),
+        Err(Error::Ineligible)
+    );
+    let out = d.reply(&q).unwrap();
+    assert_eq!(out.len(), 2);
+    assert_ack(&out[0], LEAVE_GAME_BY_GROUP, 275);
+    let n = frame(&out[1], NOTIFY_PLAYER_REMOVED, 2).unwrap();
+    let n = NotifyPlayerRemoved::decode(n.body, body_limits()).unwrap();
+    assert_eq!(
+        (
+            n.game_id,
+            n.is_lockable_for_preferred_joins,
+            n.player_removed_reason
+        ),
+        (Some(b.group), Some(true), Some(PLAYER_LEFT))
+    );
+    assert_eq!(d.rebind_group(500), Err(Error::Context), "not yet written");
+    d.committed().unwrap();
+    assert!(d.group_left() && !d.left());
+    let out = d.reply(&mesh(279, b.group, 0, DISCONNECTED, 0)).unwrap();
+    assert_ack(&out[0], UPDATE_MESH_CONNECTION, 279);
+    d.committed().unwrap();
+    assert_eq!(d.rebind_group(0), Err(Error::Context));
+    assert_eq!(d.rebind_group(b.group), Err(Error::Context));
+    d.rebind_group(500).unwrap();
+    assert!(!d.group_left());
+    assert_eq!(d.reply(&q), Err(Error::Ineligible), "the old group is gone");
+    let out = d
+        .reply(&leave_with(281, |q| q.game_id = Some(500)))
+        .unwrap();
+    assert_eq!(out.len(), 2);
+    d.committed().unwrap();
+    let out = d.reply(&leave(282)).unwrap();
+    let n = frame(&out[1], NOTIFY_PLAYER_REMOVED, 2).unwrap();
+    let n = NotifyPlayerRemoved::decode(n.body, body_limits()).unwrap();
+    assert_eq!(
+        (n.game_id, n.is_lockable_for_preferred_joins),
+        (Some(300), Some(false))
+    );
+}
+
+#[test]
+fn retired_group_disconnects_survive_both_renewal_orders_and_retries() {
+    for disconnect_first in [false, true] {
+        let mut d = departure();
+        let b = binding();
+        d.reply(&leave_with(275, |q| q.game_id = Some(b.group)))
+            .unwrap();
+        d.committed().unwrap();
+        let q = mesh(279, b.group, 0, DISCONNECTED, 0);
+        if disconnect_first {
+            assert_eq!(d.reply(&q).unwrap().len(), 1);
+            d.committed().unwrap();
+        }
+        d.rebind_group(500).unwrap();
+        for _ in 0..3 {
+            let out = d.reply(&q).unwrap();
+            assert_ack(&out[0], UPDATE_MESH_CONNECTION, 279);
+            d.committed().unwrap();
+            assert!(!d.group_left() && !d.left());
+        }
+        // A foreign group, source/target or still-connected report is not a
+        // retired departure and must never be acknowledged by this service.
+        for invalid in [
+            mesh(280, 101, 0, DISCONNECTED, 0),
+            mesh(280, b.group, 77, DISCONNECTED, 0),
+            mesh(280, b.group, 0, 2, 0),
+        ] {
+            assert_eq!(d.reply(&invalid), Err(Error::Ineligible));
+        }
+        d.reply(&leave_with(281, |q| q.game_id = Some(500)))
+            .unwrap();
+        d.committed().unwrap();
+        assert!(d.group_left());
+        d.rebind_group(600).unwrap();
+        // Another renewal retains only its immediately preceding group.
+        assert_eq!(d.reply(&q), Err(Error::Ineligible));
+        d.reply(&mesh(282, 500, 0, DISCONNECTED, 0)).unwrap();
+        d.committed().unwrap();
+        assert!(!d.group_left());
+    }
+}
+
+#[test]
+fn retired_group_reports_keep_the_existing_bound_and_account_isolation() {
+    let mut d = departure();
+    d.reply(&leave_with(1, |q| q.game_id = Some(binding().group)))
+        .unwrap();
+    d.committed().unwrap();
+    d.rebind_group(500).unwrap();
+    let q = mesh(2, binding().group, 0, DISCONNECTED, 0);
+    let mut other = Departure::new(Binding {
+        group: 101,
+        local_connection: 10,
+        ..binding()
+    })
+    .unwrap();
+    assert_eq!(other.reply(&q), Err(Error::Ineligible));
+    for _ in 0..MAX_MESH_REPORTS {
+        d.reply(&q).unwrap();
+        d.committed().unwrap();
+    }
+    assert_eq!(d.reply(&q), Err(Error::Bound));
+    assert!(!d.group_left());
 }

@@ -14,6 +14,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const MAX_PARTICIPANTS: usize = 128;
 
+pub mod intro;
+pub mod membership;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Endpoint {
     pub scene: u16,
@@ -235,6 +238,19 @@ pub enum Stage {
     LoadingPersistentData,
     PersistentDataLoaded,
     Progressing,
+    /// First-drive bootstrap; the temporary vehicle must be ready before teleport.
+    IntroSpawning,
+    IntroTeleporting,
+    IntroRendering,
+    IntroOpening,
+    /// Opening completed; retain input ownership until the first mode is ready.
+    IntroStartingDrive,
+    IntroMovie,
+    IntroRelocating,
+    IntroEnteringGarage,
+    IntroLoadingGarage,
+    IntroCarSelection,
+    IntroComposite,
     LoadingGarage,
     EntryBlocked,
     Customization,
@@ -259,6 +275,8 @@ pub enum Stage {
     ReturnPrompted,
     /// The garage-entry sequence is running while the garage is prepared.
     ReturningToGarage,
+    /// An owned in-world relocation; its caller drives the teleport handshake.
+    Relocating,
 }
 /// Garage-exit endpoints of the startup and garage sublevels, by field index:
 /// startup 97 and garage 9 are the client's exit requests, startup 81 its
@@ -289,6 +307,46 @@ pub struct ReturnBindings {
     pub finishing: [Endpoint; 3],
 }
 impl ReturnBindings {
+    fn entering(
+        self,
+        participant: u16,
+        slots: Option<(Bindings, crate::garage::Slots)>,
+    ) -> Vec<Notification> {
+        let mut chain = vec![(self.free_roam, Call::Leave)];
+        for (i, endpoint) in self.preparing.into_iter().enumerate() {
+            chain.push((endpoint, Call::Enter));
+            if i == 3
+                && let Some((bindings, slots)) = slots
+            {
+                chain.extend(
+                    bindings
+                        .garage
+                        .into_iter()
+                        .zip(slots.values())
+                        .map(|(e, item)| {
+                            (e, item.map_or(Call::NotifyTagged(19), Call::GarageItem))
+                        }),
+                );
+            }
+            chain.push((
+                endpoint,
+                if i == 1 || i == 2 {
+                    Call::LeaveTagged(31)
+                } else {
+                    Call::Leave
+                },
+            ));
+        }
+        chain.push((self.sequence, Call::Enter));
+        chain
+            .into_iter()
+            .map(|(endpoint, call)| Notification {
+                endpoint,
+                participant,
+                call,
+            })
+            .collect()
+    }
     pub fn from_records(records: &[Record], startup_key: u32) -> Result<Option<Self>, Error> {
         let mut scenes = records.iter().filter_map(|r| match &r.initial {
             Some(Initial::SubLevel { prefix, fields }) if prefix.content_key == startup_key => {
@@ -399,7 +457,11 @@ pub struct Entry {
 }
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Lifecycle {
+    membership: membership::Journal,
     bindings: Option<Bindings>,
+    intro: Option<intro::Bindings>,
+    /// Only participants who entered this session's intro own its late replies.
+    intro_started: BTreeMap<u16, intro::Chapter>,
     stages: BTreeMap<u16, Stage>,
     garage: Option<crate::garage::Slots>,
     garage_sent: BTreeSet<u16>,
@@ -414,6 +476,12 @@ pub struct Lifecycle {
     /// carries this pending request into free roam; a zone release ends it.
     /// This state alone does not establish whether the client UI is visible.
     arrival_prompts: BTreeSet<u16>,
+    /// Participants whose garage-entry box the host disabled (spawnpoints
+    /// s4 = 0): the client then sends a request only for the player's
+    /// prompt accept, and the first one starts the return (official E742
+    /// seg03 and E1026 1118.936 s, answered in 300-408 ms). While the box is
+    /// enabled its automatic request on approach is only the prompt.
+    entry_box_off: BTreeSet<u16>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Outcome {
@@ -422,6 +490,45 @@ pub enum Outcome {
     Advanced(Vec<Notification>),
 }
 impl Lifecycle {
+    /// Drain domain changes inside the same candidate transaction as RPCs.
+    pub fn take_state_operations(&mut self) -> Result<Vec<membership::Operation>, Error> {
+        self.membership.take()
+    }
+    /// Other scene services (such as a movie) share this transaction journal.
+    pub fn state_operation(&mut self, operation: membership::Operation) {
+        self.membership.push(operation);
+    }
+    /// An owning service supplies its explicit domain path, independently of
+    /// how and when it publishes the corresponding wire notifications.
+    pub fn state_path(&mut self, participant: u16, path: &[Endpoint]) {
+        self.membership.path(participant, path);
+    }
+    /// Reserve an in-world relocation only for a participant already in free roam.
+    /// The caller publishes its protocol transitions atomically with this change.
+    pub fn begin_relocation(&mut self, participant: u16) -> Result<(), Error> {
+        let stage = self
+            .stages
+            .get_mut(&participant)
+            .ok_or(Error::UnknownObject)?;
+        if !matches!(stage, Stage::FreeRoam | Stage::ReturnPrompted) {
+            return Err(Error::Shape);
+        }
+        *stage = Stage::Relocating;
+        self.arrival_prompts.remove(&participant);
+        self.prompted_requests.retain(|&p| p != participant);
+        Ok(())
+    }
+    pub fn finish_relocation(&mut self, participant: u16) -> Result<(), Error> {
+        let stage = self
+            .stages
+            .get_mut(&participant)
+            .ok_or(Error::UnknownObject)?;
+        if *stage != Stage::Relocating {
+            return Err(Error::Shape);
+        }
+        *stage = Stage::FreeRoam;
+        Ok(())
+    }
     pub fn bind_return(&mut self, records: &[Record], startup_key: u32) -> Result<bool, Error> {
         if self.returning.is_some() {
             return Err(Error::DuplicateObject);
@@ -431,6 +538,14 @@ impl Lifecycle {
     }
     pub fn take_returning(&mut self) -> Vec<u16> {
         std::mem::take(&mut self.returned_requests)
+    }
+    /// The garage-entry box value the client was told for `participant`.
+    pub fn set_entry_box(&mut self, participant: u16, enabled: bool) {
+        if enabled {
+            self.entry_box_off.remove(&participant);
+        } else {
+            self.entry_box_off.insert(participant);
+        }
     }
     /// Participants whose Enter Garage prompt began since the last call.
     pub fn take_prompted(&mut self) -> Vec<u16> {
@@ -460,10 +575,15 @@ impl Lifecycle {
         let Some(stage) = self.stages.get_mut(&participant) else {
             return Outcome::Unsupported;
         };
-        if *stage != Stage::ReturningToGarage {
-            return Outcome::Repeated;
-        }
-        *stage = Stage::LoadingGarage;
+        *stage = match *stage {
+            Stage::ReturningToGarage => Stage::LoadingGarage,
+            Stage::IntroEnteringGarage => Stage::IntroLoadingGarage,
+            _ => return Outcome::Repeated,
+        };
+        let mut path = vec![r.sequence];
+        path.extend(r.finishing);
+        path.extend([b.begin_garage, b.loading_garage]);
+        self.membership.path(participant, &path);
         let mut chain = vec![(r.sequence, Call::Leave)];
         for endpoint in r.finishing {
             chain.extend([(endpoint, Call::Enter), (endpoint, Call::LeaveTagged(31))]);
@@ -538,7 +658,9 @@ impl Lifecycle {
                 continue;
             }
             owned = true;
-            if stage != Stage::Customization || !self.garage_sent.contains(&participant) {
+            if !matches!(stage, Stage::Customization | Stage::IntroCarSelection)
+                || (stage == Stage::Customization && !self.garage_sent.contains(&participant))
+            {
                 return Err(Error::Shape);
             }
             for (i, endpoint) in bindings.garage.into_iter().enumerate() {
@@ -568,6 +690,14 @@ impl Lifecycle {
                 && connected(participant)
             {
                 *stage = Stage::PersistentDataLoaded;
+                self.membership.path(
+                    participant,
+                    &[
+                        bindings.persistent,
+                        bindings.check_player,
+                        bindings.persistent_loaded,
+                    ],
+                );
                 out.extend(
                     [
                         (bindings.persistent, Call::Leave),
@@ -613,6 +743,18 @@ impl Lifecycle {
             return Vec::new();
         }
         *stage = Stage::LoadingGarage;
+        self.membership.path(
+            participant,
+            &[
+                b.persistent_loaded,
+                b.recovery,
+                b.progression_loaded,
+                b.entered_game,
+                b.enter_garage_from_boot,
+                b.begin_garage,
+                b.loading_garage,
+            ],
+        );
         [
             (b.persistent_loaded, Call::Leave),
             (b.recovery, Call::Enter),
@@ -689,6 +831,15 @@ impl Lifecycle {
             return Outcome::Unsupported;
         }
         *stage = Stage::Customization;
+        self.membership.path(
+            participant,
+            &[
+                b.loading_garage,
+                b.composite,
+                b.initial_teleport,
+                b.customization,
+            ],
+        );
         Outcome::Advanced(
             [
                 (b.loading_garage, Call::Leave),
@@ -736,6 +887,10 @@ impl Lifecycle {
     pub fn exit_bindings(&self) -> Option<ExitBindings> {
         self.exit
     }
+    /// The bound startup state endpoints, for callers that follow them.
+    pub fn lifecycle_bindings(&self) -> Option<Bindings> {
+        self.bindings
+    }
     /// Participants whose garage exit was granted since the last call; the
     /// caller turns their garage presence off.
     pub fn take_exited(&mut self) -> Vec<u16> {
@@ -761,6 +916,7 @@ impl Lifecycle {
                 } else {
                     Stage::FreeRoam
                 };
+                self.membership.path(participant, &[x.state_79, x.state_2]);
                 Outcome::Advanced(
                     [(x.state_79, Call::Leave), (x.state_2, Call::Enter)]
                         .into_iter()
@@ -835,6 +991,12 @@ impl Lifecycle {
             return Err(Error::Bound);
         }
         self.stages.insert(participant, Stage::LoadingInventory);
+        self.membership.push(membership::Operation::Enter {
+            participant,
+            state: b.preparing,
+        });
+        self.membership
+            .path(participant, &[b.preparing, b.inventory]);
         Ok([
             (b.manager, Call::Add),
             (b.preparing, Call::Enter),
@@ -870,6 +1032,9 @@ impl Lifecycle {
         let route = envelope
             .route(RouteProfile::ClientSend)
             .map_err(|_| Error::Shape)?;
+        if let Some(outcome) = self.intro_route(&envelope, &route, &owns)? {
+            return Ok(outcome);
+        }
         if let Some(outcome) = self.return_route(&envelope, &route, &owns)? {
             return Ok(outcome);
         }
@@ -903,6 +1068,13 @@ impl Lifecycle {
                 Stage::LoadingPersistentData
                     | Stage::PersistentDataLoaded
                     | Stage::Progressing
+                    | Stage::IntroSpawning
+                    | Stage::IntroTeleporting
+                    | Stage::IntroRendering
+                    | Stage::IntroOpening
+                    | Stage::IntroStartingDrive
+                    | Stage::IntroMovie
+                    | Stage::IntroRelocating
                     | Stage::LoadingGarage
                     | Stage::EntryBlocked
                     | Stage::Customization
@@ -917,6 +1089,8 @@ impl Lifecycle {
             };
         }
         *stage = Stage::LoadingPersistentData;
+        self.membership
+            .path(participant, &[b.inventory, b.persistent]);
         Ok(Outcome::Advanced(
             [(b.inventory, Call::Leave), (b.persistent, Call::Enter)]
                 .into_iter()
@@ -952,7 +1126,6 @@ impl Lifecycle {
         if envelope.words() != [0, 0]
             || !envelope.remaining().is_empty()
             || route.arguments().len() != 7
-            || route.arguments().read_u32(0, 7) != Ok(0)
         {
             return Err(Error::Shape);
         }
@@ -965,6 +1138,8 @@ impl Lifecycle {
             .ok_or(Error::UnknownObject)?;
         match *stage {
             Stage::ReturningToGarage => return Ok(Some(Outcome::Repeated)),
+            // The player accepted the prompt: the return begins.
+            Stage::FreeRoam if self.entry_box_off.contains(&participant) => {}
             Stage::FreeRoam => {
                 // First request of this zone visit: the prompt shows and the
                 // host answers nothing, so that the client repeats the request
@@ -986,45 +1161,13 @@ impl Lifecycle {
             _ => return Ok(Some(Outcome::Unsupported)),
         }
         *stage = Stage::ReturningToGarage;
+        let mut path = vec![r.free_roam];
+        path.extend(r.preparing);
+        path.push(r.sequence);
+        self.membership.path(participant, &path);
         self.returned_requests.push(participant);
-        let mut chain = vec![(r.free_roam, Call::Leave)];
-        for (i, endpoint) in r.preparing.into_iter().enumerate() {
-            chain.push((endpoint, Call::Enter));
-            if i == 3 {
-                // Refresh the occupied slot with its item and empty slots
-                // with their tagged notification on each return. Initial
-                // login bindings are sent separately by take_garage_bindings.
-                if let (Some(b), Some(slots)) = (self.bindings, self.garage) {
-                    for (endpoint, item) in b.garage.into_iter().zip(slots.values()) {
-                        chain.push((
-                            endpoint,
-                            match item {
-                                Some(item) => Call::GarageItem(item),
-                                None => Call::NotifyTagged(19),
-                            },
-                        ));
-                    }
-                }
-            }
-            chain.push((
-                endpoint,
-                if i == 1 || i == 2 {
-                    Call::LeaveTagged(31)
-                } else {
-                    Call::Leave
-                },
-            ));
-        }
-        chain.push((r.sequence, Call::Enter));
         Ok(Some(Outcome::Advanced(
-            chain
-                .into_iter()
-                .map(|(endpoint, call)| Notification {
-                    endpoint,
-                    participant,
-                    call,
-                })
-                .collect(),
+            r.entering(participant, self.bindings.zip(self.garage)),
         )))
     }
     /// Garage exit and world entry (E747). `Ok(None)` is "not an exit route".
@@ -1073,6 +1216,16 @@ impl Lifecycle {
             }
             (ExitRoute::Exit, Stage::Customization) => {
                 *stage = Stage::ExitingGarage;
+                self.membership.path(
+                    participant,
+                    &[
+                        b.customization,
+                        x.state_94,
+                        x.state_4,
+                        x.state_3,
+                        x.state_77,
+                    ],
+                );
                 self.exited.push(participant);
                 let mut chain = vec![
                     (b.customization, Call::Leave),
@@ -1091,6 +1244,8 @@ impl Lifecycle {
             }
             (ExitRoute::WorldLoaded, Stage::ExitingGarage) => {
                 *stage = Stage::EnteringWorld;
+                self.membership
+                    .path(participant, &[x.state_77, x.state_83, x.state_78]);
                 vec![
                     (x.state_77, Call::Leave),
                     (x.state_83, Call::Enter),
@@ -1101,6 +1256,7 @@ impl Lifecycle {
             // The arrive state stays until its sequence completes (`arrived`).
             (ExitRoute::WorldReady, Stage::EnteringWorld) => {
                 *stage = Stage::Arriving;
+                self.membership.path(participant, &[x.state_78, x.state_79]);
                 self.arriving.push(participant);
                 vec![(x.state_78, Call::Leave), (x.state_79, Call::Enter)]
             }
@@ -1129,6 +1285,7 @@ impl Lifecycle {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HostRpc {
+    Movie(crate::fmv::Play),
     Bank(crate::bank::Balance),
     Launcher(crate::launchers::Enabled),
     Participant(Notification),
@@ -1136,30 +1293,41 @@ pub enum HostRpc {
     Actor(crate::actors::Binding),
     Vehicle(crate::garage::vehicle::Binding),
     GaragePresence(crate::garage::presence::Notification),
+    LiveryInvalidation(crate::garage::livery::Invalidation),
     /// SpawnPoints occupied flag (same scene rpc_bool wire shape as presence).
     SpawnOccupied(crate::garage::presence::Notification),
     /// Level root poll (scene-scoped method 0, same wire shape as presence).
     LevelPoll(crate::garage::presence::Notification),
+    /// A scene Boolean notification of a participant-in-game-mode property
+    /// (same scene rpc_bool wire shape as presence).
+    ModeNotification(crate::garage::presence::Notification),
     SequenceStop(crate::sequences::Stop),
     Event(crate::logic::Fire),
     WorldActivation(crate::world_activation::Notification),
     /// Scoring query control on a participant-owned entity serializer.
     Query(EntityCall),
+    /// An owned event's call on a game-mode, logic or scene serializer.
+    GameMode(crate::game_mode::Call),
 }
 impl HostRpc {
     /// Every object the notification names; the client must hold each one
     /// before the notification is sent.
     pub fn objects(self) -> Vec<u16> {
         match self {
+            Self::Movie(v) => vec![v.endpoint.scene, v.participant],
             Self::Bank(v) => vec![v.endpoint.scene],
             Self::Launcher(v) => vec![v.scene],
             Self::Participant(v) => vec![v.endpoint.scene, v.participant],
             Self::Garage(v) => vec![v.endpoint.scene, v.participant],
             Self::Actor(v) => vec![v.endpoint.scene, v.participant, v.actor],
             Self::Vehicle(v) => vec![v.endpoint.scene, v.participant, v.vehicle],
-            Self::GaragePresence(v) | Self::SpawnOccupied(v) | Self::LevelPoll(v) => {
+            Self::GaragePresence(v)
+            | Self::SpawnOccupied(v)
+            | Self::LevelPoll(v)
+            | Self::ModeNotification(v) => {
                 vec![v.endpoint.scene]
             }
+            Self::LiveryInvalidation(v) => vec![v.endpoint.scene],
             Self::SequenceStop(v) => vec![v.sequence],
             Self::Event(v) => vec![v.target.ghost],
             Self::WorldActivation(v) => {
@@ -1168,38 +1336,52 @@ impl HostRpc {
                 ids
             }
             Self::Query(v) => vec![v.entity],
+            Self::GameMode(v) => v.objects(),
         }
     }
     pub fn scene(self) -> u16 {
         match self {
+            Self::Movie(v) => v.endpoint.scene,
             Self::Bank(v) => v.endpoint.scene,
             Self::Launcher(v) => v.scene,
             Self::Participant(v) => v.endpoint.scene,
             Self::Garage(v) => v.endpoint.scene,
             Self::Actor(v) => v.endpoint.scene,
             Self::Vehicle(v) => v.endpoint.scene,
-            Self::GaragePresence(v) | Self::SpawnOccupied(v) | Self::LevelPoll(v) => {
-                v.endpoint.scene
-            }
+            Self::LiveryInvalidation(v) => v.endpoint.scene,
+            Self::GaragePresence(v)
+            | Self::SpawnOccupied(v)
+            | Self::LevelPoll(v)
+            | Self::ModeNotification(v) => v.endpoint.scene,
             Self::SequenceStop(v) => v.sequence,
             Self::Event(v) => v.target.ghost,
             Self::WorldActivation(v) => v.endpoint.scene,
             Self::Query(v) => v.entity,
+            Self::GameMode(v) => v.target,
         }
     }
     pub fn encode(self) -> Result<BitWriter, Error> {
         match self {
+            Self::Movie(v) => v.encode(),
             Self::Bank(v) => v.encode(),
             Self::Launcher(v) => v.encode(),
             Self::Participant(v) => v.encode(),
             Self::Garage(v) => v.encode(),
             Self::Actor(v) => v.encode(),
             Self::Vehicle(v) => v.encode(),
-            Self::GaragePresence(v) | Self::SpawnOccupied(v) | Self::LevelPoll(v) => v.encode(),
+            Self::LiveryInvalidation(v) => v.encode(),
+            Self::GaragePresence(v)
+            | Self::SpawnOccupied(v)
+            | Self::LevelPoll(v)
+            | Self::ModeNotification(v) => v.encode(),
             Self::SequenceStop(v) => v.encode(),
             Self::Event(v) => v.encode().map_err(|_| Error::Shape),
             Self::WorldActivation(v) => v.encode(),
             Self::Query(v) => v.encode(),
+            Self::GameMode(v) => v.encode().map_err(|e| match e {
+                crate::game_mode::Error::Bound => Error::Bound,
+                crate::game_mode::Error::Shape => Error::Shape,
+            }),
         }
     }
 }

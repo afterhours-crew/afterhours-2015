@@ -15,7 +15,7 @@ pub const WRONG_WAY_BEGIN: u32 = 0x25a2_81e7;
 pub const WRONG_WAY_END: u32 = 0xb275_89ef;
 pub const METRES_PER_SECOND_TO_MPH: f32 = f32::from_bits(0x400f_2a06);
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Configuration {
     pub max_distance_to_segment: f32,
     pub speeding_min_time: f32,

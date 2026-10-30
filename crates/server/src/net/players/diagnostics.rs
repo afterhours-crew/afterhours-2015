@@ -36,6 +36,61 @@ pub(super) enum Route {
 }
 
 impl PlayerListener {
+    pub(in crate::net) fn observation(
+        &self,
+        world_ms: u64,
+        replication_pending: usize,
+        content_pending: usize,
+        items_working: bool,
+    ) -> crate::net::WorldObservation {
+        use crate::net::{ParticipantObservation, WorldHealth, WorldObservation};
+        WorldObservation {
+            world_ms,
+            health: WorldHealth {
+                refused_frames: self.refused,
+                session_application_errors: 0,
+                session_link_errors: 0,
+                session_file_errors: 0,
+                decode_errors: self.stats.errors,
+                unsupported_operations: self.unsupported.total(),
+                optional_map_failures: self.optional_map_failures,
+                waiting_fallbacks: self.sequence_fallbacks[0],
+                arrival_fallbacks: self.sequence_fallbacks[1],
+                crash_fallbacks: self.sequence_fallbacks[2],
+                event_intro_fallbacks: self.event_state.intro_fallbacks,
+                disabled_systems: [
+                    self.traffic_failed,
+                    self.rivals_failed,
+                    self.scoring_failed,
+                    self.event_state.failed,
+                ],
+            },
+            participants: self
+                .players
+                .player_participants()
+                .map(|participant| ParticipantObservation {
+                    participant,
+                    stage: self.participants.stage(participant),
+                    chapter: self.participants.intro_chapter(participant),
+                })
+                .collect(),
+            owned_queues: [
+                self.pending.len(),
+                self.pending_entries.len(),
+                self.pending_rpcs.len() + self.pending_intro_presentation.len(),
+                self.pending_content.len(),
+                self.pending_speedwalls.len(),
+                self.story_pending.len(),
+                self.pending_teleports.len(),
+            ],
+            replication_pending,
+            content_pending,
+            rpc_pending: 0,
+            files_pending: 0,
+            items_working: items_working || self.has_challenge_request(),
+        }
+    }
+
     pub(in crate::net) fn with_connection(mut self, connection: u32) -> Self {
         self.unsupported = crate::diagnostics::Unsupported::new("world", connection);
         self
@@ -57,12 +112,19 @@ impl PlayerListener {
         }
     }
 
-    pub(super) fn diagnose_unconsumed(
-        &mut self,
-        parsed: &frame::Frame<'_>,
-        decoded: &[frame::Message<'_>],
-    ) {
+    pub(super) fn diagnose_unconsumed(&mut self, decoded: &[frame::Message<'_>]) {
         for message in decoded {
+            // Host-only challenges have no client-to-host consumer here.
+            if matches!(
+                message,
+                frame::Message::ChallengeFull(_) | frame::Message::ChallengeAwards(_)
+            ) || (matches!(message, frame::Message::ChallengePlayerSync(_))
+                && self.challenges.catalog.is_none())
+            {
+                self.unsupported.record(Route::Message {
+                    index: message.index(),
+                });
+            }
             if let frame::Message::Opaque { index, .. } = message {
                 // RPC and reached-event dispatch happens below. Session::Observing
                 // consumes level readiness and sublevel reports after our ACK.
@@ -70,13 +132,6 @@ impl PlayerListener {
                     self.unsupported.record(Route::Message { index: *index });
                 }
             }
-        }
-        if parsed
-            .ghost
-            .as_ref()
-            .is_some_and(|ghost| ghost.prefix.record_count() != 0)
-        {
-            self.unsupported.record(Route::ClientGhostRecords);
         }
     }
 
@@ -126,6 +181,39 @@ mod tests {
         bits::BitWriter,
         logic::{EntityRef, Message as Logic},
     };
+
+    #[test]
+    fn observations_retain_failures_after_a_later_accepted_frame() {
+        let mut listener = PlayerListener::new(7);
+        assert!(!listener.refuse(replication::Error::UnknownObject));
+        assert!(!listener.refuse(replication::Error::UnknownObject));
+        let call = rpc(300);
+        assert!(message(
+            &mut listener,
+            0,
+            frame::Message::Opaque {
+                index: 47,
+                body: call.span()
+            }
+        ));
+        listener.disable_scoring();
+        let state = listener.observation(200, 3, 4, true);
+        assert_eq!(state.health.refused_frames, 2);
+        assert_eq!(state.health.unsupported_operations, 1);
+        assert!(state.health.disabled_systems[2]);
+        assert_eq!(
+            (
+                state.replication_pending,
+                state.content_pending,
+                state.items_working
+            ),
+            (3, 4, true)
+        );
+        assert_eq!(
+            PlayerListener::new(8).observation(200, 0, 0, false).health,
+            crate::net::WorldHealth::default()
+        );
+    }
 
     fn message(listener: &mut PlayerListener, sequence: u8, value: frame::Message<'_>) -> bool {
         let wire = frame::Builder::new()
@@ -323,6 +411,40 @@ mod tests {
     }
 
     #[test]
+    fn challenge_sync_without_a_catalog_is_refused_and_reported_unsupported() {
+        let mut listener = PlayerListener::new(7);
+        assert!(!message(
+            &mut listener,
+            0,
+            frame::Message::ChallengePlayerSync(frame::ChallengePlayerSync {
+                persona: 7,
+                monthly_start: 0,
+                day_id: 1,
+                challenge_ids: vec![1, 2, 3]
+            })
+        ));
+        assert_eq!(listener.unsupported.total(), 1);
+        assert_eq!(listener.stats.errors, 0);
+        assert_eq!(listener.refused, 1);
+        assert!(listener.pending_content.is_empty());
+    }
+
+    #[test]
+    fn session_owned_level_acknowledgement_does_not_warn_or_invent_a_reply() {
+        let mut listener = PlayerListener::new(7);
+        assert!(message(
+            &mut listener,
+            0,
+            frame::Message::LevelLoadedAck(frame::LevelLoadedAck {
+                level: b"test/level".to_vec(),
+                identity: [4; 16],
+            })
+        ));
+        assert_eq!(listener.unsupported.total(), 0);
+        assert!(listener.pending_content.is_empty());
+    }
+
+    #[test]
     fn malformed_input_is_rejected_without_claiming_an_unsupported_operation() {
         let output = capture(|| {
             let mut listener = PlayerListener::new(7).with_connection(45);
@@ -350,7 +472,7 @@ mod tests {
     }
 
     #[test]
-    fn unconsumed_client_ghost_records_are_visible_but_empty_sections_are_quiet() {
+    fn unsupported_client_ghost_records_are_refused_but_empty_sections_are_quiet() {
         let output = capture(|| {
             let mut listener = PlayerListener::new(7).with_connection(47);
             for count in [0, 1] {
@@ -360,17 +482,21 @@ mod tests {
                     .put(0, 1)
                     .put(count, 13);
                 if count != 0 {
-                    wire.put(1, 1).put(23, 13);
+                    // Context-only setup, creation of an unsupported class.
+                    wire.put(0, 1).put(23, 13).put(1, 1).put(0, 5);
                 }
                 wire.align();
-                assert!(listener.frame(Queued {
-                    advertised: None,
-                    frame: 0,
-                    data: wire.span()
-                }));
+                assert_eq!(
+                    listener.frame(Queued {
+                        advertised: None,
+                        frame: 0,
+                        data: wire.span()
+                    }),
+                    count == 0
+                );
             }
         });
-        assert_eq!(output.matches("WARN").count(), 1, "{output}");
+        assert_eq!(output.matches("WARN").count(), 2, "{output}");
         assert!(output.contains("ClientGhostRecords"), "{output}");
         assert!(output.contains("unsupported_total=1"), "{output}");
     }

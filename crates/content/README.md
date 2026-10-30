@@ -25,6 +25,23 @@ let items = prepared.path(nfs_content::Kind::ItemContent);
    replaced only when it holds nothing but entry files. A patched or repaired
    installation produces a new fingerprint and therefore a new entry.
 
+Within an `AssetIndex`, event preparation shares validated scene serializer and
+embedded-bus indexes. Entries retain the full parent-instance context and exact
+construction rules; distinct installations own distinct caches. Retention is
+bounded to 64 scenes and 100,000 table rows. The first read still compares graph
+occurrences with the independent scene constructor before publishing a table.
+
+`prepared_cache` supplies a bounded atomic file cache for static compiled
+products. Component callers must key every input and compiler revision and
+validate decoded models. Local setup uses it to reuse validated garage, challenge
+and world configuration before opening another installation index. Its key covers
+the installation fingerprint, policy, source and packaged build revision; every
+hit passes the consuming loaders. Account/session state is excluded. Sprint and
+prologue runtime programs are not yet persisted. Startup benchmarks use
+`uv run --script tools/benchmark_startup.py` from the repository root with an
+explicit executable, installation and new disposable output directory; they run
+server-only and keep their content, save and logs local.
+
 | Kind | File | Source |
 | --- | --- | --- |
 | `ItemContent` | `item-content.json` | `Items/GameItemSystem`: every definition, its prices, quantity, ownership level, flags, sub/additional items and derived default, plus the starting inventory |
@@ -103,6 +120,14 @@ ambiguous or unsupported graphs fail preparation. Version 2 contains no goal
 allocation counter; that value belongs to owned runtime state.
 
 ## Participant logic layouts
+
+`prologue::extract` reads the first-drive capability named by the build profile.
+It derives the objective ID, temporary car definition, opening sequence reference
+and teleport pose from the installation. The destination follows the intro
+spawner's explicit channel binding, then its location/locator links; compatible
+channels elsewhere are not substitutes. Missing exports, duplicate occurrences,
+ambiguous links and invalid transforms refuse extraction. This is a static reader;
+it does not allocate live objects, grant a car or execute the opening sequence.
 
 `AssetIndex::participant_layout(scene, blueprint, owner)` derives a registered
 participant blueprint's asset reference, catalog, bus count, serializer profile

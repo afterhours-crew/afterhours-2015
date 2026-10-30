@@ -39,6 +39,21 @@ impl RequestRoute {
         })
     }
 }
+/// A create after the client left its group in the world renews the group
+/// (official E1026 1311.173 s leave, 1311.264 s createGame).
+fn renews_group(
+    route: (u16, u16),
+    group_left: bool,
+    state: Option<nfs_services::group::State>,
+) -> bool {
+    route == (4, 1) && group_left && state == Some(nfs_services::group::State::Initialized)
+}
+/// A renewed group awaiting its mesh report owns that report, not the world
+/// host mesh (official E1026 1311.367 s).
+fn renewed_group_mesh(renewed: bool, state: Option<nfs_services::group::State>) -> bool {
+    renewed && state == Some(nfs_services::group::State::Created)
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub enum Answer {
     Reply(Vec<Vec<u8>>),
@@ -75,6 +90,7 @@ pub struct Startup<'p> {
     current_stats: Option<nfs_services::stats::Current>,
     kickback: Option<(&'p nfs_services::kickback::State, nfs_storage::AccountId)>,
     speedwall: Option<(&'p nfs_services::speedwall::State, nfs_storage::AccountId)>,
+    current_speedwall: Option<nfs_services::speedwall::Current>,
     item_licenses: Option<&'p nfs_services::item_licenses::Content>,
     owned_local_social: bool,
     owned_menu_awards: bool,
@@ -146,6 +162,7 @@ impl<'p> Startup<'p> {
             entitlements: None,
             kickback: None,
             speedwall: None,
+            current_speedwall: None,
             item_licenses: None,
             stats: None,
             current_stats: None,
@@ -229,6 +246,19 @@ impl<'p> Startup<'p> {
     ) -> Self {
         self.speedwall = Some((state, account));
         self
+    }
+
+    pub fn needs_speedwall_view(&self, request: &[u8]) -> bool {
+        self.users.is_none()
+            && self.speedwall.is_some()
+            && RequestRoute::of(request).is_some_and(|r| {
+                r.category == 0
+                    && (nfs_services::speedwall::owns(r.component, r.command)
+                        || nfs_services::speedwall::owns_walls(r.component, r.command))
+            })
+    }
+    pub fn speedwall_view(&mut self, current: nfs_services::speedwall::Current) {
+        self.current_speedwall = Some(current);
     }
 
     pub fn with_item_licenses(mut self, content: &'p nfs_services::item_licenses::Content) -> Self {
@@ -332,7 +362,23 @@ impl<'p> Startup<'p> {
             self.previous = Some((request.to_vec(), first));
             return Ok(Answer::Reply(answer));
         }
+        // The client left its group in the world and creates a new one for
+        // the world game (official E1026 1311.264 s).
+        if renews_group(
+            (route.component, route.command),
+            self.departure.as_ref().is_some_and(|d| d.group_left()),
+            self.branch.as_ref().and_then(|b| b.group_state()),
+        ) && let (Some(branch), Some(readiness)) =
+            (self.branch.as_mut(), self.readiness.as_ref())
+        {
+            branch.renew_group(readiness.binding().game, unix_micros)?;
+        }
+        let renewing = self
+            .branch
+            .as_ref()
+            .is_some_and(|b| renewed_group_mesh(b.renewed_group().is_some(), b.group_state()));
         if (route.component, route.command) == (4, 29)
+            && !renewing
             && self
                 .readiness
                 .as_ref()
@@ -529,7 +575,38 @@ impl<'p> Startup<'p> {
             if self.users.is_some() {
                 return Ok(None);
             }
+            let refreshed = self
+                .current_speedwall
+                .as_ref()
+                .map(|c| state.with_current(c))
+                .transpose()
+                .map_err(|_| Failure::ProfileConfig)?;
+            let state = refreshed.as_ref().unwrap_or(state);
             return match state.reply(
+                request,
+                account,
+                self.identities.persona,
+                &self.identities.name,
+            ) {
+                Ok(reply) => Ok(Some(vec![reply])),
+                Err(nfs_services::speedwall::Error::Encode) => Err(Failure::Reply),
+                Err(_) => Ok(None),
+            };
+        }
+        if nfs_services::speedwall::owns_walls(route.component, route.command)
+            && let Some((state, account)) = self.speedwall
+        {
+            if self.users.is_some() {
+                return Ok(None);
+            }
+            let refreshed = self
+                .current_speedwall
+                .as_ref()
+                .map(|c| state.with_current(c))
+                .transpose()
+                .map_err(|_| Failure::ProfileConfig)?;
+            let state = refreshed.as_ref().unwrap_or(state);
+            return match state.reply_walls(
                 request,
                 account,
                 self.identities.persona,
@@ -648,12 +725,26 @@ impl<'p> Startup<'p> {
         if let Some(departure) = self.departure.as_mut()
             && departure.pending()
         {
-            return departure.committed().map_err(|_| Failure::Reply);
+            departure.committed().map_err(|_| Failure::Reply)?;
+            if departure.left()
+                && let Some(branch) = &mut self.branch
+            {
+                branch.retire_world_association();
+            }
+            return Ok(());
         }
         let Some(branch) = self.branch.as_mut() else {
             return Ok(());
         };
         branch.commit_after_write()?;
+        // Departure follows the client's renewed group once its create was
+        // written (the later leave of that group, E1026 1972.342 s).
+        if let Some(departure) = self.departure.as_mut()
+            && departure.group_left()
+            && let Some(group) = branch.renewed_group()
+        {
+            departure.rebind_group(group).map_err(|_| Failure::Reply)?;
+        }
         if let Some(batch) = self.pending_readiness.take() {
             let readiness = self.readiness.as_mut().ok_or(Failure::Reply)?;
             readiness
@@ -690,5 +781,29 @@ impl<'p> Startup<'p> {
         if let Some(branch) = self.branch.as_mut() {
             branch.abort_write();
         }
+    }
+}
+
+#[cfg(test)]
+mod renewal_tests {
+    use super::*;
+    use nfs_services::group::State;
+
+    #[test]
+    fn only_a_create_after_the_group_was_left_renews_an_initialized_group() {
+        assert!(renews_group((4, 1), true, Some(State::Initialized)));
+        assert!(!renews_group((4, 1), false, Some(State::Initialized)));
+        assert!(!renews_group((4, 22), true, Some(State::Initialized)));
+        assert!(!renews_group((4, 1), true, Some(State::AwaitCreate)));
+        assert!(!renews_group((4, 1), true, None));
+        assert!(renewed_group_mesh(true, Some(State::Created)));
+        assert!(
+            !renewed_group_mesh(false, Some(State::Created)),
+            "startup mesh"
+        );
+        assert!(
+            !renewed_group_mesh(true, Some(State::Initialized)),
+            "world meshes after it"
+        );
     }
 }

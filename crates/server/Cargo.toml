@@ -27,10 +27,12 @@ nfs-services = { path = "../services" }
 nfs-content = { path = "../content" }
 nfs-server-support = { path = "../server-support" }
 openssl = { version = "=0.10.81", features = ["vendored"] }
-serde_json = "1"
+serde_json = { version = "=1.0.151", features = ["float_roundtrip"] }
+serde = { version = "=1.0.229", features = ["derive", "rc"] }
 tokio = { version = "=1.53.2", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt", "std"] }
 
 [dev-dependencies]
+rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled", "limits"] }
 nfs-content = { path = "../content", features = ["synthetic"] }

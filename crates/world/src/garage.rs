@@ -8,6 +8,7 @@ use nfs_protocol::world::{
     rpc::{Envelope, Limits, RouteProfile},
 };
 
+pub mod livery;
 pub mod presence;
 pub mod vehicle;
 

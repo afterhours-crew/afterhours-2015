@@ -15,11 +15,13 @@ use nfs_world::{
 #[cfg(test)]
 mod tests;
 
-fn eligible(participants: &Lifecycle, participant: u16) -> bool {
-    matches!(
-        participants.stage(participant),
-        Some(Stage::FreeRoam | Stage::ReturnPrompted)
-    )
+fn eligible(participants: &Lifecycle, events: &events::State, participant: u16) -> bool {
+    participants.intro_chapter(participant).is_none()
+        && matches!(
+            participants.stage(participant),
+            Some(Stage::FreeRoam | Stage::ReturnPrompted)
+        )
+        && events.crash_allowed(participant)
 }
 
 impl PlayerListener {
@@ -30,6 +32,10 @@ impl PlayerListener {
         world_cars: &BTreeMap<u16, (u16, bool)>,
         persona: u64,
         movement: &frame::Movement<'_>,
+        event: (
+            &events::State,
+            Option<&crate::event_logic::catalog::Catalog>,
+        ),
     ) -> Result<(), replication::Error> {
         let header = movement.header.ok_or(replication::Error::Shape)?;
         for record in &movement.records {
@@ -37,15 +43,57 @@ impl PlayerListener {
                 continue;
             };
             let connection = HOST_SELECTOR as u8;
-            let item = players
-                .vehicle_item_of(connection, persona, record.id)
-                .ok_or(replication::Error::UnknownObject)?;
+            // The intro's temporary car has no durable inventory identity.
+            // Its scripted driving also owns presentation/recovery, even when
+            // the participant shares the FreeRoam movement state.
+            if players.temporary_vehicle(connection, persona, participant) == Some(record.id)
+                && !eligible(participants, event.0, participant)
+            {
+                continue;
+            }
             if record.component != 0
-                || players.owned_vehicle(connection, persona, participant, item) != Some(record.id)
+                || !players.owns_participant_vehicle(connection, persona, participant, record.id)
             {
                 return Err(replication::Error::UnknownObject);
             }
             let sample = Sample::decode(header, record.data)?;
+            let route = event
+                .0
+                .recovery_key(participant, record.id)
+                .zip(
+                    event
+                        .1
+                        .and_then(|catalog| catalog.get(event.0.event_id(participant)?)),
+                )
+                .and_then(|(key, content)| {
+                    Some((
+                        key,
+                        content.event().game_mode.recovery?,
+                        content.navigation()?,
+                    ))
+                })
+                .map(|(key, config, navigation)| {
+                    let motion = sample.physics.decode([0.; 3])?;
+                    let geometry = if ready
+                        && eligible(participants, event.0, participant)
+                        && !sample.physics.controls.flags[0]
+                        && sample.physics.controls.values[0] != 1
+                    {
+                        navigation.recovery(
+                            motion.position,
+                            usize::from(key.next),
+                            config.sharp_corner_degrees,
+                        )?
+                    } else {
+                        None
+                    };
+                    Ok::<_, replication::Error>(nfs_world::crash::route::Sample {
+                        key,
+                        config,
+                        geometry,
+                    })
+                })
+                .transpose()?;
             crashes.observe_vehicle(
                 players,
                 Owner {
@@ -55,7 +103,8 @@ impl PlayerListener {
                 },
                 record.id,
                 &sample,
-                ready && eligible(participants, participant),
+                ready && eligible(participants, event.0, participant),
+                route,
             )?;
         }
         Ok(())
@@ -77,8 +126,14 @@ impl PlayerListener {
         let mut ghosts = self.logic_ghosts.clone();
         let mut entries = Vec::new();
         for owner in crashes.pending() {
-            if !eligible(&participants, owner.participant) {
+            if !eligible(&participants, &self.event_state, owner.participant) {
                 crashes.discard_pending(owner.participant);
+                continue;
+            }
+            // Event inputs from the same accepted frame can finish the race or
+            // begin a presentation. Resolve those before admitting a new crash;
+            // the next tick rechecks the committed event state.
+            if !self.event_state.inputs.is_empty() {
                 continue;
             }
             if self.pending_entries.len() + self.session_backlog + entries.len() >= MAX_PENDING {
@@ -104,6 +159,7 @@ impl PlayerListener {
                 .collect();
             if let Some(exit) = participants.exit_bindings() {
                 let bindings = ResetBindings::from_scene(&players, exit.state_2.scene)?;
+                participants.state_path(owner.participant, &[bindings.alive, bindings.cinematic]);
                 events.push(HostRpc::Participant(Notification {
                     endpoint: bindings.cinematic,
                     participant: owner.participant,
@@ -121,8 +177,19 @@ impl PlayerListener {
                 events,
             ));
         }
+        let scene_membership = self.stage_scene_membership(&mut players, &mut participants)?;
+        let mut presentation_entries =
+            prologue::movies::sections(scene_membership.records, scene_membership.deleted)?
+                .into_iter()
+                .map(|section| (section, vec![]))
+                .collect::<Vec<_>>();
+        presentation_entries.append(&mut entries);
+        let entries = presentation_entries;
+        if entries.len() > MAX_PENDING.saturating_sub(self.pending_entries.len()) {
+            return Ok(());
+        }
         for stop in &stops {
-            tracing::info!(
+            tracing::warn!(
                 sequence = stop.sequence,
                 "crash sequence fallback Stop queued"
             );
@@ -140,10 +207,12 @@ impl PlayerListener {
             }
         }
         self.crashes = Some(crashes);
+        self.sequence_fallbacks[2] = self.sequence_fallbacks[2].saturating_add(stops.len());
         self.players = players;
         self.participants = participants;
+        self.scene_membership = scene_membership.session;
         self.logic_ghosts = ghosts;
-        self.pending_entries.extend(entries);
+        self.queue_entries(entries);
         self.pending_rpcs
             .extend(stops.into_iter().map(HostRpc::SequenceStop));
         Ok(())
@@ -159,6 +228,7 @@ impl PlayerListener {
         ghosts: &mut BTreeMap<u16, BTreeMap<u16, u16>>,
         persona: u64,
         layout: Option<&crate::vehicle_content::layout::Layout>,
+        event_state: &events::State,
     ) -> Result<
         Option<Option<(Section, Vec<HostRpc>, Option<nfs_world::teleport::Command>)>>,
         replication::Error,
@@ -190,10 +260,15 @@ impl PlayerListener {
             let [_, participant] = envelope.references() else {
                 return Err(replication::Error::Shape);
             };
-            if route.arguments().len() > 7
-                || (0..route.arguments().len()).any(|i| route.arguments().read_u32(i, 1) != Ok(0))
-                || !players.owns_participant(HOST_SELECTOR as u8, persona, *participant)
+            // This method has no arguments. The seven remaining payload bits
+            // only align it to a byte; native writers do not have to clear them.
+            if envelope.words() != [0, 0]
+                || !envelope.remaining().is_empty()
+                || route.arguments().len() != 7
             {
+                return Err(replication::Error::Shape);
+            }
+            if !players.owns_participant(HOST_SELECTOR as u8, persona, *participant) {
                 return Err(replication::Error::UnknownObject);
             }
             let owner = Owner {
@@ -207,6 +282,15 @@ impl PlayerListener {
             if !crashes.finish_relocation(owner)? {
                 return Ok(Some(None));
             }
+            participants.state_path(
+                owner.participant,
+                &[
+                    bindings.teleport,
+                    bindings.rendering,
+                    bindings.arrive,
+                    bindings.alive,
+                ],
+            );
             let arrived = Self::arrive_logic(
                 logic,
                 crate::garage_logic::Which::ResetArrived,
@@ -245,7 +329,18 @@ impl PlayerListener {
         let Some(sequence) = crashes.complete(players, owner, call)? else {
             return Ok(Some(None));
         };
-        if let Some((vehicle, destination)) = crashes.relocation(owner.participant) {
+        let event_recovery = crashes
+            .vehicle(owner.participant)
+            .and_then(|vehicle| event_state.recovery_key(owner.participant, vehicle))
+            .and_then(|key| crashes.event_relocation(owner.participant, key));
+        let relocation = event_recovery
+            .map(|(vehicle, recovery)| (vehicle, Some(recovery.destination), recovery.speed))
+            .or_else(|| {
+                crashes
+                    .relocation(owner.participant)
+                    .map(|(vehicle, destination)| (vehicle, destination, 0.))
+            });
+        if let Some((vehicle, destination, speed)) = relocation {
             let bindings = bindings.ok_or(replication::Error::UnknownObject)?;
             let destination = destination
                 .or_else(|| {
@@ -263,9 +358,16 @@ impl PlayerListener {
                 vehicle,
                 position: destination.position,
                 basis: destination.basis,
+                speed,
             };
             command.encode()?;
+            tracing::info!(participant = owner.participant, vehicle, speed, position = ?destination.position,
+                forward = ?destination.basis[2], event = event_recovery.is_some(), "crash recovery teleport queued");
             crashes.begin_relocation(owner)?;
+            participants.state_path(
+                owner.participant,
+                &[bindings.cinematic, bindings.recover, bindings.teleport],
+            );
             let presentation = Self::arrive_logic(
                 logic,
                 crate::garage_logic::Which::Resetting,
@@ -304,6 +406,7 @@ impl PlayerListener {
             Some(sequence),
         )?;
         if let Some(bindings) = bindings {
+            participants.state_path(owner.participant, &[bindings.cinematic, bindings.alive]);
             events.push(HostRpc::Participant(Notification {
                 endpoint: bindings.cinematic,
                 participant: owner.participant,

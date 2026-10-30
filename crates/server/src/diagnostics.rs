@@ -110,6 +110,10 @@ impl<K: Ord + Clone + Debug> Unsupported<K> {
         self.connection
     }
 
+    pub(crate) fn total(&self) -> u64 {
+        self.tracker.total
+    }
+
     pub(crate) fn record(&mut self, route: K) {
         self.record_correlated(route, None);
     }

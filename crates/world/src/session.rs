@@ -20,19 +20,23 @@ mod motion;
 fn rpc_message(rpc: crate::participants::HostRpc) -> frame::Message<'static> {
     use crate::participants::HostRpc;
     match rpc {
+        HostRpc::Movie(v) => frame::Message::Movie(v),
         HostRpc::Bank(v) => frame::Message::BankBalance(v),
         HostRpc::Launcher(v) => frame::Message::LauncherEnabled(v),
         HostRpc::Participant(v) => frame::Message::ParticipantNotification(v),
         HostRpc::Garage(v) => frame::Message::GarageBinding(v),
         HostRpc::Actor(v) => frame::Message::ActorBinding(v),
         HostRpc::Vehicle(v) => frame::Message::VehicleBinding(v),
-        HostRpc::GaragePresence(v) | HostRpc::SpawnOccupied(v) | HostRpc::LevelPoll(v) => {
-            frame::Message::GaragePresence(v)
-        }
+        HostRpc::LiveryInvalidation(v) => frame::Message::LiveryInvalidation(v),
+        HostRpc::GaragePresence(v)
+        | HostRpc::SpawnOccupied(v)
+        | HostRpc::LevelPoll(v)
+        | HostRpc::ModeNotification(v) => frame::Message::GaragePresence(v),
         HostRpc::SequenceStop(v) => frame::Message::SequenceStop(v),
         HostRpc::Event(v) => frame::Message::LogicEvent(v),
         HostRpc::WorldActivation(v) => frame::Message::WorldActivation(v),
         HostRpc::Query(v) => frame::Message::QueryControl(v),
+        HostRpc::GameMode(v) => frame::Message::GameModeCall(v),
     }
 }
 
@@ -66,6 +70,37 @@ pub fn replication_frame(
     wire.put_span(section.encode().map_err(Error::Replication)?.span())
         .align();
     Ok(wire)
+}
+
+/// The largest replication frame any host admits; a host's policy can only
+/// lower it.
+pub const MAX_REPLICATION_FRAME_BITS: usize = {
+    let window = (application::WINDOW as usize - 1) * DEFAULT_FRAGMENT_BITS;
+    if application::OUTBOUND_FRAME_BITS < window {
+        application::OUTBOUND_FRAME_BITS
+    } else {
+        window
+    }
+};
+
+/// The host owns the timestamp of every queued section.
+fn stamp_queued(section: &mut Section) {
+    section.float_bits = Some(0);
+    section.flag = true;
+}
+
+/// Bits `section` occupies once [`Host::queue_replication_after`] has stamped
+/// it, measured exactly as the host measures it. Code that sizes entries
+/// before queueing them checks this against [`MAX_REPLICATION_FRAME_BITS`]
+/// instead of keeping its own margin for the stamp: a refused entry closes
+/// the world (E1188).
+pub fn queued_replication_bits(
+    section: &Section,
+    before: &[crate::participants::HostRpc],
+) -> Result<usize, Error> {
+    let mut section = section.clone();
+    stamp_queued(&mut section);
+    Ok(replication_frame(&section, before, 0)?.len())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -137,6 +172,29 @@ pub struct Output {
     pub events: Vec<Event>,
 }
 
+/// Cumulative error events from receiving or polling this session. Retained
+/// work awaiting send-window room is deferred, not a failed operation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Failures {
+    pub application: usize,
+    pub link: usize,
+    pub file: usize,
+}
+
+impl Failures {
+    fn observe(&mut self, output: &Output) {
+        for event in &output.events {
+            let count = match event {
+                Event::ApplicationError(_) => &mut self.application,
+                Event::Link(_) => &mut self.link,
+                Event::FileError { .. } => &mut self.file,
+                _ => continue,
+            };
+            *count = count.saturating_add(1);
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
     Stage,
@@ -154,6 +212,7 @@ impl std::error::Error for Error {}
 
 #[derive(Clone, Debug, Default)]
 struct World {
+    messages: frame::receive::Receiver,
     initialized: Option<u64>,
     next_ex_sequence: u8,
     acked_inputs: usize,
@@ -177,6 +236,7 @@ struct World {
 
 #[derive(Clone, Debug, Default)]
 struct Seen {
+    level_loaded: Option<frame::LevelLoadedAck>,
     state_report: bool,
     state_reports: usize,
     level_ready: bool,
@@ -190,24 +250,74 @@ struct Seen {
 struct Observing<'a> {
     inner: &'a mut dyn Listener,
     seen: Seen,
+    waiting_level: Option<u16>,
+    messages: frame::receive::Receiver,
+    now_ms: u64,
+    invalid: bool,
+}
+
+impl Observing<'_> {
+    fn refused(&mut self, queued: application::Queued<'_>) -> bool {
+        // Output may be blocked on this exact resource while gameplay
+        // needs output capacity to commit. Its load proof is monotonic and
+        // independent of those mutations. Learn only that prerequisite;
+        // keep the frame unaccepted so every gameplay message is retried.
+        if let Some(level) = self.waiting_level
+            && let Ok(parsed) = frame::parse_prefix(queued.data, frame::Direction::FromClient)
+            && parsed.messages.iter().flat_map(|m| &m.groups).any(|group| {
+                group.messages.iter().any(|message| {
+                    matches!(message, frame::Message::Opaque {
+                            index: frame::EX_SUBLEVEL_REPORT, body,
+                        } if frame::sublevel_report_ids(*body).contains(&level))
+                })
+            })
+        {
+            self.seen.reports += 1;
+            self.seen.reported.push(level);
+        }
+        false
+    }
 }
 
 impl Listener for Observing<'_> {
     fn frame(&mut self, queued: application::Queued<'_>) -> bool {
+        let parsed = frame::parse_prefix(queued.data, frame::Direction::FromClient).ok();
+        let prepared = parsed
+            .as_ref()
+            .and_then(|p| p.messages.as_ref())
+            .map(|groups| self.messages.prepare(groups, self.now_ms))
+            .unwrap_or_else(|| Ok((self.messages.clone(), Vec::new())));
+        let (messages, received) = match prepared {
+            Ok(value) => value,
+            Err(_) => {
+                self.invalid = true;
+                return self.refused(queued);
+            }
+        };
+        let decoded = match received
+            .iter()
+            .map(|m| m.decode())
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(value) => value,
+            Err(_) => {
+                self.invalid = true;
+                return self.refused(queued);
+            }
+        };
         if !self.inner.frame(queued) {
-            return false;
+            return self.refused(queued);
         }
-        if let Ok(parsed) = frame::parse_prefix(queued.data, frame::Direction::FromClient) {
+        self.messages = messages;
+        if let Some(parsed) = parsed {
             if let Some(frame::TimeSync::Sample(t)) = parsed.time_sync {
                 self.seen.time_sample = Some(t);
             }
-            for message in parsed
-                .messages
-                .iter()
-                .flat_map(|m| m.groups.iter())
-                .flat_map(|g| g.messages.iter())
-            {
+            for message in &decoded {
                 match message {
+                    frame::Message::LevelLoadedAck(value) => {
+                        self.seen.level_loaded = Some(value.clone())
+                    }
                     frame::Message::State(value) => {
                         self.seen.state_report = true;
                         self.seen.state_reports += 1;
@@ -250,6 +360,17 @@ pub const MOVEMENT_INTERVAL_MS: u64 = 100;
 pub const MAX_REPLICATION_QUEUE: usize = 32;
 pub const MAX_REPLICATION_QUEUE_BITS: usize = 1024 * 1024;
 pub const MAX_RPC_QUEUE: usize = 2048;
+
+/// Combine adjacent absolute motion snapshots without crossing a lifecycle,
+/// relative-origin, binding or revision boundary. Callers must keep callback
+/// boundaries outside the pair. The budget includes the host's timestamp.
+pub fn coalesce_motion(previous: &Section, next: &Section, max_bits: usize) -> Option<Section> {
+    let combined = motion::combine(previous, next)?;
+    let mut timed = combined.clone();
+    timed.float_bits = Some(0);
+    timed.flag = true;
+    (replication_frame(&timed, &[], 0).ok()?.len() <= max_bits).then_some(combined)
+}
 /// Notifications carried ahead of one replication frame's records; the
 /// RPC-only frame sends 15 per frame.
 pub const MAX_EAGER_NOTIFICATIONS: usize = 15;
@@ -291,9 +412,23 @@ enum Stage {
     Closed(Option<Application>),
 }
 
+#[derive(Clone)]
+struct QueuedContent {
+    message: frame::Message<'static>,
+    // Counts of preceding publications, independent of wall time and retries.
+    after_replication: usize,
+    after_rpc: usize,
+}
+impl QueuedContent {
+    fn ready(&self, replication_sent: usize, rpc_sent: usize) -> bool {
+        self.after_replication <= replication_sent && self.after_rpc <= rpc_sent
+    }
+}
+
 pub struct Host {
     stage: Stage,
-    content: std::collections::VecDeque<frame::Message<'static>>,
+    failures: Failures,
+    content: std::collections::VecDeque<QueuedContent>,
     content_sent: usize,
     registered_handles: usize,
     replication_queue:
@@ -306,6 +441,7 @@ pub struct Host {
     motion_tail_open: bool,
     max_replication_frame_bits: usize,
     rpc_queue: std::collections::VecDeque<crate::participants::HostRpc>,
+    rpc_sent: usize,
     files: [Option<files::Outgoing>; 2],
     /// Objects the client is told to report movement for (selector 0).
     movement: std::collections::BTreeSet<u16>,
@@ -314,6 +450,8 @@ pub struct Host {
     /// Objects whose creation has been sent and not deleted since: grants
     /// never name an object the client cannot know yet.
     sent_objects: std::collections::BTreeSet<u16>,
+    /// The accepted native identity of the level loaded by this connection.
+    level_loaded: Option<frame::LevelLoadedAck>,
 }
 
 impl fmt::Debug for Host {
@@ -334,6 +472,7 @@ impl Host {
         let handshake = HostHandshake::new(codec, ids.client, ids.host, ids.host_index)?;
         Some(Self {
             stage: Stage::Handshake(handshake, Application::new(policy, random)),
+            failures: Failures::default(),
             content: std::collections::VecDeque::new(),
             content_sent: 0,
             registered_handles: 0,
@@ -343,20 +482,24 @@ impl Host {
             replication_sent: 0,
             motion_tail_open: false,
             rpc_queue: std::collections::VecDeque::new(),
+            rpc_sent: 0,
             files: [None, None],
             movement: std::collections::BTreeSet::new(),
             movement_sent_ms: None,
             replication_clock_ms: None,
             sent_objects: std::collections::BTreeSet::new(),
-            max_replication_frame_bits: policy
-                .max_frame_bits
-                .min(application::OUTBOUND_FRAME_BITS)
-                .min((application::WINDOW as usize - 1) * DEFAULT_FRAGMENT_BITS),
+            level_loaded: None,
+            max_replication_frame_bits: policy.max_frame_bits.min(MAX_REPLICATION_FRAME_BITS),
         })
     }
 
     pub fn queue_replication(&mut self, section: Section) -> Result<(), Error> {
         self.queue_replication_after(section, Vec::new())
+    }
+
+    /// The native identity retained only from accepted, ordered input messages.
+    pub fn loaded_level(&self) -> Option<&frame::LevelLoadedAck> {
+        self.level_loaded.as_ref()
     }
 
     /// Replace the objects whose movement the client reports. The client only
@@ -383,8 +526,7 @@ impl Host {
             return Err(Error::Application(application::Error::Window));
         }
         // Reserve the host-owned timestamp before checking frame/queue bounds.
-        section.float_bits = Some(0);
-        section.flag = true;
+        stamp_queued(&mut section);
         let bits = replication_frame(&section, &before, 0)?.len();
         if bits > self.max_replication_frame_bits {
             return Err(Error::Application(application::Error::Bound));
@@ -431,6 +573,17 @@ impl Host {
         (self.replication_sent, self.replication_queue.len())
     }
 
+    /// Published and still queued notifications. A published notification is
+    /// not proof of client acceptance; this exposes work waiting at this layer.
+    pub fn rpc_progress(&self) -> (usize, usize) {
+        (self.rpc_sent, self.rpc_queue.len())
+    }
+
+    /// Transfers remain pending through the final record's delivery receipt.
+    pub fn files_pending(&self) -> usize {
+        self.files.iter().filter(|file| file.is_some()).count()
+    }
+
     pub fn queue_launcher_enabled(
         &mut self,
         reply: crate::launchers::Enabled,
@@ -468,6 +621,15 @@ impl Host {
             crate::participants::HostRpc::Query(v) => {
                 self.replication_bindings.get(v.entity) == Some(crate::replication::Kind::Entity)
             }
+            // Every reference of an event call must already be replicated.
+            crate::participants::HostRpc::GameMode(v) => {
+                matches!(
+                    self.replication_bindings.get(v.target),
+                    Some(crate::replication::Kind::Entity | crate::replication::Kind::SubLevel)
+                ) && v
+                    .reference
+                    .is_none_or(|id| self.replication_bindings.get(id).is_some())
+            }
             _ => {
                 self.replication_bindings.get(reply.scene())
                     == Some(crate::replication::Kind::SubLevel)
@@ -477,6 +639,7 @@ impl Host {
             return Err(Error::Replication(crate::replication::Error::UnknownObject));
         }
         let participant = match reply {
+            crate::participants::HostRpc::Movie(v) => Some(v.participant),
             crate::participants::HostRpc::WorldActivation(v) => v.participant,
             crate::participants::HostRpc::Participant(v) => Some(v.participant),
             crate::participants::HostRpc::Garage(v) => Some(v.participant),
@@ -485,11 +648,14 @@ impl Host {
             crate::participants::HostRpc::Launcher(_)
             | crate::participants::HostRpc::Bank(_)
             | crate::participants::HostRpc::GaragePresence(_)
+            | crate::participants::HostRpc::LiveryInvalidation(_)
             | crate::participants::HostRpc::SpawnOccupied(_)
             | crate::participants::HostRpc::LevelPoll(_)
+            | crate::participants::HostRpc::ModeNotification(_)
             | crate::participants::HostRpc::SequenceStop(_)
             | crate::participants::HostRpc::Event(_)
-            | crate::participants::HostRpc::Query(_) => None,
+            | crate::participants::HostRpc::Query(_)
+            | crate::participants::HostRpc::GameMode(_) => None,
         };
         if participant.is_some_and(|id| {
             self.replication_bindings.get(id) != Some(crate::replication::Kind::Participant)
@@ -510,6 +676,34 @@ impl Host {
     }
 
     pub fn queue_content(&mut self, target: u8, bytes: &[u8]) -> Result<usize, Error> {
+        self.queue_content_at(target, bytes, 0, 0)
+    }
+
+    /// Send after all replication and notifications already queued. A blocked
+    /// transport retains this boundary; later motion cannot postpone it. Both
+    /// the notifications and chunks use the same reliable MessageEX sequence.
+    pub fn queue_content_after_replication(
+        &mut self,
+        target: u8,
+        bytes: &[u8],
+    ) -> Result<usize, Error> {
+        let n = self.queue_content_at(
+            target,
+            bytes,
+            self.replication_sent + self.replication_queue.len(),
+            self.rpc_sent + self.rpc_queue.len(),
+        )?;
+        self.motion_tail_open = false;
+        Ok(n)
+    }
+
+    fn queue_content_at(
+        &mut self,
+        target: u8,
+        bytes: &[u8],
+        after_replication: usize,
+        after_rpc: usize,
+    ) -> Result<usize, Error> {
         if self.stage() == StageName::Closed {
             return Err(Error::Stage);
         }
@@ -530,7 +724,12 @@ impl Host {
             .registered_handles
             .checked_add(added)
             .ok_or(Error::Application(application::Error::Bound))?;
-        self.content.extend(chunks);
+        self.content
+            .extend(chunks.into_iter().map(|message| QueuedContent {
+                message,
+                after_replication,
+                after_rpc,
+            }));
         Ok(n)
     }
 
@@ -570,7 +769,17 @@ impl Host {
         }
     }
 
+    pub fn failures(&self) -> Failures {
+        self.failures
+    }
+
     pub fn receive(&mut self, raw: &[u8], now_ms: u64, listener: &mut dyn Listener) -> Output {
+        let output = self.receive_inner(raw, now_ms, listener);
+        self.failures.observe(&output);
+        output
+    }
+
+    fn receive_inner(&mut self, raw: &[u8], now_ms: u64, listener: &mut dyn Listener) -> Output {
         let mut out = Output::default();
         let mut closed = false;
         match &mut self.stage {
@@ -619,13 +828,24 @@ impl Host {
                     let mut observing = Observing {
                         inner: listener,
                         seen: Seen::default(),
+                        messages: world.messages.clone(),
+                        now_ms,
+                        invalid: false,
+                        waiting_level: self.replication_queue.front().and_then(
+                            |(section, _, _)| missing_scene_level(section, &world.reported),
+                        ),
                     };
                     for body in &delivery.applications {
                         match application.receive(body, now_ms, &mut observing) {
                             Ok(received) => {
                                 if let Some(event) = received.event {
+                                    closed |=
+                                        matches!(event, application::Event::Disconnected { .. });
                                     queued |= matches!(event, application::Event::Queued { .. });
                                     out.events.push(Event::Application(event));
+                                }
+                                if closed {
+                                    break;
                                 }
                                 for reply in received.send {
                                     match link.send_application(&reply, now_ms) {
@@ -637,11 +857,19 @@ impl Host {
                             Err(e) => out.events.push(Event::ApplicationError(e)),
                         }
                     }
+                    if observing.invalid {
+                        out.events
+                            .push(Event::ApplicationError(application::Error::Shape));
+                    }
+                    world.messages = observing.messages;
                     let seen = observing.seen;
+                    if let Some(value) = seen.level_loaded {
+                        self.level_loaded = Some(value);
+                    }
                     world.client_state_reported |= seen.state_report;
                     world.state_reports += seen.state_reports;
                     world.client_level_ready |= seen.level_ready;
-                    world.client_level_linked |= seen.level_linked;
+                    world.client_level_linked |= seen.level_linked && world.state_sent.is_some();
                     world.client_time_ready |= seen.time_ready && world.time_sent.is_some();
                     if seen.reports > 0 {
                         world.reports += seen.reports;
@@ -651,7 +879,7 @@ impl Host {
                     if let Some(sample) = seen.time_sample {
                         world.time_sample = Some((sample, now_ms));
                     }
-                    if queued && world.initialized.is_none() {
+                    if queued && !closed && world.initialized.is_none() {
                         match Self::initialize(link, application, world, now_ms) {
                             Ok(wire) => {
                                 out.send.push(wire);
@@ -660,7 +888,7 @@ impl Host {
                             Err(e) => out.events.push(e),
                         }
                     }
-                    if delivery.closed {
+                    if delivery.closed || closed {
                         out.events.push(Event::Closed);
                         closed = true;
                     }
@@ -674,6 +902,7 @@ impl Host {
                 ..
             } = std::mem::replace(&mut self.stage, Stage::Closed(None))
         {
+            self.level_loaded = None;
             world.player_entry.release(&mut application);
             for file in &mut self.files {
                 if let Some(file) = file.take()
@@ -725,6 +954,12 @@ impl Host {
     }
 
     pub fn poll(&mut self, now_ms: u64) -> Output {
+        let output = self.poll_inner(now_ms);
+        self.failures.observe(&output);
+        output
+    }
+
+    fn poll_inner(&mut self, now_ms: u64) -> Output {
         let mut out = Output::default();
         let Stage::Running {
             link,
@@ -761,25 +996,31 @@ impl Host {
             None => world.client_state_reported && now_ms >= initialized_ms + CONTENT_DELAY_MS,
             Some(_) => world.client_level_ready,
         };
-        if !self.content.is_empty() && due {
+        let ready = self
+            .content
+            .iter()
+            .take_while(|c| c.ready(self.replication_sent, self.rpc_sent))
+            .count();
+        if ready != 0 && due {
             let (take, state) = match world.descriptor_sent {
                 None => {
                     let first_message = self
                         .content
                         .iter()
-                        .position(|m| matches!(m, frame::Message::Chunk { last: true, .. }))
-                        .map_or(self.content.len(), |i| i + 1);
+                        .take(ready)
+                        .position(|m| matches!(m.message, frame::Message::Chunk { last: true, .. }))
+                        .map_or(ready, |i| i + 1);
                     (first_message.min(frame::CHUNKS_PER_FRAME), Some(0))
                 }
-                Some(_) => (self.content.len().min(frame::CHUNKS_PER_FRAME), None),
+                Some(_) => (ready.min(frame::CHUNKS_PER_FRAME), None),
             };
-            let messages: Vec<frame::Message<'static>> = self.content.drain(..take).collect();
+            let messages: Vec<QueuedContent> = self.content.drain(..take).collect();
             let builder = frame::Builder::new().messages(
                 state,
                 vec![frame::Group {
                     channel: 0,
                     sequence: Some(world.next_ex_sequence),
-                    messages: messages.clone(),
+                    messages: messages.iter().map(|c| c.message.clone()).collect(),
                 }],
             );
             match Self::send_built(link, application, &builder, now_ms) {
@@ -789,7 +1030,11 @@ impl Host {
                     world.acked_inputs = application.stats().inputs;
                     world.descriptor_sent.get_or_insert(now_ms);
                     self.content_sent += take;
-                    if self.content.is_empty() {
+                    if self
+                        .content
+                        .front()
+                        .is_none_or(|c| !c.ready(self.replication_sent, self.rpc_sent))
+                    {
                         world.content_done_ms = Some(now_ms);
                     }
                     out.events.push(Event::Content {
@@ -817,7 +1062,7 @@ impl Host {
         else {
             return out;
         };
-        if let Some((sample, received_ms)) = world.time_sample.take() {
+        if let Some((sample, received_ms)) = world.time_sample {
             let origin = application.origin_ms().unwrap_or(initialized_ms);
             let ticks = |ms: u64| ms.saturating_sub(origin) * 1024 / 1000;
             let builder =
@@ -825,9 +1070,11 @@ impl Host {
             match Self::send_built(link, application, &builder, now_ms) {
                 Ok(wire) => {
                     out.send.push(wire);
+                    world.time_sample = None;
                     world.acked_inputs = application.stats().inputs;
                     out.events.push(Event::TimeSynced);
                 }
+                Err(Event::ApplicationError(application::Error::Window)) => {}
                 Err(e) => out.events.push(e),
             }
         }
@@ -871,10 +1118,14 @@ impl Host {
         else {
             return;
         };
-        let Some(content_done) = world.content_done_ms else {
+        let Some(_) = world.content_done_ms else {
             return;
         };
-        if !self.content.is_empty() {
+        if self
+            .content
+            .front()
+            .is_some_and(|c| c.ready(self.replication_sent, self.rpc_sent))
+        {
             return;
         }
         let reliable = |messages: Vec<frame::Message<'static>>, sequence: u8| {
@@ -887,12 +1138,10 @@ impl Host {
                 }],
             )
         };
-        let Some((state_ms, states_then)) = world.state_sent else {
-            let covered = self.registered_handles > 0
-                && world.reported.len() * 100 >= self.registered_handles * REPORT_COVERAGE_PERCENT;
-            let quiet = world.reports > 0 && now_ms >= world.last_report_ms + REPORT_QUIET_MS;
-            let timed_out = now_ms >= content_done + REPORT_TIMEOUT_MS;
-            if !(covered || quiet || timed_out) {
+        let Some(_) = world.state_sent else {
+            let covered = self.registered_handles == 0
+                || world.reported.len() * 100 >= self.registered_handles * REPORT_COVERAGE_PERCENT;
+            if self.level_loaded.is_none() || !covered {
                 return;
             }
             let builder = reliable(vec![frame::Message::State(7)], world.next_ex_sequence);
@@ -911,11 +1160,11 @@ impl Host {
             }
             return;
         };
-        let Some((time_ms, states_then)) = world.time_sent else {
-            if world.state_reports == states_then && now_ms < state_ms + STATE_WAIT_MS {
+        let Some(_) = world.time_sent else {
+            if !world.client_level_linked {
                 return;
             }
-            let origin = application.origin_ms().unwrap_or(state_ms);
+            let origin = application.origin_ms().unwrap_or(now_ms);
             let tick = (now_ms.saturating_sub(origin) * 30 / 1000) as u32;
             let builder = reliable(
                 vec![frame::Message::Time {
@@ -937,7 +1186,7 @@ impl Host {
             }
             return;
         };
-        if world.state_reports == states_then && now_ms < time_ms + STATE_WAIT_MS {
+        if !world.client_time_ready {
             return;
         }
         if world
@@ -1033,6 +1282,7 @@ impl Host {
             self.replication_bits -= size;
             self.replication_queue.pop_front();
             self.rpc_queue.drain(..eager);
+            self.rpc_sent += eager;
             self.replication_sent += 1;
             self.replication_clock_ms = Some(now_ms);
             world.next_ex_sequence = (world.next_ex_sequence + notifications as u8) & 0x7f;
@@ -1073,6 +1323,7 @@ impl Host {
                     ));
                     out.events.push(Event::FirstPlayerEntered { player });
                 }
+                Err(Event::ApplicationError(application::Error::Window)) => {}
                 Err(e) => out.events.push(e),
             }
             return;
@@ -1092,6 +1343,7 @@ impl Host {
                 Ok(wire) => {
                     out.send.push(wire);
                     self.rpc_queue.drain(..count);
+                    self.rpc_sent += count;
                     world.next_ex_sequence = (world.next_ex_sequence + count as u8) & 0x7f;
                     world.acked_inputs = application.stats().inputs;
                     world.last_replication_ms = Some(motion::slot(
@@ -1104,6 +1356,7 @@ impl Host {
                         remaining: self.rpc_queue.len(),
                     });
                 }
+                Err(Event::ApplicationError(application::Error::Window)) => {}
                 Err(e) => out.events.push(e),
             }
         }

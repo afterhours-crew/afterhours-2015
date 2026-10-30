@@ -4,6 +4,217 @@
 use super::super::events::{self, Connection, Delivery, Dispatch, Endpoint, Handler};
 use super::*;
 
+fn range_inputs(min: i32, max: i32, value: i32) -> impl FnMut(u32) -> Option<Value> {
+    move |port| {
+        Some(Value::Integer(match port {
+            RANGE_MIN => min,
+            RANGE_MAX => max,
+            FLOAT_VALUE => value,
+            _ => panic!("unexpected range input"),
+        }))
+    }
+}
+
+#[test]
+fn integer_range_defers_reads_and_uses_inclusive_signed_limits() {
+    let mut node = Node::new(Definition::CompareIntegerRange {
+        on_change: true,
+        on_start: false,
+    })
+    .unwrap();
+    assert!(
+        node.initial_outputs(|_| panic!("no constructor read"))
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        node.apply(Action::PropertyChanged(RANGE_MIN), |_| panic!("not active"))
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        node.apply(Action::Activate, range_inputs(-4, -2, -4))
+            .unwrap(),
+        [Effect::Emit(RANGE_WITHIN)]
+    );
+    for (value, expected) in [
+        (-2, vec![]),
+        (-1, vec![Effect::Emit(RANGE_ABOVE)]),
+        (i32::MAX, vec![]),
+        (i32::MIN, vec![Effect::Emit(RANGE_BELOW)]),
+        (-4, vec![Effect::Emit(RANGE_WITHIN)]),
+    ] {
+        assert_eq!(
+            node.apply(
+                Action::PropertyChanged(FLOAT_VALUE),
+                range_inputs(-4, -2, value)
+            )
+            .unwrap(),
+            expected
+        );
+    }
+    let before = node.clone();
+    assert_eq!(
+        node.apply(Action::PropertyChanged(RANGE_MAX), |_| None),
+        Err(Error::MissingInput)
+    );
+    assert_eq!(node, before);
+    assert_eq!(
+        node.apply(Action::PropertyChanged(RANGE_MAX), |_| Some(Value::Float(
+            0.0
+        ))),
+        Err(Error::InvalidGraph)
+    );
+    assert_eq!(node, before);
+}
+
+#[test]
+fn integer_range_explicit_events_repeat_without_changing_automatic_history() {
+    let mut node = Node::new(Definition::CompareIntegerRange {
+        on_change: true,
+        on_start: true,
+    })
+    .unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            node.apply(Action::Event(0), range_inputs(3, 4, 3)).unwrap(),
+            [Effect::Emit(RANGE_WITHIN)]
+        );
+    }
+    assert_eq!(
+        node.apply(Action::Activate, range_inputs(3, 4, 3)).unwrap(),
+        [Effect::Emit(RANGE_WITHIN)]
+    );
+    assert_eq!(
+        node.apply(Action::Event(IN), range_inputs(3, 4, 5))
+            .unwrap(),
+        [Effect::Emit(RANGE_ABOVE)]
+    );
+    assert!(
+        node.apply(Action::PropertyChanged(FLOAT_VALUE), range_inputs(3, 4, 4))
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        node.apply(Action::PropertyChanged(FLOAT_VALUE), range_inputs(3, 4, 5))
+            .unwrap(),
+        [Effect::Emit(RANGE_ABOVE)]
+    );
+    let mut disabled = Node::new(Definition::CompareIntegerRange {
+        on_change: false,
+        on_start: false,
+    })
+    .unwrap();
+    for action in [Action::PropertyChanged(FLOAT_VALUE), Action::Activate] {
+        assert!(
+            disabled
+                .apply(action, |_| panic!("disabled read"))
+                .unwrap()
+                .is_empty()
+        );
+    }
+    assert_eq!(
+        disabled
+            .apply(Action::Event(IN), range_inputs(3, 4, 0))
+            .unwrap(),
+        [Effect::Emit(RANGE_BELOW)]
+    );
+}
+
+#[test]
+fn integer_range_reversed_limits_keep_native_order_and_last_category() {
+    let mut node = Node::new(Definition::CompareIntegerRange {
+        on_change: true,
+        on_start: true,
+    })
+    .unwrap();
+    let both = [Effect::Emit(RANGE_ABOVE), Effect::Emit(RANGE_BELOW)];
+    assert_eq!(
+        node.apply(Action::Activate, range_inputs(10, 0, 5))
+            .unwrap(),
+        both
+    );
+    // LastResult is Below, so Above is emitted again even for equal inputs.
+    assert_eq!(
+        node.apply(Action::PropertyChanged(RANGE_MIN), range_inputs(10, 0, 5))
+            .unwrap(),
+        [Effect::Emit(RANGE_ABOVE)]
+    );
+    assert_eq!(
+        node.apply(Action::Event(IN), range_inputs(10, 0, 5))
+            .unwrap(),
+        both
+    );
+    let mut fresh = Node::new(Definition::CompareIntegerRange {
+        on_change: true,
+        on_start: true,
+    })
+    .unwrap();
+    let before = fresh.clone();
+    assert_eq!(
+        fresh.apply(Action::Activate, |_| None),
+        Err(Error::MissingInput)
+    );
+    assert_eq!(fresh, before);
+    assert_eq!(
+        fresh
+            .apply(Action::Activate, range_inputs(0, 0, 0))
+            .unwrap(),
+        [Effect::Emit(RANGE_WITHIN)]
+    );
+}
+
+#[test]
+fn not_and_clamp_follow_native_change_and_boundary_rules() {
+    let mut not = Node::new(Definition::Not).unwrap();
+    assert!(
+        not.initial_outputs(|_| panic!("no bind-time read"))
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        not.apply(Action::Activate, |_| panic!("no activation read"))
+            .unwrap()
+            .is_empty()
+    );
+    for value in [true, false, false] {
+        assert_eq!(
+            not.apply(Action::PropertyChanged(IN), |_| Some(Value::Boolean(value)))
+                .unwrap(),
+            [Effect::Publish(OUT, Value::Boolean(!value))]
+        );
+    }
+    for (min, max, input, expected) in [
+        (1.0, 5.0, 3.0, 3.0),
+        (1.0, 5.0, -2.0, 1.0),
+        (1.0, 5.0, 8.0, 5.0),
+        (5.0, 1.0, 3.0, 5.0),
+        (-0.0, 0.0, 0.0, -0.0),
+    ] {
+        let mut clamp = Node::new(Definition::Clamp { min, max }).unwrap();
+        assert_eq!(
+            clamp
+                .initial_outputs(|_| panic!("constructor seeds zero"))
+                .unwrap(),
+            [Effect::Publish(OUT, Value::Float(0.0))]
+        );
+        let effects = clamp
+            .apply(Action::PropertyChanged(IN), |_| Some(Value::Float(input)))
+            .unwrap();
+        let [Effect::Publish(OUT, Value::Float(value))] = effects.as_slice() else {
+            panic!("{effects:?}")
+        };
+        assert_eq!(value.to_bits(), (expected as f32).to_bits());
+        assert!(
+            clamp
+                .apply(Action::PropertyChanged(IN), |_| Some(Value::Float(
+                    f32::NAN
+                )))
+                .is_err()
+        );
+    }
+}
+
 #[test]
 fn boolean_cache_seeds_only_when_requested_and_loads_before_its_event() {
     for load_on_create in [false, true] {
@@ -67,12 +278,53 @@ use std::collections::BTreeMap;
 fn emits(events: &[u32]) -> Vec<Effect> {
     events.iter().copied().map(Effect::Emit).collect()
 }
+
+#[test]
+fn uint64_comparison_preserves_high_bits_and_transition_history() {
+    let mut node = compare(Comparison::Unsigned64, true, true);
+    let values = |a, b| move |p| Some(Value::Unsigned64(if p == A { a } else { b }));
+    let high = 1u64 << 63;
+    assert_eq!(
+        node.apply(Action::Activate, values(high, 7)).unwrap(),
+        emits(&[GREATER, GREATER_EQUAL, NOT_EQUAL])
+    );
+    assert!(
+        node.apply(Action::PropertyChanged(A), values(u64::MAX, 7))
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        node.apply(Action::PropertyChanged(B), values(u64::MAX, u64::MAX))
+            .unwrap(),
+        emits(&[EQUAL, LESS_EQUAL])
+    );
+    for _ in 0..2 {
+        assert_eq!(
+            node.apply(Action::Event(IN), values(high + 1, high))
+                .unwrap(),
+            emits(&[GREATER, GREATER_EQUAL, NOT_EQUAL])
+        );
+    }
+    // Explicit evaluation did not replace the equal property state.
+    assert_eq!(
+        node.apply(Action::PropertyChanged(A), values(high, high + 1))
+            .unwrap(),
+        emits(&[NOT_EQUAL, LESS])
+    );
+    let before = node.clone();
+    assert_eq!(
+        node.apply(Action::PropertyChanged(A), |_| Some(Value::Integer(-1))),
+        Err(Error::InvalidGraph)
+    );
+    assert_eq!(node, before);
+}
 fn pair(kind: Comparison, value: i32) -> impl FnMut(u32) -> Option<Value> {
     move |port| {
         let n = if port == A { value } else { 0 };
         Some(match kind {
             Comparison::Float => Value::Float(n as f32),
             Comparison::Integer => Value::Integer(n),
+            Comparison::Unsigned64 => Value::Unsigned64(n as u64),
         })
     }
 }
@@ -346,7 +598,7 @@ fn invalid_input_and_overflow_do_not_partially_mutate_nodes() {
         Value::Integer(4),
     ] {
         assert!(
-            acc.apply(Action::Event(ACCUMULATE), |_| Some(value))
+            acc.apply(Action::Event(ACCUMULATE), |_| Some(value.clone()))
                 .is_err()
         );
         assert_eq!(acc, original);
@@ -358,7 +610,7 @@ fn invalid_input_and_overflow_do_not_partially_mutate_nodes() {
         Some(Value::Float(f32::INFINITY)),
         Some(Value::Boolean(false)),
     ] {
-        assert!(node.apply(Action::Activate, |_| value).is_err());
+        assert!(node.apply(Action::Activate, |_| value.clone()).is_err());
         assert_eq!(node, original);
     }
     assert!(
@@ -474,7 +726,10 @@ fn boolean_and_integer_values_publish_without_explicit_notifications() {
             [Effect::Publish(FLOAT_VALUE, Value::Integer(output))]
         );
     }
-    let mut cache = Node::new(Definition::IntegerCache).unwrap();
+    let mut cache = Node::new(Definition::IntegerCache {
+        load_on_create: true,
+    })
+    .unwrap();
     assert_eq!(
         cache.initial_outputs(|_| Some(Value::Integer(7))).unwrap(),
         [Effect::Publish(CACHE_OUTPUT, Value::Integer(7))]
@@ -493,49 +748,134 @@ fn boolean_and_integer_values_publish_without_explicit_notifications() {
 }
 
 #[test]
-fn conditional_float_reads_and_publishes_only_the_selected_branch() {
-    let mut node = Node::new(Definition::ConditionalFloat).unwrap();
-    assert_eq!(
-        node.initial_outputs(|_| None).unwrap(),
-        [Effect::Publish(OUTPUT, Value::Float(0.0))]
-    );
-    for condition in [true, false] {
-        let chosen = if condition {
-            VALUE_IF_TRUE
-        } else {
-            VALUE_IF_FALSE
-        };
-        let other = if condition {
-            VALUE_IF_FALSE
-        } else {
-            VALUE_IF_TRUE
-        };
-        let read = |port| {
-            if port == CONDITION {
-                Some(Value::Boolean(condition))
-            } else if port == chosen {
-                Some(Value::Float(8.25))
+fn conditionals_read_and_publish_only_the_selected_branch() {
+    for (definition, zero, value) in [
+        (
+            Definition::ConditionalFloat,
+            Value::Float(0.0),
+            Value::Float(8.25),
+        ),
+        (
+            Definition::ConditionalInteger,
+            Value::Integer(0),
+            Value::Integer(17),
+        ),
+    ] {
+        let mut node = Node::new(definition).unwrap();
+        assert_eq!(
+            node.initial_outputs(|_| None).unwrap(),
+            [Effect::Publish(OUTPUT, zero)]
+        );
+        for condition in [true, false] {
+            let chosen = if condition {
+                VALUE_IF_TRUE
             } else {
-                panic!("read inactive/unknown branch")
+                VALUE_IF_FALSE
+            };
+            let other = if condition {
+                VALUE_IF_FALSE
+            } else {
+                VALUE_IF_TRUE
+            };
+            let read = |port| {
+                if port == CONDITION {
+                    Some(Value::Boolean(condition))
+                } else if port == chosen {
+                    Some(value.clone())
+                } else {
+                    panic!("read inactive/unknown branch")
+                }
+            };
+            for action in [
+                Action::Activate,
+                Action::PropertyChanged(CONDITION),
+                Action::PropertyChanged(chosen),
+            ] {
+                assert_eq!(
+                    node.apply(action, read).unwrap(),
+                    [Effect::Publish(OUTPUT, value.clone())]
+                );
             }
-        };
-        for action in [
-            Action::Activate,
-            Action::PropertyChanged(CONDITION),
-            Action::PropertyChanged(chosen),
-        ] {
-            assert_eq!(
-                node.apply(action, read).unwrap(),
-                [Effect::Publish(OUTPUT, Value::Float(8.25))]
+            assert!(
+                node.apply(Action::PropertyChanged(other), read)
+                    .unwrap()
+                    .is_empty()
             );
+            assert!(node.apply(Action::Event(IN), |_| None).unwrap().is_empty());
         }
         assert!(
-            node.apply(Action::PropertyChanged(other), read)
-                .unwrap()
-                .is_empty()
+            node.apply(Action::Activate, |p| Some(if p == CONDITION {
+                Value::Boolean(true)
+            } else {
+                Value::Boolean(false)
+            }))
+            .is_err()
         );
-        assert!(node.apply(Action::Event(IN), |_| None).unwrap().is_empty());
     }
+}
+
+#[test]
+fn integer_cache_without_initial_load_stays_unready_until_load_event() {
+    let mut cache = Node::new(Definition::IntegerCache {
+        load_on_create: false,
+    })
+    .unwrap();
+    assert!(
+        cache
+            .initial_outputs(|_| panic!("no initial input read"))
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        cache
+            .apply(Action::Activate, |_| panic!())
+            .unwrap()
+            .is_empty()
+    );
+    for value in [7, 7, -5] {
+        assert_eq!(
+            cache
+                .apply(Action::Event(LOAD), |_| Some(Value::Integer(value)))
+                .unwrap(),
+            [
+                Effect::Publish(CACHE_OUTPUT, Value::Integer(value)),
+                Effect::Emit(CACHE_LOADED)
+            ]
+        );
+    }
+}
+
+#[test]
+fn event_and_gate_waits_for_distinct_inputs_and_requires_explicit_reset() {
+    for count in [1, 2, 15, 16] {
+        let mut n = Node::new(Definition::AllEvents { count }).unwrap();
+        assert!(n.apply(Action::Activate, |_| None).unwrap().is_empty());
+        assert!(
+            n.apply(Action::Event(super::super::integers::port("In", 0)), |_| {
+                None
+            })
+            .unwrap()
+            .is_empty()
+        );
+        for round in 0..2 {
+            for input in (1..=u16::from(count)).rev() {
+                let event = Action::Event(super::super::integers::port("In", input));
+                assert_eq!(
+                    n.apply(event, |_| None).unwrap(),
+                    if input == 1 {
+                        vec![Effect::Emit(OUT)]
+                    } else {
+                        vec![]
+                    },
+                    "round {round}"
+                );
+                assert!(n.apply(event, |_| None).unwrap().is_empty());
+            }
+            assert!(n.apply(Action::Event(RESET), |_| None).unwrap().is_empty());
+        }
+    }
+    assert!(Node::new(Definition::AllEvents { count: 0 }).is_err());
+    assert!(Node::new(Definition::AllEvents { count: 17 }).is_err());
 }
 
 #[test]
@@ -609,9 +949,9 @@ impl Handler for Bank {
         let effects =
             self.nodes[target.node as usize].apply(Action::Event(target.event), |port| {
                 if target.node == 2 && port == CACHE_INPUT {
-                    props.get(&(1, OUTPUT)).copied()
+                    props.get(&(1, OUTPUT)).cloned()
                 } else {
-                    props.get(&(target.node, port)).copied()
+                    props.get(&(target.node, port)).cloned()
                 }
             })?;
         for effect in effects {
@@ -690,4 +1030,47 @@ fn bank_cache_observes_accumulated_value_before_reset_with_session_isolation() {
         assert!(state.banked.is_empty());
         assert_eq!(state.nodes, original.nodes);
     }
+}
+
+#[test]
+fn integer_participant_property_mirrors_each_written_value() {
+    let mut node = Node::new(Definition::IntegerParticipantProperty).unwrap();
+    // Binding writes the bound Value; the output mirrors it.
+    assert_eq!(
+        node.initial_outputs(|port| {
+            assert_eq!(port, FLOAT_VALUE);
+            Some(Value::Integer(0))
+        })
+        .unwrap(),
+        vec![Effect::Publish(OUTPUT_VALUE, Value::Integer(0))]
+    );
+    for value in [1284, 1284, -3, 0] {
+        assert_eq!(
+            node.apply(Action::PropertyChanged(FLOAT_VALUE), |port| {
+                assert_eq!(port, FLOAT_VALUE);
+                Some(Value::Integer(value))
+            })
+            .unwrap(),
+            [Effect::Publish(OUTPUT_VALUE, Value::Integer(value))]
+        );
+    }
+    // Events, activation and other ports do nothing; a wrong type or a missing
+    // value fails without a write.
+    assert_eq!(node.apply(Action::Activate, |_| None).unwrap(), []);
+    assert_eq!(node.apply(Action::Event(LOAD), |_| None).unwrap(), []);
+    assert_eq!(
+        node.apply(Action::PropertyChanged(OUTPUT_VALUE), |_| None)
+            .unwrap(),
+        []
+    );
+    assert_eq!(
+        node.apply(Action::PropertyChanged(FLOAT_VALUE), |_| Some(
+            Value::Float(1.0)
+        )),
+        Err(Error::InvalidGraph)
+    );
+    assert_eq!(
+        node.apply(Action::PropertyChanged(FLOAT_VALUE), |_| None),
+        Err(Error::MissingInput)
+    );
 }

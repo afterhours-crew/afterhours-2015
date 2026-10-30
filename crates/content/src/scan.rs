@@ -9,17 +9,32 @@ use nfs_frostbite::Limits;
 use nfs_frostbite::ebx::{Object, Partition, Pointer};
 use nfs_frostbite::install::{EbxLocation, Installation, Store};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 pub struct Assets {
+    pub(crate) scene_cache: crate::graph::scenes::cache::Cache,
+    pub(crate) ai_manager_cache: crate::ai::cache::Cache,
     store: Store,
-    index: HashMap<String, Vec<EbxLocation>>,
-    by_guid: HashMap<[u8; 16], String>,
-    primary: HashMap<String, String>,
-    objects: HashMap<String, Vec<Object>>,
+    index: Arc<HashMap<String, Vec<EbxLocation>>>,
+    by_guid: Arc<HashMap<[u8; 16], String>>,
+    primary: Arc<HashMap<String, String>>,
+    objects: HashMap<String, Arc<[Object]>>,
     limits: Limits,
 }
 
 impl Assets {
+    pub fn fork(&self) -> Self {
+        Self {
+            scene_cache: self.scene_cache.clone(),
+            ai_manager_cache: self.ai_manager_cache.clone(),
+            store: self.store.fork(),
+            index: self.index.clone(),
+            by_guid: self.by_guid.clone(),
+            primary: self.primary.clone(),
+            objects: self.objects.clone(),
+            limits: self.limits,
+        }
+    }
     /// Resolve either kind of graph edge, retaining object identity for cycle checks.
     pub fn target(
         &mut self,
@@ -77,10 +92,12 @@ impl Assets {
             );
         }
         Ok(Self {
+            scene_cache: Default::default(),
+            ai_manager_cache: Default::default(),
             store,
-            index,
-            by_guid,
-            primary,
+            index: Arc::new(index),
+            by_guid: Arc::new(by_guid),
+            primary: Arc::new(primary),
             objects: HashMap::new(),
             limits,
         })
@@ -106,7 +123,7 @@ impl Assets {
                 .ok_or_else(|| Error::Content(format!("asset {name} is missing")))?;
             let data = self.store.bytes(&location[0].entry)?;
             let objects = Partition::parse(&data, &self.limits)?.objects(&self.limits)?;
-            self.objects.insert(name.to_owned(), objects);
+            self.objects.insert(name.to_owned(), objects.into());
         }
         Ok(&self.objects[name])
     }

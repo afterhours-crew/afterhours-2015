@@ -23,47 +23,77 @@ pub enum Error {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Kind {
+    ClientToServerInfo,
     PlayerManager,
     PlayerView,
     Actor,
+    AiPacingGroup,
+    DebrisManager,
     Entity,
     Participant,
     ParticipantLocationMap,
     Player,
+    PursuitInfo,
     SubLevel,
     ScriptedSplineGoal,
     TrafficGoal,
     WanderGoal,
+    GotoWaypointGoal,
+    SpeedLimitGoal,
+    ScriptedInputGoal,
+    FollowTargetGoal,
+    ChaseTargetGoal,
+    LookForLawbreakersGoal,
 }
 impl Kind {
     pub fn index(self) -> u8 {
         match self {
+            Self::ClientToServerInfo => 4,
             Self::PlayerManager => 15,
             Self::PlayerView => 16,
             Self::Actor => 0,
+            Self::AiPacingGroup => 1,
+            Self::DebrisManager => 5,
             Self::Entity => 6,
             Self::Participant => 11,
             Self::ParticipantLocationMap => 12,
             Self::Player => 14,
+            Self::PursuitInfo => 17,
             Self::SubLevel => 24,
             Self::ScriptedSplineGoal => 20,
             Self::TrafficGoal => 26,
             Self::WanderGoal => 27,
+            Self::GotoWaypointGoal => 9,
+            Self::SpeedLimitGoal => 23,
+            Self::ScriptedInputGoal => 19,
+            Self::FollowTargetGoal => 8,
+            Self::ChaseTargetGoal => 3,
+            Self::LookForLawbreakersGoal => 10,
         }
     }
     fn from_index(index: u8) -> Result<Self, Error> {
         match index {
+            4 => Ok(Self::ClientToServerInfo),
             15 => Ok(Self::PlayerManager),
             16 => Ok(Self::PlayerView),
             0 => Ok(Self::Actor),
+            1 => Ok(Self::AiPacingGroup),
+            5 => Ok(Self::DebrisManager),
             6 => Ok(Self::Entity),
             11 => Ok(Self::Participant),
             12 => Ok(Self::ParticipantLocationMap),
             14 => Ok(Self::Player),
+            17 => Ok(Self::PursuitInfo),
             24 => Ok(Self::SubLevel),
             20 => Ok(Self::ScriptedSplineGoal),
             26 => Ok(Self::TrafficGoal),
             27 => Ok(Self::WanderGoal),
+            9 => Ok(Self::GotoWaypointGoal),
+            23 => Ok(Self::SpeedLimitGoal),
+            19 => Ok(Self::ScriptedInputGoal),
+            8 => Ok(Self::FollowTargetGoal),
+            3 => Ok(Self::ChaseTargetGoal),
+            10 => Ok(Self::LookForLawbreakersGoal),
             _ => Err(Error::Unsupported),
         }
     }
@@ -171,12 +201,23 @@ pub struct PlayerUpdate {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Initial {
+    ClientToServerInfo,
+    AiPacingGroup,
+    DebrisManager(debris::Initial),
+    PursuitInfo,
     PlayerView(player_view::Initial),
     PlayerManager,
     ScriptedSplineGoal(spline::Initial),
     TrafficGoal(traffic::Initial),
     WanderGoal(wander::Initial),
+    GotoWaypointGoal(goto_waypoint::Initial),
+    SpeedLimitGoal(speed_limit::Initial),
+    ScriptedInputGoal(scripted_input::Initial),
+    FollowTargetGoal(target_goal::Follow),
+    ChaseTargetGoal(target_goal::Chase),
+    LookForLawbreakersGoal(target_goal::LookForLawbreakers),
     Actor(ActorInit),
+    DirectEntity(direct_entity::Prefix),
     Entity {
         prefix: entity::creation::Prefix,
         fields: Vec<entity::Initial>,
@@ -196,12 +237,22 @@ pub enum Initial {
 impl Initial {
     pub fn kind(&self) -> Kind {
         match self {
+            Self::ClientToServerInfo => Kind::ClientToServerInfo,
+            Self::AiPacingGroup => Kind::AiPacingGroup,
+            Self::DebrisManager(_) => Kind::DebrisManager,
+            Self::PursuitInfo => Kind::PursuitInfo,
             Self::Actor(_) => Kind::Actor,
             Self::PlayerManager => Kind::PlayerManager,
             Self::ScriptedSplineGoal(_) => Kind::ScriptedSplineGoal,
             Self::TrafficGoal(_) => Kind::TrafficGoal,
             Self::WanderGoal(_) => Kind::WanderGoal,
-            Self::Entity { .. } | Self::Vehicle { .. } => Kind::Entity,
+            Self::GotoWaypointGoal(_) => Kind::GotoWaypointGoal,
+            Self::SpeedLimitGoal(_) => Kind::SpeedLimitGoal,
+            Self::ScriptedInputGoal(_) => Kind::ScriptedInputGoal,
+            Self::FollowTargetGoal(_) => Kind::FollowTargetGoal,
+            Self::ChaseTargetGoal(_) => Kind::ChaseTargetGoal,
+            Self::LookForLawbreakersGoal(_) => Kind::LookForLawbreakersGoal,
+            Self::Entity { .. } | Self::Vehicle { .. } | Self::DirectEntity(_) => Kind::Entity,
             Self::Participant(_) => Kind::Participant,
             Self::ParticipantLocationMap => Kind::ParticipantLocationMap,
             Self::PlayerView(_) => Kind::PlayerView,
@@ -212,12 +263,26 @@ impl Initial {
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Update {
+    ClientToServerInfo(client_info::Update),
+    AiPacingGroup(pacing::Update),
+    DebrisManager(debris::Update),
+    PursuitInfo(pursuit::Update),
     PlayerView(player_view::Update),
     PlayerManager(player_manager::Update),
     ScriptedSplineGoal,
     TrafficGoal,
     WanderGoal,
+    GotoWaypointGoal(goto_waypoint::Update),
+    SpeedLimitGoal,
+    ScriptedInputGoal,
+    FollowTargetGoal,
+    ChaseTargetGoal,
+    LookForLawbreakersGoal,
     Actor(ActorUpdate),
+    DirectEntity {
+        binding: std::sync::Arc<direct_entity::Binding>,
+        fields: direct_entity::References,
+    },
     Entity {
         binding: std::sync::Arc<entity::creation::Binding>,
         fields: Vec<Option<entity::Update>>,
@@ -237,12 +302,22 @@ pub enum Update {
 impl Update {
     pub fn kind(&self) -> Kind {
         match self {
+            Self::ClientToServerInfo(_) => Kind::ClientToServerInfo,
+            Self::AiPacingGroup(_) => Kind::AiPacingGroup,
+            Self::DebrisManager(_) => Kind::DebrisManager,
+            Self::PursuitInfo(_) => Kind::PursuitInfo,
             Self::PlayerManager(_) => Kind::PlayerManager,
             Self::ScriptedSplineGoal => Kind::ScriptedSplineGoal,
             Self::TrafficGoal => Kind::TrafficGoal,
             Self::WanderGoal => Kind::WanderGoal,
+            Self::GotoWaypointGoal(_) => Kind::GotoWaypointGoal,
+            Self::SpeedLimitGoal => Kind::SpeedLimitGoal,
+            Self::ScriptedInputGoal => Kind::ScriptedInputGoal,
+            Self::FollowTargetGoal => Kind::FollowTargetGoal,
+            Self::ChaseTargetGoal => Kind::ChaseTargetGoal,
+            Self::LookForLawbreakersGoal => Kind::LookForLawbreakersGoal,
             Self::Actor(_) => Kind::Actor,
-            Self::Entity { .. } | Self::Vehicle { .. } => Kind::Entity,
+            Self::Entity { .. } | Self::Vehicle { .. } | Self::DirectEntity { .. } => Kind::Entity,
             Self::Participant(_) => Kind::Participant,
             Self::ParticipantLocationMap(_) => Kind::ParticipantLocationMap,
             Self::PlayerView(_) => Kind::PlayerView,
@@ -347,11 +422,27 @@ impl Reader<'_> {
     }
     fn initial(&mut self, kind: Kind) -> Result<Initial, Error> {
         Ok(match kind {
+            Kind::ClientToServerInfo => return Err(Error::Unsupported),
             Kind::SubLevel | Kind::Entity | Kind::ScriptedSplineGoal | Kind::TrafficGoal => {
                 return Err(Error::Unsupported);
             }
             Kind::PlayerManager => Initial::PlayerManager,
             Kind::WanderGoal => Initial::WanderGoal(wander::Initial::read(self)?),
+            Kind::GotoWaypointGoal => {
+                Initial::GotoWaypointGoal(goto_waypoint::Initial::read(self)?)
+            }
+            Kind::SpeedLimitGoal => Initial::SpeedLimitGoal(speed_limit::Initial::read(self)?),
+            Kind::ScriptedInputGoal => {
+                Initial::ScriptedInputGoal(scripted_input::Initial::read(self)?)
+            }
+            Kind::FollowTargetGoal => Initial::FollowTargetGoal(target_goal::Follow::read(self)?),
+            Kind::ChaseTargetGoal => Initial::ChaseTargetGoal(target_goal::Chase::read(self)?),
+            Kind::LookForLawbreakersGoal => {
+                Initial::LookForLawbreakersGoal(target_goal::LookForLawbreakers::read(self)?)
+            }
+            Kind::AiPacingGroup => Initial::AiPacingGroup,
+            Kind::DebrisManager => Initial::DebrisManager(debris::Initial::read(self)?),
+            Kind::PursuitInfo => Initial::PursuitInfo,
             Kind::ParticipantLocationMap => Initial::ParticipantLocationMap,
             Kind::PlayerView => Initial::PlayerView(player_view::Initial::read(self)?),
             Kind::Actor => Initial::Actor(ActorInit {
@@ -380,6 +471,7 @@ impl Reader<'_> {
     }
     fn update(&mut self, kind: Kind) -> Result<Update, Error> {
         Ok(match kind {
+            Kind::ClientToServerInfo => return Err(Error::Unsupported),
             Kind::PlayerManager => Update::PlayerManager(player_manager::Update::read(self)?),
             Kind::ParticipantLocationMap => {
                 Update::ParticipantLocationMap(location_map::Update::read(self)?)
@@ -388,6 +480,15 @@ impl Reader<'_> {
             Kind::ScriptedSplineGoal => Update::ScriptedSplineGoal,
             Kind::TrafficGoal => Update::TrafficGoal,
             Kind::WanderGoal => Update::WanderGoal,
+            Kind::GotoWaypointGoal => return Err(Error::Unsupported),
+            Kind::SpeedLimitGoal => Update::SpeedLimitGoal,
+            Kind::ScriptedInputGoal => Update::ScriptedInputGoal,
+            Kind::FollowTargetGoal => Update::FollowTargetGoal,
+            Kind::ChaseTargetGoal => Update::ChaseTargetGoal,
+            Kind::LookForLawbreakersGoal => Update::LookForLawbreakersGoal,
+            Kind::AiPacingGroup => Update::AiPacingGroup(pacing::Update::read(self)?),
+            Kind::DebrisManager => Update::DebrisManager(debris::Update::read(self)?),
+            Kind::PursuitInfo => Update::PursuitInfo(pursuit::Update::read(self)?),
             Kind::SubLevel | Kind::Entity => return Err(Error::Unsupported),
             Kind::Participant => Update::Participant(ParticipantUpdate {
                 player: self.optional(Self::reference)?,
@@ -502,7 +603,11 @@ impl Writer {
     }
     fn initial(&mut self, v: &Initial) -> Result<(), Error> {
         match v {
-            Initial::SubLevel { .. } | Initial::Entity { .. } | Initial::Vehicle { .. } => {
+            Initial::ClientToServerInfo => {}
+            Initial::SubLevel { .. }
+            | Initial::Entity { .. }
+            | Initial::Vehicle { .. }
+            | Initial::DirectEntity(_) => {
                 return Err(Error::Unsupported);
             }
             Initial::PlayerManager | Initial::ParticipantLocationMap => {}
@@ -510,6 +615,14 @@ impl Writer {
             Initial::ScriptedSplineGoal(v) => v.write(self)?,
             Initial::TrafficGoal(v) => v.write(self)?,
             Initial::WanderGoal(v) => v.write(self)?,
+            Initial::GotoWaypointGoal(v) => v.write(self)?,
+            Initial::SpeedLimitGoal(v) => v.write(self)?,
+            Initial::ScriptedInputGoal(v) => v.write(self)?,
+            Initial::FollowTargetGoal(v) => v.write(self)?,
+            Initial::ChaseTargetGoal(v) => v.write(self)?,
+            Initial::LookForLawbreakersGoal(v) => v.write(self)?,
+            Initial::AiPacingGroup | Initial::PursuitInfo => {}
+            Initial::DebrisManager(v) => v.write(self)?,
             Initial::Actor(v) => {
                 self.reference(&v.participant)?;
                 self.bit(v.flag_a)?;
@@ -537,7 +650,11 @@ impl Writer {
     }
     fn update(&mut self, v: &Update) -> Result<(), Error> {
         match v {
-            Update::SubLevel { .. } | Update::Entity { .. } | Update::Vehicle { .. } => {
+            Update::ClientToServerInfo(v) => v.write(self)?,
+            Update::SubLevel { .. }
+            | Update::Entity { .. }
+            | Update::Vehicle { .. }
+            | Update::DirectEntity { .. } => {
                 return Err(Error::Unsupported);
             }
             Update::PlayerManager(v) => v.write(self)?,
@@ -546,6 +663,14 @@ impl Writer {
             Update::ScriptedSplineGoal => {}
             Update::TrafficGoal => {}
             Update::WanderGoal => {}
+            Update::GotoWaypointGoal(v) => v.write(self)?,
+            Update::SpeedLimitGoal => {}
+            Update::ScriptedInputGoal => {}
+            Update::FollowTargetGoal | Update::ChaseTargetGoal | Update::LookForLawbreakersGoal => {
+            }
+            Update::AiPacingGroup(v) => v.write(self)?,
+            Update::DebrisManager(v) => v.write(self)?,
+            Update::PursuitInfo(v) => v.write(self)?,
             Update::Participant(v) => {
                 self.optional(&v.player, Self::reference)?;
                 self.optional(&v.entity, Self::reference)?;
@@ -635,6 +760,9 @@ impl Record {
         if kind == Kind::TrafficGoal {
             return Self::decode_traffic(input, bound, None);
         }
+        if kind == Kind::GotoWaypointGoal {
+            return Self::decode_goto_waypoint(input, bound, None);
+        }
         if kind == Kind::SubLevel {
             return Self::decode_scene(input, id, create, r.pos, content, profile);
         }
@@ -655,6 +783,12 @@ impl Record {
         })
     }
     pub fn encode(&self) -> Result<BitWriter, Error> {
+        if let (Some(Initial::GotoWaypointGoal(initial)), Update::GotoWaypointGoal(update)) =
+            (&self.initial, &self.update)
+            && initial.progress_updates != update.progress_updates()
+        {
+            return Err(Error::TypeMismatch);
+        }
         if self
             .initial
             .as_ref()
@@ -667,7 +801,10 @@ impl Record {
         w.bit(self.initial.is_some())?;
         if matches!(
             &self.update,
-            Update::SubLevel { .. } | Update::Entity { .. } | Update::Vehicle { .. }
+            Update::SubLevel { .. }
+                | Update::Entity { .. }
+                | Update::Vehicle { .. }
+                | Update::DirectEntity { .. }
         ) {
             if self.initial.is_some() {
                 w.put(u64::from(self.update.kind().index()), 5)?;
@@ -675,6 +812,7 @@ impl Record {
             let body = match &self.update {
                 Update::Entity { .. } => self.entity_wire()?,
                 Update::Vehicle { .. } => self.vehicle_wire()?,
+                Update::DirectEntity { .. } => self.direct_entity_wire()?,
                 _ => self.scene_wire()?,
             };
             if w.0.len() + body.len() > MAX_RECORD_BITS {
@@ -692,9 +830,17 @@ impl Record {
     }
 }
 
+pub mod client_info;
+pub mod debris;
+pub mod direct_entity;
 pub mod entity;
 mod entity_record;
+pub mod goto_waypoint;
+pub mod pacing;
+pub mod scripted_input;
+pub mod speed_limit;
 pub mod spline;
+pub mod target_goal;
 pub mod traffic;
 pub mod wander;
 
@@ -702,6 +848,7 @@ pub mod location_map;
 pub mod player_manager;
 pub mod player_view;
 pub mod players;
+pub mod pursuit;
 mod scene_record;
 
 pub mod section;

@@ -393,6 +393,7 @@ dependencies = [
  "nfs-services",
  "nfs-world",
  "nfs-world-core",
+ "serde",
  "serde_json",
  "sha2",
 ]
@@ -449,6 +450,8 @@ dependencies = [
  "nfs-storage",
  "nfs-world",
  "openssl",
+ "rusqlite",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",
@@ -473,6 +476,8 @@ dependencies = [
  "nfs-protocol",
  "nfs-storage",
  "nfs-world-core",
+ "schemars",
+ "serde",
  "serde_json",
 ]
 
@@ -489,6 +494,7 @@ version = "0.1.0"
 dependencies = [
  "nfs-protocol",
  "nfs-world-core",
+ "serde",
 ]
 
 [[package]]

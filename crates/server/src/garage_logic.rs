@@ -102,6 +102,27 @@ pub struct Event {
     pub event: u32,
 }
 
+/// FadeControlPresentationBlueprint event that activates ViewWorld (E824).
+pub const VIEW_WORLD: u32 = 0;
+
+fn presentation_fire(
+    players: &Players,
+    ghost: u16,
+    entity: u32,
+    event: u32,
+) -> Result<Fire, replication::Error> {
+    if players.objects().get(ghost).is_none() {
+        return Err(replication::Error::UnknownObject);
+    }
+    let fire = Fire {
+        event,
+        player: None,
+        target: EntityRef { ghost, entity },
+    };
+    fire.encode().map_err(|_| replication::Error::Shape)?;
+    Ok(fire)
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Batch {
     pub scene_updates: Vec<SceneUpdate>,
@@ -149,6 +170,10 @@ pub enum Which {
     WorldSettled,
     /// Completion presentation and world membership have been queued.
     FreeRoam,
+    /// Hide world presentation and hold the black screen during relocation.
+    InWorldTeleport,
+    /// Release the black screen as the in-world arrival sequence starts.
+    InWorldArrival,
     /// Prepare the return cinematic and retire driving-only presentation.
     Returning,
     ReturnRequested,
@@ -166,6 +191,14 @@ pub struct GarageLogic {
     content: Content,
     reputation: Option<reputation::Thresholds>,
     spawn: Batch,
+    /// Extra spawn logic of a prologue participant (installed predicates and
+    /// official career start E1026 34.631–34.919 s): created with the spawn
+    /// events' captures; their own events follow the spawn events.
+    intro_spawn: Batch,
+    /// Logic a prologue participant gains when the intro hands over to
+    /// normal play (official E1026 1247.825 s: the challenge root, with the
+    /// event canceller's shutdown).
+    intro_handoff: Batch,
     vehicles: Batch,
     entry: Batch,
     exit: Batch,
@@ -175,8 +208,13 @@ pub struct GarageLogic {
     world_spawn: Batch,
     world_settled: Batch,
     free_roam: Batch,
+    in_world_teleport: Batch,
+    in_world_arrival: Batch,
     returning: Batch,
     return_requested: Batch,
+    /// Installed client EventSync that confirms the requested return.
+    return_confirmation: Option<Event>,
+    driving_timer: Option<crate::driving_timer::Binding>,
     returned: Batch,
     crashed: Batch,
     recovered: Batch,
@@ -500,7 +538,72 @@ fn batch(v: &Json, content: &Content, earlier: &BTreeSet<u16>) -> Result<Batch, 
     })
 }
 
+/// Captures the spawn batch's own events address.
+fn spawn_targets(spawn: &Batch) -> BTreeSet<u16> {
+    spawn
+        .events
+        .iter()
+        .filter_map(|e| match e.target {
+            EventTarget::Capture(id) => Some(id),
+            EventTarget::Scene(_) => None,
+        })
+        .collect()
+}
+
 impl GarageLogic {
+    /// Transfer whole participant assets to a state-owned service. Reject any
+    /// remaining dependency on their legacy IDs instead of dropping events or
+    /// silently inventing a replacement reference.
+    pub fn without_assets(&self, assets: &BTreeSet<Asset>) -> Result<Self, replication::Error> {
+        let mut next = self.clone();
+        let batches = [
+            &mut next.spawn,
+            &mut next.vehicles,
+            &mut next.entry,
+            &mut next.exit,
+            &mut next.arrive,
+            &mut next.arrived,
+            &mut next.world_ready,
+            &mut next.world_spawn,
+            &mut next.world_settled,
+            &mut next.free_roam,
+            &mut next.in_world_teleport,
+            &mut next.in_world_arrival,
+            &mut next.returning,
+            &mut next.return_requested,
+            &mut next.returned,
+            &mut next.crashed,
+            &mut next.recovered,
+            &mut next.resetting,
+            &mut next.reset_arrived,
+        ];
+        let removed: BTreeSet<_> = batches
+            .iter()
+            .flat_map(|batch| &batch.entities)
+            .filter(|definition| assets.contains(&definition.asset))
+            .map(|definition| definition.capture_id)
+            .collect();
+        for batch in &batches {
+            if batch.entity_updates.iter().any(|(id, _, _)| removed.contains(id))
+                || batch.events.iter().any(|event| matches!(event.target, EventTarget::Capture(id) if removed.contains(&id))) {
+                return Err(replication::Error::Unsupported);
+            }
+            for definition in batch.entities.iter().filter(|d| !assets.contains(&d.asset)) {
+                if removed.contains(&definition.capture_id)
+                    || matches!(definition.blueprint, Blueprint::Entity(id) if removed.contains(&id))
+                    || definition.roles.iter().any(|role| matches!(role, Role::EntityChannel { capture_target, .. } if removed.contains(capture_target))) {
+                    return Err(replication::Error::Unsupported);
+                }
+            }
+        }
+        for batch in batches {
+            batch
+                .entities
+                .retain(|definition| !assets.contains(&definition.asset));
+            batch.delete.retain(|id| !removed.contains(id));
+        }
+        Ok(next)
+    }
     pub fn load(path: &Path) -> Result<Self, Failure> {
         Self::load_with_reputation(path, None)
     }
@@ -556,6 +659,78 @@ impl GarageLogic {
             return Err(Failure::ProfileConfig);
         }
         let spawned: BTreeSet<u16> = spawn.entities.iter().map(|e| e.capture_id).collect();
+        let driving_timer = v
+            .get("driving_timer")
+            .map(|value| {
+                use crate::driving_timer::{Binding, Signal};
+                keys(value, &["role", "start", "stop"])?;
+                let role = ghost_id(&value["role"])?;
+                let definition = spawn
+                    .entities
+                    .iter()
+                    .find(|d| d.capture_id == role)
+                    .ok_or(Failure::ProfileConfig)?;
+                let Some(Role::Root { bus_count }) = definition.roles.first() else {
+                    return Err(Failure::ProfileConfig);
+                };
+                let signal = |name: &str| -> Result<Signal, Failure> {
+                    let value = &value[name];
+                    keys(value, &["entity", "event"])?;
+                    let entity = uint(&value["entity"])?;
+                    let event = uint(&value["event"])?;
+                    if entity == 0 || entity > u32::from(*bus_count) || event > 0x1ff_ffff {
+                        return Err(Failure::ProfileConfig);
+                    }
+                    Ok(Signal { entity, event })
+                };
+                let start = signal("start")?;
+                let stop = signal("stop")?;
+                if start == stop {
+                    return Err(Failure::ProfileConfig);
+                }
+                Ok(Binding { role, start, stop })
+            })
+            .transpose()?;
+        let intro_spawn = match v.get("intro_spawn") {
+            None => Batch::default(),
+            Some(b) => {
+                let b = batch(b, &content, &BTreeSet::new())?;
+                let targets = spawn_targets(&spawn);
+                if !b.scene_updates.is_empty()
+                    || !b.entity_updates.is_empty()
+                    || !b.delete.is_empty()
+                    || b.entities.iter().any(|d| targets.contains(&d.capture_id))
+                    || b.events
+                        .iter()
+                        .any(|e| matches!(e.target, EventTarget::Scene(_)))
+                {
+                    return Err(Failure::ProfileConfig);
+                }
+                b
+            }
+        };
+        let intro_handoff = match v.get("intro_handoff") {
+            None => Batch::default(),
+            Some(b) => {
+                let b = batch(b, &content, &BTreeSet::new())?;
+                let early: BTreeSet<u16> = spawn_targets(&spawn)
+                    .into_iter()
+                    .chain(intro_spawn.entities.iter().map(|d| d.capture_id))
+                    .collect();
+                if b != (Batch {
+                    entities: b.entities.clone(),
+                    ..Batch::default()
+                }) || b.entities.iter().any(|d| {
+                    early.contains(&d.capture_id)
+                        || d.roles
+                            .iter()
+                            .any(|r| matches!(r, Role::Reputation(_) | Role::ReputationLevelStat))
+                }) {
+                    return Err(Failure::ProfileConfig);
+                }
+                b
+            }
+        };
         let vehicles = match v.get("vehicles") {
             None => Batch::default(),
             Some(b) => {
@@ -617,6 +792,47 @@ impl GarageLogic {
         let world_settled = event_phase("world_settled", &exited)?;
         let free_roam = event_phase("free_roam", &after(&after(&exited, &arrive), &arrived))?;
         let driving = after(&after(&exited, &arrive), &arrived);
+        // In-world relocation replaces live presentation roles, including a
+        // new lifetime for free-roam statistics. Validate deletions against the
+        // old roles and creations/events against the surviving roles.
+        let transition = |name: &str, live: &BTreeSet<u16>| -> Result<Batch, Failure> {
+            let Some(value) = v.get(name) else {
+                return Ok(Batch::default());
+            };
+            let mut deletion = value.clone();
+            deletion["entities"] = serde_json::json!([]);
+            deletion["events"] = serde_json::json!([]);
+            let deleted = batch(&deletion, &content, live)?.delete;
+            let remaining = live
+                .difference(&deleted.iter().copied().collect())
+                .copied()
+                .collect();
+            let mut creation = value.clone();
+            creation["delete_capture_ids"] = serde_json::json!([]);
+            let mut result = batch(&creation, &content, &remaining)?;
+            if !result.scene_updates.is_empty() || !result.entity_updates.is_empty() {
+                return Err(Failure::ProfileConfig);
+            }
+            result.delete = deleted;
+            Ok(result)
+        };
+        let replaced = |live: &BTreeSet<u16>, b: &Batch| -> BTreeSet<u16> {
+            live.iter()
+                .copied()
+                .filter(|id| !b.delete.contains(id))
+                .chain(b.entities.iter().map(|e| e.capture_id))
+                .collect()
+        };
+        let in_world_teleport = transition("in_world_teleport", &driving)?;
+        let loading = replaced(&driving, &in_world_teleport);
+        let in_world_arrival = transition("in_world_arrival", &loading)?;
+        if !in_world_teleport.entities.is_empty() || !in_world_teleport.delete.is_empty() {
+            let arrival = replaced(&loading, &in_world_arrival);
+            let restore = batch(&v["arrived"], &content, &arrival)?;
+            if after(&arrival, &restore) != driving {
+                return Err(Failure::ProfileConfig);
+            }
+        }
         let crashed = v
             .get("crashed")
             .map(|b| batch(b, &content, &driving))
@@ -649,6 +865,30 @@ impl GarageLogic {
             return Err(Failure::ProfileConfig);
         }
         let return_requested = event_phase("return_requested", &driving)?;
+        let return_confirmation = v
+            .get("return_confirmation")
+            .map(|value| {
+                keys(value, &["capture_id", "entity", "event"])?;
+                let capture = ghost_id(&value["capture_id"])?;
+                let entity = uint(&value["entity"])?;
+                let event = uint(&value["event"])?;
+                if entity == 0
+                    || event > 0x1ff_ffff
+                    || !driving.contains(&capture)
+                    || !return_requested
+                        .events
+                        .iter()
+                        .any(|e| e.target == EventTarget::Capture(capture))
+                {
+                    return Err(Failure::ProfileConfig);
+                }
+                Ok(Event {
+                    target: EventTarget::Capture(capture),
+                    entity,
+                    event,
+                })
+            })
+            .transpose()?;
         let returning = v
             .get("returning")
             .map(|b| batch(b, &content, &driving))
@@ -694,6 +934,8 @@ impl GarageLogic {
             .chain(&arrived.entities)
             .chain(&returning.entities)
             .chain(&returned.entities)
+            .chain(&in_world_teleport.entities)
+            .chain(&in_world_arrival.entities)
             .chain(&crashed.entities)
             .chain(&recovered.entities)
             .chain(&resetting.entities)
@@ -703,7 +945,12 @@ impl GarageLogic {
         {
             return Err(Failure::ProfileConfig);
         }
-        for definition in spawn.entities.iter().chain(&entry.entities) {
+        for definition in spawn
+            .entities
+            .iter()
+            .chain(&entry.entities)
+            .chain(&intro_spawn.entities)
+        {
             let owned = definition
                 .roles
                 .iter()
@@ -743,6 +990,8 @@ impl GarageLogic {
             content,
             reputation,
             spawn,
+            intro_spawn,
+            intro_handoff,
             vehicles,
             entry,
             exit,
@@ -752,8 +1001,12 @@ impl GarageLogic {
             world_spawn,
             world_settled,
             free_roam,
+            in_world_teleport,
+            in_world_arrival,
             returning,
             return_requested,
+            return_confirmation,
+            driving_timer,
             returned,
             crashed,
             recovered,
@@ -763,6 +1016,53 @@ impl GarageLogic {
     }
     pub fn content(&self) -> &Content {
         &self.content
+    }
+    pub fn driving_timer(&self) -> Option<crate::driving_timer::Binding> {
+        self.driving_timer
+    }
+    pub fn driving_timer_owner(
+        &self,
+        players: &Players,
+        ghosts: &BTreeMap<u16, BTreeMap<u16, u16>>,
+        connection: u8,
+        persona: u64,
+        message: &nfs_world::logic::Message,
+    ) -> Result<crate::driving_timer::Owner, replication::Error> {
+        let binding = self.driving_timer.ok_or(replication::Error::Unsupported)?;
+        let nfs_world::logic::Message::Reached { target, player, .. } = message else {
+            return Err(replication::Error::Shape);
+        };
+        let mut candidates = ghosts
+            .iter()
+            .filter(|(_, map)| map.get(&binding.role) == Some(&target.ghost));
+        let participant = match (candidates.next(), candidates.next()) {
+            (Some((&participant, _)), None) => participant,
+            _ => return Err(replication::Error::UnknownObject),
+        };
+        let local_slot = players
+            .local_slot(connection, persona, participant)
+            .ok_or(replication::Error::UnknownObject)?;
+        let definition = self
+            .spawn
+            .entities
+            .iter()
+            .find(|d| d.capture_id == binding.role)
+            .ok_or(replication::Error::Shape)?;
+        if *player != local_slot
+            || !matches!(
+                players.objects().get(target.ghost).map(|o| &o.initial),
+                Some(replication::Initial::Entity { prefix, fields })
+                    if prefix.asset == definition.asset
+                        && matches!(fields.first(), Some(Initial::Root { reference, .. }) if *reference == participant)
+            )
+        {
+            return Err(replication::Error::UnknownObject);
+        }
+        Ok(crate::driving_timer::Owner {
+            participant,
+            ghost: target.ghost,
+            local_slot,
+        })
     }
     pub fn requires_reputation(&self) -> bool {
         self.reputation.is_some()
@@ -783,6 +1083,8 @@ impl GarageLogic {
             Which::WorldSpawn => &self.world_spawn,
             Which::WorldSettled => &self.world_settled,
             Which::FreeRoam => &self.free_roam,
+            Which::InWorldTeleport => &self.in_world_teleport,
+            Which::InWorldArrival => &self.in_world_arrival,
             Which::Returning => &self.returning,
             Which::ReturnRequested => &self.return_requested,
             Which::Returned => &self.returned,
@@ -807,6 +1109,8 @@ impl GarageLogic {
             Which::WorldSpawn,
             Which::WorldSettled,
             Which::FreeRoam,
+            Which::InWorldTeleport,
+            Which::InWorldArrival,
             Which::Returning,
             Which::ReturnRequested,
             Which::Returned,
@@ -898,6 +1202,10 @@ impl GarageLogic {
         if part == Part::Deletions {
             return Self::delete_batch(batch, players, ghosts, output);
         }
+        let replaces = matches!(which, Which::InWorldTeleport | Which::InWorldArrival);
+        if replaces && part == Part::All {
+            output = Self::delete_batch(batch, players, ghosts, output)?;
+        }
         for update in &batch.scene_updates {
             let scene = players
                 .objects()
@@ -954,7 +1262,7 @@ impl GarageLogic {
             ghosts.insert(definition.capture_id, record.id);
             output.records.push(record);
         }
-        if part != Part::Creations {
+        if part != Part::Creations && !replaces {
             output = Self::delete_batch(batch, players, ghosts, output)?;
         }
         output.events = self.events(which, players, ghosts)?;
@@ -986,6 +1294,328 @@ impl GarageLogic {
         output.deleted = ids;
         Ok(output)
     }
+    /// A batch applied to a prologue participant. The intro reuses the
+    /// ordinary per-participant presentation lifecycle (official career start,
+    /// E1183) but skips the garage entry and exit between its phases, so only
+    /// absent captures are created, present ones deleted, and events fired on
+    /// existing targets. Scene and entity value updates are not applied.
+    pub fn produce_present(
+        &self,
+        which: Which,
+        players: &mut Players,
+        participant: u16,
+        ghosts: &mut BTreeMap<u16, u16>,
+        part: Part,
+    ) -> Result<Output, replication::Error> {
+        if participant == 0 {
+            return Err(replication::Error::Shape);
+        }
+        let batch = self.batch(which);
+        let mut output = Output::default();
+        if part != Part::Deletions {
+            // The intro keeps its spawn logic, so an asset it already holds
+            // (the return cinematic of capture 15 for capture 20) is reused.
+            let held = |asset: &Asset| {
+                ghosts.values().any(|&ghost| {
+                    matches!(
+                        players.objects().get(ghost).map(|o| &o.initial),
+                        Some(replication::Initial::Entity { prefix, .. }) if prefix.asset == *asset
+                    )
+                })
+            };
+            let missing: Vec<&Definition> = batch
+                .entities
+                .iter()
+                .filter(|d| !ghosts.contains_key(&d.capture_id) && !held(&d.asset))
+                .collect();
+            for definition in missing {
+                let creation = self.creation(definition, players, participant, ghosts, None)?;
+                let record = players
+                    .spawn_entities(vec![creation], &self.content)?
+                    .remove(0);
+                ghosts.insert(definition.capture_id, record.id);
+                output.records.push(record);
+            }
+        }
+        if part != Part::Creations {
+            let present: Vec<u16> = batch
+                .delete
+                .iter()
+                .filter(|id| ghosts.contains_key(id))
+                .copied()
+                .collect();
+            let ids: Vec<u16> = present.iter().map(|id| ghosts[id]).collect();
+            if !ids.is_empty() {
+                players.remove_entities(&ids)?;
+            }
+            for id in &present {
+                ghosts.remove(id);
+            }
+            output.deleted = ids;
+        }
+        if part != Part::Deletions {
+            output.events = self.present_events(which, players, ghosts)?;
+        }
+        Ok(output)
+    }
+    /// The intro's final garage becomes an ordinary garage at customization:
+    /// the official host creates the customization presentation with the
+    /// customization Enter (career start 1247625 ms, ghost 7124), so the later
+    /// garage exit finds the same logic as after a normal entry (E912 58041 ms
+    /// deletes garage stats and that presentation). Captures the exit batch
+    /// addresses that the intro created through its own paths are adopted by
+    /// asset from the participant's live objects; the entry batch's remaining
+    /// entities are created without its fade events, which the composite
+    /// Leave presentation already sent. Returns the new records.
+    pub fn intro_customization(
+        &self,
+        players: &mut Players,
+        participant: u16,
+        ghosts: &mut BTreeMap<u16, u16>,
+    ) -> Result<Vec<Record>, replication::Error> {
+        if participant == 0 {
+            return Err(replication::Error::Shape);
+        }
+        let asset_of = |capture: u16| {
+            [
+                &self.spawn,
+                &self.entry,
+                &self.returned,
+                &self.return_requested,
+                &self.returning,
+            ]
+            .into_iter()
+            .flat_map(|b| &b.entities)
+            .find(|d| d.capture_id == capture)
+            .map(|d| d.asset)
+        };
+        let owned_by = |players: &Players, asset: &Asset, ghosts: &BTreeMap<u16, u16>| {
+            let mut found = players.objects().iter().filter_map(|(id, o)| {
+                matches!(&o.initial, replication::Initial::Entity { prefix, fields }
+                    if prefix.asset == *asset
+                    && matches!(fields.first(), Some(Initial::Root { reference, .. })
+                        if *reference == participant))
+                .then_some(id)
+            });
+            match (found.next(), found.next()) {
+                (Some(_), Some(_)) => Err(replication::Error::DuplicateObject),
+                // Already held under another capture: not adopted twice.
+                (Some(id), None) if ghosts.values().any(|&g| g == id) => Ok(None),
+                (first, _) => Ok(first),
+            }
+        };
+        let exit = self.batch(Which::Exit);
+        let needed: Vec<u16> = exit
+            .delete
+            .iter()
+            .copied()
+            .chain(exit.entity_updates.iter().map(|&(capture, _, _)| capture))
+            .collect();
+        for capture in needed {
+            if ghosts.contains_key(&capture) {
+                continue;
+            }
+            let Some(asset) = asset_of(capture) else {
+                continue;
+            };
+            if let Some(id) = owned_by(players, &asset, ghosts)? {
+                ghosts.insert(capture, id);
+            }
+        }
+        let mut records = Vec::new();
+        for definition in &self.entry.entities {
+            if ghosts.contains_key(&definition.capture_id) {
+                continue;
+            }
+            if let Some(id) = owned_by(players, &definition.asset, ghosts)? {
+                ghosts.insert(definition.capture_id, id);
+                continue;
+            }
+            let creation = self.creation(definition, players, participant, ghosts, None)?;
+            let record = players
+                .spawn_entities(vec![creation], &self.content)?
+                .remove(0);
+            ghosts.insert(definition.capture_id, record.id);
+            records.push(record);
+        }
+        Ok(records)
+    }
+    /// The spawn logic of a prologue participant: only the captures the spawn
+    /// batch's own events address (the fade control and one more in installed
+    /// content; official career start 480 and 482), then the startup events.
+    /// BlackScreen is held for the intro teleport membership publication. The
+    /// rest of the batch is garage presentation; given to an intro player it
+    /// held the client in garage loading behind the whole intro (E1184).
+    pub fn produce_intro_spawn(
+        &self,
+        players: &mut Players,
+        participant: u16,
+        ghosts: &mut BTreeMap<u16, u16>,
+    ) -> Result<Output, replication::Error> {
+        self.produce_intro_spawn_with_reputation(players, participant, ghosts, None)
+    }
+    /// As `produce_intro_spawn`, with the account's reputation for the intro
+    /// spawn's reputation logic (required when it has any).
+    pub fn produce_intro_spawn_with_reputation(
+        &self,
+        players: &mut Players,
+        participant: u16,
+        ghosts: &mut BTreeMap<u16, u16>,
+        scores: Option<ReputationScores>,
+    ) -> Result<Output, replication::Error> {
+        if participant == 0 {
+            return Err(replication::Error::Shape);
+        }
+        let values = match (scores, &self.reputation) {
+            (Some(scores), Some(thresholds)) => Some(thresholds.evaluate(scores)),
+            _ => None,
+        };
+        if values.is_none() && self.intro_requires_reputation() {
+            return Err(replication::Error::Shape);
+        }
+        let targets = spawn_targets(&self.spawn);
+        let mut output = Output::default();
+        for definition in self
+            .spawn
+            .entities
+            .iter()
+            .filter(|d| targets.contains(&d.capture_id))
+            .chain(&self.intro_spawn.entities)
+        {
+            if ghosts.contains_key(&definition.capture_id) {
+                return Err(replication::Error::DuplicateObject);
+            }
+            let creation = self.creation(definition, players, participant, ghosts, values)?;
+            let record = players
+                .spawn_entities(vec![creation], &self.content)?
+                .remove(0);
+            ghosts.insert(definition.capture_id, record.id);
+            output.records.push(record);
+        }
+        output.events = self.present_events(Which::Spawn, players, ghosts)?;
+        // Intro membership, rather than allocating its controller, causes
+        // BlackScreen. The listener publishes that effect after EnterTeleport.
+        if let Some(fade) = self.fade_capture().and_then(|id| ghosts.get(&id)) {
+            output
+                .events
+                .retain(|fire| fire.target.ghost != *fade || fire.event != 2);
+        }
+        for event in &self.intro_spawn.events {
+            let EventTarget::Capture(capture) = event.target else {
+                return Err(replication::Error::Shape);
+            };
+            let ghost = *ghosts
+                .get(&capture)
+                .ok_or(replication::Error::UnknownObject)?;
+            output.events.push(presentation_fire(
+                players,
+                ghost,
+                event.entity,
+                event.event,
+            )?);
+        }
+        Ok(output)
+    }
+    /// The drive presentation the arrive sequence completes with (installed
+    /// content: AliveState, EventResultRep, DriverDetails); a prologue drive
+    /// is live while all of them are.
+    pub fn arrived_captures(&self) -> Vec<u16> {
+        self.arrived.entities.iter().map(|d| d.capture_id).collect()
+    }
+    /// The intro's handoff logic, created once when the intro completes;
+    /// captures already live are left alone.
+    pub fn produce_intro_handoff(
+        &self,
+        players: &mut Players,
+        participant: u16,
+        ghosts: &mut BTreeMap<u16, u16>,
+    ) -> Result<Vec<Record>, replication::Error> {
+        if participant == 0 {
+            return Err(replication::Error::Shape);
+        }
+        let mut records = Vec::new();
+        for definition in &self.intro_handoff.entities {
+            if ghosts.contains_key(&definition.capture_id) {
+                continue;
+            }
+            let creation = self.creation(definition, players, participant, ghosts, None)?;
+            let record = players
+                .spawn_entities(vec![creation], &self.content)?
+                .remove(0);
+            ghosts.insert(definition.capture_id, record.id);
+            records.push(record);
+        }
+        Ok(records)
+    }
+    /// Whether the prologue spawn needs the account's reputation.
+    pub fn intro_requires_reputation(&self) -> bool {
+        self.intro_spawn
+            .entities
+            .iter()
+            .flat_map(|d| &d.roles)
+            .any(|r| matches!(r, Role::Reputation(_) | Role::ReputationLevelStat))
+    }
+    /// A batch's participant events whose capture exists, in authored order.
+    /// Scene-wide events belong to the ordinary garage and are left out.
+    pub fn present_events(
+        &self,
+        which: Which,
+        players: &Players,
+        ghosts: &BTreeMap<u16, u16>,
+    ) -> Result<Vec<Fire>, replication::Error> {
+        self.batch(which)
+            .events
+            .iter()
+            .filter_map(|e| match e.target {
+                EventTarget::Capture(id) => ghosts.get(&id).map(|&ghost| (ghost, e)),
+                EventTarget::Scene(_) => None,
+            })
+            .map(|(ghost, e)| presentation_fire(players, ghost, e.entity, e.event))
+            .collect()
+    }
+    /// Resolve the return callback against this participant's current instance.
+    pub fn return_confirmation(
+        &self,
+        players: &Players,
+        ghosts: &BTreeMap<u16, u16>,
+    ) -> Result<Option<Fire>, replication::Error> {
+        self.return_confirmation
+            .map(|event| {
+                let EventTarget::Capture(capture) = event.target else {
+                    return Err(replication::Error::Shape);
+                };
+                let ghost = *ghosts
+                    .get(&capture)
+                    .ok_or(replication::Error::UnknownObject)?;
+                presentation_fire(players, ghost, event.entity, event.event)
+            })
+            .transpose()
+    }
+    /// The fade presentation logic: the target of the free-roam ViewWorld
+    /// event (FadeControlPresentationBlueprint; capture 1 in installed content).
+    pub fn fade_capture(&self) -> Option<u16> {
+        self.free_roam.events.iter().find_map(|e| match e.target {
+            EventTarget::Capture(id) if e.event == VIEW_WORLD && e.entity == 1 => Some(id),
+            _ => None,
+        })
+    }
+    /// Events on the participant's fade presentation logic: 0 activates
+    /// ViewWorld, 1 deactivates it, 2 activates BlackScreen and 3 deactivates
+    /// it (E824). Empty without that logic.
+    pub fn fade(
+        &self,
+        players: &Players,
+        ghosts: &BTreeMap<u16, u16>,
+        events: &[u32],
+    ) -> Result<Vec<Fire>, replication::Error> {
+        let Some(&ghost) = self.fade_capture().and_then(|c| ghosts.get(&c)) else {
+            return Ok(Vec::new());
+        };
+        events
+            .iter()
+            .map(|&event| presentation_fire(players, ghost, 1, event))
+            .collect()
+    }
     /// Resolve authored event targets from current owned objects without
     /// allocating identities or changing the lifecycle.
     pub fn events(
@@ -1005,19 +1635,12 @@ impl GarageLogic {
                     .scene(key)
                     .ok_or(replication::Error::UnknownObject)?,
             };
-            if players.objects().get(ghost).is_none() {
-                return Err(replication::Error::UnknownObject);
-            }
-            let fire = Fire {
-                event: event.event,
-                player: None,
-                target: EntityRef {
-                    ghost,
-                    entity: event.entity,
-                },
-            };
-            fire.encode().map_err(|_| replication::Error::Shape)?;
-            events.push(fire);
+            events.push(presentation_fire(
+                players,
+                ghost,
+                event.entity,
+                event.event,
+            )?);
         }
         Ok(events)
     }
@@ -1157,6 +1780,39 @@ pub(crate) mod tests {
     use nfs_protocol::world::rpc::Serial;
     use nfs_world::replication::{Initial as RecordInitial, players::Request, sublevel::ordinary};
     use serde_json::json;
+    #[test]
+    fn transferring_an_asset_removes_legacy_creation_and_retirement_but_rejects_dependencies() {
+        let original = GarageLogic::from_json(&content_json()).unwrap();
+        let asset = |local_index| Asset {
+            bundle: 4,
+            type_id: 10,
+            local_index,
+        };
+        let transferred = original
+            .without_assets(&BTreeSet::from([asset(3)]))
+            .unwrap();
+        assert!(
+            transferred
+                .spawn
+                .entities
+                .iter()
+                .all(|definition| definition.asset != asset(3))
+        );
+        assert!(!transferred.entry.delete.contains(&295));
+        assert!(original.entry.delete.contains(&295));
+        assert_eq!(transferred.entry.events, original.entry.events);
+        // Another entity uses this asset's legacy ID as its parent/channel.
+        assert!(matches!(
+            original.without_assets(&BTreeSet::from([asset(1)])),
+            Err(replication::Error::Unsupported)
+        ));
+        // A legacy event still targets this asset: moving its lifetime alone
+        // cannot silently drop that behavior.
+        assert!(matches!(
+            original.without_assets(&BTreeSet::from([asset(0)])),
+            Err(replication::Error::Unsupported)
+        ));
+    }
     pub(crate) fn content_json() -> Json {
         json!({
             "format": FORMAT, "version": VERSION, "build_sha256": crate::content::BUILD,
@@ -1204,7 +1860,38 @@ pub(crate) mod tests {
         v["arrive"] = phase(&[15]);
         v["arrived"] = phase(&[16]);
         v["free_roam"] = phase(&[17]);
+        v["in_world_teleport"] = phase(&[22, 23]);
+        v["in_world_arrival"] = phase(&[24]);
         v
+    }
+
+    #[test]
+    fn return_confirmation_binds_the_current_instance_and_rejects_unrelated_roles() {
+        let mut v = presentation_json();
+        v["return_requested"] = json!({"scene_updates":[], "entities":[],
+            "events":[{"target":{"capture_id":277},"entity":1,"event":18}]});
+        v["return_confirmation"] = json!({"capture_id":277,"entity":1,"event":33});
+        let logic = GarageLogic::from_json(&v).unwrap();
+        let (mut players, participant) = world();
+        let mut ghosts = BTreeMap::new();
+        assert!(logic.return_confirmation(&players, &ghosts).is_err());
+        logic
+            .produce(Which::Spawn, &mut players, participant, &mut ghosts)
+            .unwrap();
+        let expected = logic
+            .return_confirmation(&players, &ghosts)
+            .unwrap()
+            .unwrap();
+        assert_eq!(expected.target.ghost, ghosts[&277]);
+        assert_eq!(expected.target.entity, 1);
+        assert_eq!(expected.event, 33);
+        for (key, value) in [("capture_id", 291), ("entity", 0), ("event", 0x200_0000)] {
+            let mut invalid = v.clone();
+            invalid["return_confirmation"][key] = json!(value);
+            assert!(GarageLogic::from_json(&invalid).is_err(), "{key}");
+        }
+        players.remove_entities(&[expected.target.ghost]).unwrap();
+        assert!(logic.return_confirmation(&players, &ghosts).is_err());
     }
 
     #[test]
@@ -1322,6 +2009,8 @@ pub(crate) mod tests {
             (Which::WorldSpawn, vec![14]),
             (Which::WorldSettled, vec![21, 20]),
             (Which::FreeRoam, vec![17]),
+            (Which::InWorldTeleport, vec![22, 23]),
+            (Which::InWorldArrival, vec![24]),
         ] {
             let events = logic.events(phase, &players, &ghosts).unwrap();
             assert_eq!(events.iter().map(|e| e.event).collect::<Vec<_>>(), expected);
@@ -1330,7 +2019,14 @@ pub(crate) mod tests {
         assert_eq!(players.objects().snapshot(), before);
         players.remove_entities(&[target]).unwrap();
         assert!(logic.events(Which::WorldReady, &players, &ghosts).is_err());
-        for phase in ["world_ready", "world_spawn", "world_settled", "free_roam"] {
+        for phase in [
+            "world_ready",
+            "world_spawn",
+            "world_settled",
+            "free_roam",
+            "in_world_teleport",
+            "in_world_arrival",
+        ] {
             let mut bad = v.clone();
             bad[phase]["entity_updates"] = json!([{"capture_id":291,"field":3,"bool":false}]);
             assert!(GarageLogic::from_json(&bad).is_err());
@@ -1739,6 +2435,56 @@ pub(crate) mod tests {
         );
     }
 
+    #[test]
+    fn intro_customization_makes_the_final_garage_exit_like_a_normal_one() {
+        let exit = json!({"scene_updates": [], "entities": [
+            {"capture_id": 400, "asset": {"bundle": 4, "type_id": 10, "local_index": 2}, "blueprint": {"scene_content_key": 101},
+             "roles": [{"kind": "root", "bus_count": 1}, {"kind": "channel", "scene_content_key": 101, "scene_serializer": 45}]}],
+            "delete_capture_ids": [319]});
+        let logic = GarageLogic::from_json(&with_exit(exit)).unwrap();
+        let (mut players, participant) = world();
+        let mut ghosts = BTreeMap::new();
+        // The intro holds only its spawn-event targets, never the entry batch.
+        logic
+            .produce_intro_spawn(&mut players, participant, &mut ghosts)
+            .unwrap();
+        assert!(!ghosts.contains_key(&319));
+        assert!(
+            logic
+                .produce(
+                    Which::Exit,
+                    &mut players.clone(),
+                    participant,
+                    &mut ghosts.clone()
+                )
+                .is_err()
+        );
+        let created = logic
+            .intro_customization(&mut players, participant, &mut ghosts)
+            .unwrap();
+        let presentation = ghosts[&319];
+        assert!(created.iter().any(|r| r.id == presentation));
+        // Repeats adopt what exists instead of creating it again.
+        let mut again = ghosts.clone();
+        assert!(
+            logic
+                .intro_customization(&mut players, participant, &mut again)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(again, ghosts);
+        let out = logic
+            .produce(Which::Exit, &mut players, participant, &mut ghosts)
+            .unwrap();
+        assert_eq!(out.deleted, vec![presentation]);
+        assert!(players.objects().get(presentation).is_none());
+        // Participant zero is never a garage owner.
+        assert_eq!(
+            logic.intro_customization(&mut players, 0, &mut BTreeMap::new()),
+            Err(replication::Error::Shape)
+        );
+    }
+
     fn presentation_exit() -> Json {
         json!({"scene_updates": [], "entities": [
             {"capture_id": 400, "asset": {"bundle": 4, "type_id": 10, "local_index": 2}, "blueprint": {"scene_content_key": 101},
@@ -1813,6 +2559,319 @@ pub(crate) mod tests {
         let mut v = base;
         v["arrive"] = deletes(&[277]);
         assert!(GarageLogic::from_json(&v).is_ok());
+    }
+
+    /// The intro's shape of the lifecycle: spawn's event addresses the fade
+    /// control (277), the first drive adds a HUD (330) and return-request
+    /// logic (331), and the return adds the cinematic (332, spawn 295's asset).
+    pub(crate) fn intro_json() -> Json {
+        let mut v = presentation_json();
+        v["content"]["catalogs"][0]["entries"] = json!([[10, 5]]);
+        v["content"]["profiles"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"asset": {"bundle": 4, "type_id": 10, "local_index": 4}, "serializers": ["root", "rpc_reference"]}));
+        let def = |capture: u16, serializer: u16| {
+            json!({"capture_id": capture, "asset": {"bundle": 4, "type_id": 10, "local_index": 4},
+                "blueprint": {"scene_content_key": 101},
+                "roles": [{"kind": "root", "bus_count": 1},
+                          {"kind": "channel", "scene_content_key": 101, "scene_serializer": serializer}]})
+        };
+        let ev = |capture: u16, event: u32| json!({"target": {"capture_id": capture}, "entity": 1, "event": event});
+        let mut cinematic = v["spawn"]["entities"][3].clone();
+        cinematic["capture_id"] = json!(332);
+        v["spawn"]["events"] = json!([ev(277, 2)]);
+        v["arrived"] =
+            json!({"scene_updates": [], "entities": [def(330, 46), def(331, 47)], "events": []});
+        v["free_roam"] = json!({"scene_updates": [], "entities": [],
+            "events": [ev(330, 19), ev(330, 17), ev(330, 12), ev(277, 0)]});
+        v["return_requested"] =
+            json!({"scene_updates": [], "entities": [], "events": [ev(331, 3)]});
+        v["returning"] = json!({"scene_updates": [], "entities": [cinematic],
+            "delete_capture_ids": [330, 331], "events": [ev(277, 1)]});
+        v["returned"] =
+            json!({"scene_updates": [], "entities": [], "delete_capture_ids": [332], "events": []});
+        // Transfer presentation as installed: four logics per relocation, each
+        // its own asset, the last (336) carrying the two bursts; two go at
+        // unblack, one at the arrival, the last with the next drive's retirement.
+        v["content"]["catalogs"][0]["entries"] = json!([[10, 9]]);
+        for local_index in 5..9 {
+            v["content"]["profiles"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"asset": {"bundle": 4, "type_id": 10, "local_index": local_index}, "serializers": ["root", "rpc_reference"]}));
+        }
+        let transfer = |capture: u16, serializer: u16, local_index: u16| {
+            json!({"capture_id": capture, "asset": {"bundle": 4, "type_id": 10, "local_index": local_index},
+                "blueprint": {"scene_content_key": 101},
+                "roles": [{"kind": "root", "bus_count": 2},
+                          {"kind": "channel", "scene_content_key": 101, "scene_serializer": serializer}]})
+        };
+        let burst = |entity: u32, event: u32| json!({"target": {"capture_id": 336}, "entity": entity, "event": event});
+        let transfers = || {
+            json!([
+                transfer(333, 48, 5),
+                transfer(334, 49, 6),
+                transfer(335, 50, 7),
+                transfer(336, 51, 8)
+            ])
+        };
+        // The ordinary exit/arrive cycle owns the same four roles, so every
+        // relocation, crash and return cycle restores the live set.
+        v["exit"] = json!({"scene_updates": [], "entities": transfers(), "events": [ev(277, 10)]});
+        v["arrive"] = json!({"scene_updates": [], "entities": [],
+            "delete_capture_ids": [333, 334], "events": [ev(277, 15)]});
+        v["arrived"]["delete_capture_ids"] = json!([335]);
+        v["returning"]["delete_capture_ids"] = json!([330, 331, 336]);
+        v["in_world_teleport"] = json!({"scene_updates": [], "entities": transfers(),
+            "delete_capture_ids": [336, 331, 330], "events": [ev(277, 1), ev(277, 2)]});
+        v["in_world_arrival"] = json!({"scene_updates": [], "entities": [],
+            "delete_capture_ids": [333, 334], "events": [ev(277, 3)]});
+        v["crashed"] = json!({"scene_updates": [], "entities": [],
+            "delete_capture_ids": [336, 331, 330], "events": []});
+        v["recovered"] = json!({"scene_updates": [],
+            "entities": [transfer(336, 51, 8), def(331, 47), def(330, 46)],
+            "events": [burst(1, 17), burst(1, 15), burst(1, 13), burst(1, 11),
+                       burst(2, 9), burst(2, 7), burst(2, 5), burst(2, 4)]});
+        v
+    }
+
+    #[test]
+    fn intro_spawn_adds_installed_career_start_logic_and_its_events() {
+        let mut v = intro_json();
+        let mut stats = v["recovered"]["entities"][0].clone();
+        stats["capture_id"] = json!(340);
+        v["intro_spawn"] = json!({"scene_updates": [], "entities": [stats],
+            "events": [{"target": {"capture_id": 340}, "entity": 2, "event": 9},
+                       {"target": {"capture_id": 340}, "entity": 1, "event": 17}]});
+        let logic = GarageLogic::from_json(&v).unwrap();
+        assert!(!logic.intro_requires_reputation());
+        let (mut players, participant) = world();
+        let mut ghosts = BTreeMap::new();
+        let spawn = logic
+            .produce_intro_spawn(&mut players, participant, &mut ghosts)
+            .unwrap();
+        // Keep the fade controller dormant; intro startup owns its Black.
+        // Other authored intro events still fire in their original order.
+        assert_eq!(ghosts.keys().copied().collect::<Vec<_>>(), [277, 340]);
+        assert_eq!(
+            spawn.records.iter().map(|r| r.id).collect::<Vec<_>>(),
+            [ghosts[&277], ghosts[&340]]
+        );
+        assert_eq!(
+            spawn
+                .events
+                .iter()
+                .map(|f| (f.target.ghost, f.target.entity, f.event))
+                .collect::<Vec<_>>(),
+            [(ghosts[&340], 2, 9), (ghosts[&340], 1, 17)]
+        );
+        // A repeated spawn refuses instead of duplicating.
+        assert!(
+            logic
+                .produce_intro_spawn(&mut players, participant, &mut ghosts)
+                .is_err()
+        );
+        // The intro batch may not redefine a spawn event target, update or
+        // delete anything, or fire scene-wide events.
+        let mut bad = v.clone();
+        bad["intro_spawn"]["entities"][0]["capture_id"] = json!(277);
+        bad["intro_spawn"]["events"] = json!([]);
+        assert!(GarageLogic::from_json(&bad).is_err());
+        let mut bad = v.clone();
+        bad["intro_spawn"]["delete_capture_ids"] = json!([277]);
+        assert!(GarageLogic::from_json(&bad).is_err());
+        let mut bad = v.clone();
+        bad["intro_spawn"]["events"] =
+            json!([{"target": {"scene_content_key": 101}, "entity": 1, "event": 0}]);
+        assert!(GarageLogic::from_json(&bad).is_err());
+        let mut bad = v;
+        bad["intro_spawn"]["events"] =
+            json!([{"target": {"capture_id": 277}, "entity": 1, "event": 0}]);
+        assert!(GarageLogic::from_json(&bad).is_err());
+    }
+
+    #[test]
+    fn intro_handoff_creates_its_logic_once_and_only_as_plain_creations() {
+        let mut v = intro_json();
+        let mut root = v["recovered"]["entities"][0].clone();
+        root["capture_id"] = json!(341);
+        v["intro_handoff"] = json!({"scene_updates": [], "entities": [root]});
+        let logic = GarageLogic::from_json(&v).unwrap();
+        let (mut players, participant) = world();
+        let mut ghosts = BTreeMap::new();
+        logic
+            .produce_intro_spawn(&mut players, participant, &mut ghosts)
+            .unwrap();
+        let created = logic
+            .produce_intro_handoff(&mut players, participant, &mut ghosts)
+            .unwrap();
+        assert_eq!(created.len(), 1);
+        assert_eq!(ghosts.get(&341), Some(&created[0].id));
+        // A repeated handoff leaves the live logic alone.
+        assert!(
+            logic
+                .produce_intro_handoff(&mut players, participant, &mut ghosts)
+                .unwrap()
+                .is_empty()
+        );
+        for (key, value) in [
+            ("delete_capture_ids", json!([341])),
+            (
+                "events",
+                json!([{"target": {"capture_id": 341}, "entity": 1, "event": 0}]),
+            ),
+        ] {
+            let mut bad = v.clone();
+            bad["intro_handoff"][key] = value;
+            assert!(GarageLogic::from_json(&bad).is_err(), "{key}");
+        }
+        let mut bad = v;
+        bad["intro_handoff"]["entities"][0]["capture_id"] = json!(277);
+        assert!(GarageLogic::from_json(&bad).is_err());
+    }
+
+    #[test]
+    fn intro_batches_create_only_addressed_logic_and_skip_absent_targets() {
+        let logic = GarageLogic::from_json(&intro_json()).unwrap();
+        let (mut players, participant) = world();
+        let mut ghosts = BTreeMap::new();
+        let objects = players.objects().snapshot().len();
+        let spawn = logic
+            .produce_intro_spawn(&mut players, participant, &mut ghosts)
+            .unwrap();
+        // Only the fade control its event addresses: no garage logic.
+        assert_eq!(ghosts.keys().copied().collect::<Vec<_>>(), [277]);
+        assert_eq!(spawn.records.len(), 1);
+        assert_eq!(players.objects().snapshot().len(), objects + 1);
+        assert!(spawn.events.is_empty());
+        // Ordinary spawn retains its Black; only intro membership defers it.
+        assert_eq!(
+            logic
+                .present_events(Which::Spawn, &players, &ghosts)
+                .unwrap()
+                .iter()
+                .map(|f| (f.target.ghost, f.event))
+                .collect::<Vec<_>>(),
+            [(ghosts[&277], 2)]
+        );
+        assert_eq!(
+            logic.produce_intro_spawn(&mut players, participant, &mut ghosts),
+            Err(replication::Error::DuplicateObject)
+        );
+        assert_eq!(logic.fade_capture(), Some(277));
+        let fade = ghosts[&277];
+        let arrived = logic
+            .produce_present(
+                Which::Arrived,
+                &mut players,
+                participant,
+                &mut ghosts,
+                Part::Creations,
+            )
+            .unwrap();
+        assert_eq!(arrived.records.len(), 2);
+        assert!(arrived.deleted.is_empty() && arrived.events.is_empty());
+        let (hud, request) = (ghosts[&330], ghosts[&331]);
+        let roam = logic
+            .present_events(Which::FreeRoam, &players, &ghosts)
+            .unwrap();
+        assert_eq!(
+            roam.iter()
+                .map(|f| (f.target.ghost, f.event))
+                .collect::<Vec<_>>(),
+            [(hud, 19), (hud, 17), (hud, 12), (fade, 0)]
+        );
+        let requested = logic
+            .produce_present(
+                Which::ReturnRequested,
+                &mut players,
+                participant,
+                &mut ghosts,
+                Part::All,
+            )
+            .unwrap();
+        assert_eq!(
+            requested
+                .events
+                .iter()
+                .map(|f| (f.target.ghost, f.event))
+                .collect::<Vec<_>>(),
+            [(request, 3)]
+        );
+        let before = players.objects().snapshot().len();
+        let returning = logic
+            .produce_present(
+                Which::Returning,
+                &mut players,
+                participant,
+                &mut ghosts,
+                Part::All,
+            )
+            .unwrap();
+        let mut deleted = returning.deleted.clone();
+        deleted.sort();
+        assert_eq!(deleted, [hud, request]);
+        // The cinematic is created with the return.
+        assert_eq!(returning.records.len(), 1);
+        let cinematic = ghosts[&332];
+        assert_eq!(players.objects().snapshot().len(), before - 1);
+        assert_eq!(
+            returning
+                .events
+                .iter()
+                .map(|f| (f.target.ghost, f.event))
+                .collect::<Vec<_>>(),
+            [(fade, 1)]
+        );
+        let returned = logic
+            .produce_present(
+                Which::Returned,
+                &mut players,
+                participant,
+                &mut ghosts,
+                Part::Deletions,
+            )
+            .unwrap();
+        assert_eq!(returned.deleted, [cinematic]);
+        assert!(returned.records.is_empty() && !ghosts.contains_key(&332));
+        assert!(players.objects().get(cinematic).is_none());
+        // Without the logic nothing is fired and nothing fails.
+        let empty = BTreeMap::new();
+        assert!(
+            logic
+                .present_events(Which::FreeRoam, &players, &empty)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(logic.fade(&players, &empty, &[2]).unwrap().is_empty());
+        assert_eq!(
+            logic
+                .fade(&players, &ghosts, &[2, 3])
+                .unwrap()
+                .iter()
+                .map(|f| (f.target, f.event))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    EntityRef {
+                        ghost: fade,
+                        entity: 1
+                    },
+                    2
+                ),
+                (
+                    EntityRef {
+                        ghost: fade,
+                        entity: 1
+                    },
+                    3
+                )
+            ]
+        );
+        // Content without the free-roam ViewWorld has no fade logic.
+        let plain = GarageLogic::from_json(&presentation_json()).unwrap();
+        assert_eq!(plain.fade_capture(), None);
     }
 }
 

@@ -59,6 +59,97 @@ fn request(sequence: u32) -> Vec<u8> {
     .to_vec()
 }
 
+#[tokio::test]
+async fn world_challenge_reads_use_the_bound_account_worker_without_rewards_or_replies() {
+    let repo = Arc::new(MemoryRepository::default());
+    let service = Service::new(repo.clone(), catalog());
+    let profile = service.bind(account(3));
+    profile.current_challenges(Timestamp(1)).await.unwrap();
+    let before = repo.snapshot(account(3)).unwrap();
+    let challenges = Arc::new(
+        nfs_services::challenges::Catalog::from_json(&serde_json::json!({
+            "version":1,"build_sha256":nfs_services::SUPPORTED_BUILD_SHA256,
+            "day_id":7,"monthly_start":-11,"awards":[],"ranks":[],"challenges":[]
+        }))
+        .unwrap(),
+    );
+    let mut listener = PlayerListener::new(123).with_challenges(Some(challenges));
+    let mut jobs = Exchanges::new(Some(profile), 7);
+    for sequence in 0..2 {
+        let wire = nfs_world::frame::Builder::new()
+            .messages(
+                None,
+                vec![nfs_world::frame::Group {
+                    channel: 0,
+                    sequence: Some(sequence),
+                    messages: vec![nfs_world::frame::Message::ChallengePlayerSync(
+                        nfs_world::frame::ChallengePlayerSync {
+                            persona: 123,
+                            monthly_start: (-11i64) as u64,
+                            day_id: 7,
+                            challenge_ids: vec![],
+                        },
+                    )],
+                }],
+            )
+            .build()
+            .unwrap();
+        assert!(listener.frame(Queued {
+            advertised: None,
+            frame: sequence.into(),
+            data: wire.span()
+        }));
+        assert!(listener.has_challenge_request());
+        jobs.start(&mut listener, 0, Timestamp(2));
+        assert!(jobs.working());
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                jobs.completed(&mut listener)
+            )
+            .await
+            .unwrap()
+        );
+        assert!(!listener.has_challenge_request());
+        assert!(!jobs.working());
+        assert!(jobs.pending.iter().all(Option::is_none));
+        assert!(jobs.notifications.is_empty());
+        assert_eq!(repo.snapshot(account(3)).unwrap(), before);
+    }
+    assert_eq!(repo.snapshot(account(4)), Err(nfs_storage::Error::Absent));
+
+    // Catalog presence cannot substitute for an account service. Keep the
+    // accepted read pending and stop the exchange instead of reporting success.
+    let wire = nfs_world::frame::Builder::new()
+        .messages(
+            None,
+            vec![nfs_world::frame::Group {
+                channel: 0,
+                sequence: Some(2),
+                messages: vec![nfs_world::frame::Message::ChallengePlayerSync(
+                    nfs_world::frame::ChallengePlayerSync {
+                        persona: 123,
+                        monthly_start: (-11i64) as u64,
+                        day_id: 7,
+                        challenge_ids: vec![],
+                    },
+                )],
+            }],
+        )
+        .build()
+        .unwrap();
+    assert!(listener.frame(Queued {
+        advertised: None,
+        frame: 2,
+        data: wire.span()
+    }));
+    let mut missing = Exchanges::new(None, 8);
+    missing.start(&mut listener, 0, Timestamp(3));
+    assert!(listener.has_challenge_request());
+    assert!(!missing.working());
+    assert!(missing.failed);
+}
+
 #[test]
 fn unsupported_file_and_items_warn_without_payloads_or_storage_access() {
     let repo = Arc::new(MemoryRepository::default());
@@ -570,6 +661,39 @@ fn credit_announces_each_new_record_then_each_changed_root() {
         })
         .collect();
     assert_eq!(added, (10..30).collect::<Vec<_>>());
+}
+
+#[test]
+fn a_story_award_announces_its_whole_item_tree_in_one_change_notification() {
+    let bindings = catalog();
+    let bindings = bindings.bindings();
+    let before = items::Collection {
+        roots: vec![1, 2],
+        items: [(1, record(1, items::OWNED)), (2, record(2, items::OWNED))].into(),
+    };
+    assert_eq!(
+        award_notifications(2, &before, &before, bindings),
+        Ok((vec![], 0))
+    );
+    // E1026: the starter car and its parts arrive in one notification, where a
+    // level-up credit of as many records would use thirteen.
+    let mut after = before.clone();
+    after.items.get_mut(&1).unwrap().buy_price = 1;
+    for id in 10..59 {
+        after.roots.push(id);
+        after.items.insert(id, record(id, items::OWNED));
+    }
+    let (sent, unannounced) = award_notifications(2, &before, &after, bindings).unwrap();
+    assert_eq!(unannounced, 0);
+    assert_eq!(sent.len(), 2);
+    let change = items::ChangeNotification::decode(&sent[0], bindings).unwrap();
+    assert_eq!(change.player_index, 2);
+    assert_eq!(change.added.roots, (10..59).collect::<Vec<_>>());
+    assert_eq!(change.removed, items::Collection::default());
+    let update = items::UpdateNotification::decode(&sent[1], bindings).unwrap();
+    assert_eq!(update.items, after.for_roots(vec![1]).unwrap());
+    let (credit, _) = credit_notifications(2, &before, &after, bindings).unwrap();
+    assert_eq!(credit.len(), 14);
 }
 
 #[tokio::test]

@@ -27,6 +27,8 @@ nfs-afterhours profile [--account-id <ID>]  show a saved driver's profile; chang
                        [--game-dir <DIR>]   (car names come from the installed game,
                        [--language <LOCALE>] read-only, in the game's locale)
 nfs-afterhours profile --list               list every saved driver in the data directory
+nfs-afterhours story [--account-id <ID>]    show saved intro objectives and completion provenance
+nfs-afterhours story --preview <CHECKPOINT>  preview the server-owned edit, without changing the save
 nfs-afterhours car-images [--game-dir <DIR>]  decode car pictures from the game into the data folder
 nfs-afterhours map-images [--game-dir <DIR>]  decode the world map from the game into the data folder
 nfs-afterhours sessions [--limit N] [--id <ID>]  summarize session folders and logs; change nothing
@@ -36,6 +38,32 @@ nfs-afterhours version                      program, JSON record versions and ca
 nfs-afterhours schema <RECORD>              print the JSON Schema of one --json record
 nfs-afterhours recover --account-id <ID>    restore account.json for an existing database
 ```
+
+New accounts start at the beginning of the prologue with the installed game's
+standard resources and no owned starter car. The story grants the chosen car.
+Setup reuses existing accounts without resetting their progress or resources.
+
+Story editing requires newly prepared installation content. The opening checkpoint
+replays the prologue from its beginning; `after-intro` skips to the ordinary garage.
+Middle objectives remain visible but unselectable. A skip without an owned car
+lists the three authored first-car definitions. Preview again with `--starter`,
+then apply that same choice, generation and plan hash. The car, its authored parts,
+selection and story state commit together after a verified save backup. Replaying
+keeps earned cars, tuning, cash and REP; the first-car scene reuses the previously
+earned car even if another preview is selected. Legacy saves reuse their existing
+primary car. A missing earned car refuses the edit rather than granting it again.
+
+For a fresh career, add `--restart` to both the preview and apply at the opening
+checkpoint. This explicit action resets all story progress (including the main
+career), owned cars and parts, money, REP, unlocks, messages, challenges, awards
+and race records to the same defaults as a new account. Driver identity,
+entitlements, settings and user-created media remain. It works even when the
+story is already at its opening. `story-restart` advertises support; the preview
+proof binds that intent and the current initialization content. Omitting the flag
+keeps the ordinary reward-preserving checkpoint behavior described above.
+The complete backup is verified before one atomic reset; a failed transaction
+leaves the old career intact. Storage generations and session identifiers never
+rewind, and repeating the exact successful command does not reset it again.
 
 Every subcommand accepts `--data-dir <DIR>` and `--json`. `--help` on any
 subcommand explains it. For installation requirements and the full
@@ -68,6 +96,9 @@ field and a JSON Schema (draft 7) generated from the Rust type that prints it:
 | `session-file` | the session API's `/v1/sessions/<id>/files/<name>`: the start of one session file |
 | `game-endpoints` | the session API's `/v1/game`: where a game reaches the server |
 | `profile`, `profile-list` | `profile --json` (also the session API's `/v1/profile`), `profile --list --json` |
+| `story` | `story --json` and `GET /v1/story`: saved intro position, authored checkpoint order and played, edited or inherited completion |
+| `story-preview` | `story --preview <checkpoint> [--starter <definition>] --json`: exact account, save generation, target, plan hash, objective changes, first-car choices and availability |
+| `story-apply` | `story --apply <checkpoint> --expected-generation <generation> --plan-id <hash> [--starter <definition>] --json`: committed generation, selected first car and verified backup receipt |
 | `car-images` | `car-images --json`: the image set, counts per size, formats and unresolved images |
 | `map-images` | `map-images --json`: the tile set, its detail levels, file naming, the world box it covers and any missing tiles |
 | `sessions` | `sessions --json` |

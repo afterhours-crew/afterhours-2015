@@ -10,6 +10,7 @@ extern crate self as nfs_server;
 pub mod ai_settings;
 pub mod auxiliary;
 pub mod bank_account;
+pub mod chapter_notifications;
 pub mod cli;
 pub mod client_state;
 pub mod content;
@@ -17,6 +18,9 @@ pub mod control;
 pub mod customization_timer;
 pub mod deployment;
 mod diagnostics;
+pub mod driving_timer;
+pub mod event_ai;
+pub mod event_logic;
 pub mod fresh_account;
 pub mod garage_logic;
 pub mod glass;
@@ -29,10 +33,12 @@ pub mod map_feed;
 pub mod matchmaking_session;
 pub mod matchmaking_status;
 pub mod menu_news;
+pub mod messages;
 pub mod net;
 pub mod persistent;
 pub mod prepare_content;
 pub mod progression;
+pub mod prologue;
 pub mod recommendations;
 pub mod record;
 pub mod reputation_account;
@@ -46,8 +52,10 @@ pub mod shared_wraps;
 pub mod startup;
 pub mod startup_branch;
 pub mod startup_profile;
+pub mod story_account;
 pub mod telemetry;
 pub mod traffic_content;
+pub mod tutorials;
 pub mod user_lookup;
 pub mod user_settings;
 pub mod vehicle_content;
@@ -105,3 +113,5 @@ pub fn user_session_failure(error: nfs_services::user_session::Error) -> Failure
 pub fn support_failure(error: Failure) -> Failure {
     error
 }
+
+pub mod prepared_content;

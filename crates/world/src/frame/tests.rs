@@ -4,8 +4,353 @@
 
 use super::*;
 
+#[test]
+fn client_movement_keeps_clock_component_boundaries_and_neighboring_messages() {
+    let mut header = BitWriter::new();
+    header.put(0x12345678, 32).put(0x90abcdef, 32).put(47, 32);
+    let mut a = BitWriter::new();
+    a.put(0x1a73, 13);
+    let mut b = BitWriter::new();
+    b.put(5, 3);
+    let reports = Movement {
+        header: Some(header.span()),
+        records: vec![
+            MovementRecord {
+                id: 700,
+                component: 0,
+                data: a.span(),
+            },
+            MovementRecord {
+                id: 65535,
+                component: 15,
+                data: b.span(),
+            },
+        ],
+    };
+    let encoded = Builder::new()
+        .messages(
+            None,
+            vec![Group {
+                channel: 1,
+                sequence: None,
+                messages: vec![Message::State(1)],
+            }],
+        )
+        .client_movement(reports.clone())
+        .build()
+        .unwrap();
+    let parsed = parse(encoded.span(), Direction::FromClient).unwrap();
+    assert!(parsed.complete);
+    assert_eq!(parsed.mask, 6);
+    assert_eq!(
+        parsed.messages.unwrap().groups[0].messages,
+        vec![Message::State(1)]
+    );
+    let decoded = parsed.movement.unwrap();
+    let decoded_header = decoded.header.unwrap();
+    assert_eq!(decoded_header.len(), 96);
+    for offset in [0, 32, 64] {
+        assert_eq!(
+            decoded_header.read_u32(offset, 32),
+            header.span().read_u32(offset, 32)
+        );
+    }
+    assert_eq!(decoded.records.len(), reports.records.len());
+    for (actual, expected) in decoded.records.iter().zip(&reports.records) {
+        assert_eq!(
+            (actual.id, actual.component, actual.data.len()),
+            (expected.id, expected.component, expected.data.len())
+        );
+        assert_eq!(
+            actual.data.read_u32(0, actual.data.len() as u8),
+            expected.data.read_u32(0, expected.data.len() as u8)
+        );
+    }
+    assert!(
+        parse(
+            encoded.span().slice(0, encoded.len() - 8).unwrap(),
+            Direction::FromClient
+        )
+        .is_err()
+    );
+
+    let alone = Builder::new().client_movement(reports).build().unwrap();
+    assert_eq!(bits(&alone, 6, 32), 0x12345678);
+    assert_eq!(bits(&alone, 70, 32), 47);
+    assert_eq!(bits(&alone, 102, 6), 2);
+    assert_eq!(bits(&alone, 108, 16), 700);
+    assert_eq!(bits(&alone, 128, 16), 13);
+    assert_eq!(bits(&alone, 144, 13), 0x1a73);
+    assert_eq!(bits(&alone, 157, 16), 65535);
+}
+
+#[test]
+fn client_movement_rejects_unrepresentable_lengths_and_selectors() {
+    let mut header = BitWriter::new();
+    header.put_bytes(&[0; 12]);
+    let mut body = BitWriter::new();
+    body.put_bytes(&[0; 8192]);
+    let record = MovementRecord {
+        id: 1,
+        component: 0,
+        data: body.span().slice(0, 1).unwrap(),
+    };
+    let build = |header, records| {
+        Builder::new()
+            .client_movement(Movement { header, records })
+            .build()
+    };
+    assert!(build(None, vec![]).is_err());
+    for length in [0, 95] {
+        assert!(build(Some(header.span().slice(0, length).unwrap()), vec![]).is_err());
+    }
+    assert!(build(Some(header.span()), vec![record.clone(); 64]).is_err());
+    assert!(
+        build(
+            Some(header.span()),
+            vec![MovementRecord {
+                component: 16,
+                ..record.clone()
+            }]
+        )
+        .is_err()
+    );
+    assert!(
+        build(
+            Some(header.span()),
+            vec![MovementRecord {
+                data: body.span(),
+                ..record.clone()
+            }]
+        )
+        .is_err()
+    );
+    let full = build(Some(header.span()), vec![record; 63]).unwrap();
+    assert_eq!(
+        parse(full.span(), Direction::FromClient)
+            .unwrap()
+            .movement
+            .unwrap()
+            .records
+            .len(),
+        63
+    );
+}
+
+#[test]
+fn challenge_progress_preserves_native_words_flags_and_following_message() {
+    let expected = ChallengeProgress {
+        entries: vec![
+            ChallengeProgressEntry {
+                words: [0x80000000, 0xffffffff, 0x7fc01234],
+                flag: true,
+            },
+            ChallengeProgressEntry {
+                words: [9, 0, 42],
+                flag: false,
+            },
+        ],
+        trailing_word: 0xabcdef01,
+    };
+    // Independently written schema, including the final word after the list.
+    let mut wire = BitWriter::new();
+    wire.put(2, 32)
+        .put(0x80000000, 32)
+        .put(0xffffffff, 32)
+        .put(0x7fc01234, 32)
+        .put(1, 1);
+    wire.put(9, 32)
+        .put(0, 32)
+        .put(42, 32)
+        .put(0, 1)
+        .put(0xabcdef01, 32);
+    let mut reader = Reader {
+        span: wire.span(),
+        pos: 0,
+    };
+    assert_eq!(
+        message(&mut reader, EX_CHALLENGE_PROGRESS).unwrap(),
+        Message::ChallengeProgress(expected.clone())
+    );
+    assert_eq!(reader.pos, 258);
+    for end in 0..wire.len() {
+        let mut reader = Reader {
+            span: wire.span().slice(0, end).unwrap(),
+            pos: 0,
+        };
+        assert_eq!(
+            message(&mut reader, EX_CHALLENGE_PROGRESS),
+            Err(Error::Truncated)
+        );
+    }
+    let mut encoded = BitWriter::new();
+    Builder::put_message(&mut encoded, &Message::ChallengeProgress(expected.clone())).unwrap();
+    let mut whole = BitWriter::new();
+    whole.put(76, 7).put_span(wire.span());
+    assert_eq!(encoded, whole);
+    let messages = vec![Message::ChallengeProgress(expected), Message::Sentinel(-7)];
+    let frame = Builder::new()
+        .messages(
+            None,
+            vec![Group {
+                channel: 0,
+                sequence: Some(0),
+                messages: messages.clone(),
+            }],
+        )
+        .build()
+        .unwrap();
+    let decoded = parse(frame.span(), Direction::FromHost).unwrap();
+    assert!(decoded.complete);
+    assert_eq!(decoded.messages.unwrap().groups[0].messages, messages);
+}
+
+#[test]
+fn challenge_progress_empty_and_count_bounds_are_explicit() {
+    let empty = Message::ChallengeProgress(ChallengeProgress {
+        entries: vec![],
+        trailing_word: 17,
+    });
+    let mut wire = BitWriter::new();
+    wire.put(0, 32).put(17, 32);
+    assert_eq!(
+        assembled_message(EX_CHALLENGE_PROGRESS, wire.bytes()).unwrap(),
+        empty
+    );
+    wire.put(0, 8);
+    assert_eq!(
+        assembled_message(EX_CHALLENGE_PROGRESS, wire.bytes()),
+        Err(Error::Shape)
+    );
+    for count in [MAX_CHALLENGE_PROGRESS_ENTRIES as u32 + 1, u32::MAX] {
+        let mut wire = BitWriter::new();
+        wire.put(u64::from(count), 32);
+        let mut reader = Reader {
+            span: wire.span(),
+            pos: 0,
+        };
+        assert_eq!(
+            message(&mut reader, EX_CHALLENGE_PROGRESS),
+            Err(Error::Bound)
+        );
+    }
+    let entry = ChallengeProgressEntry {
+        words: [0; 3],
+        flag: false,
+    };
+    let oversized = Message::ChallengeProgress(ChallengeProgress {
+        entries: vec![entry.clone(); MAX_CHALLENGE_PROGRESS_ENTRIES + 1],
+        trailing_word: 0,
+    });
+    assert_eq!(
+        Builder::put_message(&mut BitWriter::new(), &oversized),
+        Err(Error::Bound)
+    );
+    let maximum = Message::ChallengeProgress(ChallengeProgress {
+        entries: vec![entry; MAX_CHALLENGE_PROGRESS_ENTRIES],
+        trailing_word: 7,
+    });
+    let mut wire = BitWriter::new();
+    Builder::put_message(&mut wire, &maximum).unwrap();
+    let mut reader = Reader {
+        span: wire.span().after(7).unwrap(),
+        pos: 0,
+    };
+    assert_eq!(
+        message(&mut reader, EX_CHALLENGE_PROGRESS).unwrap(),
+        maximum
+    );
+    assert_eq!(reader.rest().unwrap().len(), 0);
+}
+
 fn bits(w: &BitWriter, offset: usize, width: u8) -> u32 {
     w.span().read_u32(offset, width).unwrap()
+}
+
+#[test]
+fn file_start_and_finish_after_object_records_are_resumed_atomically() {
+    use crate::{files::Record, replication::section::Bindings};
+    let start = Record::Start {
+        name: b"Items".to_vec(),
+        bytes: 256,
+    };
+    let mut w = BitWriter::new();
+    w.put(0b11_1000, 6)
+        .put(0, 1)
+        .put(0, 1)
+        .put(1, 13)
+        .put(0, 1)
+        .put(1, 13)
+        .put(1, 1)
+        .put(4, 5)
+        .put(0, 1);
+    let section_bits = w.len() - 6;
+    w.put_span(start.encode(None).unwrap().span());
+    let before_finish = w.len();
+    w.put_span(Record::Finish.encode(None).unwrap().span());
+    let end = w.len();
+    w.align();
+    let mut frame = parse(w.span(), Direction::FromClient).unwrap();
+    assert!(!frame.complete && frame.files.is_empty());
+    let decoded = Bindings::from_client(1)
+        .unwrap()
+        .decode(w.span().after(6).unwrap())
+        .unwrap();
+    assert_eq!(decoded.bits, section_bits);
+    assert_eq!(
+        frame
+            .finish_ghost(w.span(), decoded.bits, [None; 2])
+            .unwrap(),
+        end
+    );
+    assert!(frame.complete);
+    assert_eq!(frame.files, [(4, start), (5, Record::Finish)]);
+    let short = BitSpan::new(w.bytes(), 0, before_finish + 1).unwrap();
+    let mut incomplete = parse(short, Direction::FromClient).unwrap();
+    assert!(
+        incomplete
+            .finish_ghost(short, decoded.bits, [None; 2])
+            .is_err()
+    );
+    assert!(!incomplete.complete && incomplete.files.is_empty());
+    w.put(0, 8);
+    let mut extra = parse(w.span(), Direction::FromClient).unwrap();
+    assert_eq!(
+        extra.finish_ghost(w.span(), decoded.bits, [None; 2]),
+        Err(Error::Shape)
+    );
+    assert!(extra.files.is_empty());
+}
+
+#[test]
+fn file_blocks_after_ghost_require_the_previously_observed_start() {
+    use crate::files::Record;
+    let mut w = BitWriter::new();
+    w.put(0b01_1000, 6)
+        .put(0, 1)
+        .put(0, 1)
+        .put(1, 13)
+        .put(0, 1)
+        .put(1, 13)
+        .put(0, 1)
+        .put(0, 1);
+    let section_bits = w.len() - 6;
+    let block = Record::Blocks {
+        first: 0,
+        blocks: vec![vec![0x5a; 128]],
+    };
+    w.put_span(block.encode(Some(256)).unwrap().span());
+    w.align();
+    let mut frame = parse(w.span(), Direction::FromClient).unwrap();
+    assert_eq!(
+        frame.finish_ghost(w.span(), section_bits, [None; 2]),
+        Err(Error::File(crate::files::Error::MissingStart))
+    );
+    assert!(frame.files.is_empty());
+    frame
+        .finish_ghost(w.span(), section_bits, [Some(256), None])
+        .unwrap();
+    assert_eq!(frame.files, [(4, block)]);
 }
 
 #[test]
@@ -490,5 +835,110 @@ fn host_movement_grants_build_in_the_official_layout_and_parse() {
     assert_eq!(
         Builder::new().movement(many).build().err(),
         Some(Error::Bound)
+    );
+}
+
+#[test]
+fn speed_wall_sync_has_its_native_bounded_layout() {
+    // Independently packed: value 0x0102_0304_0506_0708, count 2, then two
+    // (u32, f32, f32) entries.
+    let mut w = BitWriter::new();
+    w.put(0x0102_0304, 32).put(0x0506_0708, 32).put(2, 32);
+    for (id, a, b) in [(1_761_118_161u32, 117_128f32, 22_087f32), (7, 0., 1.5)] {
+        w.put(u64::from(id), 32)
+            .put(u64::from(a.to_bits()), 32)
+            .put(u64::from(b.to_bits()), 32);
+    }
+    let bytes = w.bytes().to_vec();
+    assert_eq!(bytes.len() * 8, 64 + 32 + 2 * 96);
+    let Ok(Message::Opaque { index, body }) = assembled_message(EX_SPEED_WALLS_TO_SERVER, &bytes)
+    else {
+        panic!("decoded")
+    };
+    assert_eq!(
+        (index, body.len()),
+        (EX_SPEED_WALLS_TO_SERVER, 64 + 32 + 2 * 96)
+    );
+    // A truncated entry, trailing whole bytes and an oversized count are refused.
+    assert_eq!(
+        assembled_message(EX_SPEED_WALLS_TO_SERVER, &bytes[..bytes.len() - 1]),
+        Err(Error::Truncated)
+    );
+    let mut longer = bytes.clone();
+    longer.push(0);
+    assert_eq!(
+        assembled_message(EX_SPEED_WALLS_TO_SERVER, &longer),
+        Err(Error::Shape)
+    );
+    let mut huge = BitWriter::new();
+    huge.put(0, 32)
+        .put(0, 32)
+        .put((MAX_SPEED_WALL_ENTRIES + 1) as u64, 32);
+    assert_eq!(
+        assembled_message(EX_SPEED_WALLS_TO_SERVER, huge.bytes()),
+        Err(Error::Bound)
+    );
+}
+
+#[test]
+fn recommendations_sync_entries_have_their_native_layout() {
+    // Value 9, count 1, then (u32, f32, u32, u64, Boolean, Boolean); 2 pad bits.
+    let mut w = BitWriter::new();
+    w.put(9, 32).put(0, 32).put(1, 32);
+    w.put(5, 32).put(u64::from(1.5f32.to_bits()), 32).put(3, 32);
+    w.put(7, 32).put(0, 32).put(1, 1).put(0, 1);
+    let bytes = w.bytes().to_vec();
+    let Ok(Message::RecommendationSync(sync)) = assembled_message(89, &bytes) else {
+        panic!("decoded")
+    };
+    assert_eq!(sync.persona, 9);
+    assert_eq!(
+        sync.entries,
+        vec![RecommendationEntry {
+            word: 5,
+            value_bits: 1.5f32.to_bits(),
+            key: 3,
+            wide_word: 7,
+            flags: [true, false],
+        }]
+    );
+    assert_eq!(
+        assembled_message(89, &bytes[..bytes.len() - 2]),
+        Err(Error::Truncated)
+    );
+}
+
+#[test]
+fn load_reports_require_the_entire_declared_list_before_proving_readiness() {
+    let mut valid = BitWriter::new();
+    valid.put(1, 32).put(2, 32).put(175, 16).put(511, 16);
+    assert_eq!(sublevel_report_ids(valid.span()), [175, 511]);
+    for count in [2, u32::MAX] {
+        let mut truncated = BitWriter::new();
+        truncated.put(1, 32).put(count.into(), 32).put(175, 16);
+        assert!(sublevel_report_ids(truncated.span()).is_empty());
+    }
+    assert!(sublevel_report_ids(BitWriter::new().span()).is_empty());
+}
+
+#[test]
+fn decoded_handler_boundary_distinguishes_padding_from_unparsed_bytes() {
+    let w = Builder::new()
+        .movement(vec![(293, vec![0])])
+        .build()
+        .unwrap();
+    let decoded = parse(w.span(), Direction::FromHost).unwrap();
+    // Mask 6, count 8, id 16, selector count 4 and one selector 4.
+    assert_eq!(decoded.consumed_bits, Some(38));
+    assert_eq!(w.len() - decoded.consumed_bits.unwrap(), 2);
+    let mut extended = w.clone();
+    extended.put(0, 8);
+    let parsed = parse(extended.span(), Direction::FromHost).unwrap();
+    assert_eq!(extended.len() - parsed.consumed_bits.unwrap(), 10);
+    assert_eq!(
+        parse_prefix(w.span(), Direction::FromHost)
+            .unwrap()
+            .consumed_bits,
+        None
     );
 }

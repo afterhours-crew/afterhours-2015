@@ -6,6 +6,7 @@ use super::players::{
     AwardRequest, Credited, EquipmentRequest, GarageOperation, GarageRequest, PlayerListener,
 };
 mod garage;
+pub(super) mod story;
 use crate::inventory;
 use nfs_storage::{AccountId, InventoryRepository, Timestamp};
 use nfs_world::{
@@ -35,9 +36,39 @@ fn credit_notifications(
     after: &nfs_world::items::Collection,
     catalog: &nfs_world::items::Catalog,
 ) -> Result<(Vec<Vec<u8>>, usize), nfs_world::items::Error> {
+    let added = after.changes_since(before)?.added.len();
+    notifications_with(
+        player_index,
+        before,
+        after,
+        catalog,
+        added.div_ceil(MAX_SEPARATE).max(1),
+    )
+}
+
+/// Notifications for a story award: every new record in one change
+/// notification. The official career start sent the starter car's complete
+/// item tree as a single 3,926-byte Items change notification, together with
+/// the car's creation and before the selection callback (E1026 497.299 s,
+/// E1249); changed roots keep their own update notifications.
+fn award_notifications(
+    player_index: u32,
+    before: &nfs_world::items::Collection,
+    after: &nfs_world::items::Collection,
+    catalog: &nfs_world::items::Catalog,
+) -> Result<(Vec<Vec<u8>>, usize), nfs_world::items::Error> {
+    notifications_with(player_index, before, after, catalog, usize::MAX)
+}
+
+fn notifications_with(
+    player_index: u32,
+    before: &nfs_world::items::Collection,
+    after: &nfs_world::items::Collection,
+    catalog: &nfs_world::items::Catalog,
+    per: usize,
+) -> Result<(Vec<Vec<u8>>, usize), nfs_world::items::Error> {
     let changes = after.changes_since(before)?;
     let mut notifications = Vec::new();
-    let per = changes.added.len().div_ceil(MAX_SEPARATE).max(1);
     for roots in changes.added.chunks(per) {
         notifications.push(
             nfs_world::items::ChangeNotification {
@@ -356,6 +387,14 @@ impl Profile {
         nfs_services::awards::Current::from_snapshot(&snapshot, loaded, thresholds)
             .map_err(|_| crate::Failure::ProfileConfig)
     }
+    pub async fn current_speedwall(
+        &self,
+        now: Timestamp,
+    ) -> Result<nfs_services::speedwall::Current, crate::Failure> {
+        let (snapshot, _) = self.current_account(now, false).await?;
+        nfs_services::speedwall::Current::from_snapshot(self.account, &snapshot)
+            .map_err(|_| crate::Failure::ProfileConfig)
+    }
     pub async fn current_challenges(
         &self,
         now: Timestamp,
@@ -455,6 +494,7 @@ impl Profile {
         let batch_id = request.batch_id;
         let thresholds = request.thresholds.clone();
         let player_index = request.player_index;
+        let event = request.event.clone();
         timeout(JOB_TIMEOUT, async move {
             let permit = service
                 .workers
@@ -484,9 +524,23 @@ impl Profile {
                 };
                 let before = inventory::collection(&snapshot, service.catalog.bindings())
                     .map_err(Error::Inventory)?;
-                let batch = policy
-                    .prepare(&snapshot, credit, batch_id)
-                    .map_err(Error::Inventory)?;
+                let batch = match &event {
+                    // An event completion's rewards commit as one transaction.
+                    Some(event) => {
+                        let snapshot = nfs_services::awards::ensure_empty(
+                            service.repository.as_ref(),
+                            account,
+                            snapshot,
+                            now,
+                        )
+                        .map_err(|_| Error::Inventory(nfs_storage::Error::Config.into()))?;
+                        nfs_services::event_rewards::prepare(&policy, &snapshot, event)
+                            .map_err(Error::Inventory)?
+                    }
+                    None => policy
+                        .prepare(&snapshot, credit, batch_id)
+                        .map_err(Error::Inventory)?,
+                };
                 let applied = service
                     .repository
                     .apply(account, &batch, now)
@@ -650,10 +704,13 @@ enum UnsupportedRoute {
 
 pub(super) struct Exchanges {
     profile: Option<Profile>,
+    challenges: JoinSet<Result<nfs_services::challenges::Current, crate::Failure>>,
     jobs: JoinSet<(usize, u8, Result<Option<LoadedReply>, Error>)>,
     equipment: JoinSet<(EquipmentRequest, Result<Equipped, Error>)>,
     garage: JoinSet<(GarageRequest, Result<garage::Updated, Error>)>,
     awards: JoinSet<(AwardRequest, Result<Credited, Error>)>,
+    story: JoinSet<(story::Request, Result<story::Committed, Error>)>,
+    story_delivery: Option<(story::Request, story::Committed)>,
     pending: [Option<Completed>; 2],
     started: [Option<u64>; 2],
     /// Unsolicited notifications awaiting the request handler, in order.
@@ -669,10 +726,13 @@ impl Exchanges {
     pub(super) fn new(profile: Option<Profile>, connection: u32) -> Self {
         Self {
             profile,
+            challenges: JoinSet::new(),
             jobs: JoinSet::new(),
             equipment: JoinSet::new(),
             garage: JoinSet::new(),
             awards: JoinSet::new(),
+            story: JoinSet::new(),
+            story_delivery: None,
             pending: [None, None],
             started: [None, None],
             notifications: VecDeque::new(),
@@ -683,12 +743,32 @@ impl Exchanges {
         }
     }
     pub(super) fn working(&self) -> bool {
-        !self.jobs.is_empty()
+        !self.challenges.is_empty()
+            || !self.jobs.is_empty()
             || !self.equipment.is_empty()
             || !self.awards.is_empty()
             || !self.garage.is_empty()
+            || !self.story.is_empty()
     }
     pub(super) fn start(&mut self, listener: &mut PlayerListener, now: u64, utc: Timestamp) {
+        if self.pending.iter().all(Option::is_none)
+            && self.started.iter().all(Option::is_none)
+            && self.notifications.is_empty()
+            && let Some((request, committed)) = &self.story_delivery
+        {
+            match listener.story_committed(request, committed.clone()) {
+                Ok(()) => self.story_delivery = None,
+                Err(nfs_world::replication::Error::Bound) => return,
+                Err(error) => {
+                    warn!(
+                        connection = self.connection,
+                        ?error,
+                        "committed story snapshot rejected"
+                    );
+                    self.failed = true;
+                }
+            }
+        }
         if self.pending.iter().all(Option::is_none)
             && self.started.iter().all(Option::is_none)
             && let Some(updated) = self.garage_delivery.take()
@@ -710,10 +790,26 @@ impl Exchanges {
             return;
         }
         if self.working()
+            || self.story_delivery.is_some()
             || self.pending.iter().any(Option::is_some)
             || self.started.iter().any(Option::is_some)
             || !self.notifications.is_empty()
         {
+            return;
+        }
+        if let Some(request) = listener.take_story() {
+            if let Some(profile) = self.profile.clone() {
+                self.story.spawn(async move {
+                    let result = profile.story(&request, utc).await;
+                    (request, result)
+                });
+            } else {
+                warn!(
+                    connection = self.connection,
+                    "story persistence service not configured"
+                );
+                self.failed = true;
+            }
             return;
         }
         if let Some(request) = listener.take_equipment() {
@@ -755,6 +851,20 @@ impl Exchanges {
                     connection = self.connection,
                     "reputation credit dropped: inventory service not configured"
                 );
+                listener.release_award(request.batch_id);
+            }
+            return;
+        }
+        if listener.has_challenge_request() {
+            if let Some(profile) = self.profile.clone() {
+                self.challenges
+                    .spawn(async move { profile.current_challenges(utc).await });
+            } else {
+                warn!(
+                    connection = self.connection,
+                    "challenge account service not configured"
+                );
+                self.failed = true;
             }
             return;
         }
@@ -830,6 +940,57 @@ impl Exchanges {
         }
     }
     pub(super) async fn completed(&mut self, listener: &mut PlayerListener) -> bool {
+        if !self.challenges.is_empty() {
+            return match self.challenges.join_next().await {
+                Some(Ok(Ok(current))) => match listener.challenges_loaded(current) {
+                    Ok(()) => true,
+                    Err(error) => {
+                        warn!(
+                            connection = self.connection,
+                            ?error,
+                            "challenge cache rejected"
+                        );
+                        false
+                    }
+                },
+                failure => {
+                    warn!(
+                        connection = self.connection,
+                        ?failure,
+                        "challenge account read failed"
+                    );
+                    false
+                }
+            };
+        }
+        if !self.story.is_empty() {
+            let Some(Ok((request, result))) = self.story.join_next().await else {
+                return false;
+            };
+            return match result {
+                Ok(mut committed) => {
+                    self.notifications.extend(
+                        std::mem::take(&mut committed.notifications)
+                            .into_iter()
+                            .map(|bytes| Completed {
+                                name: b"Items".to_vec(),
+                                bytes,
+                            }),
+                    );
+                    self.story_delivery = Some((request, committed));
+                    true
+                }
+                Err(error) => {
+                    warn!(
+                        connection = self.connection,
+                        ?error,
+                        "story persistence failed"
+                    );
+                    listener.story_failed(&request);
+                    false
+                }
+            };
+        }
         if !self.garage.is_empty() {
             let Some(Ok((request, result))) = self.garage.join_next().await else {
                 return false;
@@ -905,6 +1066,7 @@ impl Exchanges {
                                 batch_id = request.batch_id,
                                 "reputation credit snapshot rejected"
                             );
+                            listener.release_award(request.batch_id);
                             false
                         }
                     }
@@ -916,6 +1078,7 @@ impl Exchanges {
                         batch_id = request.batch_id,
                         "reputation credit failed"
                     );
+                    listener.release_award(request.batch_id);
                     false
                 }
             };

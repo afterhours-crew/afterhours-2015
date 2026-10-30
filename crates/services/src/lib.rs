@@ -15,6 +15,7 @@ pub mod client_state;
 pub mod control_catalogs;
 pub mod departure;
 pub mod equipment;
+pub mod event_rewards;
 pub mod fresh_account;
 pub mod garage;
 pub mod group;
@@ -23,13 +24,16 @@ pub mod item_builder;
 pub mod item_content;
 pub mod item_unlocks;
 pub mod persistent;
+pub mod progression;
 pub mod purchase;
 pub mod recommendations;
 pub mod reputation;
 pub mod shared_wraps;
 pub mod stats;
+pub mod story;
 pub mod telemetry;
 pub mod text_filter;
+pub mod tutorials;
 
 /// Build identity required by versioned content documents; no game data is bundled.
 pub const SUPPORTED_BUILD_SHA256: &str =
@@ -128,6 +132,7 @@ pub mod entitlements;
 pub mod heartbeat;
 pub mod item_licenses;
 pub mod kickback;
+pub mod messages;
 pub mod speedwall;
 
 pub mod user_session;

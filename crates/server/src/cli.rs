@@ -427,13 +427,21 @@ fn account(text: &str) -> Result<nfs_storage::AccountId, String> {
     nfs_storage::AccountId::from_owned_config(bytes).map_err(|_| "zero local account".into())
 }
 
-fn inventory_config(args: &Args) -> Result<Option<net::InventoryProfile>, Failure> {
+fn inventory_config(
+    args: &Args,
+) -> Result<
+    (
+        Option<net::InventoryProfile>,
+        Option<nfs_storage::sqlite::WriterLease>,
+    ),
+    Failure,
+> {
     let (Some(content), Some(directory), Some(account)) = (
         &args.item_content,
         &args.state_directory,
         args.local_account,
     ) else {
-        return Ok(None);
+        return Ok((None, None));
     };
     let mut components = directory.components();
     if components.next() != Some(std::path::Component::Normal("artifacts".as_ref()))
@@ -474,6 +482,9 @@ fn inventory_config(args: &Args) -> Result<Option<net::InventoryProfile>, Failur
         .transpose()?;
     let repository = nfs_storage::SqliteRepository::open_owned_directory(&directory)
         .map_err(|_| Failure::Output)?;
+    let lease = repository
+        .writer_lease(account)
+        .map_err(|_| Failure::ProfileConfig)?;
     let records = nfs_storage::records::SqliteRecords(repository.clone());
     let mut service = net::InventoryService::new(Arc::new(repository), Arc::new(catalog))
         .with_records(Arc::new(records));
@@ -489,7 +500,53 @@ fn inventory_config(args: &Args) -> Result<Option<net::InventoryProfile>, Failur
     if let Some(persistent) = persistent {
         service = service.with_persistent(Arc::new(persistent));
     }
-    Ok(Some(service.bind(account)))
+    Ok((Some(service.bind(account)), Some(lease)))
+}
+
+/// The world inputs one session of this server start would get, without
+/// binding listeners: for the reference harness, which drives
+/// [`net::run_world`] with a recorded run. Takes the same arguments as the
+/// server; the returned lease keeps the account open.
+pub async fn prepare_world(
+    args: impl Iterator<Item = std::ffi::OsString>,
+) -> Result<
+    (
+        net::WorldServe,
+        Option<net::Resume>,
+        Option<nfs_storage::sqlite::WriterLease>,
+    ),
+    String,
+> {
+    let mut args = parse_from(args)?;
+    resolve_install_content(&mut args, &nfs_content::Options::default())?;
+    let prepared = prepare(&args).await.map_err(|e| format!("{e:?}"))?;
+    let (persona, mac_template) = prepared
+        .pack
+        .world_identity()
+        .ok_or("the deployment has no local identity")?;
+    let (_, ai) = nfs_server::ai_settings::Live::channel(args.ai);
+    Ok((
+        net::WorldServe {
+            mac_template,
+            content: prepared.world_content,
+            persona,
+            inventory: prepared.inventory,
+            challenges: prepared.challenges,
+            progression: prepared.progression,
+            prologue: prepared.prologue,
+            vehicles: prepared.vehicles,
+            sequences: prepared.sequences,
+            traffic: prepared.traffic,
+            rivals: prepared.rivals,
+            garage_logic: prepared.garage_logic,
+            scoring: prepared.scoring,
+            events: prepared.events,
+            ai,
+            map_feed: None,
+        },
+        prepared.resume,
+        prepared.account_lease,
+    ))
 }
 
 pub fn main() -> std::process::ExitCode {
@@ -501,6 +558,10 @@ pub fn main() -> std::process::ExitCode {
 pub fn main_from(args: impl Iterator<Item = std::ffi::OsString>) -> std::process::ExitCode {
     let mut args = args.peekable();
     match args.peek().and_then(|arg| arg.to_str()) {
+        Some("story") => {
+            args.next();
+            return nfs_server::story_account::main(args);
+        }
         Some("bank") => {
             args.next();
             return nfs_server::bank_account::main(args);
@@ -566,8 +627,42 @@ pub fn main_from(args: impl Iterator<Item = std::ffi::OsString>) -> std::process
     }
 }
 
-async fn run(args: Args) -> Result<(), Failure> {
-    let inventory = inventory_config(&args)?;
+/// Everything a server start prepares before binding listeners: account
+/// state, deployment policy and the installed world content.
+struct Prepared {
+    inventory: Option<net::InventoryProfile>,
+    account_lease: Option<nfs_storage::sqlite::WriterLease>,
+    pack: Arc<Deployment>,
+    lsx_profile: nfs_lsx::message::Profile,
+    world_content: Option<Arc<content::WorldContent>>,
+    content_messages: usize,
+    progression: Option<Arc<nfs_server::progression::Content>>,
+    vehicles: Option<Arc<nfs_server::vehicle_content::GarageContent>>,
+    sequences: Option<Arc<nfs_server::sequence_content::SequenceContent>>,
+    traffic: Option<Arc<nfs_content::traffic::Content>>,
+    rivals: Option<Arc<nfs_server::rival_content::Content>>,
+    garage_logic: Option<Arc<nfs_server::garage_logic::GarageLogic>>,
+    scoring: Option<Arc<nfs_server::scoring::Content>>,
+    events: Option<Arc<nfs_server::event_logic::catalog::Catalog>>,
+    prologue: Option<Arc<nfs_server::prologue::Content>>,
+    entitlements: Option<(
+        nfs_storage::AccountId,
+        Arc<nfs_services::entitlements::State>,
+    )>,
+    kickback: Option<(nfs_storage::AccountId, Arc<nfs_services::kickback::State>)>,
+    speedwall: Option<(nfs_storage::AccountId, Arc<nfs_services::speedwall::State>)>,
+    item_licenses: Option<Arc<nfs_services::item_licenses::Content>>,
+    catalogs: Option<Arc<nfs_services::control_catalogs::Catalog>>,
+    user_settings: Option<Arc<nfs_server::user_settings::Store>>,
+    challenges: Option<Arc<nfs_services::challenges::Catalog>>,
+    stats: Option<Arc<nfs_services::stats::Catalog>>,
+    resume: Option<net::Resume>,
+}
+
+/// Prepare a server start: open the account, load policy and content, and
+/// settle an unfinished intro. Shared by the server and [`prepare_world`].
+async fn prepare(args: &Args) -> Result<Prepared, Failure> {
+    let (inventory, account_lease) = inventory_config(args)?;
     let account = args.local_account.ok_or(Failure::ProfileConfig)?;
     let root = args.root.join(
         args.state_directory
@@ -646,7 +741,7 @@ async fn run(args: Args) -> Result<(), Failure> {
         )?)),
         None => None,
     };
-    let progression = args
+    let mut progression = args
         .progression_content
         .as_ref()
         .map(|path| nfs_server::progression::Content::load(&args.root.join(path)))
@@ -684,7 +779,7 @@ async fn run(args: Args) -> Result<(), Failure> {
         })
         .transpose()?
         .map(Arc::new);
-    let rivals = if let Some(path) = &args.rival_content {
+    let (rivals, installation_index) = if let Some(path) = &args.rival_content {
         let path = args.root.join(path);
         let item_path = args
             .root
@@ -695,21 +790,42 @@ async fn run(args: Args) -> Result<(), Failure> {
             .vehicles
             .clone();
         let game_dir = args.game_dir.clone();
-        let (content, graph) = tokio::task::spawn_blocking(move || {
+        let road_cache_root = args.root.clone();
+        let (content, graph, index) = tokio::task::spawn_blocking(move || {
             let items = nfs_services::item_content::ItemContent::load(&item_path)
                 .map_err(|_| Failure::ProfileConfig)?;
             let content = nfs_server::rival_content::Content::load(&path, definitions, &items)?;
             // The host simulates rivals on the installed road graph (E987).
+            let started = std::time::Instant::now();
+            let mut index = None;
             let graph = game_dir.ok_or(None).and_then(|dir| {
                 nfs_content::assets::AssetIndex::open(&dir, &nfs_content::Options::default())
-                    .and_then(|mut index| index.road_graph())
+                    .and_then(|mut opened| {
+                        let graph = nfs_server::prepared_content::Cache::for_index(
+                            &road_cache_root,
+                            &opened,
+                        )
+                        .and_then(|cache| {
+                            nfs_server::prepared_content::roads::graph(&mut opened, cache.as_ref())
+                        });
+                        // Preserve the validated source and its immutable tables
+                        // for scoring, events and story preparation below.
+                        index = Some(opened);
+                        graph
+                    })
                     .map_err(Some)
             });
-            Ok::<_, Failure>((content, graph))
+            tracing::info!(
+                phase = "rival_roads",
+                elapsed_ms = started.elapsed().as_millis(),
+                success = graph.is_ok(),
+                "runtime preparation phase complete"
+            );
+            Ok::<_, Failure>((content, graph, index))
         })
         .await
         .map_err(|_| Failure::Output)??;
-        match graph {
+        let rivals = match graph {
             Ok(graph) => {
                 tracing::info!(
                     nodes = graph.node_count(),
@@ -725,9 +841,10 @@ async fn run(args: Args) -> Result<(), Failure> {
                 );
                 None
             }
-        }
+        };
+        (rivals, index)
     } else {
-        None
+        (None, None)
     };
     let default_reputation = args
         .reputation_thresholds
@@ -750,23 +867,214 @@ async fn run(args: Args) -> Result<(), Failure> {
         .map(Arc::new);
     // Free-roam scoring compiles the installed driving participants directly
     // from the installation; without it (or without garage logic) scoring stays off.
+    let mut events = None;
+    let mut prologue = None;
     let scoring = match (&args.game_dir, garage_logic.is_some()) {
         (Some(game_dir), true) => {
             let game_dir = game_dir.clone();
+            let prepared_root = args.root.clone();
+            let event_vehicles = vehicles.as_ref().map(|v| v.vehicles.clone());
+            let event_items = args.item_content.as_ref().map(|p| args.root.join(p));
+            let intro_parent = progression
+                .as_ref()
+                .and_then(|p| {
+                    p.construction
+                        .blueprint(nfs_server::progression::Branch::Intro)
+                })
+                .map(|b| b.asset());
+            let intro_items = inventory.as_ref().map(|i| i.item_catalog());
             let content = tokio::task::spawn_blocking(move || {
-                let mut index = nfs_content::assets::AssetIndex::open(
-                    &game_dir,
-                    &nfs_content::Options::default(),
+                let started = std::time::Instant::now();
+                let reused = installation_index.is_some();
+                let mut index = match installation_index {
+                    Some(index) => index,
+                    None => nfs_content::assets::AssetIndex::open(
+                        &game_dir,
+                        &nfs_content::Options::default(),
+                    )?,
+                };
+                tracing::info!(
+                    phase = "asset_index",
+                    reused,
+                    elapsed_ms = started.elapsed().as_millis(),
+                    "runtime preparation phase complete"
+                );
+                let runtime_cache =
+                    nfs_server::prepared_content::Cache::for_index(&prepared_root, &index)?;
+                let stage = std::time::Instant::now();
+                let scoring = nfs_server::prepared_content::scoring::prepare(
+                    &mut index,
+                    "levels/genesis01/gameplay",
+                    runtime_cache.as_ref(),
                 )?;
-                let scoring = index.scoring_content("levels/genesis01/gameplay")?;
-                let road = index.road_network();
+                let keepers = index.score_keepers(
+                    "levels/genesis01/gameplay",
+                    &scoring.categories.keys().copied().collect(),
+                );
+                let road = nfs_server::prepared_content::roads::network(
+                    &mut index,
+                    runtime_cache.as_ref(),
+                );
                 let nitrous = index.nitrous_configurations()?;
-                Ok::<_, nfs_content::Error>((scoring, road, nitrous))
+                let hides = index.progression_debug_hides();
+                let messages = nfs_server::messages::Content::prepare(&mut index);
+                let tutorials = nfs_server::tutorials::Content::prepare(&mut index);
+                let chapters = nfs_server::chapter_notifications::Content::prepare(&mut index);
+                tracing::info!(
+                    phase = "shared_content",
+                    elapsed_ms = stage.elapsed().as_millis(),
+                    "runtime preparation phase complete"
+                );
+                let stage = std::time::Instant::now();
+                // The owned race event resolves from the same installation; its
+                // failure leaves scoring on and the event off.
+                let event = (|| -> Result<_, nfs_content::Error> {
+                    let items = event_items
+                        .as_ref()
+                        .map(|path| {
+                            nfs_services::item_content::ItemContent::load(path).map_err(|e| {
+                                nfs_content::Error::Content(format!("event AI items: {e:?}"))
+                            })
+                        })
+                        .transpose()?;
+                    nfs_server::event_logic::catalog::prepare::sprints_cached(
+                        &mut index,
+                        &scoring.categories,
+                        event_vehicles.as_ref(),
+                        items.as_ref(),
+                        runtime_cache.as_ref(),
+                    )
+                })();
+                tracing::info!(
+                    phase = "sprints",
+                    elapsed_ms = stage.elapsed().as_millis(),
+                    success = event.is_ok(),
+                    "runtime preparation phase complete"
+                );
+                let stage = std::time::Instant::now();
+                let story = (|| {
+                    let parent = intro_parent.ok_or_else(|| {
+                        nfs_content::Error::Content("intro participant content missing".into())
+                    })?;
+                    let items = intro_items.ok_or_else(|| {
+                        nfs_content::Error::Content("intro item catalog missing".into())
+                    })?;
+                    let vehicles = event_vehicles.clone().ok_or_else(|| {
+                        nfs_content::Error::Content("intro vehicle content missing".into())
+                    })?;
+                    let path = event_items.as_ref().ok_or_else(|| {
+                        nfs_content::Error::Content("intro item content missing".into())
+                    })?;
+                    let ai_items =
+                        nfs_services::item_content::ItemContent::load(path).map_err(|e| {
+                            nfs_content::Error::Content(format!("intro AI items: {e:?}"))
+                        })?;
+                    nfs_server::prologue::Content::prepare_cached(
+                        &mut index,
+                        parent,
+                        &items,
+                        &vehicles,
+                        &ai_items,
+                        runtime_cache.as_ref(),
+                    )
+                })();
+                tracing::info!(
+                    phase = "prologue",
+                    elapsed_ms = stage.elapsed().as_millis(),
+                    success = story.is_ok(),
+                    total_ms = started.elapsed().as_millis(),
+                    "runtime preparation phase complete"
+                );
+                Ok::<_, nfs_content::Error>((
+                    scoring, road, nitrous, event, story, hides, messages, tutorials, chapters,
+                    keepers,
+                ))
             })
             .await
             .map_err(|_| Failure::Output)?;
             match content {
-                Ok((content, road, nitrous)) => {
+                Ok((
+                    content,
+                    road,
+                    nitrous,
+                    event,
+                    story,
+                    hides,
+                    messages,
+                    tutorials,
+                    chapters,
+                    keepers,
+                )) => {
+                    match chapters {
+                        Ok(chapters) => {
+                            if let Some(current) = progression.take() {
+                                tracing::info!(
+                                    notifications = chapters.len(),
+                                    "chapter notifications read from the installation"
+                                );
+                                progression = Some(Arc::new(
+                                    (*current).clone().with_chapter_notifications(chapters),
+                                ));
+                            }
+                        }
+                        Err(error) => tracing::warn!(
+                            %error,
+                            "chapter notifications unavailable; markers keep their defaults"
+                        ),
+                    }
+                    match tutorials {
+                        Ok(tutorials) => {
+                            if let Some(current) = progression.take() {
+                                tracing::info!("tutorial spawners read from the installation");
+                                progression =
+                                    Some(Arc::new((*current).clone().with_tutorials(tutorials)));
+                            }
+                        }
+                        Err(error) => tracing::warn!(
+                            %error,
+                            "tutorials unavailable; no tutorial logics are created"
+                        ),
+                    }
+                    match messages {
+                        Ok(messages) => {
+                            if let Some(current) = progression.take() {
+                                tracing::info!(
+                                    messages = messages.catalog.len(),
+                                    "phone messages read from the installation"
+                                );
+                                progression =
+                                    Some(Arc::new((*current).clone().with_messages(messages)));
+                            }
+                        }
+                        Err(error) => tracing::warn!(
+                            %error,
+                            "phone messages unavailable; message managers stay uninitiated"
+                        ),
+                    }
+                    match hides {
+                        Ok(hides) => {
+                            if let Some(current) = progression.take() {
+                                let count = hides.len();
+                                progression =
+                                    Some(Arc::new((*current).clone().with_debug_hides(hides)?));
+                                tracing::info!(
+                                    count,
+                                    "progression debug-print hides read from the installation"
+                                );
+                            }
+                        }
+                        Err(error) => tracing::warn!(
+                            %error,
+                            "progression debug-print hides unavailable; objective debug prints stay as created"
+                        ),
+                    }
+                    match story {
+                        Ok(content) => {
+                            prologue = Some(Arc::new(content));
+                            tracing::info!("installed prologue opening prepared");
+                        }
+                        Err(error) => tracing::warn!(%error,"prologue opening unavailable"),
+                    }
                     let mut content = nfs_server::scoring::Content::new(Arc::new(content))
                         .map_err(|_| Failure::ProfileConfig)?
                         .with_items(
@@ -776,6 +1084,34 @@ async fn run(args: Args) -> Result<(), Failure> {
                                 .item_catalog(),
                         )
                         .with_nitrous(nitrous);
+                    match keepers.map_err(|e| e.to_string()).and_then(|k| {
+                        content
+                            .clone()
+                            .with_keepers(k)
+                            .map_err(|e| format!("{e:?}"))
+                    }) {
+                        Ok(with) => content = with,
+                        Err(error) => tracing::warn!(
+                            %error,
+                            "score keepers unavailable; award keeper calls stay off"
+                        ),
+                    }
+                    match event {
+                        Ok(prepared) => {
+                            let (catalog, attached) = prepared
+                                .attach(content)
+                                .map_err(|_| Failure::ProfileConfig)?;
+                            content = attached;
+                            tracing::info!(
+                                playable = catalog.iter().count(),
+                                "normal sprint catalog ready; progression gating disabled"
+                            );
+                            events = Some(Arc::new(catalog));
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error,"sprint catalog unavailable; events stay off")
+                        }
+                    }
                     match road {
                         Ok(network) => {
                             tracing::info!(
@@ -871,6 +1207,102 @@ async fn run(args: Args) -> Result<(), Failure> {
     if let Some(content) = &world_content {
         content.validate_runtime()?;
     }
+    // An unfinished intro cannot be resumed mid-story, so settle it before
+    // any session restores progression from the account.
+    let resume = match (&inventory, &progression) {
+        (Some(profile), Some(progression)) => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+            let now = nfs_storage::Timestamp(now);
+            let start = prologue
+                .as_deref()
+                .map(|p: &nfs_server::prologue::Content| p.start.objective);
+            match profile.resume_intro(progression.clone(), start, now).await {
+                Ok(resume) => Some(resume),
+                Err(error) => {
+                    tracing::warn!(?error, "unfinished intro check failed; account unchanged");
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+    match resume {
+        Some(net::Resume::Stranded) if args.game_dir.is_some() => {
+            eprintln!(
+                "nfs-server: this account has not finished the prologue and owns no car, but the \
+                 prologue could not be prepared from the game installation. Check the game \
+                 directory and the server log for \"prologue opening unavailable\"."
+            );
+            return Err(Failure::ProfileConfig);
+        }
+        Some(net::Resume::Stranded) => {
+            tracing::warn!("unfinished intro without a car and no prologue; garage will be empty")
+        }
+        Some(resume @ (net::Resume::Restarted | net::Resume::Finished)) => {
+            tracing::warn!(
+                resume = resume.label(),
+                "interrupted intro settled before serving"
+            )
+        }
+        _ => {}
+    }
+    Ok(Prepared {
+        inventory,
+        account_lease,
+        pack,
+        lsx_profile,
+        world_content,
+        content_messages,
+        progression,
+        vehicles,
+        sequences,
+        traffic,
+        rivals,
+        garage_logic,
+        scoring,
+        events,
+        prologue,
+        entitlements,
+        kickback,
+        speedwall,
+        item_licenses,
+        catalogs,
+        user_settings,
+        challenges,
+        stats,
+        resume,
+    })
+}
+
+async fn run(args: Args) -> Result<(), Failure> {
+    let Prepared {
+        inventory,
+        account_lease: _account_lease,
+        pack,
+        lsx_profile,
+        world_content,
+        content_messages,
+        progression,
+        vehicles,
+        sequences,
+        traffic,
+        rivals,
+        garage_logic,
+        scoring,
+        events,
+        prologue,
+        entitlements,
+        kickback,
+        speedwall,
+        item_licenses,
+        catalogs,
+        user_settings,
+        challenges,
+        stats,
+        resume,
+    } = prepare(&args).await?;
     let listeners = net::Listeners::bind(args.listen, args.redirector_port).await?;
     let a = listeners.addresses()?;
     let lsx_listener = match args.lsx_port {
@@ -931,6 +1363,7 @@ async fn run(args: Args) -> Result<(), Failure> {
         "pack"
     });
     ready["lsx"] = serde_json::json!(lsx_address.map(|a| a.to_string()));
+    ready["intro_resume"] = serde_json::json!(resume.map(net::Resume::label));
     ready["manifest_mode"] = serde_json::json!("none");
     ready["install_content"] = args.generated.clone().unwrap_or(serde_json::Value::Null);
     println!("{ready}");
@@ -969,12 +1402,14 @@ async fn run(args: Args) -> Result<(), Failure> {
         world_content,
         inventory,
         progression,
+        prologue,
         vehicles,
         sequences,
         traffic,
         rivals,
         garage_logic,
         scoring,
+        events,
         catalogs,
         entitlements,
         user_settings,

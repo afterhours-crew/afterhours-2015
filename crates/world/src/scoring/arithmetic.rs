@@ -15,7 +15,7 @@ pub const IN0: u32 = 193450866;
 pub const DIVISOR_EPSILON: f32 = f32::from_bits(0x358637bd);
 pub const SMALL_DIVISOR_MULTIPLIER: f32 = f32::from_bits(0x49742400);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Operation {
     Add,
     Subtract,

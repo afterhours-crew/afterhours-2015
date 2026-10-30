@@ -120,6 +120,14 @@ pub fn with_inputs(
             })),
             Kind::Part { variants } => Part::new(*variants)?.initial(),
             Kind::Wheel => Wheel::default().initial(rpc()?),
+            Kind::SearchLight => Initial::SearchLight {
+                rpc: rpc()?,
+                enabled: false,
+            },
+            Kind::Siren => Initial::Siren {
+                rpc: rpc()?,
+                flags: [false; 2],
+            },
             Kind::Index => Initial::Index {
                 rpc: rpc()?,
                 index: nos.variant,

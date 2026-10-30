@@ -1,0 +1,103 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "StoryCheckpoint": {
+      "properties": {
+        "active": {
+          "type": "boolean"
+        },
+        "completed": {
+          "type": "boolean"
+        },
+        "edited": {
+          "type": "boolean"
+        },
+        "existing": {
+          "description": "Completion inherited from a save without a gameplay provenance receipt.",
+          "type": "boolean"
+        },
+        "id": {
+          "description": "Exact native objective ID; `after-intro` is the terminal checkpoint.",
+          "type": "string"
+        },
+        "label": {
+          "description": "Authored label when the installed catalog supplies it.",
+          "type": "string"
+        },
+        "played": {
+          "type": "boolean"
+        },
+        "reward_claimed": {
+          "type": "boolean"
+        },
+        "selectable": {
+          "description": "True only after this runtime supports starting from this boundary.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "active",
+        "completed",
+        "played",
+        "edited",
+        "existing",
+        "reward_claimed",
+        "selectable"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "account_id": {
+      "type": "string"
+    },
+    "can_edit": {
+      "type": "boolean"
+    },
+    "checkpoints": {
+      "items": {
+        "$ref": "#/definitions/StoryCheckpoint"
+      },
+      "type": "array"
+    },
+    "current_checkpoint": {
+      "type": "string"
+    },
+    "generation": {
+      "type": "string"
+    },
+    "intro_completed": {
+      "type": "boolean"
+    },
+    "session_running": {
+      "type": "boolean"
+    },
+    "version": {
+      "const": 1,
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "warnings": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "version",
+    "account_id",
+    "generation",
+    "current_checkpoint",
+    "checkpoints",
+    "intro_completed",
+    "session_running",
+    "can_edit",
+    "warnings"
+  ],
+  "title": "StoryReport",
+  "type": "object"
+}

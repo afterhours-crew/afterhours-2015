@@ -1,0 +1,74 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "Backup": {
+      "additionalProperties": false,
+      "properties": {
+        "database_sha256": {
+          "type": "string"
+        },
+        "generation": {
+          "type": "string"
+        },
+        "id": {
+          "description": "One immutable directory under artifacts/story-backups, never a path.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "generation",
+        "database_sha256"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "account_id": {
+      "type": "string"
+    },
+    "backup": {
+      "$ref": "#/definitions/Backup"
+    },
+    "generation": {
+      "type": "string"
+    },
+    "previous_generation": {
+      "type": "string"
+    },
+    "replayed": {
+      "type": "boolean"
+    },
+    "restart": {
+      "type": "boolean"
+    },
+    "starter": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "target_checkpoint": {
+      "type": "string"
+    },
+    "version": {
+      "const": 1,
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version",
+    "account_id",
+    "previous_generation",
+    "generation",
+    "target_checkpoint",
+    "replayed",
+    "backup",
+    "starter"
+  ],
+  "title": "Applied",
+  "type": "object"
+}

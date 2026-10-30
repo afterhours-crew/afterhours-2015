@@ -966,6 +966,7 @@ pub fn write(root: &Path, assets: &[Asset]) -> std::io::Result<(Options, [u8; 64
             garage_links: garage_links(),
             vehicles: vehicles::rules(),
             progression: progression::rules(),
+            prologue_links: crate::BuildIdentity::supported().prologue_links,
             sequences: sequences::rules(),
             participant_logic: crate::BuildIdentity::supported().participant_logic,
             traffic_spline_class_id: 72,

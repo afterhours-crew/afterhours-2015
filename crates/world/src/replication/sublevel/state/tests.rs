@@ -92,6 +92,49 @@ fn updates() -> Vec<Option<Update>> {
 }
 
 #[test]
+fn world_removal_checks_all_stored_scene_references_without_rebuilding_scenes() {
+    use crate::replication::{self, state::World, wander};
+    let mut world = World::default();
+    for _ in 0..10 {
+        world
+            .spawn(
+                replication::Initial::WanderGoal(wander::Initial {
+                    allocation_serial: 0,
+                    flags: [false; 3],
+                }),
+                replication::Update::WanderGoal,
+            )
+            .unwrap();
+    }
+    world.register_levels(&[0, 7]).unwrap();
+    let (mut creation, content) = fixture();
+    creation.body.updates[4] = Some(Update::ReferenceMap(Some(vec![(7, 23)])));
+    creation.body.updates[5] = Some(Update::FourReferences([Some(8), None, Some(0), None]));
+    creation.body.updates[7] = Some(Update::PursuitMaps([Some(vec![(5, 9)]), None]));
+    creation.body.updates[8] = Some(Update::LevelReference(Some(7)));
+    let scene = world.spawn_scene(creation, &content).unwrap().id;
+    let before = world.snapshot();
+    for id in 1..=9 {
+        assert_eq!(
+            world.remove(id),
+            Err(Error::UnknownObject),
+            "reference {id}"
+        );
+        assert_eq!(world.snapshot(), before);
+    }
+    assert_eq!(world.unregister_level(0), Err(Error::UnknownObject));
+    assert_eq!(world.unregister_level(7), Err(Error::UnknownObject));
+    world.remove(10).unwrap();
+    world.remove(scene).unwrap();
+    for id in 1..=9 {
+        world.remove(id).unwrap();
+    }
+    world.unregister_level(0).unwrap();
+    world.unregister_level(7).unwrap();
+    assert!(world.is_empty());
+}
+
+#[test]
 fn creation_changes_become_current_values_and_reconnect_state() {
     let (mut creation, content) = fixture();
     creation.body.updates[1] = Some(Update::BoolProperty(Some(true)));

@@ -6,7 +6,7 @@
 //! object construction or replace event connection delivery modes.
 use crate::{Error, graph::bits32};
 use nfs_frostbite::ebx::{Object, Value};
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Realm {
     Neither,
     Client,
@@ -21,7 +21,7 @@ impl Realm {
         matches!(self, Self::Client | Self::Both)
     }
 }
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Listeners {
     pub events: Realm,
     pub properties: Realm,
@@ -43,9 +43,15 @@ impl Listeners {
     }
     /// Non-entity objects may lack Flags; absence is not a guessed realm.
     pub fn read(object: &Object) -> Result<Option<Self>, Error> {
-        // Blueprint bus Flags are a distinct UInt16 field, not EntityData flags.
+        // EntityBusData Flags are UInt16, distinct from EntityData flags.
+        // SubWorldData derives from SpatialPrefabBlueprint; LevelData derives
+        // from WorldData and ultimately SubWorldData.
         if matches!(object.fields.get("Flags"), Some(Value::UInt16(_)))
-            && object.class.ends_with("Blueprint")
+            && (object.class.ends_with("Blueprint")
+                || matches!(
+                    object.class.as_str(),
+                    "SubWorldData" | "WorldData" | "LevelData" | "WorldPartData" | "LayerData"
+                ))
         {
             return Ok(None);
         }
@@ -68,6 +74,16 @@ mod tests {
             fields: Fields(vec![("Flags".into(), Value::UInt16(15))]),
         };
         assert_eq!(Listeners::read(&object).unwrap(), None);
+        for class in [
+            "SubWorldData",
+            "WorldData",
+            "LevelData",
+            "WorldPartData",
+            "LayerData",
+        ] {
+            object.class = class.into();
+            assert_eq!(Listeners::read(&object).unwrap(), None);
+        }
         object.class = "BoolEntityData".into();
         assert!(Listeners::read(&object).is_err());
         object.fields = Fields(vec![("Flags".into(), Value::Bool(true))]);

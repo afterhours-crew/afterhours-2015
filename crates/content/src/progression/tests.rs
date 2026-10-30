@@ -7,6 +7,7 @@ use crate::{
     assets::AssetIndex,
     synthetic::{self, Field},
 };
+use std::collections::BTreeSet;
 struct Installation(std::path::PathBuf);
 impl Drop for Installation {
     fn drop(&mut self) {
@@ -32,6 +33,10 @@ fn defaults_roles_registry_order_and_explicit_channel_targets_come_from_installa
     let (_dir, mut index) = index(vec![]);
     let bytes = build(&mut index, &"a".repeat(64)).unwrap();
     let v: Json = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        v.get("story_editor").is_none(),
+        "a partial catalog must not advertise editable prologue checkpoints"
+    );
     let parsed = Content::from_json(&v).unwrap();
     let main = parsed.construction.blueprint(Branch::Main).unwrap();
     let intro = parsed.construction.blueprint(Branch::Intro).unwrap();
@@ -185,7 +190,7 @@ fn activation_evaluates_against_completed_objectives_and_post_intro_rows_follow(
     let on = Settings {
         consumer_beta: true,
     };
-    let main = &catalog.branches()[&Branch::Main].objectives;
+    let main = catalog.branches()[&Branch::Main].objectives();
     let intro = catalog.objective_ids(Branch::Intro);
     assert_eq!(intro, BTreeSet::from([10, 20]));
     let (first, second, never) = (&main[0].1, &main[1].1, &main[2].1);

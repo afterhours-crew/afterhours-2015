@@ -95,7 +95,7 @@ impl Handler for State {
         Ok(&mut self.gate)
     }
     fn property_gate_input(&self, _: u16, c: Channel) -> Result<Option<Value>, Error> {
-        Ok(self.inputs[c as usize])
+        Ok(self.inputs[c as usize].clone())
     }
 }
 fn apply(s: &State, g: &Graph, a: Action) -> State {
@@ -109,7 +109,7 @@ fn fresh_open_flushes_all_channels_in_order_even_without_write_on_open() {
         s.output,
         CHANNELS
             .into_iter()
-            .map(|c| (c.output(), s.inputs[c as usize].unwrap()))
+            .map(|c| (c.output(), s.inputs[c as usize].clone().unwrap()))
             .collect::<Vec<_>>()
     );
     let closed = apply(&s, &g, Action::Event(nodes::CLOSE));

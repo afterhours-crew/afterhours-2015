@@ -7,6 +7,8 @@ use std::collections::BTreeMap;
 
 mod actors;
 pub mod ai;
+mod goals;
+pub use goals::Completion as GoalCompletion;
 mod locations;
 mod manager;
 mod vehicles;
@@ -48,12 +50,23 @@ pub struct Players {
     participants: BTreeMap<u16, u16>,
     actors: BTreeMap<u16, u16>,
     vehicles: BTreeMap<(u16, u64), u16>,
+    /// A participant's temporary story car has no persistent inventory identity.
+    temporary_vehicles: BTreeMap<u16, u16>,
+    /// Display-only story cars, keyed by their authored slot. They grant no
+    /// driving, purchase, equipment or persistent item authority.
+    preview_vehicles: BTreeMap<(u16, u16), u16>,
     /// Garage display cars prepared while the participant still drives the world car.
     staged_vehicles: BTreeMap<(u16, u64), u16>,
     goal_allocation_serial: u8,
+    /// Completed goal lifetimes, bounded by the world's non-reused object IDs.
+    completed_goals: BTreeMap<u16, goals::Owner>,
+    /// Human goal ownership retained at an owned release, for callbacks already
+    /// in flight. IDs are never reused within this bounded world lifetime.
+    retired_goals: BTreeMap<u16, goals::Owner>,
     ai: BTreeMap<(u8, u64, u64), ai::Instance>,
     /// Persistent AI participants whose cars come and go (roaming rivals).
     ai_slots: BTreeMap<(u8, u64, u64), ai::Slot>,
+    pacing_groups: BTreeMap<u16, (u8, u64)>,
 }
 
 /// Native runtime index of the player on `connection` and local `slot`.
@@ -71,6 +84,12 @@ fn runtime_index(connection: u8, slot: u8) -> Option<u8> {
 impl Players {
     pub fn objects(&self) -> &state::World {
         &self.objects
+    }
+
+    /// Joined human participants in this world. AI slots have separate ownership
+    /// and must not make player invitations available.
+    pub fn player_participants(&self) -> impl Iterator<Item = u16> + '_ {
+        self.participants.values().copied()
     }
 
     pub fn owns(&self, connection: u8, persona: u64, id: u16) -> bool {

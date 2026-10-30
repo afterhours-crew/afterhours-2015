@@ -160,12 +160,11 @@ game process, this session ends with an error; start again after activation. It
 never adopts a different game process without the original identity guards.
 
 `--player-name "My Driver"` sets the first account's display name. It does not
-rename or replace an existing account. New accounts start **after the scripted
-prologue**; the official prologue and complete progression are not yet supported.
-Launcher-created tester accounts start one level below the installed REP cap
-(level 69 of 70 on the supported build), with $10,000,000. These resources are
-committed with the new account; existing accounts are reused without a top-up.
-This is a local testing preset, not earned rewards or completed career events.
+rename or replace an existing account. New accounts start **at the beginning of
+the prologue**, with standard resources and the starter car granted by story
+selection. Existing accounts retain their progress, cars, level and balance;
+older tester profiles are not reset or topped up. Complete progression after
+the prologue remains tracked separately from this entry path.
 Stage headings and labeled colors distinguish progress, success, activation waits
 and errors. Redirected output and `NO_COLOR=1` remain plain; JSON is uncolored.
 The local challenge menu uses three fixed preview objectives derived from installed
@@ -378,6 +377,14 @@ therefore always in the log. The JSON results of preparation steps are kept
 from their start instead; one that would exceed 4 MiB fails the step. The
 server recording has a 64 MiB, 100,000-event and 256-stream budget. It stops
 recording at the limit and continues serving.
+After the serving child reports readiness with its own process ID, the launcher
+writes `server-process.json` in the session directory. This bounded receipt keeps
+the session ID, server or relay role, process IDs, executable path and SHA-256,
+working directory, exact argument array, spawn/readiness times and readiness
+record. It excludes preparation children and works with compatibility filenames
+and bundled server roles. A receipt failure stops startup before game launch.
+The receipt is historical provenance; its PID does not prove a process is still
+alive, and server readiness does not establish playable-game acceptance.
 These bounds are per run. When a session starts, only the newest 20 sessions
 are kept (as many as `sessions` lists by default): older ones lose their
 `artifacts/launcher/<session-id>/` folder and their `artifacts/runs/<session-id>/`

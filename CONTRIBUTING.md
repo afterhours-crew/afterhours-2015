@@ -80,6 +80,14 @@ Content loaders use serde_json 1.0.151 (MIT OR Apache-2.0); all registry
 versions and checksums are locked. Main/master/default require pull requests
 and reject force pushes/deletion, including for administrators.
 
+Static compiler products use the already locked serde 1.0.229 (MIT OR
+Apache-2.0), with derive and shared immutable pointer support. JSON uses its
+float-roundtrip parser. Serialize installation definitions only; player/session
+state is not a prepared-content product. Cache readers must preserve private
+constructor invariants and validate compiled models before atomic publication.
+The source fingerprint and running executable digest invalidate incompatible
+products, including locally modified builds.
+
 The launcher uses clap 4.6.7 (MIT OR Apache-2.0) with default features off
 (`std`, `derive`, `help`, `usage`, `error-context`); its tree adds clap_builder,
 clap_derive, clap_lex, anstyle and heck, all MIT OR Apache-2.0. The
@@ -122,6 +130,16 @@ These dependencies are fetched from the Cargo registry, not copied here.
 The server edge uses Tokio 1.53.2 (MIT), tracing 0.1.44 (MIT) and
 tracing-subscriber 0.3.23 (MIT). Versions/checksums are locked; these dependencies
 remain at the socket/diagnostic edge rather than in the sans-IO service models.
+
+## Compatibility regressions
+
+Compatibility fixes retain the original failing control and a related case
+exercising the shared mechanism. For transitions affected by message timing,
+include valid order variations, bounded retries and the subsequent transition.
+Assert resulting state and ownership, not just successful encoding or message
+counts. Keep tests constructed and portable; private reference provenance stays
+in the research workspace. Distinguish implemented, offline-tested and
+game-validated in review notes.
 
 ## Local packet-loss diagnostics
 

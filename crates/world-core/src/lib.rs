@@ -12,4 +12,5 @@ pub mod files;
 pub mod handshake;
 pub mod items;
 pub mod link;
+pub mod rpc;
 pub mod transport;

@@ -20,6 +20,18 @@ fn object(class: &str, value: Option<Value>) -> Object {
 }
 
 #[test]
+fn debug_factory_eligibility_is_separate_from_authored_server_realm() {
+    for class in ["PropertyDebugEntityData", "PrintDebugTextEntityData"] {
+        assert_eq!(
+            compile(&object(class, Some(realm(1, "Realm_Server")))).unwrap(),
+            Some(Realm::Server)
+        );
+        assert!(!server_factory(class));
+    }
+    assert!(server_factory("FloatHubEntityData"));
+}
+
+#[test]
 fn creation_enum_is_not_the_listener_bit_encoding() {
     for (value, name, expected) in [
         (0, "Realm_Client", Realm::Client),
@@ -31,6 +43,21 @@ fn creation_enum_is_not_the_listener_bit_encoding() {
             "FloatEntityData",
             "DelayEntityData",
             "RaceVehiclePhysicsQueryEntityData",
+            "RaceTimeProviderEntityData",
+            "IntegerDeltaEntityData",
+            "BankTransactionEntityData",
+            "AwardItemTransactionEntityData",
+            "StateSequenceParticipantProviderEntityData",
+            "ConsoleCommandEntityData",
+            "BoolHubEntityData",
+            "PropertyStackEntryEntityData",
+            "SequenceEntityData",
+            "SettingEntityData",
+            "SelectEventEntityData",
+            "TransformBuilderEntityData",
+            "TransformHubEntityData",
+            "Vec2HubEntityData",
+            "Vector3EntityData",
         ] {
             let mut data = object(class, Some(realm(value, name)));
             // Deliberately conflicting listener bits do not change eligibility.
@@ -45,9 +72,54 @@ fn fixed_creation_realms_ignore_an_authored_realm_and_listener_flags() {
     for (class, expected) in [
         ("RaceVehicleDonutQueryEntityData", Realm::Server),
         ("RaceVehicleNosQueryEntityData", Realm::Server),
+        // Native data getter 0x5134230 (shared with the Boolean accessor): server.
+        ("IntParticipantPropertyAccessorEntityData", Realm::Server),
         ("RaceVehicleNearMissQueryEntityData", Realm::Both),
         ("SyncedFloatEntityData", Realm::Both),
         ("RaceVehicleAnyCollisionEvaluatorEntityData", Realm::Client),
+        (
+            "ParticipantLogicParticipantTransitionEntityData",
+            Realm::Server,
+        ),
+        ("ParticipantEventChannelReferenceEntityData", Realm::Server),
+        ("EventSyncEntityData", Realm::Both),
+        ("ParticipantStateEntityData", Realm::Both),
+        ("EventStartPromptSenderEntityData", Realm::Client),
+        ("RaceVehicleModifierEntityData", Realm::Client),
+        // Fixed getters and two-slot server factories, E1023 mode census.
+        ("ResultEntityData", Realm::Server),
+        ("DistanceReporterEntityData", Realm::Server),
+        ("IntParticipantPropertySorterEntityData", Realm::Server),
+        ("CompoundStatesReporterEntityData", Realm::Server),
+        ("StateReporterEntityData", Realm::Both),
+        ("GameModeEntityData", Realm::Both),
+        ("SpawnAiForGameModeStateEntityData", Realm::Both),
+        ("ParticipantPlayerTypeFilterEntityData", Realm::Client),
+        ("WaypointsGameModeStateReporterEntityData", Realm::Client),
+        ("ItemSelectorEntityData", Realm::Server),
+        ("VehicleSlotLoaderEntityData", Realm::Server),
+        ("ParticipantEventEntityData", Realm::Server),
+        ("ParticipantProviderStateReporterEntityData", Realm::Server),
+        ("ParticipantStateSequenceEntityData", Realm::Both),
+        ("ContextInterfaceEntityData", Realm::Client),
+        ("MixerEntityData", Realm::Client),
+        ("BasicControllerEntityData", Realm::Client),
+        ("CinebotCameraModeEntityData", Realm::Client),
+        ("CinebotCameraProxyEntityData", Realm::Client),
+        ("CinebotStateLogicEntityData", Realm::Client),
+        ("EventPresentationDataCollectorEntityData", Realm::Client),
+        ("FadeEntityData", Realm::Client),
+        ("FixedArmTransposerEntityData", Realm::Client),
+        ("FixedTargetComposerEntityData", Realm::Client),
+        ("MenuContainerWidgetData", Realm::Client),
+        ("MenuControllerEntityData", Realm::Client),
+        ("MovieCompositorEntityData", Realm::Client),
+        ("MovieEntityData", Realm::Client),
+        ("NoiseControllerEntityData", Realm::Client),
+        ("PlayVideoEntityData", Realm::Client),
+        ("UIInputActionHandlerEntityData", Realm::Client),
+        ("UIScreenRenderEntityData", Realm::Client),
+        ("UIWidgetEntityData", Realm::Client),
     ] {
         for value in [None, Some(realm(3, "Realm_None")), Some(Value::Bool(false))] {
             assert_eq!(compile(&object(class, value)).unwrap(), Some(expected));

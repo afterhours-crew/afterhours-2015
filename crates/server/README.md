@@ -14,7 +14,37 @@ profile. The [`nfs-afterhours` launcher](../../docs/LOCAL-LAUNCHER.md) derives c
 the owner's supported installation and creates a separate local account;
 the complete prologue and several garage mutations are still incomplete.
 
+Temporary opening cars use the shared world-car constructor with an empty
+nitrous meter and their native initial audio flags. These initial states remain
+separate from owned cars and roaming rivals. Their construction does not grant
+inventory or activate a prologue session.
+
 ## Build and start
+
+`story --root <data-directory> --local-account <id> --progression-content <file>
+--preview <checkpoint>` inspects an existing account and returns a JSON preview.
+Checkpoint names are native objective IDs written as exact decimal strings, or
+`after-intro`. The preview binds the exact save file, account, generation, target and prepared
+rules to a plan hash. Restart points remain disabled until their gameplay path
+is implemented and validated; this development build refuses every apply.
+
+The edit transaction is implemented and tested with constructed supported points.
+`--apply <checkpoint> --expected-generation <generation> --plan-id <hash>` takes
+the launcher's data lock and an exclusive per-account process lease. Running
+servers and offline bank/REP writers share that lease; read-only views remain
+available. An active owner, stale preview or changed rules refuse the edit.
+Before one atomic objective/provenance/receipt commit, the server copies the full
+SQLite account, including committed WAL pages, into a standalone database under
+`artifacts/story-backups/<backup-id>/`. The synced manifest records its account,
+generation, plan and SHA-256. Existing backups are never replaced. Failed commits
+leave the original save and completed backup intact; retries create a fresh backup.
+An exact retry after success verifies the durable receipt and backup without
+applying effects again. Story skips award no cash, REP or items.
+
+The launcher exposes this interface through `story --preview` and `story --apply`;
+the graphical launcher never writes the account database itself. Backup retention
+and restoration are operator-managed while the game/server are stopped. Backup
+and failure tests establish transaction behavior, not playable prologue support.
 
 For ordinary startup, follow the [launcher instructions](../../docs/LOCAL-LAUNCHER.md).
 The options below document the server interface for developers and custom hosts.
@@ -225,6 +255,54 @@ derive Stats scopes from the installed game modes and use local AllDrive policy:
 time-limited features and recent-player listing are disabled, and no SpeedList
 types are offered. Explicit catalogs retain their configured policies.
 
+Compiled free-roam scoring, road-routing, road-scoring, normal-sprint and
+complete-prologue inputs are also reused across processes in
+`artifacts/prepared-runtime` under the selected data root. This separate cache
+contains installed static definitions, never player inventory, progression or
+live session state. It belongs on the local machine and is not a distributable
+asset. Keys bind the installation fingerprint, running executable digest and
+scoring categories (sprints), the gameplay scene (free-roam scoring), or the
+parent blueprint (prologue). An installation or executable change causes a new build;
+truncated, corrupt or invalid models are rebuilt. Publication is bounded and
+atomic, with one builder per key. Runtime constructors still validate cached
+inputs against the current vehicle/item definitions.
+
+Free-roam scoring caches both compiled programs and their static scene layouts.
+Loading validates interpreter graphs, serializer ordering, catalog bindings and
+the six score categories. Session state, awards, inputs and player identities
+are not serialized. Scene keeper lookup remains separate, preserving its
+existing failure handling. `profile_scoring_cache` compares whole installed
+programs and keeper bindings across uncached, cold and warm preparation.
+
+The road products retain authored node/lane/segment order, lane direction,
+widths, points and speed limits. Reads rebuild spatial indexes through the
+ordinary graph/network constructors; player positions and current AI routes
+are excluded. The two components are independent, so an unavailable routing
+graph does not suppress an otherwise valid scoring network. Topology, geometry
+and spatial-grid bounds are checked before publication and on every load.
+The local cache encoding preserves float bits and rejects unknown versions,
+oversized counts, truncated fields and trailing data; it is not a game protocol.
+`profile_roads_cache` compares complete installed uncached/cold/warm models
+without opening a save or listener.
+
+The prologue snapshot includes both races, movies, garage selection and return,
+sequences, membership and world-volume definitions. A missing required phase or
+empty-volume fallback cannot be published as a complete cache. Reads reconstruct
+codec profiles, lifecycle plans, reporter clocks and queues, opponents and the
+three ephemeral starter previews; no player's car, selection or progress is
+restored from these files. Invalid layouts, clocks or graph references trigger
+rebuilding. `profile_prologue_cache` provides an offline comparison of uncached,
+cold and warm models against an installation, without opening a save or game.
+
+Cold sprint preparation initializes shared tables once, then uses at most two
+workers by default (one on a single-CPU host). Workers share immutable content
+and use separate archive handles. Results retain roster order, all workers join
+on failure, and a failed batch publishes no cache entry. For measured diagnostics,
+`AFTERHOURS_PREPARATION_WORKERS=1`, `2`, `3` or `4` selects a bounded worker count.
+Logs report completed/total cold work and whether a static cache was loaded,
+missing or invalid. A warm hit skips the corresponding compilation. Other runtime preparation
+still runs; this cache alone does not establish a whole-startup latency guarantee.
+
 It also supplies `--reputation-thresholds`, a versioned threshold document built
 from the installed reputation calculator. The garage-logic document can omit its
 `reputation_thresholds` array; this file then supplies the same thresholds to the
@@ -367,6 +445,18 @@ Recording stops at 64 MiB, 100,000 events, or 256 raw streams per run, while the
 server continues serving. A raw chunk over 1 MiB also stops recording without
 writing a partial chunk. The final metadata marker identifies exhaustion.
 Structured status logs contain route/error summaries, not request bodies.
+
+The recorder separately syncs `world-<connection>-clock.json` before world
+traffic. It records the recording ID, PID, connection, Unix world-clock origin
+and nanosecond offset from the recorder's monotonic origin. World timestamps
+advance from that origin with monotonic elapsed time. Ordinary log rotation
+cannot remove this receipt. Metadata shares the recorder's bounded byte budget.
+After a normal recorder shutdown, `recording-complete.json` identifies the
+recorded world connections, raw mode and whether a recording limit was reached.
+A crash or failed recorder can leave it absent. Missing clock provenance is
+warned about without stopping gameplay; such a recording cannot certify a
+replay. Preserve these receipts with the exact serving-process receipt and
+pre-launch save when collecting local replay evidence.
 
 ## Unsupported-operation diagnostics
 

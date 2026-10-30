@@ -98,16 +98,16 @@ impl Dispatch<'_> {
             .iter()
             .find(|o| o.field == field)
             .ok_or(Error::InvalidGraph)?;
-        output.kind.validate(value)?;
+        output.kind.validate(&value)?;
         let Some(suppress_equal) = bindings.suppression(field) else {
             return Ok(());
         };
         let port = Port { node, field };
         let previous = state.properties().read(port)?;
-        if let Some(previous) = previous {
+        if let Some(previous) = &previous {
             output.kind.validate(previous)?;
         }
-        if !suppress_equal || previous != Some(value) {
+        if !suppress_equal || previous.as_ref() != Some(&value) {
             self.publish(state, port, value)?;
         }
         Ok(())
