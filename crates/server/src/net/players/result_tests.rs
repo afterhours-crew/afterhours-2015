@@ -41,31 +41,72 @@ fn rule() -> Completion {
     }
 }
 fn content() -> crate::progression::Content {
-    crate::progression::Content::from_json(&crate::progression::tests::combined())
+    let mut definition = crate::progression::tests::combined();
+    definition["restoration"]["branches"][0]["objectives"]
+        .as_array_mut()
         .unwrap()
-        .with_messages(crate::messages::Content {
-            catalog: Catalog::new(
-                3,
-                vec![(
-                    ("constructed/result".into(), 0),
-                    Message {
-                        name: "constructed/result".into(),
-                        hash: 71,
-                        flat: 10,
-                        persisted: true,
-                    },
-                )],
-            )
+        .push(serde_json::json!({"id":40,"active":{"completed":30}}));
+    definition["entities"]["branches"][0]["roles"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({"kind":"objective","id":40}));
+    definition["entities"]["content"]["profiles"][0]["serializers"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!("rpc_flags"));
+    crate::progression::Content::from_json(&definition)
+        .unwrap()
+        .with_messages(
+            crate::messages::Content {
+                catalog: Catalog::new(
+                    3,
+                    std::iter::once((
+                        ("constructed/result".into(), 0),
+                        Message {
+                            name: "constructed/result".into(),
+                            hash: 71,
+                            flat: 10,
+                            persisted: true,
+                        },
+                    ))
+                    .chain((80..83).map(|hash| {
+                        (
+                            (format!("constructed/next/{hash}"), 0),
+                            Message {
+                                name: format!("constructed/next/{hash}"),
+                                hash,
+                                flat: 20 + (hash - 80) as u16,
+                                persisted: true,
+                            },
+                        )
+                    }))
+                    .collect(),
+                )
+                .unwrap(),
+                managers: Managers {
+                    scene_key: 909,
+                    normal: 3,
+                    underground: 4,
+                },
+                licensed: vec![],
+                active: vec![],
+                power: vec![],
+                result: vec![],
+            }
+            .with_result(vec![
+                nfs_content::messages::result::Invitation::new(
+                    40,
+                    30,
+                    3,
+                    [80, 81, 82],
+                    123,
+                    std::time::Duration::from_secs(1),
+                    std::time::Duration::from_secs(5),
+                )
+                .unwrap(),
+            ])
             .unwrap(),
-            managers: Managers {
-                scene_key: 909,
-                normal: 3,
-                underground: 4,
-            },
-            licensed: vec![],
-            active: vec![],
-            power: vec![],
-        })
+        )
         .with_objective_results(vec![rule()])
         .unwrap()
 }
@@ -283,6 +324,7 @@ async fn authored_result_waits_for_its_message_and_commits_before_retryable_publ
     let before = listener.persistent.clone().unwrap();
     let calls = listener.pending_rpcs.len();
     let credited = profile.credit_for_test(&award, Timestamp(6)).await.unwrap();
+    assert_eq!(listener.active_invitations.result_won(30), None);
     assert_eq!(listener.pending_rpcs.len(), calls);
     assert_eq!(
         listener.persistent.as_ref().unwrap().generation(),
@@ -322,9 +364,12 @@ async fn authored_result_waits_for_its_message_and_commits_before_retryable_publ
         before.generation()
     );
     listener.pending_rpcs.clear();
+    assert_eq!(listener.active_invitations.result_won(30), None);
     let retry = profile.credit_for_test(&award, Timestamp(7)).await.unwrap();
     assert!(retry.replayed);
     listener.awarded(&award, retry).unwrap();
+    assert_eq!(listener.active_invitations.result_won(30), Some(false));
+    assert_eq!(active_invitations::State::default().result_won(30), None);
     assert_eq!(repository.snapshot(account).unwrap(), saved);
     assert_eq!(
         listener
@@ -342,6 +387,18 @@ async fn authored_result_waits_for_its_message_and_commits_before_retryable_publ
         )
         .unwrap();
     assert_eq!(listener.pending_rpcs.len(), published);
+    listener
+        .advance_active_invitations(listener.world_ms)
+        .unwrap();
+    let next = listener.take_story().unwrap();
+    assert_eq!(
+        next.action,
+        Action::ConditionalMessage {
+            objective: 40,
+            hash: 81,
+            manager: Manager::Normal
+        }
+    );
     assert!(
         progression
             .result_objective(&categories, listener.persistent.as_ref().unwrap())

@@ -168,16 +168,13 @@ impl PlayerListener {
             use crate::net::items::story::Action;
             let announcement = match request.action {
                 Action::Message { hash, manager } => Some((manager, vec![hash])),
-                Action::PowerMessage {
+                Action::ConditionalMessage {
                     objective, manager, ..
                 } => {
-                    let plan = messages
-                        .power
-                        .iter()
-                        .find(|p| p.objective() == objective)
-                        .filter(|p| messages.manager(p.manager()) == Some(manager))
+                    let hashes = messages
+                        .conditional_hashes(objective, manager)
                         .ok_or(replication::Error::Shape)?;
-                    Some((manager, plan.hashes().to_vec()))
+                    Some((manager, hashes.to_vec()))
                 }
                 _ => None,
             };

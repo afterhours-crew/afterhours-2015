@@ -1845,6 +1845,7 @@ impl PlayerListener {
             return Err(replication::Error::Bound);
         }
         let held = self.scoring_state.held.contains(&request.batch_id);
+        let invitations = self.prepare_result_invitation(request)?;
         // Adopt the refreshed collection (unlock grants join a credit) and keep
         // the garage population's spawn snapshot in step with it: the garage
         // return compares the live inventory with that snapshot and refuses a
@@ -1882,6 +1883,7 @@ impl PlayerListener {
             }
         }
         self.persistent = Some(credited.loaded);
+        self.active_invitations = invitations;
         tracing::info!(
             participant = request.participant,
             batch_id = request.batch_id,

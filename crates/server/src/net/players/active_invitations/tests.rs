@@ -68,6 +68,7 @@ fn messages() -> crate::messages::Content {
         licensed: vec![],
         active: vec![],
         power: vec![],
+        result: vec![],
     }
     .with_active(vec![Invitation {
         objective: 30,
@@ -79,12 +80,36 @@ fn messages() -> crate::messages::Content {
 
 #[tokio::test]
 async fn invitation_waits_for_committed_activation_and_survives_backpressure_and_restart() {
-    exercise_messages(false).await;
+    exercise_messages(false, false).await;
 }
 
 #[tokio::test]
 async fn power_invitation_waits_for_authored_delay_and_excludes_competing_tiers_after_restart() {
-    exercise_messages(true).await;
+    exercise_messages(true, false).await;
+}
+
+#[tokio::test]
+async fn result_invitation_default_is_committed_once_and_restored_despite_competing_choices() {
+    exercise_messages(false, true).await;
+}
+
+fn result_messages() -> crate::messages::Content {
+    let mut content = power_messages();
+    content.power.clear();
+    content
+        .with_result(vec![
+            nfs_content::messages::result::Invitation::new(
+                30,
+                20,
+                3,
+                [HASH, HASH + 1, HASH + 2],
+                123,
+                std::time::Duration::from_secs(1),
+                std::time::Duration::from_secs(7),
+            )
+            .unwrap(),
+        ])
+        .unwrap()
 }
 
 fn power_messages() -> crate::messages::Content {
@@ -121,7 +146,7 @@ fn power_messages() -> crate::messages::Content {
         .unwrap()
 }
 
-async fn exercise_messages(power: bool) {
+async fn exercise_messages(power: bool, result: bool) {
     let (mut listener, participant, _) = setup();
     let (repository, account, snapshot) = crate::progression::tests::local();
     let repository = Arc::new(Failable {
@@ -131,7 +156,13 @@ async fn exercise_messages(power: bool) {
     let progression = Arc::new(
         crate::progression::Content::from_json(&crate::progression::tests::combined())
             .unwrap()
-            .with_messages(if power { power_messages() } else { messages() }),
+            .with_messages(if result {
+                result_messages()
+            } else if power {
+                power_messages()
+            } else {
+                messages()
+            }),
     );
     let mut definition = crate::progression::tests::table_definition();
     for table in definition["tables"].as_array_mut().unwrap() {
@@ -208,6 +239,17 @@ async fn exercise_messages(power: bool) {
         .unwrap();
     assert_eq!(listener.story_pending.len(), MAX_PENDING);
     listener.story_pending.clear();
+    if result {
+        listener
+            .advance_active_invitations(listener.world_ms + 6999)
+            .unwrap();
+        assert!(listener.take_story().is_none());
+        assert!(
+            listener.active_invitations.result[&(Manager::Normal, 30)]
+                .hash
+                .is_none()
+        );
+    }
     if power {
         listener
             .advance_active_invitations(listener.world_ms + 6999)
@@ -250,8 +292,8 @@ async fn exercise_messages(power: bool) {
     listener.world_ms += 7000;
     assert_eq!(
         send.action,
-        if power {
-            Action::PowerMessage {
+        if power || result {
+            Action::ConditionalMessage {
                 objective: 30,
                 hash: HASH,
                 manager: Manager::Normal,
@@ -309,10 +351,10 @@ async fn exercise_messages(power: bool) {
     let mut published = listener.pending_rpcs.len();
     listener.story_committed(&send, committed).unwrap();
     assert_eq!(listener.pending_rpcs.len(), published);
-    if power {
+    if power || result {
         let saved = repository.snapshot(account).unwrap();
         let mut competing = send.clone();
-        competing.action = Action::PowerMessage {
+        competing.action = Action::ConditionalMessage {
             objective: 30,
             hash: HASH + 1,
             manager: Manager::Normal,
@@ -336,7 +378,7 @@ async fn exercise_messages(power: bool) {
             if c.method==2 && matches!(c.arguments,nfs_world::game_mode::Arguments::Message{flat:10,flag:false,..}))
         );
         published += 1;
-        competing.action = Action::PowerMessage {
+        competing.action = Action::ConditionalMessage {
             objective: 30,
             hash: 999,
             manager: Manager::Normal,

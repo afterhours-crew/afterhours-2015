@@ -54,6 +54,7 @@ fn content() -> Content {
         licensed,
         active: vec![],
         power: vec![],
+        result: vec![],
     }
 }
 

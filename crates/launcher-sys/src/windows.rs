@@ -862,10 +862,13 @@ mod tests {
         let me = Process::open(std::process::id(), false).unwrap();
         assert_eq!(me.wait(0).unwrap(), Wait::Running);
         assert!(me.creation_time().unwrap() > 0);
-        assert_eq!(me.image_path().unwrap(), std::env::current_exe().unwrap());
+        // Windows APIs can resolve a directory junction while current_exe
+        // preserves the launch path. Compare the files, not those spellings.
+        let expected = std::env::current_exe().unwrap().canonicalize().unwrap();
+        assert_eq!(me.image_path().unwrap().canonicalize().unwrap(), expected);
         let (base, size, path) = me.main_module().unwrap();
         assert!(base > 0 && size > 0);
-        assert_eq!(path, std::env::current_exe().unwrap());
+        assert_eq!(path.canonicalize().unwrap(), expected);
         assert!(!thread_ids(std::process::id(), 1024).unwrap().is_empty());
         assert!(process_exists(std::process::id()));
         assert!(!process_exists(0));

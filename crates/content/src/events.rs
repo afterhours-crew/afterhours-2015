@@ -31,6 +31,7 @@ pub mod intro;
 mod invitations;
 pub mod lifecycle;
 mod pacing;
+pub mod recommendations;
 mod recovery;
 mod request;
 pub mod restart;

@@ -8,6 +8,7 @@ use crate::{
     net::items::story::{Action, Request},
     progression::Branch,
 };
+mod result;
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct State {
@@ -15,6 +16,8 @@ pub(super) struct State {
     wanted: BTreeSet<(Manager, u32)>,
     queued: BTreeSet<(Manager, u32)>,
     power: BTreeMap<(Manager, u64), Choice>,
+    result: BTreeMap<(Manager, u64), result::Choice>,
+    results: BTreeMap<u64, (u64, bool)>,
 }
 
 #[derive(Clone, Debug)]
@@ -67,10 +70,10 @@ impl PlayerListener {
         let Some(content) = &progression.messages else {
             return Ok(());
         };
-        if content.active.is_empty() && content.power.is_empty() {
+        if content.active.is_empty() && content.power.is_empty() && content.result.is_empty() {
             return Ok(());
         }
-        if content.active.len() > 64 || content.power.len() > 16 {
+        if content.active.len() > 64 || content.power.len() > 16 || content.result.len() > 16 {
             return Err(replication::Error::Bound);
         }
         let Some(participant) = self
@@ -152,6 +155,32 @@ impl PlayerListener {
                     next.power.remove(&key);
                 }
             }
+            for plan in &content.result {
+                let manager = content
+                    .manager(plan.manager())
+                    .ok_or(replication::Error::Shape)?;
+                let state = restored
+                    .branch(Branch::Main)
+                    .objectives()
+                    .get(&plan.objective())
+                    .ok_or(replication::Error::UnknownObject)?;
+                let held_count = plan
+                    .hashes()
+                    .iter()
+                    .filter(|h| held.contains(&(manager, **h)))
+                    .count();
+                if held_count > 1 {
+                    return Err(replication::Error::Shape);
+                }
+                let key = (manager, plan.objective());
+                if state.active && held_count == 0 {
+                    next.result
+                        .entry(key)
+                        .or_insert_with(|| result::Choice::new(world_ms));
+                } else {
+                    next.result.remove(&key);
+                }
+            }
         }
         let capacity = MAX_PENDING.saturating_sub(self.story_pending.len());
         let selected: Vec<_> = next
@@ -207,7 +236,40 @@ impl PlayerListener {
                     participant,
                     player_index: u32::from(player_index),
                     progression: progression.clone(),
-                    action: Action::PowerMessage {
+                    action: Action::ConditionalMessage {
+                        objective: plan.objective(),
+                        hash,
+                        manager,
+                    },
+                });
+                choice.queued = true;
+            }
+        }
+        for plan in &content.result {
+            let manager = content
+                .manager(plan.manager())
+                .ok_or(replication::Error::Shape)?;
+            let won = next.result_won(plan.result_objective());
+            let Some(choice) = next.result.get_mut(&(manager, plan.objective())) else {
+                continue;
+            };
+            // The authenticated, entered participant above supplies the checker
+            // context. Empty or not-yet-synchronized caches answer false now.
+            choice.select(
+                plan,
+                world_ms,
+                Some(self.recommendations.contains(plan.recommendation_key())),
+                won,
+            )?;
+            if let Some(hash) = choice.hash
+                && !choice.queued
+                && jobs.len() < capacity
+            {
+                jobs.push(Request {
+                    participant,
+                    player_index: u32::from(player_index),
+                    progression: progression.clone(),
+                    action: Action::ConditionalMessage {
                         objective: plan.objective(),
                         hash,
                         manager,

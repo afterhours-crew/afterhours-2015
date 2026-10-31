@@ -22,7 +22,7 @@ pub(in crate::net) enum Action {
     },
     /// One authored conditional invitation. The worker checks the restrictor
     /// against its latest snapshot, so concurrent sessions cannot send two tiers.
-    PowerMessage {
+    ConditionalMessage {
         objective: u64,
         hash: u32,
         manager: crate::messages::Manager,
@@ -138,7 +138,7 @@ impl Profile {
                         result.ok_or(Error::Inventory(nfs_storage::Error::Conflict.into()))?
                     }
                     Action::Message { hash, manager }
-                    | Action::PowerMessage { hash, manager, .. }
+                    | Action::ConditionalMessage { hash, manager, .. }
                     | Action::MessageRead { hash, manager, .. } => {
                         let mut result = None;
                         for _ in 0..8 {
@@ -147,25 +147,17 @@ impl Profile {
                                 .snapshot(account)
                                 .map_err(|e| Error::Inventory(e.into()))?;
                             let table = manager.table();
-                            let prepared = if let Action::PowerMessage { objective, .. } =
+                            let prepared = if let Action::ConditionalMessage { objective, .. } =
                                 request.action
                             {
                                 let content =
                                     request.progression.messages.as_ref().ok_or(Error::Worker)?;
-                                let plan = content
-                                    .power
-                                    .iter()
-                                    .find(|p| p.objective() == objective)
-                                    .filter(|p| {
-                                        content.manager(p.manager()) == Some(manager)
-                                            && p.hashes().contains(&hash)
-                                    })
+                                let hashes = content
+                                    .conditional_hashes(objective, manager)
+                                    .filter(|hashes| hashes.contains(&hash))
                                     .ok_or(Error::Worker)?;
                                 let prepared = nfs_services::messages::append_exclusive(
-                                    &snapshot,
-                                    table,
-                                    hash,
-                                    &plan.hashes(),
+                                    &snapshot, table, hash, &hashes,
                                 )
                                 .map_err(|e| Error::Inventory(e.into()))?;
                                 if prepared.is_some()

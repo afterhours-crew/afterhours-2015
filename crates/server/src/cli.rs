@@ -928,9 +928,15 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                         "gameplay/progression/messages/build_01_obj02_pho_invite_performance_01",
                         "gameplay/progression/messages/build_01_obj02_pho_invite_heavy_01",
                     ])?;
+                    let result = index.result_objective_messages([
+                        "gameplay/progression/messages/build_01_obj04_pho_invite02_goodresult_02",
+                        "gameplay/progression/messages/build_01_obj04_pho_invite03_badresult_01",
+                        "gameplay/progression/messages/build_01_obj04_pho_invite03_autolog_recommended_03",
+                    ])?;
                     nfs_server::messages::Content::prepare(&mut index)?
                         .with_active(invitations)?
-                        .with_power(vec![power])
+                        .with_power(vec![power])?
+                        .with_result(vec![result])
                 })();
                 let tutorials = nfs_server::tutorials::Content::prepare(&mut index);
                 let chapters = nfs_server::chapter_notifications::Content::prepare(&mut index);
