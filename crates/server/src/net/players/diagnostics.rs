@@ -55,6 +55,7 @@ impl PlayerListener {
                 unsupported_operations: self.unsupported.total(),
                 optional_map_failures: self.optional_map_failures,
                 event_availability_failures: self.event_discovery.failures,
+                driving_distance_failures: self.distance.failures,
                 waiting_fallbacks: self.sequence_fallbacks[0],
                 arrival_fallbacks: self.sequence_fallbacks[1],
                 crash_fallbacks: self.sequence_fallbacks[2],

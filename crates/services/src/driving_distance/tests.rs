@@ -158,6 +158,104 @@ fn failed_and_lost_commit_results_retry_the_same_cumulative_value() {
 }
 
 #[test]
+fn host_claim_preserves_identity_after_an_uncertain_open_or_checkpoint() {
+    for after_commit in [false, true] {
+        let repo = Failing {
+            inner: MemoryRepository::default(),
+            fail: AtomicBool::new(false),
+            after_commit,
+        };
+        let catalog = catalog();
+        initialize(&repo, account(1), &catalog);
+        let mut claim = Claim::new(account(1), [32; 16]).unwrap();
+        repo.fail.store(true, Ordering::SeqCst);
+        assert_eq!(
+            claim.checkpoint(&repo, &catalog, 12, Timestamp(3)),
+            Err(Error::Storage)
+        );
+        let uncertain = claim.stream.clone().unwrap();
+        let done = claim.checkpoint(&repo, &catalog, 12, Timestamp(4)).unwrap();
+        assert_eq!(claim.stream, Some(uncertain));
+        assert_eq!(metres(&catalog, &done), Ok(12));
+        repo.fail.store(true, Ordering::SeqCst);
+        assert_eq!(
+            claim.checkpoint(&repo, &catalog, 31, Timestamp(5)),
+            Err(Error::Storage)
+        );
+        let done = claim.checkpoint(&repo, &catalog, 31, Timestamp(6)).unwrap();
+        assert_eq!(metres(&catalog, &done), Ok(31));
+        assert_eq!(
+            claim.checkpoint(&repo, &catalog, 12, Timestamp(7)),
+            Ok(done)
+        );
+        // A previously used claim cannot turn a retired writer into a new one.
+        for i in 0..MAX_STREAMS {
+            begin(&repo, account(1), 40 + i as u8);
+        }
+        let before = repo.snapshot(account(1)).unwrap();
+        assert_eq!(
+            claim.checkpoint(&repo, &catalog, 32, Timestamp(8)),
+            Err(Error::Conflict)
+        );
+        assert_eq!(repo.snapshot(account(1)).unwrap(), before);
+    }
+}
+
+struct Racing {
+    inner: MemoryRepository,
+    race: AtomicBool,
+    same_receipt: bool,
+}
+impl InventoryRepository for Racing {
+    fn open(&self, a: AccountId) -> Result<Snapshot, Error> {
+        self.inner.open(a)
+    }
+    fn snapshot(&self, a: AccountId) -> Result<Snapshot, Error> {
+        self.inner.snapshot(a)
+    }
+    fn receipt(&self, a: AccountId, id: u64) -> Result<Option<Applied>, Error> {
+        self.inner.receipt(a, id)
+    }
+    fn apply(&self, a: AccountId, batch: &Batch, now: Timestamp) -> Result<Applied, Error> {
+        if self.race.swap(false, Ordering::SeqCst) {
+            self.inner.apply(
+                a,
+                &Batch {
+                    id: if self.same_receipt { batch.id } else { 6789 },
+                    expected_generation: batch.expected_generation,
+                    ops: vec![Op::SetTable(key("Independent"), Table::default())],
+                },
+                now,
+            )?;
+        }
+        self.inner.apply(a, batch, now)
+    }
+}
+
+#[test]
+fn fresh_claim_retries_definite_cas_loss_and_competing_receipts() {
+    for same_receipt in [false, true] {
+        let repo = Racing {
+            inner: MemoryRepository::default(),
+            race: AtomicBool::new(false),
+            same_receipt,
+        };
+        let catalog = catalog();
+        initialize(&repo, account(1), &catalog);
+        let mut claim = Claim::new(account(1), [11; 16]).unwrap();
+        repo.race.store(true, Ordering::SeqCst);
+        let saved = claim.checkpoint(&repo, &catalog, 17, Timestamp(2)).unwrap();
+        assert_eq!(metres(&catalog, &saved), Ok(17));
+        assert_eq!(journal(&saved).unwrap().rows.len(), 2);
+        assert!(saved.tables.contains_key(&key("Independent")));
+        assert_eq!(
+            claim.checkpoint(&repo, &catalog, 17, Timestamp(3)),
+            Ok(saved)
+        );
+    }
+}
+
+#[test]
 fn semantic_watermark_outlives_generic_batch_receipt_eviction() {
     let repo = MemoryRepository::default();
     let catalog = catalog();

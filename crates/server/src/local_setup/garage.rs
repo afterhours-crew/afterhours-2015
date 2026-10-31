@@ -535,6 +535,18 @@ pub(super) fn build(index: &mut AssetIndex, thresholds: &Json) -> Result<Json> {
     doc["driving_timer"] = json!({"role":timer.role,
         "start":{"entity":timer.start.entity,"event":timer.start.event},
         "stop":{"entity":timer.stop.entity,"event":timer.stop.event}});
+    let distance = index.driving_distance_binding(DRIVER)?;
+    // This authored channel's IntParticipantProperty / persistence interface
+    // reaches GameplayStatsTable.DistanceDriven. Other stat branches are not
+    // substitutions for that store and must not inherit this policy.
+    if distance.distance_property != 1093294172
+        || entities[&24]["roles"][distance.channel_serializer]["kind"] != "channel"
+    {
+        return Err("unsupported driving distance persistent channel".into());
+    }
+    doc["driving_distance"] = json!({"role":24,
+        "kilometres":distance.kilometres_serializer,"miles":distance.miles_serializer,
+        "period_seconds":distance.period_seconds,"metres_per_mile":distance.metres_per_mile});
     doc["content"] = json!({"catalogs":catalogs.into_values().collect::<Vec<_>>(),"profiles":profiles.into_values().collect::<Vec<_>>()});
     crate::garage_logic::GarageLogic::from_json(&doc)
         .map_err(|_| "generated garage lifecycle failed validation")?;

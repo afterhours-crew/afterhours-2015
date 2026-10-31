@@ -910,6 +910,7 @@ fn flush_owned(
     host: &mut Host,
     connection: u32,
 ) -> Result<(), Refused> {
+    listener.prune_distance_publications();
     while let Some(message) = listener.pending_content.front() {
         let Ok(bytes) = message.encode() else {
             return Err(Refused {

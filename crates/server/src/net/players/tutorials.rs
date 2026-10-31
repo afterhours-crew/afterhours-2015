@@ -388,6 +388,7 @@ impl PlayerListener {
 
     /// The seen commit failed: the logic stays live for another accept.
     pub(in crate::net) fn story_failed(&mut self, request: &crate::net::items::story::Request) {
+        self.distance_failed(&request.action);
         if let crate::net::items::story::Action::UnlockMessage { hash, signal } = request.action {
             self.unlock_notifications.failed(hash, signal);
         }

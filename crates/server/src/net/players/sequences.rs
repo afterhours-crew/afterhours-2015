@@ -21,6 +21,7 @@ impl PlayerListener {
         if world_ms < self.world_ms {
             return Err(replication::Error::Shape);
         }
+        self.advance_driving_distance(world_ms);
         self.advance_binding_refreshes(world_ms)
             .inspect_err(|error| {
                 tracing::warn!(?error, world_ms, "binding refresh update rejected");

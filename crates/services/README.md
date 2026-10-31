@@ -191,3 +191,13 @@ wrong proof identities and malformed requests fail closed. Retries emit only the
 correlated ACK after readiness commits. The edge remains responsible for admitting
 the current world after its setup/self-validation writes and for publishing real
 transport synchronization; construction does not prove those prerequisites.
+
+`driving_distance::Claim` accepts host-owned cumulative metre checkpoints. Its
+versioned, bounded journal atomically stores the stream watermark and updates
+`GameplayStatsTable.DistanceDriven`. Repeated/older checkpoints add nothing;
+independent streams add only their own increase. A fresh claim may retry a
+definite compare-and-swap conflict, but an uncertain write retains its identity.
+An established stream cannot reopen after reset or journal eviction. Keep one
+claim per world connection, serialize its writes and preserve its cumulative
+count across transient driver-logic replacement. This API does not authenticate
+movement, select sample times or establish client acceptance.

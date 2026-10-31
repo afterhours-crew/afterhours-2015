@@ -432,3 +432,11 @@ REP eligibility, durable delivery and live acceptance remain separate concerns.
 and follows the actual dynamic-table link to its one manager and authored ring
 capacity. Another persistence node's capacity field does not confer ownership.
 Use the example's `--delivery` option to inspect that complete projection.
+
+`AssetIndex::driving_distance_binding` validates the installed driver-distance
+graph before exposing its sampling period, unit factor and publisher serializer
+positions. It follows the shared participant/car owner, vector caches, world
+delay, accumulator and integer conversions. Extra inputs, changed event order,
+ambiguous owners and unsupported cache/listener policies fail compilation.
+The `driving_distance` example inspects this binding without opening an account.
+Preparation revision44 rebuilds cached configuration with the validated binding.

@@ -141,6 +141,7 @@ impl PlayerListener {
         request: &Request,
         committed: Committed,
     ) -> Result<(), replication::Error> {
+        self.validate_distance_commit(&request.action)?;
         if !self
             .players
             .owns_participant(HOST_SELECTOR as u8, self.persona, request.participant)
@@ -497,6 +498,7 @@ impl PlayerListener {
         self.population = population;
         self.inventory = inventory;
         self.persistent = Some(committed.loaded);
+        self.distance_committed(&request.action);
         self.unlock_notifications = unlock_notifications;
         self.seen_points = seen_points;
         self.story_pending.extend(licensed);

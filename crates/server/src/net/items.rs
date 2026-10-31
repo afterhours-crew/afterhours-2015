@@ -5,6 +5,7 @@
 use super::players::{
     AwardRequest, Credited, EquipmentRequest, GarageOperation, GarageRequest, PlayerListener,
 };
+pub(super) mod distance;
 mod garage;
 pub(super) mod story;
 use crate::inventory;
@@ -1033,7 +1034,7 @@ impl Exchanges {
                         "story persistence failed"
                     );
                     listener.story_failed(&request);
-                    false
+                    matches!(request.action, story::Action::Distance { .. })
                 }
             };
         }

@@ -5,6 +5,10 @@ use super::*;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(in crate::net) enum Action {
+    Distance {
+        writer: super::distance::Writer,
+        cumulative: i32,
+    },
     Complete {
         objective: u64,
     },
@@ -88,6 +92,7 @@ impl Profile {
         timeout(JOB_TIMEOUT, async move {
             let permit = service
                 .workers
+                .clone()
                 .acquire_owned()
                 .await
                 .map_err(|_| Error::Worker)?;
@@ -110,6 +115,10 @@ impl Profile {
                     .story_policy(request.progression.settings);
                 let mut reward = None;
                 let snapshot = match request.action {
+                    Action::Distance {
+                        ref writer,
+                        cumulative,
+                    } => writer.checkpoint(&service, account, cumulative, now)?,
                     Action::UnlockMessage { hash, signal } => {
                         let content = request.progression.messages.as_ref().ok_or(Error::Worker)?;
                         let delivery = content.unlocks.as_ref().ok_or(Error::Worker)?;

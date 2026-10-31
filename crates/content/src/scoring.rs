@@ -30,6 +30,7 @@ pub mod creation;
 pub mod delay;
 pub mod donut;
 pub mod draft;
+pub mod driving_distance;
 pub mod event_details;
 pub mod event_sync;
 pub mod events;

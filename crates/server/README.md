@@ -414,6 +414,21 @@ Interrupting before result reporting retains earned rewards without inventing a
 story completion. This describes implemented ordering, not live acceptance of
 every story mission.
 
+An optional installed `driving_distance` garage binding enables the owned
+driver-details sampler. Accepted chassis positions use the authored world-time
+period; airborne/crashed samples exclude vertical displacement. Explicit
+relocation, car replacement and new logic lifetimes reset the position anchor.
+Fractional distance accumulates before truncation. The connection retains a
+cumulative checkpoint across logic retirement, and blocking storage runs on the
+existing bounded workers. A failed write retains pending distance and increments
+`driving_distance_failures` without rejecting movement.
+
+Kilometre/mile publications use the latest committed total and the owning Player
+reference. Newer pending movement does not block that committed publication;
+queue pressure retries it, and retirement removes unsent calls to the old logic.
+These are implemented persistence/publication semantics with constructed tests;
+game acceptance remains tracked in [#226](https://github.com/afterhours-crew/afterhours-2015/issues/226).
+
 Garage logic may supply event-only `world_ready`, `world_spawn` and `free_roam`
 batches. They run once at the first new-car readiness report, release of its spawn
 assignment, and completion of the queued world handoff, respectively. These

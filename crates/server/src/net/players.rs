@@ -24,6 +24,7 @@ mod client_info;
 mod crashing;
 mod customization;
 mod diagnostics;
+mod driving_distance;
 mod equipment;
 mod events;
 mod garage;
@@ -116,6 +117,7 @@ pub(super) struct PlayerListener {
     selection: crate::sequence_content::authored::Instances,
     selection_execution: BTreeMap<u16, prologue::selection::State>,
     story_pending: VecDeque<super::items::story::Request>,
+    distance: driving_distance::State,
     seen_points: map_points::State,
     objective_timers: BTreeMap<u16, crate::progression::timers::State>,
     active_invitations: active_invitations::State,
@@ -994,6 +996,7 @@ impl PlayerListener {
             selection: crate::sequence_content::authored::Instances::default(),
             selection_execution: BTreeMap::new(),
             story_pending: VecDeque::new(),
+            distance: driving_distance::State::default(),
             seen_points: map_points::State::default(),
             objective_timers: BTreeMap::new(),
             active_invitations: active_invitations::State::default(),
