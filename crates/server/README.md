@@ -377,6 +377,20 @@ registration. These inputs are static roles, never previously allocated ghost
 IDs. No default game asset table is embedded in the server. An optional
 `spawn_points` key names the level's SpawnPoints scene.
 
+Optional `roles.bank` and `roles.seen_points` each contain a static `scene` key
+and `serializer` index. Deployment validation requires one registered scene and
+a plain RPC serializer at that position. The installation builder derives both
+bindings and rejects ambiguous matches. Builder revision 43 invalidates older
+prepared caches for the new seen-points binding. Explicit world-content overrides
+must supply that binding themselves to enable seen-marker restoration.
+
+Seen map IDs belong to the account's `PoiIdTable`. Owned Participant requests
+commit before acknowledgement; reconnect clears the client projection and restores
+the committed set through a bounded output queue. This records which markers have
+been seen. Event availability still follows progression predicates. Storage failure
+sends no acknowledgement; a repeated request or later reconnect can recover.
+Portable tests cover this policy; it has not yet received a live game check.
+
 The optional `roles.free_roam` catalog supplies `volumes`, `presence`, `streamed`
 and `location` bindings. Each binding contains a static `scene_key` and one-based
 `serializer` index. Only unconditional world-volume subscriptions belong in this

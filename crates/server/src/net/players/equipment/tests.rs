@@ -359,6 +359,7 @@ fn fixture() -> (
         spawn_points: None,
         free_roam: None,
         bank: None,
+        seen_points: None,
     });
     listener.vehicles = Some(Arc::new(GarageContent { vehicles, layout }));
     let offers = nfs_services::purchase::Offers::new([[7; 16], [9; 16], [10; 16]])

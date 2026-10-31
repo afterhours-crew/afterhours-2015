@@ -163,6 +163,7 @@ impl PlayerListener {
             request.participant,
         )?;
         let mut unlock_notifications = self.unlock_notifications.clone();
+        let seen_points = self.committed_map_points(request, &committed.loaded)?;
         // Announce newly committed state. A competing connection can have
         // committed another member of the same restrictor while this request
         // waited; publish that winner, not the losing request's proposed hash.
@@ -497,6 +498,7 @@ impl PlayerListener {
         self.inventory = inventory;
         self.persistent = Some(committed.loaded);
         self.unlock_notifications = unlock_notifications;
+        self.seen_points = seen_points;
         self.story_pending.extend(licensed);
         if event_reported {
             self.release_event_story(request.participant);

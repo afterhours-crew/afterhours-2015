@@ -43,6 +43,9 @@ impl PlayerListener {
             .inspect_err(|error| {
                 tracing::warn!(?error, world_ms, "unlock notification update rejected");
             })?;
+        self.advance_map_points().inspect_err(|error| {
+            tracing::warn!(?error, world_ms, "seen map points update rejected");
+        })?;
         self.advance_crashes(world_ms).inspect_err(|error| {
             tracing::warn!(?error, world_ms, "crash recovery update rejected");
         })?;

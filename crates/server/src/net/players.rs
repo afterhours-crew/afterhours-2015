@@ -35,6 +35,7 @@ mod active_invitations;
 mod launchers;
 mod licensed;
 mod map_feed;
+mod map_points;
 mod objective_timers;
 mod output;
 mod prologue;
@@ -115,6 +116,7 @@ pub(super) struct PlayerListener {
     selection: crate::sequence_content::authored::Instances,
     selection_execution: BTreeMap<u16, prologue::selection::State>,
     story_pending: VecDeque<super::items::story::Request>,
+    seen_points: map_points::State,
     objective_timers: BTreeMap<u16, crate::progression::timers::State>,
     active_invitations: active_invitations::State,
     unlock_notifications: unlock_notifications::State,
@@ -992,6 +994,7 @@ impl PlayerListener {
             selection: crate::sequence_content::authored::Instances::default(),
             selection_execution: BTreeMap::new(),
             story_pending: VecDeque::new(),
+            seen_points: map_points::State::default(),
             objective_timers: BTreeMap::new(),
             active_invitations: active_invitations::State::default(),
             unlock_notifications: unlock_notifications::State::default(),
@@ -2814,6 +2817,17 @@ impl Listener for PlayerListener {
                 Err(error) => {
                     return self.refuse_rpc(error, body);
                 }
+            }
+            match self.map_point_request(&players, body) {
+                Ok(Some(request)) => {
+                    if story_pending.len() >= MAX_PENDING {
+                        return self.refuse_rpc(replication::Error::Bound, body);
+                    }
+                    story_pending.push_back(request);
+                    continue;
+                }
+                Ok(None) => {}
+                Err(error) => return self.refuse_rpc(error, body),
             }
             // The client read a message (official E1026 923.634 s): the
             // stored row is marked read; nothing is answered.

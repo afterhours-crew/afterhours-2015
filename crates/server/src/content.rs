@@ -76,15 +76,16 @@ impl WorldContent {
         }
         let profiles = self.scene_profiles.as_ref().ok_or(Failure::ProfileConfig)?;
         self.launchers.as_ref().ok_or(Failure::ProfileConfig)?;
-        if let Some(bank) = roles.bank
-            && profiles
-                .profile(bank.scene)
+        for binding in [roles.bank, roles.seen_points].into_iter().flatten() {
+            if profiles
+                .profile(binding.scene)
                 .map_err(|_| Failure::ProfileConfig)?
                 .kinds()
-                .get(bank.serializer)
+                .get(binding.serializer)
                 != Some(&nfs_world::replication::sublevel::Kind::Rpc)
-        {
-            return Err(Failure::ProfileConfig);
+            {
+                return Err(Failure::ProfileConfig);
+            }
         }
         if let Some(catalog) = &roles.free_roam {
             catalog
@@ -126,15 +127,16 @@ impl WorldContent {
                 return Err(Failure::ProfileConfig);
             }
         }
-        if let Some(bank) = roles.bank
-            && bindings
+        for binding in [roles.bank, roles.seen_points].into_iter().flatten() {
+            if bindings
                 .hierarchy()
                 .iter()
-                .filter(|level| level.content_key == bank.scene)
+                .filter(|level| level.content_key == binding.scene)
                 .count()
                 != 1
-        {
-            return Err(Failure::ProfileConfig);
+            {
+                return Err(Failure::ProfileConfig);
+            }
         }
         if let Some(catalog) = &roles.free_roam {
             for site in catalog.volumes.iter().chain([

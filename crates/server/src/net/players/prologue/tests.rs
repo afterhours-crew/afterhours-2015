@@ -287,6 +287,7 @@ fn attach_location_service(listener: &mut PlayerListener) {
         streaming_gate: asset,
         spawn_points: None,
         bank: None,
+        seen_points: None,
         free_roam: Some(Activation {
             volumes: vec![],
             presence: Site {
@@ -766,6 +767,7 @@ fn ready_for_selection_with_return_confirmation(
         spawn_points: None,
         free_roam: None,
         bank: None,
+        seen_points: None,
     });
     let before = (*items).clone();
     tick_with_normal_presentation(&mut listener).unwrap();

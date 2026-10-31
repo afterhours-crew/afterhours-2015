@@ -45,6 +45,11 @@ pub(in crate::net) enum Action {
     Tutorial {
         key: u32,
     },
+    /// A map marker reported by the owned participant at this scene lifetime.
+    PoiSeen {
+        endpoint: nfs_world::participants::Endpoint,
+        id: u32,
+    },
 }
 #[derive(Clone, Debug)]
 pub(in crate::net) struct Request {
@@ -280,15 +285,19 @@ impl Profile {
                         }
                         result.ok_or(Error::Inventory(nfs_storage::Error::Conflict.into()))?
                     }
-                    Action::Tutorial { key } => {
+                    Action::Tutorial { key } | Action::PoiSeen { id: key, .. } => {
                         let mut result = None;
                         for _ in 0..8 {
                             let snapshot = service
                                 .repository
                                 .snapshot(account)
                                 .map_err(|e| Error::Inventory(e.into()))?;
-                            let Some(batch) = nfs_services::tutorials::mark(&snapshot, key)
-                                .map_err(|e| Error::Inventory(e.into()))?
+                            let prepared = if matches!(request.action, Action::PoiSeen { .. }) {
+                                nfs_services::map_points::mark(&snapshot, key)
+                            } else {
+                                nfs_services::tutorials::mark(&snapshot, key)
+                            };
+                            let Some(batch) = prepared.map_err(|e| Error::Inventory(e.into()))?
                             else {
                                 result = Some(snapshot);
                                 break;

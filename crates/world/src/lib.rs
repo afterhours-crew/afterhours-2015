@@ -19,6 +19,7 @@ pub mod garage;
 pub mod launchers;
 pub mod level_poll;
 pub mod logic;
+pub mod map_points;
 pub mod messages;
 pub mod nitrous_fuel;
 pub mod participant_states;

@@ -19,6 +19,23 @@ fn content() -> WorldContent {
 }
 
 #[test]
+fn seen_map_binding_requires_a_registered_scene_and_a_plain_rpc_serializer() {
+    let mut content = content_with(Some(&[Kind::Noop, Kind::Rpc, Kind::RpcBool]));
+    let scene = content.roles.as_ref().unwrap().spawn_points.unwrap();
+    content.roles.as_mut().unwrap().seen_points = Some(crate::scene_roles::SceneRpc {
+        scene,
+        serializer: 1,
+    });
+    content.validate_runtime().unwrap();
+    for (scene, serializer) in [(scene, 0), (scene, 2), (scene, 999), (9_999_999, 1)] {
+        let mut wrong = content.clone();
+        wrong.roles.as_mut().unwrap().seen_points =
+            Some(crate::scene_roles::SceneRpc { scene, serializer });
+        assert!(wrong.validate_runtime().is_err());
+    }
+}
+
+#[test]
 fn garage_livery_cache_update_uses_owned_scene_and_reliable_reply_queue() {
     use nfs_protocol::world::rpc::Serial;
     use nfs_world::{bits::BitWriter, replication::sublevel};
@@ -824,6 +841,7 @@ fn content_with(spawn: Option<&[Kind]>) -> WorldContent {
         spawn_points: spawn.map(|_| keys[14]),
         free_roam: None,
         bank: None,
+        seen_points: None,
         streaming_gate: Asset {
             bundle: 2,
             type_id: 3,
