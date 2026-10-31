@@ -63,7 +63,7 @@ server-only and keep their content, save and logs local.
 | `VehicleParts` | `vehicle-parts.json` | Item-system customization, tuning assets, NOS variants, wheel geometry, wrap/plate identifiers and mesh GUID alternatives |
 | `VehicleProfiles` | `vehicle-profiles.json` | Player vehicle blueprints reached through the item system: component profiles, mesh-link order, bus flags, registry identities, physics, appearance and health defaults |
 | `ProgressionContent` | `progression-content.json` | Main/intro persistence links, stable IDs, activation expressions, entity composition and explicit spawner-to-scene channel bindings |
-| `SequenceContent` | `sequence-content.json` | Waiting/exit sequence registries, manager bus and serializer, spawner channel links and the exit command's registered spline definition |
+| `SequenceContent` | `sequence-content.json` | Waiting, garage entry/exit and recovery registries; manager/channel bindings, registered splines and validated controlled-arrival timing |
 | `TrafficContent` | `traffic-content.json` | Linked traffic personas in provider order, vehicle profiles, manager serializer ordinals and roads with owning scene catalogs |
 | `RivalContent` | `rival-content.json` | Roaming racer activation regions, spawn transforms, complete vehicle presets, provider and personality-library indices |
 | `WorldMacTemplate` | `world-mac-template.bin` | 64 bytes of the executable image at the build's known address, checked by digest |
@@ -117,14 +117,23 @@ and asset references (class ID and position in registry order). A Blueprint
 class without a profiled ID is an error, never a guess. These are inputs for
 world, garage, vehicle, sequence and progression content.
 
-Sequence extraction checks the waiting and garage-exit serializer layouts and
-resolves channels from each scene's particular sequence referer, through prefab
+Sequence extraction checks waiting, garage entry/exit, crash and controlled-arrival
+layouts and resolves channels from each scene's particular referer, through prefab
 and scene interfaces. The manager's scene determines the one-based embedded bus.
 The spline command selects a channel port; that target selects the exact registered
 `ScriptedAISplineEntityData` object and its loop default. Speed-segment assets and
 unrelated channels are not interchangeable with these identities. Missing,
 ambiguous or unsupported graphs fail preparation. Version 2 contains no goal
 allocation counter; that value belongs to owned runtime state.
+
+Controlled-arrival preparation follows both recovery spawners to the same
+explicit channel and resolves its actor and participant managers in that scene.
+It validates the complete condition/timer/control graph, including participant
+validity, both gates, actor enable/release, Stop and client completion. Timer
+realm, clock, flags and bounded duration are authored inputs. Duplicate roots,
+extra or missing edges, unsupported conditions and ambiguous channel bindings
+fail preparation. The compiled definition contains static bindings and timing;
+the server owns each participant's sequence and preserves its existing goals.
 
 ## Participant logic layouts
 

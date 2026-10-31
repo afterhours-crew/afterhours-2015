@@ -441,8 +441,8 @@ phases from installed bindings. See the launcher guide for live validation scope
 Crash recovery uses the owned car's client-reported crash flag. A brief pulse
 is retained independently of movement echo throttling. Once replication capacity
 is available, the server replaces driving presentation with the installed input
-lock and crash sequence. The client's sequence-completion message restores the
-driving objects and re-arms world activation. The installed server timer supplies
+lock and crash sequence. In-place recovery completes after the client's
+sequence-completion message. The installed server timer supplies
 a fallback Stop; completion can arrive before that timer. Duplicate completion,
 stale movement and a held crash flag cannot start another recovery.
 The owned car remains a focus for nearby traffic and roaming rivals while crash
@@ -454,8 +454,16 @@ the server relocates it to a recent upright, grounded driving sample, with the
 installed road spawn as a fallback. History is bounded and scoped to the owned
 vehicle. Paired `resetting`/`reset_arrived` batches keep the installed reset
 loading screen active from before relocation until the client acknowledges
-arrival; only then are input and driving presentation restored. `prepare-local`
-builds these batches from the installation. Live acceptance is tracked in issue
+the teleport. When `crash.arrival` is configured, that acknowledgement starts
+the installed controlled-arrival sequence. It temporarily holds the owned actor,
+preserves existing race goals and restores the actor's prior control value when
+the authored timer expires. The restored actor is published before Stop; the
+client's subsequent completion restores driving presentation and Alive. Queue
+pressure retains each transition, and stale or premature completions cannot
+skip it. Older configurations without this optional arrival definition retain
+their teleport-acknowledgement completion behavior. `prepare-local` builds the
+paired logic batches and controlled-arrival binding from the installation.
+These paths have constructed regressions; live acceptance is tracked in issue
 #156.
 
 Garage return requires the installed entry sequence and all three garage logic
