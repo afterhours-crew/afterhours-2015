@@ -24,6 +24,14 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
+  # Building the workspace and network-test variant exhausted runner storage
+  # with full symbols. Keep runtime checks while omitting debug information.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_PROFILE_DEV_DEBUG_ASSERTIONS: "true"
+  CARGO_PROFILE_TEST_DEBUG_ASSERTIONS: "true"
+  CARGO_PROFILE_DEV_OVERFLOW_CHECKS: "true"
+  CARGO_PROFILE_TEST_OVERFLOW_CHECKS: "true"
 
 jobs:
   fmt:
@@ -67,6 +75,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --locked
       - run: cargo test -p nfs-server --features network-test --locked
+
+      - name: Report build storage
+        if: always()
+        run: |
+          df -h .
+          if [ -d target ]; then du -sh target; fi
 
   test-windows:
     name: Test (Windows)
