@@ -175,6 +175,17 @@ impl PlayerListener {
                 life.session
                     .rebase(seconds, sample)
                     .map_err(|_| replication::Error::Shape)?;
+                tracing::debug!(
+                    participant,
+                    ghost,
+                    ?car,
+                    world_ms,
+                    seconds,
+                    period_seconds = binding.period_seconds,
+                    relocating,
+                    ?sample,
+                    "driving distance anchor reset"
+                );
                 life.car = car;
             } else {
                 let before = life
@@ -190,6 +201,20 @@ impl PlayerListener {
                         .cumulative
                         .checked_add(total - before)
                         .ok_or(replication::Error::Bound)?;
+                    if total != before || !life.sampled {
+                        tracing::debug!(
+                            participant,
+                            ghost,
+                            ?car,
+                            world_ms,
+                            seconds,
+                            before,
+                            total,
+                            cumulative = next.cumulative,
+                            ?sample,
+                            "driving distance sample staged"
+                        );
+                    }
                     life.sampled = sample.is_some();
                 }
             }

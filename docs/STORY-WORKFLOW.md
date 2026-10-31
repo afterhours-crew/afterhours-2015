@@ -69,6 +69,12 @@ deadline. Unexpected timeout recovery or unsupported work remains a failed or
 degraded case. Containment prevents unrelated movement from failing; it does not
 turn the affected mission into a pass.
 
+The `nfs_server::net::players::driving_distance` debug target records anchor
+resets and the first or changed whole-metre samples, with world/relative clocks,
+period, object lifetime and input position. These are staged sampler diagnostics;
+only the persistence receipt and exported save establish committed distance.
+Derive the expected path separately rather than adopting a diagnostic total.
+
 ## Validate the flow and its boundaries
 
 1. Retain a failing case, the corrected case and a related case exercising the
