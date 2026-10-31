@@ -162,12 +162,53 @@ impl PlayerListener {
             &self.players,
             request.participant,
         )?;
+        let mut unlock_notifications = self.unlock_notifications.clone();
         // Announce newly committed state. A competing connection can have
         // committed another member of the same restrictor while this request
         // waited; publish that winner, not the losing request's proposed hash.
         if let Some(messages) = &request.progression.messages {
             use crate::net::items::story::Action;
             let announcement = match request.action {
+                Action::UnlockMessage { hash, .. } => {
+                    let delivery = messages.unlocks.as_ref().ok_or(replication::Error::Shape)?;
+                    let rule = delivery
+                        .notifications
+                        .iter()
+                        .find(|n| n.hash == hash)
+                        .ok_or(replication::Error::Shape)?;
+                    if matches!(
+                        rule.trigger,
+                        nfs_content::messages::unlocks::Trigger::Part { .. }
+                    ) {
+                        unlock_notifications.seed(messages, before)?;
+                        let old = messages.dynamic_identities(before)?;
+                        for new in messages.dynamic_identities(&committed.loaded)? {
+                            if new.row.hash == hash
+                                && !old.iter().any(|r| {
+                                    r.row.index == new.row.index
+                                        && r.generation == new.generation
+                                        && r.row.data == new.row.data
+                                        && r.row.hash == new.row.hash
+                                })
+                            {
+                                calls.push(messages.dynamic_message(
+                                    self.players.objects(),
+                                    &new.row,
+                                    false,
+                                )?);
+                                unlock_notifications.added(new);
+                            }
+                        }
+                        None
+                    } else {
+                        Some((
+                            messages
+                                .manager(rule.manager)
+                                .ok_or(replication::Error::Shape)?,
+                            vec![hash],
+                        ))
+                    }
+                }
                 Action::Message { hash, manager } => Some((manager, vec![hash])),
                 Action::ConditionalMessage {
                     objective, manager, ..
@@ -455,6 +496,7 @@ impl PlayerListener {
         self.population = population;
         self.inventory = inventory;
         self.persistent = Some(committed.loaded);
+        self.unlock_notifications = unlock_notifications;
         self.story_pending.extend(licensed);
         if event_reported {
             self.release_event_story(request.participant);

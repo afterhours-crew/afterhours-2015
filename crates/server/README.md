@@ -19,6 +19,22 @@ nitrous meter and their native initial audio flags. These initial states remain
 separate from owned cars and roaming rivals. Their construction does not grant
 inventory or activate a prologue session.
 
+Earned REP unlock notifications use installed sender, filter, delay and manager
+bindings. Pending delivery is saved with the reward, then the world-clock delay
+queues a storage job. Only its committed inbox change is announced. Output queue
+pressure retains that publication; failed writes remain pending. Part attachments
+sample the latest committed input, and inbox restoration precedes manager
+initiation. Repeated message hashes keep separate deliveries; client read reports
+select the first live matching message, with a receipt preventing stale reads
+after ring reuse.
+
+A server restart starts the full authored delay for an intent that was still
+pending; this is an explicit local recovery policy, not a claim about official
+cross-process timer behavior. Already-delivered messages restore without another
+toast. Full-career reset clears the inbox and private pending/delivery tables.
+Portable tests cover these boundaries; whole-span reference qualification and
+owner game acceptance remain separate gates.
+
 ## Build and start
 
 `story --root <data-directory> --local-account <id> --progression-content <file>

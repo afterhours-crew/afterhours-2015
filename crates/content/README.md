@@ -427,3 +427,8 @@ Unknown attachments, extra inputs, ambiguous links and unsupported delay policie
 fail extraction. The `unlock_messages` example inspects these rules without
 opening a save. This projection neither grants rewards nor schedules messages;
 REP eligibility, durable delivery and live acceptance remain separate concerns.
+
+`unlock_delivery` also resolves transaction definition GUIDs to nested item IDs
+and follows the actual dynamic-table link to its one manager and authored ring
+capacity. Another persistence node's capacity field does not confer ownership.
+Use the example's `--delivery` option to inspect that complete projection.

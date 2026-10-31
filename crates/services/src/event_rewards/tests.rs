@@ -113,6 +113,7 @@ impl Fixture {
             thresholds: &self.thresholds,
             categories: None,
             items: None,
+            notifications: None,
         }
     }
     fn initialize(&self, repo: &dyn InventoryRepository, who: AccountId) -> Snapshot {

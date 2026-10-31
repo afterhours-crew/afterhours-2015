@@ -41,7 +41,64 @@ pub enum Trigger {
     Part { include: bool, ids: BTreeSet<u32> },
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+pub struct Part {
+    pub definition: [u8; 16],
+    pub id: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+pub struct Delivery {
+    pub notifications: Vec<Notification>,
+    pub controller: [u8; 16],
+    pub parts: Vec<Part>,
+    /// The one manager wired to the attachment-bearing persistent table.
+    pub dynamic_manager: usize,
+    pub dynamic_capacity: u16,
+}
+
 impl AssetIndex {
+    /// Resolve item IDs and the real dynamic-table owner as well as senders.
+    /// A second manager with a capacity field is not evidence that it owns the
+    /// same inbox: only the actual DynamicMessage table link qualifies it.
+    pub fn unlock_delivery(&mut self, selected: &BTreeSet<String>) -> Result<Delivery, Error> {
+        let notifications = self.unlock_messages(selected)?;
+        let controllers = self.assets.named("CategoryUnlockControllerItemData");
+        let [controller] = controllers.as_slice() else {
+            return Err(bad("unique notification category controller"));
+        };
+        let controller = self
+            .assets
+            .objects(controller)?
+            .first()
+            .and_then(|o| o.guid)
+            .ok_or_else(|| bad("notification category controller GUID"))?;
+        let bindings = self
+            .scene_bindings(GAMEPLAY)?
+            .into_iter()
+            .filter(|b| b.class == MANAGER)
+            .map(|b| ((b.asset.to_lowercase(), b.object), b.serializer))
+            .collect();
+        let mut graph = Graph::new(&mut self.assets);
+        let nodes = graph.read(Site::root(LOGIC))?;
+        let world = graph.read(Site::root(GAMEPLAY))?;
+        let parts = part_ids(&mut graph, &nodes)?;
+        let (dynamic_manager, dynamic_capacity) = dynamic_inbox(&mut graph, &world, &bindings)?;
+        check(
+            notifications.iter().all(|n| {
+                !matches!(n.trigger, Trigger::Part { .. }) || n.manager == dynamic_manager
+            }),
+            "part notification dynamic manager",
+        )?;
+        Ok(Delivery {
+            notifications,
+            controller,
+            parts,
+            dynamic_manager,
+            dynamic_capacity,
+        })
+    }
+
     /// Compile every explicitly selected category/part notification. Unsupported
     /// attachment types, extra inputs and unresolved ownership fail this call.
     /// Unselected wrap/decal awards are outside this projection.
@@ -80,6 +137,74 @@ impl AssetIndex {
         }
         read(&mut graph, &nodes, &world, &bindings, selected)
     }
+}
+
+fn part_ids<S: Source>(g: &mut Graph<S>, nodes: &[Node]) -> Result<Vec<Part>, Error> {
+    let mut parts = BTreeMap::new();
+    let mut ids = BTreeSet::new();
+    for n in nodes
+        .iter()
+        .filter(|n| n.object.class == "UnlockItemTransactionEntityData")
+    {
+        let target = g.target_field(&n.site, "UnlockedItem")?;
+        let item = g.source.object(&target)?;
+        check(item.class.ends_with("ItemData"), "notification part class")?;
+        let definition = item
+            .guid
+            .filter(|g| *g != [0; 16])
+            .ok_or_else(|| bad("notification part GUID"))?;
+        let id = item_id(&item)?;
+        check(id != 0 && parts.len() < 4096, "notification part bound")?;
+        if let Some(previous) = parts.insert(definition, id) {
+            check(previous == id, "notification part GUID alias")?;
+        } else {
+            check(ids.insert(id), "notification part ID alias")?;
+        }
+    }
+    check(!parts.is_empty(), "missing notification part IDs")?;
+    Ok(parts
+        .into_iter()
+        .map(|(definition, id)| Part { definition, id })
+        .collect())
+}
+
+fn dynamic_inbox<S: Source>(
+    g: &mut Graph<S>,
+    nodes: &[Node],
+    bindings: &BTreeMap<Key, usize>,
+) -> Result<(usize, u16), Error> {
+    const DYNAMIC: u32 = 123_756_709;
+    let mut inbox = None;
+    for n in nodes
+        .iter()
+        .filter(|n| n.object.class == "MessagePersistenceEntityData")
+    {
+        let targets = g.links(&n.site, DYNAMIC)?;
+        if targets.is_empty() {
+            continue;
+        }
+        let [target] = targets.as_slice() else {
+            return Err(bad("unique dynamic inbox table"));
+        };
+        let table = g.object(&target.site)?;
+        check(
+            target.port == 0
+                && table.class == "PersistentTableWithDynamicSecondaryKeyEntityData"
+                && value(&table, "TableName")?.as_str() == Some("DynamicMessage"),
+            "dynamic inbox table",
+        )?;
+        let manager = one_link(g, &n.site, MANAGER_LINK, 0)?;
+        let serializer = *bindings
+            .get(&manager.site.key)
+            .ok_or_else(|| bad("dynamic inbox manager"))?;
+        let capacity = u16::try_from(bits32(value(&n.object, "DynamicMessageLimit")?)?)
+            .map_err(|_| bad("dynamic inbox capacity"))?;
+        check(
+            (2..=512).contains(&capacity) && inbox.replace((serializer, capacity)).is_none(),
+            "dynamic inbox ownership/capacity",
+        )?;
+    }
+    inbox.ok_or_else(|| bad("missing dynamic inbox"))
 }
 
 fn read<S: Source>(
@@ -199,13 +324,7 @@ fn read<S: Source>(
                         .ok_or_else(|| bad("null part filter definition"))?;
                     let item = g.source.object(&key)?;
                     check(item.class.ends_with("ItemData"), "part filter item class")?;
-                    let id = item
-                        .fields
-                        .get("Id")
-                        .and_then(Value::as_fields)
-                        .and_then(|f| f.get("Id"))
-                        .and_then(Value::bits32)
-                        .ok_or_else(|| bad("part filter ItemData.Id"))?;
+                    let id = item_id(&item)?;
                     check(ids.insert(id), "duplicate part filter identity")?;
                 }
                 Trigger::Part { include, ids }
@@ -235,6 +354,21 @@ fn read<S: Source>(
         "selected unlock sender missing",
     )?;
     Ok(found.into_values().collect())
+}
+
+fn item_id(o: &Object) -> Result<u32, Error> {
+    o.fields
+        .get("Id")
+        .and_then(Value::as_fields)
+        .and_then(|f| f.get("Id"))
+        .and_then(Value::bits32)
+        .ok_or_else(|| bad("notification ItemData.Id"))
+}
+
+fn value<'a>(o: &'a Object, name: &str) -> Result<&'a Value, Error> {
+    o.fields
+        .get(name)
+        .ok_or_else(|| bad("unlock delivery field"))
 }
 
 fn array<'a>(o: &'a Object, name: &str) -> Result<&'a [Value], Error> {

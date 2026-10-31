@@ -13,6 +13,9 @@
 use crate::persistent::key;
 use nfs_storage::{Batch, Error, Op, Snapshot, tables::Value};
 
+pub mod dynamic;
+pub mod unlocks;
+
 pub const STATIC: &str = "StaticMessage";
 pub const UNDERGROUND: &str = "UgStaticMessages";
 const NAMESPACE: u64 = 1 << 53;

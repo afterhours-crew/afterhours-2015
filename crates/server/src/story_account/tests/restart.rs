@@ -76,6 +76,36 @@ fn fixture() -> Fixture {
                 ops: vec![
                     Op::Update(item),
                     Op::SetTable(
+                        key(nfs_services::messages::unlocks::TABLE),
+                        Table {
+                            rows: [(
+                                17,
+                                [
+                                    (key("Version"), Value::Int(1)),
+                                    (key("Kind"), Value::Int(1)),
+                                    (key("Signal"), Value::String("2".into())),
+                                    (key("Part"), Value::Int(100)),
+                                ]
+                                .into(),
+                            )]
+                            .into(),
+                        },
+                    ),
+                    Op::SetTable(
+                        key(nfs_services::messages::dynamic::RECEIPTS),
+                        Table {
+                            rows: [(
+                                0,
+                                [
+                                    (key("Version"), Value::Int(1)),
+                                    (key("Generation"), Value::String("2".into())),
+                                ]
+                                .into(),
+                            )]
+                            .into(),
+                        },
+                    ),
+                    Op::SetTable(
                         key("AfterhoursGarageSessions"),
                         Table {
                             rows: BTreeMap::from([(0, Row::from([(0, Value::Int(42))]))]),
@@ -132,6 +162,16 @@ fn full_restart_at_opening_clears_car_later_career_and_records_with_restorable_b
         nfs_services::bank::Balance(0)
     );
     assert!(!after.snapshot.tables.contains_key(&key("Reputation")));
+    for name in [
+        nfs_services::messages::unlocks::TABLE,
+        nfs_services::messages::dynamic::RECEIPTS,
+    ] {
+        assert!(before.snapshot.tables.contains_key(&key(name)));
+        assert!(
+            !after.snapshot.tables.contains_key(&key(name)),
+            "full-career reset clears {name}"
+        );
+    }
     assert_eq!(
         after.snapshot.tables[&key("ProgressionObjective")].rows[&30][&key("Completed")],
         Value::Int(0)

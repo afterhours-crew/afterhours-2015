@@ -10,6 +10,8 @@ use nfs_world_core::items::{
     self, Definition, DefinitionClass, DefinitionFlags, Derived, OwnershipLevel,
 };
 
+mod unlocks;
+
 fn account(n: u8) -> AccountId {
     AccountId::from_owned_config([n; 16]).unwrap()
 }
@@ -40,6 +42,22 @@ impl Fixture {
             .find(|t| t["name"] == "RepValuesTable")
             .unwrap();
         table["columns"] = serde_json::json!(["RepScore", "RepLevel", "BuildScore", "CrewScore", "OutlawScore", "SpeedScore", "StyleScore"].map(|name| serde_json::json!({"name":name,"key":key(name),"value_type":"int","default":"0"})));
+        for (name, columns) in [
+            ("StaticMessage", vec!["Asset", "Read"]),
+            ("UgStaticMessages", vec!["MessageHash", "Read"]),
+            ("DynamicMessage", vec!["Asset", "Read", "Data"]),
+        ] {
+            let table = data["tables"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|t| t["name"] == name)
+                .unwrap();
+            table["columns"] = serde_json::json!(columns.into_iter().map(|name| serde_json::json!({
+                "name": name, "key": key(name), "value_type": if name == "Data" { "string" } else { "int" },
+                "default": if name == "Data" { "" } else { "0" },
+            })).collect::<Vec<_>>());
+        }
         let controller = Definition {
             class: DefinitionClass::CategoryUnlockControllerItemData,
             buy_price: 0,
@@ -90,6 +108,7 @@ impl Fixture {
             thresholds: &self.thresholds,
             categories: Some(&self.categories),
             items: Some(&self.items),
+            notifications: None,
         }
     }
     fn initialize(&self, repo: &dyn InventoryRepository, who: AccountId) -> Snapshot {

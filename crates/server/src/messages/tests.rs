@@ -55,6 +55,7 @@ fn content() -> Content {
         active: vec![],
         power: vec![],
         result: vec![],
+        unlocks: None,
     }
 }
 
@@ -89,7 +90,7 @@ fn each_manager_restores_its_rows_before_its_initiation() {
     assert_eq!(
         calls(
             content
-                .session_start(world, &[row(REMINDER)], &[row(PREORDER)])
+                .session_start(world, &[row(REMINDER)], &[row(PREORDER)], &[])
                 .unwrap()
         ),
         [
@@ -102,7 +103,7 @@ fn each_manager_restores_its_rows_before_its_initiation() {
     // A fresh account (E1026 36.220 s): the two initiations only; a row of
     // a message that is not installed is skipped.
     assert_eq!(
-        calls(content.session_start(world, &[row(7)], &[]).unwrap()),
+        calls(content.session_start(world, &[row(7)], &[], &[]).unwrap()),
         [(normal, INITIATED, None), (underground, INITIATED, None)]
     );
     // E1026 1247.925 s: the licensed message is announced on its manager.
@@ -162,6 +163,7 @@ fn restored_messages_keep_their_read_flags_and_new_announcements_are_unread() {
             players.objects(),
             &[row(REMINDER, true)],
             &[row(PREORDER, false)],
+            &[],
         )
         .unwrap();
     restored.push(

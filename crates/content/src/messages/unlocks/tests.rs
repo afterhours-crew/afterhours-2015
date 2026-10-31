@@ -244,6 +244,166 @@ fn category_success_and_filtered_part_share_owned_manager_but_keep_their_delays(
 }
 
 #[test]
+fn attachment_inbox_belongs_to_the_wired_manager_not_every_capacity_field() {
+    let mut m = Memory::default();
+    m.put(
+        "p",
+        0,
+        "LogicPrefabBlueprint",
+        &[
+            ("Objects", Value::Array((1..=5).map(local).collect())),
+            (
+                "LinkConnections",
+                Value::Array(vec![
+                    edge(local(1), MANAGER_LINK, local(3), 0),
+                    edge(local(2), MANAGER_LINK, local(4), 0),
+                    edge(local(2), 123_756_709, local(5), 0),
+                ]),
+            ),
+        ],
+    );
+    for i in [1, 2] {
+        m.put(
+            "p",
+            i,
+            "MessagePersistenceEntityData",
+            &[("DynamicMessageLimit", Value::UInt32(7))],
+        );
+    }
+    for i in [3, 4] {
+        m.put("p", i, MANAGER, &[]);
+    }
+    m.put(
+        "p",
+        5,
+        "PersistentTableWithDynamicSecondaryKeyEntityData",
+        &[("TableName", Value::String("DynamicMessage".into()))],
+    );
+    let compile = |m: &mut Memory| {
+        let mut g = Graph::new(m);
+        let nodes = g.read(Site::root("p"))?;
+        dynamic_inbox(
+            &mut g,
+            &nodes,
+            &[(("p".into(), 3), 21), (("p".into(), 4), 22)].into(),
+        )
+    };
+    assert_eq!(compile(&mut m).unwrap(), (22, 7));
+    for capacity in [0, 1, 513, u32::MAX] {
+        let mut bad = Memory(m.0.clone());
+        set(
+            &mut bad,
+            "p",
+            2,
+            "DynamicMessageLimit",
+            Value::UInt32(capacity),
+        );
+        assert!(compile(&mut bad).is_err());
+    }
+    let mut bad = Memory(m.0.clone());
+    set(
+        &mut bad,
+        "p",
+        5,
+        "TableName",
+        Value::String("StaticMessage".into()),
+    );
+    assert!(compile(&mut bad).is_err());
+    for index in [1, 2] {
+        let mut bad = Memory(m.0.clone());
+        let fields = &mut bad.0.get_mut(&("p".into(), 0)).unwrap().fields;
+        let Value::Array(edges) = &mut fields
+            .0
+            .iter_mut()
+            .find(|(k, _)| k == "LinkConnections")
+            .unwrap()
+            .1
+        else {
+            panic!()
+        };
+        edges.remove(index);
+        assert!(compile(&mut bad).is_err());
+    }
+    let fields = &mut m.0.get_mut(&("p".into(), 0)).unwrap().fields;
+    let Value::Array(edges) = &mut fields
+        .0
+        .iter_mut()
+        .find(|(k, _)| k == "LinkConnections")
+        .unwrap()
+        .1
+    else {
+        panic!()
+    };
+    edges.push(edge(local(1), 123_756_709, local(5), 0));
+    assert!(
+        compile(&mut m).is_err(),
+        "two managers may not own one ring"
+    );
+}
+
+#[test]
+fn part_attachment_ids_are_definition_ids_and_aliases_are_rejected() {
+    let mut m = Memory::default();
+    m.put(
+        "p",
+        0,
+        "ParticipantLogicBlueprint",
+        &[("Objects", Value::Array(vec![local(1), local(2)]))],
+    );
+    for i in [1, 2] {
+        m.put(
+            "p",
+            i,
+            "UnlockItemTransactionEntityData",
+            &[("UnlockedItem", ptr("i", i))],
+        );
+        m.put(
+            "i",
+            i,
+            "AirFilterItemData",
+            &[("Id", record(&[("Id", Value::UInt32(100 + i as u32))]))],
+        );
+        m.0.get_mut(&("i".into(), i)).unwrap().guid = Some([i as u8; 16]);
+    }
+    let compile = |m: &mut Memory| {
+        let mut g = Graph::new(m);
+        let nodes = g.read(Site::root("p"))?;
+        part_ids(&mut g, &nodes)
+    };
+    assert_eq!(
+        compile(&mut m).unwrap(),
+        [
+            Part {
+                definition: [1; 16],
+                id: 101
+            },
+            Part {
+                definition: [2; 16],
+                id: 102
+            }
+        ]
+    );
+    for id in [0, 101] {
+        let mut bad = Memory(m.0.clone());
+        set(&mut bad, "i", 2, "Id", record(&[("Id", Value::UInt32(id))]));
+        assert!(compile(&mut bad).is_err());
+    }
+    for value in [Value::UInt32(102), record(&[("Wrong", Value::UInt32(102))])] {
+        let mut bad = Memory(m.0.clone());
+        set(&mut bad, "i", 2, "Id", value);
+        assert!(
+            compile(&mut bad).is_err(),
+            "the installed ID is a nested field"
+        );
+    }
+    for guid in [None, Some([0; 16]), Some([1; 16])] {
+        let mut bad = Memory(m.0.clone());
+        bad.0.get_mut(&("i".into(), 2)).unwrap().guid = guid;
+        assert!(compile(&mut bad).is_err());
+    }
+}
+
+#[test]
 fn every_required_event_property_and_link_is_checked_including_realms() {
     for field in ["PropertyConnections", "LinkConnections", "EventConnections"] {
         let length = rows(&mut fixture(), field).len();

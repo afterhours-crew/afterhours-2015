@@ -48,6 +48,7 @@ mod scoring;
 mod sequences;
 mod traffic;
 mod tutorials;
+mod unlock_notifications;
 
 #[cfg(test)]
 mod deployment_tests;
@@ -116,6 +117,7 @@ pub(super) struct PlayerListener {
     story_pending: VecDeque<super::items::story::Request>,
     objective_timers: BTreeMap<u16, crate::progression::timers::State>,
     active_invitations: active_invitations::State,
+    unlock_notifications: unlock_notifications::State,
     intro_composites: prologue::finale::Composites,
     intro_modes: prologue::Modes,
     intro_movies: prologue::movies::Movies,
@@ -701,6 +703,7 @@ impl PlayerListener {
                         players.objects(),
                         &rows(crate::messages::Manager::Normal)?,
                         &rows(crate::messages::Manager::Underground)?,
+                        &messages.dynamic_rows(loaded)?,
                     )?);
                 }
                 // The notified tutorial seen values join the same flush
@@ -991,6 +994,7 @@ impl PlayerListener {
             story_pending: VecDeque::new(),
             objective_timers: BTreeMap::new(),
             active_invitations: active_invitations::State::default(),
+            unlock_notifications: unlock_notifications::State::default(),
             intro_composites: BTreeMap::new(),
             intro_modes: BTreeMap::new(),
             intro_movies: BTreeMap::new(),
@@ -2828,15 +2832,42 @@ impl Listener for PlayerListener {
                         if story_pending.len() >= MAX_PENDING {
                             return self.refuse_rpc(replication::Error::Bound, body);
                         }
+                        let dynamic = messages.unlocks.as_ref().is_some_and(|d| {
+                            messages.manager(d.dynamic_manager) == Some(manager)
+                                && d.notifications.iter().any(|n| {
+                                    n.hash == hash
+                                        && matches!(
+                                            n.trigger,
+                                            nfs_content::messages::unlocks::Trigger::Part { .. }
+                                        )
+                                })
+                        });
+                        let action = if dynamic {
+                            let Some(loaded) = self.persistent.as_deref() else {
+                                return self.refuse_rpc(replication::Error::Shape, body);
+                            };
+                            match self.unlock_notifications.first(hash, &messages, loaded) {
+                                Ok(Some(identity)) => {
+                                    super::items::story::Action::DynamicMessageRead {
+                                        identity,
+                                        read,
+                                    }
+                                }
+                                Ok(None) => continue,
+                                Err(error) => return self.refuse_rpc(error, body),
+                            }
+                        } else {
+                            super::items::story::Action::MessageRead {
+                                hash,
+                                manager,
+                                read,
+                            }
+                        };
                         story_pending.push_back(super::items::story::Request {
                             participant,
                             player_index: u32::from(player_index),
                             progression,
-                            action: super::items::story::Action::MessageRead {
-                                hash,
-                                manager,
-                                read,
-                            },
+                            action,
                         });
                         continue;
                     }

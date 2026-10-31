@@ -54,6 +54,56 @@ pub(crate) enum Command {
     ImmediateOrSchedule { replace: bool },
 }
 impl<C: Copy> Manager<C> {
+    /// Adapter for an external owner of ordinary replacement delays. Uses the
+    /// same ordered float32 queue as graph execution. Do not mix this adapter
+    /// with graph initialization/reentrant dispatch on the same manager.
+    pub fn replace_owned(&mut self, node: u16, seconds: f32, context: C) -> Result<(), Error> {
+        finite(seconds)?;
+        let definition = self
+            .definitions
+            .get(&node)
+            .ok_or(Error::UnknownNode)?
+            .definition;
+        if self.updating
+            || seconds <= 0.0
+            || definition.auto_start
+            || definition.run_once
+            || !definition.remove_duplicates
+        {
+            return Err(Error::InvalidGraph);
+        }
+        self.schedule(node, seconds, context, true)
+    }
+
+    pub fn cancel_owned(&mut self, node: u16) -> Result<(), Error> {
+        self.pending(node)?;
+        if self.updating {
+            return Err(Error::InvalidGraph);
+        }
+        self.cancel(node);
+        Ok(())
+    }
+
+    /// Advance a caller-supplied world-clock delta with unit scale. The caller
+    /// retains fired contexts until downstream queue capacity is available.
+    pub fn advance_owned(&mut self, delta: f32) -> Result<Vec<(u16, C)>, Error> {
+        finite(delta)?;
+        if delta < 0.0 {
+            return Err(Error::InvalidGraph);
+        }
+        let mut next = self.clone();
+        next.begin_update()?;
+        let mut output = vec![];
+        while next.current_node()?.is_some() {
+            if let Some(value) = next.advance(delta, 1.0)? {
+                output.push(value);
+            }
+        }
+        next.end_update();
+        *self = next;
+        Ok(output)
+    }
+
     /// Context must be a plain value or owned identity, with no external mutable
     /// state. Copy and this size bound prevent retaining an arbitrary heap payload.
     pub fn new(nodes: usize, definitions: &[(u16, Definition)]) -> Result<Self, Error> {

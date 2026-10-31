@@ -1,5 +1,15 @@
 # nfs-services
 
+REP reward planning can include authored unlock notifications in the same
+generation-checked transaction as the grants. `messages::unlocks` stores bounded,
+versioned pending intents; the world adapter supplies timing and canonical
+attachment bytes. Delivery atomically appends the inbox row and removes its
+intent. `messages::dynamic` retains repeated hashes in an authored-capacity ring,
+stores opaque attachments as padded base64, and uses private delivery receipts
+to reject stale read updates after slot reuse. Those private tables never join
+the client table projection. Constructed storage and integration tests do not
+establish client acceptance.
+
 State-owned services built on the storage port and typed protocol models.
 
 The utility text check (`9/20`) uses an explicit local policy for garage text:

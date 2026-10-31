@@ -100,6 +100,7 @@ pub struct Service {
     offers: Option<Arc<nfs_services::purchase::Offers>>,
     car_offers: Option<Arc<nfs_services::garage::Offers>>,
     category_unlocks: Option<Arc<nfs_services::category_unlocks::Policy>>,
+    unlock_notifications: Option<Arc<nfs_services::messages::unlocks::Policy>>,
     records: Option<Arc<dyn nfs_storage::records::Repository>>,
     workers: Arc<Semaphore>,
 }
@@ -112,6 +113,7 @@ impl Service {
             offers: None,
             car_offers: None,
             category_unlocks: None,
+            unlock_notifications: None,
             records: None,
             workers: Arc::new(Semaphore::new(WORKERS)),
         }
@@ -197,6 +199,20 @@ fn supported_request(bytes: &[u8]) -> Result<bool, nfs_world::items::Error> {
     }
 }
 impl Profile {
+    pub fn with_unlock_notifications(
+        mut self,
+        policy: nfs_services::messages::unlocks::Policy,
+    ) -> Result<Self, crate::Failure> {
+        policy
+            .validate_grants(
+                self.service.category_unlocks.as_deref(),
+                self.service.offers.as_ref().and_then(|o| o.item_unlocks()),
+            )
+            .map_err(|_| crate::Failure::ProfileConfig)?;
+        self.service.unlock_notifications = Some(Arc::new(policy));
+        Ok(self)
+    }
+
     pub(super) fn bind_records(
         &self,
         records: crate::auxiliary::LocalRecords,
@@ -524,6 +540,7 @@ impl Profile {
                     inventory: &service.catalog,
                     thresholds: &thresholds,
                     categories: service.category_unlocks.as_deref(),
+                    notifications: service.unlock_notifications.as_deref(),
                     items: service
                         .offers
                         .as_ref()

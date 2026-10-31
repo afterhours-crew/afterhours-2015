@@ -69,6 +69,7 @@ fn messages() -> crate::messages::Content {
         active: vec![],
         power: vec![],
         result: vec![],
+        unlocks: None,
     }
     .with_active(vec![Invitation {
         objective: 30,

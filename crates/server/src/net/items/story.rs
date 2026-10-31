@@ -33,6 +33,14 @@ pub(in crate::net) enum Action {
         manager: crate::messages::Manager,
         read: bool,
     },
+    UnlockMessage {
+        hash: u32,
+        signal: u64,
+    },
+    DynamicMessageRead {
+        identity: nfs_services::messages::dynamic::Identity,
+        read: bool,
+    },
     /// The client accepted a tutorial: its seen value becomes durable.
     Tutorial {
         key: u32,
@@ -97,6 +105,92 @@ impl Profile {
                     .story_policy(request.progression.settings);
                 let mut reward = None;
                 let snapshot = match request.action {
+                    Action::UnlockMessage { hash, signal } => {
+                        let content = request.progression.messages.as_ref().ok_or(Error::Worker)?;
+                        let delivery = content.unlocks.as_ref().ok_or(Error::Worker)?;
+                        let rule = delivery
+                            .notifications
+                            .iter()
+                            .find(|n| n.hash == hash)
+                            .ok_or(Error::Worker)?;
+                        let manager = content.manager(rule.manager).ok_or(Error::Worker)?;
+                        let notification_policy = content
+                            .unlock_policy()
+                            .map_err(|_| Error::Worker)?
+                            .ok_or(Error::Worker)?;
+                        let mut result = None;
+                        for _ in 0..8 {
+                            let snapshot = service
+                                .repository
+                                .snapshot(account)
+                                .map_err(|e| Error::Inventory(e.into()))?;
+                            let pending = notification_policy
+                                .pending(snapshot.tables.get(&crate::persistent::key(
+                                    nfs_services::messages::unlocks::TABLE,
+                                )))
+                                .map_err(|e| Error::Inventory(e.into()))?;
+                            let Some(row) = pending
+                                .into_iter()
+                                .find(|r| r.hash == hash && r.signal == signal)
+                            else {
+                                result = Some(snapshot);
+                                break;
+                            };
+                            let bytes = row
+                                .part
+                                .map(|item_data_id| {
+                                    nfs_world::messages::CarPartAttachment { item_data_id }
+                                        .encode()
+                                        .to_vec()
+                                })
+                                .unwrap_or_default();
+                            let batch = nfs_services::messages::unlocks::deliver(
+                                &snapshot,
+                                row,
+                                manager.table(),
+                                delivery.dynamic_capacity,
+                                &bytes,
+                            )
+                            .map_err(|e| Error::Inventory(e.into()))?
+                            .ok_or(Error::Worker)?;
+                            match service.repository.apply(account, &batch, now) {
+                                Ok(_) | Err(nfs_storage::Error::Conflict) => continue,
+                                Err(e) => return Err(Error::Inventory(e.into())),
+                            }
+                        }
+                        result.ok_or(Error::Inventory(nfs_storage::Error::Conflict.into()))?
+                    }
+                    Action::DynamicMessageRead { ref identity, read } => {
+                        let delivery = request
+                            .progression
+                            .messages
+                            .as_ref()
+                            .and_then(|c| c.unlocks.as_ref())
+                            .ok_or(Error::Worker)?;
+                        let mut result = None;
+                        for _ in 0..8 {
+                            let snapshot = service
+                                .repository
+                                .snapshot(account)
+                                .map_err(|e| Error::Inventory(e.into()))?;
+                            let Some(batch) = nfs_services::messages::dynamic::set_read_owned(
+                                &snapshot,
+                                delivery.dynamic_capacity,
+                                identity,
+                                read,
+                            )
+                            .map_err(|e| Error::Inventory(e.into()))?
+                            else {
+                                result = Some(snapshot);
+                                break;
+                            };
+                            match service.repository.apply(account, &batch, now) {
+                                Ok(_) | Err(nfs_storage::Error::Conflict) => continue,
+                                Err(e) => return Err(Error::Inventory(e.into())),
+                            }
+                        }
+                        result.ok_or(Error::Inventory(nfs_storage::Error::Conflict.into()))?
+                    }
                     Action::Choose {
                         objective,
                         definition,

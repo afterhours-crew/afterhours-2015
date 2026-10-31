@@ -662,7 +662,7 @@ struct Prepared {
 /// Prepare a server start: open the account, load policy and content, and
 /// settle an unfinished intro. Shared by the server and [`prepare_world`].
 async fn prepare(args: &Args) -> Result<Prepared, Failure> {
-    let (inventory, account_lease) = inventory_config(args)?;
+    let (mut inventory, account_lease) = inventory_config(args)?;
     let account = args.local_account.ok_or(Failure::ProfileConfig)?;
     let root = args.root.join(
         args.state_directory
@@ -933,10 +933,18 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                         "gameplay/progression/messages/build_01_obj04_pho_invite03_badresult_01",
                         "gameplay/progression/messages/build_01_obj04_pho_invite03_autolog_recommended_03",
                     ])?;
+                    let unlocks = index.unlock_delivery(&[
+                        "gameplay/progression/messages/unlockmessage".to_owned(),
+                    ].into_iter().chain([
+                        "bodykits", "brakediscs", "calipers", "frontbumpers", "frontcanards",
+                        "frontfenders", "headlights", "rearbumpers", "rearcanards", "rearfenders",
+                        "sideskirts", "taillights", "tirebombing", "trunklid", "wingmirror",
+                    ].map(|name| format!("gameplay/progression/messages/unlockmessages/{name}"))).collect())?;
                     nfs_server::messages::Content::prepare(&mut index)?
                         .with_active(invitations)?
                         .with_power(vec![power])?
-                        .with_result(vec![result])
+                        .with_result(vec![result])?
+                        .with_unlocks(unlocks)
                 })();
                 let tutorials = nfs_server::tutorials::Content::prepare(&mut index);
                 let chapters = nfs_server::chapter_notifications::Content::prepare(&mut index);
@@ -1289,6 +1297,14 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
     }
     // An unfinished intro cannot be resumed mid-story, so settle it before
     // any session restores progression from the account.
+    if let Some(messages) = progression.as_ref().and_then(|p| p.messages.as_ref())
+        && let Some(policy) = messages
+            .unlock_policy()
+            .map_err(|_| Failure::ProfileConfig)?
+        && let Some(profile) = inventory.take()
+    {
+        inventory = Some(profile.with_unlock_notifications(policy)?);
+    }
     let resume = match (&inventory, &progression) {
         (Some(profile), Some(progression)) => {
             let now = std::time::SystemTime::now()

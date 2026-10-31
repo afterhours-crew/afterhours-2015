@@ -17,6 +17,7 @@ pub struct Policy<'a> {
     pub thresholds: &'a Thresholds,
     pub categories: Option<&'a category_unlocks::Policy>,
     pub items: Option<&'a item_unlocks::Policy>,
+    pub notifications: Option<&'a crate::messages::unlocks::Policy>,
 }
 
 impl Policy<'_> {
@@ -78,11 +79,16 @@ impl Policy<'_> {
         if let Some(policy) = self.items {
             ops.extend(policy.operations(&proposed, self.inventory)?);
         }
-        let batch = Batch {
+        let mut batch = Batch {
             id: batch_id,
             expected_generation: snapshot.generation,
             ops,
         };
+        if let Some(policy) = self.notifications {
+            batch
+                .ops
+                .extend(policy.operations(snapshot, self.inventory, &batch)?);
+        }
         batch.validate()?;
         Ok(batch)
     }

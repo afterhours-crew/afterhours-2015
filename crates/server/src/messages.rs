@@ -57,6 +57,7 @@ pub struct Content {
     pub active: Vec<nfs_content::messages::active::Invitation>,
     pub power: Vec<nfs_content::messages::power::Invitation>,
     pub result: Vec<nfs_content::messages::result::Invitation>,
+    pub unlocks: Option<nfs_content::messages::unlocks::Delivery>,
 }
 
 impl Content {
@@ -77,7 +78,159 @@ impl Content {
             active: vec![],
             power: vec![],
             result: vec![],
+            unlocks: None,
         })
+    }
+    pub fn with_unlocks(
+        mut self,
+        delivery: nfs_content::messages::unlocks::Delivery,
+    ) -> Result<Self, nfs_content::Error> {
+        let mut hashes: std::collections::BTreeSet<_> = self
+            .active
+            .iter()
+            .map(|m| m.hash)
+            .chain(self.power.iter().flat_map(|m| m.hashes()))
+            .chain(self.result.iter().flat_map(|m| m.hashes()))
+            .collect();
+        if self.manager(delivery.dynamic_manager).is_none()
+            || !(2..=512).contains(&delivery.dynamic_capacity)
+            || delivery.notifications.is_empty()
+            || delivery.notifications.len() > 64
+        {
+            return Err(nfs_content::Error::Content("unlock delivery bounds".into()));
+        }
+        for n in &delivery.notifications {
+            if self.manager(n.manager).is_none()
+                || !hashes.insert(n.hash)
+                || !self.catalog.by_hash(n.hash).is_some_and(|m| m.persisted)
+                || n.delay.is_zero()
+                || n.delay > std::time::Duration::from_secs(60)
+                || matches!(
+                    n.trigger,
+                    nfs_content::messages::unlocks::Trigger::Part { .. }
+                ) && n.manager != delivery.dynamic_manager
+            {
+                return Err(nfs_content::Error::Content(
+                    "unlock delivery identity".into(),
+                ));
+            }
+        }
+        self.unlocks = Some(delivery);
+        self.unlock_policy()?;
+        Ok(self)
+    }
+
+    pub fn unlock_policy(
+        &self,
+    ) -> Result<Option<nfs_services::messages::unlocks::Policy>, nfs_content::Error> {
+        let Some(delivery) = &self.unlocks else {
+            return Ok(None);
+        };
+        use nfs_content::messages::unlocks::Trigger as Input;
+        use nfs_services::messages::unlocks::{Policy, Trigger};
+        let parts: std::collections::BTreeMap<_, _> = delivery
+            .parts
+            .iter()
+            .map(|p| (p.definition, p.id))
+            .collect();
+        if parts.len() != delivery.parts.len() {
+            return Err(nfs_content::Error::Content(
+                "duplicate unlock definition".into(),
+            ));
+        }
+        Policy::new(
+            Some(delivery.controller),
+            parts,
+            delivery
+                .notifications
+                .iter()
+                .map(|n| {
+                    (
+                        n.hash,
+                        match &n.trigger {
+                            Input::Categories { mask } => Trigger::Categories { mask: *mask },
+                            Input::Part { include, ids } => Trigger::Part {
+                                include: *include,
+                                ids: ids.clone(),
+                            },
+                        },
+                    )
+                })
+                .collect(),
+        )
+        .map(Some)
+        .map_err(|_| nfs_content::Error::Content("unlock notification policy".into()))
+    }
+
+    pub(crate) fn dynamic_rows(
+        &self,
+        loaded: &crate::persistent::Loaded,
+    ) -> Result<Vec<nfs_services::messages::dynamic::Row>, Error> {
+        let table = loaded.tables().get(&crate::persistent::key(
+            nfs_services::messages::dynamic::TABLE,
+        ));
+        let Some(delivery) = &self.unlocks else {
+            return if table.is_none_or(|t| t.rows.is_empty()) {
+                Ok(vec![])
+            } else {
+                Err(Error::Unsupported)
+            };
+        };
+        nfs_services::messages::dynamic::rows(table, delivery.dynamic_capacity)
+            .map_err(|_| Error::Shape)
+    }
+
+    pub(crate) fn dynamic_identities(
+        &self,
+        loaded: &crate::persistent::Loaded,
+    ) -> Result<Vec<nfs_services::messages::dynamic::Identity>, Error> {
+        let Some(delivery) = &self.unlocks else {
+            self.dynamic_rows(loaded)?;
+            return Ok(vec![]);
+        };
+        nfs_services::messages::dynamic::identities(
+            loaded.tables().get(&crate::persistent::key(
+                nfs_services::messages::dynamic::TABLE,
+            )),
+            loaded.owned(nfs_services::messages::dynamic::RECEIPTS),
+            delivery.dynamic_capacity,
+        )
+        .map_err(|_| Error::Shape)
+    }
+
+    pub(crate) fn dynamic_message(
+        &self,
+        world: &World,
+        row: &nfs_services::messages::dynamic::Row,
+        restored: bool,
+    ) -> Result<HostRpc, Error> {
+        let delivery = self.unlocks.as_ref().ok_or(Error::Unsupported)?;
+        if !delivery.notifications.iter().any(|n| {
+            n.hash == row.hash
+                && matches!(
+                    n.trigger,
+                    nfs_content::messages::unlocks::Trigger::Part { .. }
+                )
+        }) {
+            return Err(Error::Unsupported);
+        }
+        let part =
+            nfs_world::messages::CarPartAttachment::decode(&row.data).map_err(|_| Error::Shape)?;
+        let message = self.catalog.by_hash(row.hash).ok_or(Error::Unsupported)?;
+        let (scene, selector) = self.endpoint(world, delivery.dynamic_manager)?;
+        Ok(HostRpc::GameMode(event_logic::call(
+            world,
+            scene,
+            selector,
+            if restored { RESTORED } else { ADDED },
+            None,
+            Arguments::CarPartMessage {
+                bundle: self.catalog.bundle,
+                flat: message.flat,
+                flag: row.read,
+                part,
+            },
+        )?))
     }
     pub fn with_active(
         mut self,
@@ -280,6 +433,7 @@ impl Content {
         world: &World,
         normal: &[nfs_services::messages::Row],
         underground: &[nfs_services::messages::Row],
+        dynamic: &[nfs_services::messages::dynamic::Row],
     ) -> Result<Vec<HostRpc>, Error> {
         let mut out = vec![];
         for (manager, rows) in [
@@ -296,6 +450,15 @@ impl Content {
                     continue;
                 }
                 out.push(self.message(world, manager, RESTORED, row.hash, row.read)?);
+            }
+            if self
+                .unlocks
+                .as_ref()
+                .is_some_and(|d| d.dynamic_manager == self.serializer(manager))
+            {
+                for row in dynamic {
+                    out.push(self.dynamic_message(world, row, true)?);
+                }
             }
             let (scene, selector) = self.endpoint(world, self.serializer(manager))?;
             out.push(HostRpc::GameMode(event_logic::call(

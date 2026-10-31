@@ -2,6 +2,48 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 use super::*;
+
+#[test]
+fn external_owner_adapter_preserves_replacement_order_and_invalid_ticks_are_atomic() {
+    let definition = Definition {
+        auto_start: false,
+        run_once: false,
+        remove_duplicates: true,
+    };
+    let mut queue = Manager::new(2, &[(0, definition), (1, definition)]).unwrap();
+    queue.replace_owned(0, 2.0, 10u64).unwrap();
+    queue.replace_owned(1, 2.0, 20).unwrap();
+    queue.replace_owned(0, 2.0, 30).unwrap();
+    let before = queue.clone();
+    for delta in [f32::NAN, f32::INFINITY, -1.0] {
+        assert!(queue.advance_owned(delta).is_err());
+        assert_eq!(queue, before);
+    }
+    assert!(queue.replace_owned(2, 2.0, 40).is_err());
+    assert!(queue.replace_owned(0, 0.0, 40).is_err());
+    assert_eq!(queue, before);
+    assert_eq!(queue.advance_owned(2.0).unwrap(), [(1, 20), (0, 30)]);
+    queue.replace_owned(0, 2.0, 40).unwrap();
+    queue.cancel_owned(0).unwrap();
+    assert!(queue.advance_owned(3.0).unwrap().is_empty());
+    for definition in [
+        Definition {
+            auto_start: true,
+            ..definition
+        },
+        Definition {
+            run_once: true,
+            ..definition
+        },
+        Definition {
+            remove_duplicates: false,
+            ..definition
+        },
+    ] {
+        let mut queue = Manager::new(1, &[(0, definition)]).unwrap();
+        assert!(queue.replace_owned(0, 1.0, 10u64).is_err());
+    }
+}
 use crate::scoring::events::{self, Dispatch, Endpoint, Graph};
 #[derive(Clone, Debug, PartialEq)]
 struct State {

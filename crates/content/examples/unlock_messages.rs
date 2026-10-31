@@ -4,7 +4,11 @@
 
 //! Inspect selected installed unlock notifications without opening a save.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<_> = std::env::args().skip(1).collect();
+    let mut args: Vec<_> = std::env::args().skip(1).collect();
+    let delivery = args.first().is_some_and(|a| a == "--delivery");
+    if delivery {
+        args.remove(0);
+    }
     let [game, assets @ ..] = args.as_slice() else {
         return Err("usage: unlock_messages <game-root> <message-asset>...".into());
     };
@@ -12,9 +16,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::path::Path::new(game),
         &nfs_content::Options::default(),
     )?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&index.unlock_messages(&assets.iter().cloned().collect())?)?
-    );
+    let selected = assets.iter().cloned().collect();
+    let output = if delivery {
+        serde_json::to_string_pretty(&index.unlock_delivery(&selected)?)?
+    } else {
+        serde_json::to_string_pretty(&index.unlock_messages(&selected)?)?
+    };
+    println!("{output}");
     Ok(())
 }

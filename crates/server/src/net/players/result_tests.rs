@@ -92,6 +92,7 @@ fn content() -> crate::progression::Content {
                 active: vec![],
                 power: vec![],
                 result: vec![],
+                unlocks: None,
             }
             .with_result(vec![
                 nfs_content::messages::result::Invitation::new(
