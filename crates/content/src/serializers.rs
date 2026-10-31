@@ -74,7 +74,17 @@ mod tests {
                         F::RawPointers((2..objects.len() as u32 + 2).collect()),
                     ),
                 ],
-                objects.into_iter().map(|c| (c, vec![])).collect(),
+                objects
+                    .into_iter()
+                    .map(|c| {
+                        let fields = if c == "UIWidgetBlueprint" {
+                            vec![("Flags", F::UInt(0))]
+                        } else {
+                            vec![]
+                        };
+                        (c, fields)
+                    })
+                    .collect(),
             ),
         }
     }
@@ -152,6 +162,9 @@ mod tests {
                     "IllegalActivityInterfaceEntityData",
                     "Vec3PresentationDataCollectorEntityData",
                     "ConditionalVec3EntityData",
+                    "UIWidgetBlueprint",
+                    "StateSequenceSelectorEntityData",
+                    "ParticipantEventEntityData",
                     "SyncedBoolEntityData",
                 ],
             ),

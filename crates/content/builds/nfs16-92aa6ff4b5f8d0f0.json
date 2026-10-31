@@ -1,6 +1,6 @@
 {
   "format": "nfs-build-profile",
-  "version": 16,
+  "version": 17,
   "prologue_links": {
     "first_drive": "gameplay/progression/intro/introdrivetoclub",
     "item_definition": 3339738264,
@@ -1187,6 +1187,7 @@
   },
   "participant_logic": {
     "classes": {
+      "ParticipantEventEntityData": null,
       "RaceVehicleRoadblockCollisionEntityData": null,
       "EscapeGameModeStateEntityData": "rpc_references",
       "CooldownGameModeStateEntityData": "rpc_references",
@@ -1458,6 +1459,7 @@
       "SpeedLimitCommandEntityData": null,
       "StateReporterEntityData": null,
       "StateSequenceChannelReferenceEntityData": "channel",
+      "StateSequenceSelectorEntityData": null,
       "StatsAndAwardManagerEntityData": null,
       "SyncedStringEntityData": "string",
       "TelemetryUtilEntityData": null,
@@ -1469,6 +1471,7 @@
       "TransformMultiplierEntityData": null,
       "UIInputActionHandlerEntityData": null,
       "UIScreenRenderEntityData": null,
+      "UIWidgetBlueprint": null,
       "UIWidgetEntityData": null,
       "UIntPresentationDataCollectorEntityData": null,
       "VehicleResetRouteEntityData": null,
