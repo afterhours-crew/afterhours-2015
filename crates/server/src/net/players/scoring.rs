@@ -776,8 +776,7 @@ impl PlayerListener {
             .map_err(fail("vehicle physics"))?;
         let motion = physics.decode([0.; 3]).map_err(fail("physics decode"))?;
         let mut vehicle =
-            Vehicle::from_motion(u32::from(car), &motion).map_err(fail("vehicle basis"))?;
-        vehicle.airborne = Some(physics.controls.is_airborne());
+            Vehicle::from_physics(u32::from(car), &physics).map_err(fail("vehicle basis"))?;
         vehicle.nos = nitrous.map(Nitrous::sample);
         vehicle.burnout = nfs_world::scoring::burnout::Controls::from_wire(&physics.controls, None)
             .map_err(fail("burnout controls"))?;

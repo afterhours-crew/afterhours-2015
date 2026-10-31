@@ -12,6 +12,7 @@ pub mod actors;
 pub mod arrival;
 pub mod bank;
 pub mod crash;
+pub mod driving_distance;
 pub mod fmv;
 pub mod frame;
 pub mod game_mode;

@@ -14,6 +14,7 @@ pub mod challenges;
 pub mod client_state;
 pub mod control_catalogs;
 pub mod departure;
+pub mod driving_distance;
 pub mod equipment;
 pub mod event_rewards;
 pub mod fresh_account;

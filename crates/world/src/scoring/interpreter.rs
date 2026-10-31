@@ -62,6 +62,19 @@ pub struct Vehicle {
 }
 
 impl Vehicle {
+    /// Chassis-backed physics queries share the established airborne and crash
+    /// predicates. Other unmeasured fields remain absent.
+    pub fn from_physics(
+        identity: u32,
+        physics: &crate::replication::vehicle::Physics,
+    ) -> Result<Self, Error> {
+        let motion = physics.decode([0.; 3]).map_err(|_| Error::InvalidGraph)?;
+        let mut vehicle = Self::from_motion(identity, &motion)?;
+        vehicle.airborne = Some(physics.controls.is_airborne());
+        vehicle.state_3c230e35 = Some(physics.controls.is_crashed());
+        Ok(vehicle)
+    }
+
     /// Motion measurements from a decoded chassis report. Control state is
     /// supplied separately by the caller, including the airborne enum; fields
     /// not present in Motion remain absent until that input is supplied.
