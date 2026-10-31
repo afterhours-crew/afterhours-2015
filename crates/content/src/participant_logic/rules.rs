@@ -69,6 +69,11 @@ impl Rules {
                 Some("waypoint_list") => Some(Kind::WaypointList),
                 Some("rpc_guid") => Some(Kind::RpcGuid),
                 Some("rpc_set64") => Some(Kind::RpcSet64),
+                Some("rpc_bool_update") => Some(Kind::RpcBoolUpdate),
+                Some("rpc_chase_update") => Some(Kind::RpcChaseUpdate),
+                Some("rpc_cop_fine_tracker") => Some(Kind::RpcCopFineTracker),
+                Some("rpc_cop_map_update") => Some(Kind::RpcCopMapUpdate),
+                Some("rpc_target_visibility_update") => Some(Kind::RpcTargetVisibilityUpdate),
                 _ => return Err(bad("participant serializer kind")),
             };
             classes.insert(name(class)?, role);
@@ -131,6 +136,11 @@ impl Rules {
                         Kind::WaypointList => "waypoint_list",
                         Kind::RpcGuid => "rpc_guid",
                         Kind::RpcSet64 => "rpc_set64",
+                        Kind::RpcBoolUpdate => "rpc_bool_update",
+                        Kind::RpcChaseUpdate => "rpc_chase_update",
+                        Kind::RpcCopFineTracker => "rpc_cop_fine_tracker",
+                        Kind::RpcCopMapUpdate => "rpc_cop_map_update",
+                        Kind::RpcTargetVisibilityUpdate => "rpc_target_visibility_update",
                         _ => "unsupported",
                     }),
                 )

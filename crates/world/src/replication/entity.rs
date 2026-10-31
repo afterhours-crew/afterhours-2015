@@ -57,6 +57,34 @@ pub enum Kind {
     /// RPC whose update is the scene codec's optional set: an optional 7-bit-count list
     /// of 64-bit values, low word first.
     RpcSet64,
+    /// RPC initialization and an optional Boolean update.
+    RpcBoolUpdate,
+    /// RPC initialization; independent byte, participant and Boolean updates.
+    RpcChaseUpdate,
+    /// RPC, three signed bytes and a bounded fine list; one optional byte update.
+    RpcCopFineTracker,
+    /// RPC initialization and an optional 6-bit-count participant list update.
+    RpcCopMapUpdate,
+    /// RPC initialization; optional participant and 16-bit-count reference list.
+    RpcTargetVisibilityUpdate,
+}
+
+mod pursuit;
+pub use pursuit::{ChaseUpdate, FineSnapshot, TargetVisibilityUpdate};
+
+impl Kind {
+    /// These layouts can be inspected, but their gameplay/state semantics are
+    /// deliberately not part of the generic entity state owner yet.
+    fn inspection_only(self) -> bool {
+        matches!(
+            self,
+            Self::RpcBoolUpdate
+                | Self::RpcChaseUpdate
+                | Self::RpcCopFineTracker
+                | Self::RpcCopMapUpdate
+                | Self::RpcTargetVisibilityUpdate
+        )
+    }
 }
 
 pub const MAX_WAYPOINTS: usize = 255;
@@ -194,6 +222,14 @@ pub enum Initial {
         guid: Option<[u8; 16]>,
     },
     RpcSet64(Rpc),
+    RpcBoolUpdate(Rpc),
+    RpcChaseUpdate(Rpc),
+    RpcCopFineTracker {
+        rpc: Rpc,
+        snapshot: FineSnapshot,
+    },
+    RpcCopMapUpdate(Rpc),
+    RpcTargetVisibilityUpdate(Rpc),
 }
 impl Initial {
     pub fn kind(&self) -> Kind {
@@ -221,6 +257,11 @@ impl Initial {
             Self::WaypointList { .. } => Kind::WaypointList,
             Self::RpcGuid { .. } => Kind::RpcGuid,
             Self::RpcSet64(_) => Kind::RpcSet64,
+            Self::RpcBoolUpdate(_) => Kind::RpcBoolUpdate,
+            Self::RpcChaseUpdate(_) => Kind::RpcChaseUpdate,
+            Self::RpcCopFineTracker { .. } => Kind::RpcCopFineTracker,
+            Self::RpcCopMapUpdate(_) => Kind::RpcCopMapUpdate,
+            Self::RpcTargetVisibilityUpdate(_) => Kind::RpcTargetVisibilityUpdate,
         }
     }
     /// The RPC identity, when this initial value carries one.
@@ -243,7 +284,12 @@ impl Initial {
             | Self::DnfTransition { rpc, .. }
             | Self::WaypointList { rpc, .. }
             | Self::RpcGuid { rpc, .. }
-            | Self::RpcSet64(rpc) => Some(rpc),
+            | Self::RpcSet64(rpc)
+            | Self::RpcBoolUpdate(rpc)
+            | Self::RpcChaseUpdate(rpc)
+            | Self::RpcCopFineTracker { rpc, .. }
+            | Self::RpcCopMapUpdate(rpc)
+            | Self::RpcTargetVisibilityUpdate(rpc) => Some(rpc),
             Self::GameModeRoot(root) => Some(&root.rpc),
             Self::BoolProperty(_)
             | Self::FloatProperty(_)
@@ -264,6 +310,10 @@ pub enum Update {
     /// The scene codec's optional set of 64-bit values.
     Set64(Option<super::sublevel::Set64>),
     VehicleSequence(VehicleSequenceUpdate),
+    Chase(ChaseUpdate),
+    CopFineTracker(Option<i8>),
+    CopMap(Option<Vec<u16>>),
+    TargetVisibility(TargetVisibilityUpdate),
 }
 
 /// Two independently replaced lists. Each list carries an 8-bit count; a slot
@@ -332,13 +382,19 @@ impl Update {
                     | Kind::DnfTransition
                     | Kind::WaypointList
                     | Kind::RpcGuid
-            ) | (Self::BoolProperty(_), Kind::BoolProperty)
-                | (Self::FloatProperty(_), Kind::FloatProperty)
+            ) | (
+                Self::BoolProperty(_),
+                Kind::BoolProperty | Kind::RpcBoolUpdate
+            ) | (Self::FloatProperty(_), Kind::FloatProperty)
                 | (Self::GhostReference(_), Kind::RpcGhostReference)
                 | (Self::I32Property(_), Kind::I32Property)
                 | (Self::StringProperty(_), Kind::StringProperty)
                 | (Self::Set64(_), Kind::RpcSet64)
                 | (Self::VehicleSequence(_), Kind::VehicleSequenceRoot)
+                | (Self::Chase(_), Kind::RpcChaseUpdate)
+                | (Self::CopFineTracker(_), Kind::RpcCopFineTracker)
+                | (Self::CopMap(_), Kind::RpcCopMapUpdate)
+                | (Self::TargetVisibility(_), Kind::RpcTargetVisibilityUpdate)
         )
     }
 }
@@ -589,6 +645,16 @@ impl Body {
                         })?,
                     },
                     Kind::RpcSet64 => Initial::RpcSet64(read_rpc(&mut r)?),
+                    Kind::RpcBoolUpdate => Initial::RpcBoolUpdate(read_rpc(&mut r)?),
+                    Kind::RpcChaseUpdate => Initial::RpcChaseUpdate(read_rpc(&mut r)?),
+                    Kind::RpcCopFineTracker => Initial::RpcCopFineTracker {
+                        rpc: read_rpc(&mut r)?,
+                        snapshot: FineSnapshot::read(&mut r)?,
+                    },
+                    Kind::RpcCopMapUpdate => Initial::RpcCopMapUpdate(read_rpc(&mut r)?),
+                    Kind::RpcTargetVisibilityUpdate => {
+                        Initial::RpcTargetVisibilityUpdate(read_rpc(&mut r)?)
+                    }
                 });
             }
             Some(values)
@@ -624,7 +690,19 @@ impl Body {
                     Kind::RpcGhostReference => {
                         Update::GhostReference(r.optional(Reader::reference)?)
                     }
-                    Kind::BoolProperty => Update::BoolProperty(r.optional(Reader::bit)?),
+                    Kind::BoolProperty | Kind::RpcBoolUpdate => {
+                        Update::BoolProperty(r.optional(Reader::bit)?)
+                    }
+                    Kind::RpcChaseUpdate => Update::Chase(ChaseUpdate::read(&mut r)?),
+                    Kind::RpcCopFineTracker => {
+                        Update::CopFineTracker(r.optional(|r| Ok(r.take(8)? as i8))?)
+                    }
+                    Kind::RpcCopMapUpdate => {
+                        Update::CopMap(r.optional(|r| pursuit::read_references(r, 6))?)
+                    }
+                    Kind::RpcTargetVisibilityUpdate => {
+                        Update::TargetVisibility(TargetVisibilityUpdate::read(&mut r)?)
+                    }
                     Kind::FloatProperty => Update::FloatProperty(r.optional(|r| r.take(32))?),
                     Kind::I32Property => {
                         Update::I32Property(r.optional(|r| Ok(r.take(32)? as i32))?)
@@ -836,7 +914,15 @@ impl Body {
                             bytes.iter().try_for_each(|b| w.put(u64::from(*b), 8))
                         })?;
                     }
-                    Initial::RpcSet64(rpc) => write_rpc(&mut w, rpc)?,
+                    Initial::RpcSet64(rpc)
+                    | Initial::RpcBoolUpdate(rpc)
+                    | Initial::RpcChaseUpdate(rpc)
+                    | Initial::RpcCopMapUpdate(rpc)
+                    | Initial::RpcTargetVisibilityUpdate(rpc) => write_rpc(&mut w, rpc)?,
+                    Initial::RpcCopFineTracker { rpc, snapshot } => {
+                        write_rpc(&mut w, rpc)?;
+                        snapshot.write(&mut w)?;
+                    }
                 }
             }
         }
@@ -863,6 +949,14 @@ impl Body {
                     }
                     Update::Set64(set) => write_set64(&mut w, set)?,
                     Update::VehicleSequence(value) => value.write(&mut w)?,
+                    Update::Chase(value) => value.write(&mut w)?,
+                    Update::CopFineTracker(value) => {
+                        w.optional(value, |w, v| w.put(u64::from(*v as u8), 8))?
+                    }
+                    Update::CopMap(value) => {
+                        w.optional(value, |w, v| pursuit::write_references(w, v, 6))?
+                    }
+                    Update::TargetVisibility(value) => value.write(&mut w)?,
                 }
             }
         }
@@ -874,6 +968,8 @@ impl Body {
 mod float_tests;
 #[cfg(test)]
 mod game_mode_tests;
+#[cfg(test)]
+mod pursuit_tests;
 #[cfg(test)]
 mod query_tests;
 #[cfg(test)]

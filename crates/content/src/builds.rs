@@ -12,7 +12,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 pub const FORMAT: &str = "nfs-build-profile";
-pub const VERSION: u64 = 15;
+pub const VERSION: u64 = 16;
 
 /// `(file name, contents)` of every profile.
 const PROFILES: &[(&str, &str)] = &[(
