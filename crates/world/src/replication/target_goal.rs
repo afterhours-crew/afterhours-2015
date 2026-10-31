@@ -2,10 +2,12 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! FollowTargetGoal (8), ChaseTargetGoal (3) and LookForLawbreakersGoal (10).
+//! FollowTargetGoal (8), ChaseTargetGoal (3), LookForLawbreakersGoal (10),
+//! SearchFindTargetGoal (21) and SearchGotoGoal (22).
 //! Follow has a completable-goal
 //! RPC identity and an optional ordered triple; chase has neither. Both native
-//! update serializers are empty. The triple's gameplay meaning is not assumed.
+//! update serializers are empty, as are the other goal updates here. The triple's
+//! gameplay meaning is not assumed.
 use super::{Error, Reader, Writer};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -32,6 +34,17 @@ pub struct LookForLawbreakers {
     pub allocation_serial: u8,
     pub target: u16,
     pub flag: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SearchFindTarget {
+    pub allocation_serial: u8,
+    pub target: u16,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SearchGoto {
+    pub allocation_serial: u8,
 }
 
 fn finite(values: [u32; 3]) -> Result<[u32; 3], Error> {
@@ -94,6 +107,32 @@ impl LookForLawbreakers {
         w.put(u64::from(self.allocation_serial), 6)?;
         w.reference(&self.target)?;
         w.put(u64::from(self.flag), 1)
+    }
+}
+
+impl SearchFindTarget {
+    pub(super) fn read(r: &mut Reader<'_>) -> Result<Self, Error> {
+        Ok(Self {
+            allocation_serial: r.take(6)? as u8,
+            target: r.reference()?,
+        })
+    }
+
+    pub(super) fn write(&self, w: &mut Writer) -> Result<(), Error> {
+        w.put(u64::from(self.allocation_serial), 6)?;
+        w.reference(&self.target)
+    }
+}
+
+impl SearchGoto {
+    pub(super) fn read(r: &mut Reader<'_>) -> Result<Self, Error> {
+        Ok(Self {
+            allocation_serial: r.take(6)? as u8,
+        })
+    }
+
+    pub(super) fn write(&self, w: &mut Writer) -> Result<(), Error> {
+        w.put(u64::from(self.allocation_serial), 6)
     }
 }
 
