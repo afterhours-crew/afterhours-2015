@@ -70,6 +70,14 @@ pub enum Arguments {
         flat: u16,
         flag: bool,
     },
+    /// A delivery with one versioned car-part attachment. The caller must
+    /// resolve both the message asset and the installed item definition.
+    CarPartMessage {
+        bundle: u16,
+        flat: u16,
+        flag: bool,
+        part: crate::messages::CarPartAttachment,
+    },
 }
 impl Arguments {
     pub fn time(seconds: f64) -> Self {
@@ -150,18 +158,15 @@ impl Call {
                     .put(lap.into(), 32);
             }
             Arguments::Message { bundle, flat, flag } => {
-                if !matches!(self.method, 0 | 2) || self.reference.is_some() {
-                    return Err(Error::Shape);
-                }
-                if bundle == 0 || bundle > 2047 || flat > 4095 {
-                    return Err(Error::Bound);
-                }
-                payload
-                    .put(2, 2)
-                    .put(bundle.into(), 11)
-                    .put(flat.into(), 12)
-                    .put(0, 8)
-                    .put(u64::from(flag), 1);
+                self.message(&mut payload, bundle, flat, flag, &[])?;
+            }
+            Arguments::CarPartMessage {
+                bundle,
+                flat,
+                flag,
+                part,
+            } => {
+                self.message(&mut payload, bundle, flat, flag, &part.encode())?;
             }
         }
         payload.align();
@@ -175,6 +180,32 @@ impl Call {
         body.put(payload.bytes().len() as u64, 9)
             .put_span(payload.span());
         Ok(body)
+    }
+
+    fn message(
+        &self,
+        payload: &mut BitWriter,
+        bundle: u16,
+        flat: u16,
+        flag: bool,
+        attachment: &[u8],
+    ) -> Result<(), Error> {
+        if !matches!(self.method, 0 | 2) || self.reference.is_some() {
+            return Err(Error::Shape);
+        }
+        if bundle == 0 || bundle > 2047 || flat > 4095 || attachment.len() > 255 {
+            return Err(Error::Bound);
+        }
+        payload
+            .put(2, 2)
+            .put(bundle.into(), 11)
+            .put(flat.into(), 12)
+            .put(attachment.len() as u64, 8);
+        for &byte in attachment {
+            payload.put(byte.into(), 8);
+        }
+        payload.put(u64::from(flag), 1);
+        Ok(())
     }
 }
 

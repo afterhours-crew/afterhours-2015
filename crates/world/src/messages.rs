@@ -18,6 +18,29 @@ const REGISTRY: u32 = 2;
 const READ: u32 = 3;
 const READ_BITS: usize = 2 + 11 + 12 + 1;
 
+/// One `CarPartAttachmentAsset` payload. The identifier is the installed
+/// `ItemData.Id`, not an inventory instance ID, definition GUID or message hash.
+/// Only the version-zero, single-attachment representation is supported here.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CarPartAttachment {
+    pub item_data_id: u32,
+}
+impl CarPartAttachment {
+    pub fn encode(self) -> [u8; 5] {
+        let id = self.item_data_id.to_be_bytes();
+        [0, id[0], id[1], id[2], id[3]]
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
+        let [0, a, b, c, d] = bytes else {
+            return Err(Error::Shape);
+        };
+        Ok(Self {
+            item_data_id: u32::from_be_bytes([*a, *b, *c, *d]),
+        })
+    }
+}
+
 /// Message reference and read flag sent by a client. Trailing bits are payload
 /// alignment, not additional flags; their values are deliberately unconstrained.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -156,7 +179,123 @@ mod tests {
         bits::BitWriter,
         game_mode::{Arguments, Call},
     };
+
+    #[test]
+    fn car_part_attachment_uses_versioned_network_order_item_id() {
+        let value = CarPartAttachment {
+            item_data_id: 0x12ab_34cd,
+        };
+        // Constructed vector with four different bytes catches a symmetric
+        // encoder/decoder endian mistake; this is not a captured part ID.
+        assert_eq!(value.encode(), [0, 0x12, 0xab, 0x34, 0xcd]);
+        assert_eq!(CarPartAttachment::decode(&value.encode()).unwrap(), value);
+        assert_ne!(
+            CarPartAttachment::decode(&[0, 0xcd, 0x34, 0xab, 0x12]).unwrap(),
+            value
+        );
+        for id in [0, u32::MAX] {
+            let edge = CarPartAttachment { item_data_id: id };
+            assert_eq!(CarPartAttachment::decode(&edge.encode()).unwrap(), edge);
+        }
+    }
+
+    #[test]
+    fn car_part_attachment_rejects_unknown_versions_and_incomplete_or_extra_data() {
+        let bytes = [0, 0x12, 0xab, 0x34, 0xcd];
+        for end in 0..bytes.len() {
+            assert!(CarPartAttachment::decode(&bytes[..end]).is_err());
+        }
+        assert!(CarPartAttachment::decode(&[0, 0x12, 0xab, 0x34, 0xcd, 0]).is_err());
+        for version in 1..=u8::MAX {
+            let mut invalid = bytes;
+            invalid[0] = version;
+            assert!(CarPartAttachment::decode(&invalid).is_err());
+        }
+    }
     use nfs_protocol::world::rpc::Serial;
+
+    #[test]
+    fn part_added_and_restored_calls_preserve_identity_read_state_and_attachment() {
+        let part = CarPartAttachment {
+            item_data_id: 0x12ab_34cd,
+        };
+        for method in [0, 2] {
+            for flag in [false, true] {
+                let call = Call {
+                    target: 42,
+                    selector: 9,
+                    serial: Serial::new(3).unwrap(),
+                    method,
+                    reference: None,
+                    arguments: Arguments::CarPartMessage {
+                        bundle: 17,
+                        flat: 2049,
+                        flag,
+                        part,
+                    },
+                };
+                let encoded = call.encode().unwrap();
+                let envelope = Envelope::decode(
+                    encoded.span(),
+                    Limits {
+                        max_input_bits: 512,
+                        max_references: 1,
+                        max_payload_bytes: 32,
+                    },
+                )
+                .unwrap();
+                assert_eq!(envelope.references(), &[42]);
+                let route = envelope.route(RouteProfile::ClientReceive).unwrap();
+                assert_eq!(route.method_index(), method);
+                let delivered = DeliveryArguments::decode(route.arguments()).unwrap();
+                assert_eq!(
+                    (delivered.bundle, delivered.flat, delivered.flag),
+                    (17, 2049, flag)
+                );
+                assert_eq!(delivered.attachment, [0, 0x12, 0xab, 0x34, 0xcd]);
+                assert_eq!(
+                    CarPartAttachment::decode(&delivered.attachment).unwrap(),
+                    part
+                );
+                for invalid in [
+                    Call { method: 1, ..call },
+                    Call {
+                        reference: Some(43),
+                        ..call
+                    },
+                    Call {
+                        arguments: Arguments::CarPartMessage {
+                            bundle: 0,
+                            flat: 2049,
+                            flag,
+                            part,
+                        },
+                        ..call
+                    },
+                    Call {
+                        arguments: Arguments::CarPartMessage {
+                            bundle: 2048,
+                            flat: 2049,
+                            flag,
+                            part,
+                        },
+                        ..call
+                    },
+                    Call {
+                        arguments: Arguments::CarPartMessage {
+                            bundle: 17,
+                            flat: 4096,
+                            flag,
+                            part,
+                        },
+                        ..call
+                    },
+                ] {
+                    assert!(invalid.encode().is_err());
+                }
+            }
+        }
+    }
 
     fn delivery_bits(length: u8, attachment: &[u8], flag: bool, padding: u8) -> BitWriter {
         let mut bits = BitWriter::new();

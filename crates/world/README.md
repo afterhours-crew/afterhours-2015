@@ -78,3 +78,7 @@ Message argument readers expose delivery and client-read identities for external
 protocol inspection. Delivery attachments are preserved as opaque bytes with the
 wire's 255-byte bound. Alignment bits are not interpreted as message flags. These
 readers do not establish phone presentation or execute attachment behavior.
+The car-part attachment codec supports version zero and the installed
+`ItemData.Id` in network byte order. Added/restored calls can carry that typed
+attachment; choosing the part, scheduling delivery and persisting the inbox
+remain service responsibilities.
