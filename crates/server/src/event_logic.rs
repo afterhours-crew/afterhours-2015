@@ -87,8 +87,10 @@ pub enum State {
     /// IntParticipantPropertyClientNotification: the local participant's position.
     LocalPosition,
     DnfState,
+    /// Spawn-AI prefab state after its wait; distinct from the root main state.
+    AiSpawned,
 }
-const STATES: [(State, &str, &str); 11] = [
+const STATES: [(State, &str, &str); 12] = [
     (
         State::Main,
         "gameplay/gamemodes/racegamemode",
@@ -142,6 +144,11 @@ const STATES: [(State, &str, &str); 11] = [
     (
         State::DnfState,
         "gameplay/gamemodes/states/dnfstateprefab",
+        "GameModeStateEntityData",
+    ),
+    (
+        State::AiSpawned,
+        "gameplay/gamemodes/states/spawnaistate",
         "GameModeStateEntityData",
     ),
 ];
@@ -772,6 +779,18 @@ impl Content {
     /// The game-mode state that spawns a sequence.
     pub fn spawner(&self, name: &str) -> Result<usize, Error> {
         let index = self.sequence(name)?.spawner.ok_or(Error::Unsupported)?;
+        let field = self
+            .event
+            .game_mode
+            .layout
+            .fields
+            .get(index)
+            .ok_or(Error::Bound)?;
+        if field.class != "ParticipantSequenceSpawnerGameModeStateEntityData"
+            || field.kind != Kind::RpcReferences
+        {
+            return Err(Error::TypeMismatch);
+        }
         selector(&self.event.game_mode.layout, index)?;
         Ok(index)
     }

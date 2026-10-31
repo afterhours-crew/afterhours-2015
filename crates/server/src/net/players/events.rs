@@ -1805,13 +1805,6 @@ impl PlayerListener {
             Step::Finished => {
                 let outro = content.spawner(names::OUTRO_SEQUENCE)?;
                 let p = Some(participant);
-                out.rpcs.push(HostRpc::GameMode(content.field_call(
-                    players.objects(),
-                    game_mode,
-                    outro,
-                    0,
-                    p,
-                )?));
                 for (state, method) in [(Gm::Waypoints, 1), (Gm::Finish, 0), (Gm::Finish, 1)] {
                     out.rpcs.push(HostRpc::GameMode(world_call(
                         players,
@@ -1821,6 +1814,13 @@ impl PlayerListener {
                         Arguments::None,
                     )?));
                 }
+                out.rpcs.push(HostRpc::GameMode(content.field_call(
+                    players.objects(),
+                    game_mode,
+                    outro,
+                    0,
+                    p,
+                )?));
                 let position = race.finish.map_or(1, |f| f.position) as u32;
                 out.rpcs.push(HostRpc::GameMode(world_call(
                     players,
@@ -1852,10 +1852,27 @@ impl PlayerListener {
                 }
                 let outro = content.spawner(names::OUTRO_SEQUENCE)?;
                 let p = Some(participant);
+                // Publish the authored state path before asking the human to
+                // depart. Primary removal belongs to AI final-state adoption;
+                // the human remains a member until its leave request.
+                out.rpcs.push(HostRpc::GameMode(content.field_call(
+                    players.objects(),
+                    game_mode,
+                    outro,
+                    1,
+                    p,
+                )?));
                 out.rpcs.push(HostRpc::GameMode(world_call(
                     players,
-                    Gm::Root,
-                    3,
+                    Gm::ResultReporting,
+                    0,
+                    p,
+                    Arguments::None,
+                )?));
+                out.rpcs.push(HostRpc::GameMode(world_call(
+                    players,
+                    Gm::ResultReporting,
+                    1,
                     p,
                     Arguments::None,
                 )?));
@@ -1865,27 +1882,6 @@ impl PlayerListener {
                     0,
                     p,
                     Arguments::None,
-                )?));
-                out.rpcs.push(HostRpc::GameMode(world_call(
-                    players,
-                    Gm::ResultReporting,
-                    0,
-                    p,
-                    Arguments::None,
-                )?));
-                out.rpcs.push(HostRpc::GameMode(world_call(
-                    players,
-                    Gm::ResultReporting,
-                    1,
-                    p,
-                    Arguments::None,
-                )?));
-                out.rpcs.push(HostRpc::GameMode(content.field_call(
-                    players.objects(),
-                    game_mode,
-                    outro,
-                    1,
-                    p,
                 )?));
                 out.rpcs.push(HostRpc::GameMode(world_call(
                     players,
@@ -2051,6 +2047,13 @@ impl PlayerListener {
         let intro_state = content.spawner(names::INTRO_SEQUENCE)?;
         let world = players.objects();
         let p = Some(participant);
+        out.rpcs.push(HostRpc::GameMode(content.field_call(
+            world,
+            game_mode,
+            intro_state,
+            1,
+            p,
+        )?));
         out.rpcs.push(HostRpc::GameMode(content.state_call(
             world,
             game_mode,
@@ -2058,13 +2061,6 @@ impl PlayerListener {
             0,
             p,
             Arguments::None,
-        )?));
-        out.rpcs.push(HostRpc::GameMode(content.field_call(
-            world,
-            game_mode,
-            intro_state,
-            1,
-            p,
         )?));
         out.rpcs.push(HostRpc::GameMode(content.state_call(
             world,

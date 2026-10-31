@@ -359,7 +359,15 @@ fn started() -> Harness {
     assert!(h.world().get(goals[0]).is_none());
     let calls = counting.calls();
     let countdown = h.content.state(Gm::Countdown) as u16;
-    assert_eq!(calls[0], (gm, countdown, 0, Some(h.participant)));
+    let intro_state = h.content.spawner(names::INTRO_SEQUENCE).unwrap() as u16;
+    assert_eq!(
+        &calls[..2],
+        &[
+            (gm, intro_state, 1, Some(h.participant)),
+            (gm, countdown, 0, Some(h.participant)),
+        ],
+        "leave the intro before entering the countdown"
+    );
     assert_eq!(calls[2].2, 2, "countdown start time");
     let HostRpc::GameMode(start_call) = counting.rpcs[2] else {
         panic!("start call")
@@ -450,7 +458,22 @@ fn a_win_runs_the_official_order_and_pays_once() {
     );
     let calls = h.run(7_200, vec![]).calls();
     let finish_state = h.content.state(Gm::Finish) as u16;
-    assert!(calls.contains(&(gm, finish_state, 0, Some(h.participant))));
+    let outro_state = h.content.spawner(names::OUTRO_SEQUENCE).unwrap() as u16;
+    assert_eq!(
+        &calls[..4],
+        &[
+            (
+                gm,
+                h.content.state(Gm::Waypoints) as u16,
+                1,
+                Some(h.participant)
+            ),
+            (gm, finish_state, 0, Some(h.participant)),
+            (gm, finish_state, 1, Some(h.participant)),
+            (gm, outro_state, 0, Some(h.participant)),
+        ],
+        "leave waypoints and complete the finish transition before entering the outro"
+    );
     // A repeated last crossing pays nothing more.
     h.run(7_300, vec![h.checkpoint(7, 61.)]);
     assert_eq!(h.listener.scoring_state.pending_awards.len(), 1);
@@ -462,6 +485,33 @@ fn a_win_runs_the_official_order_and_pays_once() {
     assert_eq!(ended.created().len(), 1, "cooldown logic");
     assert!(!h.listener.event_suspended.contains(&h.participant));
     let ending = h.run(8_300, vec![]).calls();
+    assert_eq!(
+        &ending[..5],
+        &[
+            (gm, outro_state, 1, Some(h.participant)),
+            (
+                gm,
+                h.content.state(Gm::ResultReporting) as u16,
+                0,
+                Some(h.participant)
+            ),
+            (
+                gm,
+                h.content.state(Gm::ResultReporting) as u16,
+                1,
+                Some(h.participant)
+            ),
+            (
+                gm,
+                h.content.state(Gm::Final) as u16,
+                0,
+                Some(h.participant)
+            ),
+            (gm, 0, 1, None),
+        ],
+        "leave the outro, report results, enter final and request departure; retain the human membership until departure"
+    );
+    assert!(!ending.contains(&(gm, 0, 3, Some(h.participant))));
     assert_eq!(
         ending[ending.len() - 4],
         (gm, 0, 1, None),

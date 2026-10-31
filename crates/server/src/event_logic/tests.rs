@@ -192,7 +192,7 @@ fn game_mode() -> Layout {
     l.bus_count = 12;
     l
 }
-const INTRO_SPAWNER: usize = 13;
+const INTRO_SPAWNER: usize = 2 + STATES.len();
 pub(crate) const GOTO: Goto = Goto {
     point: [10.5, 2.0, -30.25],
     radius: 150.,
@@ -206,7 +206,7 @@ pub(crate) const FLAGS: [(u32, usize); 5] = [
     (EVENTS, 1),
     (GAMEPLAY, 3),
 ];
-const OUTRO_SPAWNER: usize = 14;
+const OUTRO_SPAWNER: usize = INTRO_SPAWNER + 1;
 
 pub(crate) fn event() -> Event {
     let gm = game_mode();
@@ -891,6 +891,25 @@ fn content_names_every_state_and_refuses_missing_or_repeated_ones() {
     let mut other_catalog = event();
     other_catalog.start_logics[0].catalog = vec![(10, 41)];
     assert!(Content::new(other_catalog, "x".into()).is_err());
+}
+
+#[test]
+fn sequence_spawner_rejects_an_rpc_bearing_state_of_the_wrong_class() {
+    let good = event();
+    assert!(Content::new(good.clone(), "x".into()).is_ok());
+    for name in [request::INTRO_SEQUENCE, request::OUTRO_SEQUENCE] {
+        let mut wrong = good.clone();
+        wrong
+            .sequences
+            .iter_mut()
+            .find(|s| s.layout.blueprint == name)
+            .unwrap()
+            .spawner = Some(2);
+        assert!(
+            Content::new(wrong, "x".into()).is_err(),
+            "a published main-state RPC cannot serve as a sequence spawner"
+        );
+    }
 }
 
 #[test]

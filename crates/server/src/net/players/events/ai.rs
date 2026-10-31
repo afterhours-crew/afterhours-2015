@@ -175,8 +175,8 @@ impl PlayerListener {
                 (Gm::Root, 2),
                 (Gm::WaitForAi, 0),
                 (Gm::WaitForAi, 1),
-                (Gm::Main, 0),
-                (Gm::Main, 1),
+                (Gm::AiSpawned, 0),
+                (Gm::AiSpawned, 1),
             ] {
                 out.rpcs.push(HostRpc::GameMode(content.state_call(
                     players.objects(),
@@ -413,8 +413,8 @@ impl PlayerListener {
                         (Gm::Waypoints, 1),
                         (Gm::DnfState, 0),
                         (Gm::DnfState, 1),
-                        (Gm::Root, 3),
                         (Gm::Final, 0),
+                        (Gm::Root, 3),
                     ] {
                         out.rpcs.push(HostRpc::GameMode(content.state_call(
                             players.objects(),
@@ -445,11 +445,18 @@ impl PlayerListener {
                     // Final-state entry releases this participant, which invokes
                     // the authored individual-completion handoff. The human's
                     // race and the other opponents continue independently.
+                    out.rpcs.push(HostRpc::GameMode(content.field_call(
+                        players.objects(),
+                        race.game_mode,
+                        content.spawner(names::OUTRO_SEQUENCE)?,
+                        1,
+                        Some(participant),
+                    )?));
                     for (state, method) in [
-                        (Gm::Root, 3),
-                        (Gm::Final, 0),
                         (Gm::ResultReporting, 0),
                         (Gm::ResultReporting, 1),
+                        (Gm::Final, 0),
+                        (Gm::Root, 3),
                     ] {
                         out.rpcs.push(HostRpc::GameMode(content.state_call(
                             players.objects(),
@@ -460,13 +467,6 @@ impl PlayerListener {
                             Arguments::None,
                         )?));
                     }
-                    out.rpcs.push(HostRpc::GameMode(content.field_call(
-                        players.objects(),
-                        race.game_mode,
-                        content.spawner(names::OUTRO_SEQUENCE)?,
-                        1,
-                        Some(participant),
-                    )?));
                     let index = grid
                         .racers
                         .members
@@ -595,8 +595,8 @@ impl PlayerListener {
                     active: false,
                 },
             ),
-            (Gm::ResultReporting, 0, Arguments::None),
-            (Gm::ResultReporting, 1, Arguments::None),
+            (Gm::Finish, 0, Arguments::None),
+            (Gm::Finish, 1, Arguments::None),
         ] {
             out.rpcs.push(HostRpc::GameMode(content.state_call(
                 players.objects(),
