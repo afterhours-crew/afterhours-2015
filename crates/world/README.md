@@ -73,3 +73,8 @@ awarding REP. The listener commits callbacks with movement, reliable ordering
 and bounded output queues; a failed frame publishes none of those changes.
 See [#120](https://github.com/afterhours-crew/afterhours-2015/issues/120) for the
 remaining live validation of these paths.
+
+Message argument readers expose delivery and client-read identities for external
+protocol inspection. Delivery attachments are preserved as opaque bytes with the
+wire's 255-byte bound. Alignment bits are not interpreted as message flags. These
+readers do not establish phone presentation or execute attachment behavior.

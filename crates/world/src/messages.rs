@@ -18,6 +18,74 @@ const REGISTRY: u32 = 2;
 const READ: u32 = 3;
 const READ_BITS: usize = 2 + 11 + 12 + 1;
 
+/// Message reference and read flag sent by a client. Trailing bits are payload
+/// alignment, not additional flags; their values are deliberately unconstrained.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReadArguments {
+    pub bundle: u16,
+    pub flat: u16,
+    pub flag: bool,
+}
+impl ReadArguments {
+    pub fn decode(bits: BitSpan<'_>) -> Result<Self, Error> {
+        if !(READ_BITS..READ_BITS + 8).contains(&bits.len()) {
+            return Err(Error::Shape);
+        }
+        let (bundle, flat) = reference(bits)?;
+        Ok(Self {
+            bundle,
+            flat,
+            flag: bits.read_u32(25, 1).map_err(|_| Error::Shape)? == 1,
+        })
+    }
+}
+
+/// Arguments of host messageRestored/messageAdded. Attachments are bounded by
+/// the wire's byte length and preserved opaquely; this does not interpret them
+/// or establish that a client executed the delivery.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeliveryArguments {
+    pub bundle: u16,
+    pub flat: u16,
+    pub attachment: Vec<u8>,
+    pub flag: bool,
+}
+impl DeliveryArguments {
+    pub fn decode(bits: BitSpan<'_>) -> Result<Self, Error> {
+        // Host selector/serial/method occupy 51 bits. The reference, length,
+        // attachment and flag occupy 34 + 8*n bits, followed by 3 padding bits.
+        if bits.len() < 37 || bits.len() > 37 + 8 * 255 {
+            return Err(Error::Shape);
+        }
+        let (bundle, flat) = reference(bits)?;
+        let length = bits.read_u32(25, 8).map_err(|_| Error::Shape)? as usize;
+        if bits.len() != 37 + length * 8 {
+            return Err(Error::Shape);
+        }
+        let attachment = (0..length)
+            .map(|i| bits.read_u32(33 + i * 8, 8).map(|v| v as u8))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| Error::Shape)?;
+        Ok(Self {
+            bundle,
+            flat,
+            attachment,
+            flag: bits
+                .read_u32(33 + length * 8, 1)
+                .map_err(|_| Error::Shape)?
+                == 1,
+        })
+    }
+}
+
+fn reference(bits: BitSpan<'_>) -> Result<(u16, u16), Error> {
+    let read = |offset, width| bits.read_u32(offset, width).map_err(|_| Error::Shape);
+    if read(0, 2)? != REGISTRY {
+        return Err(Error::Shape);
+    }
+    Ok((read(2, 11)? as u16, read(13, 12)? as u16))
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Read {
     pub manager: u16,
@@ -69,17 +137,14 @@ impl Read {
         if manager == 0 || participant == 0 {
             return Err(Error::UnknownObject);
         }
-        let read = |offset, width| bits.read_u32(offset, width).map_err(|_| Error::Shape);
-        if read(0, 2)? != REGISTRY {
-            return Err(Error::Shape);
-        }
+        let arguments = ReadArguments::decode(bits)?;
         Ok(Some(Self {
             manager,
             selector: route.selector(),
             participant,
-            bundle: read(2, 11)? as u16,
-            flat: read(13, 12)? as u16,
-            flag: read(25, 1)? == 1,
+            bundle: arguments.bundle,
+            flat: arguments.flat,
+            flag: arguments.flag,
         }))
     }
 }
@@ -92,6 +157,82 @@ mod tests {
         game_mode::{Arguments, Call},
     };
     use nfs_protocol::world::rpc::Serial;
+
+    fn delivery_bits(length: u8, attachment: &[u8], flag: bool, padding: u8) -> BitWriter {
+        let mut bits = BitWriter::new();
+        bits.put(2, 2)
+            .put(17, 11)
+            .put(2049, 12)
+            .put(length.into(), 8);
+        for byte in attachment {
+            bits.put((*byte).into(), 8);
+        }
+        bits.put(u64::from(flag), 1).put(padding.into(), 3);
+        bits
+    }
+
+    #[test]
+    fn deliveries_preserve_opaque_attachments_and_ignore_only_alignment() {
+        for attachment in [vec![], vec![0, 255, 7, 128, 1], vec![219; 255]] {
+            for flag in [false, true] {
+                for padding in [0, 7] {
+                    let bits = delivery_bits(attachment.len() as u8, &attachment, flag, padding);
+                    let decoded = DeliveryArguments::decode(bits.span()).unwrap();
+                    assert_eq!(
+                        (decoded.bundle, decoded.flat, decoded.flag),
+                        (17, 2049, flag)
+                    );
+                    assert_eq!(decoded.attachment, attachment);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn delivery_lengths_and_registry_mode_fail_closed() {
+        let valid = delivery_bits(5, &[1, 2, 3, 4, 5], true, 7);
+        for length in 0..valid.span().len() {
+            let short = BitSpan::new(valid.bytes(), 0, length).unwrap();
+            assert!(DeliveryArguments::decode(short).is_err(), "length {length}");
+        }
+        for (declared, actual) in [(0, 1), (1, 0), (254, 255), (255, 254)] {
+            assert!(
+                DeliveryArguments::decode(
+                    delivery_bits(declared, &vec![3; actual], false, 0).span()
+                )
+                .is_err()
+            );
+        }
+        let mut wrong_mode = valid.bytes().to_vec();
+        wrong_mode[0] &= 0x3f;
+        assert!(
+            DeliveryArguments::decode(BitSpan::new(&wrong_mode, 0, valid.span().len()).unwrap())
+                .is_err()
+        );
+        let mut trailing = valid.clone();
+        trailing.put(0, 1);
+        assert!(DeliveryArguments::decode(trailing.span()).is_err());
+    }
+
+    #[test]
+    fn read_payload_keeps_flag_separate_from_nonzero_padding() {
+        for flag in [false, true] {
+            let mut bits = BitWriter::new();
+            bits.put(2, 2)
+                .put(17, 11)
+                .put(2049, 12)
+                .put(u64::from(flag), 1)
+                .put(31, 5);
+            assert_eq!(
+                ReadArguments::decode(bits.span()).unwrap(),
+                ReadArguments {
+                    bundle: 17,
+                    flat: 2049,
+                    flag
+                }
+            );
+        }
+    }
     fn read_body(selector: u16, method: u32, args: &str, refs: &[u16]) -> BitWriter {
         let mut payload = BitWriter::new();
         payload.put(selector.into(), 9).put(method.into(), 32);
