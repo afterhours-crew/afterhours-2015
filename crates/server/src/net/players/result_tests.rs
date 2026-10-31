@@ -161,7 +161,7 @@ fn tables() -> Arc<crate::persistent::Catalog> {
 }
 
 #[tokio::test]
-async fn authored_result_waits_for_its_message_and_commits_before_retryable_publication() {
+async fn authored_reward_and_story_report_have_separate_retryable_commit_boundaries() {
     let (mut listener, participant, _) = prologue::tests::setup();
     let progression = Arc::new(content());
     let repository = Arc::new(MemoryRepository::new());
@@ -332,7 +332,7 @@ async fn authored_result_waits_for_its_message_and_commits_before_retryable_publ
     );
     let saved = repository.snapshot(account).unwrap();
     assert!(
-        progression
+        !progression
             .catalog
             .story_policy(progression.settings)
             .objective(&saved, 30)
@@ -346,6 +346,32 @@ async fn authored_result_waits_for_its_message_and_commits_before_retryable_publ
         2000
     );
     assert_eq!(Scores::load(&credited.loaded).unwrap(), scores);
+    listener.awarded(&award, credited).unwrap();
+    let retry = profile.credit_for_test(&award, Timestamp(7)).await.unwrap();
+    assert!(retry.replayed);
+    listener.awarded(&award, retry).unwrap();
+    assert_eq!(listener.active_invitations.result_won(30), Some(false));
+    assert_eq!(active_invitations::State::default().result_won(30), None);
+    assert_eq!(repository.snapshot(account).unwrap(), saved);
+    assert_eq!(
+        listener
+            .pending_rpcs
+            .iter()
+            .filter(|rpc| matches!(rpc, HostRpc::Query(c) if c.method == 2))
+            .count(),
+        0,
+        "paying a finish must not complete the story before result reporting"
+    );
+    // The owned event reports only after its outro; this worker control supplies
+    // that later transition explicitly. The event-path tests exercise its gate.
+    let report = Request {
+        participant,
+        player_index: 0,
+        progression: progression.clone(),
+        action: Action::Complete { objective: 30 },
+    };
+    let completed = profile.story_for_test(&report, Timestamp(8)).await.unwrap();
+    let paid_generation = listener.persistent.as_ref().unwrap().generation();
     let filler = HostRpc::Query(nfs_world::participants::EntityCall {
         entity: scene,
         selector: 1,
@@ -356,21 +382,34 @@ async fn authored_result_waits_for_its_message_and_commits_before_retryable_publ
         .pending_rpcs
         .resize(nfs_world::session::MAX_RPC_QUEUE, filler);
     assert_eq!(
-        listener.awarded(&award, credited),
+        listener.story_committed(&report, completed.clone()),
         Err(replication::Error::Bound)
     );
     assert_eq!(
         listener.persistent.as_ref().unwrap().generation(),
-        before.generation()
+        paid_generation
     );
     listener.pending_rpcs.clear();
-    assert_eq!(listener.active_invitations.result_won(30), None);
-    let retry = profile.credit_for_test(&award, Timestamp(7)).await.unwrap();
-    assert!(retry.replayed);
-    listener.awarded(&award, retry).unwrap();
-    assert_eq!(listener.active_invitations.result_won(30), Some(false));
-    assert_eq!(active_invitations::State::default().result_won(30), None);
-    assert_eq!(repository.snapshot(account).unwrap(), saved);
+    listener.story_committed(&report, completed).unwrap();
+    let completed_save = repository.snapshot(account).unwrap();
+    assert!(
+        progression
+            .catalog
+            .story_policy(progression.settings)
+            .objective(&completed_save, 30)
+            .unwrap()
+            .completed
+    );
+    assert_eq!(
+        nfs_services::bank::Balance::from_snapshot(&completed_save)
+            .unwrap()
+            .0,
+        2000
+    );
+    assert_eq!(
+        Scores::load(listener.persistent.as_ref().unwrap()).unwrap(),
+        scores
+    );
     assert_eq!(
         listener
             .pending_rpcs
@@ -387,6 +426,7 @@ async fn authored_result_waits_for_its_message_and_commits_before_retryable_publ
         )
         .unwrap();
     assert_eq!(listener.pending_rpcs.len(), published);
+    assert_eq!(repository.snapshot(account).unwrap(), completed_save);
     listener
         .advance_active_invitations(listener.world_ms)
         .unwrap();
@@ -407,7 +447,7 @@ async fn authored_result_waits_for_its_message_and_commits_before_retryable_publ
     let mut wrong = award.clone();
     wrong.event.as_mut().unwrap().batch_id += 1;
     assert!(profile.credit_for_test(&wrong, Timestamp(9)).await.is_err());
-    assert_eq!(repository.snapshot(account).unwrap(), saved);
+    assert_eq!(repository.snapshot(account).unwrap(), completed_save);
 }
 
 #[test]

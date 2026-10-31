@@ -154,6 +154,7 @@ impl PlayerListener {
         if committed.loaded.generation() < before.generation() {
             return Err(replication::Error::Shape);
         }
+        let event_reported = self.event_story_reported(request, &committed.loaded)?;
         let mut calls = progression_calls(
             &request.progression,
             before,
@@ -437,6 +438,10 @@ impl PlayerListener {
         {
             return Err(replication::Error::Bound);
         }
+        let licensed = self.licensed_after_completion(request, &committed.loaded)?;
+        if licensed.len() > MAX_PENDING.saturating_sub(self.story_pending.len()) {
+            return Err(replication::Error::Bound);
+        }
         self.players = players;
         self.logic_ghosts = logic_ghosts;
         self.intro_modes = modes;
@@ -447,14 +452,13 @@ impl PlayerListener {
         self.pending.extend(sections);
         self.pending_content.extend(output.messages);
         self.pending_rpcs.extend(calls);
-        let licensed = self.licensed_after_completion(request, &committed.loaded)?;
-        if licensed.len() > MAX_PENDING.saturating_sub(self.story_pending.len()) {
-            return Err(replication::Error::Bound);
-        }
         self.population = population;
         self.inventory = inventory;
         self.persistent = Some(committed.loaded);
         self.story_pending.extend(licensed);
+        if event_reported {
+            self.release_event_story(request.participant);
+        }
         Ok(())
     }
 }

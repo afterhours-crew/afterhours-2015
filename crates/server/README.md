@@ -365,6 +365,16 @@ eligibility is modeled. Owned participants
 already in FreeRoam may report their location before the activation queue drains;
 this records readiness without bypassing subscription ordering.
 
+Owned race rewards and story reporting use separate transition boundaries.
+Crossing the finish commits cash, REP, unlocks and the event record together with
+one retry receipt. Completing the outro then enters result reporting and commits
+any attributed story objective. Its next-objective activation and map changes
+follow that commit; final departure waits for it. Queue pressure retains the
+report and its state entry together, and retries do not pay the finish twice.
+Interrupting before result reporting retains earned rewards without inventing a
+story completion. This describes implemented ordering, not live acceptance of
+every story mission.
+
 Garage logic may supply event-only `world_ready`, `world_spawn` and `free_roam`
 batches. They run once at the first new-car readiness report, release of its spawn
 assignment, and completion of the queued world handoff, respectively. These

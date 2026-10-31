@@ -12,6 +12,7 @@ mod ai;
 mod availability;
 mod catalog;
 mod recovery;
+mod reporting;
 mod restart;
 mod speedwall;
 

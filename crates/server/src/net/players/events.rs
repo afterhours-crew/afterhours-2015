@@ -44,6 +44,7 @@ use nfs_world::{
 mod ai;
 pub(super) mod discovery;
 mod finish;
+mod reporting;
 mod restart;
 mod speedwall;
 
@@ -173,6 +174,9 @@ struct Race {
     speedwall: Option<nfs_world::speedwall::Progress>,
     credit_batch: Option<u64>,
     credit_committed: bool,
+    /// Attributed at finish, completed only by the post-outro result report.
+    story: Option<super::scoring::StoryResult>,
+    reporting_started: bool,
     exit: Option<Exit>,
     awaiting_leave: bool,
     /// The intro's AI goals on the participant's Actor, while it holds them.
@@ -297,6 +301,7 @@ struct Out {
     rivals: Option<crate::rival_content::population::Population>,
     teleports: Vec<nfs_world::teleport::Command>,
     speedwalls: Vec<nfs_world::speedwall::Progress>,
+    story: Vec<crate::net::items::story::Request>,
     // Clone only when a presentation lifecycle changes; commit with the world
     // and output queues so a rejected batch cannot lose or duplicate roles.
     logic_ghosts: Option<BTreeMap<u16, BTreeMap<u16, u16>>>,
@@ -866,6 +871,7 @@ impl PlayerListener {
             || out.messages.len() > MAX_PENDING.saturating_sub(self.pending_content.len())
             || out.teleports.len() > MAX_PENDING.saturating_sub(self.pending_teleports.len())
             || out.speedwalls.len() > MAX_PENDING.saturating_sub(self.pending_speedwalls.len())
+            || out.story.len() > MAX_PENDING.saturating_sub(self.story_pending.len())
         {
             // Retry the same inputs and allocations after the queues drain.
             return Ok(());
@@ -894,6 +900,7 @@ impl PlayerListener {
         }
         self.pending_content.extend(out.messages);
         self.pending_speedwalls.extend(out.speedwalls);
+        self.story_pending.extend(out.story);
         self.pending.extend(sections);
         self.pending_rpcs.extend(out.rpcs);
         self.queue_entries(out.entries);
@@ -1526,6 +1533,8 @@ impl PlayerListener {
             speedwall: None,
             credit_batch: None,
             credit_committed: false,
+            story: None,
+            reporting_started: false,
             exit: None,
             awaiting_leave: false,
             goals: Vec::new(),
@@ -1840,8 +1849,51 @@ impl PlayerListener {
                 // The panel must read committed results. Storage has its own
                 // bounded worker/deadline; a delayed credit cannot publish an
                 // uncommitted Speedwall attempt or let the leave overtake it.
-                if race.speedwall.is_some() && race.credit_batch.is_some() && !race.credit_committed
+                if (race.speedwall.is_some() || race.story.is_some())
+                    && race.credit_batch.is_some()
+                    && !race.credit_committed
                 {
+                    state
+                        .steps
+                        .push_back((now_ms + FOLLOW_MS, participant, Step::Ending));
+                    return Ok(());
+                }
+                let outro = content.spawner(names::OUTRO_SEQUENCE)?;
+                let p = Some(participant);
+                // Publish the authored state path before asking the human to
+                // depart. Primary removal belongs to AI final-state adoption;
+                // the human remains a member until its leave request.
+                if !race.reporting_started {
+                    out.rpcs.push(HostRpc::GameMode(content.field_call(
+                        players.objects(),
+                        game_mode,
+                        outro,
+                        1,
+                        p,
+                    )?));
+                    out.rpcs.push(HostRpc::GameMode(world_call(
+                        players,
+                        Gm::ResultReporting,
+                        0,
+                        p,
+                        Arguments::None,
+                    )?));
+                    race.reporting_started = true;
+                    if let Some(story) = &race.story {
+                        out.story.push(crate::net::items::story::Request {
+                            participant,
+                            player_index: players
+                                .runtime_index(HOST_SELECTOR as u8, self.persona, participant)
+                                .map(u32::from)
+                                .ok_or(replication::Error::UnknownObject)?,
+                            progression: story.progression.clone(),
+                            action: crate::net::items::story::Action::Complete {
+                                objective: story.objective,
+                            },
+                        });
+                    }
+                }
+                if race.story.is_some() {
                     state
                         .steps
                         .push_back((now_ms + FOLLOW_MS, participant, Step::Ending));
@@ -1850,25 +1902,6 @@ impl PlayerListener {
                 if let Some(progress) = race.speedwall.take() {
                     out.speedwalls.push(progress);
                 }
-                let outro = content.spawner(names::OUTRO_SEQUENCE)?;
-                let p = Some(participant);
-                // Publish the authored state path before asking the human to
-                // depart. Primary removal belongs to AI final-state adoption;
-                // the human remains a member until its leave request.
-                out.rpcs.push(HostRpc::GameMode(content.field_call(
-                    players.objects(),
-                    game_mode,
-                    outro,
-                    1,
-                    p,
-                )?));
-                out.rpcs.push(HostRpc::GameMode(world_call(
-                    players,
-                    Gm::ResultReporting,
-                    0,
-                    p,
-                    Arguments::None,
-                )?));
                 out.rpcs.push(HostRpc::GameMode(world_call(
                     players,
                     Gm::ResultReporting,
@@ -2277,6 +2310,7 @@ impl PlayerListener {
         )? {
             Some(request) => {
                 race.credit_batch = Some(request.batch_id);
+                race.story = request.story.clone();
                 completions.push(request);
             }
             None => tracing::warn!(

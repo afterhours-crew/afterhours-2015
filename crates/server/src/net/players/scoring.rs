@@ -102,7 +102,8 @@ pub(in crate::net) struct AwardRequest {
     /// An owned event completion paid with this credit: its cash, earned-cash
     /// statistic and race-event record join the same transaction.
     pub event: Option<nfs_services::event_rewards::Completion>,
-    /// Authored objective attributed to this owned result before queuing it.
+    /// Authored objective attributed to this owned result. Rewards commit at
+    /// finish; the event's later result-reporting state completes this objective.
     pub story: Option<StoryResult>,
 }
 

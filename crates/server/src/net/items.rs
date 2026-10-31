@@ -495,8 +495,7 @@ impl Profile {
         let thresholds = request.thresholds.clone();
         let player_index = request.player_index;
         let event = request.event.clone();
-        let story = request.story.clone();
-        if (story.is_some() && event.is_none())
+        if (request.story.is_some() && event.is_none())
             || event
                 .as_ref()
                 .is_some_and(|e| e.batch_id != batch_id || e.rep != credit)
@@ -547,10 +546,10 @@ impl Profile {
                             account,
                             &policy,
                             event,
-                            story.as_ref().map(|s| nfs_services::event_rewards::Story {
-                                policy: s.progression.catalog.story_policy(s.progression.settings),
-                                objective: s.objective,
-                            }),
+                            // Finish rewards precede the outro. The owned event
+                            // reports its attributed story result afterwards;
+                            // paying the finish must not start that handoff.
+                            None,
                             now,
                         )
                         .map_err(Error::Inventory)?
