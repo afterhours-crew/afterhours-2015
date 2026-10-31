@@ -12,7 +12,8 @@ start or automated test does not establish complete gameplay or launcher
 independence. The repository does not distribute game content or an account
 profile. The [`nfs-afterhours` launcher](../../docs/LOCAL-LAUNCHER.md) derives content from
 the owner's supported installation and creates a separate local account;
-the complete prologue and several garage mutations are still incomplete.
+the [gameplay roadmap](https://github.com/afterhours-crew/afterhours-2015/issues/62)
+tracks accepted milestones and remaining gameplay work.
 
 Temporary opening cars use the shared world-car constructor with an empty
 nitrous meter and their native initial audio flags. These initial states remain
@@ -27,6 +28,14 @@ sample the latest committed input, and inbox restoration precedes manager
 initiation. Repeated message hashes keep separate deliveries; client read reports
 select the first live matching message, with a receipt preventing stale reads
 after ring reuse.
+
+Committed REP level changes also publish the installed level-stat integer call
+to the owning player object. The comparison uses the current world projection,
+so an already-refreshed storage snapshot cannot hide an unpublished change.
+Queue capacity is checked before adopting the projection and its calls together;
+retrying a committed credit or earning more points within the same level does
+not repeat the change. Reconnect initializes the publisher from current saved
+scores. This local publication does not require a hosted stat service.
 
 A server restart starts the full authored delay for an intent that was still
 pending; this is an explicit local recovery policy, not a claim about official

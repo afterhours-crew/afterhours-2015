@@ -26,6 +26,8 @@ use nfs_storage::{AccountId, InventoryRepository, MemoryRepository, Timestamp};
 use nfs_world::participants::HostRpc;
 use std::sync::Arc;
 
+mod rep_stat;
+
 fn rule() -> Completion {
     Completion {
         objective: 30,

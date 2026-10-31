@@ -38,6 +38,12 @@ order. Tester descriptions are leads until corroborated. Unexpected behaviour in
 an official session is not automatically a requirement to reproduce a bug.
 Missing evidence remains explicit and blocks the affected readiness claim.
 
+Ground RPC reference kinds and ownership as well as their argument bits. A valid
+ghost ID and successful encoding do not prove that a method expects that object:
+a player and its joined participant are distinct references. Check the expected
+kind against the client reader and observed call, and retain a control that
+substitutes a different live object kind or another owner's object.
+
 Keep detailed reference material in the private research workspace. Public tasks,
 code and tests contain reviewed semantics and constructed inputs, never captured
 identities, raw traffic, profile data, extracted content or private source links.

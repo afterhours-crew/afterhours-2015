@@ -1779,7 +1779,9 @@ impl PlayerListener {
         let mut players = self.players.clone();
         let mut dirty = self.scoring_state.dirty.clone();
         let mut changed = 0usize;
+        let mut committed_calls = Vec::new();
         if let Some(logic) = self.logic.as_deref() {
+            let stat_fields = logic.reputation_stat_fields();
             for (participant, ghosts) in &self.logic_ghosts {
                 if !self
                     .players
@@ -1787,7 +1789,8 @@ impl PlayerListener {
                 {
                     continue;
                 }
-                for (capture, index, value) in crate::scoring::reputation_updates(logic, &values) {
+                for (capture, index, field) in logic.reputation_fields() {
+                    let value = values.get(field);
                     let Some(&ghost) = ghosts.get(&capture) else {
                         continue;
                     };
@@ -1805,6 +1808,54 @@ impl PlayerListener {
                     {
                         return Err(replication::Error::TypeMismatch);
                     }
+                    if field == nfs_services::reputation::Field::Level {
+                        let replication::Initial::Entity { fields, .. } = &players
+                            .objects()
+                            .get(ghost)
+                            .ok_or(replication::Error::UnknownObject)?
+                            .initial
+                        else {
+                            return Err(replication::Error::TypeMismatch);
+                        };
+                        // Compare the currently presented property, not the
+                        // newest Loaded snapshot: another committed storage job
+                        // can already have refreshed that snapshot. Publication
+                        // and this property update are adopted together below.
+                        if fields.get(index)
+                            != Some(&nfs_world::replication::entity::Initial::I32Property(Some(
+                                value,
+                            )))
+                        {
+                            for &(_, publisher) in
+                                stat_fields.iter().filter(|(id, _)| *id == capture)
+                            {
+                                let Some(nfs_world::replication::entity::Initial::RpcVariant {
+                                    rpc,
+                                    ..
+                                }) = fields.get(publisher)
+                                else {
+                                    return Err(replication::Error::TypeMismatch);
+                                };
+                                // This method resolves a Player, not its joined
+                                // Participant (event state calls use the latter).
+                                let Some(replication::Initial::Participant(owner)) = players
+                                    .objects()
+                                    .get(*participant)
+                                    .map(|object| &object.initial)
+                                else {
+                                    return Err(replication::Error::TypeMismatch);
+                                };
+                                committed_calls.push(HostRpc::GameMode(crate::event_logic::call(
+                                    players.objects(),
+                                    ghost,
+                                    rpc.selector,
+                                    0,
+                                    Some(owner.player),
+                                    nfs_world::game_mode::Arguments::Word(value as u32),
+                                )?));
+                            }
+                        }
+                    }
                     let mut fields = vec![None; kinds.len()];
                     fields[index] = Some(nfs_world::replication::entity::Update::I32Property(
                         Some(value),
@@ -1820,7 +1871,6 @@ impl PlayerListener {
         }
         // Prepare all output and check queue capacity before adopting any of the
         // refreshed state. A full queue must leave publication retryable.
-        let mut committed_calls = Vec::new();
         if request.event.is_some()
             && let Some(bank) = self.bank_notification(credited.loaded.balance().0)?
         {
