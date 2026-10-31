@@ -20,6 +20,8 @@ use crate::transport::{self, Codec, Header, Part};
 
 mod client;
 pub use client::ClientHandshake;
+mod control;
+pub use control::Control;
 
 /// Largest forward jump of the client's cipher cursor accepted (lost datagrams).
 pub const MAX_FORWARD_UNITS: u16 = 128;
@@ -82,14 +84,6 @@ pub struct HostHandshake {
     state: State,
 }
 
-fn words(bytes: &[u8]) -> impl Iterator<Item = u32> + '_ {
-    bytes
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .map(|w| u32::from_be_bytes(*w))
-}
-
 impl HostHandshake {
     /// `client`/`host` are the connection ids; they must differ and be non-zero.
     pub fn new(codec: Codec, client: u32, host: u32, host_index: u16) -> Option<Self> {
@@ -137,8 +131,7 @@ impl HostHandshake {
         if part.channel != 0 {
             return Step::Ignored(Ignored::Unexpected);
         }
-        let fields: Vec<u32> = words(&part.bytes).collect();
-        match (self.state, decoded.header, fields.as_slice()) {
+        match (self.state, decoded.header, Control::decode(&part.bytes)) {
             (
                 State::AwaitRequest,
                 Header::Initial {
@@ -147,18 +140,19 @@ impl HostHandshake {
                     peer_known: false,
                     ..
                 },
-                [1, token, id],
-            ) if part.bytes.len() == 12 => {
-                if sender != self.client || *id != self.client {
+                Some(Control::Request { token, sender: id }),
+            ) => {
+                if sender != self.client || id != self.client {
                     return Step::Ignored(Ignored::Identity);
                 }
                 if let Some(ignored) = self.check_cursor(decoded.header) {
                     return Step::Ignored(ignored);
                 }
-                let reply = [5, *token, self.host]
-                    .iter()
-                    .flat_map(|w| w.to_be_bytes())
-                    .collect();
+                let reply = Control::Reply {
+                    token,
+                    sender: self.host,
+                }
+                .encode();
                 let header = Header::Initial {
                     sender: self.host,
                     index: self.host_index,
@@ -183,22 +177,22 @@ impl HostHandshake {
                 };
                 self.rx = rx;
                 self.tx = tx;
-                self.token = Some(*token);
+                self.token = Some(token);
                 self.client_index = Some(index);
                 self.reply = Some(bytes.clone());
                 self.state = State::Replied;
                 Step::Send(bytes)
             }
-            (State::Replied, Header::Initial { sender, .. }, [1, token, _])
-                if Some(*token) == self.token && sender == self.client =>
-            {
+            (
+                State::Replied,
+                Header::Initial { sender, .. },
+                Some(Control::Request { token, .. }),
+            ) if Some(token) == self.token && sender == self.client => {
                 // The client did not get our reply: send the identical bytes again.
                 Step::Send(self.reply.clone().unwrap_or_default())
             }
-            (State::Replied, Header::Ordinary { index, .. }, [2, token])
-                if part.bytes.len() == 8 =>
-            {
-                if index != self.host_index || Some(*token) != self.token {
+            (State::Replied, Header::Ordinary { index, .. }, Some(Control::Confirm { token })) => {
+                if index != self.host_index || Some(token) != self.token {
                     return Step::Ignored(Ignored::Identity);
                 }
                 if let Some(ignored) = self.check_cursor(decoded.header) {
@@ -331,6 +325,24 @@ mod tests {
             panic!()
         };
         assert_eq!(h.receive(&request(0, 5)), Step::Send(first));
+    }
+
+    #[test]
+    fn malformed_retransmission_cannot_hide_trailing_partial_words() {
+        let mut host = HostHandshake::new(codec(), CLIENT, HOST, 3).unwrap();
+        let request = request(0, 5);
+        let Step::Send(reply) = host.receive(&request) else {
+            panic!("reply")
+        };
+        let decoded = codec().decode(&request).unwrap();
+        for length in 1..=4 {
+            let mut parts = decoded.parts.clone();
+            parts[0].bytes.extend(vec![0; length]);
+            let malformed = codec().encode(decoded.header, &parts).unwrap();
+            assert_eq!(host.receive(&malformed), Step::Ignored(Ignored::Unexpected));
+        }
+        assert_eq!(host.receive(&request), Step::Send(reply));
+        assert_eq!(host.receive(&confirm(4, 5, 3)), Step::Established);
     }
 
     #[test]
