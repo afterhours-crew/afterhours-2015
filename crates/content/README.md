@@ -418,3 +418,12 @@ spawn transitions, checks their client-notification flags, then resolves the
 destination's actual scene and serializer. Missing, ambiguous or unsupported
 sequences fail preparation. Build-profile ports and builder revision invalidate
 older caches; scene ordinals are not embedded in runtime policy.
+
+`AssetIndex::unlock_messages` compiles explicitly selected category and car-part
+notification senders from the installed progression graph. It checks the success
+or filtered listener event, attachment property, shared participant/inventory,
+authored world delay and manager binding through the actual startup scene parents.
+Unknown attachments, extra inputs, ambiguous links and unsupported delay policies
+fail extraction. The `unlock_messages` example inspects these rules without
+opening a save. This projection neither grants rewards nor schedules messages;
+REP eligibility, durable delivery and live acceptance remain separate concerns.

@@ -19,6 +19,7 @@ pub mod active;
 mod conditional;
 pub mod power;
 pub mod result;
+pub mod unlocks;
 
 const GAMEPLAY: &str = "levels/genesis01/gameplay";
 const MANAGER: &str = "MessageManagerEntityData";
@@ -129,6 +130,7 @@ pub(crate) fn sender_manager<S: Source>(
     };
     let asset = graph.target_field(&channel.site, "ChannelAsset")?;
     let mut managers = Vec::new();
+    let mut targets = 0;
     for node in world
         .iter()
         .filter(|n| n.object.class == "LinkedSchematicChannelEntityData")
@@ -137,6 +139,7 @@ pub(crate) fn sender_manager<S: Source>(
             continue;
         }
         for target in graph.links(&node.site, channel.port)? {
+            targets += 1;
             if let Some(&serializer) = bindings.get(&target.site.key) {
                 managers.push(serializer);
             }
@@ -144,7 +147,11 @@ pub(crate) fn sender_manager<S: Source>(
     }
     match managers.as_slice() {
         [manager] => Ok(*manager),
-        _ => Err(bad("unique sender manager missing or ambiguous")),
+        _ => Err(bad(&format!(
+            "unique sender manager missing or ambiguous: channel={asset:?}, port={}, targets={targets}, managers={}",
+            channel.port,
+            managers.len()
+        ))),
     }
 }
 
