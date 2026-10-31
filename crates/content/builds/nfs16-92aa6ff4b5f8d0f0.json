@@ -1028,6 +1028,8 @@
     "exit": "gameplay/tests/garageexitsequence",
     "entry": "gameplay/tests/garageentrysequence",
     "crash": "gameplay/sequences/crashedsequence",
+    "arrival": "gameplay/tests/aicontrolledarrivesequencetest",
+    "arrival_channels": 11291503,
     "entry_timer_events": [
       216863469,
       5862146,

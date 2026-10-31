@@ -10,6 +10,7 @@ pub const WAITING: &str = "synthetic/sequences/waiting";
 pub const EXIT: &str = "synthetic/sequences/exit";
 pub const ENTRY: &str = "synthetic/sequences/entry";
 pub const CRASH: &str = "synthetic/sequences/crash";
+pub const ARRIVAL: &str = "synthetic/sequences/controlled_arrival";
 const GAMEPLAY: &str = "levels/runtime/gameplay";
 const GARAGE: &str = "levels/runtime/garage";
 fn guid(seed: u8) -> [u8; 16] {
@@ -38,6 +39,8 @@ pub fn rules() -> Rules {
         exit: EXIT.into(),
         entry: ENTRY.into(),
         crash: CRASH.into(),
+        arrival: ARRIVAL.into(),
+        arrival_channels: 9010,
         entry_timer_events: [9005, 9006, 9007, 9008],
         waiting_scene: GAMEPLAY.into(),
         exit_scene: GARAGE.into(),
@@ -57,6 +60,10 @@ pub fn rules() -> Rules {
             ("LinkedSchematicChannelReferenceEntityData", Some("channel")),
             ("ScriptedSplineCommandEntityData", None),
             ("DelayEntityData", None),
+            ("CompareBoolEntityData", None),
+            ("EventAndGateEntityData", None),
+            ("EnableAiOnParticipantEntityData", None),
+            ("ParticipantProviderToParticipantEventEntityData", None),
             ("LogicPrefabReferenceObjectData", None),
             ("LogicPrefabBlueprint", None),
         ]
@@ -68,6 +75,14 @@ pub fn rules() -> Rules {
 pub fn assets_with(mut edit: impl FnMut(&str, &mut ObjectFields, &mut SceneObjects)) -> Vec<Asset> {
     let rules = rules();
     let mut out = Vec::new();
+    out.push(controlled_arrival(&mut edit));
+    out.push(asset(
+        13,
+        "synthetic/sequences/control_channel",
+        "SchematicChannelAsset",
+        vec![],
+        vec![],
+    ));
     for (seed, name, label, exit) in [
         (1, WAITING, "Gameplay/WaitingForGarageSequence", false),
         (2, EXIT, "Gameplay/Tests/GarageExitSequence", true),
@@ -339,6 +354,7 @@ pub fn install(assets: &mut Vec<Asset>) {
         pointers.push((guid(sequence), guid(sequence ^ 0x80)));
         if scene == GAMEPLAY {
             pointers.push((guid(10), guid(10 ^ 0x80)));
+            pointers.push((guid(12), guid(12 ^ 0x80)));
             pointers.extend(super::traffic::registered());
         }
         if scene == GARAGE {
@@ -348,5 +364,187 @@ pub fn install(assets: &mut Vec<Asset>) {
             }
         }
         assets.push(super::registry(seed, scene, pointers));
+    }
+}
+
+fn controlled_arrival(edit: &mut impl FnMut(&str, &mut ObjectFields, &mut SceneObjects)) -> Asset {
+    let server = || Field::Enum("Realm", "Realm_Server", 1);
+    let mut objects = vec![
+        (
+            "ParticipantStateSequenceEntityData",
+            vec![("Enabled", Field::Bool(true))],
+        ),
+        (
+            "StateSequenceParticipantProviderEntityData",
+            vec![("Realm", Field::Enum("Realm", "Realm_ClientAndServer", 3))],
+        ),
+        (
+            "CompareBoolEntityData",
+            vec![
+                ("Realm", server()),
+                ("Bool", Field::Bool(false)),
+                ("TriggerOnPropertyChange", Field::Bool(true)),
+                ("TriggerOnStart", Field::Bool(true)),
+                ("AlwaysSend", Field::Bool(false)),
+            ],
+        ),
+        (
+            "DelayEntityData",
+            vec![
+                ("Delay", Field::Float(2.25)),
+                ("Realm", server()),
+                (
+                    "TimeDeltaType",
+                    Field::Enum("TimeDeltaType", "TimeDeltaType_World", 2),
+                ),
+                ("AutoStart", Field::Bool(false)),
+                ("RunOnce", Field::Bool(false)),
+                ("RemoveDuplicateEvents", Field::Bool(true)),
+            ],
+        ),
+        (
+            "EnableAiOnParticipantEntityData",
+            vec![
+                (
+                    "PlayerInclusionMode",
+                    Field::Enum("PlayerInclusion", "PlayerInclusion_OnlyHuman", 0),
+                ),
+                ("AddParticipantToStateOnEnableAi", Field::Bool(false)),
+                ("RemoveParticipantFromStateOnDisableAi", Field::Bool(false)),
+            ],
+        ),
+        (
+            "EventAndGateEntityData",
+            vec![("Realm", server()), ("EventCount", Field::UInt(2))],
+        ),
+        (
+            "EventAndGateEntityData",
+            vec![("Realm", server()), ("EventCount", Field::UInt(2))],
+        ),
+        (
+            "LinkedSchematicChannelReferenceEntityData",
+            vec![
+                ("ChannelAsset", import(13)),
+                ("OutputProperties", Field::RawPointers(vec![])),
+                ("OutputRefProperties", Field::RawPointers(vec![])),
+            ],
+        ),
+        ("ParticipantProviderToParticipantEventEntityData", vec![]),
+        ("ParticipantProviderToParticipantEventEntityData", vec![]),
+    ];
+    let mut events = Vec::new();
+    for (s, sp, t, tp, client) in [
+        (2, 216863469, 5, 5862146, false),
+        (4, 2861454674, 7, 193450864, false),
+        (4, 2861454674, 8, 193450864, false),
+        (2, 216863469, 7, 193450867, false),
+        (5, 193453899, 8, 193450867, false),
+        (7, 193453899, 10, 5862146, false),
+        (8, 193453899, 11, 5862146, false),
+        (10, 193453899, 6, 0x93ef_b252, false),
+        (11, 193453899, 6, 0x72f6_cc1d, false),
+        (11, 193453899, 2, 2089401213, false),
+        (2, 2861486076, 2, 2193212940, true),
+    ] {
+        events.push(vec![
+            ("Source", Field::RawPointer(s)),
+            ("Target", Field::RawPointer(t)),
+            (
+                "SourceEvent",
+                Field::Struct("EventSpec", vec![("Id", Field::UInt(sp))]),
+            ),
+            (
+                "TargetEvent",
+                Field::Struct("EventSpec", vec![("Id", Field::UInt(tp))]),
+            ),
+            (
+                "TargetType",
+                Field::Enum(
+                    "EventConnectionTargetType",
+                    if client {
+                        "EventConnectionTargetType_Client"
+                    } else {
+                        "EventConnectionTargetType_Server"
+                    },
+                    if client { 2 } else { 1 },
+                ),
+            ),
+        ]);
+    }
+    let mut property = connection(3, 2741198505, 4, 2088812747);
+    property.push(("Flags", Field::UInt(3)));
+    let mut fields = vec![
+        (
+            "Name",
+            Field::CString("Gameplay/tests/AIControlledArriveSequenceTest".into()),
+        ),
+        ("Flags", Field::UInt(1)),
+        ("Objects", Field::RawPointers((2..=11).collect())),
+        (
+            "PropertyConnections",
+            Field::Structs("PropertyConnection", vec![property]),
+        ),
+        (
+            "EventConnections",
+            Field::Structs("EventConnection", events),
+        ),
+        (
+            "LinkConnections",
+            Field::Structs(
+                "LinkConnection",
+                vec![
+                    connection(2, 304393993, 3, 0),
+                    connection(2, rules().root_channels, 9, 0),
+                    connection(6, 3806204033, 9, 3806204033),
+                    connection(6, 673467093, 9, 673467093),
+                    connection(10, 3062566331, 3, 0),
+                    connection(11, 3062566331, 3, 0),
+                ],
+            ),
+        ),
+    ];
+    edit(ARRIVAL, &mut fields, &mut objects);
+    asset(
+        12,
+        ARRIVAL,
+        "ParticipantStateSequenceBlueprint",
+        fields,
+        objects,
+    )
+}
+
+/// Put the recovery bindings alongside the existing AI managers. A same-asset
+/// channel decoy precedes the explicitly connected target.
+pub(super) fn arrival_scene(fields: &mut ObjectFields, objects: &mut SceneObjects) {
+    let start = objects.len() as u32 + 2;
+    let mut spawner = vec![
+        ("DefaultStateSequenceBlueprint", Field::RawPointer(0)),
+        ("AiStateSequenceBlueprint", import(12)),
+    ];
+    let oob = spawner.clone();
+    spawner.push(("CrashedSequenceBlueprint", import(10)));
+    objects.extend([
+        ("CrashedParticipantTransitionEntityData", spawner),
+        ("ControllableOutOfBoundsTrackerEntityData", oob),
+        (
+            "LinkedSchematicChannelEntityData",
+            vec![("ChannelAsset", import(13))],
+        ),
+        (
+            "LinkedSchematicChannelEntityData",
+            vec![("ChannelAsset", import(13))],
+        ),
+    ]);
+    for (key, value) in fields {
+        match (*key, value) {
+            ("Objects", Field::RawPointers(values)) => values.extend(start..start + 4),
+            ("LinkConnections", Field::Structs(_, values)) => values.extend([
+                connection(start, rules().arrival_channels, start + 3, 0),
+                connection(start + 1, rules().arrival_channels, start + 3, 0),
+                connection(start + 3, 673467093, 2, 0),
+                connection(start + 3, 3806204033, 4, 0),
+            ]),
+            _ => (),
+        }
     }
 }

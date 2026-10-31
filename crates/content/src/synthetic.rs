@@ -1014,6 +1014,8 @@ pub fn write(root: &Path, assets: &[Asset]) -> std::io::Result<(Options, [u8; 64
                         Some(nfs_world::replication::sublevel::Kind::Rpc),
                     ),
                     ("RoamingRacerManagerEntityData", None),
+                    ("CrashedParticipantTransitionEntityData", None),
+                    ("ControllableOutOfBoundsTrackerEntityData", None),
                     ("RoamingRacerEntityData", None),
                     ("SpecificVehicleProviderEntityData", None),
                     ("RacerSpawnPointEntityData", None),

@@ -14,6 +14,8 @@ pub struct Rules {
     pub exit: String,
     pub entry: String,
     pub crash: String,
+    pub arrival: String,
+    pub arrival_channels: u32,
     pub entry_timer_events: [u32; 4],
     pub waiting_scene: String,
     pub exit_scene: String,
@@ -31,6 +33,8 @@ impl Rules {
             "exit",
             "entry",
             "crash",
+            "arrival",
+            "arrival_channels",
             "entry_timer_events",
             "waiting_scene",
             "exit_scene",
@@ -106,6 +110,8 @@ impl Rules {
             exit: path("exit")?,
             entry: path("entry")?,
             crash: path("crash")?,
+            arrival: path("arrival")?,
+            arrival_channels: number("arrival_channels")?,
             entry_timer_events: map["entry_timer_events"]
                 .as_array()
                 .filter(|a| a.len() == 4)
@@ -133,13 +139,15 @@ impl Rules {
             || result.entry == result.exit
             || result.entry == result.waiting
             || [&result.waiting, &result.exit, &result.entry].contains(&&result.crash)
+            || [&result.waiting, &result.exit, &result.entry, &result.crash]
+                .contains(&&result.arrival)
         {
             return Err(bad("duplicate sequence roots"));
         }
         Ok(result)
     }
     pub fn to_json(&self) -> Value {
-        json!({"waiting":self.waiting,"exit":self.exit,"entry":self.entry,"crash":self.crash,"entry_timer_events":self.entry_timer_events,"waiting_scene":self.waiting_scene,"exit_scene":self.exit_scene,"manager_scene":self.manager_scene,
+        json!({"waiting":self.waiting,"exit":self.exit,"entry":self.entry,"crash":self.crash,"arrival":self.arrival,"arrival_channels":self.arrival_channels,"entry_timer_events":self.entry_timer_events,"waiting_scene":self.waiting_scene,"exit_scene":self.exit_scene,"manager_scene":self.manager_scene,
             "classes":self.classes,"root_channels":self.root_channels,"spawner_channels":self.spawner_channels,"spline_link":self.spline_link,"spline_class_id":self.spline_class_id})
     }
 }

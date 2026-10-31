@@ -9,6 +9,7 @@ pub enum ParseError {
     Io,
 }
 pub(crate) mod authored;
+mod controlled_arrival;
 mod extract;
 mod rules;
 pub(crate) use extract::build;
@@ -241,7 +242,11 @@ impl SequenceContent {
                                 "duration_ms",
                             ],
                         )?;
-                        if a["blueprint"] != "Gameplay/Tests/AIControlledArriveSequenceTest" {
+                        if a["blueprint"].as_str().is_none_or(|name| {
+                            !name.eq_ignore_ascii_case(
+                                "Gameplay/Tests/AIControlledArriveSequenceTest",
+                            )
+                        }) {
                             return Err(ParseError::Invalid);
                         }
                         let (definition, content) = sequence(a, Layout::ControlledArrival)?;
@@ -375,6 +380,9 @@ mod tests {
         assert_eq!(arrival.definition.layout, Layout::ControlledArrival);
         assert_eq!(arrival.duration_ms, 700);
         assert!(arrival.instance().is_ok());
+        doc["crash"]["arrival"]["blueprint"] =
+            json!("Gameplay/tests/AIControlledArriveSequenceTest");
+        assert!(SequenceContent::from_json(&doc).is_ok());
         for (pointer, invalid) in [
             ("/crash/arrival/duration_ms", json!(0)),
             ("/crash/arrival/duration_ms", json!(30_001)),
