@@ -695,12 +695,61 @@ fn movement_pulse_between_echoes_survives_and_only_owned_ready_cars_trigger() {
 
 #[test]
 fn rollover_relocation_waits_for_publication_and_acknowledgement_then_repeats() {
+    exercise_rollover(false);
+}
+
+#[test]
+fn controlled_rollover_waits_for_arrival_under_queue_pressure_then_repeats() {
+    exercise_rollover(true);
+}
+
+fn exercise_rollover(controlled: bool) {
     crate::net::players::test_wire::with_native_padding(|| {
         use nfs_world::replication::vehicle::{
             chassis::{Controls, Motion},
             movement::Sample,
         };
+        let stride = if controlled { 6 } else { 4 };
         let (mut listener, owner) = setup();
+        if controlled {
+            let asset = Asset {
+                bundle: 9,
+                type_id: 77,
+                local_index: 1,
+            };
+            let layout = nfs_world::sequences::Layout::ControlledArrival;
+            let arrival = nfs_world::crash::arrival::Arrivals::new(
+                nfs_world::sequences::Definition {
+                    layout,
+                    asset,
+                    manager: Component {
+                        scene_key: 701,
+                        index: 3,
+                    },
+                    embedded_bus: 2,
+                    channel: Component {
+                        scene_key: 701,
+                        index: 56,
+                    },
+                    presentation: None,
+                },
+                Entities::new(
+                    vec![Catalog::new(9, &[(77, 2)]).unwrap()],
+                    vec![(asset, layout.profile())],
+                )
+                .unwrap(),
+                700,
+            )
+            .unwrap();
+            listener.crashes = Some(
+                listener
+                    .crashes
+                    .take()
+                    .unwrap()
+                    .with_arrival(arrival)
+                    .unwrap(),
+            );
+        }
         let car_id = car(&mut listener, owner);
         listener
             .world_cars
@@ -743,7 +792,7 @@ fn rollover_relocation_waits_for_publication_and_acknowledgement_then_repeats() 
             let (creation, calls) = listener.pending_entries.pop_front().unwrap();
             let sequence = creation.records.last().unwrap().id;
             transport.queue_replication_after(creation, calls).unwrap();
-            let done = completion_frame(owner, sequence, cycle * 4);
+            let done = completion_frame(owner, sequence, cycle * stride);
             // Failure to enqueue the complete transition must not expose the
             // loading entity or consume the sequence completion.
             listener
@@ -752,7 +801,7 @@ fn rollover_relocation_waits_for_publication_and_acknowledgement_then_repeats() 
             let before = listener.players.objects().snapshot();
             assert!(!listener.frame(Queued {
                 advertised: None,
-                frame: u16::from(cycle * 4),
+                frame: u16::from(cycle * stride),
                 data: done.span()
             }));
             assert_eq!(listener.players.objects().snapshot(), before);
@@ -760,7 +809,7 @@ fn rollover_relocation_waits_for_publication_and_acknowledgement_then_repeats() 
             listener.pending_entries.clear();
             assert!(listener.frame(Queued {
                 advertised: None,
-                frame: u16::from(cycle * 4),
+                frame: u16::from(cycle * stride),
                 data: done.span()
             }));
             assert!(
@@ -810,10 +859,10 @@ fn rollover_relocation_waits_for_publication_and_acknowledgement_then_repeats() 
                     .build()
                     .unwrap()
             };
-            let early = ack(cycle * 4 + 1);
+            let early = ack(cycle * stride + 1);
             assert!(listener.frame(Queued {
                 advertised: None,
-                frame: u16::from(cycle * 4 + 1),
+                frame: u16::from(cycle * stride + 1),
                 data: early.span()
             }));
             assert!(
@@ -866,14 +915,14 @@ fn rollover_relocation_waits_for_publication_and_acknowledgement_then_repeats() 
             );
             assert_eq!(foreign_players.objects().len(), objects);
             assert!(foreign_crashes.relocating(owner.participant));
-            let completed = ack(cycle * 4 + 2);
+            let completed = ack(cycle * stride + 2);
             listener
                 .pending_entries
                 .resize(MAX_PENDING - 1, (returning::empty_section(), vec![]));
             let before = listener.players.objects().snapshot();
             assert!(!listener.frame(Queued {
                 advertised: None,
-                frame: u16::from(cycle * 4 + 2),
+                frame: u16::from(cycle * stride + 2),
                 data: completed.span()
             }));
             assert_eq!(listener.players.objects().snapshot(), before);
@@ -881,9 +930,141 @@ fn rollover_relocation_waits_for_publication_and_acknowledgement_then_repeats() 
             listener.pending_entries.clear();
             assert!(listener.frame(Queued {
                 advertised: None,
-                frame: u16::from(cycle * 4 + 2),
+                frame: u16::from(cycle * stride + 2),
                 data: completed.span()
             }));
+            let arrival_id = if controlled {
+                assert_eq!(
+                    listener.participants.stage(owner.participant),
+                    Some(Stage::Crashing)
+                );
+                assert!(
+                    listener
+                        .crashes
+                        .as_ref()
+                        .unwrap()
+                        .arriving(owner.participant)
+                );
+                assert!(!listener.logic_ghosts[&owner.participant].contains_key(&100));
+                assert!(!listener.logic_ghosts[&owner.participant].contains_key(&102));
+                let actor = listener
+                    .players
+                    .owned_actor(owner.connection, owner.persona, owner.participant)
+                    .unwrap();
+                let controlled_flag = |p: &Players| {
+                    let replication::Update::Actor(a) = &p.objects().get(actor).unwrap().current
+                    else {
+                        panic!("actor");
+                    };
+                    a.flag_a
+                };
+                assert_eq!(controlled_flag(&listener.players), Some(false));
+                let awaiting = listener.players.objects().snapshot();
+                listener.advance_crashes(listener.world_ms + 1).unwrap();
+                assert_eq!(listener.players.objects().snapshot(), awaiting);
+                let states: Vec<_> = listener
+                    .pending_entries
+                    .iter()
+                    .flat_map(|(_, calls)| calls)
+                    .filter_map(|rpc| {
+                        if let HostRpc::Participant(n) = rpc {
+                            Some(*n)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                assert_eq!(states, bindings.arrived(owner.participant));
+                for (section, calls) in listener.pending_entries.drain(..) {
+                    transport.queue_replication_after(section, calls).unwrap();
+                }
+                listener.session_backlog = 1;
+                listener.advance_crashes(listener.world_ms + 2).unwrap();
+                assert_eq!(listener.players.objects().snapshot(), awaiting);
+                assert!(listener.pending_entries.is_empty());
+                listener.session_backlog = 0;
+                listener.advance_crashes(listener.world_ms + 100).unwrap();
+                let ids: Vec<_> = listener
+                    .pending_entries
+                    .iter()
+                    .flat_map(|(s, _)| &s.records)
+                    .filter(|r| {
+                        listener
+                            .crashes
+                            .as_ref()
+                            .unwrap()
+                            .has_arrival_completion(r.id, 0)
+                    })
+                    .map(|r| r.id)
+                    .collect();
+                assert_eq!(ids.len(), 1);
+                let arrival_id = ids[0];
+                assert_eq!(controlled_flag(&listener.players), Some(true));
+                assert!(
+                    listener
+                        .crashes
+                        .as_ref()
+                        .unwrap()
+                        .pending_arrivals()
+                        .is_empty()
+                );
+                for (section, calls) in listener.pending_entries.drain(..) {
+                    transport.queue_replication_after(section, calls).unwrap();
+                }
+                listener.advance_crashes(listener.world_ms + 799).unwrap();
+                assert!(listener.pending_entries.is_empty());
+                listener
+                    .pending_entries
+                    .resize(MAX_PENDING - 1, (returning::empty_section(), vec![]));
+                let held = listener.players.objects().snapshot();
+                listener.advance_crashes(listener.world_ms + 800).unwrap();
+                assert_eq!(listener.players.objects().snapshot(), held);
+                listener.pending_entries.clear();
+                listener.advance_crashes(listener.world_ms + 801).unwrap();
+                assert_eq!(controlled_flag(&listener.players), Some(false));
+                assert_eq!(
+                    listener.participants.stage(owner.participant),
+                    Some(Stage::Crashing)
+                );
+                assert_eq!(listener.pending_entries.len(), 2);
+                assert_eq!(listener.pending_entries[0].0.records[0].id, actor);
+                assert!(listener.pending_entries[0].1.is_empty());
+                assert!(listener.pending_entries[1].0.records.is_empty());
+                assert!(
+                    matches!(listener.pending_entries[1].1.as_slice(), [HostRpc::SequenceStop(stop)] if stop.sequence == arrival_id)
+                );
+                assert_eq!(listener.sequence_fallbacks, [0; 3]);
+                for (section, calls) in listener.pending_entries.drain(..) {
+                    transport.queue_replication_after(section, calls).unwrap();
+                }
+                let completion = completion_frame(owner, arrival_id, cycle * stride + 3);
+                listener
+                    .pending_entries
+                    .resize(MAX_PENDING - 1, (returning::empty_section(), vec![]));
+                let held = listener.players.objects().snapshot();
+                assert!(!listener.frame(Queued {
+                    advertised: None,
+                    frame: u16::from(cycle * stride + 3),
+                    data: completion.span()
+                }));
+                assert_eq!(listener.players.objects().snapshot(), held);
+                assert!(
+                    listener
+                        .crashes
+                        .as_ref()
+                        .unwrap()
+                        .arriving(owner.participant)
+                );
+                listener.pending_entries.clear();
+                assert!(listener.frame(Queued {
+                    advertised: None,
+                    frame: u16::from(cycle * stride + 3),
+                    data: completion.span()
+                }));
+                Some(arrival_id)
+            } else {
+                None
+            };
             assert_eq!(
                 listener.participants.stage(owner.participant),
                 Some(Stage::FreeRoam)
@@ -900,7 +1081,12 @@ fn rollover_relocation_waits_for_publication_and_acknowledgement_then_repeats() 
             assert!(listener.players.objects().get(loading).is_none());
             let entries: Vec<_> = listener.pending_entries.drain(..).collect();
             assert_eq!(entries.len(), 2);
-            assert!(entries[0].0.deleted.contains(&loading));
+            assert!(
+                entries[0]
+                    .0
+                    .deleted
+                    .contains(&arrival_id.unwrap_or(loading))
+            );
             assert!(entries[0].1.is_empty());
             let states: Vec<_> = entries[1]
                 .1
@@ -913,19 +1099,37 @@ fn rollover_relocation_waits_for_publication_and_acknowledgement_then_repeats() 
                     }
                 })
                 .collect();
-            assert_eq!(states, bindings.finish(owner.participant));
+            assert_eq!(
+                states,
+                if controlled {
+                    bindings.resume(owner.participant)
+                } else {
+                    bindings.finish(owner.participant)
+                }
+            );
             for (section, calls) in entries {
                 transport.queue_replication_after(section, calls).unwrap();
             }
             let count = listener.players.objects().len();
-            let duplicate = ack(cycle * 4 + 3);
+            let duplicate_sequence = cycle * stride + if controlled { 4 } else { 3 };
+            let duplicate = ack(duplicate_sequence);
             assert!(listener.frame(Queued {
                 advertised: None,
-                frame: u16::from(cycle * 4 + 3),
+                frame: u16::from(duplicate_sequence),
                 data: duplicate.span()
             }));
             assert_eq!(listener.players.objects().len(), count);
             assert!(listener.pending_entries.is_empty());
+            if let Some(arrival) = arrival_id {
+                let duplicate = completion_frame(owner, arrival, cycle * stride + 5);
+                assert!(listener.frame(Queued {
+                    advertised: None,
+                    frame: u16::from(cycle * stride + 5),
+                    data: duplicate.span()
+                }));
+                assert!(listener.pending_entries.is_empty());
+                assert_eq!(listener.players.objects().len(), count);
+            }
             listener.pending.clear();
         }
         assert_eq!(listener.unsupported_rpcs, 0);

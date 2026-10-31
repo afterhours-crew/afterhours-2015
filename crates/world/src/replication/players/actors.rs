@@ -5,6 +5,29 @@
 use super::*;
 
 impl Players {
+    /// Update only the control flag of the current owned actor. Temporary
+    /// lifecycle owners must retain its identity and restore the previous flag;
+    /// route goals and every other actor field remain owned by their existing owner.
+    pub(crate) fn set_actor_control(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        participant: u16,
+        actor: u16,
+        enabled: bool,
+    ) -> Result<Option<Record>, Error> {
+        if self.owned_actor(connection, persona, participant) != Some(actor) {
+            return Err(Error::UnknownObject);
+        }
+        self.objects.change(
+            actor,
+            Update::Actor(ActorUpdate {
+                flag_a: Some(enabled),
+                ..ActorUpdate::default()
+            }),
+        )
+    }
+
     /// Assign a race route and shared pacing to a human Actor while preserving
     /// manual control. The intro must have released its control and goal lists.
     /// The event owns the route; the pacing group has its own shared lifetime.

@@ -125,6 +125,50 @@ impl PlayerListener {
         let mut participants = self.participants.clone();
         let mut ghosts = self.logic_ghosts.clone();
         let mut entries = Vec::new();
+        // Calls precede their entry's records. Keep the control release in a
+        // separate earlier entry so Stop cannot overtake it at the wire edge.
+        let arrival_capacity =
+            MAX_PENDING.saturating_sub(self.pending_entries.len() + self.session_backlog) / 2;
+        for stopped in crashes.poll_arrivals(&mut players, arrival_capacity)? {
+            let records: Vec<_> = stopped.actor.into_iter().collect();
+            entries.push((
+                Section {
+                    float_bits: None,
+                    flag: false,
+                    deleted: vec![],
+                    setup: (!records.is_empty()).then_some(Setup::RawEscape([0; 3])),
+                    records,
+                },
+                vec![],
+            ));
+            entries.push((
+                returning::empty_section(),
+                vec![HostRpc::SequenceStop(stopped.stop)],
+            ));
+        }
+        // Enter-arrival notifications must leave before its sequence is created.
+        // The session backlog includes entries already handed to the transport.
+        if self.pending_entries.is_empty() && self.session_backlog == 0 {
+            for owner in crashes.pending_arrivals() {
+                if entries.len() >= MAX_PENDING {
+                    break;
+                }
+                if participants.stage(owner.participant) != Some(Stage::Crashing) {
+                    return Err(replication::Error::Shape);
+                }
+                let records = crashes.start_arrival(&mut players, owner)?;
+                entries.push((
+                    Section {
+                        float_bits: None,
+                        flag: false,
+                        deleted: vec![],
+                        setup: (!records.is_empty()).then_some(Setup::RawEscape([0; 3])),
+                        records,
+                    },
+                    vec![],
+                ));
+            }
+        }
         for owner in crashes.pending() {
             if !eligible(&participants, &self.event_state, owner.participant) {
                 crashes.discard_pending(owner.participant);
@@ -282,6 +326,39 @@ impl PlayerListener {
             if !crashes.finish_relocation(owner)? {
                 return Ok(Some(None));
             }
+            if crashes.arriving(*participant) {
+                participants.state_path(
+                    owner.participant,
+                    &[bindings.teleport, bindings.rendering, bindings.arrive],
+                );
+                let arrived = Self::arrive_logic(
+                    logic,
+                    crate::garage_logic::Which::ResetArrived,
+                    players,
+                    owner.participant,
+                    ghosts,
+                )?;
+                let records = arrived.records;
+                let section = Section {
+                    float_bits: None,
+                    flag: false,
+                    deleted: arrived.deleted,
+                    setup: (!records.is_empty()).then_some(Setup::RawEscape([0; 3])),
+                    records,
+                };
+                let events = arrived
+                    .events
+                    .into_iter()
+                    .map(HostRpc::Event)
+                    .chain(
+                        bindings
+                            .arrived(*participant)
+                            .into_iter()
+                            .map(HostRpc::Participant),
+                    )
+                    .collect();
+                return Ok(Some(Some((section, events, None))));
+            }
             participants.state_path(
                 owner.participant,
                 &[
@@ -312,6 +389,34 @@ impl PlayerListener {
             events.extend(
                 bindings
                     .finish(*participant)
+                    .into_iter()
+                    .map(HostRpc::Participant),
+            );
+            return Ok(Some(Some((section, events, None))));
+        }
+        if crashes.has_arrival_completion(ghost, route.selector()) && route.method_index() == 1 {
+            let call = Completed::decode(body)?;
+            let owner = Owner {
+                connection: HOST_SELECTOR as u8,
+                persona,
+                participant: call.participant,
+            };
+            let Some(sequence) = crashes.complete_arrival(players, owner, call)? else {
+                return Ok(Some(None));
+            };
+            let bindings = bindings.ok_or(replication::Error::UnknownObject)?;
+            participants.state_path(owner.participant, &[bindings.arrive, bindings.alive]);
+            let (section, mut events) = Self::restore_crash_driving(
+                players,
+                participants,
+                logic,
+                ghosts,
+                owner,
+                Some(sequence),
+            )?;
+            events.extend(
+                bindings
+                    .resume(owner.participant)
                     .into_iter()
                     .map(HostRpc::Participant),
             );

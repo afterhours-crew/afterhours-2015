@@ -52,8 +52,13 @@ impl SequenceContent {
     pub fn crashes(
         &self,
     ) -> Option<Result<nfs_world::crash::Crashes, nfs_world::replication::Error>> {
-        self.crash
-            .as_ref()
-            .map(|c| nfs_world::crash::Crashes::new(c.definition, c.content.clone(), c.duration_ms))
+        self.crash.as_ref().map(|c| {
+            let crashes =
+                nfs_world::crash::Crashes::new(c.definition, c.content.clone(), c.duration_ms)?;
+            match &c.arrival {
+                Some(arrival) => crashes.with_arrival(arrival.instance()?),
+                None => Ok(crashes),
+            }
+        })
     }
 }

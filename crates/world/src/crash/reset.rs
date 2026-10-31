@@ -60,13 +60,19 @@ impl ResetBindings {
     }
 
     pub fn finish(self, participant: u16) -> Vec<Notification> {
+        self.arrived(participant)
+            .into_iter()
+            .chain(self.resume(participant))
+            .collect()
+    }
+
+    /// Relocation ACK enters arrival; it does not authorize Alive.
+    pub fn arrived(self, participant: u16) -> Vec<Notification> {
         [
             (self.teleport, Call::Leave),
             (self.rendering, Call::Enter),
             (self.rendering, Call::Leave),
             (self.arrive, Call::Enter),
-            (self.arrive, Call::Leave),
-            (self.alive, Call::Enter),
         ]
         .map(|(endpoint, call)| Notification {
             endpoint,
@@ -74,5 +80,15 @@ impl ResetBindings {
             call,
         })
         .to_vec()
+    }
+
+    pub fn resume(self, participant: u16) -> Vec<Notification> {
+        [(self.arrive, Call::Leave), (self.alive, Call::Enter)]
+            .map(|(endpoint, call)| Notification {
+                endpoint,
+                participant,
+                call,
+            })
+            .to_vec()
     }
 }
