@@ -201,14 +201,21 @@ impl PlayerListener {
         layout: Option<&crate::vehicle_content::layout::Layout>,
         participant: u16,
         vehicle: u16,
+        selected: Option<nfs_content::events::restart::Destination>,
     ) -> Option<nfs_world::teleport::Command> {
-        let destination = layout?.exit_teleport()?;
+        let (position, basis) = match selected {
+            Some(destination) => (destination.position, destination.basis),
+            None => {
+                let destination = layout?.exit_teleport()?;
+                (destination.locator(), destination.basis())
+            }
+        };
         Some(nfs_world::teleport::Command {
             endpoint: exit?.state_77,
             participant,
             vehicle,
-            position: destination.locator(),
-            basis: destination.basis(),
+            position,
+            basis,
             speed: 0.,
         })
     }

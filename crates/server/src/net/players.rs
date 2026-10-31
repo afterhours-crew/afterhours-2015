@@ -23,6 +23,7 @@ mod challenges;
 mod client_info;
 mod crashing;
 mod customization;
+mod destinations;
 mod diagnostics;
 mod driving_distance;
 mod equipment;
@@ -186,6 +187,7 @@ pub(super) struct PlayerListener {
     sequences: Option<nfs_world::sequences::Sequences>,
     /// Arrive sequences after garage exit (optional sequence content).
     arrivals: Option<nfs_world::arrival::Arrivals>,
+    selected_destinations: destinations::State,
     returns: Option<nfs_world::arrival::Arrivals>,
     crashes: Option<nfs_world::crash::Crashes>,
     inventory: Option<Inventory>,
@@ -1033,6 +1035,7 @@ impl PlayerListener {
             return_trace_until: 0,
             session_backlog: 0,
             arrivals: None,
+            selected_destinations: Default::default(),
             returns: None,
             crashes: None,
             glass: crate::glass::Glass::default(),
@@ -1560,6 +1563,8 @@ impl Listener for PlayerListener {
         let mut spawn_settled = self.spawn_settled.clone();
         let mut scheduled_settled = Vec::new();
         let mut arrivals = self.arrivals.clone();
+        let mut selected_destinations = self.selected_destinations.clone();
+        selected_destinations.retain(&self.participants);
         let mut returns = self.returns.clone();
         let mut completed_returns = Vec::new();
         let mut scheduled_teleports = Vec::new();
@@ -1946,6 +1951,7 @@ impl Listener for PlayerListener {
                             self.vehicles.as_deref().map(|c| &c.layout),
                             notification.participant,
                             target.ghost,
+                            selected_destinations.position(notification.participant),
                         ) {
                             scheduled_teleports.push((self.world_ms + TELEPORT_DELAY_MS, command));
                         }
@@ -2023,6 +2029,20 @@ impl Listener for PlayerListener {
         let mut garage_commands = self.garage_commands.clone();
         let delegated = self.delegated_ai(&players);
         for body in rpcs {
+            match selected_destinations.receive(
+                self.events
+                    .as_ref()
+                    .and_then(|c| c.availability())
+                    .map(|c| c.teleports()),
+                &players,
+                &participants,
+                self.persona,
+                body,
+            ) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(error) => return self.refuse_rpc(error, body),
+            }
             match Self::livery_cache_update(self.roles.as_ref(), &players, self.persona, body) {
                 Ok(Some(invalidation)) => {
                     responses.push(nfs_world::participants::HostRpc::LiveryInvalidation(
@@ -3548,6 +3568,7 @@ impl Listener for PlayerListener {
         self.spawn_settled = spawn_settled;
         self.pending_settled.extend(scheduled_settled);
         self.arrivals = arrivals;
+        self.selected_destinations = selected_destinations;
         self.returns = returns;
         self.pending_returns = pending_returns;
         self.crashes = crashes;

@@ -8,6 +8,15 @@ use nfs_content::events::discovery::{Visibility, membership::Binding};
 use serde_json::json;
 use std::sync::Arc;
 
+pub(crate) fn teleport_fixture(
+    event: &crate::event_logic::Content,
+    definitions: nfs_content::events::discovery::teleport::Definitions,
+) -> Arc<Content> {
+    definitions.validate().unwrap();
+    let mut content = gated_fixture(event);
+    Arc::make_mut(&mut content).source.availability.teleports = definitions;
+    content
+}
 fn site(serializer: usize) -> Endpoint {
     Endpoint {
         scene_key: 700,
@@ -25,6 +34,7 @@ fn source() -> Source {
     };
     Source {
         availability: Availability {
+            teleports: Default::default(),
             entries: ["normal", "story"]
                 .into_iter()
                 .map(|id| Entry {

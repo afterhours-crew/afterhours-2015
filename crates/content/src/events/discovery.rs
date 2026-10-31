@@ -11,6 +11,7 @@ pub mod channels;
 pub mod integers;
 pub mod membership;
 pub mod requirements;
+pub mod teleport;
 
 pub const MAX_EVENTS: usize = 512;
 
@@ -60,6 +61,7 @@ impl AssetIndex {
             visibility: r.visibility,
             copies: r.copies,
             channels: r.channels,
+            teleports: r.teleports,
         })
     }
 
@@ -91,8 +93,28 @@ impl AssetIndex {
         let mut requirements = Vec::new();
         let mut memberships = BTreeMap::new();
         let mut visibility_rules = BTreeMap::new();
+        let mut teleports = teleport::Definitions::default();
         for (scene, root) in &roots {
             let nodes = graph.read(root.clone())?;
+            if include_memberships {
+                for node in nodes
+                    .iter()
+                    .filter(|n| n.object.class == "TeleportManagerEntityData")
+                {
+                    let (scene_key, serializer) = scenes.endpoint(&mut graph, &node.site)?;
+                    let site = Endpoint {
+                        scene_key,
+                        serializer,
+                    };
+                    if teleports
+                        .manager
+                        .replace(site)
+                        .is_some_and(|old| old != site)
+                    {
+                        return Err(bad("ambiguous scene teleport manager"));
+                    }
+                }
+            }
             for launcher in nodes.iter().filter(|n| n.object.class == LAUNCHER) {
                 let mode = graph.target_field(&launcher.site, "GameMode")?.0;
                 // Automatic speed-run/drift-corner activities have their own
@@ -230,7 +252,7 @@ impl AssetIndex {
                     },
                     notifications: resolved,
                 };
-                if include_requirements {
+                if include_requirements || include_memberships {
                     let mut start_area = launcher.site.clone();
                     let frame = start_area
                         .parents
@@ -238,13 +260,28 @@ impl AssetIndex {
                         .ok_or_else(|| bad("start area parent"))?;
                     start_area.key = frame.reference;
                     start_area.bus = frame.bus;
-                    requirements.extend(requirements::read(
-                        &mut graph,
-                        &mut scenes,
-                        &start_area,
-                        &entry,
-                        &identified,
-                    )?);
+                    if include_memberships
+                        && let Some((location, points)) =
+                            restart::selection(&mut graph, &start_area)?
+                    {
+                        let (scene_key, serializer) = scenes.endpoint(&mut graph, &location)?;
+                        teleports.insert(
+                            Endpoint {
+                                scene_key,
+                                serializer,
+                            },
+                            points,
+                        )?;
+                    }
+                    if include_requirements {
+                        requirements.extend(requirements::read(
+                            &mut graph,
+                            &mut scenes,
+                            &start_area,
+                            &entry,
+                            &identified,
+                        )?);
+                    }
                 }
                 if entries.insert(id, entry).is_some() || entries.len() > MAX_EVENTS {
                     return Err(bad("duplicate event identity or roster bound"));
@@ -287,6 +324,7 @@ impl AssetIndex {
             &roots.iter().map(|(_, s)| s.clone()).collect::<Vec<_>>(),
             &copies.values().map(|c| c.channel.clone()).collect(),
         )?;
+        teleports.validate()?;
         Ok(Roster {
             entries: entries.into_values().collect(),
             requirements,
@@ -295,11 +333,13 @@ impl AssetIndex {
             visibility: visibility_rules,
             copies,
             channels,
+            teleports,
         })
     }
 }
 
 struct Roster {
+    teleports: teleport::Definitions,
     entries: Vec<Entry>,
     requirements: Vec<requirements::Binding>,
     memberships: BTreeMap<Endpoint, membership::Binding>,
@@ -312,6 +352,7 @@ struct Roster {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Availability {
+    pub teleports: teleport::Definitions,
     pub entries: Vec<Entry>,
     pub memberships: Vec<membership::Binding>,
     #[serde(with = "crate::prepared_cache::ordered_map")]

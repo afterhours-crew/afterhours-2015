@@ -1185,19 +1185,31 @@ fn the_exit_teleport_targets_the_teleport_state_with_the_configured_destination(
     let mut v = crate::vehicle_content::layout::tests::fixture();
     v["exit_teleport"] = serde_json::json!({"transform_bits": bits});
     let layout = crate::vehicle_content::layout::Layout::from_json(&v).unwrap();
-    let command = PlayerListener::exit_teleport(Some(exit), Some(&layout), 178, 205).unwrap();
+    let command = PlayerListener::exit_teleport(Some(exit), Some(&layout), 178, 205, None).unwrap();
     assert_eq!(command.endpoint, exit.state_77);
     assert_eq!((command.participant, command.vehicle), (178, 205));
     assert_eq!(command.position, [12.5, 0., 0.]);
     assert!(command.encode().is_ok());
     // Without exit bindings or a configured destination there is no teleport.
-    assert!(PlayerListener::exit_teleport(None, Some(&layout), 178, 205).is_none());
+    assert!(PlayerListener::exit_teleport(None, Some(&layout), 178, 205, None).is_none());
     let plain = crate::vehicle_content::layout::Layout::from_json(
         &crate::vehicle_content::layout::tests::fixture(),
     )
     .unwrap();
-    assert!(PlayerListener::exit_teleport(Some(exit), Some(&plain), 178, 205).is_none());
-    assert!(PlayerListener::exit_teleport(Some(exit), None, 178, 205).is_none());
+    assert!(PlayerListener::exit_teleport(Some(exit), Some(&plain), 178, 205, None).is_none());
+    assert!(PlayerListener::exit_teleport(Some(exit), None, 178, 205, None).is_none());
+    let chosen = nfs_content::events::restart::Destination {
+        position: [321., -12., 54.],
+        basis: [[0., 0., 1.], [0., 1., 0.], [-1., 0., 0.]],
+    };
+    for layout in [Some(&layout), None] {
+        let command =
+            PlayerListener::exit_teleport(Some(exit), layout, 178, 205, Some(chosen)).unwrap();
+        assert_eq!(command.position, chosen.position);
+        assert_eq!(command.basis, chosen.basis);
+        assert_eq!(command.speed, 0.);
+        assert!(command.encode().is_ok());
+    }
 }
 
 #[test]

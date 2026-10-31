@@ -24,6 +24,8 @@ pub const METHOD: u32 = 2;
 /// Content target that carries a chunked RPC envelope.
 pub const CONTENT_TARGET: u8 = 47;
 
+pub mod selection;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Command {
     pub endpoint: Endpoint,

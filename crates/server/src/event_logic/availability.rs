@@ -12,4 +12,6 @@ mod saved;
 mod state;
 #[cfg(test)]
 pub(crate) use content::tests::gated_fixture;
+#[cfg(test)]
+pub(crate) use content::tests::teleport_fixture;
 pub use state::{Participant, State};

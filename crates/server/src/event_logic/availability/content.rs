@@ -87,6 +87,7 @@ impl Content {
     }
     fn new(source: Source, known: &BTreeSet<Progress>) -> Result<Self, Error> {
         let a = &source.availability;
+        a.teleports.validate()?;
         if a.entries.is_empty()
             || a.entries.len() > MAX_EVENTS
             || a.memberships.len() > MAX_EVENTS * 4
@@ -236,6 +237,9 @@ impl Content {
     }
     pub fn entries(&self) -> &[Entry] {
         &self.source.availability.entries
+    }
+    pub fn teleports(&self) -> &nfs_content::events::discovery::teleport::Definitions {
+        &self.source.availability.teleports
     }
     pub fn facts(&self) -> &BTreeSet<Progress> {
         &self.facts
