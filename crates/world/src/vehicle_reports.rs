@@ -111,7 +111,7 @@ impl Reports {
         for (id, target, sample) in reports {
             let stamp = sample.physics.identity_words;
             let physics = sample.physics;
-            if let Some(entry) = next.entries.get_mut(&id) {
+            let echo = if let Some(entry) = next.entries.get_mut(&id) {
                 if now_ms < entry.sent_ms {
                     return Err(Error::Shape);
                 }
@@ -120,9 +120,11 @@ impl Reports {
                 }
                 entry.stamp = stamp;
                 if now_ms - entry.sent_ms < ECHO_INTERVAL_MS {
-                    continue;
+                    false
+                } else {
+                    entry.sent_ms = now_ms;
+                    true
                 }
-                entry.sent_ms = now_ms;
             } else {
                 next.entries.insert(
                     id,
@@ -132,16 +134,27 @@ impl Reports {
                         sent_ms: now_ms,
                     },
                 );
-            }
+                true
+            };
+            // Throttle outgoing replication, never the accepted authoritative
+            // pose or controls. Distance, crash and other owned state readers
+            // must see inputs received between two echoes as well.
             match target {
                 Target::Player => {
-                    output.extend(world.set_vehicle_physics(connection, persona, id, physics)?)
+                    let records = world.set_vehicle_physics(connection, persona, id, physics)?;
+                    if echo {
+                        output.extend(records);
+                    }
                 }
                 Target::Ai(key) => {
-                    output.extend(world.set_ai_vehicle_physics(connection, persona, key, physics)?);
+                    let records =
+                        world.set_ai_vehicle_physics(connection, persona, key, physics)?;
                     // The first accepted report proves the client drives the car;
                     // only then is its actor's control suppression cleared.
-                    output.extend(world.release_ai_control(connection, persona, key)?);
+                    if echo {
+                        output.extend(records);
+                        output.extend(world.release_ai_control(connection, persona, key)?);
+                    }
                 }
             }
         }

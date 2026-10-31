@@ -387,7 +387,7 @@ fn delegated_traffic_reports_are_isolated_retry_safe_and_retired() {
         world.ai_vehicle_physics(1, 100, 1).unwrap().controls.value3,
         0
     );
-    for (index, now) in [(0, 0), (1, 100)] {
+    for (index, now) in [(0, 0), (1, 50), (2, 100)] {
         let physics = vehicle::chassis::Motion {
             identity: (100. + index as f64 * 0.1).to_bits(),
             revision: 3000 + index * 3,
@@ -430,8 +430,10 @@ fn delegated_traffic_reports_are_isolated_retry_safe_and_retired() {
         let first = reports
             .receive_ai(&mut world, 1, 100, &movement, &cars, now)
             .unwrap();
-        assert_eq!(first.len(), if index == 0 { 2 } else { 1 });
-        assert_eq!(first[0].id, ids.vehicle);
+        assert_eq!(first.len(), [2, 0, 1][index as usize]);
+        if let Some(record) = first.first() {
+            assert_eq!(record.id, ids.vehicle);
+        }
         if index == 0 {
             assert_eq!(first[1].id, ids.actor);
             assert!(matches!(

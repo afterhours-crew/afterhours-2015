@@ -1265,6 +1265,81 @@ fn client_physics_handoff_is_owned_ordered_bounded_and_preserves_other_component
 }
 
 #[test]
+fn accepted_player_reports_retain_motion_and_crash_flags_between_echoes() {
+    use nfs_world::{
+        frame::{Movement, MovementRecord},
+        replication::vehicle::movement::Sample,
+        vehicle_reports::Reports,
+    };
+    let (mut population, mut players, content, layout, items, p) = fixture();
+    let layout = world_layout(&layout);
+    population
+        .spawn(
+            &mut players,
+            owner(p),
+            inventory(items.clone()),
+            &content,
+            &layout,
+            [0.; 3],
+        )
+        .unwrap();
+    let car = population
+        .spawn_world(&mut players, owner(p), &inventory(items), &content, &layout)
+        .unwrap()
+        .records[0]
+        .id;
+    let cars = [car].into_iter().collect();
+    let mut reports = Reports::default();
+    let mut latest = None;
+    for (now, revision, position, crashed, echoed) in [
+        (5000, 1, [0., 0., 0.], false, true),
+        (5050, 2, [3., 0., 4.], true, false),
+        (5051, 1, [999., 0., 0.], false, false), // stale report cannot undo the crash
+        (5099, 3, [6., 0., 8.], false, false),
+        (5100, 4, [9., 0., 12.], false, true),
+    ] {
+        let mut controls = vehicle::chassis::Controls::new(0).unwrap();
+        controls.flags[0] = crashed;
+        let physics = vehicle::chassis::Motion {
+            identity: (now as f64 / 1000.).to_bits(),
+            revision,
+            position,
+            quaternion: [0., 0., 0., 1.],
+            velocity: [5., 0., 0.],
+            angular_velocity: [0.; 3],
+        }
+        .encode([0.; 3], &controls)
+        .unwrap();
+        let (header, body) = Sample {
+            physics: physics.clone(),
+            flag: true,
+        }
+        .encode()
+        .unwrap();
+        let movement = Movement {
+            header: Some(header.span()),
+            records: vec![MovementRecord {
+                id: car,
+                component: 0,
+                data: body.span(),
+            }],
+        };
+        let out = reports
+            .receive(&mut players, 3, 0x100000002, &movement, &cars, now)
+            .unwrap();
+        assert_eq!(out.len(), usize::from(echoed), "echo at {now}");
+        if now != 5051 {
+            latest = Some(physics);
+        }
+        assert_eq!(
+            Some(players.vehicle_physics(3, 0x100000002, car).unwrap()),
+            latest,
+            "accepted motion at {now}"
+        );
+    }
+}
+
+#[test]
 fn manager_and_participant_bind_the_owned_car_and_clear_repeatedly() {
     use nfs_world::replication::{Update, player_manager::Entry};
     let (mut population, mut players, content, layout, items, p) = fixture();
