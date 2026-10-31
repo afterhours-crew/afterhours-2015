@@ -239,3 +239,72 @@ fn selection_is_per_participant_repeat_safe_and_cleared_after_departure() {
     assert_eq!(state.position(20), None);
     assert_eq!(state.position(21), None);
 }
+
+#[test]
+fn selected_destination_survives_loading_and_arrival_then_clears_in_free_roam() {
+    use nfs_world::replication::sublevel;
+    let (mut listener, participant, defs) = fixture();
+    let input = selection(&listener, &defs, participant, 0);
+    assert!(send(&mut listener, &[input], 1));
+    let mut kinds = vec![sublevel::Kind::Rpc; 10];
+    kinds[0] = sublevel::Kind::Noop;
+    let scenes =
+        sublevel::Content::new(vec![(910, sublevel::Profile::new(false, &kinds).unwrap())])
+            .unwrap();
+    let creation = sublevel::passive::creation(
+        3000,
+        910,
+        nfs_protocol::world::rpc::Serial::new(1).unwrap(),
+        &scenes,
+    )
+    .unwrap();
+    listener
+        .players
+        .create_scenes(&[3000], vec![creation], &scenes)
+        .unwrap();
+    listener
+        .participants
+        .bind_exit(&listener.players.objects().snapshot(), 909, 910)
+        .unwrap();
+    let exit = listener.participants.exit_bindings().unwrap();
+    for (endpoint, method, stage) in [
+        (exit.exit_request, 0, Stage::ExitingGarage),
+        (exit.state_77, 3, Stage::EnteringWorld),
+        (exit.ready_request, 0, Stage::Arriving),
+    ] {
+        let input = request(
+            endpoint.scene,
+            endpoint.selector,
+            method,
+            &[participant],
+            &[false; 7],
+        );
+        assert!(matches!(
+            listener
+                .participants
+                .receive(input.span(), |id| id == participant)
+                .unwrap(),
+            Outcome::Advanced(_)
+        ));
+        assert_eq!(listener.participants.stage(participant), Some(stage));
+        listener
+            .selected_destinations
+            .retain(&listener.participants);
+        assert_eq!(
+            listener.selected_destinations.position(participant),
+            Some(point(123.))
+        );
+    }
+    assert!(matches!(
+        listener.participants.arrived(participant),
+        Outcome::Advanced(_)
+    ));
+    assert_eq!(
+        listener.participants.stage(participant),
+        Some(Stage::FreeRoam)
+    );
+    listener
+        .selected_destinations
+        .retain(&listener.participants);
+    assert_eq!(listener.selected_destinations.position(participant), None);
+}

@@ -3,6 +3,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 use super::*;
+mod immediate;
 use crate::{
     logic::EntityRef,
     replication::{

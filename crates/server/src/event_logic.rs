@@ -1345,17 +1345,7 @@ pub(crate) fn logic_creation_fields(
     Ok(creation)
 }
 
-/// Live sequences that name the manager endpoint.
-pub fn live_sequences(world: &World, manager: (u16, u16)) -> u32 {
-    world
-        .iter()
-        .filter(|(_, object)| {
-            matches!(&object.initial, RecordInitial::Entity { fields, .. }
-                if matches!(fields.first(), Some(Initial::SequenceRoot { manager: m, manager_selector: s, .. } | Initial::VehicleSequenceRoot { manager: m, manager_selector: s, .. })
-                    if (*m, *s) == manager))
-        })
-        .count() as u32
-}
+pub use nfs_world::sequences::authored::live_sequences;
 
 /// A call on a live object's serializer with the serial it was created with.
 pub fn call(

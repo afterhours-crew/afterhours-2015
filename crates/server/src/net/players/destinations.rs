@@ -24,7 +24,12 @@ impl State {
         self.selected.retain(|&id, _| {
             matches!(
                 participants.stage(id),
-                Some(Stage::Customization | Stage::ExitingGarage)
+                Some(
+                    Stage::Customization
+                        | Stage::ExitingGarage
+                        | Stage::EnteringWorld
+                        | Stage::Arriving
+                )
             )
         });
     }

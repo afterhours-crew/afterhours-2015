@@ -35,6 +35,9 @@ pub const MAX_INSTANCES: usize = 128;
 /// Client acknowledgements (method 0): started, then done before completing.
 const ACKNOWLEDGED: [u16; 2] = [2, 3];
 
+mod immediate;
+pub use immediate::Immediate;
+
 pub fn profile() -> entity::Profile {
     Layout::GarageExit.profile()
 }
@@ -42,6 +45,7 @@ pub fn profile() -> entity::Profile {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Phase {
     Running { fallback_at: u64 },
+    Immediate { deadline: u64 },
     Stopping,
     Complete,
 }
@@ -53,6 +57,7 @@ struct Instance {
     phase: Phase,
     goal: Option<u16>,
     cleaned: bool,
+    immediate: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -63,6 +68,7 @@ pub struct Arrivals {
     entries: BTreeMap<u16, Instance>,
     world_ms: u64,
     duration_ms: u64,
+    immediate: Option<Immediate>,
 }
 
 impl Arrivals {
@@ -87,6 +93,7 @@ impl Arrivals {
             entries: BTreeMap::new(),
             world_ms: 0,
             duration_ms,
+            immediate: None,
         })
     }
     /// Only a completed, cleaned lifetime can be reused. Old ghost IDs stay stale.
@@ -116,6 +123,13 @@ impl Arrivals {
         self.spline = Some(definition);
         Ok(self)
     }
+    pub fn with_immediate(mut self, definition: Immediate) -> Result<Self, Error> {
+        if !self.entries.is_empty() || self.definition.layout != Layout::GarageExit {
+            return Err(Error::Shape);
+        }
+        self.immediate = Some(definition);
+        Ok(self)
+    }
     /// Start the sequence and its owned path atomically. The path assignment
     /// precedes the sequence on the wire so the cinematic sees its vehicle goal.
     pub fn start_rollout(
@@ -123,13 +137,25 @@ impl Arrivals {
         players: &mut Players,
         owner: Owner,
     ) -> Result<Vec<Record>, Error> {
+        self.start_departure(players, owner, false)
+    }
+    /// Select the arrival presentation without borrowing an event's lifecycle.
+    /// A selected destination never receives the garage's spline goal.
+    pub fn start_departure(
+        &mut self,
+        players: &mut Players,
+        owner: Owner,
+        selected: bool,
+    ) -> Result<Vec<Record>, Error> {
         let mut next_players = players.clone();
         let mut next = self.clone();
-        let Some(sequence) = next.start(&mut next_players, owner)? else {
+        let Some(sequence) = next.start_kind(&mut next_players, owner, selected)? else {
             return Ok(Vec::new());
         };
         let mut records = Vec::new();
-        if let Some(definition) = &self.spline {
+        if let Some(definition) = &self.spline
+            && !selected
+        {
             let (goal, actor) = next_players.start_spline(
                 owner.connection,
                 owner.persona,
@@ -205,17 +231,26 @@ impl Arrivals {
             entries: BTreeMap::new(),
             world_ms: 0,
             duration_ms: FALLBACK_MS,
+            immediate: None,
         })
     }
 
     /// Create the participant's arrive sequence. Its number follows the
     /// garage waiting sequence (0); E101 numbered it 1.
     pub fn start(&mut self, players: &mut Players, owner: Owner) -> Result<Option<Record>, Error> {
+        self.start_kind(players, owner, false)
+    }
+    fn start_kind(
+        &mut self,
+        players: &mut Players,
+        owner: Owner,
+        selected: bool,
+    ) -> Result<Option<Record>, Error> {
         if !players.owns_participant(owner.connection, owner.persona, owner.participant) {
             return Err(Error::UnknownObject);
         }
         if let Some(old) = self.entries.get(&owner.participant) {
-            return if old.owner == owner {
+            return if old.owner == owner && old.immediate == selected {
                 Ok(None)
             } else {
                 Err(Error::DuplicateObject)
@@ -228,20 +263,36 @@ impl Arrivals {
             .world_ms
             .checked_add(self.duration_ms)
             .ok_or(Error::Bound)?;
-        let creation = self
-            .definition
-            .creation(players.objects(), owner.participant, 1)?;
-        let record = players
-            .spawn_entities(vec![creation], &self.content)?
-            .remove(0);
+        let (record, phase) = if selected {
+            let record = self
+                .immediate
+                .as_ref()
+                .ok_or(Error::Unsupported)?
+                .start(players, owner)?;
+            (
+                record,
+                Phase::Immediate {
+                    deadline: fallback_at,
+                },
+            )
+        } else {
+            let creation = self
+                .definition
+                .creation(players.objects(), owner.participant, 1)?;
+            let record = players
+                .spawn_entities(vec![creation], &self.content)?
+                .remove(0);
+            (record, Phase::Running { fallback_at })
+        };
         self.entries.insert(
             owner.participant,
             Instance {
                 owner,
                 ghost: record.id,
-                phase: Phase::Running { fallback_at },
+                phase,
                 goal: None,
                 cleaned: false,
+                immediate: selected,
             },
         );
         Ok(Some(record))
@@ -261,6 +312,7 @@ impl Arrivals {
             if self.definition.layout == Layout::GarageExit
                 && *event == ARRIVED && target.entity == 1
                 && self.entries.values().any(|i| i.ghost == target.ghost
+                    && !i.immediate
                     && i.owner.connection == connection && i.owner.persona == persona
                     && players.local_slot(connection, persona, i.owner.participant) == Some(*player)))
     }
@@ -298,6 +350,14 @@ impl Arrivals {
         if world_ms < self.world_ms {
             return Err(Error::Shape);
         }
+        if self
+            .entries
+            .values()
+            .any(|i| matches!(i.phase,Phase::Immediate {deadline} if world_ms>=deadline))
+        {
+            // Never synthesize a rendered arrival or release Alive on timeout.
+            return Err(Error::Unsupported);
+        }
         self.world_ms = world_ms;
         let mut stops = Vec::new();
         for instance in self.entries.values_mut() {
@@ -316,7 +376,10 @@ impl Arrivals {
     pub fn acknowledges(&self, ghost: u16, selector: u16, method: u32) -> bool {
         method == 0
             && ACKNOWLEDGED.contains(&selector)
-            && self.entries.values().any(|i| i.ghost == ghost)
+            && self
+                .entries
+                .values()
+                .any(|i| i.ghost == ghost && !i.immediate)
     }
 
     pub fn has_completion(&self, ghost: u16, selector: u16) -> bool {
@@ -346,7 +409,7 @@ impl Arrivals {
         }
         match instance.phase {
             Phase::Running { .. } => Err(Error::Shape),
-            Phase::Stopping => {
+            Phase::Stopping | Phase::Immediate { .. } => {
                 instance.phase = Phase::Complete;
                 Ok(Some(instance.ghost))
             }

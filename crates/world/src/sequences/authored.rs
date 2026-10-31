@@ -13,6 +13,15 @@ use crate::replication::{
 };
 use nfs_protocol::world::rpc::Serial;
 
+/// Live sequence instances registered with one manager endpoint.
+pub fn live_sequences(world: &crate::replication::state::World, manager: (u16, u16)) -> u32 {
+    world.iter().filter(|(_,object)| {
+        matches!(&object.initial, crate::replication::Initial::Entity { fields, .. }
+            if matches!(fields.first(), Some(Initial::SequenceRoot {manager:m,manager_selector:s,..}
+                | Initial::VehicleSequenceRoot {manager:m,manager_selector:s,..}) if (*m,*s)==manager))
+    }).count() as u32
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Blueprint {
     asset: Asset,

@@ -493,6 +493,15 @@ membership then complete the handoff. The garage/free-roam/return loop has
 passed live checks; the [gameplay roadmap](https://github.com/afterhours-crew/afterhours-2015/issues/62)
 records the separately accepted gameplay systems and remaining work.
 
+An explicit event-destination selection before leaving the garage is retained
+for that participant through world loading. Its position and orientation come
+from the installed location definition. This departure uses the shared authored
+fade-in and waits for the owning client's completion before free roam; it does
+not assign the garage rollout spline. Missing or conflicting arrival content,
+stale/foreign completion and an expired arrival remain errors. Normal departures
+keep their garage rollout. Portable tests and private offline comparisons cover
+the selected route; its game acceptance remains part of the story batch.
+
 `--redirector-port 0` chooses an ephemeral port (the default).
 `--idle-seconds` accepts 1–3600. `--qos-seconds` bounds each QoS TLS request
 (default 10 seconds, accepts 1–86400); it no longer expires the listeners after

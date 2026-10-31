@@ -1332,6 +1332,27 @@ pub async fn run_world<I: WorldIo>(
             return WorldEnd::Stopped;
         }
     };
+    let arrivals = match (|| -> Result<_, nfs_world::replication::Error> {
+        let immediate = events
+            .as_ref()
+            .map(|c| c.destination_arrival())
+            .transpose()?
+            .flatten();
+        match (arrivals, immediate) {
+            (Some(owner), Some(definition)) => Ok(Some(owner.with_immediate(definition)?)),
+            (owner, _) => Ok(owner),
+        }
+    })() {
+        Ok(owner) => owner,
+        Err(error) => {
+            warn!(
+                connection,
+                ?error,
+                "selected destination arrival configuration rejected"
+            );
+            return WorldEnd::Stopped;
+        }
+    };
     let returns = match sequences.as_ref().and_then(|c| c.returns()).transpose() {
         Ok(returns) => returns,
         Err(error) => {

@@ -3122,7 +3122,7 @@ impl Listener for PlayerListener {
                                     match Self::start_arrivals(
                                         &mut players,
                                         &mut participants,
-                                        arrivals.as_mut(),
+                                        (arrivals.as_mut(), &selected_destinations),
                                         self.logic.as_deref(),
                                         &mut logic_ghosts,
                                         self.persona,
