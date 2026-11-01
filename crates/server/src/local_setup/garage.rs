@@ -288,6 +288,14 @@ fn phase_fades() -> Vec<PhaseFades> {
         ),
         ("in_world_arrival", vec![("BlackScreen", false)]),
         ("returning", vec![("ViewWorld", false)]),
+        (
+            "returned",
+            vec![
+                ("BlackScreen", true),
+                ("BlackScreen", false),
+                ("BlackScreen", true),
+            ],
+        ),
         ("crashed", vec![("ViewWorld", false)]),
     ]
 }
@@ -563,10 +571,7 @@ pub(super) fn build(index: &mut AssetIndex, thresholds: &Json) -> Result<Json> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn crash_policy_hides_the_owning_world_before_recovery_reveals_it() {
-        use crate::garage_logic::{GarageLogic, Which};
-        use nfs_world::logic::{EntityRef, Message};
+    fn presentation_policy() -> Json {
         let mut doc = json!({
             "format":"nfs-garage-logic", "version":1, "build_sha256":crate::content::BUILD,
             "content":{"catalogs":[{"bundle":4,"entries":[[10,1]]}],
@@ -577,10 +582,10 @@ mod tests {
             "entry":batch(),
             "free_roam":{"scene_updates":[],"entities":[],
                 "events":[{"target":{"capture_id":1},"entity":1,"event":10}]},
-            "crashed":batch(), "recovered":batch()
+            "crashed":batch(), "recovered":batch(), "returned":batch()
         });
         for (phase, events) in phase_fades() {
-            if phase != "crashed" {
+            if !matches!(phase, "crashed" | "returned" | "entry") {
                 continue;
             }
             for (key, active) in events {
@@ -601,7 +606,14 @@ mod tests {
                 );
             }
         }
-        let logic = GarageLogic::from_json(&doc).unwrap();
+        doc
+    }
+
+    #[test]
+    fn crash_policy_hides_the_owning_world_before_recovery_reveals_it() {
+        use crate::garage_logic::{GarageLogic, Which};
+        use nfs_world::logic::{EntityRef, Message};
+        let logic = GarageLogic::from_json(&presentation_policy()).unwrap();
         let (mut players, participant) = crate::garage_logic::tests::world();
         let mut ghosts = BTreeMap::new();
         logic
@@ -636,6 +648,74 @@ mod tests {
                 }
             );
             assert!(output.records.is_empty() && output.deleted.is_empty());
+        }
+    }
+
+    #[test]
+    fn ordinary_garage_loading_stays_black_until_customization_and_intro_is_not_doubled() {
+        use crate::garage_logic::{GarageLogic, Part, Which};
+        use nfs_world::logic::{EntityRef, Message};
+        let logic = GarageLogic::from_json(&presentation_policy()).unwrap();
+        let (mut players, participant) = crate::garage_logic::tests::world();
+        let mut ghosts = BTreeMap::new();
+        logic
+            .produce(Which::Spawn, &mut players, participant, &mut ghosts)
+            .unwrap();
+        let target = EntityRef {
+            ghost: ghosts[&1],
+            entity: 1,
+        };
+        for _ in 0..3 {
+            // Intro transitions own their presentation and consume only the
+            // return batch's deletions. The ordinary path consumes all parts.
+            let intro = logic
+                .produce_present(
+                    Which::Returned,
+                    &mut players,
+                    participant,
+                    &mut ghosts,
+                    Part::Deletions,
+                )
+                .unwrap();
+            assert!(intro.events.is_empty());
+            for (phase, expected, final_black) in [
+                (Which::Returned, vec![12, 13, 12], true),
+                (Which::Entry, vec![13, 10, 11, 10], false),
+            ] {
+                let output = logic
+                    .produce(phase, &mut players, participant, &mut ghosts)
+                    .unwrap();
+                let mut observed = Vec::new();
+                let mut black = None;
+                let mut visible = None;
+                for fire in output.events {
+                    let Message::Fire {
+                        events,
+                        player,
+                        target: actual,
+                    } = Message::decode(fire.index(), fire.encode().unwrap().span()).unwrap()
+                    else {
+                        panic!("expected presentation event");
+                    };
+                    assert_eq!(actual, target);
+                    assert_eq!(player, None);
+                    for event in &events {
+                        match event {
+                            10 => visible = Some(true),
+                            11 => visible = Some(false),
+                            12 => black = Some(true),
+                            13 => black = Some(false),
+                            _ => panic!("unexpected presentation event"),
+                        }
+                    }
+                    observed.extend(events);
+                }
+                assert_eq!(observed, expected);
+                assert_eq!(black, Some(final_black));
+                if matches!(phase, Which::Entry) {
+                    assert_eq!(visible, Some(true));
+                }
+            }
         }
     }
 
