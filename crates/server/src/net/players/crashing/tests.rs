@@ -580,6 +580,119 @@ fn car(listener: &mut PlayerListener, owner: Owner) -> u16 {
 }
 
 #[test]
+fn accepted_movement_notifies_scoring_and_nitrous_between_echoes() {
+    crate::net::players::test_wire::with_native_padding(|| {
+        use crate::net::players::scoring::Nitrous;
+        use nfs_world::nitrous_fuel::{Boosts, Buildup, Configuration, Curve, Fuel};
+
+        let (mut listener, owner) = setup();
+        let id = car(&mut listener, owner);
+        listener.world_cars.insert(id, (owner.participant, true));
+        let config = Configuration::new(
+            8.0,
+            Curve::new(vec![[0.0, 1.0], [2.0, 1.0]]).unwrap(),
+            Curve::new(vec![[0.0, 0.0], [2.0, 0.0]]).unwrap(),
+            Boosts::default(),
+        )
+        .unwrap();
+        listener.scoring_state.nitrous.insert(
+            id,
+            Nitrous {
+                fuel: Fuel::full(std::sync::Arc::new(config), 5).unwrap(),
+                buildup: Buildup::default(),
+                transitions: VecDeque::new(),
+                last_ms: 0.0,
+                clock: None,
+            },
+        );
+        let initial = listener
+            .players
+            .vehicle_physics(owner.connection, owner.persona, id)
+            .unwrap();
+        let wire = |revision, seconds: f64| {
+            let mut sample = Sample {
+                physics: initial.clone(),
+                flag: true,
+            };
+            let clock = seconds.to_bits();
+            sample.physics.identity_words = [(clock >> 32) as u32, clock as u32, revision];
+            let (header, body) = sample.encode().unwrap();
+            let mut frame = BitWriter::new();
+            frame
+                .put(1 << frame::MOVEMENT, 6)
+                .put_span(header.span())
+                .put(1, 6)
+                .put(id.into(), 16)
+                .put(0, 4)
+                .put(body.len() as u64, 16)
+                .put_span(body.span())
+                .align();
+            frame
+        };
+        // Fresh revisions with unchanged pose still carry a new client clock.
+        // Stale revisions must neither notify scoring nor replace that clock.
+        let mut expected_clock = None;
+        for (revision, now, seconds, accepted, echo) in [
+            (1, 100, 5.0, true, true),
+            (2, 120, 5.02, true, false),
+            (2, 140, 99.0, false, false),
+            (1, 160, 98.0, false, false),
+            (3, 180, 5.08, true, false),
+            (4, 200, 5.1, true, true),
+        ] {
+            listener.world_ms = now;
+            let packet = wire(revision, seconds);
+            assert!(listener.frame(Queued {
+                advertised: None,
+                frame: now as u16,
+                data: packet.span(),
+            }));
+            assert_eq!(
+                std::mem::take(&mut listener.scoring_state.reported),
+                if accepted {
+                    BTreeSet::from([id])
+                } else {
+                    BTreeSet::new()
+                },
+                "accepted scoring input at {now}ms"
+            );
+            if accepted {
+                expected_clock = Some((seconds, now));
+            }
+            assert_eq!(listener.scoring_state.nitrous[&id].clock, expected_clock);
+            assert_eq!(listener.pending.len(), usize::from(echo));
+            listener.pending.clear();
+        }
+        // A rejected echo cannot commit an input notification or clock. The
+        // same revision must remain admissible once output capacity returns.
+        listener.world_ms = 300;
+        let packet = wire(5, 5.2);
+        let before = listener.players.objects().snapshot();
+        listener
+            .pending
+            .resize(MAX_PENDING, crate::net::players::returning::empty_section());
+        assert!(!listener.frame(Queued {
+            advertised: None,
+            frame: 300,
+            data: packet.span(),
+        }));
+        assert_eq!(listener.players.objects().snapshot(), before);
+        assert!(listener.scoring_state.reported.is_empty());
+        assert_eq!(listener.scoring_state.nitrous[&id].clock, expected_clock);
+        listener.pending.clear();
+        assert!(listener.frame(Queued {
+            advertised: None,
+            frame: 300,
+            data: packet.span(),
+        }));
+        assert_eq!(listener.scoring_state.reported, BTreeSet::from([id]));
+        assert_eq!(listener.scoring_state.nitrous[&id].clock, Some((5.2, 300)));
+        assert_eq!(listener.pending.len(), 1);
+        assert_eq!(listener.refused, 1);
+    });
+}
+
+#[test]
 fn movement_pulse_between_echoes_survives_and_only_owned_ready_cars_trigger() {
     crate::net::players::test_wire::with_native_padding(|| {
         let (mut listener, owner) = setup();

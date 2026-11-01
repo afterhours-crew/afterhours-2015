@@ -1324,10 +1324,25 @@ fn accepted_player_reports_retain_motion_and_crash_flags_between_echoes() {
                 data: body.span(),
             }],
         };
+        for (connection, persona) in [(4, 0x100000002), (3, 1)] {
+            let before = players.objects().snapshot();
+            assert_eq!(
+                reports
+                    .receive_with_accepted(&mut players, connection, persona, &movement, &cars, now)
+                    .unwrap_err(),
+                Error::UnknownObject
+            );
+            assert_eq!(players.objects().snapshot(), before);
+        }
         let out = reports
-            .receive(&mut players, 3, 0x100000002, &movement, &cars, now)
+            .receive_with_accepted(&mut players, 3, 0x100000002, &movement, &cars, now)
             .unwrap();
-        assert_eq!(out.len(), usize::from(echoed), "echo at {now}");
+        assert_eq!(out.echoes.len(), usize::from(echoed), "echo at {now}");
+        assert_eq!(
+            out.accepted,
+            if now == 5051 { vec![] } else { vec![car] },
+            "accepted input at {now}"
+        );
         if now != 5051 {
             latest = Some(physics);
         }

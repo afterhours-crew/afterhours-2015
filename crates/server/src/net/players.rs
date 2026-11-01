@@ -1473,7 +1473,7 @@ impl Listener for PlayerListener {
         let mut crashes = self.crashes.clone();
         if let Some(movement) = &parsed.movement {
             let cars = world_cars.keys().copied().collect();
-            match vehicle_reports.receive(
+            match vehicle_reports.receive_with_accepted(
                 &mut players,
                 HOST_SELECTOR as u8,
                 self.persona,
@@ -1481,15 +1481,12 @@ impl Listener for PlayerListener {
                 &cars,
                 self.world_ms,
             ) {
-                Ok(reports) if !reports.is_empty() => {
-                    scoring_reported.extend(reports.iter().map(|r| r.id));
-                    for report in &reports {
-                        if let Some(fuel) = nitrous.get_mut(&report.id)
-                            && let Ok(physics) = players.vehicle_physics(
-                                HOST_SELECTOR as u8,
-                                self.persona,
-                                report.id,
-                            )
+                Ok(received) => {
+                    scoring_reported.extend(received.accepted.iter().copied());
+                    for id in received.accepted {
+                        if let Some(fuel) = nitrous.get_mut(&id)
+                            && let Ok(physics) =
+                                players.vehicle_physics(HOST_SELECTOR as u8, self.persona, id)
                         {
                             let [high, low, _] = physics.identity_words;
                             fuel.observe_clock(
@@ -1498,15 +1495,16 @@ impl Listener for PlayerListener {
                             );
                         }
                     }
-                    movement_section = Some(Section {
-                        float_bits: None,
-                        flag: false,
-                        deleted: Vec::new(),
-                        setup: Some(Setup::RawEscape([0; 3])),
-                        records: reports,
-                    })
+                    if !received.echoes.is_empty() {
+                        movement_section = Some(Section {
+                            float_bits: None,
+                            flag: false,
+                            deleted: Vec::new(),
+                            setup: Some(Setup::RawEscape([0; 3])),
+                            records: received.echoes,
+                        });
+                    }
                 }
-                Ok(_) => {}
                 Err(error) => {
                     return self.refuse(error);
                 }

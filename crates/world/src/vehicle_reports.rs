@@ -19,6 +19,14 @@ struct Entry {
 pub struct Reports {
     entries: BTreeMap<u16, Entry>,
 }
+/// Fresh authoritative inputs and their independently throttled replication.
+#[derive(Clone, Debug, Default)]
+pub struct Received {
+    /// Owned vehicles whose newer revisions were successfully retained.
+    pub accepted: Vec<u16>,
+    /// Records due for replication; these may be empty despite accepted input.
+    pub echoes: Vec<Record>,
+}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Target {
     Player,
@@ -38,6 +46,21 @@ impl Reports {
         cars: &BTreeSet<u16>,
         now_ms: u64,
     ) -> Result<Vec<Record>, Error> {
+        self.receive_with_accepted(players, connection, persona, movement, cars, now_ms)
+            .map(|received| received.echoes)
+    }
+
+    /// Return every fresh accepted vehicle separately from outgoing echoes so
+    /// owned input consumers are not limited by the replication interval.
+    pub fn receive_with_accepted(
+        &mut self,
+        players: &mut Players,
+        connection: u8,
+        persona: u64,
+        movement: &frame::Movement<'_>,
+        cars: &BTreeSet<u16>,
+        now_ms: u64,
+    ) -> Result<Received, Error> {
         let targets = cars.iter().map(|&id| (id, Target::Player)).collect();
         self.receive_targets(players, connection, persona, movement, &targets, now_ms)
     }
@@ -70,6 +93,7 @@ impl Reports {
             .map(|(&id, &key)| (id, Target::Ai(key)))
             .collect();
         self.receive_targets(players, connection, persona, movement, &targets, now_ms)
+            .map(|received| received.echoes)
     }
 
     fn receive_targets(
@@ -80,7 +104,7 @@ impl Reports {
         movement: &frame::Movement<'_>,
         cars: &BTreeMap<u16, Target>,
         now_ms: u64,
-    ) -> Result<Vec<Record>, Error> {
+    ) -> Result<Received, Error> {
         let header = movement.header.ok_or(Error::Shape)?;
         if cars.len() > frame::MAX_MOVEMENT_RECORDS {
             return Err(Error::Bound);
@@ -107,7 +131,7 @@ impl Reports {
         let mut world = players.clone();
         next.entries
             .retain(|id, entry| cars.get(id) == Some(&entry.target));
-        let mut output = Vec::new();
+        let mut output = Received::default();
         for (id, target, sample) in reports {
             let stamp = sample.physics.identity_words;
             let physics = sample.physics;
@@ -143,7 +167,7 @@ impl Reports {
                 Target::Player => {
                     let records = world.set_vehicle_physics(connection, persona, id, physics)?;
                     if echo {
-                        output.extend(records);
+                        output.echoes.extend(records);
                     }
                 }
                 Target::Ai(key) => {
@@ -152,11 +176,14 @@ impl Reports {
                     // The first accepted report proves the client drives the car;
                     // only then is its actor's control suppression cleared.
                     if echo {
-                        output.extend(records);
-                        output.extend(world.release_ai_control(connection, persona, key)?);
+                        output.echoes.extend(records);
+                        output
+                            .echoes
+                            .extend(world.release_ai_control(connection, persona, key)?);
                     }
                 }
             }
+            output.accepted.push(id);
         }
         *self = next;
         *players = world;
