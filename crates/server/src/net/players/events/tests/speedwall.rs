@@ -4,7 +4,10 @@
 use super::*;
 
 fn finished() -> Harness {
-    let mut h = started();
+    finish(started())
+}
+
+pub(super) fn finish(mut h: Harness) -> Harness {
     h.run(6000, vec![h.checkpoint(6, 30.)]);
     h.run(7000, vec![h.checkpoint(7, 60.)]);
     let batch = h

@@ -12,6 +12,7 @@ pub mod integers;
 pub mod membership;
 pub mod requirements;
 pub mod teleport;
+pub mod volumes;
 
 pub const MAX_EVENTS: usize = 512;
 

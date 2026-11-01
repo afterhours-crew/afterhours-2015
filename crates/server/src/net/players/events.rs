@@ -220,6 +220,28 @@ pub(in crate::net) struct State {
 }
 
 impl State {
+    /// Mode-category properties end with the host release, not deletion after
+    /// the client's leave acknowledgement. Unknown content is not an empty set.
+    pub(super) fn matches_held_mode(
+        &self,
+        participant: u16,
+        catalog: Option<&Catalog>,
+        categories: &BTreeSet<u32>,
+        all: bool,
+    ) -> Option<bool> {
+        let Some(race) = self.entries.get(&participant).and_then(|e| e.race.as_ref()) else {
+            return Some(false);
+        };
+        if !race.flags {
+            return Some(false);
+        }
+        let held = &catalog?.get(race.event_id)?.event().categories;
+        Some(if all {
+            categories.is_subset(held)
+        } else {
+            !categories.is_disjoint(held)
+        })
+    }
     /// The native crash transition excludes participants with an active
     /// sequence. Keep event presentation and relocation protected through their
     /// handoffs too, until this participant is driving again.
@@ -830,6 +852,28 @@ impl PlayerListener {
         let scene_membership = self.stage_scene_membership(&mut players, &mut participants)?;
         out.records.extend(scene_membership.records);
         out.deleted.extend(scene_membership.deleted);
+        let mut world_volumes = self.world_volumes.clone();
+        world_volumes.forget(
+            |p| players.objects().get(p).is_none(),
+            |s| {
+                players
+                    .objects()
+                    .scene_endpoint(s.scene_key, s.serializer)
+                    .is_some()
+            },
+        );
+        self.project_world_spots(
+            &mut world_volumes,
+            &players,
+            scene_membership.session.as_ref(),
+            &state,
+        )?;
+        if let Some(content) = self.prologue.as_deref() {
+            // These calls follow the mode transition in this transaction and
+            // precede later mode joins. Capacity failure below rolls back both.
+            out.rpcs
+                .extend(world_volumes.reserve_normal(&content.volumes, &players)?);
+        }
         let mut sections = if out.registrations.is_some() {
             split_scenes(
                 out.records,
@@ -890,6 +934,9 @@ impl PlayerListener {
         self.participants = participants;
         self.scene_membership = scene_membership.session;
         self.event_state = state;
+        self.world_volumes = world_volumes;
+        self.activity_inside
+            .retain(|(p, s), _| self.world_volumes.member(*p, *s));
         if self.event_state.failed {
             self.events = None;
         }

@@ -54,6 +54,9 @@ impl TryFrom<Source> for Program {
                                 && sites.iter().all(|s| s.scene_key != 0)
                                 && sites.iter().collect::<BTreeSet<_>>().len() == sites.len()
                         }
+                        Fact::GameMode { categories, .. } => {
+                            !categories.is_empty() && categories.len() <= 128
+                        }
                     };
                     if !valid {
                         return Err(bad("prepared membership fact identity"));

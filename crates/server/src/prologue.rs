@@ -344,23 +344,9 @@ impl Content {
                 parent,
                 "gameplay/progression/intro/introreturntogarage",
             )?),
-            // The intro plays without them; their absence is only logged.
-            volumes: match volumes::WorldVolumes::prepare(index) {
-                Ok(found) => {
-                    tracing::info!(
-                        events = found.events.len(),
-                        activities = found.activities.len(),
-                        spots = found.spots.len(),
-                        notifications = found.notifications.len(),
-                        "world volumes prepared"
-                    );
-                    found
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "world volumes unavailable; the intro joins none");
-                    volumes::WorldVolumes::default()
-                }
-            },
+            // Missing authored membership must fail preparation, not silently
+            // remove the subscriptions required by the next gameplay transition.
+            volumes: volumes::WorldVolumes::prepare(index)?,
             items: Arc::new(built.collection),
             previews: Some(Arc::new(PreviewCars {
                 garage,

@@ -15,6 +15,7 @@ mod recovery;
 mod reporting;
 mod restart;
 mod speedwall;
+mod volumes;
 
 struct Harness {
     listener: PlayerListener,

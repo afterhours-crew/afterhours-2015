@@ -436,6 +436,28 @@ impl ModeNotification {
 /// `BoolPropertyClientNotificationEntityData` link to its participant property.
 const NOTIFICATION_PROPERTY: u32 = 2_526_680_631;
 
+/// Shared reader for notifications and participant-set predicates. The property
+/// names categories, not a hardcoded list of race types or a live object ID.
+pub(crate) fn mode_property<S: Source>(
+    graph: &mut Graph<S>,
+    site: &Site,
+) -> Result<(BTreeSet<u32>, bool), Error> {
+    let object = graph.object(site)?;
+    if object.class != "ParticipantInGameModeBoolPropertyEntityData" {
+        return Err(bad("participant-in-game-mode property class"));
+    }
+    let all = match object.fields.get("Operation").and_then(Value::as_enum_name) {
+        Some("GameModeCategoryOperation_Any") => false,
+        Some("GameModeCategoryOperation_All") => true,
+        _ => return Err(bad("unsupported participant-in-game-mode operation")),
+    };
+    let categories = results::categories(graph, site)?;
+    if categories.is_empty() {
+        return Err(bad("participant-in-game-mode without categories"));
+    }
+    Ok((categories, all))
+}
+
 impl AssetIndex {
     /// The scene's Boolean notifications that report a participant-in-game-
     /// mode property, by scene serializer. Other notifications are not listed.
@@ -463,19 +485,7 @@ impl AssetIndex {
             if object.class != "ParticipantInGameModeBoolPropertyEntityData" {
                 continue;
             }
-            let all = match object.fields.get("Operation") {
-                Some(Value::Enum { name: Some(n), .. }) if n == "GameModeCategoryOperation_Any" => {
-                    false
-                }
-                Some(Value::Enum { name: Some(n), .. }) if n == "GameModeCategoryOperation_All" => {
-                    true
-                }
-                _ => return Err(bad("unsupported participant-in-game-mode operation")),
-            };
-            let categories = results::categories(&mut graph, &target.site)?;
-            if categories.is_empty() {
-                return Err(bad("participant-in-game-mode without categories"));
-            }
+            let (categories, all) = mode_property(&mut graph, &target.site)?;
             out.push(ModeNotification {
                 serializer: b.serializer,
                 categories,

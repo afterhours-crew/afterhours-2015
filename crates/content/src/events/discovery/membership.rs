@@ -23,6 +23,12 @@ pub enum Fact {
     Ai(Identity),
     Traffic(Identity),
     States(Vec<Endpoint>),
+    /// True while an owned mode holds this participant and matches its authored
+    /// categories. A released mode awaiting a client acknowledgement is not held.
+    GameMode {
+        categories: BTreeSet<u32>,
+        all: bool,
+    },
     Copy(Identity),
     /// Explicitly mutable membership, maintained by its event owner.
     Mutable(Identity),
@@ -175,6 +181,11 @@ impl Compiler<'_> {
                         .cloned()
                         .ok_or_else(|| bad("event set Boolean identifier missing"))?,
                 ))
+            }
+            "ParticipantSetBoolPropertyAdapterEntityData" => {
+                let property = link(g, &site, 2_526_680_631)?;
+                let (categories, all) = intro::mode_property(g, &property)?;
+                Op::Fact(Fact::GameMode { categories, all })
             }
             "ParticipantSetPlayerAdapterEntityData" => {
                 let manager = link(g, &site, name("ParticipantManager"))?;

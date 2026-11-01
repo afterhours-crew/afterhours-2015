@@ -66,6 +66,10 @@ pub struct WorldVolumes {
     pub activities: BTreeSet<Endpoint>,
     /// Collectible and spot volumes (a membership pulse on the first drive).
     pub spots: BTreeSet<Endpoint>,
+    /// Complete authored eligibility of each spot after the intro. These inputs
+    /// distinguish being alive from being held by a qualifying game mode.
+    pub spot_memberships: Vec<nfs_content::events::discovery::volumes::Binding>,
+    pub spot_player_manager: Option<nfs_content::scoring::events::Identity>,
     /// Start-area map notifications (scene switches).
     pub notifications: BTreeSet<Endpoint>,
     /// Ungated events first, then notification declaration order in the loaded
@@ -99,7 +103,41 @@ impl WorldVolumes {
                 });
             }
         }
-        Self::classify(&roster, &bindings)
+        let mut volumes = Self::classify(&roster, &bindings)?;
+        volumes.spot_memberships =
+            index.world_volume_memberships(&SPOTS.into_iter().map(str::to_owned).collect())?;
+        let mut managers = BTreeSet::new();
+        for binding in &volumes.spot_memberships {
+            for fact in binding.program.facts() {
+                use nfs_content::events::discovery::membership::Fact;
+                match fact {
+                    Fact::Player(manager) => {
+                        managers.insert(manager.clone());
+                    }
+                    Fact::States(_) | Fact::GameMode { .. } => {}
+                    _ => {
+                        return Err(nfs_content::Error::Content(
+                            "unsupported world spot membership owner".into(),
+                        ));
+                    }
+                }
+            }
+        }
+        let endpoints: BTreeSet<_> = volumes
+            .spot_memberships
+            .iter()
+            .map(|b| b.endpoint)
+            .collect();
+        if endpoints != volumes.spots
+            || endpoints.len() != volumes.spot_memberships.len()
+            || managers.len() != 1
+        {
+            return Err(nfs_content::Error::Content(
+                "incomplete world spot membership catalog".into(),
+            ));
+        }
+        volumes.spot_player_manager = managers.into_iter().next();
+        Ok(volumes)
     }
 
     pub fn classify(roster: &[Entry], bindings: &[Binding]) -> Result<Self, nfs_content::Error> {
