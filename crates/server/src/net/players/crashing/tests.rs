@@ -366,6 +366,7 @@ fn crash_start_and_completion_are_atomic_under_queue_pressure_and_repeat() {
             listener.session_backlog = MAX_PENDING;
             listener.advance_crashes(u64::from(cycle) * 5000).unwrap();
             assert_eq!(listener.players.objects().snapshot(), before);
+            assert!(listener.pending_entries.is_empty());
             assert_eq!(
                 listener.participants.stage(owner.participant),
                 Some(Stage::FreeRoam)
@@ -382,8 +383,19 @@ fn crash_start_and_completion_are_atomic_under_queue_pressure_and_repeat() {
             transport
                 .queue_replication_after(section.clone(), calls.clone())
                 .unwrap();
-            assert!(matches!(calls.as_slice(), [HostRpc::Participant(n)] if
-            n.participant == owner.participant && n.call == Call::Enter));
+            let bindings = ResetBindings::from_scene(
+                &listener.players,
+                listener.participants.exit_bindings().unwrap().state_2.scene,
+            )
+            .unwrap();
+            // Recovery re-enters Alive, so the crash must leave it first.
+            // Check both endpoints and order, including retries and repeats.
+            assert!(matches!(calls.as_slice(),
+                [HostRpc::Participant(leave), HostRpc::Participant(enter)] if
+                    leave.participant == owner.participant
+                    && leave.endpoint == bindings.alive && leave.call == Call::Leave
+                    && enter.participant == owner.participant
+                    && enter.endpoint == bindings.cinematic && enter.call == Call::Enter));
             assert_eq!(section.deleted.len(), 1);
             assert_eq!(section.records.len(), 2);
             let ghost = section
@@ -458,6 +470,12 @@ fn crash_start_and_completion_are_atomic_under_queue_pressure_and_repeat() {
             assert!(entries[0].1.is_empty());
             assert!(entries[1].0.records.is_empty());
             assert!(!entries[1].1.is_empty());
+            assert!(matches!(entries[1].1.as_slice(),
+                [HostRpc::Event(_), HostRpc::Participant(leave), HostRpc::Participant(enter)] if
+                    leave.participant == owner.participant
+                    && leave.endpoint == bindings.cinematic && leave.call == Call::Leave
+                    && enter.participant == owner.participant
+                    && enter.endpoint == bindings.alive && enter.call == Call::Enter));
             for (section, calls) in entries {
                 transport.queue_replication_after(section, calls).unwrap();
             }

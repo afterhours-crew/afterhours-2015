@@ -205,6 +205,11 @@ impl PlayerListener {
                 let bindings = ResetBindings::from_scene(&players, exit.state_2.scene)?;
                 participants.state_path(owner.participant, &[bindings.alive, bindings.cinematic]);
                 events.push(HostRpc::Participant(Notification {
+                    endpoint: bindings.alive,
+                    participant: owner.participant,
+                    call: Call::Leave,
+                }));
+                events.push(HostRpc::Participant(Notification {
                     endpoint: bindings.cinematic,
                     participant: owner.participant,
                     call: Call::Enter,
@@ -516,6 +521,11 @@ impl PlayerListener {
                 endpoint: bindings.cinematic,
                 participant: owner.participant,
                 call: Call::Leave,
+            }));
+            events.push(HostRpc::Participant(Notification {
+                endpoint: bindings.alive,
+                participant: owner.participant,
+                call: Call::Enter,
             }));
         }
         Ok(Some(Some((section, events, None))))
