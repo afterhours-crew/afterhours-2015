@@ -45,6 +45,11 @@ async workers. `MemoryRepository` and `SqliteRepository` implement the same
   SQLite from treating a local drive as a UNC share during concurrent WAL opens.
   Network/device paths and names whose meaning changes under that conversion
   are rejected. Lock waits and transaction durability settings are unchanged.
+  Long account/backup filenames use SQLite's bundled Windows long-path VFS and
+  an extended local filename, including room for journal suffixes. Readers,
+  writers and backups use the same filename form; backups, read-only inspection,
+  concurrent WAL handles and subsequent edits are regression-tested beyond 260
+  characters. Other platforms continue using their default VFS.
 - `SqliteRepository::inspect` is for local tools that show a save while the
   server runs. `open_existing_directory` creates nothing; the connection opens
   the file read-only with `query_only` and never checkpoints or deletes the

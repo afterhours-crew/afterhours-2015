@@ -25,6 +25,22 @@ while a decision is pending. Merge and release authorization remain separate.
 
 ## Establish the transition contract
 
+### Delivery pace (owner, 2026-11-01)
+
+Nearly two days for the opening two races is not an acceptable repeatable pace.
+Reuse established race, call, reward, save and comparison machinery in later
+batches. Finish a coherent candidate against the approved gameplay contract and
+batch related corrections before complete regression and code checkpoints. Reuse
+unchanged evidence only when its identity and coverage checks permit it; retain
+all required coverage and full gates for code commits.
+
+Focus investigation on concrete failures that prevent the approved gameplay or
+its delivery. Separate runtime faults, driver limitations and test-environment
+failures before changing behavior. Avoid serial broad audits, unrelated scope
+expansion and infrastructure work that does not close an acceptance requirement.
+Report remaining acceptance blockers and their next resolving action, rather
+than test counts or investigation volume. Preserve this direction in handoffs.
+
 For every objective, establish prerequisites, start trigger, participants, event
 variant, success/failure conditions, interruption/retry behaviour, presentation
 handoff, durable effects and next objectives. Multiple objectives may be active;

@@ -52,6 +52,39 @@ const MAX_LIST_BYTES: usize = MAX_NESTED * 8;
 mod maintenance;
 pub use maintenance::WriterLease;
 
+pub(crate) fn open_connection(path: &Path, flags: OpenFlags) -> rusqlite::Result<Connection> {
+    // Story backups add a receipt directory beneath the account root. SQLite's
+    // default Windows VFS can refuse their database/journal paths even when the
+    // account itself opens. The bundled long-path VFS retains normal locking.
+    #[cfg(windows)]
+    {
+        use std::{
+            os::windows::ffi::OsStrExt,
+            path::{Component, Prefix},
+        };
+        // Leave room for SQLite's journal/WAL suffixes. Long-path VFS alone
+        // raises SQLite's limit but does not opt Win32 file APIs into extended
+        // path handling. All connections use the same spelling for this file.
+        let extended;
+        let path = if path.as_os_str().encode_wide().count() >= 240
+            && matches!(path.components().next(), Some(Component::Prefix(p))
+                if matches!(p.kind(), Prefix::Disk(_)))
+        {
+            let mut name = std::ffi::OsString::from(r"\\?\");
+            name.push(path);
+            extended = PathBuf::from(name);
+            &extended
+        } else {
+            path
+        };
+        Connection::open_with_flags_and_vfs(path, flags, "win32-longpath")
+    }
+    #[cfg(not(windows))]
+    {
+        Connection::open_with_flags(path, flags)
+    }
+}
+
 #[cfg(windows)]
 fn windows_local_root(canonical: PathBuf) -> Result<PathBuf, Error> {
     use std::path::{Component, Prefix};
@@ -166,8 +199,8 @@ impl SqliteRepository {
     /// it closes. Returns the main file's size at open.
     pub(crate) fn connect_read_only(&self, account: AccountId) -> Result<(Connection, u64), Error> {
         let bytes = self.checked_file(account, false)?.ok_or(Error::Absent)?;
-        let conn = Connection::open_with_flags(
-            self.path(account),
+        let conn = open_connection(
+            &self.path(account),
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
         if !conn.set_db_config(
@@ -187,7 +220,7 @@ impl SqliteRepository {
         if create {
             flags |= OpenFlags::SQLITE_OPEN_CREATE;
         }
-        let conn = Connection::open_with_flags(path, flags)?;
+        let conn = open_connection(&path, flags)?;
         Self::limit(&conn)?;
         // EXTRA protects the initial rollback-journal import; it equals FULL
         // once the file is in WAL mode.

@@ -181,6 +181,85 @@ fn backup_includes_committed_wal_domains_livery_and_retry_history_and_reopens_al
 }
 
 #[test]
+fn long_backup_paths_preserve_accounts_and_support_reopen_and_edit() {
+    let root = Root::new();
+    let repo = populated(&root);
+    let who = account(1);
+    let before = repo.inspect(who).unwrap();
+    let original = std::fs::read(repo.path(who)).unwrap();
+    let mut directory = root.0.join("backup directory å");
+    while directory.as_os_str().len() < 300 {
+        directory.push("0123456789abcdef0123456789abcdef");
+    }
+    let backup = SqliteRepository::open_owned_directory(&directory).unwrap();
+    assert!(backup.path(who).as_os_str().len() > 260);
+    let lease = repo.writer_lease(who).unwrap();
+    let saved = repo
+        .backup_into(&lease, before.snapshot.generation, &backup)
+        .unwrap();
+    assert_eq!(saved.snapshot, before.snapshot);
+    assert_eq!(saved.documents, before.documents);
+    assert_eq!(saved.livery, before.livery);
+    assert_eq!(std::fs::read(repo.path(who)).unwrap(), original);
+    drop(lease);
+    drop(backup);
+
+    let reopened = SqliteRepository::open_existing_directory(&directory).unwrap();
+    assert_eq!(reopened.inspect(who).unwrap().snapshot, before.snapshot);
+    // Keep committed pages in WAL while the normal repository opens readers
+    // and writers. This catches a long-path fix that only works with one handle.
+    #[cfg(windows)]
+    let hold = rusqlite::Connection::open_with_flags_and_vfs(
+        reopened.path(who).canonicalize().unwrap(),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+        "win32-longpath",
+    )
+    .unwrap();
+    #[cfg(not(windows))]
+    let hold = rusqlite::Connection::open(reopened.path(who)).unwrap();
+    hold.execute_batch(
+        "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; BEGIN; SELECT count(*) FROM item;",
+    )
+    .unwrap();
+    let change = Batch {
+        id: 91,
+        expected_generation: before.snapshot.generation,
+        ops: vec![counter(99)],
+    };
+    let applied = reopened.apply(who, &change, Timestamp(200)).unwrap();
+    assert_eq!(applied.generation, before.snapshot.generation + 1);
+    assert!(
+        reopened
+            .apply(who, &change, Timestamp(201))
+            .unwrap()
+            .replayed
+    );
+    let wal = reopened.path(who).with_extension("sqlite-wal");
+    let wal_before = std::fs::read(&wal).unwrap();
+    assert!(!wal_before.is_empty());
+    let updated = reopened.inspect(who).unwrap();
+    assert_eq!(std::fs::read(&wal).unwrap(), wal_before);
+    assert_eq!(reopened.open(account(2)).unwrap().generation, 0);
+    assert_eq!(reopened.inspect(who).unwrap().snapshot, updated.snapshot);
+    assert_ne!(updated.snapshot, before.snapshot);
+    assert_eq!(repo.inspect(who).unwrap().snapshot, before.snapshot);
+    assert_eq!(updated.documents, before.documents);
+    assert_eq!(updated.livery, before.livery);
+
+    let short = root.repository("restored");
+    let held = reopened.writer_lease(who).unwrap();
+    assert_eq!(reopened.writer_lease(who).unwrap_err(), Error::Busy);
+    let copied = reopened
+        .backup_into(&held, updated.snapshot.generation, &short)
+        .unwrap();
+    assert_eq!(copied.snapshot, updated.snapshot);
+    assert_eq!(copied.documents, before.documents);
+    assert_eq!(copied.livery, before.livery);
+    assert_eq!(std::fs::read(&wal).unwrap(), wal_before);
+    drop(hold);
+}
+
+#[test]
 fn stale_absent_foreign_and_existing_destinations_never_replace_a_save() {
     let root = Root::new();
     let repo = populated(&root);
