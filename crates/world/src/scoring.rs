@@ -28,6 +28,7 @@ pub mod item_info;
 pub mod math;
 pub mod nodes;
 pub mod nos;
+pub mod participant_pacing;
 pub mod participant_properties;
 pub mod participant_sets;
 pub mod program;

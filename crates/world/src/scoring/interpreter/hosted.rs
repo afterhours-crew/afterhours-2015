@@ -7,6 +7,9 @@
 use super::*;
 use events::native::{Operation, Scope};
 
+#[cfg(test)]
+mod retirement_tests;
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
     Start,
@@ -116,6 +119,28 @@ impl Candidate<'_> {
                     dispatch.road(self, node, frame, self.inputs.road)?;
                 }
                 Behavior::Proximity { set } => self.proximity(node, *set, dispatch)?,
+                Behavior::ParticipantPacing { sources, provider } => {
+                    let participant = self
+                        .state
+                        .participant_providers
+                        .get(provider)
+                        .ok_or(Error::MissingInput)?;
+                    if let Some(&value) = self
+                        .state
+                        .pacing_samples
+                        .get(&(sources.clone(), *participant))
+                    {
+                        let port = Port {
+                            node,
+                            field: super::super::participant_pacing::NOS_REBUILD,
+                        };
+                        if self.bound(port)
+                            && self.state.store.read(port)? != Some(Value::Float(value))
+                        {
+                            dispatch.publish(self, port, Value::Float(value))?;
+                        }
+                    }
+                }
                 Behavior::Stats => self.stats(node, dispatch)?,
                 Behavior::RaceTime => self.race_time(node, dispatch)?,
                 Behavior::Nos => self.nos(node, dispatch)?,
@@ -187,13 +212,15 @@ impl Candidate<'_> {
                 }
                 self.state.burnout_changes.push(change);
             }
-            if node.created
+            // Standalone activation keeps local observers without subscribing
+            // through a native host. Match that boundary during retirement.
+            if dispatch.is_hosted()
                 && self.state.set_observers.contains(&(id as u16))
                 && matches!(node.behavior, Behavior::ParticipantSetAccessor { .. })
             {
                 dispatch.native(self, id as u16, events::native::Call::SetUnobserve)?;
             }
-            if node.created
+            if dispatch.is_hosted()
                 && matches!(node.behavior, Behavior::ParticipantProperty { .. })
                 && self
                     .state
@@ -209,6 +236,7 @@ impl Candidate<'_> {
             self.state.deactivated.insert(id as u16);
         }
         self.state.scheduled.clear();
+        self.state.pacing_samples.clear();
         Ok(())
     }
 

@@ -81,6 +81,10 @@ pub enum Behavior {
         source: super::participant_properties::Property,
         provider: u16,
     },
+    ParticipantPacing {
+        sources: super::participant_pacing::Sources,
+        provider: u16,
+    },
     TeleportLocation {
         provider: u16,
         location: super::participant_properties::Property,
@@ -402,6 +406,12 @@ impl Program {
                     }
                 }
                 Behavior::LinkedCurve { source } => source.validate()?,
+                Behavior::ParticipantPacing { sources, provider } => {
+                    sources.validate()?;
+                    if node(*provider)?.behavior != Behavior::ParticipantProvider {
+                        return Err(Error::InvalidGraph);
+                    }
+                }
                 Behavior::EventDetails {
                     source: Some(source),
                 } => source.validate()?,

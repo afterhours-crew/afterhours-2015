@@ -218,6 +218,7 @@ struct State {
     set_observers: Vec<u16>,
     set_changes: Vec<super::participant_sets::Change>,
     participant_providers: BTreeMap<u16, u64>,
+    pacing_samples: BTreeMap<(super::participant_pacing::Sources, u64), f32>,
     participant_values: BTreeMap<(u64, participant_properties::Property, Kind), Value>,
     bound_accessors: Vec<(u16, u64)>,
     property_writes: Vec<participant_properties::Write>,
@@ -273,6 +274,7 @@ impl Session {
         let cells: Vec<Definition> = program.cells.clone();
         let store = Store::new(count, cells)?;
         let mut state = State {
+            pacing_samples: BTreeMap::new(),
             retired: false,
             deactivated: std::collections::BTreeSet::new(),
             ai: ai::State::default(),
@@ -740,6 +742,37 @@ impl Session {
         self.state
             .event_channels
             .insert(node, (channel, participant));
+        Ok(())
+    }
+
+    /// Supply a host-evaluated pacing sample for one participant and its exact
+    /// service bindings. `None` removes the sample; subsequent ticks preserve
+    /// the accessor's last output, as when no pacing group contains its owner.
+    /// This does not publish before activation or tick unrelated graph nodes.
+    pub fn set_pacing_sample(
+        &mut self,
+        sources: &super::participant_pacing::Sources,
+        participant: u64,
+        value: Option<f32>,
+    ) -> Result<(), Error> {
+        sources.validate()?;
+        if self.state.retired || !self.program.nodes.iter().any(|node| {
+            matches!(&node.behavior, Behavior::ParticipantPacing { sources: bound, .. } if bound == sources)
+        }) {
+            return Err(Error::InvalidGraph);
+        }
+        let key = (sources.clone(), participant);
+        if let Some(value) = value {
+            finite(value)?;
+            if !self.state.pacing_samples.contains_key(&key)
+                && self.state.pacing_samples.len() >= participant_properties::MAX_VALUES
+            {
+                return Err(Error::Bound);
+            }
+            self.state.pacing_samples.insert(key, value);
+        } else {
+            self.state.pacing_samples.remove(&key);
+        }
         Ok(())
     }
 
@@ -1520,6 +1553,21 @@ impl Candidate<'_> {
                 Ok(())
             }
             Behavior::FloatSelect => self.float_select(node, true, dispatch),
+            Behavior::ParticipantPacing { .. } => {
+                let port = Port {
+                    node,
+                    field: super::participant_pacing::NOS_REBUILD,
+                };
+                if self.bound(port) {
+                    dispatch.initialize(
+                        self,
+                        port,
+                        Value::Float(0.),
+                        super::properties::DefaultMode::Override,
+                    )?;
+                }
+                Ok(())
+            }
             Behavior::RandomFloat { true_random } => self.random_float(node, true_random, dispatch),
             Behavior::ItemInfo { .. }
             | Behavior::ContextReporter { .. }
@@ -1898,6 +1946,7 @@ impl Candidate<'_> {
                 Ok(())
             }
             Behavior::Road { .. }
+            | Behavior::ParticipantPacing { .. }
             | Behavior::Proximity { .. }
             | Behavior::Nos
             | Behavior::Donut(_) => {

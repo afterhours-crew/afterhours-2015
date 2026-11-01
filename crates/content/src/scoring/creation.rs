@@ -63,6 +63,7 @@ pub fn compile(object: &Object) -> Result<Option<Realm>, Error> {
         | "IntParticipantPropertySorterEntityData"
         | "PacingScheduleProviderEntityData"
         | "ParticipantEventChannelEntityData"
+        | "ParticipantPacingAccessorEntityData"
         | "ParticipantEventToParticipantProviderEntityData"
         | "ParticipantSetBoolPropertyAdapterEntityData"
         | "ParticipantSetEntityData"

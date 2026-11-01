@@ -3,6 +3,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 use super::*;
 mod ai;
+mod participant_pacing;
 mod vehicle_stats;
 use crate::scoring::properties::{DefaultMode, Kind};
 use crate::scoring::{

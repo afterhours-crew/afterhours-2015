@@ -37,6 +37,7 @@ pub mod events;
 pub mod interfaces;
 pub mod linked_curve;
 pub mod nodes;
+pub mod participant_pacing;
 pub mod participant_properties;
 pub mod program;
 pub mod property_gate;

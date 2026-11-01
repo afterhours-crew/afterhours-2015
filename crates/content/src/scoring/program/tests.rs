@@ -127,6 +127,7 @@ pub(crate) fn fixture() -> Sources {
         vehicle_info: vec![],
         teleport_locations: vec![],
         vehicle_tuning: vec![],
+        participant_pacing: vec![],
         context_reporters: vec![],
         transitions: vec![],
         linked_curves: vec![],
@@ -627,4 +628,73 @@ fn explicit_native_selection_excludes_scalar_configuration_only_for_that_occurre
     let nodes = super::super::nodes::read(&mut selected, "r").unwrap();
     assert_eq!(nodes.len(), 1);
     assert_eq!(nodes[0].identity, identity("r", 2, &[]));
+}
+
+#[test]
+fn participant_pacing_compiles_with_a_typed_output_and_owned_provider() {
+    use world::participant_pacing::{NOS_REBUILD, Sources as Services};
+    use world::participant_properties::Property;
+    let mut sources = fixture();
+    let accessor = identity("root", 1, &[]);
+    let provider = identity("root", 6, &[]);
+    sources.scalars.retain(|n| n.identity != accessor);
+    sources.composition.nodes[1].class = super::super::participant_pacing::CLASS.into();
+    sources.composition.nodes.push(event_node(
+        provider.clone(),
+        "ParticipantLogicParticipantProviderEntityData",
+        server(),
+        None,
+    ));
+    sources.creation.push(created(
+        provider.clone(),
+        "ParticipantLogicParticipantProviderEntityData",
+    ));
+    for n in &mut sources.creation {
+        if n.identity == accessor {
+            n.class = super::super::participant_pacing::CLASS.into();
+        }
+    }
+    for declaration in &mut sources.declarations {
+        if declaration.identity == accessor {
+            declaration.class = super::super::participant_pacing::CLASS.into();
+            declaration.declaration.outputs = vec![(NOS_REBUILD, Kind::Float)];
+        }
+    }
+    for edge in &mut sources.composition.properties {
+        if edge.source.node == 1 {
+            edge.source.field = NOS_REBUILD;
+        }
+    }
+    let key = |port| Property {
+        channel: "services".into(),
+        port,
+    };
+    let services = Services {
+        pacing: key(1),
+        actors: key(2),
+        personalities: key(3),
+        curves: key(4),
+    };
+    sources
+        .participant_pacing
+        .push(super::super::participant_pacing::Node {
+            identity: accessor.clone(),
+            provider,
+            sources: services.clone(),
+        });
+    let compiled = compile(&sources).unwrap();
+    assert_eq!(
+        compiled.nodes[1].behavior,
+        Behavior::ParticipantPacing {
+            sources: services,
+            provider: 11
+        }
+    );
+    assert!(compiled.cells.iter().any(|c| c.kind == Kind::Float
+        && c.ports.contains(&Port {
+            node: 1,
+            field: NOS_REBUILD
+        })));
+    sources.participant_pacing[0].provider = accessor;
+    assert!(compile(&sources).is_err());
 }

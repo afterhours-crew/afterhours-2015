@@ -395,6 +395,10 @@ pub fn compile(object: &Object) -> Result<Option<Declaration>, Error> {
             d.outputs
                 .extend(world::stats::UNPUBLISHED_FLOATS.map(|p| (p, Kind::Float)));
         }
+        "ParticipantPacingAccessorEntityData" => {
+            d.outputs
+                .push((world::participant_pacing::NOS_REBUILD, Kind::Float));
+        }
         "RaceVehicleNosQueryEntityData" => {
             d.outputs.extend(
                 [
