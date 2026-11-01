@@ -1372,6 +1372,13 @@ impl PlayerListener {
         let Some(content) = self.scoring.clone() else {
             return Ok(());
         };
+        // Tie opt-in scalar diagnostics to the actual scheduler clock. Packet
+        // timestamps alone do not show when publication backpressure deferred
+        // a reported sample or which sample an eventual scoring tick consumed.
+        let _trace_scope = self
+            .scoring_state
+            .trace
+            .then(|| tracing::info_span!("scoring_advance", world_ms = now_ms).entered());
         if !self.pending_entries.is_empty() || self.pending.len() >= MAX_PENDING {
             return Ok(());
         }
@@ -1576,6 +1583,16 @@ impl PlayerListener {
                         &mut collected,
                     )?;
                 }
+            }
+            if state.trace {
+                tracing::info!(
+                    participant,
+                    car,
+                    previous_world_ms = last_ms,
+                    covered_seconds = covered,
+                    ?inputs,
+                    "scoring input snapshot"
+                );
             }
             let start = inputs.now - f64::from(covered);
             if now_ms / 1000 != last_ms / 1000

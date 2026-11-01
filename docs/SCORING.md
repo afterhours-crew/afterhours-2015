@@ -517,7 +517,13 @@ provisional vertical-acceleration detector; the trailing Boolean flags and
 wheel-slip pairs are different measurements. Every Boolean
 synchronized change is logged (`scoring flag`), and `NFS_SCORING_TRACE` in
 the server's environment logs every synchronized change for comparisons
-with the official stream. The recorded jump carries the explicit airborne
+with the official stream. This opt-in trace also labels advances with their
+world clock and records each consumed player input snapshot, previous scoring
+clock and covered duration. Publication backpressure can defer scoring, so a
+received movement timestamp alone does not establish the input or duration of
+a scoring tick. The snapshot includes the bounded current vehicle, nearby-car,
+participant-set, road and stat inputs; keep diagnostic logs private.
+The recorded jump carries the explicit airborne
 state for about 0.73 seconds. This reference check does not establish a new
 local live airtime result.
 
