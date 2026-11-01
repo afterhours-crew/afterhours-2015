@@ -637,6 +637,130 @@ mod tests {
     }
 
     #[test]
+    fn accepted_ai_movement_notifies_scoring_between_echoes_and_rolls_back_with_frame() {
+        crate::net::players::test_wire::with_native_padding(|| {
+            use nfs_world::bits::BitWriter;
+            use nfs_world::replication::vehicle::movement::Sample;
+            let connection = HOST_SELECTOR as u8;
+            let (mut rivals, mut world, mut registrations, _) =
+                crate::rival_content::population::tests::fixture(connection);
+            let ids = crate::rival_content::population::tests::spawn(
+                &mut rivals,
+                &mut world,
+                &mut registrations,
+                connection,
+            )
+            .spawned
+            .unwrap();
+            let mut listener = PlayerListener::new(100);
+            listener.players = world;
+            listener.rival_population = Some(rivals);
+            let key = listener.delegated_ai(&listener.players)[&ids.vehicle];
+            let initial = listener
+                .players
+                .ai_vehicle_physics(connection, 100, key)
+                .unwrap();
+            let wire = |revision, seconds: f64| {
+                let mut physics = initial.clone();
+                let clock = seconds.to_bits();
+                physics.identity_words = [(clock >> 32) as u32, clock as u32, revision];
+                let (header, body) = Sample {
+                    physics,
+                    flag: false,
+                }
+                .encode()
+                .unwrap();
+                let mut frame = BitWriter::new();
+                frame
+                    .put(1 << frame::MOVEMENT, 6)
+                    .put_span(header.span())
+                    .put(1, 6)
+                    .put(ids.vehicle.into(), 16)
+                    .put(0, 4)
+                    .put(body.len() as u64, 16)
+                    .put_span(body.span())
+                    .align();
+                frame
+            };
+            let mut retained = initial.clone();
+            for (revision, now, seconds, accepted, echo) in [
+                (1, 100, 5.0, true, true),
+                (2, 120, 5.02, true, false),
+                (2, 140, 99.0, false, false),
+                (1, 160, 98.0, false, false),
+                (3, 180, 5.08, true, false),
+                (4, 200, 5.1, true, true),
+            ] {
+                listener.world_ms = now;
+                let packet = wire(revision, seconds);
+                assert!(listener.frame(Queued {
+                    advertised: None,
+                    frame: now as u16,
+                    data: packet.span()
+                }));
+                assert_eq!(
+                    std::mem::take(&mut listener.scoring_state.reported),
+                    if accepted {
+                        BTreeSet::from([ids.vehicle])
+                    } else {
+                        BTreeSet::new()
+                    },
+                    "AI scoring notification at {now}ms"
+                );
+                if accepted {
+                    let clock = seconds.to_bits();
+                    retained.identity_words = [(clock >> 32) as u32, clock as u32, revision];
+                }
+                assert_eq!(
+                    listener
+                        .players
+                        .ai_vehicle_physics(connection, 100, key)
+                        .unwrap(),
+                    retained
+                );
+                assert_eq!(!listener.pending.is_empty(), echo);
+                listener.pending.clear();
+            }
+            listener.world_ms = 300;
+            let packet = wire(5, 5.2);
+            let before = listener.players.objects().snapshot();
+            listener
+                .pending
+                .resize(MAX_PENDING, returning::empty_section());
+            assert!(!listener.frame(Queued {
+                advertised: None,
+                frame: 300,
+                data: packet.span()
+            }));
+            assert_eq!(listener.players.objects().snapshot(), before);
+            assert!(listener.scoring_state.reported.is_empty());
+            listener.pending.clear();
+            assert!(listener.frame(Queued {
+                advertised: None,
+                frame: 300,
+                data: packet.span()
+            }));
+            assert_eq!(
+                std::mem::take(&mut listener.scoring_state.reported),
+                BTreeSet::from([ids.vehicle])
+            );
+            listener.pending.clear();
+            // Retirement revokes delegation immediately. A repeated old input
+            // cannot leave a scoring notification for the deleted car.
+            listener
+                .players
+                .remove_ai_vehicle(connection, 100, key)
+                .unwrap();
+            assert!(listener.frame(Queued {
+                advertised: None,
+                frame: 301,
+                data: packet.span()
+            }));
+            assert!(listener.scoring_state.reported.is_empty());
+        });
+    }
+
+    #[test]
     fn mixed_traffic_and_rival_reports_keep_both_delegations_and_echo_clocks() {
         use nfs_world::replication::vehicle::{chassis, movement::Sample};
         let connection = HOST_SELECTOR as u8;
@@ -672,7 +796,7 @@ mod tests {
             delegated[&ids[1]],
             crate::traffic_content::population::RIVAL_KEY_START
         );
-        for (step, now) in [(0, 100), (1, 200)] {
+        for (step, now, echo) in [(0, 100, true), (1, 120, false), (2, 200, true)] {
             let samples = ids.map(|id| {
                 let mut motion = listener
                     .players
@@ -705,9 +829,22 @@ mod tests {
                     })
                     .collect(),
             };
-            let echoes = listener
+            let before = listener.players.objects().snapshot();
+            let mut wrong_key = delegated.clone();
+            wrong_key.insert(ids[1], delegated[&ids[0]]);
+            for (c, p, cars) in [
+                (connection + 1, 100, &delegated),
+                (connection, 101, &delegated),
+                (connection, 100, &wrong_key),
+            ] {
+                assert!(listener.traffic_reports.receive_ai_with_accepted(
+                    &mut listener.players, c, p, &movement, cars, now,
+                ).is_err());
+                assert_eq!(listener.players.objects().snapshot(), before);
+            }
+            let received = listener
                 .traffic_reports
-                .receive_ai(
+                .receive_ai_with_accepted(
                     &mut listener.players,
                     connection,
                     100,
@@ -717,12 +854,21 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(
+                received.accepted.iter().copied().collect::<BTreeSet<_>>(),
+                ids.into_iter().collect()
+            );
+            let echoes = received.echoes;
+            assert_eq!(
                 echoes
                     .iter()
                     .map(|r| r.id)
                     .filter(|id| ids.contains(id))
                     .collect::<BTreeSet<_>>(),
-                ids.into_iter().collect()
+                if echo {
+                    ids.into_iter().collect()
+                } else {
+                    BTreeSet::new()
+                }
             );
             // Only each car's first report releases its actor's held control.
             let actors = [ambient.actor, rival.actor];
@@ -748,20 +894,18 @@ mod tests {
                     sample.physics
                 );
             }
-            assert!(
-                listener
-                    .traffic_reports
-                    .receive_ai(
-                        &mut listener.players,
-                        connection,
-                        100,
-                        &movement,
-                        &delegated,
-                        now,
-                    )
-                    .unwrap()
-                    .is_empty()
-            );
+            let repeated = listener
+                .traffic_reports
+                .receive_ai_with_accepted(
+                    &mut listener.players,
+                    connection,
+                    100,
+                    &movement,
+                    &delegated,
+                    now,
+                )
+                .unwrap();
+            assert!(repeated.accepted.is_empty() && repeated.echoes.is_empty());
         }
     }
     #[test]

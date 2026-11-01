@@ -1534,7 +1534,7 @@ impl Listener for PlayerListener {
                     .any(|(a, _, _)| !a.delegated(&players).is_empty())
             {
                 let delegated = self.delegated_ai(&players);
-                match traffic_reports.receive_ai(
+                match traffic_reports.receive_ai_with_accepted(
                     &mut players,
                     HOST_SELECTOR as u8,
                     self.persona,
@@ -1542,16 +1542,18 @@ impl Listener for PlayerListener {
                     &delegated,
                     self.world_ms,
                 ) {
-                    Ok(reports) if !reports.is_empty() => {
-                        deferred_sections.extend(reports.into_iter().map(|record| Section {
-                            float_bits: None,
-                            flag: false,
-                            deleted: Vec::new(),
-                            setup: Some(Setup::RawEscape([0; 3])),
-                            records: vec![record],
+                    Ok(received) => {
+                        scoring_reported.extend(received.accepted);
+                        deferred_sections.extend(received.echoes.into_iter().map(|record| {
+                            Section {
+                                float_bits: None,
+                                flag: false,
+                                deleted: Vec::new(),
+                                setup: Some(Setup::RawEscape([0; 3])),
+                                records: vec![record],
+                            }
                         }))
                     }
-                    Ok(_) => {}
                     Err(error) => return self.refuse(error),
                 }
             }

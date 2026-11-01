@@ -77,6 +77,21 @@ impl Reports {
         cars: &BTreeMap<u16, u64>,
         now_ms: u64,
     ) -> Result<Vec<Record>, Error> {
+        self.receive_ai_with_accepted(players, connection, persona, movement, cars, now_ms)
+            .map(|received| received.echoes)
+    }
+
+    /// Fresh AI input is independent of the outgoing echo cadence, just like
+    /// player input. Validate every delegated key before retaining any sample.
+    pub fn receive_ai_with_accepted(
+        &mut self,
+        players: &mut Players,
+        connection: u8,
+        persona: u64,
+        movement: &frame::Movement<'_>,
+        cars: &BTreeMap<u16, u64>,
+        now_ms: u64,
+    ) -> Result<Received, Error> {
         if cars.len() > frame::MAX_MOVEMENT_RECORDS {
             return Err(Error::Bound);
         }
@@ -93,7 +108,6 @@ impl Reports {
             .map(|(&id, &key)| (id, Target::Ai(key)))
             .collect();
         self.receive_targets(players, connection, persona, movement, &targets, now_ms)
-            .map(|received| received.echoes)
     }
 
     fn receive_targets(

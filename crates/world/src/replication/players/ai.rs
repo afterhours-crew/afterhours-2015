@@ -111,6 +111,19 @@ pub struct SlotIds {
     pub car: Option<u64>,
 }
 
+/// An owned AI participant, including persistent slots between car handoffs.
+/// Membership and delegation policy belong to the population owner; neither
+/// is inferred from the actor's mode or the presence of a car.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Participant {
+    pub participant: u16,
+    pub actor: u16,
+    pub personality: u16,
+    pub managers: Option<Managers>,
+    /// Current car's spawn key and ghost. Absent while a slot has no car.
+    pub car: Option<(u64, u16)>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct SlotCreated {
     pub ids: SlotIds,
@@ -165,6 +178,56 @@ impl Players {
 
     pub fn ai_ids(&self, connection: u8, persona: u64, key: u64) -> Option<Ids> {
         self.ai.get(&(connection, persona, key)).map(|a| a.ids)
+    }
+
+    /// Snapshot the session's AI participants once each, in participant order.
+    /// Attached slot cars do not create a second participant. Unbound instances
+    /// remain explicitly unbound, rather than acquiring a guessed manager.
+    pub fn ai_participants(&self, connection: u8, persona: u64) -> Result<Vec<Participant>, Error> {
+        if self.account_runtime_index(connection, persona).is_none() {
+            return Err(Error::UnknownObject);
+        }
+        let mut result = Vec::new();
+        for (&(c, p, key), slot) in &self.ai_slots {
+            if (c, p) != (connection, persona) {
+                continue;
+            }
+            let car = slot
+                .car
+                .map(|car| {
+                    let instance = self.ai.get(&(c, p, car)).ok_or(Error::UnknownObject)?;
+                    if instance.slot != Some(key)
+                        || instance.ids.participant != slot.participant
+                        || instance.ids.actor != slot.actor
+                        || instance.managers != Some(slot.managers)
+                    {
+                        return Err(Error::Shape);
+                    }
+                    Ok((car, instance.ids.vehicle))
+                })
+                .transpose()?;
+            result.push(Participant {
+                participant: slot.participant,
+                actor: slot.actor,
+                personality: slot.request.words[1],
+                managers: Some(slot.managers),
+                car,
+            });
+        }
+        for (&(c, p, key), instance) in &self.ai {
+            if (c, p) != (connection, persona) || instance.slot.is_some() {
+                continue;
+            }
+            result.push(Participant {
+                participant: instance.ids.participant,
+                actor: instance.ids.actor,
+                personality: instance.request.words[1],
+                managers: instance.managers,
+                car: Some((key, instance.ids.vehicle)),
+            });
+        }
+        result.sort_by_key(|p| p.participant);
+        Ok(result)
     }
 
     /// Allocate the participant, actor and car together. A failed car record or
@@ -1892,6 +1955,192 @@ mod tests {
             words: [7, 16],
             mode: 2,
         }
+    }
+
+    #[test]
+    fn pacing_lookup_uses_current_owned_group_and_preserves_absence() {
+        let mut world = world();
+        let (managers, _) = managers(&mut world);
+        let (car, content) = car();
+        let slot = world
+            .create_ai_slot(1, 100, rival_request(50), managers)
+            .unwrap()
+            .unwrap()
+            .ids;
+        let other = world
+            .create_ai_slot(2, 200, rival_request(50), managers)
+            .unwrap()
+            .unwrap()
+            .ids;
+        assert_eq!(world.ai_pacing_sample(1, 100, slot.participant), Ok(None));
+        assert_eq!(
+            world.ai_pacing_sample(2, 200, slot.participant),
+            Err(Error::UnknownObject)
+        );
+        assert_eq!(
+            world.ai_pacing_sample(1, 100, other.participant),
+            Err(Error::UnknownObject)
+        );
+        let entry = |value: f32| pacing::Entry {
+            participant: slot.participant,
+            value: value.to_bits(),
+        };
+        let group = world
+            .create_ai_pacing_group(1, 100, vec![entry(0.75)])
+            .unwrap()
+            .id;
+        assert_eq!(
+            world.ai_pacing_sample(1, 100, slot.participant),
+            Ok(Some(0.75))
+        );
+        let attached = world
+            .attach_ai_slot_vehicle(1, 100, 50, 900, car, &content)
+            .unwrap();
+        assert_eq!(
+            world.ai_pacing_sample(1, 100, slot.participant),
+            Ok(Some(0.75))
+        );
+        world.remove_ai_vehicle(1, 100, 900).unwrap();
+        assert!(world.objects.get(attached.ids.vehicle).is_none());
+        assert_eq!(
+            world.ai_pacing_sample(1, 100, slot.participant),
+            Ok(Some(0.75))
+        );
+        // Read the retained update rather than the creation's original value.
+        world
+            .change(
+                group,
+                Update::AiPacingGroup(pacing::Update {
+                    entries: Some(vec![entry(-0.25)]),
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            world.ai_pacing_sample(1, 100, slot.participant),
+            Ok(Some(-0.25))
+        );
+        for entries in [vec![entry(f32::NAN)], vec![entry(0.5), entry(0.5)]] {
+            let mut damaged = world.clone();
+            damaged
+                .change(
+                    group,
+                    Update::AiPacingGroup(pacing::Update {
+                        entries: Some(entries),
+                    }),
+                )
+                .unwrap();
+            assert_eq!(
+                damaged.ai_pacing_sample(1, 100, slot.participant),
+                Err(Error::Shape)
+            );
+        }
+        let duplicate = world
+            .create_ai_pacing_group(1, 100, vec![entry(0.75)])
+            .unwrap()
+            .id;
+        assert_eq!(
+            world.ai_pacing_sample(1, 100, slot.participant),
+            Err(Error::Shape)
+        );
+        world.remove_ai_pacing_group(1, 100, duplicate).unwrap();
+        world
+            .change(
+                group,
+                Update::AiPacingGroup(pacing::Update {
+                    entries: Some(vec![]),
+                }),
+            )
+            .unwrap();
+        assert_eq!(world.ai_pacing_sample(1, 100, slot.participant), Ok(None));
+        world.remove_ai_pacing_group(1, 100, group).unwrap();
+        assert_eq!(world.ai_pacing_sample(1, 100, slot.participant), Ok(None));
+        world.remove_ai_slot(1, 100, 50).unwrap();
+        assert_eq!(
+            world.ai_pacing_sample(1, 100, slot.participant),
+            Err(Error::UnknownObject)
+        );
+    }
+
+    #[test]
+    fn participant_inventory_tracks_slots_binding_and_session_ownership() {
+        let mut world = world();
+        let (managers, _) = managers(&mut world);
+        let (car, content) = car();
+        let slot = world
+            .create_ai_slot(1, 100, rival_request(50), managers)
+            .unwrap()
+            .unwrap()
+            .ids;
+        let unbound = world
+            .spawn_ai_vehicle(1, 100, request(1), car.clone(), &content)
+            .unwrap()
+            .unwrap()
+            .ids;
+        let foreign = world
+            .create_ai_slot(2, 200, rival_request(50), managers)
+            .unwrap()
+            .unwrap()
+            .ids;
+        let expected = Participant {
+            participant: slot.participant,
+            actor: slot.actor,
+            personality: 16,
+            managers: Some(managers),
+            car: None,
+        };
+        let snapshot = world.ai_participants(1, 100).unwrap();
+        assert_eq!(snapshot.len(), 2);
+        assert_eq!(snapshot[0], expected);
+        assert_eq!(
+            snapshot[1],
+            Participant {
+                participant: unbound.participant,
+                actor: unbound.actor,
+                personality: request(1).words[1],
+                managers: None,
+                car: Some((1, unbound.vehicle)),
+            }
+        );
+        assert_eq!(
+            world.ai_participants(2, 200).unwrap()[0].participant,
+            foreign.participant
+        );
+        assert_eq!(world.ai_participants(2, 100), Err(Error::UnknownObject));
+        assert_eq!(world.ai_participants(1, 200), Err(Error::UnknownObject));
+        world.bind_ai_managers(1, 100, 1, managers).unwrap();
+        assert_eq!(
+            world.ai_participants(1, 100).unwrap()[1].managers,
+            Some(managers)
+        );
+        for key in [900, 901] {
+            let attached = world
+                .attach_ai_slot_vehicle(1, 100, 50, key, car.clone(), &content)
+                .unwrap();
+            let snapshot = world.ai_participants(1, 100).unwrap();
+            assert_eq!(snapshot.len(), 2);
+            assert_eq!(
+                snapshot[0],
+                Participant {
+                    car: Some((key, attached.ids.vehicle)),
+                    ..expected
+                }
+            );
+            // An inconsistent retained car association must not silently
+            // produce a believable participant snapshot.
+            let mut damaged = world.clone();
+            damaged.ai.get_mut(&(1, 100, key)).unwrap().ids.actor = unbound.actor;
+            assert_eq!(damaged.ai_participants(1, 100), Err(Error::Shape));
+            world.remove_ai_vehicle(1, 100, key).unwrap();
+            assert_eq!(world.ai_participants(1, 100).unwrap()[0], expected);
+        }
+        world.remove_ai_slot(1, 100, 50).unwrap();
+        assert_eq!(world.ai_participants(1, 100).unwrap().len(), 1);
+        world.remove_ai_vehicle(1, 100, 1).unwrap();
+        assert!(world.ai_participants(1, 100).unwrap().is_empty());
+        assert_eq!(
+            world.ai_participants(2, 200).unwrap()[0].participant,
+            foreign.participant
+        );
     }
 
     #[test]
