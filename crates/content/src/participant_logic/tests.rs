@@ -11,6 +11,43 @@ const LEVEL: &str = "levels/test/root";
 const SCENE: &str = "levels/test/scene";
 const CHILD: &str = "test/child";
 const PARENT: &str = "test/parent";
+
+#[test]
+fn server_pacing_node_preserves_neighboring_replication_fields() {
+    use crate::graph::tests::{Memory, local};
+    let mut memory = Memory::default();
+    memory.put(
+        "r",
+        0,
+        "ParticipantLogicBlueprint",
+        &[
+            ("Flags", Value::UInt32(1)),
+            ("Objects", Value::Array((1..=4).map(local).collect())),
+        ],
+    );
+    memory.put("r", 1, "ParticipantLogicEntityData", &[]);
+    memory.put("r", 2, "SyncedFloatEntityData", &[]);
+    memory.put("r", 3, "ParticipantPacingAccessorEntityData", &[]);
+    memory.put("r", 4, "SyncedFloatEntityData", &[]);
+    let mut nodes = Graph::new(&mut memory).read(Site::root("r")).unwrap();
+    let rules = crate::BuildIdentity::supported().participant_logic;
+    let (buses, fields) = shape(&nodes, &rules).unwrap();
+    assert_eq!(buses, 1);
+    assert_eq!(
+        fields
+            .iter()
+            .map(|(site, kind)| (site.key.1, *kind))
+            .collect::<Vec<_>>(),
+        [
+            (1, Kind::Root),
+            (2, Kind::FloatProperty),
+            (4, Kind::FloatProperty)
+        ]
+    );
+    nodes[3].object.class = "UnknownPacingAccessorEntityData".into();
+    assert!(shape(&nodes, &rules).is_err());
+}
+
 fn reference(seed: u8) -> ([u8; 16], [u8; 16]) {
     ([seed; 16], [seed + 100; 16])
 }

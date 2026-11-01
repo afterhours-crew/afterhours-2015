@@ -37,7 +37,9 @@ impl TryFrom<Source> for Program {
                 Op::Fact(fact) => {
                     let valid = match fact {
                         Fact::Boolean(name) => !name.is_empty() && name.len() <= 512,
-                        Fact::Player(id) | Fact::Copy(id) => identity(id),
+                        Fact::Player(id) | Fact::Ai(id) | Fact::Traffic(id) | Fact::Copy(id) => {
+                            identity(id)
+                        }
                         Fact::Mutable(id) => {
                             mutable.insert(id.clone());
                             identity(id)

@@ -1354,6 +1354,7 @@
       "FloatPresentationDataCollectorEntityData": null,
       "LinkedSchematicChannelRelayEntityData": null,
       "ParticipantSetCounterEntityData": null,
+      "ParticipantPacingAccessorEntityData": null,
       "RaceVehicleAccumulatingCollisionsQueryEntityData": "rpc",
       "RaceVehicleAnyCollisionEvaluatorEntityData": null,
       "RaceVehicleCollisionQueryEntityData": "rpc_bool",

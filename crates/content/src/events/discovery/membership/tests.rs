@@ -11,6 +11,118 @@ fn site(index: usize) -> Site {
         ..Site::root("a")
     }
 }
+
+#[test]
+fn ai_state_intersection_excludes_traffic_and_requires_each_exact_manager() {
+    let mut m = Memory::default();
+    m.put(
+        "a",
+        0,
+        "Blueprint",
+        &[(
+            "LinkConnections",
+            Value::Array(vec![
+                edge(local(1), name("0"), local(2), 0),
+                edge(local(1), name("1"), local(5), 0),
+                edge(local(2), name("0"), local(3), 0),
+                edge(local(2), name("1"), local(4), 0),
+                edge(local(3), 3_806_204_033, local(6), 0),
+                edge(local(4), name("ParticipantStates"), local(7), 0),
+                edge(local(5), 3_498_635_899, local(8), 0),
+            ]),
+        )],
+    );
+    for (index, op) in [(1, "DIF"), (2, "INTERSECTION")] {
+        m.put(
+            "a",
+            index,
+            "ParticipantSetPredicateEntityData",
+            &[
+                ("NumberOfOperands", Value::UInt32(2)),
+                (
+                    "Operation",
+                    Value::Enum {
+                        value: 0,
+                        name: Some(op.into()),
+                    },
+                ),
+            ],
+        );
+    }
+    for (index, class) in [
+        (3, "ParticipantSetAllAiAdapterEntityData"),
+        (4, "ParticipantSetStateAdapterEntityData"),
+        (5, "ParticipantSetTrafficAdapterEntityData"),
+        (6, "AiParticipantManagerEntityData"),
+        (7, "ParticipantStateEntityData"),
+        (8, "TrafficManagerEntityData"),
+    ] {
+        m.put("a", index, class, &[]);
+    }
+    let read = |m: &mut Memory| {
+        read_set(
+            &mut Graph::new(m),
+            site(1),
+            &BTreeMap::new(),
+            &mut |_, s| {
+                Ok(Endpoint {
+                    scene_key: 3,
+                    serializer: s.key.1,
+                })
+            },
+        )
+    };
+    let program = read(&mut m).unwrap();
+    assert_eq!(
+        program.facts().collect::<Vec<_>>(),
+        vec![
+            &Fact::Ai(Identity::from(&site(6))),
+            &Fact::States(vec![Endpoint {
+                scene_key: 3,
+                serializer: 7
+            }]),
+            &Fact::Traffic(Identity::from(&site(8))),
+        ]
+    );
+    for mask in 0..8 {
+        assert_eq!(
+            program
+                .evaluate(|fact| Some(match fact {
+                    Fact::Ai(_) => mask & 1 != 0,
+                    Fact::States(_) => mask & 2 != 0,
+                    Fact::Traffic(_) => mask & 4 != 0,
+                    _ => unreachable!(),
+                }))
+                .unwrap(),
+            mask == 3
+        );
+    }
+    assert!(
+        program
+            .evaluate(|f| if matches!(f, Fact::Ai(_)) {
+                Some(false)
+            } else {
+                None
+            })
+            .is_err()
+    );
+    let encoded = serde_json::to_value(&program).unwrap();
+    assert_eq!(
+        serde_json::from_value::<Program>(encoded.clone()).unwrap(),
+        program
+    );
+    for fact in ["Ai", "Traffic"] {
+        let mut damaged = encoded.clone();
+        let i = if fact == "Ai" { 0 } else { 3 };
+        damaged["ops"][i]["Fact"][fact]["asset"] = serde_json::json!("");
+        assert!(serde_json::from_value::<Program>(damaged).is_err());
+    }
+    m.put("a", 6, "TrafficManagerEntityData", &[]);
+    assert!(read(&mut m).is_err());
+    m.put("a", 6, "AiParticipantManagerEntityData", &[]);
+    m.put("a", 8, "AiParticipantManagerEntityData", &[]);
+    assert!(read(&mut m).is_err());
+}
 fn fixture() -> Memory {
     let mut m = Memory::default();
     m.put(

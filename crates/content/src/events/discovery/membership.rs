@@ -18,6 +18,10 @@ mod prepared;
 pub enum Fact {
     Boolean(String),
     Player(Identity),
+    /// Manager-owned membership. AI and traffic remain separate sources;
+    /// neither is inferred from a car's presence or its distance to the player.
+    Ai(Identity),
+    Traffic(Identity),
     States(Vec<Endpoint>),
     Copy(Identity),
     /// Explicitly mutable membership, maintained by its event owner.
@@ -177,6 +181,20 @@ impl Compiler<'_> {
                 }
                 Op::Fact(Fact::Player(Identity::from(&manager)))
             }
+            "ParticipantSetAllAiAdapterEntityData" => {
+                let manager = link(g, &site, 3_806_204_033)?;
+                if g.object(&manager)?.class != "AiParticipantManagerEntityData" {
+                    return Err(bad("AI set participant manager class"));
+                }
+                Op::Fact(Fact::Ai(Identity::from(&manager)))
+            }
+            "ParticipantSetTrafficAdapterEntityData" => {
+                let manager = link(g, &site, 3_498_635_899)?;
+                if g.object(&manager)?.class != "TrafficManagerEntityData" {
+                    return Err(bad("traffic set manager class"));
+                }
+                Op::Fact(Fact::Traffic(Identity::from(&manager)))
+            }
             "ParticipantSetStateAdapterEntityData" => {
                 let links = g.links(&site, name("ParticipantStates"))?;
                 if links.is_empty() || links.len() > 64 {
@@ -319,7 +337,7 @@ pub(super) fn read<S: Source>(
     read_set(g, root, identified, endpoint)
 }
 
-fn read_set<S: Source>(
+pub(crate) fn read_set<S: Source>(
     g: &mut Graph<S>,
     root: Site,
     identified: &BTreeMap<Site, String>,

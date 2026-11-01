@@ -155,13 +155,37 @@ pub(crate) fn context<S: Source>(
     root_channels: u32,
     spawner_channels: u32,
 ) -> Result<(Vec<Node>, BTreeMap<Site, Site>), Error> {
+    let context = spawner_context(
+        graph,
+        scene,
+        blueprint,
+        "ParticipantLogicSpawnerEntityData",
+        root_channels,
+        spawner_channels,
+    )?;
+    Ok((context.branch, context.aliases))
+}
+
+pub(crate) struct SpawnerContext {
+    pub branch: Vec<Node>,
+    pub aliases: BTreeMap<Site, Site>,
+    pub spawner: Site,
+}
+
+/// Select an exact spawner class. Boolean and set controllers have different
+/// lifetimes even when they instantiate the same blueprint.
+pub(crate) fn spawner_context<S: Source>(
+    graph: &mut Graph<S>,
+    scene: Site,
+    blueprint: &str,
+    class: &str,
+    root_channels: u32,
+    spawner_channels: u32,
+) -> Result<SpawnerContext, Error> {
     let branch = graph.read(Site::root(blueprint))?;
     let scene_nodes = graph.read(scene)?;
     let mut spawners = Vec::new();
-    for node in scene_nodes
-        .iter()
-        .filter(|n| n.object.class == "ParticipantLogicSpawnerEntityData")
-    {
+    for node in scene_nodes.iter().filter(|n| n.object.class == class) {
         if graph.target_field(&node.site, "ParticipantLogicBlueprint")? == (blueprint.to_owned(), 0)
         {
             spawners.push(node.site.clone());
@@ -180,7 +204,11 @@ pub(crate) fn context<S: Source>(
     let refs = graph.links(&root.site, root_channels)?;
     let targets = graph.links(spawner, spawner_channels)?;
     let aliases = bind(graph, &branch, refs, targets)?;
-    Ok((branch, aliases))
+    Ok(SpawnerContext {
+        branch,
+        aliases,
+        spawner: spawner.clone(),
+    })
 }
 
 /// Resolve channel links through that participant's bound occurrences, preserving

@@ -28,6 +28,7 @@ use std::sync::Arc;
 
 pub const ACQUISITION: &str = "gameplay/drivingdataacquisition";
 pub const SCORING: &str = "gameplay/scoring/drivingstylescoringparticipantlogic";
+pub const AI_SCORING: &str = "gameplay/scoring/aidrivingstylescoringparticipantlogic";
 /// The race events' driving-style participant: the free-roam scoring prefab
 /// plus the event tracking logic (E994 ghost 1605).
 pub const EVENT_SCORING: &str = "gameplay/scoring/eventdrivingstylescoringparticipantlogic";
@@ -257,9 +258,18 @@ impl AssetIndex {
         &mut self,
         scene: &str,
         blueprint: &str,
+        owned_properties: bool,
     ) -> Result<(Participant, Composition), Error> {
         let sources: Sources = self.scoring_sources(blueprint)?;
-        let program = compile(&sources)?;
+        let program = if owned_properties {
+            let properties = self
+                .owned_participant_properties(blueprint)?
+                .into_iter()
+                .collect();
+            compile_with_properties(&sources, &properties)?
+        } else {
+            compile(&sources)?
+        };
         let layout = self.participant_layout(scene, blueprint, Owner::Scene)?;
         let fields = serializer_fields(&sources.composition, &self.identity.participant_logic)?;
         if fields.len() != layout.fields.len()
@@ -408,11 +418,19 @@ impl AssetIndex {
         Ok(out)
     }
 
-    /// Read both installed driving participants for one gameplay scene.
+    /// Compile the scene-owned AI driving logic and its actual spawner bindings.
+    /// Its property writes remain owned by each AI participant; selecting eligible
+    /// participants and supplying the bound services belongs to the host.
+    pub fn ai_scoring_participant(&mut self, scene: &str) -> Result<Participant, Error> {
+        self.scoring_participant(scene, AI_SCORING, true)
+            .map(|(participant, _)| participant)
+    }
+
+    /// Read both installed player driving participants for one gameplay scene.
     pub fn scoring_content(&mut self, scene: &str) -> Result<ScoringContent, Error> {
         let (acquisition, acquisition_composition) =
-            self.scoring_participant(scene, ACQUISITION)?;
-        let (scoring, composition) = self.scoring_participant(scene, SCORING)?;
+            self.scoring_participant(scene, ACQUISITION, false)?;
+        let (scoring, composition) = self.scoring_participant(scene, SCORING, false)?;
         let categories = keeper_categories(&scoring.program, &composition)?;
         if keeper_categories(&acquisition.program, &acquisition_composition).is_ok() {
             return Err(bad("acquisition participant must not award"));

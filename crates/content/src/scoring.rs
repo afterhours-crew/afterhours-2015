@@ -16,6 +16,7 @@ use nfs_world::scoring::{
 };
 
 pub mod ai;
+pub mod ai_deployment;
 pub mod arithmetic;
 pub mod awards;
 pub mod bank;
