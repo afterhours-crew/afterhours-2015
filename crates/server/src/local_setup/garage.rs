@@ -254,6 +254,44 @@ fn return_confirmation(
     Ok(*signal)
 }
 
+type PhaseFades = (&'static str, Vec<(&'static str, bool)>);
+
+fn phase_fades() -> Vec<PhaseFades> {
+    vec![
+        ("spawn", vec![("BlackScreen", true)]),
+        (
+            "vehicles",
+            vec![("BlackScreen", false), ("BlackScreen", true)],
+        ),
+        (
+            "entry",
+            vec![
+                ("BlackScreen", false),
+                ("ViewWorld", true),
+                ("ViewWorld", false),
+                ("ViewWorld", true),
+            ],
+        ),
+        ("arrive", vec![("BlackScreen", false)]),
+        (
+            "world_ready",
+            vec![
+                ("ViewWorld", false),
+                ("BlackScreen", true),
+                ("BlackScreen", false),
+            ],
+        ),
+        ("world_spawn", vec![("BlackScreen", true)]),
+        (
+            "in_world_teleport",
+            vec![("ViewWorld", false), ("BlackScreen", true)],
+        ),
+        ("in_world_arrival", vec![("BlackScreen", false)]),
+        ("returning", vec![("ViewWorld", false)]),
+        ("crashed", vec![("ViewWorld", false)]),
+    ]
+}
+
 pub(super) fn build(index: &mut AssetIndex, thresholds: &Json) -> Result<Json> {
     let definitions = [
         (1, GAMEPLAY, FADE),
@@ -429,38 +467,7 @@ pub(super) fn build(index: &mut AssetIndex, thresholds: &Json) -> Result<Json> {
         }
         Ok(event(1, matches[0]))
     };
-    for (phase, events) in [
-        ("spawn", vec![("BlackScreen", true)]),
-        (
-            "vehicles",
-            vec![("BlackScreen", false), ("BlackScreen", true)],
-        ),
-        (
-            "entry",
-            vec![
-                ("BlackScreen", false),
-                ("ViewWorld", true),
-                ("ViewWorld", false),
-                ("ViewWorld", true),
-            ],
-        ),
-        ("arrive", vec![("BlackScreen", false)]),
-        (
-            "world_ready",
-            vec![
-                ("ViewWorld", false),
-                ("BlackScreen", true),
-                ("BlackScreen", false),
-            ],
-        ),
-        ("world_spawn", vec![("BlackScreen", true)]),
-        (
-            "in_world_teleport",
-            vec![("ViewWorld", false), ("BlackScreen", true)],
-        ),
-        ("in_world_arrival", vec![("BlackScreen", false)]),
-        ("returning", vec![("ViewWorld", false)]),
-    ] {
+    for (phase, events) in phase_fades() {
         for (key, active) in events {
             push(&mut doc, phase, "events", select_fade(key, active)?);
         }
@@ -556,6 +563,82 @@ pub(super) fn build(index: &mut AssetIndex, thresholds: &Json) -> Result<Json> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn crash_policy_hides_the_owning_world_before_recovery_reveals_it() {
+        use crate::garage_logic::{GarageLogic, Which};
+        use nfs_world::logic::{EntityRef, Message};
+        let mut doc = json!({
+            "format":"nfs-garage-logic", "version":1, "build_sha256":crate::content::BUILD,
+            "content":{"catalogs":[{"bundle":4,"entries":[[10,1]]}],
+                "profiles":[{"asset":{"bundle":4,"type_id":10,"local_index":0},"serializers":["root"]}]},
+            "spawn":{"scene_updates":[],"entities":[{"capture_id":1,
+                "asset":{"bundle":4,"type_id":10,"local_index":0},
+                "blueprint":{"scene_content_key":101},"roles":[{"kind":"root","bus_count":1}]}],"events":[]},
+            "entry":batch(),
+            "free_roam":{"scene_updates":[],"entities":[],
+                "events":[{"target":{"capture_id":1},"entity":1,"event":10}]},
+            "crashed":batch(), "recovered":batch()
+        });
+        for (phase, events) in phase_fades() {
+            if phase != "crashed" {
+                continue;
+            }
+            for (key, active) in events {
+                // Synthetic installed binding ordinals deliberately differ from
+                // the lifecycle's role handles and from real game ordinals.
+                let ordinal = match (key, active) {
+                    ("ViewWorld", true) => 10,
+                    ("ViewWorld", false) => 11,
+                    ("BlackScreen", true) => 12,
+                    ("BlackScreen", false) => 13,
+                    _ => panic!("unexpected presentation context"),
+                };
+                push(
+                    &mut doc,
+                    phase,
+                    "events",
+                    json!({"target":{"capture_id":1},"entity":1,"event":ordinal}),
+                );
+            }
+        }
+        let logic = GarageLogic::from_json(&doc).unwrap();
+        let (mut players, participant) = crate::garage_logic::tests::world();
+        let mut ghosts = BTreeMap::new();
+        logic
+            .produce(Which::Spawn, &mut players, participant, &mut ghosts)
+            .unwrap();
+        let target = EntityRef {
+            ghost: ghosts[&1],
+            entity: 1,
+        };
+        for which in [
+            Which::Crashed,
+            Which::FreeRoam,
+            Which::Crashed,
+            Which::FreeRoam,
+        ] {
+            let output = logic
+                .produce(which, &mut players, participant, &mut ghosts)
+                .unwrap();
+            assert_eq!(output.events.len(), 1);
+            let fire = output.events[0];
+            let expected = if matches!(which, Which::Crashed) {
+                11
+            } else {
+                10
+            };
+            assert_eq!(
+                Message::decode(fire.index(), fire.encode().unwrap().span()).unwrap(),
+                Message::Fire {
+                    events: vec![expected],
+                    player: None,
+                    target
+                }
+            );
+            assert!(output.records.is_empty() && output.deleted.is_empty());
+        }
+    }
+
     #[test]
     fn driving_timer_binds_authored_routes_and_rejects_changed_gate_behavior() {
         use nfs_content::scoring::{

@@ -65,6 +65,12 @@ code and tests contain reviewed semantics and constructed inputs, never captured
 identities, raw traffic, profile data, extracted content or private source links.
 No production build or runtime may depend on the reference workspace.
 
+When changing generated startup policy, regenerate the affected input through
+the canonical producer before testing the fix. A rebuilt executable can still
+consume the old policy from a saved fixture. Bind the refreshed input to its
+producer and role definitions; preserve the original failing fixture and its
+other overrides. Verify the changed behavior in serialized output.
+
 ## Reuse mechanisms and preserve ownership
 
 Extend the existing content, sequence, event and progression components. Resolve
