@@ -46,6 +46,11 @@ impl PlayerListener {
         content: &Content,
     ) -> Result<BTreeMap<u16, Participant>, replication::Error> {
         let players = &self.players;
+        // The scheduler runs before the player joins. An empty world has no
+        // AI eligibility to evaluate and no account owner to look up yet.
+        if players.ai_count() == 0 && players.ai_slot_count() == 0 {
+            return Ok(BTreeMap::new());
+        }
         let owned = players.ai_participants(HOST_SELECTOR as u8, self.persona)?;
         if owned.is_empty() {
             return Ok(BTreeMap::new());

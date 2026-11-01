@@ -469,6 +469,40 @@ fn ai_scoring_owner_retirement_is_atomic_and_preserves_unregistered_references()
 }
 
 #[test]
+fn ai_scoring_waits_for_join_before_reading_owned_population() {
+    let (mut listener, _) = fixture();
+    let joined = std::mem::take(&mut listener.players);
+    for now in [0, 1, 2] {
+        listener.advance_scoring(now).unwrap();
+        assert!(listener.scoring_state.ai.is_empty());
+        assert!(listener.pending.is_empty());
+        assert!(listener.pending_rpcs.is_empty());
+    }
+    listener.players = joined;
+    listener.advance_scoring(3).unwrap();
+    assert_eq!(listener.scoring_state.ai.len(), 1);
+    assert_eq!(
+        listener
+            .pending
+            .iter()
+            .flat_map(|s| &s.records)
+            .filter(|r| r.initial.is_some())
+            .count(),
+        1
+    );
+    // Once a population exists, missing/foreign account ownership is still
+    // an error; the startup boundary must not conceal invalid live state.
+    let before = listener.players.objects().snapshot();
+    listener.persona = 200;
+    assert_eq!(
+        listener.advance_scoring(4),
+        Err(replication::Error::UnknownObject)
+    );
+    assert_eq!(listener.players.objects().snapshot(), before);
+    assert_eq!(listener.scoring_state.ai.len(), 1);
+}
+
+#[test]
 fn ai_scoring_waits_for_publication_capacity_and_resumes_once() {
     let (mut listener, _) = fixture();
     let before = listener.players.objects().snapshot();
