@@ -4,12 +4,18 @@
 use super::*;
 use nfs_content::{
     participant_logic::{Field as LayoutField, Layout},
-    scoring::content::{Field, Participant},
+    scoring::{
+        ai_deployment::{BooleanSet, Deployment, Pacing},
+        content::{Field, Participant},
+        events::Identity as ContentIdentity,
+        participant_properties::Property,
+    },
 };
 use nfs_world::{
     replication::entity::{Kind, creation::Asset},
     scoring::{
         interpreter::{Category, Inputs, Session},
+        participant_pacing::{Library, Sources},
         program::{Behavior, Identity, Node, Program},
     },
 };
@@ -43,7 +49,7 @@ fn participant(blueprint: &str, local_index: u16) -> Participant {
                 type_id: 10,
                 local_index,
             },
-            catalog: vec![(10, 2)],
+            catalog: vec![(10, 3)],
             scene_content_key: 101,
             owner: Owner::Scene,
             bus_count: 1,
@@ -60,10 +66,84 @@ fn participant(blueprint: &str, local_index: u16) -> Participant {
         bus_entities: vec![Some(0)],
     }
 }
+fn ai() -> Deployment {
+    let property = |port| Property {
+        channel: "constructed/channel".into(),
+        port,
+    };
+    let id = |index| ContentIdentity {
+        asset: "constructed/services".into(),
+        index,
+        instances: vec![],
+    };
+    let sources = Sources {
+        pacing: property(1),
+        actors: property(2),
+        personalities: property(3),
+        curves: property(4),
+    };
+    let mut participant = participant(AI_SCORING, 2);
+    let program = Arc::make_mut(&mut participant.program);
+    for (class, behavior) in [
+        (
+            "ParticipantLogicParticipantProviderEntityData",
+            Behavior::ParticipantProvider,
+        ),
+        (
+            "ParticipantPacingAccessorEntityData",
+            Behavior::ParticipantPacing {
+                sources: sources.clone(),
+                provider: 1,
+            },
+        ),
+        (
+            "BoolParticipantPropertyAccessorEntityData",
+            Behavior::ParticipantProperty {
+                property: property(5),
+                kind: nfs_world::scoring::properties::Kind::Boolean,
+                write: true,
+            },
+        ),
+    ] {
+        let mut node = program.nodes[0].clone();
+        node.identity.index = program.nodes.len() as u32;
+        node.class = class.into();
+        node.behavior = behavior;
+        program.nodes.push(node);
+    }
+    Deployment {
+        participant,
+        eligibility: serde_json::from_value(serde_json::json!({
+            "ops": [{"Fact": {"States": [{"scene_key": 101, "serializer": 3}]}}],
+            "ranges": [], "empty_sets": []
+        }))
+        .unwrap(),
+        pacing: vec![Pacing {
+            sources,
+            manager: id(1),
+            actors: nfs_content::events::discovery::Endpoint {
+                scene_key: 101,
+                serializer: 4,
+            },
+            personalities: id(2),
+            curves: id(3),
+            library: Library {
+                personalities: vec![None],
+                fallback: None,
+            },
+        }],
+        boolean_sets: vec![BooleanSet {
+            property: property(5),
+            set: property(6),
+            definition: id(4),
+        }],
+    }
+}
 fn fixture() -> ScoringContent {
     ScoringContent {
         acquisition: participant(ACQUISITION, 0),
         scoring: participant(SCORING, 1),
+        ai: ai(),
         categories: [
             Category::Total,
             Category::Build,
@@ -97,6 +177,7 @@ fn scoring_cache_restores_programs_and_bindings_but_never_live_sessions() {
     for (original, cached) in [
         (&cold.acquisition, &warm.acquisition),
         (&cold.scoring, &warm.scoring),
+        (&cold.ai.participant, &warm.ai.participant),
     ] {
         let mut first = Session::new(original.program.clone()).unwrap();
         let second = Session::new(cached.program.clone()).unwrap();
@@ -117,6 +198,11 @@ fn scoring_cache_restores_programs_and_bindings_but_never_live_sessions() {
         assert_eq!(original.layout, cached.layout);
         assert_eq!(original.fields, cached.fields);
     }
+    assert!(warm.ai.eligibility.evaluate(|_| Some(true)).unwrap());
+    assert!(!warm.ai.eligibility.evaluate(|_| Some(false)).unwrap());
+    assert!(warm.ai.eligibility.evaluate(|_| None).is_err());
+    assert_eq!(warm.ai.pacing, cold.ai.pacing);
+    assert_eq!(warm.ai.boolean_sets, cold.ai.boolean_sets);
 }
 
 #[test]
@@ -131,6 +217,21 @@ fn invalid_scoring_programs_layouts_and_categories_fail_before_publication() {
         ("/scoring/fields/0/serializer", serde_json::json!(1)),
         ("/scoring/layout/catalog", serde_json::json!([])),
         ("/categories", serde_json::json!({})),
+        ("/ai/participant/fields/0/node", serde_json::json!(999)),
+        ("/ai/participant/layout/asset/bundle", serde_json::json!(5)),
+        ("/ai/participant/blueprint", serde_json::json!("wrong/ai")),
+        ("/ai/eligibility/ops", serde_json::json!([])),
+        ("/ai/pacing", serde_json::json!([])),
+        ("/ai/pacing/0/sources/actors/port", serde_json::json!(99)),
+        ("/ai/pacing/0/actors/scene_key", serde_json::json!(0)),
+        ("/ai/pacing/0/manager/asset", serde_json::json!("")),
+        ("/ai/pacing/0/personalities/asset", serde_json::json!("")),
+        ("/ai/pacing/0/curves/asset", serde_json::json!("")),
+        ("/ai/pacing/0/library/personalities", serde_json::json!([])),
+        ("/ai/boolean_sets", serde_json::json!([])),
+        ("/ai/boolean_sets/0/property/port", serde_json::json!(99)),
+        ("/ai/boolean_sets/0/set/port", serde_json::json!(0)),
+        ("/ai/boolean_sets/0/definition/asset", serde_json::json!("")),
         (
             "/acquisition/blueprint",
             serde_json::json!("wrong/blueprint"),
@@ -160,4 +261,26 @@ fn invalid_scoring_programs_layouts_and_categories_fail_before_publication() {
     let mut concatenated = bytes.clone();
     concatenated.extend(&bytes);
     assert!(decode(&concatenated).is_err());
+}
+
+#[test]
+fn ai_deployment_is_required_and_duplicate_services_or_query_sets_fail() {
+    let valid = serde_json::to_value(fixture()).unwrap();
+    let mut missing = valid.clone();
+    missing.as_object_mut().unwrap().remove("ai");
+    assert!(decode(&serde_json::to_vec(&missing).unwrap()).is_err());
+    for path in ["/ai/pacing", "/ai/boolean_sets"] {
+        let mut repeated = valid.clone();
+        let rows = repeated.pointer_mut(path).unwrap().as_array_mut().unwrap();
+        rows.push(rows[0].clone());
+        assert!(
+            decode(&serde_json::to_vec(&repeated).unwrap()).is_err(),
+            "{path}"
+        );
+    }
+    let mut extra = fixture();
+    let mut binding = extra.ai.pacing[0].clone();
+    binding.sources.pacing.port = 91;
+    extra.ai.pacing.push(binding);
+    assert!(decode(&serde_json::to_vec(&extra).unwrap()).is_err());
 }

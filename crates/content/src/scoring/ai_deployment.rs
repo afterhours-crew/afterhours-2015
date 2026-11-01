@@ -21,6 +21,7 @@ use crate::{
     participant_logic,
 };
 use nfs_world::scoring::participant_pacing::{Library, MAX_PERSONALITIES, Sources};
+use nfs_world::scoring::{program::Behavior, properties::Kind};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -51,6 +52,73 @@ pub struct BooleanSet {
     pub property: Property,
     pub set: Property,
     pub definition: Identity,
+}
+
+impl Deployment {
+    /// Restore compiler invariants before publishing cached or supplied data.
+    /// This checks binding completeness, not the host's live membership facts.
+    pub fn validate(&self) -> Result<(), Error> {
+        let invalid = || bad("AI scoring deployment invariants");
+        self.participant.program.validate().map_err(|_| invalid())?;
+        let bound = super::participant_properties::MAX_ACCESSORS;
+        if self.pacing.len() > bound || self.boolean_sets.len() > bound {
+            return Err(invalid());
+        }
+        let identity = |id: &Identity| {
+            !id.asset.is_empty()
+                && id.asset.len() <= 512
+                && id.instances.len() <= crate::scenes::MAX_GRAPH_DEPTH
+                && id
+                    .instances
+                    .iter()
+                    .all(|(asset, _)| !asset.is_empty() && asset.len() <= 512)
+        };
+        let mut pacing = BTreeSet::new();
+        for binding in &self.pacing {
+            binding.sources.validate().map_err(|_| invalid())?;
+            binding.library.validate().map_err(|_| invalid())?;
+            if !pacing.insert(&binding.sources)
+                || binding.library.personalities.is_empty()
+                || binding.actors.scene_key == 0
+                || [&binding.manager, &binding.personalities, &binding.curves]
+                    .into_iter()
+                    .any(|id| !identity(id))
+            {
+                return Err(invalid());
+            }
+        }
+        let mut properties = BTreeSet::new();
+        let mut sets = BTreeSet::new();
+        for binding in &self.boolean_sets {
+            binding.property.validate().map_err(|_| invalid())?;
+            binding.set.validate().map_err(|_| invalid())?;
+            if !identity(&binding.definition) || !sets.insert(&binding.set) {
+                return Err(invalid());
+            }
+            properties.insert(&binding.property);
+        }
+        let mut required_pacing = BTreeSet::new();
+        let mut required_properties = BTreeSet::new();
+        for node in &self.participant.program.nodes {
+            match &node.behavior {
+                Behavior::ParticipantPacing { sources, .. } => {
+                    required_pacing.insert(sources);
+                }
+                Behavior::ParticipantProperty {
+                    property,
+                    kind: Kind::Boolean,
+                    ..
+                } => {
+                    required_properties.insert(property);
+                }
+                _ => {}
+            }
+        }
+        if pacing != required_pacing || properties != required_properties {
+            return Err(invalid());
+        }
+        Ok(())
+    }
 }
 
 fn boolean_sets<S: Source>(
@@ -269,12 +337,14 @@ impl AssetIndex {
             });
         }
         let boolean_sets = boolean_sets(&mut graph, &branch, &aliases)?;
-        Ok(Deployment {
+        let deployment = Deployment {
             participant,
             eligibility,
             pacing,
             boolean_sets,
-        })
+        };
+        deployment.validate()?;
+        Ok(deployment)
     }
 }
 

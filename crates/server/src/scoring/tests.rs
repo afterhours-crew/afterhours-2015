@@ -109,9 +109,54 @@ fn content() -> Content {
     Content::new(Arc::new(ScoringContent {
         acquisition: participant(0),
         scoring: participant(1),
+        ai: ai(),
         categories,
     }))
     .unwrap()
+}
+
+fn ai() -> nfs_content::scoring::ai_deployment::Deployment {
+    nfs_content::scoring::ai_deployment::Deployment {
+        participant: participant(2),
+        eligibility: serde_json::from_value(serde_json::json!({
+            "ops": [{"Fact": {"States": [{"scene_key": 101, "serializer": 3}]}}],
+            "ranges": [], "empty_sets": []
+        }))
+        .unwrap(),
+        pacing: vec![],
+        boolean_sets: vec![],
+    }
+}
+
+#[test]
+fn ai_uses_its_own_program_binding_and_updates() {
+    let content = content();
+    assert!(!Which::Ai.is_event());
+    assert!(!Which::FREE_ROAM.contains(&Which::Ai));
+    assert!(Arc::ptr_eq(
+        content.program(Which::Ai).unwrap(),
+        &content.installed.ai.participant.program
+    ));
+    assert!(!Arc::ptr_eq(
+        content.program(Which::Ai).unwrap(),
+        content.program(Which::Scoring).unwrap()
+    ));
+    assert_eq!(content.binding(Which::Ai).unwrap().asset().local_index, 2);
+    let RecordUpdate::Entity { binding, fields } = content
+        .update(Which::Ai, &[(1, Value::Float(7.))])
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("AI entity update")
+    };
+    assert_eq!(binding.asset().local_index, 2);
+    assert_eq!(
+        fields[1],
+        Some(EntityUpdate::FloatProperty(Some(7f32.to_bits())))
+    );
+    let mut broken = content.installed().clone();
+    broken.ai.participant.layout.asset.bundle += 1;
+    assert!(Content::new(Arc::new(broken)).is_err());
 }
 
 #[test]
@@ -236,6 +281,7 @@ fn content_requires_one_shared_catalog() {
         Content::new(Arc::new(ScoringContent {
             acquisition: participant(0),
             scoring: other,
+            ai: ai(),
             categories: BTreeMap::new(),
         }))
         .is_err()
@@ -251,6 +297,7 @@ fn synchronized_string_replication_preserves_empty_and_utf8_bytes() {
     let content = Content::new(Arc::new(ScoringContent {
         acquisition: participant(0),
         scoring: part,
+        ai: ai(),
         categories: BTreeMap::new(),
     }))
     .unwrap();

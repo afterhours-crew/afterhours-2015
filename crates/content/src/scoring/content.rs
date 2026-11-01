@@ -2,7 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! Everything the server needs to run the two installed driving participants:
+//! Everything the server needs to run the installed player and AI driving participants:
 //! their compiled programs, replication layouts, the map from graph nodes to
 //! serializer fields and the map from keeper link IDs to score categories.
 //! The event driving-style participant compiles the same way against the
@@ -58,6 +58,8 @@ pub struct Participant {
 pub struct ScoringContent {
     pub acquisition: Participant,
     pub scoring: Participant,
+    /// Required scene-owned opponent logic, eligibility and external bindings.
+    pub ai: super::ai_deployment::Deployment,
     /// Keeper link ID (from the installed channel) to the category it credits.
     pub categories: BTreeMap<u32, Category>,
 }
@@ -426,7 +428,7 @@ impl AssetIndex {
             .map(|(participant, _)| participant)
     }
 
-    /// Read both installed player driving participants for one gameplay scene.
+    /// Read the player and AI driving participants for one gameplay scene.
     pub fn scoring_content(&mut self, scene: &str) -> Result<ScoringContent, Error> {
         let (acquisition, acquisition_composition) =
             self.scoring_participant(scene, ACQUISITION, false)?;
@@ -438,6 +440,7 @@ impl AssetIndex {
         Ok(ScoringContent {
             acquisition,
             scoring,
+            ai: self.ai_scoring_deployment(scene)?,
             categories,
         })
     }

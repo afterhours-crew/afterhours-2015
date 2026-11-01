@@ -292,9 +292,13 @@ truncated, corrupt or invalid models are rebuilt. Publication is bounded and
 atomic, with one builder per key. Runtime constructors still validate cached
 inputs against the current vehicle/item definitions.
 
-Free-roam scoring caches both compiled programs and their static scene layouts.
-Loading validates interpreter graphs, serializer ordering, catalog bindings and
-the six score categories. Session state, awards, inputs and player identities
+Free-roam scoring caches the player and AI programs and their static scene layouts.
+AI eligibility, pacing libraries and Boolean query-set bindings are required
+compiler products; old entries that omit them are rebuilt. Loading validates
+interpreter graphs, serializer ordering, shared catalog bindings, complete and
+unambiguous AI service bindings, and the six score categories. This preparation
+does not itself create AI sessions; their live lifetime and query membership
+remain the listener's responsibility. Session state, awards, inputs and player identities
 are not serialized. Scene keeper lookup remains separate, preserving its
 existing failure handling. `profile_scoring_cache` compares whole installed
 programs and keeper bindings across uncached, cold and warm preparation.
