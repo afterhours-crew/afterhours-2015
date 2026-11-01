@@ -33,6 +33,7 @@ use nfs_world::{
     },
 };
 use std::sync::Arc;
+mod ai;
 
 /// The participant root's disable notification, which banks every category
 /// (installed topology: OnDisabled forwards into the scoring prefab's bank
@@ -50,7 +51,7 @@ const MAX_TICK_SECONDS: f32 = 0.5;
 const FLUSH_INTERVAL_MS: u64 = 100;
 /// Coalesced records waiting for a flush (one per live entity at most, plus
 /// reputation fields); more than this means the queue never drains.
-const MAX_DIRTY: usize = 64;
+const MAX_DIRTY: usize = 64 + nfs_world::replication::players::ai::MAX_AI;
 /// Other cars supplied to the queries per tick.
 const MAX_OTHERS: usize = 64;
 
@@ -129,6 +130,7 @@ pub(in crate::net) struct Credited {
 #[derive(Clone, Debug, Default)]
 pub(super) struct State {
     pub live: BTreeMap<u16, Live>,
+    pub ai: BTreeMap<u16, ai::Live>,
     pub reported: BTreeSet<u16>,
     pub reports: Vec<QueuedReport>,
     pub pending_awards: VecDeque<AwardRequest>,
@@ -770,6 +772,7 @@ impl PlayerListener {
         car: u16,
         now_ms: u64,
         nitrous: Option<&Nitrous>,
+        state: &State,
     ) -> Result<Inputs, replication::Error> {
         let physics = players
             .vehicle_physics(HOST_SELECTOR as u8, self.persona, car)
@@ -792,12 +795,7 @@ impl PlayerListener {
             vehicle: Some(vehicle),
             road,
             others: other_vehicles(players, car),
-            // The drift and high-speed participant sets hold participants
-            // whose own scoring sets that property: other players and AI
-            // racers, never traffic (E1130). This host scores only its own
-            // player and its rivals run no scoring, so no other participant
-            // is a member.
-            participants: Vec::new(),
+            participants: ai::members(content, players, state, self.persona)?,
             stats: self.vehicle_stats(content, players, car),
             ..idle_inputs(self.persona, now_ms)
         })
@@ -878,32 +876,41 @@ impl PlayerListener {
         players: &Players,
         body: nfs_protocol::world::BitSpan<'_>,
     ) -> Result<Option<QueuedReport>, replication::Error> {
-        for (&participant, live) in &self.scoring_state.live {
-            for entity in &live.entities {
-                let which = entity.which;
-                for (node, binding) in &entity.reports {
-                    let report = binding.receive(
-                        players,
-                        HOST_SELECTOR as u8,
-                        self.persona,
-                        body,
-                        |id| players.objects().get(id).is_some(),
-                    )?;
-                    if let Some(report) = report {
-                        tracing::info!(
-                            participant,
-                            ?which,
-                            node,
-                            ?report,
-                            "scoring report received"
-                        );
-                        return Ok(Some(QueuedReport {
-                            participant,
-                            which,
-                            node: *node,
-                            report,
-                        }));
-                    }
+        let player_entities = self
+            .scoring_state
+            .live
+            .iter()
+            .flat_map(|(&participant, live)| {
+                live.entities
+                    .iter()
+                    .map(move |entity| (participant, entity))
+            });
+        let ai_entities = self
+            .scoring_state
+            .ai
+            .iter()
+            .map(|(&participant, live)| (participant, &live.entity));
+        for (participant, entity) in player_entities.chain(ai_entities) {
+            let which = entity.which;
+            for (node, binding) in &entity.reports {
+                let report =
+                    binding.receive(players, HOST_SELECTOR as u8, self.persona, body, |id| {
+                        players.objects().get(id).is_some()
+                    })?;
+                if let Some(report) = report {
+                    tracing::info!(
+                        participant,
+                        ?which,
+                        node,
+                        ?report,
+                        "scoring report received"
+                    );
+                    return Ok(Some(QueuedReport {
+                        participant,
+                        which,
+                        node: *node,
+                        report,
+                    }));
                 }
             }
         }
@@ -925,6 +932,9 @@ impl PlayerListener {
             which,
             ghost,
         } = scope;
+        if which == Which::Ai && !output.awards.is_empty() {
+            return Err(replication::Error::Unsupported);
+        }
         if let Some(live) = state.live.get(&participant)
             && let Some(nitrous) = state.nitrous.get_mut(&live.car)
         {
@@ -1119,7 +1129,14 @@ impl PlayerListener {
             .get(&participant)
             .ok_or(replication::Error::Shape)?
             .car;
-        let inputs = self.scoring_inputs(content, players, car, now_ms, state.nitrous.get(&car))?;
+        let inputs = self.scoring_inputs(
+            content,
+            players,
+            car,
+            now_ms,
+            state.nitrous.get(&car),
+            state,
+        )?;
         let (session, output) = content
             .start(which, &inputs)
             .map_err(fail("session start"))?;
@@ -1355,9 +1372,10 @@ impl PlayerListener {
         let Some(content) = self.scoring.clone() else {
             return Ok(());
         };
-        if !self.pending_entries.is_empty() {
+        if !self.pending_entries.is_empty() || self.pending.len() >= MAX_PENDING {
             return Ok(());
         }
+        let desired_ai = self.desired_ai_scoring(&content)?;
         let mut desired = self.desired_scoring(content.has_event());
         for (&participant, kinds) in &mut desired {
             for (which, _) in kinds {
@@ -1405,6 +1423,8 @@ impl PlayerListener {
         }
         let idle = retiring.is_empty()
             && starting.is_empty()
+            && desired_ai.is_empty()
+            && self.scoring_state.ai.is_empty()
             && self.scoring_state.reports.is_empty()
             && self.scoring_state.reported.is_empty();
         if idle {
@@ -1414,6 +1434,14 @@ impl PlayerListener {
         let mut state = self.scoring_state.clone();
         let mut players = self.players.clone();
         let mut collected = Collected::default();
+        self.advance_ai_scoring(
+            &content,
+            &mut players,
+            &mut state,
+            &desired_ai,
+            now_ms,
+            &mut collected,
+        )?;
         for (participant, which) in retiring {
             self.retire(
                 &content,
@@ -1453,6 +1481,7 @@ impl PlayerListener {
                 live.car,
                 now_ms,
                 state.nitrous.get(&live.car),
+                &state,
             )?;
             let (output, ghost) = {
                 let live = state
@@ -1494,8 +1523,14 @@ impl PlayerListener {
             }
             let covered = ((now_ms - last_ms) as f32 / 1000.0).min(MAX_TICK_SECONDS);
             let mut remaining = covered;
-            let mut inputs =
-                self.scoring_inputs(&content, &players, car, now_ms, state.nitrous.get(&car))?;
+            let mut inputs = self.scoring_inputs(
+                &content,
+                &players,
+                car,
+                now_ms,
+                state.nitrous.get(&car),
+                &state,
+            )?;
             // Preserve transitions even when start and release arrive between
             // scheduler passes. Component notifications deliver their snapshots
             // without advancing unrelated queries, timers or fuel.

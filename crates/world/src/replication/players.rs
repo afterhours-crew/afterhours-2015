@@ -66,6 +66,8 @@ pub struct Players {
     ai: BTreeMap<(u8, u64, u64), ai::Instance>,
     /// Persistent AI participants whose cars come and go (roaming rivals).
     ai_slots: BTreeMap<(u8, u64, u64), ai::Slot>,
+    /// Explicit participant-owned children, deleted before their AI owner.
+    ai_entities: BTreeMap<u16, u16>,
     pacing_groups: BTreeMap<u16, (u8, u64)>,
 }
 
@@ -281,6 +283,7 @@ impl Players {
             }
         }
         self.objects = next;
+        self.ai_entities.retain(|id, _| !ids.contains(id));
         Ok(())
     }
 

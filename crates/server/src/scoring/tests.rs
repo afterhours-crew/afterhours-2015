@@ -95,7 +95,7 @@ fn participant(local_index: u16) -> Participant {
     }
 }
 
-fn content() -> Content {
+pub(crate) fn content() -> Content {
     let categories = [
         (10, Category::Total),
         (11, Category::Build),
@@ -123,6 +123,7 @@ fn ai() -> nfs_content::scoring::ai_deployment::Deployment {
             "ranges": [], "empty_sets": []
         }))
         .unwrap(),
+        membership: vec![],
         pacing: vec![],
         boolean_sets: vec![],
     }

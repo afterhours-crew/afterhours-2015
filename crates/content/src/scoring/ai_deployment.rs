@@ -13,7 +13,7 @@ use super::{
 use crate::{
     Error,
     assets::AssetIndex,
-    events::discovery::{Endpoint as SceneEndpoint, membership},
+    events::discovery::{Endpoint as SceneEndpoint, membership as sets},
     graph::{
         Graph, Site, Source, bad,
         scenes::{SceneLookup, scene_roots},
@@ -23,6 +23,18 @@ use crate::{
 use nfs_world::scoring::participant_pacing::{Library, MAX_PERSONALITIES, Sources};
 use nfs_world::scoring::{program::Behavior, properties::Kind};
 use std::collections::{BTreeMap, BTreeSet};
+
+pub mod membership;
+
+fn identity_valid(id: &Identity) -> bool {
+    !id.asset.is_empty()
+        && id.asset.len() <= 512
+        && id.instances.len() <= crate::scenes::MAX_GRAPH_DEPTH
+        && id
+            .instances
+            .iter()
+            .all(|(asset, _)| !asset.is_empty() && asset.len() <= 512)
+}
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -39,7 +51,8 @@ pub struct Pacing {
 #[serde(deny_unknown_fields)]
 pub struct Deployment {
     pub participant: Participant,
-    pub eligibility: membership::Program,
+    pub eligibility: sets::Program,
+    pub membership: Vec<membership::Binding>,
     pub pacing: Vec<Pacing>,
     pub boolean_sets: Vec<BooleanSet>,
 }
@@ -60,19 +73,11 @@ impl Deployment {
     pub fn validate(&self) -> Result<(), Error> {
         let invalid = || bad("AI scoring deployment invariants");
         self.participant.program.validate().map_err(|_| invalid())?;
+        membership::validate(self)?;
         let bound = super::participant_properties::MAX_ACCESSORS;
         if self.pacing.len() > bound || self.boolean_sets.len() > bound {
             return Err(invalid());
         }
-        let identity = |id: &Identity| {
-            !id.asset.is_empty()
-                && id.asset.len() <= 512
-                && id.instances.len() <= crate::scenes::MAX_GRAPH_DEPTH
-                && id
-                    .instances
-                    .iter()
-                    .all(|(asset, _)| !asset.is_empty() && asset.len() <= 512)
-        };
         let mut pacing = BTreeSet::new();
         for binding in &self.pacing {
             binding.sources.validate().map_err(|_| invalid())?;
@@ -82,7 +87,7 @@ impl Deployment {
                 || binding.actors.scene_key == 0
                 || [&binding.manager, &binding.personalities, &binding.curves]
                     .into_iter()
-                    .any(|id| !identity(id))
+                    .any(|id| !identity_valid(id))
             {
                 return Err(invalid());
             }
@@ -92,7 +97,7 @@ impl Deployment {
         for binding in &self.boolean_sets {
             binding.property.validate().map_err(|_| invalid())?;
             binding.set.validate().map_err(|_| invalid())?;
-            if !identity(&binding.definition) || !sets.insert(&binding.set) {
+            if !identity_valid(&binding.definition) || !sets.insert(&binding.set) {
                 return Err(invalid());
             }
             properties.insert(&binding.property);
@@ -276,7 +281,7 @@ impl AssetIndex {
         if controller.port != 0 {
             return Err(bad("AI scoring set controller port"));
         }
-        let eligibility = membership::read_set(
+        let resolved = sets::read_set_sources(
             &mut graph,
             controller.site.clone(),
             &BTreeMap::new(),
@@ -288,6 +293,13 @@ impl AssetIndex {
                 })
             },
         )?;
+        let membership = membership::bind(&mut graph, &resolved, &mut |graph, site| {
+            let (scene_key, serializer) = lookup.endpoint(graph, site)?;
+            Ok(SceneEndpoint {
+                scene_key,
+                serializer,
+            })
+        })?;
         let mut pacing = Vec::new();
         for accessor in accessors {
             let node = branch
@@ -339,7 +351,8 @@ impl AssetIndex {
         let boolean_sets = boolean_sets(&mut graph, &branch, &aliases)?;
         let deployment = Deployment {
             participant,
-            eligibility,
+            eligibility: resolved.program,
+            membership,
             pacing,
             boolean_sets,
         };

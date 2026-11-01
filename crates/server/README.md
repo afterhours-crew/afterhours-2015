@@ -296,12 +296,22 @@ Free-roam scoring caches the player and AI programs and their static scene layou
 AI eligibility, pacing libraries and Boolean query-set bindings are required
 compiler products; old entries that omit them are rebuilt. Loading validates
 interpreter graphs, serializer ordering, shared catalog bindings, complete and
-unambiguous AI service bindings, and the six score categories. This preparation
-does not itself create AI sessions; their live lifetime and query membership
-remain the listener's responsibility. Session state, awards, inputs and player identities
+unambiguous AI service and population-owner bindings, and the six score categories.
+The listener creates eligible racer scoring sessions from current owned population
+membership, retains them across car handoffs and carless intervals, and retires
+them when eligibility ends. Installed Boolean outputs determine which current
+cars enter the player's scoring queries; unknown population ownership rejects.
+AI query reports require the current connection and account, and AI scoring
+cannot credit player awards. Scoring entities register as explicit children of
+their AI participant and are deleted before that participant during population
+teardown; unrelated references still reject the transaction. Session state,
+awards, inputs and player identities
 are not serialized. Scene keeper lookup remains separate, preserving its
 existing failure handling. `profile_scoring_cache` compares whole installed
 programs and keeper bindings across uncached, cold and warm preparation.
+Constructed tests cover lifetime, report routing, queue backpressure and atomic
+failure/retry. Full story behavior and Crew rewards still require qualification
+and owner live acceptance.
 
 The road products retain authored node/lane/segment order, lane direction,
 widths, points and speed limits. Reads rebuild spatial indexes through the
@@ -679,7 +689,8 @@ profiles and explicit pose/speed inputs, without player inventory. Manager
 binding and constructor tests cover rollback and isolation. Prepared population
 supplies bounded creation, client simulation grants, validated physics reports
 and retirement. The host owns placement, AI goals and lifetime; the client
-simulates delegated cars. AI remains separate from player inventory and scoring.
+simulates delegated cars. AI remains separate from player inventory and awards;
+eligible racers have their own scoring sessions, while traffic is excluded.
 Only session-authorized spawn keys accept reports; stale reports cannot rewind
 state, and retirement removes their grants. Independent chassis updates can
 share bounded publications without crossing lifecycle barriers. Installed cubic

@@ -118,6 +118,7 @@ fn ai() -> Deployment {
             "ranges": [], "empty_sets": []
         }))
         .unwrap(),
+        membership: vec![],
         pacing: vec![Pacing {
             sources,
             manager: id(1),
@@ -283,4 +284,65 @@ fn ai_deployment_is_required_and_duplicate_services_or_query_sets_fail() {
     binding.sources.pacing.port = 91;
     extra.ai.pacing.push(binding);
     assert!(decode(&serde_json::to_vec(&extra).unwrap()).is_err());
+}
+
+#[test]
+fn ai_membership_cache_requires_exact_complete_owner_bindings() {
+    use nfs_content::events::discovery::membership::Fact;
+    use nfs_content::scoring::ai_deployment::membership::{Binding, Owner};
+    let id = |index| ContentIdentity {
+        asset: "constructed/owner".into(),
+        index,
+        instances: vec![],
+    };
+    let mut content = fixture();
+    content.ai.eligibility = serde_json::from_value(serde_json::json!({
+        "ops": [{"Fact": {"Mutable": id(1)}}], "ranges": [], "empty_sets": []
+    }))
+    .unwrap();
+    // The old missing-owner state must reject, including after cache restore.
+    assert!(decode(&serde_json::to_vec(&content).unwrap()).is_err());
+    content.ai.membership.push(Binding {
+        fact: Fact::Mutable(id(1)),
+        owner: Owner::Cops {
+            dispatch: id(2),
+            roadblocks: id(3),
+        },
+    });
+    let bytes = serde_json::to_vec(&content).unwrap();
+    let restored = decode(&bytes).unwrap();
+    assert_eq!(restored.ai.membership, content.ai.membership);
+    assert!(restored.ai.eligibility.evaluate(|_| None).is_err());
+    assert!(restored.ai.eligibility.evaluate(|_| Some(true)).unwrap());
+    assert!(!restored.ai.eligibility.evaluate(|_| Some(false)).unwrap());
+    for replacement in [
+        Binding {
+            fact: Fact::Mutable(id(4)),
+            owner: content.ai.membership[0].owner.clone(),
+        },
+        Binding {
+            fact: Fact::Mutable(id(1)),
+            owner: Owner::Traffic { manager: id(1) },
+        },
+        Binding {
+            fact: Fact::Mutable(id(1)),
+            owner: Owner::Cops {
+                dispatch: id(2),
+                roadblocks: id(2),
+            },
+        },
+    ] {
+        let mut bad = restored.clone();
+        bad.ai.membership[0] = replacement;
+        assert!(decode(&serde_json::to_vec(&bad).unwrap()).is_err());
+    }
+    let mut repeated = restored;
+    repeated
+        .ai
+        .membership
+        .push(repeated.ai.membership[0].clone());
+    assert!(decode(&serde_json::to_vec(&repeated).unwrap()).is_err());
+    let mut missing = serde_json::to_value(content).unwrap();
+    missing["ai"].as_object_mut().unwrap().remove("membership");
+    assert!(decode(&serde_json::to_vec(&missing).unwrap()).is_err());
 }

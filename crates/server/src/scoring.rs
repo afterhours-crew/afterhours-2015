@@ -644,4 +644,4 @@ pub fn reputation_updates(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

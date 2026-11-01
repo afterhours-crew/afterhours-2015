@@ -125,6 +125,7 @@ struct Compiler<'a> {
     ops: Vec<Op>,
     ranges: BTreeMap<Identity, IntegerRange>,
     empty_sets: BTreeSet<Identity>,
+    sites: BTreeMap<Identity, Site>,
 }
 impl Compiler<'_> {
     fn visit<S: Source>(
@@ -140,6 +141,7 @@ impl Compiler<'_> {
             return Err(bad("event set cycle or bound"));
         }
         let object = g.object(&site)?;
+        self.sites.insert(Identity::from(&site), site.clone());
         let op = match object.class.as_str() {
             "ParticipantSetPredicateEntityData" => {
                 if object
@@ -186,6 +188,7 @@ impl Compiler<'_> {
                 if g.object(&manager)?.class != "AiParticipantManagerEntityData" {
                     return Err(bad("AI set participant manager class"));
                 }
+                self.sites.insert(Identity::from(&manager), manager.clone());
                 Op::Fact(Fact::Ai(Identity::from(&manager)))
             }
             "ParticipantSetTrafficAdapterEntityData" => {
@@ -193,6 +196,7 @@ impl Compiler<'_> {
                 if g.object(&manager)?.class != "TrafficManagerEntityData" {
                     return Err(bad("traffic set manager class"));
                 }
+                self.sites.insert(Identity::from(&manager), manager.clone());
                 Op::Fact(Fact::Traffic(Identity::from(&manager)))
             }
             "ParticipantSetStateAdapterEntityData" => {
@@ -343,18 +347,39 @@ pub(crate) fn read_set<S: Source>(
     identified: &BTreeMap<Site, String>,
     endpoint: &mut impl FnMut(&mut Graph<S>, &Site) -> Result<Endpoint, Error>,
 ) -> Result<Program, Error> {
+    Ok(read_set_sources(g, root, identified, endpoint)?.program)
+}
+
+/// Compiler context for consumers that must bind live membership owners.
+/// Sites retain their actual connection buses and instance ancestry; callers
+/// must not reconstruct those from an asset name or search for a similar node.
+pub(crate) struct Resolved {
+    pub program: Program,
+    pub sites: BTreeMap<Identity, Site>,
+}
+
+pub(crate) fn read_set_sources<S: Source>(
+    g: &mut Graph<S>,
+    root: Site,
+    identified: &BTreeMap<Site, String>,
+    endpoint: &mut impl FnMut(&mut Graph<S>, &Site) -> Result<Endpoint, Error>,
+) -> Result<Resolved, Error> {
     let mut compiler = Compiler {
         identified,
         active: BTreeSet::new(),
         ops: Vec::new(),
         ranges: BTreeMap::new(),
         empty_sets: BTreeSet::new(),
+        sites: BTreeMap::new(),
     };
     compiler.visit(g, root, endpoint)?;
-    Ok(Program {
-        ops: compiler.ops,
-        ranges: compiler.ranges,
-        empty_sets: compiler.empty_sets,
+    Ok(Resolved {
+        program: Program {
+            ops: compiler.ops,
+            ranges: compiler.ranges,
+            empty_sets: compiler.empty_sets,
+        },
+        sites: compiler.sites,
     })
 }
 

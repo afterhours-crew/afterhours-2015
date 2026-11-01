@@ -335,6 +335,41 @@ impl Players {
         })
     }
 
+    /// Attach an explicitly owned logic entity to an AI participant's lifetime.
+    /// Only registered children cascade; unrelated incoming references still
+    /// reject retirement. Detaching a slot's car retains these children.
+    pub fn bind_ai_entity(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        participant: u16,
+        entity: u16,
+    ) -> Result<(), Error> {
+        if !self.owns_ai_participant(connection, persona, participant) {
+            return Err(Error::UnknownObject);
+        }
+        let Some(Initial::Entity { fields, .. }) = self.objects.get(entity).map(|o| &o.initial)
+        else {
+            return Err(Error::TypeMismatch);
+        };
+        if !matches!(fields.first(), Some(entity::Initial::Root { reference, .. }) if *reference == participant)
+        {
+            return Err(Error::Shape);
+        }
+        if let Some(owner) = self.ai_entities.get(&entity) {
+            return if *owner == participant {
+                Ok(())
+            } else {
+                Err(Error::Shape)
+            };
+        }
+        if self.ai_entities.len() >= MAX_AI {
+            return Err(Error::Bound);
+        }
+        self.ai_entities.insert(entity, participant);
+        Ok(())
+    }
+
     pub fn ai_slot(&self, connection: u8, persona: u64, key: u64) -> Option<SlotIds> {
         self.ai_slots
             .get(&(connection, persona, key))
@@ -537,6 +572,8 @@ impl Players {
             self.ai.remove(&(connection, persona, key));
         }
         self.ai_slots.remove(&(connection, persona, slot));
+        self.ai_entities
+            .retain(|id, _| !result.deleted.contains(id));
         Ok(result)
     }
 
@@ -684,6 +721,8 @@ impl Players {
         };
         self.objects = next;
         self.ai.remove(&(connection, persona, key));
+        self.ai_entities
+            .retain(|id, _| !result.deleted.contains(id));
         Ok(result)
     }
 
@@ -742,6 +781,12 @@ impl Players {
         retired: Retired,
     ) -> Result<Removed, Error> {
         let mut result = Removed::default();
+        for (&entity, &participant) in &self.ai_entities {
+            if participant == retired.participant {
+                next.remove(entity)?;
+                result.deleted.push(entity);
+            }
+        }
         if let Some(managers) = retired.alive {
             result
                 .leave
