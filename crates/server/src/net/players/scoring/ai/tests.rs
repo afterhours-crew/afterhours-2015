@@ -156,16 +156,17 @@ fn fixture() -> (PlayerListener, Registry) {
 #[test]
 fn ai_scoring_keeps_carless_sessions_projects_authored_flags_and_retires() {
     let (mut listener, mut registry) = fixture();
+    let before = listener.players.objects().snapshot();
     listener.advance_scoring(0).unwrap();
     let participant = *listener.scoring_state.ai.keys().next().unwrap();
-    let ghost = listener.scoring_state.ai[&participant].entity.ghost;
-    assert!(listener.players.objects().get(ghost).is_some());
+    assert_eq!(listener.players.objects().snapshot(), before);
+    assert!(listener.pending.is_empty());
+    assert!(listener.pending_rpcs.is_empty());
     assert!(listener.scoring_state.ai[&participant].car.is_none());
     let content = listener.scoring.clone().unwrap();
     let property = &content.installed().ai.boolean_sets[0].property;
     assert_eq!(
         listener.scoring_state.ai[&participant]
-            .entity
             .session
             .participant_value(u64::from(participant), property, Kind::Boolean),
         Some(Value::Boolean(true))
@@ -177,7 +178,7 @@ fn ai_scoring_keeps_carless_sessions_projects_authored_flags_and_retires() {
     );
     advance_population(&mut listener, &mut registry, 10_000, Some([0., 1., 0.]));
     listener.advance_scoring(10_000).unwrap();
-    assert_eq!(listener.scoring_state.ai[&participant].entity.ghost, ghost);
+    assert_eq!(listener.scoring_state.ai.len(), 1);
     let (key, car) = listener.scoring_state.ai[&participant].car.unwrap();
     let rows = members(&content, &listener.players, &listener.scoring_state, 100).unwrap();
     assert_eq!(rows.len(), 2);
@@ -225,59 +226,46 @@ fn ai_scoring_keeps_carless_sessions_projects_authored_flags_and_retires() {
         .into_iter()
         .map(|p| (p.participant, p))
         .collect();
-    let mut players = listener.players.clone();
+    let players = listener.players.clone();
     let mut state = listener.scoring_state.clone();
     listener
-        .advance_ai_scoring(
-            &content,
-            &mut players,
-            &mut state,
-            &desired,
-            10_100,
-            &mut Collected::default(),
-        )
+        .advance_ai_scoring(&content, &players, &mut state, &desired, 10_100)
         .unwrap();
-    assert_eq!(state.ai[&participant].entity.ghost, ghost);
+    assert_eq!(state.ai.len(), 1);
     assert!(state.ai[&participant].car.is_none());
     assert!(members(&content, &players, &state, 100).unwrap().is_empty());
     listener
-        .advance_ai_scoring(
-            &content,
-            &mut players,
-            &mut state,
-            &BTreeMap::new(),
-            10_200,
-            &mut Collected::default(),
-        )
+        .advance_ai_scoring(&content, &players, &mut state, &BTreeMap::new(), 10_200)
         .unwrap();
     assert!(state.ai.is_empty());
-    assert!(players.objects().get(ghost).is_none());
-    assert!(state.dirty_deleted.contains(&ghost));
+    assert_eq!(
+        players.objects().snapshot(),
+        listener.players.objects().snapshot()
+    );
+    assert!(state.dirty.is_empty());
+    assert!(state.dirty_deleted.is_empty());
     assert!(state.pending_awards.is_empty());
 }
 
 #[test]
-fn ai_scoring_late_capacity_failure_rolls_back_and_unknown_population_rejects() {
+fn ai_scoring_failed_start_rolls_back_and_unknown_population_rejects() {
     let (mut listener, _) = fixture();
     let before = listener.players.objects().snapshot();
-    for id in 1000..1000 + MAX_DIRTY as u16 {
-        listener.scoring_state.dirty.insert(
-            id,
-            Record {
-                id,
-                initial: None,
-                update: replication::Update::PlayerView(replication::player_view::Update {
-                    base: None,
-                    view: None,
-                }),
-            },
-        );
-    }
-    assert!(listener.advance_scoring(1).is_err());
+    let good = listener.scoring.clone().unwrap();
+    let mut broken = good.installed().clone();
+    // Fail after both startup flags have been written. A duplicate accessor
+    // activation is invalid at runtime and must not leave a partial session.
+    Arc::make_mut(&mut broken.ai.participant.program)
+        .startup
+        .push(Step::Activate(5));
+    listener.scoring = Some(Arc::new(Content::new(Arc::new(broken)).unwrap()));
+    assert_eq!(listener.advance_scoring(1), Err(replication::Error::Shape));
     assert_eq!(listener.players.objects().snapshot(), before);
     assert!(listener.scoring_state.ai.is_empty());
-    assert_eq!(listener.scoring_state.dirty.len(), MAX_DIRTY);
-    listener.scoring_state.dirty.clear();
+    assert!(listener.scoring_state.dirty.is_empty());
+    assert!(listener.pending.is_empty());
+    assert!(listener.pending_rpcs.is_empty());
+    listener.scoring = Some(good);
     listener.advance_scoring(1).unwrap();
     assert_eq!(listener.scoring_state.ai.len(), 1);
     let content = listener.scoring.clone().unwrap();
@@ -292,12 +280,46 @@ fn ai_scoring_late_capacity_failure_rolls_back_and_unknown_population_rejects() 
 }
 
 #[test]
-fn ai_scoring_query_reports_require_the_current_population_owner() {
+fn local_ai_cannot_send_client_commands_or_credit_a_human_player() {
+    use nfs_world::scoring::collision::Command;
+    let (listener, _) = fixture();
+    let content = listener.scoring.as_deref().unwrap();
+    for output in [
+        Output {
+            commands: vec![(4, Command::Begin)],
+            ..Output::default()
+        },
+        Output {
+            awards: vec![Award {
+                keeper: 10,
+                participant: 100,
+                amount: 500,
+            }],
+            ..Output::default()
+        },
+        Output {
+            participant_properties: vec![nfs_world::scoring::participant_properties::Write {
+                participant: 100,
+                property: content.installed().ai.boolean_sets[0].property.clone(),
+                value: Value::Boolean(true),
+            }],
+            ..Output::default()
+        },
+    ] {
+        assert_eq!(
+            local_output(content, 42, output, false),
+            Err(replication::Error::Unsupported)
+        );
+    }
+}
+
+#[test]
+fn ai_scoring_has_no_client_query_target_and_retires_after_population() {
     use nfs_world::bits::BitWriter;
     let (mut listener, _) = fixture();
     listener.advance_scoring(0).unwrap();
     let (&participant, live) = listener.scoring_state.ai.first_key_value().unwrap();
-    let ghost = live.entity.ghost;
+    let before_session = format!("{:?}", live.session);
     let mut payload = BitWriter::new();
     payload.put(1, 9).put(0, 32);
     for value in [1f32, 2., 3., 4.] {
@@ -308,102 +330,54 @@ fn ai_scoring_query_reports_require_the_current_population_owner() {
     body.put(0, 32)
         .put(0, 32)
         .put(1, 8)
-        .put(u64::from(ghost), 13)
+        .put(u64::from(participant), 13)
         .put(payload.span().len().div_ceil(8) as u64, 9)
         .put_span(payload.span());
-    let report = listener
-        .scoring_report(&listener.players, body.span())
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        (report.participant, report.which, report.node),
-        (participant, Which::Ai, 3)
+    assert!(
+        listener
+            .scoring_report(&listener.players, body.span())
+            .unwrap()
+            .is_none()
     );
-    let binding = live
-        .entity
-        .reports
-        .iter()
-        .find(|(node, _)| *node == 3)
-        .unwrap()
-        .1
-        .clone();
-    for (connection, persona) in [(1, 100), (HOST_SELECTOR as u8, 200)] {
-        assert_eq!(
-            binding.receive(&listener.players, connection, persona, body.span(), |_| {
-                true
-            }),
-            Err(replication::Error::UnknownObject)
-        );
-    }
     assert_eq!(
-        binding.receive(
-            &listener.players,
-            HOST_SELECTOR as u8,
-            100,
-            body.span(),
-            |_| false
-        ),
-        Err(replication::Error::UnknownObject)
+        format!("{:?}", listener.scoring_state.ai[&participant].session),
+        before_session
     );
-    listener.scoring_state.reports.push(report);
-    listener.advance_scoring(1).unwrap();
-    assert!(listener.scoring_state.reports.is_empty());
-    let session = &listener.scoring_state.ai[&participant].entity.session;
-    for (field, value) in [0xad59_4576, 0x445f_266b, 0xd70a_7f0c, 0xd887_31d6]
-        .into_iter()
-        .zip([1., 2., 3., 4.])
-    {
-        assert_eq!(
-            session.read(Port { node: 3, field }).unwrap(),
-            Some(Value::Float(value))
-        );
-    }
     assert!(listener.scoring_state.pending_awards.is_empty());
     let removed = listener
         .players
         .remove_ai_for_connection(HOST_SELECTOR as u8)
         .unwrap();
-    let child_index = removed.deleted.iter().position(|id| *id == ghost).unwrap();
-    let owner_index = removed
-        .deleted
-        .iter()
-        .position(|id| *id == participant)
-        .unwrap();
-    assert!(child_index < owner_index);
-    assert_eq!(
-        binding.receive(
-            &listener.players,
-            HOST_SELECTOR as u8,
-            100,
-            body.span(),
-            |_| true
-        ),
-        Err(replication::Error::UnknownObject)
-    );
+    assert!(removed.deleted.contains(&participant));
     listener.pending.clear();
     listener.advance_scoring(2).unwrap();
     assert!(listener.scoring_state.ai.is_empty());
     assert!(listener.scoring_state.dirty.is_empty());
     assert!(
         listener.pending.is_empty(),
-        "population already published the deletion"
+        "local scoring retirement must not publish an extra deletion"
     );
 }
 
 #[test]
-fn ai_scoring_owner_retirement_is_atomic_and_preserves_unregistered_references() {
+fn explicit_ai_children_retire_atomically_and_preserve_unregistered_references() {
     let (mut listener, _) = fixture();
     listener.advance_scoring(0).unwrap();
     let (&participant, live) = listener.scoring_state.ai.first_key_value().unwrap();
-    let ghost = live.entity.ghost;
     let content = listener.scoring.clone().unwrap();
     let extra = content
-        .creation(
-            Which::Ai,
-            &live.entity.session,
-            participant,
-            &listener.players,
-        )
+        .creation(Which::Ai, &live.session, participant, &listener.players)
+        .unwrap();
+    // A caller may explicitly own a replicated child for another purpose.
+    // The local scoring session itself has not allocated one.
+    let ghost = listener
+        .players
+        .spawn_entities(vec![extra.clone()], content.creation_content())
+        .unwrap()[0]
+        .id;
+    listener
+        .players
+        .bind_ai_entity(HOST_SELECTOR as u8, 100, participant, ghost)
         .unwrap();
     let extra_id = listener
         .players
@@ -488,7 +462,7 @@ fn ai_scoring_waits_for_join_before_reading_owned_population() {
             .flat_map(|s| &s.records)
             .filter(|r| r.initial.is_some())
             .count(),
-        1
+        0
     );
     // Once a population exists, missing/foreign account ownership is still
     // an error; the startup boundary must not conceal invalid live state.
@@ -516,33 +490,14 @@ fn ai_scoring_waits_for_publication_capacity_and_resumes_once() {
     listener.pending.clear();
     listener.advance_scoring(1).unwrap();
     assert_eq!(listener.scoring_state.ai.len(), 1);
-    let ghost = listener
-        .scoring_state
-        .ai
-        .values()
-        .next()
-        .unwrap()
-        .entity
-        .ghost;
+    let (&participant, live) = listener.scoring_state.ai.first_key_value().unwrap();
+    let before_session = format!("{:?}", live.session);
     listener.advance_scoring(1).unwrap();
     assert_eq!(
-        listener
-            .scoring_state
-            .ai
-            .values()
-            .next()
-            .unwrap()
-            .entity
-            .ghost,
-        ghost
+        format!("{:?}", listener.scoring_state.ai[&participant].session),
+        before_session
     );
-    assert_eq!(
-        listener
-            .pending
-            .iter()
-            .flat_map(|s| &s.records)
-            .filter(|r| r.id == ghost && r.initial.is_some())
-            .count(),
-        1
-    );
+    assert!(listener.pending.is_empty());
+    assert!(listener.pending_rpcs.is_empty());
+    assert_eq!(listener.players.objects().snapshot(), before);
 }

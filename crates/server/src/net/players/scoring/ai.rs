@@ -3,6 +3,8 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! AI sessions follow participant membership, independently of delegated cars.
+//! Host AI has no Player recipient: its scoring executes locally, without a
+//! client logic object, query binding or replication lifetime.
 use super::*;
 use nfs_content::{
     events::discovery::{Endpoint, membership::Fact},
@@ -15,9 +17,53 @@ use nfs_world::{
 
 #[derive(Clone, Debug)]
 pub(in crate::net::players) struct Live {
-    pub entity: Entity,
+    pub session: Session,
     pub car: Option<(u64, u16)>,
     pub last_ms: u64,
+}
+
+/// The AI graph owns its Boolean participant properties. Proximity queries read
+/// those values from the session below. Its synchronized/client-bus outputs have
+/// no recipient; other side effects require an explicit host implementation.
+fn local_output(
+    content: &Content,
+    participant: u16,
+    mut output: Output,
+    trace: bool,
+) -> Result<(), replication::Error> {
+    for write in std::mem::take(&mut output.participant_properties) {
+        if write.participant != u64::from(participant)
+            || !matches!(write.value, Value::Boolean(_))
+            || !content
+                .installed()
+                .ai
+                .boolean_sets
+                .iter()
+                .any(|binding| binding.property == write.property)
+        {
+            return Err(replication::Error::Unsupported);
+        }
+    }
+    let synced = std::mem::take(&mut output.synced);
+    // Keep the compiler/wire-shape validation, without allocating a ghost.
+    content.update(Which::Ai, &synced)?;
+    for (node, value) in synced {
+        if trace || matches!(value, Value::Boolean(_)) {
+            let identity = content
+                .program(Which::Ai)?
+                .nodes
+                .get(usize::from(node))
+                .map(|n| (n.identity.asset.as_str(), n.identity.index));
+            tracing::info!(participant, which = ?Which::Ai, node, ?identity, flag = ?value, "scoring flag");
+        }
+    }
+    // These are client-bus emissions, not local graph events. Local dispatch
+    // has already run inside Session; there is no client object to address.
+    output.remote.clear();
+    if output != Output::default() {
+        return Err(replication::Error::Unsupported);
+    }
+    Ok(())
 }
 
 fn contains(
@@ -169,20 +215,17 @@ impl PlayerListener {
         Ok(inputs)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn advance_ai_scoring(
         &self,
         content: &Content,
-        players: &mut Players,
+        players: &Players,
         state: &mut State,
         desired: &BTreeMap<u16, Participant>,
         now_ms: u64,
-        collected: &mut Collected,
     ) -> Result<(), replication::Error> {
-        let (reports, other): (Vec<_>, Vec<_>) = std::mem::take(&mut state.reports)
-            .into_iter()
-            .partition(|report| report.which == Which::Ai);
-        state.reports = other;
+        if state.reports.iter().any(|report| report.which == Which::Ai) {
+            return Err(replication::Error::Unsupported);
+        }
         let retiring: Vec<_> = state
             .ai
             .keys()
@@ -195,46 +238,11 @@ impl PlayerListener {
                 .remove(&participant)
                 .ok_or(replication::Error::Shape)?;
             let output = live
-                .entity
                 .session
                 .retire(&idle_inputs(u64::from(participant), now_ms))
                 .map_err(fail("AI scoring retirement"))?;
-            let present = players.objects().get(live.entity.ghost).is_some();
-            if present {
-                Self::collect_output(
-                    content,
-                    players,
-                    state,
-                    Scope {
-                        participant,
-                        which: Which::Ai,
-                        ghost: live.entity.ghost,
-                    },
-                    output,
-                    collected,
-                )?;
-            } else if players.owns_ai_participant(HOST_SELECTOR as u8, self.persona, participant)
-                || output != Output::default()
-            {
-                // Population teardown already queued this registered child's
-                // deletion before its participant. No late calls may target it.
-                return Err(replication::Error::Unsupported);
-            }
-            let unpublished = state
-                .dirty
-                .remove(&live.entity.ghost)
-                .is_some_and(|record| record.initial.is_some());
-            if present {
-                players.remove_entities(&[live.entity.ghost])?;
-                if !unpublished {
-                    state.dirty_deleted.push(live.entity.ghost);
-                }
-            }
-            tracing::debug!(
-                participant,
-                ghost = live.entity.ghost,
-                "AI scoring participant retired"
-            );
+            local_output(content, participant, output, state.trace)?;
+            tracing::debug!(participant, "AI scoring participant retired");
         }
         for (&participant, &owned) in desired {
             let inputs = self.ai_scoring_inputs(content, players, owned, now_ms)?;
@@ -245,51 +253,21 @@ impl PlayerListener {
                 let (session, output) = content
                     .start(Which::Ai, &inputs)
                     .map_err(fail("AI scoring start"))?;
-                let creation = content.creation(Which::Ai, &session, participant, players)?;
-                let record = players
-                    .spawn_entities(vec![creation], content.creation_content())?
-                    .remove(0);
-                let ghost = record.id;
-                players.bind_ai_entity(HOST_SELECTOR as u8, self.persona, participant, ghost)?;
-                merge_record(&mut state.dirty, record)?;
-                let reports = content.report_bindings(Which::Ai, players, ghost)?;
+                local_output(content, participant, output, state.trace)?;
                 state.ai.insert(
                     participant,
                     Live {
-                        entity: Entity {
-                            which: Which::Ai,
-                            ghost,
-                            session,
-                            reports,
-                        },
+                        session,
                         car: owned.car,
                         last_ms: now_ms,
                     },
                 );
-                tracing::debug!(participant, ghost, car = ?owned.car, "AI scoring participant started");
-                Self::collect_output(
-                    content,
-                    players,
-                    state,
-                    Scope {
-                        participant,
-                        which: Which::Ai,
-                        ghost,
-                    },
-                    Output {
-                        synced: Vec::new(),
-                        ..output
-                    },
-                    collected,
-                )?;
+                tracing::debug!(participant, car = ?owned.car, "AI scoring participant started");
             }
             let live = state
                 .ai
                 .get_mut(&participant)
                 .ok_or(replication::Error::Shape)?;
-            if players.objects().get(live.entity.ghost).is_none() {
-                return Err(replication::Error::UnknownObject);
-            }
             let changed_car = live.car != owned.car;
             live.car = owned.car;
             for binding in &content.installed().ai.pacing {
@@ -304,39 +282,11 @@ impl PlayerListener {
                     .map(|sample| binding.library.evaluate(Some(owned.personality), sample))
                     .transpose()
                     .map_err(fail("AI scoring pacing"))?;
-                live.entity
-                    .session
+                live.session
                     .set_pacing_sample(&binding.sources, u64::from(participant), value)
                     .map_err(fail("AI scoring pacing sample"))?;
             }
             let last_ms = live.last_ms;
-            for report in reports
-                .iter()
-                .filter(|report| report.participant == participant)
-            {
-                let live = state
-                    .ai
-                    .get_mut(&participant)
-                    .ok_or(replication::Error::Shape)?;
-                let output = live
-                    .entity
-                    .session
-                    .report(report.node, &report.report, &inputs)
-                    .map_err(fail("AI scoring report"))?;
-                let ghost = live.entity.ghost;
-                Self::collect_output(
-                    content,
-                    players,
-                    state,
-                    Scope {
-                        participant,
-                        which: Which::Ai,
-                        ghost,
-                    },
-                    output,
-                    collected,
-                )?;
-            }
             if now_ms <= last_ms && !changed_car {
                 continue;
             }
@@ -347,31 +297,16 @@ impl PlayerListener {
             loop {
                 let step = remaining.min(TICK_SECONDS);
                 step_inputs.now += f64::from(step);
-                let (output, ghost) = {
+                let output = {
                     let live = state
                         .ai
                         .get_mut(&participant)
                         .ok_or(replication::Error::Shape)?;
-                    (
-                        live.entity
-                            .session
-                            .tick(step, &step_inputs)
-                            .map_err(fail("AI scoring tick"))?,
-                        live.entity.ghost,
-                    )
+                    live.session
+                        .tick(step, &step_inputs)
+                        .map_err(fail("AI scoring tick"))?
                 };
-                Self::collect_output(
-                    content,
-                    players,
-                    state,
-                    Scope {
-                        participant,
-                        which: Which::Ai,
-                        ghost,
-                    },
-                    output,
-                    collected,
-                )?;
+                local_output(content, participant, output, state.trace)?;
                 remaining -= step;
                 if remaining <= 0. {
                     break;
@@ -404,7 +339,7 @@ pub(super) fn members(
             .ai_vehicle_physics(HOST_SELECTOR as u8, persona, key)?
             .decode([0.; 3])?;
         for binding in &content.installed().ai.boolean_sets {
-            if live.entity.session.participant_value(
+            if live.session.participant_value(
                 u64::from(participant),
                 &binding.property,
                 Kind::Boolean,

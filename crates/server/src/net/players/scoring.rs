@@ -51,7 +51,7 @@ const MAX_TICK_SECONDS: f32 = 0.5;
 const FLUSH_INTERVAL_MS: u64 = 100;
 /// Coalesced records waiting for a flush (one per live entity at most, plus
 /// reputation fields); more than this means the queue never drains.
-const MAX_DIRTY: usize = 64 + nfs_world::replication::players::ai::MAX_AI;
+const MAX_DIRTY: usize = 64;
 /// Other cars supplied to the queries per tick.
 const MAX_OTHERS: usize = 64;
 
@@ -885,12 +885,7 @@ impl PlayerListener {
                     .iter()
                     .map(move |entity| (participant, entity))
             });
-        let ai_entities = self
-            .scoring_state
-            .ai
-            .iter()
-            .map(|(&participant, live)| (participant, &live.entity));
-        for (participant, entity) in player_entities.chain(ai_entities) {
+        for (participant, entity) in player_entities {
             let which = entity.which;
             for (node, binding) in &entity.reports {
                 let report =
@@ -1441,14 +1436,7 @@ impl PlayerListener {
         let mut state = self.scoring_state.clone();
         let mut players = self.players.clone();
         let mut collected = Collected::default();
-        self.advance_ai_scoring(
-            &content,
-            &mut players,
-            &mut state,
-            &desired_ai,
-            now_ms,
-            &mut collected,
-        )?;
+        self.advance_ai_scoring(&content, &players, &mut state, &desired_ai, now_ms)?;
         for (participant, which) in retiring {
             self.retire(
                 &content,
