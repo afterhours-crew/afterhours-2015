@@ -23,7 +23,9 @@ mod challenges;
 mod client_info;
 mod crashing;
 mod customization;
+mod destinations;
 mod diagnostics;
+mod driving_distance;
 mod equipment;
 mod events;
 mod garage;
@@ -31,19 +33,25 @@ mod recommendations;
 pub(super) use equipment::EquipmentRequest;
 pub(super) use garage::{GarageOperation, GarageRequest};
 pub(super) use scoring::{AwardRequest, Credited};
+mod active_invitations;
 mod launchers;
 mod licensed;
 mod map_feed;
+mod map_points;
+mod objective_timers;
 mod output;
 mod prologue;
 mod purchases;
 mod refusal;
+#[cfg(test)]
+mod result_tests;
 mod returning;
 mod rivals;
 mod scoring;
 mod sequences;
 mod traffic;
 mod tutorials;
+mod unlock_notifications;
 
 #[cfg(test)]
 mod deployment_tests;
@@ -89,6 +97,19 @@ pub(super) fn describe_host_rpc(rpc: &nfs_world::participants::HostRpc) -> Strin
     }
 }
 
+/// A snapshot of what the listener carries, logged with the loop timing.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(in crate::net) struct LoopLoad {
+    pub traffic: usize,
+    pub rivals: usize,
+    pub ai_scoring: usize,
+    pub scoring: usize,
+    pub world_cars: usize,
+    pub pending: usize,
+    pub pending_entries: usize,
+    pub pending_rpcs: usize,
+}
+
 pub(super) struct PlayerListener {
     stats: Accepting,
     messages: frame::receive::Receiver,
@@ -110,6 +131,11 @@ pub(super) struct PlayerListener {
     selection: crate::sequence_content::authored::Instances,
     selection_execution: BTreeMap<u16, prologue::selection::State>,
     story_pending: VecDeque<super::items::story::Request>,
+    distance: driving_distance::State,
+    seen_points: map_points::State,
+    objective_timers: BTreeMap<u16, crate::progression::timers::State>,
+    active_invitations: active_invitations::State,
+    unlock_notifications: unlock_notifications::State,
     intro_composites: prologue::finale::Composites,
     intro_modes: prologue::Modes,
     intro_movies: prologue::movies::Movies,
@@ -174,6 +200,7 @@ pub(super) struct PlayerListener {
     sequences: Option<nfs_world::sequences::Sequences>,
     /// Arrive sequences after garage exit (optional sequence content).
     arrivals: Option<nfs_world::arrival::Arrivals>,
+    selected_destinations: destinations::State,
     returns: Option<nfs_world::arrival::Arrivals>,
     crashes: Option<nfs_world::crash::Crashes>,
     inventory: Option<Inventory>,
@@ -367,6 +394,22 @@ pub(super) fn defer_deletions(entries: &mut Vec<(Section, Vec<nfs_world::partici
     }
 }
 impl PlayerListener {
+    /// What the world loop is carrying, for its periodic timing summary:
+    /// traffic and rival participants, AI and player scoring sessions, world
+    /// cars, and the sections, entries and calls still waiting to be flushed.
+    pub(in crate::net) fn loop_load(&self) -> LoopLoad {
+        LoopLoad {
+            traffic: self.traffic_population.as_ref().map_or(0, |p| p.count()),
+            rivals: self.rival_population.as_ref().map_or(0, |p| p.count()),
+            ai_scoring: self.scoring_state.ai.len(),
+            scoring: self.scoring_state.live.len(),
+            world_cars: self.world_cars.len(),
+            pending: self.pending.len(),
+            pending_entries: self.pending_entries.len(),
+            pending_rpcs: self.pending_rpcs.len(),
+        }
+    }
+
     /// Queue entries for the world flush. The flush refuses an entry the
     /// session does not admit and closes the world (E1186, E1188), so each
     /// entry is measured here, where its producer is still known: test builds
@@ -695,6 +738,7 @@ impl PlayerListener {
                         players.objects(),
                         &rows(crate::messages::Manager::Normal)?,
                         &rows(crate::messages::Manager::Underground)?,
+                        &messages.dynamic_rows(loaded)?,
                     )?);
                 }
                 // The notified tutorial seen values join the same flush
@@ -983,6 +1027,11 @@ impl PlayerListener {
             selection: crate::sequence_content::authored::Instances::default(),
             selection_execution: BTreeMap::new(),
             story_pending: VecDeque::new(),
+            distance: driving_distance::State::default(),
+            seen_points: map_points::State::default(),
+            objective_timers: BTreeMap::new(),
+            active_invitations: active_invitations::State::default(),
+            unlock_notifications: unlock_notifications::State::default(),
             intro_composites: BTreeMap::new(),
             intro_modes: BTreeMap::new(),
             intro_movies: BTreeMap::new(),
@@ -1015,6 +1064,7 @@ impl PlayerListener {
             return_trace_until: 0,
             session_backlog: 0,
             arrivals: None,
+            selected_destinations: Default::default(),
             returns: None,
             crashes: None,
             glass: crate::glass::Glass::default(),
@@ -1452,7 +1502,7 @@ impl Listener for PlayerListener {
         let mut crashes = self.crashes.clone();
         if let Some(movement) = &parsed.movement {
             let cars = world_cars.keys().copied().collect();
-            match vehicle_reports.receive(
+            match vehicle_reports.receive_with_accepted(
                 &mut players,
                 HOST_SELECTOR as u8,
                 self.persona,
@@ -1460,15 +1510,12 @@ impl Listener for PlayerListener {
                 &cars,
                 self.world_ms,
             ) {
-                Ok(reports) if !reports.is_empty() => {
-                    scoring_reported.extend(reports.iter().map(|r| r.id));
-                    for report in &reports {
-                        if let Some(fuel) = nitrous.get_mut(&report.id)
-                            && let Ok(physics) = players.vehicle_physics(
-                                HOST_SELECTOR as u8,
-                                self.persona,
-                                report.id,
-                            )
+                Ok(received) => {
+                    scoring_reported.extend(received.accepted.iter().copied());
+                    for id in received.accepted {
+                        if let Some(fuel) = nitrous.get_mut(&id)
+                            && let Ok(physics) =
+                                players.vehicle_physics(HOST_SELECTOR as u8, self.persona, id)
                         {
                             let [high, low, _] = physics.identity_words;
                             fuel.observe_clock(
@@ -1477,15 +1524,16 @@ impl Listener for PlayerListener {
                             );
                         }
                     }
-                    movement_section = Some(Section {
-                        float_bits: None,
-                        flag: false,
-                        deleted: Vec::new(),
-                        setup: Some(Setup::RawEscape([0; 3])),
-                        records: reports,
-                    })
+                    if !received.echoes.is_empty() {
+                        movement_section = Some(Section {
+                            float_bits: None,
+                            flag: false,
+                            deleted: Vec::new(),
+                            setup: Some(Setup::RawEscape([0; 3])),
+                            records: received.echoes,
+                        });
+                    }
                 }
-                Ok(_) => {}
                 Err(error) => {
                     return self.refuse(error);
                 }
@@ -1515,7 +1563,7 @@ impl Listener for PlayerListener {
                     .any(|(a, _, _)| !a.delegated(&players).is_empty())
             {
                 let delegated = self.delegated_ai(&players);
-                match traffic_reports.receive_ai(
+                match traffic_reports.receive_ai_with_accepted(
                     &mut players,
                     HOST_SELECTOR as u8,
                     self.persona,
@@ -1523,16 +1571,18 @@ impl Listener for PlayerListener {
                     &delegated,
                     self.world_ms,
                 ) {
-                    Ok(reports) if !reports.is_empty() => {
-                        deferred_sections.extend(reports.into_iter().map(|record| Section {
-                            float_bits: None,
-                            flag: false,
-                            deleted: Vec::new(),
-                            setup: Some(Setup::RawEscape([0; 3])),
-                            records: vec![record],
+                    Ok(received) => {
+                        scoring_reported.extend(received.accepted);
+                        deferred_sections.extend(received.echoes.into_iter().map(|record| {
+                            Section {
+                                float_bits: None,
+                                flag: false,
+                                deleted: Vec::new(),
+                                setup: Some(Setup::RawEscape([0; 3])),
+                                records: vec![record],
+                            }
                         }))
                     }
-                    Ok(_) => {}
                     Err(error) => return self.refuse(error),
                 }
             }
@@ -1542,6 +1592,8 @@ impl Listener for PlayerListener {
         let mut spawn_settled = self.spawn_settled.clone();
         let mut scheduled_settled = Vec::new();
         let mut arrivals = self.arrivals.clone();
+        let mut selected_destinations = self.selected_destinations.clone();
+        selected_destinations.retain(&self.participants);
         let mut returns = self.returns.clone();
         let mut completed_returns = Vec::new();
         let mut scheduled_teleports = Vec::new();
@@ -1928,6 +1980,7 @@ impl Listener for PlayerListener {
                             self.vehicles.as_deref().map(|c| &c.layout),
                             notification.participant,
                             target.ghost,
+                            selected_destinations.position(notification.participant),
                         ) {
                             scheduled_teleports.push((self.world_ms + TELEPORT_DELAY_MS, command));
                         }
@@ -2005,6 +2058,20 @@ impl Listener for PlayerListener {
         let mut garage_commands = self.garage_commands.clone();
         let delegated = self.delegated_ai(&players);
         for body in rpcs {
+            match selected_destinations.receive(
+                self.events
+                    .as_ref()
+                    .and_then(|c| c.availability())
+                    .map(|c| c.teleports()),
+                &players,
+                &participants,
+                self.persona,
+                body,
+            ) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(error) => return self.refuse_rpc(error, body),
+            }
             match Self::livery_cache_update(self.roles.as_ref(), &players, self.persona, body) {
                 Ok(Some(invalidation)) => {
                     responses.push(nfs_world::participants::HostRpc::LiveryInvalidation(
@@ -2803,6 +2870,17 @@ impl Listener for PlayerListener {
                     return self.refuse_rpc(error, body);
                 }
             }
+            match self.map_point_request(&players, body) {
+                Ok(Some(request)) => {
+                    if story_pending.len() >= MAX_PENDING {
+                        return self.refuse_rpc(replication::Error::Bound, body);
+                    }
+                    story_pending.push_back(request);
+                    continue;
+                }
+                Ok(None) => {}
+                Err(error) => return self.refuse_rpc(error, body),
+            }
             // The client read a message (official E1026 923.634 s): the
             // stored row is marked read; nothing is answered.
             if let Some(progression) = self.progression.clone()
@@ -2811,7 +2889,7 @@ impl Listener for PlayerListener {
                 match messages.read(players.objects(), body, |id| {
                     players.owns_participant(HOST_SELECTOR as u8, self.persona, id)
                 }) {
-                    Ok(Some((hash, participant, manager))) => {
+                    Ok(Some((hash, participant, manager, read))) => {
                         let Some(player_index) =
                             players.runtime_index(HOST_SELECTOR as u8, self.persona, participant)
                         else {
@@ -2820,11 +2898,42 @@ impl Listener for PlayerListener {
                         if story_pending.len() >= MAX_PENDING {
                             return self.refuse_rpc(replication::Error::Bound, body);
                         }
+                        let dynamic = messages.unlocks.as_ref().is_some_and(|d| {
+                            messages.manager(d.dynamic_manager) == Some(manager)
+                                && d.notifications.iter().any(|n| {
+                                    n.hash == hash
+                                        && matches!(
+                                            n.trigger,
+                                            nfs_content::messages::unlocks::Trigger::Part { .. }
+                                        )
+                                })
+                        });
+                        let action = if dynamic {
+                            let Some(loaded) = self.persistent.as_deref() else {
+                                return self.refuse_rpc(replication::Error::Shape, body);
+                            };
+                            match self.unlock_notifications.first(hash, &messages, loaded) {
+                                Ok(Some(identity)) => {
+                                    super::items::story::Action::DynamicMessageRead {
+                                        identity,
+                                        read,
+                                    }
+                                }
+                                Ok(None) => continue,
+                                Err(error) => return self.refuse_rpc(error, body),
+                            }
+                        } else {
+                            super::items::story::Action::MessageRead {
+                                hash,
+                                manager,
+                                read,
+                            }
+                        };
                         story_pending.push_back(super::items::story::Request {
                             participant,
                             player_index: u32::from(player_index),
                             progression,
-                            action: super::items::story::Action::MessageRead { hash, manager },
+                            action,
                         });
                         continue;
                     }
@@ -3042,7 +3151,7 @@ impl Listener for PlayerListener {
                                     match Self::start_arrivals(
                                         &mut players,
                                         &mut participants,
-                                        arrivals.as_mut(),
+                                        (arrivals.as_mut(), &selected_destinations),
                                         self.logic.as_deref(),
                                         &mut logic_ghosts,
                                         self.persona,
@@ -3488,6 +3597,7 @@ impl Listener for PlayerListener {
         self.spawn_settled = spawn_settled;
         self.pending_settled.extend(scheduled_settled);
         self.arrivals = arrivals;
+        self.selected_destinations = selected_destinations;
         self.returns = returns;
         self.pending_returns = pending_returns;
         self.crashes = crashes;

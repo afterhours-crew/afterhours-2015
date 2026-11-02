@@ -169,6 +169,7 @@ pub(crate) fn build(index: &mut AssetIndex, scenes: &scenes::Catalog) -> Result<
         "progression":progression.1,"spawn_points":spawn.1,"traffic":traffic,
         "customization_timer":timer,"streaming_gate":gate});
     let mut bank = None;
+    let mut seen_points = None;
     for entry in entries.iter().filter(|e| e.kind == StartupKind::SubLevel) {
         for binding in index.scene_bindings(&entry.name)? {
             if binding.class == "BankEntityData" {
@@ -178,10 +179,20 @@ pub(crate) fn build(index: &mut AssetIndex, scenes: &scenes::Catalog) -> Result<
                 bank =
                     Some(json!({"scene":scene_key(&entry.name),"serializer":binding.serializer}));
             }
+            if binding.class == "PersistedIdEntityData" {
+                if seen_points.is_some() {
+                    return Err(bad("ambiguous seen map points entity"));
+                }
+                seen_points =
+                    Some(json!({"scene":scene_key(&entry.name),"serializer":binding.serializer}));
+            }
         }
     }
     if let Some(bank) = bank {
         roles["bank"] = bank;
+    }
+    if let Some(binding) = seen_points {
+        roles["seen_points"] = binding;
     }
     let value = json!({"format":"nfs-world-content","version":5,"build_sha256":nfs_services::SUPPORTED_BUILD_SHA256,
         "level":{"level":level.level,"attributes":level.attributes,"word":level.word,"text":level.text,

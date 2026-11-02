@@ -4,29 +4,42 @@
 
 //! Kickback (component 2053) menu state bound to an explicit durable local
 //! account: the screenshot counters (`2053/2`), the last-week winner tile
-//! (`2053/17`) and the snapshot gallery tiles (`2053/22`).
+//! (`2053/17`) and the snapshot gallery tiles (`2053/22`), plus the
+//! per-session screenshot record allocation (`2053/8 addPendingScreenshot`)
+//! and commit (`2053/9 commitScreenshot`) the client sends after a race
+//! finish (the automatic Snapshot Pro picture).
 //!
 //! The counters and the winner tile are named values of a versioned state
 //! document; the gallery is an explicit empty local directory. A document
 //! without a winner tile answers `2053/17` with `KICKBACK_ERR_NOT_FOUND`
-//! rather than inventing a tile. Screenshot uploads, kickback voting and
-//! gallery contents are outside this read-only subset.
+//! rather than inventing a tile. A pending screenshot is a session-local
+//! record id (allocated from the injected clock, never random) whose record
+//! name is the request `NAME` as decimal text, as the official server answered
+//! in every captured pair; its commit answers the account's counters. The
+//! image bytes (ByteVault, component 31), kickback voting and gallery
+//! contents are outside this subset: a committed record is not stored.
 use crate::{ContentError, SUPPORTED_BUILD_SHA256};
 use nfs_fire2::{Fields, Frame};
 use nfs_protocol::kickback::{
-    COMPONENT, GET_LAST_WEEKS_WINNER_DATA, GET_SCREENSHOT_COUNTERS, GET_SNAPSHOT_GALLERY_TILES,
+    ADD_PENDING_SCREENSHOT, AddPendingScreenshotRequest, AddPendingScreenshotResponse,
+    COMMIT_SCREENSHOT, COMPONENT, CommitScreenshotRequest, CommitScreenshotResponse,
+    GET_LAST_WEEKS_WINNER_DATA, GET_SCREENSHOT_COUNTERS, GET_SNAPSHOT_GALLERY_TILES,
     GetLastWeekWinnerDataRequest, GetScreenshotCounterRequest, GetScreenshotCounterResponse,
     GetSnapshotGalleryTilesRequest, GetSnapshotGalleryTilesResponse, ScreenshotGalleryDataEx,
     SnapshotGalleryTiles,
 };
 use nfs_storage::AccountId;
 use serde_json::Value as Json;
-use std::{fs::File, io::Read, path::Path};
+use std::{collections::BTreeSet, fs::File, io::Read, path::Path};
 
 pub const MAX_STATE_BYTES: usize = 64 * 1024;
 pub const MAX_TITLE_BYTES: usize = 256;
 pub const MAX_RECORD_NAME_BYTES: usize = 40;
 pub const MAX_BODY_BYTES: usize = 1024;
+/// Uncommitted screenshot records one session may hold; the oldest is
+/// forgotten beyond this (the client commits each record about 1.2 s after
+/// allocating it, so an uncommitted backlog means abandoned records).
+pub const MAX_PENDING_SCREENSHOTS: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
@@ -56,6 +69,47 @@ pub fn owns(component: u16, command: u16) -> bool {
             command,
             GET_SCREENSHOT_COUNTERS | GET_LAST_WEEKS_WINNER_DATA | GET_SNAPSHOT_GALLERY_TILES
         )
+}
+/// The two screenshot record routes, answered with session-local pending state.
+pub fn owns_screenshots(component: u16, command: u16) -> bool {
+    component == COMPONENT && matches!(command, ADD_PENDING_SCREENSHOT | COMMIT_SCREENSHOT)
+}
+
+/// One control session's allocated, not yet committed screenshot record ids.
+///
+/// Ids are allocated from the injected clock (Unix seconds, at least 1) and
+/// kept strictly increasing within the session, so a replay with the same
+/// clock reproduces them. The official ids were a server-wide increasing
+/// counter (249017865, 249017895, ... in E1026); only their uniqueness and
+/// round trip through `2053/9` are modeled.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PendingScreenshots {
+    ids: BTreeSet<u64>,
+    last: u64,
+}
+impl PendingScreenshots {
+    pub fn len(&self) -> usize {
+        self.ids.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.ids.is_empty()
+    }
+    pub fn contains(&self, id: u64) -> bool {
+        self.ids.contains(&id)
+    }
+    fn allocate(&mut self, unix_micros: i64) -> u64 {
+        let seconds = u64::try_from(unix_micros / 1_000_000).unwrap_or(0).max(1);
+        let id = seconds.max(self.last.saturating_add(1));
+        self.last = id;
+        while self.ids.len() >= MAX_PENDING_SCREENSHOTS {
+            self.ids.pop_first();
+        }
+        self.ids.insert(id);
+        id
+    }
+    fn commit(&mut self, id: u64) -> bool {
+        self.ids.remove(&id)
+    }
 }
 
 fn frame(wire: &[u8]) -> Result<Frame<'_>, Error> {
@@ -301,6 +355,65 @@ impl State {
                     .map_err(|_| Error::Ineligible)?;
                 GetSnapshotGalleryTilesResponse {
                     tile_identifiers: Some(SnapshotGalleryTiles(vec![])),
+                    ..Default::default()
+                }
+                .encode(limits)
+                .map_err(|_| Error::Encode)?
+            }
+            _ => return Err(Error::Ineligible),
+        };
+        response(&f, &body)
+    }
+}
+
+impl State {
+    /// Answer `2053/8` (allocate a pending record for this session) or `2053/9`
+    /// (commit one of this session's pending records). `Identity` and
+    /// `Ineligible` are "not mine". A request naming no `NAME` has no record
+    /// name to answer and is ineligible; a commit of an unknown or already
+    /// committed id answers the client's `KICKBACK_ERR_NOT_FOUND`.
+    pub fn reply_screenshot(
+        &self,
+        pending: &mut PendingScreenshots,
+        wire: &[u8],
+        account: AccountId,
+        persona: i64,
+        unix_micros: i64,
+    ) -> Result<Vec<u8>, Error> {
+        let f = frame(wire)?;
+        if account != self.account || persona <= 0 {
+            return Err(Error::Identity);
+        }
+        let limits = body_limits();
+        let body = match f.fields.routing_b {
+            ADD_PENDING_SCREENSHOT => {
+                let request = AddPendingScreenshotRequest::decode(f.body, limits)
+                    .map_err(|_| Error::Ineligible)?;
+                let name = request.name.ok_or(Error::Ineligible)?;
+                let record_name = name.to_string();
+                let id = pending.allocate(unix_micros);
+                AddPendingScreenshotResponse {
+                    screenshot_id: Some(id),
+                    record_name: Some(record_name.as_bytes()),
+                    ..Default::default()
+                }
+                .encode(limits)
+                .map_err(|_| Error::Encode)?
+            }
+            COMMIT_SCREENSHOT => {
+                let request = CommitScreenshotRequest::decode(f.body, limits)
+                    .map_err(|_| Error::Ineligible)?;
+                let id = request.screenshot_id.ok_or(Error::Ineligible)?;
+                if !pending.commit(id) {
+                    return crate::error_reply(
+                        f.fields,
+                        nfs_protocol::metadata::KICKBACK_ERR_NOT_FOUND,
+                    )
+                    .ok_or(Error::Encode);
+                }
+                CommitScreenshotResponse {
+                    screenshot_count: Some(self.screenshot_count),
+                    screenshot_count_max: Some(self.screenshot_count_max),
                     ..Default::default()
                 }
                 .encode(limits)

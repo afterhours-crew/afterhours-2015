@@ -4,7 +4,7 @@
 
 //! Session-owned race recommendation cache. Requests merge by their entry key;
 //! an empty list initializes the cache without clearing it or sending a reply.
-//! This does not implement recommendation generation or event selection.
+//! Authored invitation checks query membership; this does not generate entries.
 use super::*;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -20,6 +20,12 @@ enum Rejected {
 }
 
 impl State {
+    /// The owning listener already authenticated the persona on insertion.
+    /// No entry means false even before the first synchronization; payload
+    /// scores/flags do not participate in this native membership query.
+    pub(super) fn contains(&self, key: u32) -> bool {
+        self.entries.contains_key(&key)
+    }
     fn prepare(
         &self,
         persona: u64,
@@ -78,6 +84,21 @@ impl PlayerListener {
 mod tests {
     use super::*;
     use nfs_world::bits::BitWriter;
+
+    #[test]
+    fn membership_uses_only_the_authenticated_key_even_before_first_sync() {
+        let empty = State::default();
+        assert!(!empty.contains(123));
+        let state = empty
+            .prepare(7, &[request(7, vec![entry(123, 999)])])
+            .unwrap()
+            .unwrap();
+        assert!(state.contains(123));
+        assert!(!state.contains(999));
+        assert!(!empty.contains(123));
+        let state = state.prepare(7, &[request(7, vec![])]).unwrap().unwrap();
+        assert!(state.contains(123));
+    }
 
     fn entry(key: u32, word: u32) -> frame::RecommendationEntry {
         frame::RecommendationEntry {

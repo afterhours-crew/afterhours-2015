@@ -15,6 +15,40 @@ pub struct GoalChanges {
 }
 
 impl Players {
+    /// Read an owned AI's current pacing-group value. The same value is
+    /// replicated to the client; callers must not substitute base personality
+    /// skill, distance or a default when the participant has no pacing group.
+    pub fn ai_pacing_sample(
+        &self,
+        connection: u8,
+        persona: u64,
+        participant: u16,
+    ) -> Result<Option<f32>, Error> {
+        if !self.owns_ai_participant(connection, persona, participant) {
+            return Err(Error::UnknownObject);
+        }
+        let mut sample = None;
+        for (&group, &owner) in &self.pacing_groups {
+            if owner != (connection, persona) {
+                continue;
+            }
+            let Update::AiPacingGroup(pacing::Update {
+                entries: Some(entries),
+            }) = &self.objects.get(group).ok_or(Error::UnknownObject)?.current
+            else {
+                return Err(Error::Shape);
+            };
+            for entry in entries.iter().filter(|e| e.participant == participant) {
+                self.check_pacing_member(connection, persona, participant, group)?;
+                let value = f32::from_bits(entry.value);
+                if !value.is_finite() || sample.replace(value).is_some() {
+                    return Err(Error::Shape);
+                }
+            }
+        }
+        Ok(sample)
+    }
+
     /// A pacing group belongs to this connection's participants. Its lifetime is
     /// owned by the event, separately from any one AI's commands.
     pub fn create_ai_pacing_group(

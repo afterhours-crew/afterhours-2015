@@ -87,7 +87,11 @@ pub struct Loaded {
     owned: BTreeMap<u32, Table>,
 }
 /// Afterhours-owned tables a loaded view carries beside the schema tables.
-const OWNED: [&str; 1] = [crate::tutorials::TABLE];
+const OWNED: [&str; 3] = [
+    crate::tutorials::TABLE,
+    crate::messages::unlocks::TABLE,
+    crate::messages::dynamic::RECEIPTS,
+];
 impl std::fmt::Debug for Loaded {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LoadedTables")

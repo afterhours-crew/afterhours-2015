@@ -22,6 +22,9 @@ pub const MAX_PERSONAS: usize = 1024;
 // Installed link fields, validated against the normal event's authored graph.
 const EVENT_SPAWNER: u32 = 356_246_362;
 const SPAWNS: u32 = (-2_102_271_509i32) as u32;
+// The spawner processes these authored entries before its ordinary fill list.
+// Story variants can have only this list, or mix it with ordinary opponents.
+const PRIORITY_SPAWNS: u32 = (-1_118_065_650i32) as u32;
 const SPAWN_LOCATION: u32 = (-1_050_389_661i32) as u32;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -166,7 +169,8 @@ pub(crate) fn extract_spawner<S: Source>(
             return Err(bad("AI personality library identity"));
         }
     }
-    let spawns = g.links(spawner, SPAWNS)?;
+    let mut spawns = g.links(spawner, PRIORITY_SPAWNS)?;
+    spawns.extend(g.links(spawner, SPAWNS)?);
     if spawns.len() > MAX_SPAWNS {
         return Err(bad("AI spawn count"));
     }

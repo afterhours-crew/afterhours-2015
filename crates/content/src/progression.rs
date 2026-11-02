@@ -9,8 +9,11 @@ pub use nfs_services::progression::{
 };
 use serde_json::Value as Json;
 use std::{fs::File, io::Read, path::Path};
+pub mod conditions;
+pub mod delays;
 pub mod entities;
 mod extract;
+pub mod results;
 use crate::graph;
 mod rules;
 #[cfg(test)]

@@ -10,8 +10,38 @@ use std::{collections::BTreeSet, fmt};
 
 pub const COMPONENT: u16 = 2053;
 pub const GET_SCREENSHOT_COUNTERS: u16 = 2;
+pub const ADD_PENDING_SCREENSHOT: u16 = 8;
+pub const COMMIT_SCREENSHOT: u16 = 9;
 pub const GET_LAST_WEEKS_WINNER_DATA: u16 = 17;
 pub const GET_SNAPSHOT_GALLERY_TILES: u16 = 22;
+
+// Screenshot record allocation and commit (E162 native binding: four
+// `Blaze::Kickback` types, eleven members; official bodies observed seven times
+// in the E1026 Amy capture after race finishes). Member meanings beyond the
+// tag names are unassigned: `AUTO` and `ST` were always 1, `X` is signed
+// (observed -5250..159), `NAME` was the client's clock in seconds, and the
+// official `RECN` was that `NAME` as decimal text.
+schema!(AddPendingScreenshotRequest {
+    automatic: u32 => [0x87, 0x5d, 0x2f],
+    description: &'a [u8] => [0x92, 0x5c, 0xe3],
+    name: u64 => [0xba, 0x1b, 0x65],
+    st: u32 => [0xcf, 0x40, 0x00],
+    x: i32 => [0xe0, 0x00, 0x00],
+    y: i32 => [0xe4, 0x00, 0x00],
+});
+schema!(AddPendingScreenshotResponse {
+    screenshot_id: u64 => [0xa6, 0x40, 0x00],
+    record_name: &'a [u8] => [0xca, 0x58, 0xee],
+});
+schema!(CommitScreenshotRequest {
+    screenshot_id: u64 => [0xa6, 0x40, 0x00],
+});
+// `SCC`/`SCCM` are distinct tags from the counters query's `SSC`/`SCCM`; the
+// E162 diagram names them screenshotCount and screenshotCountMax.
+schema!(CommitScreenshotResponse {
+    screenshot_count: u32 => [0xce, 0x38, 0xc0],
+    screenshot_count_max: u32 => [0xce, 0x38, 0xed],
+});
 
 /// The native request has zero members. Extra fields are not acknowledged.
 #[derive(Debug, Default)]

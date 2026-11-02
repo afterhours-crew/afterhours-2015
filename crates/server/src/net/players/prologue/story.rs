@@ -117,11 +117,31 @@ impl PlayerListener {
         }
         self.story_pending.pop_front()
     }
+    pub(in crate::net::players) fn committed_progression_calls(
+        &self,
+        content: &crate::progression::Content,
+        after: &crate::persistent::Loaded,
+        participant: u16,
+    ) -> Result<Vec<HostRpc>, replication::Error> {
+        if !self
+            .players
+            .owns_participant(HOST_SELECTOR as u8, self.persona, participant)
+        {
+            return Err(replication::Error::UnknownObject);
+        }
+        let before = self
+            .persistent
+            .as_deref()
+            .ok_or(replication::Error::Unsupported)?;
+        progression_calls(content, before, after, &self.players, participant)
+    }
+
     pub(in crate::net) fn story_committed(
         &mut self,
         request: &Request,
         committed: Committed,
     ) -> Result<(), replication::Error> {
+        self.validate_distance_commit(&request.action)?;
         if !self
             .players
             .owns_participant(HOST_SELECTOR as u8, self.persona, request.participant)
@@ -135,6 +155,7 @@ impl PlayerListener {
         if committed.loaded.generation() < before.generation() {
             return Err(replication::Error::Shape);
         }
+        let event_reported = self.event_story_reported(request, &committed.loaded)?;
         let mut calls = progression_calls(
             &request.progression,
             before,
@@ -142,17 +163,81 @@ impl PlayerListener {
             &self.players,
             request.participant,
         )?;
-        // A message is announced once, by the commit that stored it.
-        if let crate::net::items::story::Action::Message { hash, manager } = request.action
-            && let Some(messages) = &request.progression.messages
-        {
-            let held = |loaded: &crate::persistent::Loaded| {
-                nfs_services::messages::rows(loaded.tables(), manager.table())
-                    .map(|rows| rows.iter().any(|r| r.hash == hash))
-                    .map_err(|_| replication::Error::Shape)
+        let mut unlock_notifications = self.unlock_notifications.clone();
+        let seen_points = self.committed_map_points(request, &committed.loaded)?;
+        // Announce newly committed state. A competing connection can have
+        // committed another member of the same restrictor while this request
+        // waited; publish that winner, not the losing request's proposed hash.
+        if let Some(messages) = &request.progression.messages {
+            use crate::net::items::story::Action;
+            let announcement = match request.action {
+                Action::UnlockMessage { hash, .. } => {
+                    let delivery = messages.unlocks.as_ref().ok_or(replication::Error::Shape)?;
+                    let rule = delivery
+                        .notifications
+                        .iter()
+                        .find(|n| n.hash == hash)
+                        .ok_or(replication::Error::Shape)?;
+                    if matches!(
+                        rule.trigger,
+                        nfs_content::messages::unlocks::Trigger::Part { .. }
+                    ) {
+                        unlock_notifications.seed(messages, before)?;
+                        let old = messages.dynamic_identities(before)?;
+                        for new in messages.dynamic_identities(&committed.loaded)? {
+                            if new.row.hash == hash
+                                && !old.iter().any(|r| {
+                                    r.row.index == new.row.index
+                                        && r.generation == new.generation
+                                        && r.row.data == new.row.data
+                                        && r.row.hash == new.row.hash
+                                })
+                            {
+                                calls.push(messages.dynamic_message(
+                                    self.players.objects(),
+                                    &new.row,
+                                    false,
+                                )?);
+                                unlock_notifications.added(new);
+                            }
+                        }
+                        None
+                    } else {
+                        Some((
+                            messages
+                                .manager(rule.manager)
+                                .ok_or(replication::Error::Shape)?,
+                            vec![hash],
+                        ))
+                    }
+                }
+                Action::Message { hash, manager } => Some((manager, vec![hash])),
+                Action::ConditionalMessage {
+                    objective, manager, ..
+                } => {
+                    let hashes = messages
+                        .conditional_hashes(objective, manager)
+                        .ok_or(replication::Error::Shape)?;
+                    Some((manager, hashes.to_vec()))
+                }
+                _ => None,
             };
-            if !held(before)? && held(&committed.loaded)? {
-                calls.push(messages.added(self.players.objects(), manager, hash)?);
+            if let Some((manager, hashes)) = announcement {
+                let held = |loaded: &crate::persistent::Loaded| {
+                    nfs_services::messages::rows(loaded.tables(), manager.table())
+                        .map(|rows| rows.into_iter().map(|r| r.hash).collect::<BTreeSet<_>>())
+                        .map_err(|_| replication::Error::Shape)
+                };
+                let old = held(before)?;
+                let new = held(&committed.loaded)?;
+                if hashes.len() > 1 && hashes.iter().filter(|h| new.contains(h)).count() != 1 {
+                    return Err(replication::Error::Shape);
+                }
+                for hash in hashes {
+                    if !old.contains(&hash) && new.contains(&hash) {
+                        calls.push(messages.added(self.players.objects(), manager, hash)?);
+                    }
+                }
             }
         }
         // A tutorial accept is durable: its logic goes at the next advance.
@@ -396,6 +481,10 @@ impl PlayerListener {
         {
             return Err(replication::Error::Bound);
         }
+        let licensed = self.licensed_after_completion(request, &committed.loaded)?;
+        if licensed.len() > MAX_PENDING.saturating_sub(self.story_pending.len()) {
+            return Err(replication::Error::Bound);
+        }
         self.players = players;
         self.logic_ghosts = logic_ghosts;
         self.intro_modes = modes;
@@ -406,14 +495,16 @@ impl PlayerListener {
         self.pending.extend(sections);
         self.pending_content.extend(output.messages);
         self.pending_rpcs.extend(calls);
-        let licensed = self.licensed_after_completion(request, &committed.loaded)?;
-        if licensed.len() > MAX_PENDING.saturating_sub(self.story_pending.len()) {
-            return Err(replication::Error::Bound);
-        }
         self.population = population;
         self.inventory = inventory;
         self.persistent = Some(committed.loaded);
+        self.distance_committed(&request.action);
+        self.unlock_notifications = unlock_notifications;
+        self.seen_points = seen_points;
         self.story_pending.extend(licensed);
+        if event_reported {
+            self.release_event_story(request.participant);
+        }
         Ok(())
     }
 }

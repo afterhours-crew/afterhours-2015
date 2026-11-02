@@ -203,6 +203,14 @@ impl<'de> serde::Deserialize<'de> for Config {
     }
 }
 
+/// One member's evaluated pacing value and, for a player-relative opponent,
+/// its signed distance to the authored target (metres; negative is behind).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Evaluation {
+    pub value: f32,
+    pub difference: Option<f32>,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Progress {
     pub distance: f32,
@@ -311,6 +319,22 @@ impl Config {
         reference: Option<u16>,
         total_distance: f32,
     ) -> Result<Vec<f32>, Error> {
+        Ok(self
+            .evaluate_members_detailed(members, reference, total_distance)?
+            .into_iter()
+            .map(|e| e.value)
+            .collect())
+    }
+
+    /// `evaluate_members` with each player-relative member's distance to its
+    /// authored target (metres; negative is behind). The reference member and
+    /// the other modes carry no target.
+    pub fn evaluate_members_detailed(
+        &self,
+        members: &[Member],
+        reference: Option<u16>,
+        total_distance: f32,
+    ) -> Result<Vec<Evaluation>, Error> {
         if members.len() > MAX_OPPONENTS + usize::from(reference.is_some())
             || finite(total_distance)? <= 0.
         {
@@ -346,7 +370,13 @@ impl Config {
                 at -= 1;
             }
         }
-        let mut values: Vec<_> = members.iter().map(|m| m.base_skill).collect();
+        let mut values: Vec<_> = members
+            .iter()
+            .map(|m| Evaluation {
+                value: m.base_skill,
+                difference: None,
+            })
+            .collect();
         if order.is_empty() {
             return Ok(values);
         }
@@ -376,7 +406,7 @@ impl Config {
                     Mode::PlayerRelative => unreachable!(),
                 };
                 let modifier = curve.as_ref().map_or(Ok(0.), |c| c.evaluate(input))?;
-                values[i] = finite(m.base_skill + modifier)?;
+                values[i].value = finite(m.base_skill + modifier)?;
             }
             return Ok(values);
         }
@@ -402,7 +432,7 @@ impl Config {
         };
         for (rank, &i) in order.iter().enumerate() {
             let m = members[i];
-            values[i] = self.evaluate(
+            values[i] = self.evaluate_detailed(
                 order.len(),
                 rank + 1,
                 Progress {
@@ -420,6 +450,16 @@ impl Config {
     /// Preserve the native f32 operation order. The skill curve clamps its input;
     /// the final personality-plus-modifier result has no additional clamp.
     pub fn evaluate(&self, count: usize, rank: usize, p: Progress) -> Result<f32, Error> {
+        Ok(self.evaluate_detailed(count, rank, p)?.value)
+    }
+
+    /// `evaluate` with the member's signed distance to its target.
+    pub fn evaluate_detailed(
+        &self,
+        count: usize,
+        rank: usize,
+        p: Progress,
+    ) -> Result<Evaluation, Error> {
         if self.mode != Mode::PlayerRelative {
             // The other modes require the member's lap or the full train.
             return Err(Error::MissingInput);
@@ -447,7 +487,10 @@ impl Config {
             .skill
             .as_ref()
             .map_or(Ok(0.), |c| c.evaluate(difference))?;
-        finite(p.base_skill + modifier)
+        Ok(Evaluation {
+            value: finite(p.base_skill + modifier)?,
+            difference: Some(difference),
+        })
     }
 }
 

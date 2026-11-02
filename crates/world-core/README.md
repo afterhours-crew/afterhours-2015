@@ -19,6 +19,13 @@ assumed-delivery policy. Callers still own application identity validation and
 every decision about accepting handler frames. These APIs do not implement a
 game client, mid-session restoration or a complete multiplayer world.
 
+`handshake::Control` exposes the exact request/reply/confirmation body codec
+shared by both endpoints. It rejects incomplete or trailing data, including on a
+retried request. Decoding a body alone does not validate its transport header,
+peer identity, token, cursor or handshake order; endpoint admission retains those
+checks. Diagnostic consumers can distinguish these controls from link frames
+without carrying a second handshake parser.
+
 Tests cover loss, retries, ordering, rollover, limits, cancellation and constructed
 transfers, plus independently packed startup literals and registration allocation.
 [The rollover vector](tests/fixtures/transport/README.md) is synthetic.

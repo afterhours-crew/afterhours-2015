@@ -33,10 +33,11 @@ impl ClientHandshake {
                 },
                 &[Part {
                     channel: 0,
-                    bytes: [1, token, client]
-                        .iter()
-                        .flat_map(|w| w.to_be_bytes())
-                        .collect(),
+                    bytes: Control::Request {
+                        token,
+                        sender: client,
+                    }
+                    .encode(),
                 }],
             )
             .ok()?;
@@ -87,14 +88,13 @@ impl ClientHandshake {
         else {
             return Step::Ignored(Ignored::Unexpected);
         };
-        if part.channel != 0 || part.bytes.len() != 12 {
+        if part.channel != 0 {
             return Step::Ignored(Ignored::Unexpected);
         }
-        let fields: Vec<_> = words(&part.bytes).collect();
-        if fields[0] != 5 {
+        let Some(Control::Reply { token, sender: id }) = Control::decode(&part.bytes) else {
             return Step::Ignored(Ignored::Unexpected);
-        }
-        if sender != self.host || fields[1] != self.token || fields[2] != self.host {
+        };
+        if sender != self.host || token != self.token || id != self.host {
             return Step::Ignored(Ignored::Identity);
         }
         if cursor > MAX_FORWARD_UNITS {
@@ -107,10 +107,7 @@ impl ClientHandshake {
             },
             &[Part {
                 channel: 0,
-                bytes: [2, self.token]
-                    .iter()
-                    .flat_map(|w| w.to_be_bytes())
-                    .collect(),
+                bytes: Control::Confirm { token: self.token }.encode(),
             }],
         ) {
             Ok(wire) => wire,

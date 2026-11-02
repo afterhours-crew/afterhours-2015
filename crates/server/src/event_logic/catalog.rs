@@ -19,6 +19,7 @@ pub struct Catalog {
     events: BTreeMap<u32, Arc<Content>>,
     starts: BTreeMap<Endpoint, u32>,
     discovery: BTreeSet<Endpoint>,
+    availability: Option<Arc<super::availability::Content>>,
 }
 
 impl Catalog {
@@ -71,7 +72,57 @@ impl Catalog {
             events,
             starts,
             discovery,
+            availability: None,
         })
+    }
+
+    pub fn new_gated(
+        contents: Vec<Content>,
+        availability: Arc<super::availability::Content>,
+    ) -> Result<Self, Error> {
+        let mut catalog = Self::new(contents, availability.entries())?;
+        catalog.discovery = availability.notifications();
+        catalog.availability = Some(availability);
+        Ok(catalog)
+    }
+    pub fn availability(&self) -> Option<&Arc<super::availability::Content>> {
+        self.availability.as_ref()
+    }
+
+    /// The shared authored fade-in used for an explicitly selected departure.
+    /// Require identical registration/manager identity across all event copies;
+    /// choosing the first conflicting definition would hide a preparation error.
+    pub fn destination_arrival(&self) -> Result<Option<nfs_world::arrival::Immediate>, Error> {
+        let mut selected: Option<(&Content, &nfs_content::events::Sequence)> = None;
+        for content in self.iter().filter(|c| c.event().restart.is_some()) {
+            let sequence = content.sequence(super::request::RESTART_ARRIVAL)?;
+            if let Some((_, old)) = selected {
+                if old.manager != sequence.manager
+                    || old.layout.asset != sequence.layout.asset
+                    || old.layout.sub_id != sequence.layout.sub_id
+                    || old.layout.bus_count != sequence.layout.bus_count
+                    || old.layout.catalog != sequence.layout.catalog
+                {
+                    return Err(Error::Shape);
+                }
+            } else {
+                selected = Some((content, sequence));
+            }
+        }
+        selected
+            .map(|(content, sequence)| {
+                nfs_world::arrival::Immediate::new(
+                    sequence.layout.asset,
+                    nfs_world::sequences::Component {
+                        scene_key: sequence.manager.0,
+                        index: sequence.manager.1,
+                    },
+                    sequence.layout.sub_id,
+                    sequence.layout.bus_count,
+                    content.creation_content().clone(),
+                )
+            })
+            .transpose()
     }
 
     pub fn get(&self, id: u32) -> Option<&Content> {
@@ -101,6 +152,7 @@ impl From<Content> for Catalog {
             discovery: content.discovery_notifications().clone(),
             starts: BTreeMap::from([(endpoint, id)]),
             events: BTreeMap::from([(id, Arc::new(content))]),
+            availability: None,
         }
     }
 }
@@ -108,6 +160,68 @@ impl From<Content> for Catalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn with_arrival() -> Content {
+        let mut event = super::super::tests::content().event().clone();
+        event.restart = Some(vec![nfs_content::events::restart::Destination {
+            position: [20., 3., -15.],
+            basis: [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]],
+        }]);
+        let mut sequence = event.sequences[0].clone();
+        sequence.layout.blueprint = super::super::request::RESTART_ARRIVAL.into();
+        sequence.layout.asset.local_index = 39;
+        sequence.layout.fields.truncate(1);
+        sequence.layout.bus_count = 1;
+        sequence.spawner = None;
+        sequence.goto = None;
+        sequence.wander = None;
+        event.sequences.push(sequence);
+        Content::new(event, "constructed".into()).unwrap()
+    }
+    #[test]
+    fn destination_arrival_requires_consistent_authored_asset_and_manager() {
+        assert!(
+            Catalog::from(super::super::tests::content())
+                .destination_arrival()
+                .unwrap()
+                .is_none()
+        );
+        let first = with_arrival();
+        let mut second = first.clone();
+        second.event.game_mode_id = "constructed/second".into();
+        second.record_id = nfs_content::events::record_id(&second.event.game_mode_id);
+        second.event.scene_content_key += 1;
+        let roster = [entry(&first), entry(&second)];
+        assert!(
+            Catalog::new(vec![first.clone(), second.clone()], &roster)
+                .unwrap()
+                .destination_arrival()
+                .unwrap()
+                .is_some()
+        );
+        for field in 0..5 {
+            let mut changed = second.event().clone();
+            let arrival = changed.sequences.last_mut().unwrap();
+            match field {
+                0 => arrival.manager.0 += 1,
+                1 => arrival.manager.1 += 1,
+                2 => arrival.layout.asset.bundle = 42,
+                3 => arrival.layout.sub_id += 1,
+                4 => arrival.layout.bus_count += 1,
+                _ => unreachable!(),
+            }
+            let changed = Content::new(changed, "constructed".into())
+                .unwrap_or_else(|error| panic!("invalid mutation {field}: {error:?}"));
+            assert!(
+                matches!(
+                    Catalog::new(vec![first.clone(), changed], &roster)
+                        .unwrap()
+                        .destination_arrival(),
+                    Err(Error::Shape)
+                ),
+                "ambiguous field {field}"
+            );
+        }
+    }
     fn entry(content: &Content) -> Entry {
         Entry {
             id: content.event().game_mode_id.clone(),

@@ -34,6 +34,26 @@ pub enum Expr {
     Not(Box<Expr>),
     All(Vec<Expr>),
 }
+impl serde::Serialize for Expr {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde_json::json;
+        let value = match self {
+            Self::Constant(v) => json!({"constant":v}),
+            Self::Completed(id) => json!({"completed":id}),
+            Self::ConsumerBeta => json!({"setting":"Gameplay.NFS16ConsumerBeta"}),
+            Self::Not(v) => json!({"negate":v}),
+            Self::All(v) => json!({"all":v}),
+        };
+        value.serialize(serializer)
+    }
+}
+impl<'de> serde::Deserialize<'de> for Expr {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = Json::deserialize(deserializer)?;
+        Self::from_json(&value)
+            .map_err(|e| serde::de::Error::custom(format!("activation expression: {e:?}")))
+    }
+}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Definition {
     objectives: Vec<(u64, Expr)>,
@@ -117,6 +137,11 @@ fn expression(
     })
 }
 impl Expr {
+    /// Parse one bounded authored activation expression independently of the
+    /// two gameplay branches. Callers still validate its state ownership.
+    pub fn from_json(value: &Json) -> Result<Self, ParseError> {
+        expression(value, 0, &mut 0, &mut BTreeSet::new())
+    }
     /// The activation value with no objective completed yet.
     pub fn initial(&self, settings: Settings) -> bool {
         self.evaluate(settings, &BTreeSet::new())

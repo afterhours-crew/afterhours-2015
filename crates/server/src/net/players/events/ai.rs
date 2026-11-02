@@ -175,8 +175,8 @@ impl PlayerListener {
                 (Gm::Root, 2),
                 (Gm::WaitForAi, 0),
                 (Gm::WaitForAi, 1),
-                (Gm::Main, 0),
-                (Gm::Main, 1),
+                (Gm::AiSpawned, 0),
+                (Gm::AiSpawned, 1),
             ] {
                 out.rpcs.push(HostRpc::GameMode(content.state_call(
                     players.objects(),
@@ -254,6 +254,20 @@ impl PlayerListener {
             &measured.skills,
         )?;
         append(out, changes);
+        // One bounded line per group creation (at most 12 members): the next
+        // recorded live run can be judged from the log (E1280).
+        tracing::info!(
+            target: "nfs_server::event_ai::pacing",
+            event_id = race.event_id,
+            human = participant,
+            tick_ms = now_ms,
+            group = ?commands.pacing(),
+            members = ?commands.members(),
+            values = ?measured.skills,
+            target_differences_m = ?measured.differences,
+            location_misses = ?measured.misses,
+            "ai pacing group created"
+        );
         grid.commands = Some(commands);
         grid.route = Some(route);
         grid.next_pacing = now_ms.saturating_add(2001);
@@ -413,8 +427,8 @@ impl PlayerListener {
                         (Gm::Waypoints, 1),
                         (Gm::DnfState, 0),
                         (Gm::DnfState, 1),
-                        (Gm::Root, 3),
                         (Gm::Final, 0),
+                        (Gm::Root, 3),
                     ] {
                         out.rpcs.push(HostRpc::GameMode(content.state_call(
                             players.objects(),
@@ -445,11 +459,18 @@ impl PlayerListener {
                     // Final-state entry releases this participant, which invokes
                     // the authored individual-completion handoff. The human's
                     // race and the other opponents continue independently.
+                    out.rpcs.push(HostRpc::GameMode(content.field_call(
+                        players.objects(),
+                        race.game_mode,
+                        content.spawner(names::OUTRO_SEQUENCE)?,
+                        1,
+                        Some(participant),
+                    )?));
                     for (state, method) in [
-                        (Gm::Root, 3),
-                        (Gm::Final, 0),
                         (Gm::ResultReporting, 0),
                         (Gm::ResultReporting, 1),
+                        (Gm::Final, 0),
+                        (Gm::Root, 3),
                     ] {
                         out.rpcs.push(HostRpc::GameMode(content.state_call(
                             players.objects(),
@@ -460,13 +481,6 @@ impl PlayerListener {
                             Arguments::None,
                         )?));
                     }
-                    out.rpcs.push(HostRpc::GameMode(content.field_call(
-                        players.objects(),
-                        race.game_mode,
-                        content.spawner(names::OUTRO_SEQUENCE)?,
-                        1,
-                        Some(participant),
-                    )?));
                     let index = grid
                         .racers
                         .members
@@ -513,6 +527,19 @@ impl PlayerListener {
             if now_ms >= grid.next_pacing {
                 out.records
                     .extend(commands.pace(players, &measured.skills)?);
+                // Rate-limited to the refresh cadence (2001 ms) per race.
+                tracing::info!(
+                    target: "nfs_server::event_ai::pacing",
+                    event_id = race.event_id,
+                    human,
+                    tick_ms = now_ms,
+                    group = ?commands.pacing(),
+                    members = ?commands.members(),
+                    values = ?measured.skills,
+                    target_differences_m = ?measured.differences,
+                    location_misses = ?measured.misses,
+                    "ai pacing group refreshed"
+                );
                 grid.next_pacing = now_ms.saturating_add(2001);
             }
             if now_ms >= grid.next_positions {
@@ -595,8 +622,8 @@ impl PlayerListener {
                     active: false,
                 },
             ),
-            (Gm::ResultReporting, 0, Arguments::None),
-            (Gm::ResultReporting, 1, Arguments::None),
+            (Gm::Finish, 0, Arguments::None),
+            (Gm::Finish, 1, Arguments::None),
         ] {
             out.rpcs.push(HostRpc::GameMode(content.state_call(
                 players.objects(),

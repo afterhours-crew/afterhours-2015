@@ -2,6 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+pub mod driving_distance;
 mod reputation;
 use crate::Failure;
 use nfs_protocol::world::rpc::Serial;
@@ -215,6 +216,7 @@ pub struct GarageLogic {
     /// Installed client EventSync that confirms the requested return.
     return_confirmation: Option<Event>,
     driving_timer: Option<crate::driving_timer::Binding>,
+    driving_distance: Option<driving_distance::Binding>,
     returned: Batch,
     crashed: Batch,
     recovered: Batch,
@@ -583,6 +585,12 @@ impl GarageLogic {
             .filter(|definition| assets.contains(&definition.asset))
             .map(|definition| definition.capture_id)
             .collect();
+        if next
+            .driving_distance
+            .is_some_and(|binding| removed.contains(&binding.role))
+        {
+            return Err(replication::Error::Unsupported);
+        }
         for batch in &batches {
             if batch.entity_updates.iter().any(|(id, _, _)| removed.contains(id))
                 || batch.events.iter().any(|event| matches!(event.target, EventTarget::Capture(id) if removed.contains(&id))) {
@@ -986,6 +994,10 @@ impl GarageLogic {
                 }
             }
         }
+        let driving_distance = v
+            .get("driving_distance")
+            .map(|value| driving_distance::Binding::read(value, &arrived))
+            .transpose()?;
         Ok(Self {
             content,
             reputation,
@@ -1007,6 +1019,7 @@ impl GarageLogic {
             return_requested,
             return_confirmation,
             driving_timer,
+            driving_distance,
             returned,
             crashed,
             recovered,
@@ -1019,6 +1032,9 @@ impl GarageLogic {
     }
     pub fn driving_timer(&self) -> Option<crate::driving_timer::Binding> {
         self.driving_timer
+    }
+    pub fn driving_distance(&self) -> Option<driving_distance::Binding> {
+        self.driving_distance
     }
     pub fn driving_timer_owner(
         &self,
@@ -1097,8 +1113,41 @@ impl GarageLogic {
     /// Every integer serializer that presents a reputation value, as
     /// (capture id, field index, reputation field), across all batches.
     pub fn reputation_fields(&self) -> Vec<(u16, usize, ReputationField)> {
-        let mut fields = Vec::new();
-        for which in [
+        self.definitions()
+            .flat_map(|definition| {
+                definition
+                    .roles
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, role)| {
+                        if let Role::Reputation(field) = role {
+                            Some((definition.capture_id, index, *field))
+                        } else {
+                            None
+                        }
+                    })
+            })
+            .collect()
+    }
+    /// Integer online-stat publishers driven by the same entity's calculated
+    /// REP level, as (capture id, serializer index). Their method 0 takes one
+    /// player reference and a signed 32-bit level; it is not a variant tag.
+    pub fn reputation_stat_fields(&self) -> Vec<(u16, usize)> {
+        self.definitions()
+            .flat_map(|definition| {
+                definition
+                    .roles
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, role)| {
+                        (*role == Role::ReputationLevelStat)
+                            .then_some((definition.capture_id, index))
+                    })
+            })
+            .collect()
+    }
+    fn definitions(&self) -> impl Iterator<Item = &Definition> {
+        [
             Which::Spawn,
             Which::Vehicles,
             Which::Entry,
@@ -1118,16 +1167,9 @@ impl GarageLogic {
             Which::Recovered,
             Which::Resetting,
             Which::ResetArrived,
-        ] {
-            for definition in &self.batch(which).entities {
-                for (index, role) in definition.roles.iter().enumerate() {
-                    if let Role::Reputation(field) = role {
-                        fields.push((definition.capture_id, index, *field));
-                    }
-                }
-            }
-        }
-        fields
+        ]
+        .into_iter()
+        .flat_map(|which| &self.batch(which).entities)
     }
     /// Whether deployment content describes a batch for this point.
     pub fn has(&self, which: Which) -> bool {

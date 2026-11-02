@@ -266,7 +266,12 @@ fn a_running_crash_finishes_before_outro_publication_without_delaying_finish_ran
     assert!(h.race().pending_outro.is_some());
     assert!(h.race().sequence.is_none());
     let shown = h.run(11300, vec![]);
-    assert_eq!(shown.created().len(), 4);
+    assert_eq!(
+        shown.created().len(),
+        7,
+        "add-set, results, awards, outro sequence, the outro goals and the Actor (E1280)"
+    );
+    assert_eq!(h.race().goals.len(), 2);
     assert!(h.race().pending_outro.is_none());
     assert_eq!(h.race().finish.unwrap(), result);
     let outro = h.race().sequence.unwrap().1;

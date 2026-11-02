@@ -23,6 +23,14 @@ impl State {
         content: &Content,
         known: impl Fn(u16) -> bool,
     ) -> Result<Self, Error> {
+        if content
+            .profile(creation.prefix.asset)?
+            .kinds()
+            .iter()
+            .any(|kind| kind.inspection_only())
+        {
+            return Err(Error::Unsupported);
+        }
         creation.encode(content)?;
         let initial = creation.body.initial.ok_or(Error::Shape)?;
         let prefix = creation.prefix;
@@ -185,6 +193,13 @@ impl State {
                     Kind::FloatProperty => Update::FloatProperty(None),
                     Kind::I32Property => Update::I32Property(None),
                     Kind::StringProperty => Update::StringProperty(None),
+                    Kind::RpcBoolUpdate
+                    | Kind::RpcChaseUpdate
+                    | Kind::RpcCopFineTracker
+                    | Kind::RpcCopMapUpdate
+                    | Kind::RpcTargetVisibilityUpdate => {
+                        unreachable!("inspection-only profile rejected at construction")
+                    }
                 })
             })
             .collect();

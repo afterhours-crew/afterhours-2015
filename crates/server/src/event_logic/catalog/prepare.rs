@@ -5,7 +5,10 @@
 //! Blocking installation preparation shared by startup and offline audits.
 use super::{Catalog, Content, Entry};
 use crate::{event_logic::request, scoring, vehicle_content};
-use nfs_content::{Error, assets::AssetIndex, scoring::content::EventScoring};
+use nfs_content::{
+    Error, assets::AssetIndex, events::recommendations::NarrativeEventMap,
+    scoring::content::EventScoring,
+};
 use nfs_services::item_content::ItemContent;
 use nfs_world::{replication::entity::creation::Asset, scoring::interpreter::Category};
 use std::{
@@ -17,6 +20,7 @@ use std::{
 pub struct Prepared {
     entries: Vec<(Content, EventScoring, Asset)>,
     roster: Vec<Entry>,
+    availability: Option<Arc<crate::event_logic::availability::Content>>,
 }
 
 impl Prepared {
@@ -36,7 +40,11 @@ impl Prepared {
             )?;
             contents.push(content);
         }
-        Ok((Catalog::new(contents, &self.roster)?, scoring))
+        let catalog = match self.availability {
+            Some(availability) => Catalog::new_gated(contents, availability)?,
+            None => Catalog::new(contents, &self.roster)?,
+        };
+        Ok((catalog, scoring))
     }
 }
 
@@ -68,6 +76,80 @@ pub fn sprints_cached(
     )
 }
 
+/// Prepare ordinary sprint support and an explicitly approved narrative set.
+/// Visibility still covers every authored variant independently of playability.
+pub fn sprints_gated_cached(
+    index: &mut AssetIndex,
+    categories: &BTreeMap<u32, Category>,
+    vehicles: Option<&vehicle_content::Content>,
+    items: Option<&ItemContent>,
+    availability: Arc<crate::event_logic::availability::Content>,
+    narrative: &BTreeSet<String>,
+    cache: Option<&crate::prepared_content::Cache>,
+) -> Result<Prepared, Error> {
+    if narrative.len() > 64
+        || narrative.iter().any(|id| {
+            !availability
+                .entries()
+                .iter()
+                .any(|e| &e.id == id && request::sprint(e).is_some())
+        })
+    {
+        return Err(Error::Cache("selected narrative sprint missing"));
+    }
+    let roster: Vec<_> = availability
+        .entries()
+        .iter()
+        .filter(|e| {
+            (!e.id.ends_with("_nar") && !e.id.ends_with("_pres")) || narrative.contains(&e.id)
+        })
+        .cloned()
+        .collect();
+    let navigation = Arc::new(index.road_distance()?);
+    let narrative_map = index.narrative_event_map()?;
+    let workers = crate::prepared_content::parallel::workers()?;
+    let finish = |snapshot: Snapshot| {
+        if snapshot.roster.len() != roster.len()
+            || snapshot.roster.iter().zip(&roster).any(|(a, b)| {
+                a.id != b.id
+                    || a.volume != b.volume
+                    || a.scene != b.scene
+                    || a.game_mode != b.game_mode
+                    || a.notifications != b.notifications
+            })
+        {
+            return Err(Error::Cache("selected sprint roster mismatch"));
+        }
+        let mut result = snapshot.finish(
+            categories,
+            vehicles,
+            items,
+            navigation.clone(),
+            &narrative_map,
+        )?;
+        result.availability = Some(availability.clone());
+        Ok(result)
+    };
+    match cache {
+        Some(cache) => cache.prepare(
+            "available-sprints",
+            &serde_json::to_vec(&(categories, &roster))
+                .map_err(|_| Error::Cache("selected sprint identity"))?,
+            |bytes| {
+                finish(
+                    serde_json::from_slice(bytes)
+                        .map_err(|_| Error::Cache("selected sprint snapshot"))?,
+                )
+            },
+            || {
+                serde_json::to_vec(&build_roster(index, workers, roster.clone())?)
+                    .map_err(|_| Error::Cache("selected sprint serialization"))
+            },
+        ),
+        None => finish(build_roster(index, workers, roster.clone())?),
+    }
+}
+
 /// Explicit worker count for bounded offline comparisons and diagnostics.
 pub fn sprints_with_workers(
     index: &mut AssetIndex,
@@ -81,8 +163,16 @@ pub fn sprints_with_workers(
         return Err(Error::Cache("preparation workers must be 1..4"));
     }
     let navigation = Arc::new(index.road_distance()?);
-    let finish =
-        |snapshot: Snapshot| snapshot.finish(categories, vehicles, items, navigation.clone());
+    let narrative_map = index.narrative_event_map()?;
+    let finish = |snapshot: Snapshot| {
+        snapshot.finish(
+            categories,
+            vehicles,
+            items,
+            navigation.clone(),
+            &narrative_map,
+        )
+    };
     match cache {
         Some(cache) => cache.prepare(
             "normal-sprints",
@@ -120,6 +210,13 @@ struct Snapshot {
 
 fn build(index: &mut AssetIndex, workers: usize) -> Result<Snapshot, Error> {
     let roster = index.event_roster()?;
+    build_roster(index, workers, roster)
+}
+fn build_roster(
+    index: &mut AssetIndex,
+    workers: usize,
+    roster: Vec<Entry>,
+) -> Result<Snapshot, Error> {
     let selected: Vec<_> = roster
         .iter()
         .filter(|entry| request::sprint(entry).is_some())
@@ -223,6 +320,7 @@ impl Snapshot {
         vehicles: Option<&vehicle_content::Content>,
         items: Option<&ItemContent>,
         navigation: Arc<nfs_world::road_distance::Network>,
+        narrative_map: &NarrativeEventMap,
     ) -> Result<Prepared, Error> {
         let invalid = || Error::Cache("invalid compiled sprint input");
         let expected: Vec<_> = self.roster.iter().filter_map(request::sprint).collect();
@@ -273,7 +371,9 @@ impl Snapshot {
                 }
                 property.validate().map_err(|_| invalid())?;
             }
+            // The client keys its speed walls by the standard event (E1280).
             let content = Content::new(event, category)
+                .map(|c| c.with_speedwall_event(narrative_map))
                 .and_then(|c| c.with_awards(awards))
                 .and_then(|c| c.with_navigation(navigation.clone()))
                 .map_err(|_| invalid())?;
@@ -309,6 +409,7 @@ impl Snapshot {
         Ok(Prepared {
             entries,
             roster: self.roster,
+            availability: None,
         })
     }
 }

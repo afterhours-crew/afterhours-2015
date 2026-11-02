@@ -759,47 +759,53 @@ fn startup_resolves_roles_by_name_and_traffic_by_construction_order() {
 }
 
 #[test]
-fn startup_derives_bank_position_and_rejects_ambiguous_banks() {
+fn startup_derives_scene_services_and_rejects_ambiguous_bindings() {
     use synthetic::Field;
-    for count in [0, 1, 2] {
-        let replacements = synthetic::garage_layout_with(|_, _, fields, objects| {
-            let first = objects.len() as u32 + 2;
-            let Field::RawPointers(pointers) = &mut fields[1].1 else {
-                panic!()
-            };
-            for i in 0..count {
-                objects.push(("BankEntityData", vec![]));
-                // Place the bank before every pre-existing scene child.
-                pointers.insert(0, first + i);
-            }
-        });
-        let mut fixture = assets();
-        fixture.retain(|a| !replacements.iter().any(|b| b.name == a.name));
-        fixture.extend(replacements);
-        let mut install = install_with(&fixture);
-        install.options.identity.scenes.classes.insert(
-            "BankEntityData".into(),
-            Some(nfs_world::replication::sublevel::Kind::Rpc),
-        );
-        let mut index = assets::AssetIndex::open(&install.game(), &install.options()).unwrap();
-        let scenes = scenes::build(&mut index.assets, &install.options.identity.scenes).unwrap();
-        let catalog =
-            scenes::Catalog::from_json(&serde_json::from_slice(&scenes).unwrap()).unwrap();
-        let prepared = startup::build(&mut index, &catalog);
-        if count == 2 {
-            assert!(matches!(prepared, Err(Error::Content(_))));
-            continue;
-        }
-        let value: serde_json::Value = serde_json::from_slice(&prepared.unwrap()).unwrap();
-        if count == 0 {
-            assert!(value["roles"].get("bank").is_none());
-        } else {
-            assert_eq!(
-                value["roles"]["bank"],
-                serde_json::json!({
-                    "scene": assets::scene_key("levels/runtime/gameplay"), "serializer":1
-                })
+    for (class, role) in [
+        ("BankEntityData", "bank"),
+        ("PersistedIdEntityData", "seen_points"),
+    ] {
+        for count in [0, 1, 2] {
+            let replacements = synthetic::garage_layout_with(|_, _, fields, objects| {
+                let first = objects.len() as u32 + 2;
+                let Field::RawPointers(pointers) = &mut fields[1].1 else {
+                    panic!()
+                };
+                for i in 0..count {
+                    objects.push((class, vec![]));
+                    // Place the service before every pre-existing scene child.
+                    pointers.insert(0, first + i);
+                }
+            });
+            let mut fixture = assets();
+            fixture.retain(|a| !replacements.iter().any(|b| b.name == a.name));
+            fixture.extend(replacements);
+            let mut install = install_with(&fixture);
+            install.options.identity.scenes.classes.insert(
+                class.into(),
+                Some(nfs_world::replication::sublevel::Kind::Rpc),
             );
+            let mut index = assets::AssetIndex::open(&install.game(), &install.options()).unwrap();
+            let scenes =
+                scenes::build(&mut index.assets, &install.options.identity.scenes).unwrap();
+            let catalog =
+                scenes::Catalog::from_json(&serde_json::from_slice(&scenes).unwrap()).unwrap();
+            let prepared = startup::build(&mut index, &catalog);
+            if count == 2 {
+                assert!(matches!(prepared, Err(Error::Content(_))));
+                continue;
+            }
+            let value: serde_json::Value = serde_json::from_slice(&prepared.unwrap()).unwrap();
+            if count == 0 {
+                assert!(value["roles"].get(role).is_none());
+            } else {
+                assert_eq!(
+                    value["roles"][role],
+                    serde_json::json!({
+                        "scene": assets::scene_key("levels/runtime/gameplay"), "serializer":1
+                    })
+                );
+            }
         }
     }
 }

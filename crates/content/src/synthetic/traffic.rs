@@ -35,6 +35,7 @@ fn asset(
     if seed == 1 {
         super::rivals::append(&mut fields, &mut objects);
         append_lifecycle(&mut fields, &mut objects);
+        super::sequences::arrival_scene(&mut fields, &mut objects);
     }
     let (partition, instance) = reference(seed);
     Asset {

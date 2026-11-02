@@ -52,6 +52,39 @@ const MAX_LIST_BYTES: usize = MAX_NESTED * 8;
 mod maintenance;
 pub use maintenance::WriterLease;
 
+pub(crate) fn open_connection(path: &Path, flags: OpenFlags) -> rusqlite::Result<Connection> {
+    // Story backups add a receipt directory beneath the account root. SQLite's
+    // default Windows VFS can refuse their database/journal paths even when the
+    // account itself opens. The bundled long-path VFS retains normal locking.
+    #[cfg(windows)]
+    {
+        use std::{
+            os::windows::ffi::OsStrExt,
+            path::{Component, Prefix},
+        };
+        // Leave room for SQLite's journal/WAL suffixes. Long-path VFS alone
+        // raises SQLite's limit but does not opt Win32 file APIs into extended
+        // path handling. All connections use the same spelling for this file.
+        let extended;
+        let path = if path.as_os_str().encode_wide().count() >= 240
+            && matches!(path.components().next(), Some(Component::Prefix(p))
+                if matches!(p.kind(), Prefix::Disk(_)))
+        {
+            let mut name = std::ffi::OsString::from(r"\\?\");
+            name.push(path);
+            extended = PathBuf::from(name);
+            &extended
+        } else {
+            path
+        };
+        Connection::open_with_flags_and_vfs(path, flags, "win32-longpath")
+    }
+    #[cfg(not(windows))]
+    {
+        Connection::open_with_flags(path, flags)
+    }
+}
+
 #[cfg(windows)]
 fn windows_local_root(canonical: PathBuf) -> Result<PathBuf, Error> {
     use std::path::{Component, Prefix};
@@ -166,8 +199,8 @@ impl SqliteRepository {
     /// it closes. Returns the main file's size at open.
     pub(crate) fn connect_read_only(&self, account: AccountId) -> Result<(Connection, u64), Error> {
         let bytes = self.checked_file(account, false)?.ok_or(Error::Absent)?;
-        let conn = Connection::open_with_flags(
-            self.path(account),
+        let conn = open_connection(
+            &self.path(account),
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
         if !conn.set_db_config(
@@ -187,7 +220,7 @@ impl SqliteRepository {
         if create {
             flags |= OpenFlags::SQLITE_OPEN_CREATE;
         }
-        let conn = Connection::open_with_flags(path, flags)?;
+        let conn = open_connection(&path, flags)?;
         Self::limit(&conn)?;
         // EXTRA protects the initial rollback-journal import; it equals FULL
         // once the file is in WAL mode.
@@ -515,6 +548,36 @@ impl InventoryRepository for SqliteRepository {
         let snapshot = Self::snapshot_in(&tx, account)?;
         tx.commit()?;
         Ok(snapshot)
+    }
+    fn receipt(&self, account: AccountId, batch_id: u64) -> Result<Option<Applied>, Error> {
+        if batch_id == 0 {
+            return Err(Error::Invalid);
+        }
+        let mut conn = self.connect(account, false)?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        Self::check(&tx, account)?;
+        let (current, _) = Self::read_meta(&tx)?;
+        let recorded: Option<i64> = tx
+            .query_row(
+                "SELECT generation FROM batch WHERE id=?1",
+                params![batch_id.to_be_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let receipt = recorded
+            .map(|generation| {
+                let generation = u64::try_from(generation).map_err(|_| Error::Config)?;
+                if generation == 0 || generation > current {
+                    return Err(Error::Config);
+                }
+                Ok(Applied {
+                    generation,
+                    replayed: true,
+                })
+            })
+            .transpose()?;
+        tx.commit()?;
+        Ok(receipt)
     }
     fn apply(&self, account: AccountId, batch: &Batch, now: Timestamp) -> Result<Applied, Error> {
         let mut conn = self.connect(account, false)?;

@@ -5,6 +5,7 @@
 use super::players::{
     AwardRequest, Credited, EquipmentRequest, GarageOperation, GarageRequest, PlayerListener,
 };
+pub(super) mod distance;
 mod garage;
 pub(super) mod story;
 use crate::inventory;
@@ -100,6 +101,7 @@ pub struct Service {
     offers: Option<Arc<nfs_services::purchase::Offers>>,
     car_offers: Option<Arc<nfs_services::garage::Offers>>,
     category_unlocks: Option<Arc<nfs_services::category_unlocks::Policy>>,
+    unlock_notifications: Option<Arc<nfs_services::messages::unlocks::Policy>>,
     records: Option<Arc<dyn nfs_storage::records::Repository>>,
     workers: Arc<Semaphore>,
 }
@@ -112,6 +114,7 @@ impl Service {
             offers: None,
             car_offers: None,
             category_unlocks: None,
+            unlock_notifications: None,
             records: None,
             workers: Arc::new(Semaphore::new(WORKERS)),
         }
@@ -197,6 +200,20 @@ fn supported_request(bytes: &[u8]) -> Result<bool, nfs_world::items::Error> {
     }
 }
 impl Profile {
+    pub fn with_unlock_notifications(
+        mut self,
+        policy: nfs_services::messages::unlocks::Policy,
+    ) -> Result<Self, crate::Failure> {
+        policy
+            .validate_grants(
+                self.service.category_unlocks.as_deref(),
+                self.service.offers.as_ref().and_then(|o| o.item_unlocks()),
+            )
+            .map_err(|_| crate::Failure::ProfileConfig)?;
+        self.service.unlock_notifications = Some(Arc::new(policy));
+        Ok(self)
+    }
+
     pub(super) fn bind_records(
         &self,
         records: crate::auxiliary::LocalRecords,
@@ -495,6 +512,13 @@ impl Profile {
         let thresholds = request.thresholds.clone();
         let player_index = request.player_index;
         let event = request.event.clone();
+        if (request.story.is_some() && event.is_none())
+            || event
+                .as_ref()
+                .is_some_and(|e| e.batch_id != batch_id || e.rep != credit)
+        {
+            return Err(Error::Inventory(nfs_storage::Error::Invalid.into()));
+        }
         timeout(JOB_TIMEOUT, async move {
             let permit = service
                 .workers
@@ -517,6 +541,7 @@ impl Profile {
                     inventory: &service.catalog,
                     thresholds: &thresholds,
                     categories: service.category_unlocks.as_deref(),
+                    notifications: service.unlock_notifications.as_deref(),
                     items: service
                         .offers
                         .as_ref()
@@ -524,27 +549,39 @@ impl Profile {
                 };
                 let before = inventory::collection(&snapshot, service.catalog.bindings())
                     .map_err(Error::Inventory)?;
-                let batch = match &event {
+                let applied = match &event {
                     // An event completion's rewards commit as one transaction.
                     Some(event) => {
-                        let snapshot = nfs_services::awards::ensure_empty(
+                        nfs_services::awards::ensure_empty(
                             service.repository.as_ref(),
                             account,
                             snapshot,
                             now,
                         )
                         .map_err(|_| Error::Inventory(nfs_storage::Error::Config.into()))?;
-                        nfs_services::event_rewards::prepare(&policy, &snapshot, event)
-                            .map_err(Error::Inventory)?
+                        nfs_services::event_rewards::commit(
+                            service.repository.as_ref(),
+                            account,
+                            &policy,
+                            event,
+                            // Finish rewards precede the outro. The owned event
+                            // reports its attributed story result afterwards;
+                            // paying the finish must not start that handoff.
+                            None,
+                            now,
+                        )
+                        .map_err(Error::Inventory)?
                     }
-                    None => policy
-                        .prepare(&snapshot, credit, batch_id)
-                        .map_err(Error::Inventory)?,
+                    None => {
+                        let batch = policy
+                            .prepare(&snapshot, credit, batch_id)
+                            .map_err(Error::Inventory)?;
+                        service
+                            .repository
+                            .apply(account, &batch, now)
+                            .map_err(|e| Error::Inventory(e.into()))?
+                    }
                 };
-                let applied = service
-                    .repository
-                    .apply(account, &batch, now)
-                    .map_err(|e| Error::Inventory(e.into()))?;
                 let snapshot = service
                     .repository
                     .snapshot(account)
@@ -575,6 +612,16 @@ impl Profile {
         })
         .await
         .map_err(|_| Error::Deadline)?
+    }
+    #[cfg(test)]
+    pub(in crate::net) async fn credit_for_test(
+        &self,
+        request: &AwardRequest,
+        now: Timestamp,
+    ) -> Result<Credited, String> {
+        self.credit(request, now)
+            .await
+            .map_err(|e| format!("{e:?}"))
     }
     async fn answer(&self, request: Vec<u8>, now: Timestamp) -> Result<Option<LoadedReply>, Error> {
         if !supported_request(&request).map_err(|e| Error::Inventory(e.into()))? {
@@ -987,7 +1034,7 @@ impl Exchanges {
                         "story persistence failed"
                     );
                     listener.story_failed(&request);
-                    false
+                    matches!(request.action, story::Action::Distance { .. })
                 }
             };
         }

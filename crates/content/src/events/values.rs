@@ -32,6 +32,9 @@ const MAX_DEPTH: usize = 64;
 /// Bound on the values one field may receive across prefab boundaries.
 const MAX_CANDIDATES: usize = 16;
 
+#[cfg(test)]
+mod precedence;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Number {
     Integer(i32),
@@ -106,19 +109,23 @@ impl<'g, 'a, S: Source> Evaluator<'g, 'a, S> {
         Ok(())
     }
     /// Every value a property connection may carry into `site`'s field `port`.
-    /// General fan-in retains every candidate. The one known startup precedence
-    /// here is an unbound bus-interface fallback followed by a constant entity's
-    /// binding publication (the bus is constructed before its entities).
+    /// General fan-in retains every candidate. Known startup publishers can
+    /// supersede an unbound bus-interface initialization default: constants at
+    /// binding and ConditionalFloat's selected Output at activation. A bound
+    /// interface remains a producer, so it receives no such precedence.
     fn candidates(&mut self, site: &Site, port: u32) -> Result<Vec<Number>, Error> {
         self.enter()?;
         let sources = self.graph.property_sources(site, port)?;
         if let [a, b] = sources.as_slice() {
-            for (constant, fallback) in [(a, b), (b, a)] {
-                if constant.port != VALUE
-                    || !matches!(
-                        self.graph.object(&constant.site)?.class.as_str(),
-                        "IntEntityData" | "FloatEntityData" | "BoolEntityData"
-                    )
+            for (publisher, fallback) in [(a, b), (b, a)] {
+                let publishes = match self.graph.object(&publisher.site)?.class.as_str() {
+                    "IntEntityData" | "FloatEntityData" | "BoolEntityData" => {
+                        publisher.port == VALUE
+                    }
+                    "ConditionalFloatEntityData" => publisher.port == OUTPUT,
+                    _ => false,
+                };
+                if !publishes
                     || self.graph.object(&fallback.site)?.class != "InterfaceDescriptorData"
                 {
                     continue;
@@ -135,14 +142,16 @@ impl<'g, 'a, S: Source> Evaluator<'g, 'a, S> {
                     None => true,
                 };
                 if unbound {
-                    let value = self.output(&constant.site, constant.port)?;
+                    let value = self.output(&publisher.site, publisher.port)?;
                     if self
                         .interface_default(&fallback.site, fallback.port)?
                         .is_some_and(|v| {
                             std::mem::discriminant(&v) != std::mem::discriminant(&value)
                         })
                     {
-                        return Err(bad("constant and interface fallback types disagree"));
+                        return Err(bad(
+                            "startup publisher and interface fallback types disagree",
+                        ));
                     }
                     self.depth -= 1;
                     return Ok(vec![value]);
@@ -403,11 +412,15 @@ impl<'g, 'a, S: Source> Evaluator<'g, 'a, S> {
                     Number::Boolean(v) => v,
                     _ => return Err(bad("conditional float condition type")),
                 };
-                if condition {
+                let selected = if condition {
                     self.field_or_input(site, IF_TRUE, "ValueIfTrue")?
                 } else {
                     self.field_or_input(site, IF_FALSE, "ValueIfFalse")?
+                };
+                if !matches!(selected, Number::Float(v) if v.is_finite()) {
+                    return Err(bad("conditional float selected value type or range"));
                 }
+                selected
             }
             "MathEntityData" if port == OUT => {
                 let crate::scoring::Calculation::Math { program, .. } =

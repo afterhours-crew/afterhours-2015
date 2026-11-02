@@ -16,6 +16,7 @@ use nfs_world::scoring::{
 };
 
 pub mod ai;
+pub mod ai_deployment;
 pub mod arithmetic;
 pub mod awards;
 pub mod bank;
@@ -30,12 +31,14 @@ pub mod creation;
 pub mod delay;
 pub mod donut;
 pub mod draft;
+pub mod driving_distance;
 pub mod event_details;
 pub mod event_sync;
 pub mod events;
 pub mod interfaces;
 pub mod linked_curve;
 pub mod nodes;
+pub mod participant_pacing;
 pub mod participant_properties;
 pub mod program;
 pub mod property_gate;

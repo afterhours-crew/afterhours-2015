@@ -756,7 +756,11 @@ fn all_populations_share_the_world_budget_and_resume_after_a_slot_is_freed() {
 
 /// A racer authored 1 km east of the focus, facing it.
 fn far_fixture() -> (Population, Players, registrations::Registry) {
-    let (mut p, world, registry, _) = fixture_mode(1, false);
+    far_fixture_with(1)
+}
+
+pub(crate) fn far_fixture_with(connection: u8) -> (Population, Players, registrations::Registry) {
+    let (mut p, world, registry, _) = fixture_mode(connection, false);
     let racer = &mut Arc::make_mut(&mut p.content).data.racers[0];
     racer.position = [1000., 0., 2.];
     racer.basis = [[0., 0., 1.], [0., 1., 0.], [-1., 0., 0.]];

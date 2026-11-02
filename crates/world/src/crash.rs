@@ -14,6 +14,7 @@ use crate::{
 };
 use nfs_protocol::world::rpc::Serial;
 use std::collections::BTreeMap;
+pub mod arrival;
 mod reset;
 pub mod route;
 mod trail;
@@ -90,6 +91,7 @@ enum Phase {
     Stopping,
     Complete,
     Resetting,
+    Arriving,
 }
 #[derive(Clone, Debug)]
 struct Entry {
@@ -113,6 +115,7 @@ pub struct Crashes {
     duration_ms: u64,
     world_ms: u64,
     entries: BTreeMap<u16, Entry>,
+    arrival: Option<arrival::Arrivals>,
 }
 impl Crashes {
     pub fn new(definition: Definition, content: Content, duration_ms: u64) -> Result<Self, Error> {
@@ -128,7 +131,97 @@ impl Crashes {
             duration_ms,
             world_ms: 0,
             entries: BTreeMap::new(),
+            arrival: None,
         })
+    }
+
+    /// Installation-backed arrival behavior must be configured before any
+    /// participant lifetime begins. Legacy content keeps its existing path.
+    pub fn with_arrival(mut self, arrival: arrival::Arrivals) -> Result<Self, Error> {
+        if !self.entries.is_empty() || self.arrival.is_some() {
+            return Err(Error::Shape);
+        }
+        self.arrival = Some(arrival);
+        Ok(self)
+    }
+
+    pub fn arriving(&self, participant: u16) -> bool {
+        self.entries
+            .get(&participant)
+            .is_some_and(|e| e.phase == Phase::Arriving)
+    }
+
+    pub fn pending_arrivals(&self) -> Vec<Owner> {
+        self.entries
+            .values()
+            .filter(|e| {
+                e.phase == Phase::Arriving
+                    && self
+                        .arrival
+                        .as_ref()
+                        .is_some_and(|a| !a.active(e.owner.participant))
+            })
+            .map(|e| e.owner)
+            .collect()
+    }
+
+    pub fn start_arrival(
+        &mut self,
+        players: &mut Players,
+        owner: Owner,
+    ) -> Result<Vec<Record>, Error> {
+        if !self
+            .entries
+            .get(&owner.participant)
+            .is_some_and(|e| e.owner == owner && e.phase == Phase::Arriving)
+        {
+            return Err(Error::Shape);
+        }
+        self.arrival
+            .as_mut()
+            .ok_or(Error::Shape)?
+            .start(players, owner, self.world_ms)
+    }
+
+    pub fn poll_arrivals(
+        &mut self,
+        players: &mut Players,
+        capacity: usize,
+    ) -> Result<Vec<arrival::Stopped>, Error> {
+        match &mut self.arrival {
+            Some(arrival) => arrival.poll(players, self.world_ms, capacity),
+            None => Ok(vec![]),
+        }
+    }
+
+    pub fn has_arrival_completion(&self, ghost: u16, selector: u16) -> bool {
+        self.arrival
+            .as_ref()
+            .is_some_and(|a| a.claims(ghost, selector))
+    }
+
+    pub fn complete_arrival(
+        &mut self,
+        players: &mut Players,
+        owner: Owner,
+        call: Completed,
+    ) -> Result<Option<u16>, Error> {
+        let entry = self
+            .entries
+            .get_mut(&owner.participant)
+            .ok_or(Error::UnknownObject)?;
+        if entry.owner != owner || !matches!(entry.phase, Phase::Arriving | Phase::Complete) {
+            return Err(Error::Shape);
+        }
+        let removed = self
+            .arrival
+            .as_mut()
+            .ok_or(Error::Shape)?
+            .complete(players, owner, call)?;
+        if removed.is_some() {
+            entry.phase = Phase::Complete;
+        }
+        Ok(removed)
     }
 
     /// Feed only a decoded report from this participant's current owned car.
@@ -346,7 +439,11 @@ impl Crashes {
         if entry.phase != Phase::Resetting || !entry.relocation_sent {
             return Ok(false);
         }
-        entry.phase = Phase::Complete;
+        entry.phase = if self.arrival.is_some() {
+            Phase::Arriving
+        } else {
+            Phase::Complete
+        };
         entry.destination = None;
         entry.trail = trail::Trail::default();
         entry.route = route::Cache::default();
@@ -364,7 +461,11 @@ impl Crashes {
         self.entries.get(&participant).is_some_and(|e| {
             matches!(
                 e.phase,
-                Phase::Pending | Phase::Running { .. } | Phase::Stopping | Phase::Resetting
+                Phase::Pending
+                    | Phase::Running { .. }
+                    | Phase::Stopping
+                    | Phase::Resetting
+                    | Phase::Arriving
             )
         })
     }
@@ -434,8 +535,12 @@ impl Crashes {
     /// A queued fallback is obsolete once this sequence has completed.
     pub fn completed(&self, ghost: u16) -> bool {
         self.entries.values().any(|e| {
-            e.ghost == Some(ghost) && matches!(e.phase, Phase::Complete | Phase::Resetting)
-        })
+            e.ghost == Some(ghost)
+                && matches!(
+                    e.phase,
+                    Phase::Complete | Phase::Resetting | Phase::Arriving
+                )
+        }) || self.arrival.as_ref().is_some_and(|a| a.completed(ghost))
     }
     /// Remove only this owner's sequence, once. Retain its last ID so reliable
     /// duplicate completion calls are harmless until the next lifetime.
@@ -459,7 +564,7 @@ impl Crashes {
             return Err(Error::UnknownObject);
         }
         match entry.phase {
-            Phase::Complete | Phase::Resetting => Ok(None),
+            Phase::Complete | Phase::Resetting | Phase::Arriving => Ok(None),
             Phase::Running { .. } | Phase::Stopping => {
                 players.remove_entities(&[call.sequence])?;
                 entry.phase = Phase::Complete;
@@ -473,6 +578,9 @@ impl Crashes {
     pub fn retire(&mut self, participant: u16) -> Result<(), Error> {
         if self.active(participant) {
             return Err(Error::Shape);
+        }
+        if let Some(arrival) = &mut self.arrival {
+            arrival.retire(participant)?;
         }
         self.entries.remove(&participant);
         Ok(())

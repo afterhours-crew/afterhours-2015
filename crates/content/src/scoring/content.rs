@@ -2,7 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! Everything the server needs to run the two installed driving participants:
+//! Everything the server needs to run the installed player and AI driving participants:
 //! their compiled programs, replication layouts, the map from graph nodes to
 //! serializer fields and the map from keeper link IDs to score categories.
 //! The event driving-style participant compiles the same way against the
@@ -28,6 +28,7 @@ use std::sync::Arc;
 
 pub const ACQUISITION: &str = "gameplay/drivingdataacquisition";
 pub const SCORING: &str = "gameplay/scoring/drivingstylescoringparticipantlogic";
+pub const AI_SCORING: &str = "gameplay/scoring/aidrivingstylescoringparticipantlogic";
 /// The race events' driving-style participant: the free-roam scoring prefab
 /// plus the event tracking logic (E994 ghost 1605).
 pub const EVENT_SCORING: &str = "gameplay/scoring/eventdrivingstylescoringparticipantlogic";
@@ -57,6 +58,8 @@ pub struct Participant {
 pub struct ScoringContent {
     pub acquisition: Participant,
     pub scoring: Participant,
+    /// Required scene-owned opponent logic, eligibility and external bindings.
+    pub ai: super::ai_deployment::Deployment,
     /// Keeper link ID (from the installed channel) to the category it credits.
     pub categories: BTreeMap<u32, Category>,
 }
@@ -257,9 +260,18 @@ impl AssetIndex {
         &mut self,
         scene: &str,
         blueprint: &str,
+        owned_properties: bool,
     ) -> Result<(Participant, Composition), Error> {
         let sources: Sources = self.scoring_sources(blueprint)?;
-        let program = compile(&sources)?;
+        let program = if owned_properties {
+            let properties = self
+                .owned_participant_properties(blueprint)?
+                .into_iter()
+                .collect();
+            compile_with_properties(&sources, &properties)?
+        } else {
+            compile(&sources)?
+        };
         let layout = self.participant_layout(scene, blueprint, Owner::Scene)?;
         let fields = serializer_fields(&sources.composition, &self.identity.participant_logic)?;
         if fields.len() != layout.fields.len()
@@ -408,11 +420,19 @@ impl AssetIndex {
         Ok(out)
     }
 
-    /// Read both installed driving participants for one gameplay scene.
+    /// Compile the scene-owned AI driving logic and its actual spawner bindings.
+    /// Its property writes remain owned by each AI participant; selecting eligible
+    /// participants and supplying the bound services belongs to the host.
+    pub fn ai_scoring_participant(&mut self, scene: &str) -> Result<Participant, Error> {
+        self.scoring_participant(scene, AI_SCORING, true)
+            .map(|(participant, _)| participant)
+    }
+
+    /// Read the player and AI driving participants for one gameplay scene.
     pub fn scoring_content(&mut self, scene: &str) -> Result<ScoringContent, Error> {
         let (acquisition, acquisition_composition) =
-            self.scoring_participant(scene, ACQUISITION)?;
-        let (scoring, composition) = self.scoring_participant(scene, SCORING)?;
+            self.scoring_participant(scene, ACQUISITION, false)?;
+        let (scoring, composition) = self.scoring_participant(scene, SCORING, false)?;
         let categories = keeper_categories(&scoring.program, &composition)?;
         if keeper_categories(&acquisition.program, &acquisition_composition).is_ok() {
             return Err(bad("acquisition participant must not award"));
@@ -420,6 +440,7 @@ impl AssetIndex {
         Ok(ScoringContent {
             acquisition,
             scoring,
+            ai: self.ai_scoring_deployment(scene)?,
             categories,
         })
     }

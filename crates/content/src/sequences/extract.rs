@@ -174,6 +174,7 @@ pub(crate) fn build(index: &mut AssetIndex) -> Result<Vec<u8>, Error> {
         (&rules.exit, &rules.exit_scene),
         (&rules.entry, &rules.exit_scene),
         (&rules.crash, &rules.manager_scene),
+        (&rules.arrival, &rules.manager_scene),
     ] {
         let asset = index.reference(scene, name)?;
         definitions.push(json!({"asset":{"bundle":bundle(scene)?,"type_id":asset.class_id,"local_index":asset.local_index},"catalog":index.catalog(scene)?}));
@@ -204,6 +205,7 @@ pub(crate) fn build(index: &mut AssetIndex) -> Result<Vec<u8>, Error> {
         (&rules.exit, &rules.exit_scene),
         (&rules.entry, &rules.exit_scene),
         (&rules.crash, &rules.manager_scene),
+        (&rules.arrival, &rules.manager_scene),
     ]
     .into_iter()
     .enumerate()
@@ -221,6 +223,13 @@ pub(crate) fn build(index: &mut AssetIndex) -> Result<Vec<u8>, Error> {
         );
         doc["manager"] = manager_component.clone();
         doc["embedded_bus"] = json!(bus);
+        if i == 4 {
+            let (duration, target) =
+                super::controlled_arrival::compile(&mut graph, &manager_nodes, &nodes, &rules)?;
+            doc["duration_ms"] = json!(duration);
+            doc["channel"] = component(&mut graph, &mut scenes, &target)?;
+            continue;
+        }
         if i == 3 {
             let root = unique(&nodes, "ParticipantStateSequenceEntityData")?;
             if !graph.links(root, rules.root_channels)?.is_empty() {
@@ -272,6 +281,7 @@ pub(crate) fn build(index: &mut AssetIndex) -> Result<Vec<u8>, Error> {
     result["arrive"] = definitions.remove(0);
     result["returning"] = definitions.remove(0);
     result["crash"] = definitions.remove(0);
+    result["crash"]["arrival"] = definitions.remove(0);
     SequenceContent::from_json(&result)
         .map_err(|_| bad("generated sequence content failed validation"))?;
     let bytes = serde_json::to_vec(&result).map_err(|_| bad("sequence encoding"))?;

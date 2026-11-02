@@ -66,6 +66,39 @@ impl PlayerListener {
             .remove(0);
         race.sequence = Some((Sequence::Outro, outro.id, false));
         records.push(outro);
+        // The results screen drives the car (E1280: at the human's finish frame
+        // the official host creates the outro's authored wander and speed-limit
+        // goals and sets the Actor's first flag with them; both go at the outro's
+        // end). Goals the intro left on the Actor are released first; a refused
+        // assignment keeps the finish and is logged.
+        let held = std::mem::take(&mut race.goals);
+        release_goals(players, self.persona, participant, held, out);
+        if content.sequence(names::OUTRO_SEQUENCE)?.wander.is_some() {
+            match players.start_controlled_goals(
+                HOST_SELECTOR as u8,
+                self.persona,
+                participant,
+                content.outro_goals()?,
+            ) {
+                Ok(assigned) => {
+                    race.goals = assigned[..assigned.len() - 1]
+                        .iter()
+                        .map(|r| r.id)
+                        .collect();
+                    tracing::info!(
+                        participant,
+                        goals = ?race.goals,
+                        "owned event outro goals assigned; the Actor drives the results screen"
+                    );
+                    records.extend(assigned);
+                }
+                Err(error) => tracing::warn!(
+                    participant,
+                    ?error,
+                    "owned event outro goals not assigned; the results screen keeps manual control"
+                ),
+            }
+        }
         let mut gone = Vec::new();
         for logic in [
             Logic::Restart,

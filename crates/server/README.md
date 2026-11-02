@@ -12,12 +12,37 @@ start or automated test does not establish complete gameplay or launcher
 independence. The repository does not distribute game content or an account
 profile. The [`nfs-afterhours` launcher](../../docs/LOCAL-LAUNCHER.md) derives content from
 the owner's supported installation and creates a separate local account;
-the complete prologue and several garage mutations are still incomplete.
+the [gameplay roadmap](https://github.com/afterhours-crew/afterhours-2015/issues/62)
+tracks accepted milestones and remaining gameplay work.
 
 Temporary opening cars use the shared world-car constructor with an empty
 nitrous meter and their native initial audio flags. These initial states remain
 separate from owned cars and roaming rivals. Their construction does not grant
 inventory or activate a prologue session.
+
+Earned REP unlock notifications use installed sender, filter, delay and manager
+bindings. Pending delivery is saved with the reward, then the world-clock delay
+queues a storage job. Only its committed inbox change is announced. Output queue
+pressure retains that publication; failed writes remain pending. Part attachments
+sample the latest committed input, and inbox restoration precedes manager
+initiation. Repeated message hashes keep separate deliveries; client read reports
+select the first live matching message, with a receipt preventing stale reads
+after ring reuse.
+
+Committed REP level changes also publish the installed level-stat integer call
+to the owning player object. The comparison uses the current world projection,
+so an already-refreshed storage snapshot cannot hide an unpublished change.
+Queue capacity is checked before adopting the projection and its calls together;
+retrying a committed credit or earning more points within the same level does
+not repeat the change. Reconnect initializes the publisher from current saved
+scores. This local publication does not require a hosted stat service.
+
+A server restart starts the full authored delay for an intent that was still
+pending; this is an explicit local recovery policy, not a claim about official
+cross-process timer behavior. Already-delivered messages restore without another
+toast. Full-career reset clears the inbox and private pending/delivery tables.
+Portable tests cover these boundaries; whole-span reference qualification and
+owner game acceptance remain separate gates.
 
 ## Build and start
 
@@ -190,6 +215,10 @@ account's empty state is answered without invented values: a license declaration
 naming no license receives the observed empty acknowledgement, a settings read of
 an absent key answers `UTIL_USS_RECORD_NOT_FOUND`, and a missing kickback winner
 answers `KICKBACK_ERR_NOT_FOUND` (codes from the client's error-name tables).
+The post-race automatic screenshot (`2053/8 addPendingScreenshot`) receives a
+session-local record id from the injected clock and the request `NAME` as its
+record name; `2053/9 commitScreenshot` of that id answers the account counters,
+and an unknown id answers `KICKBACK_ERR_NOT_FOUND`. Image bytes are not stored.
 A missing speedwall row remains unsupported.
 
 Leaving the current world (`4/22 leaveGameByGroup`) answers an empty
@@ -267,12 +296,26 @@ truncated, corrupt or invalid models are rebuilt. Publication is bounded and
 atomic, with one builder per key. Runtime constructors still validate cached
 inputs against the current vehicle/item definitions.
 
-Free-roam scoring caches both compiled programs and their static scene layouts.
-Loading validates interpreter graphs, serializer ordering, catalog bindings and
-the six score categories. Session state, awards, inputs and player identities
+Free-roam scoring caches the player and AI programs and their static scene layouts.
+AI eligibility, pacing libraries and Boolean query-set bindings are required
+compiler products; old entries that omit them are rebuilt. Loading validates
+interpreter graphs, serializer ordering, shared catalog bindings, complete and
+unambiguous AI service and population-owner bindings, and the six score categories.
+The listener creates eligible racer scoring sessions from current owned population
+membership, retains them across car handoffs and carless intervals, and retires
+them when eligibility ends. Installed Boolean outputs determine which current
+cars enter the player's scoring queries; unknown population ownership rejects.
+AI query reports require the current connection and account, and AI scoring
+cannot credit player awards. Scoring entities register as explicit children of
+their AI participant and are deleted before that participant during population
+teardown; unrelated references still reject the transaction. Session state,
+awards, inputs and player identities
 are not serialized. Scene keeper lookup remains separate, preserving its
 existing failure handling. `profile_scoring_cache` compares whole installed
 programs and keeper bindings across uncached, cold and warm preparation.
+Constructed tests cover lifetime, report routing, queue backpressure and atomic
+failure/retry. Full story behavior and Crew rewards still require qualification
+and owner live acceptance.
 
 The road products retain authored node/lane/segment order, lane direction,
 widths, points and speed limits. Reads rebuild spatial indexes through the
@@ -352,6 +395,20 @@ registration. These inputs are static roles, never previously allocated ghost
 IDs. No default game asset table is embedded in the server. An optional
 `spawn_points` key names the level's SpawnPoints scene.
 
+Optional `roles.bank` and `roles.seen_points` each contain a static `scene` key
+and `serializer` index. Deployment validation requires one registered scene and
+a plain RPC serializer at that position. The installation builder derives both
+bindings and rejects ambiguous matches. Builder revision 43 invalidates older
+prepared caches for the new seen-points binding. Explicit world-content overrides
+must supply that binding themselves to enable seen-marker restoration.
+
+Seen map IDs belong to the account's `PoiIdTable`. Owned Participant requests
+commit before acknowledgement; reconnect clears the client projection and restores
+the committed set through a bounded output queue. This records which markers have
+been seen. Event availability still follows progression predicates. Storage failure
+sends no acknowledgement; a repeated request or later reconnect can recover.
+Portable tests cover this policy; it has not yet received a live game check.
+
 The optional `roles.free_roam` catalog supplies `volumes`, `presence`, `streamed`
 and `location` bindings. Each binding contains a static `scene_key` and one-based
 `serializer` index. Only unconditional world-volume subscriptions belong in this
@@ -365,6 +422,31 @@ eligibility is modeled. Owned participants
 already in FreeRoam may report their location before the activation queue drains;
 this records readiness without bypassing subscription ordering.
 
+Owned race rewards and story reporting use separate transition boundaries.
+Crossing the finish commits cash, REP, unlocks and the event record together with
+one retry receipt. Completing the outro then enters result reporting and commits
+any attributed story objective. Its next-objective activation and map changes
+follow that commit; final departure waits for it. Queue pressure retains the
+report and its state entry together, and retries do not pay the finish twice.
+Interrupting before result reporting retains earned rewards without inventing a
+story completion. This describes implemented ordering, not live acceptance of
+every story mission.
+
+An optional installed `driving_distance` garage binding enables the owned
+driver-details sampler. Accepted chassis positions use the authored world-time
+period; airborne/crashed samples exclude vertical displacement. Explicit
+relocation, car replacement and new logic lifetimes reset the position anchor.
+Fractional distance accumulates before truncation. The connection retains a
+cumulative checkpoint across logic retirement, and blocking storage runs on the
+existing bounded workers. A failed write retains pending distance and increments
+`driving_distance_failures` without rejecting movement.
+
+Kilometre/mile publications use the latest committed total and the owning Player
+reference. Newer pending movement does not block that committed publication;
+queue pressure retries it, and retirement removes unsent calls to the old logic.
+These are implemented persistence/publication semantics with constructed tests;
+game acceptance remains tracked in [#226](https://github.com/afterhours-crew/afterhours-2015/issues/226).
+
 Garage logic may supply event-only `world_ready`, `world_spawn` and `free_roam`
 batches. They run once at the first new-car readiness report, release of its spawn
 assignment, and completion of the queued world handoff, respectively. These
@@ -377,8 +459,8 @@ phases from installed bindings. See the launcher guide for live validation scope
 Crash recovery uses the owned car's client-reported crash flag. A brief pulse
 is retained independently of movement echo throttling. Once replication capacity
 is available, the server replaces driving presentation with the installed input
-lock and crash sequence. The client's sequence-completion message restores the
-driving objects and re-arms world activation. The installed server timer supplies
+lock and crash sequence. In-place recovery completes after the client's
+sequence-completion message. The installed server timer supplies
 a fallback Stop; completion can arrive before that timer. Duplicate completion,
 stale movement and a held crash flag cannot start another recovery.
 The owned car remains a focus for nearby traffic and roaming rivals while crash
@@ -390,8 +472,16 @@ the server relocates it to a recent upright, grounded driving sample, with the
 installed road spawn as a fallback. History is bounded and scoped to the owned
 vehicle. Paired `resetting`/`reset_arrived` batches keep the installed reset
 loading screen active from before relocation until the client acknowledges
-arrival; only then are input and driving presentation restored. `prepare-local`
-builds these batches from the installation. Live acceptance is tracked in issue
+the teleport. When `crash.arrival` is configured, that acknowledgement starts
+the installed controlled-arrival sequence. It temporarily holds the owned actor,
+preserves existing race goals and restores the actor's prior control value when
+the authored timer expires. The restored actor is published before Stop; the
+client's subsequent completion restores driving presentation and Alive. Queue
+pressure retains each transition, and stale or premature completions cannot
+skip it. Older configurations without this optional arrival definition retain
+their teleport-acknowledgement completion behavior. `prepare-local` builds the
+paired logic batches and controlled-arrival binding from the installation.
+These paths have constructed regressions; live acceptance is tracked in issue
 #156.
 
 Garage return requires the installed entry sequence and all three garage logic
@@ -420,6 +510,15 @@ answers are recorded. Configured arrival sequences, vehicle bindings and world
 membership then complete the handoff. The garage/free-roam/return loop has
 passed live checks; the [gameplay roadmap](https://github.com/afterhours-crew/afterhours-2015/issues/62)
 records the separately accepted gameplay systems and remaining work.
+
+An explicit event-destination selection before leaving the garage is retained
+for that participant through world loading. Its position and orientation come
+from the installed location definition. This departure uses the shared authored
+fade-in and waits for the owning client's completion before free roam; it does
+not assign the garage rollout spline. Missing or conflicting arrival content,
+stale/foreign completion and an expired arrival remain errors. Normal departures
+keep their garage rollout. Portable tests and private offline comparisons cover
+the selected route; its game acceptance remains part of the story batch.
 
 `--redirector-port 0` chooses an ephemeral port (the default).
 `--idle-seconds` accepts 1–3600. `--qos-seconds` bounds each QoS TLS request
@@ -594,7 +693,8 @@ profiles and explicit pose/speed inputs, without player inventory. Manager
 binding and constructor tests cover rollback and isolation. Prepared population
 supplies bounded creation, client simulation grants, validated physics reports
 and retirement. The host owns placement, AI goals and lifetime; the client
-simulates delegated cars. AI remains separate from player inventory and scoring.
+simulates delegated cars. AI remains separate from player inventory and awards;
+eligible racers have their own scoring sessions, while traffic is excluded.
 Only session-authorized spawn keys accept reports; stale reports cannot rewind
 state, and retirement removes their grants. Independent chassis updates can
 share bounded publications without crossing lifecycle barriers. Installed cubic

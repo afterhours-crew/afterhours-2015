@@ -199,3 +199,178 @@ fn documents_are_validated_and_bound_to_the_account() {
     assert_eq!(State::from_json(&v, a).err(), Some(ContentError::Invalid));
     assert_eq!(State::new(a, 1, 0, None).err(), Some(ContentError::Invalid));
 }
+
+mod screenshots {
+    use super::*;
+    use nfs_services::kickback::{MAX_PENDING_SCREENSHOTS, PendingScreenshots};
+
+    /// Official E1026 race-1 request: AUTO 1, DESC "2:4:6:0:ID_CAR_NISSAN_…",
+    /// NAME 1761118161, ST 1, X 159, Y 102; reply RECN "1761118161".
+    const ADD: &str = "875d2f0001925ce3013b323a343a363a303a49445f4341525f4e495353414e5f534b594c494e454754524e49534d4f5a54554e455f323030355f53484f52545f4e414d4500ba1b6500919fc48f0dcf40000001e00000009f02e4000000a601";
+    fn hex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+    fn commit(id: u64, corr: u32) -> Vec<u8> {
+        let body = CommitScreenshotRequest {
+            screenshot_id: Some(id),
+            ..Default::default()
+        }
+        .encode(body_limits())
+        .unwrap();
+        wire(9, 0, corr, &body)
+    }
+    fn add_with_name(name: u64, corr: u32) -> Vec<u8> {
+        let body = AddPendingScreenshotRequest {
+            name: Some(name),
+            automatic: Some(1),
+            ..Default::default()
+        }
+        .encode(body_limits())
+        .unwrap();
+        wire(8, 0, corr, &body)
+    }
+    fn state(a: AccountId) -> State {
+        State::from_json(&document(a, None), a).unwrap()
+    }
+
+    #[test]
+    fn kickback_screenshot_id_comes_from_the_clock_and_record_name_from_the_request() {
+        let a = account(1);
+        let s = state(a);
+        let mut pending = PendingScreenshots::default();
+        let t = 1_761_118_166_123_456; // 5 s after the client's NAME clock
+        let reply = s
+            .reply_screenshot(&mut pending, &wire(8, 0, 20, &hex(ADD)), a, 42, t)
+            .unwrap();
+        let f = frame(&reply);
+        assert_eq!(
+            (f.fields.routing_b, f.fields.category, f.fields.correlation),
+            (8, 1, 20)
+        );
+        let m = AddPendingScreenshotResponse::decode(f.body, body_limits()).unwrap();
+        assert_eq!(m.screenshot_id, Some(1_761_118_166));
+        assert_eq!(m.record_name, Some(b"1761118161".as_slice()));
+        assert_eq!(m.unknown_field_count(), 0);
+        assert!(pending.contains(1_761_118_166));
+        // Same clock again: the id still moves forward; a repeat is a new record.
+        let again = s
+            .reply_screenshot(&mut pending, &wire(8, 0, 21, &hex(ADD)), a, 42, t)
+            .unwrap();
+        let m = AddPendingScreenshotResponse::decode(frame(&again).body, body_limits()).unwrap();
+        assert_eq!(m.screenshot_id, Some(1_761_118_167));
+        assert_eq!(pending.len(), 2);
+        // Deterministic: a fresh session with the same clock allocates the same id.
+        let mut other = PendingScreenshots::default();
+        let replay = s
+            .reply_screenshot(&mut other, &wire(8, 0, 20, &hex(ADD)), a, 42, t)
+            .unwrap();
+        assert_eq!(replay, reply);
+        // A clock before 1970 or at zero still yields a positive id.
+        let mut early = PendingScreenshots::default();
+        let r = s
+            .reply_screenshot(&mut early, &wire(8, 0, 22, &hex(ADD)), a, 42, -5)
+            .unwrap();
+        let m = AddPendingScreenshotResponse::decode(frame(&r).body, body_limits()).unwrap();
+        assert_eq!(m.screenshot_id, Some(1));
+    }
+
+    #[test]
+    fn kickback_screenshot_commit_answers_counters_once_then_not_found() {
+        let a = account(1);
+        let s = state(a); // counters 3 / 20 from the document
+        let mut pending = PendingScreenshots::default();
+        let r = s
+            .reply_screenshot(&mut pending, &wire(8, 0, 30, &hex(ADD)), a, 42, 7_000_000)
+            .unwrap();
+        let id = AddPendingScreenshotResponse::decode(frame(&r).body, body_limits())
+            .unwrap()
+            .screenshot_id
+            .unwrap();
+        let ok = s
+            .reply_screenshot(&mut pending, &commit(id, 31), a, 42, 8_000_000)
+            .unwrap();
+        let f = frame(&ok);
+        assert_eq!(
+            (f.fields.routing_b, f.fields.category, f.fields.correlation),
+            (9, 1, 31)
+        );
+        let m = CommitScreenshotResponse::decode(f.body, body_limits()).unwrap();
+        assert_eq!(
+            (m.screenshot_count, m.screenshot_count_max),
+            (Some(3), Some(20))
+        );
+        assert!(pending.is_empty());
+        for bad in [id, id + 1, 0] {
+            let err = s
+                .reply_screenshot(&mut pending, &commit(bad, 32), a, 42, 9_000_000)
+                .unwrap();
+            let d = nfs_fire2::decode(&err, Default::default())
+                .unwrap()
+                .unwrap();
+            assert_eq!((d.frame.fields.routing_b, d.frame.fields.category), (9, 3));
+            assert!(d.frame.body.is_empty());
+            let m =
+                nfs_protocol::metadata::Fire2Metadata::decode(d.frame.metadata, Default::default())
+                    .unwrap();
+            assert_eq!(
+                m.error_code,
+                Some(nfs_protocol::metadata::KICKBACK_ERR_NOT_FOUND)
+            );
+        }
+    }
+
+    #[test]
+    fn kickback_screenshot_pending_set_is_bounded_and_foreign_requests_do_not_answer() {
+        let a = account(1);
+        let s = state(a);
+        let mut pending = PendingScreenshots::default();
+        let mut ids = Vec::new();
+        for i in 0..=MAX_PENDING_SCREENSHOTS as u64 {
+            let r = s
+                .reply_screenshot(&mut pending, &add_with_name(100 + i, 40), a, 42, 1_000_000)
+                .unwrap();
+            let m = AddPendingScreenshotResponse::decode(frame(&r).body, body_limits()).unwrap();
+            assert_eq!(m.record_name, Some((100 + i).to_string().as_bytes()));
+            ids.push(m.screenshot_id.unwrap());
+        }
+        assert_eq!(pending.len(), MAX_PENDING_SCREENSHOTS);
+        assert!(!pending.contains(ids[0]), "oldest record forgotten");
+        assert!(pending.contains(ids[1]) && pending.contains(ids[MAX_PENDING_SCREENSHOTS]));
+        // Unknown fields are tolerated; a request without NAME is not answered.
+        let mut extra = hex(ADD);
+        extra.extend_from_slice(&hex("fef7df0005"));
+        assert!(
+            s.reply_screenshot(&mut pending, &wire(8, 0, 41, &extra), a, 42, 1)
+                .is_ok()
+        );
+        let no_name = AddPendingScreenshotRequest {
+            automatic: Some(1),
+            ..Default::default()
+        }
+        .encode(body_limits())
+        .unwrap();
+        assert_eq!(
+            s.reply_screenshot(&mut pending, &wire(8, 0, 42, &no_name), a, 42, 1),
+            Err(Error::Ineligible)
+        );
+        assert_eq!(
+            s.reply_screenshot(&mut pending, &wire(8, 0, 43, &hex(ADD)), account(2), 42, 1),
+            Err(Error::Identity)
+        );
+        assert_eq!(
+            s.reply_screenshot(&mut pending, &wire(8, 1, 44, &hex(ADD)), a, 42, 1),
+            Err(Error::Ineligible)
+        );
+        assert_eq!(
+            s.reply_screenshot(&mut pending, &wire(2, 0, 45, &[]), a, 42, 1),
+            Err(Error::Ineligible)
+        );
+        assert!(nfs_services::kickback::owns_screenshots(2053, 8));
+        assert!(nfs_services::kickback::owns_screenshots(2053, 9));
+        assert!(!nfs_services::kickback::owns_screenshots(2053, 2));
+        assert!(!nfs_services::kickback::owns(2053, 8));
+    }
+}

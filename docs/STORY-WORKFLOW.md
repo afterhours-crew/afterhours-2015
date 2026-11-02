@@ -25,6 +25,22 @@ while a decision is pending. Merge and release authorization remain separate.
 
 ## Establish the transition contract
 
+### Delivery pace (owner, 2026-11-01)
+
+Nearly two days for the opening two races is not an acceptable repeatable pace.
+Reuse established race, call, reward, save and comparison machinery in later
+batches. Finish a coherent candidate against the approved gameplay contract and
+batch related corrections before complete regression and code checkpoints. Reuse
+unchanged evidence only when its identity and coverage checks permit it; retain
+all required coverage and full gates for code commits.
+
+Focus investigation on concrete failures that prevent the approved gameplay or
+its delivery. Separate runtime faults, driver limitations and test-environment
+failures before changing behavior. Avoid serial broad audits, unrelated scope
+expansion and infrastructure work that does not close an acceptance requirement.
+Report remaining acceptance blockers and their next resolving action, rather
+than test counts or investigation volume. Preserve this direction in handoffs.
+
 For every objective, establish prerequisites, start trigger, participants, event
 variant, success/failure conditions, interruption/retry behaviour, presentation
 handoff, durable effects and next objectives. Multiple objectives may be active;
@@ -38,10 +54,22 @@ order. Tester descriptions are leads until corroborated. Unexpected behaviour in
 an official session is not automatically a requirement to reproduce a bug.
 Missing evidence remains explicit and blocks the affected readiness claim.
 
+Ground RPC reference kinds and ownership as well as their argument bits. A valid
+ghost ID and successful encoding do not prove that a method expects that object:
+a player and its joined participant are distinct references. Check the expected
+kind against the client reader and observed call, and retain a control that
+substitutes a different live object kind or another owner's object.
+
 Keep detailed reference material in the private research workspace. Public tasks,
 code and tests contain reviewed semantics and constructed inputs, never captured
 identities, raw traffic, profile data, extracted content or private source links.
 No production build or runtime may depend on the reference workspace.
+
+When changing generated startup policy, regenerate the affected input through
+the canonical producer before testing the fix. A rebuilt executable can still
+consume the old policy from a saved fixture. Bind the refreshed input to its
+producer and role definitions; preserve the original failing fixture and its
+other overrides. Verify the changed behavior in serialized output.
 
 ## Reuse mechanisms and preserve ownership
 
@@ -62,6 +90,12 @@ unmet condition, awaited response, pending commit, relevant entity lifetime and
 deadline. Unexpected timeout recovery or unsupported work remains a failed or
 degraded case. Containment prevents unrelated movement from failing; it does not
 turn the affected mission into a pass.
+
+The `nfs_server::net::players::driving_distance` debug target records anchor
+resets and the first or changed whole-metre samples, with world/relative clocks,
+period, object lifetime and input position. These are staged sampler diagnostics;
+only the persistence receipt and exported save establish committed distance.
+Derive the expected path separately rather than adopting a diagnostic total.
 
 ## Validate the flow and its boundaries
 
@@ -98,6 +132,14 @@ Report implemented, offline-tested and game-validated separately. Provide the
 exact source/artifact identities, first failing phase if any, changed assertions,
 related control, remaining uncertainty and a short owner run plan. Keep one
 current task status; append historical evidence without rewriting failed runs.
+
+A virtual-clock diagnostic cannot show the host's own pacing or load: the
+reacting client stands still, the clock steps exactly one tick and every
+datagram is acknowledged at once. Before an owner run, also pass a real-time
+driving run (the reference harness's `--real-time on --free-roam-drive on`)
+with zero refused frames and a replication queue peak below its bound, and
+read the server's `world loop timing` summaries. The 2026-11-01 owner run
+failed on a send-gate backlog that every virtual-clock case had passed.
 
 Within an approved batch, agents can commit/push complete checkpoints and prepare
 the PR under existing repository rules. They do not create another automatic

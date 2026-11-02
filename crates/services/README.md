@@ -1,5 +1,15 @@
 # nfs-services
 
+REP reward planning can include authored unlock notifications in the same
+generation-checked transaction as the grants. `messages::unlocks` stores bounded,
+versioned pending intents; the world adapter supplies timing and canonical
+attachment bytes. Delivery atomically appends the inbox row and removes its
+intent. `messages::dynamic` retains repeated hashes in an authored-capacity ring,
+stores opaque attachments as padded base64, and uses private delivery receipts
+to reject stale read updates after slot reuse. Those private tables never join
+the client table projection. Constructed storage and integration tests do not
+establish client acceptance.
+
 State-owned services built on the storage port and typed protocol models.
 
 The utility text check (`9/20`) uses an explicit local policy for garage text:
@@ -145,13 +155,30 @@ not implement the official prologue award protocol or infer missing menu replies
 
 `progression` owns the installed objective catalog and activation expressions;
 the content builder reexports these types. `story::Policy` uses that same catalog
-to inspect a saved intro and prepare atomic checkpoint/completion batches. Intro
-ordering must have a single next objective at each step. Existing main-story
+to inspect saved objectives and prepare atomic checkpoint/completion batches.
+`event_rewards::commit` can join an attributed story objective to the same
+transaction as race cash, REP, earned-cash statistics, records and unlocks. It
+reads the result's retained retry receipt before rebuilding effects; a later
+story operation or restart does not make an old result payable again. Missing
+receipts retain the active-objective checks. The caller must establish the owned
+result and its authored completion conditions; this service does not infer a
+mission from a payout or require a win. The server's selected result contracts
+carry their attributed objective into this transaction. Portable service and
+worker checks do not establish full mission or live-game acceptance.
+
+Intro ordering must have a single next objective at each step; main-story
+completion preserves independent active objectives and projects their authored
+prerequisites. Checkpoint editing remains limited to the intro. Existing main-story
 completions and unrelated items/tables are retained. A versioned `AfterhoursStory`
 table records played, edited and inherited completion, plus the last monotonic
 operation receipt. Reward operations supplied by the owning domain commit with
 completion, and claimed rewards cannot be granted again after a rewind. Partial
 objectives, malformed receipts, stale generations and reused intents are refused.
+Version2 covers both branches. Version1 intro-only ledgers remain readable and
+migrate atomically on the next mutation; earlier main completions retain existing
+provenance and cannot acquire newly earned rewards. Reading or preparing a plan
+does not mutate the save. `Policy::objective` exposes one objective's flags and
+completion provenance without assigning a linear main-story position.
 The caller must establish objective success and serialize commits; this module
 does not play the intro or validate arbitrary client-reported race results.
 
@@ -164,3 +191,13 @@ wrong proof identities and malformed requests fail closed. Retries emit only the
 correlated ACK after readiness commits. The edge remains responsible for admitting
 the current world after its setup/self-validation writes and for publishing real
 transport synchronization; construction does not prove those prerequisites.
+
+`driving_distance::Claim` accepts host-owned cumulative metre checkpoints. Its
+versioned, bounded journal atomically stores the stream watermark and updates
+`GameplayStatsTable.DistanceDriven`. Repeated/older checkpoints add nothing;
+independent streams add only their own increase. A fresh claim may retry a
+definite compare-and-swap conflict, but an uncertain write retains its identity.
+An established stream cannot reopen after reset or journal eviction. Keep one
+claim per world connection, serialize its writes and preserve its cumulative
+count across transient driver-logic replacement. This API does not authenticate
+movement, select sample times or establish client acceptance.

@@ -84,6 +84,11 @@ pub enum SetSource {
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SetKind {
     Owned,
+    /// A separately owned snapshot. Activation binds the source without
+    /// copying it; only its Copy/Clear events replace membership.
+    Copy {
+        source: Option<SetSource>,
+    },
     States(Vec<Endpoint>),
     Boolean(Link),
     Players {
@@ -195,6 +200,7 @@ fn set_class(class: &str) -> bool {
     matches!(
         class,
         "ParticipantSetEntityData"
+            | "ParticipantSetCopyEntityData"
             | "ParticipantSetStateAdapterEntityData"
             | "ParticipantSetBoolPropertyAdapterEntityData"
             | "ParticipantSetPlayerAdapterEntityData"
@@ -483,6 +489,13 @@ pub(super) fn extract<S: Source>(
             class if set_class(class) => {
                 let kind = match class {
                     "ParticipantSetEntityData" => SetKind::Owned,
+                    "ParticipantSetCopyEntityData" => SetKind::Copy {
+                        source: if controller(graph, &node.site, 0x2e0d_19d8)?.is_some() {
+                            Some(set_source(graph, &node.site, 0x2e0d_19d8)?)
+                        } else {
+                            None
+                        },
+                    },
                     "ParticipantSetStateAdapterEntityData" => {
                         let states = endpoints(graph, &node.site, 0x9e22_81be, &index, fields)?;
                         if states.len() > MAX_STATES {

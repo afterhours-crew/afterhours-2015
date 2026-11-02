@@ -15,7 +15,8 @@ use nfs_world::scoring::{
     nodes::{self, Comparison, Definition},
 };
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Configuration {
     pub definition: Definition,
     /// Authored input fallbacks, not output initialization. The interpreter must

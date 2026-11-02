@@ -3,10 +3,10 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! Per-account process ownership and standalone, generation-bound backups.
-use super::SqliteRepository;
+use super::{SqliteRepository, open_connection};
 use crate::{AccountId, Error, Inspection};
 use rusqlite::{
-    Connection, OpenFlags, OptionalExtension, TransactionBehavior,
+    OpenFlags, OptionalExtension, TransactionBehavior,
     backup::{Backup, StepResult},
 };
 use std::{fs::File, path::PathBuf};
@@ -180,7 +180,7 @@ impl SqliteRepository {
             })?;
         drop(reserved);
         let copied = (|| {
-            let mut target = Connection::open_with_flags(
+            let mut target = open_connection(
                 &path,
                 OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
             )?;

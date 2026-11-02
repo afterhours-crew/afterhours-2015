@@ -191,6 +191,11 @@ impl PhysicsControls {
     pub fn is_airborne(&self) -> bool {
         self.values[0] == 1
     }
+    /// Crash predicate copied from the physics state into its first trailing
+    /// flag. Distinct from airborne and from the unresolved remaining flags.
+    pub fn is_crashed(&self) -> bool {
+        self.flags[0]
+    }
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Physics {

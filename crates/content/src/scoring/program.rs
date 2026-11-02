@@ -58,6 +58,7 @@ pub struct Sources {
     pub burnout_overrides: Vec<super::burnout_override::Node>,
     pub teleport_locations: Vec<super::teleport_location::Node>,
     pub vehicle_tuning: Vec<super::vehicle_tuning::Node>,
+    pub participant_pacing: Vec<super::participant_pacing::Node>,
     pub context_reporters: Vec<super::context_reporter::Node>,
     pub transitions: Vec<super::transitions::Node>,
     pub linked_curves: Vec<super::linked_curve::Node>,
@@ -395,6 +396,17 @@ fn compile_inputs(
             index.node(&n.identity, "VehicleTuningQueryEntityData")?,
             Behavior::VehicleTuning {
                 source: n.source.clone(),
+                provider: index
+                    .node(&n.provider, "ParticipantLogicParticipantProviderEntityData")?,
+            },
+        )?;
+    }
+    for n in &sources.participant_pacing {
+        assign(
+            &mut behaviors,
+            index.node(&n.identity, super::participant_pacing::CLASS)?,
+            Behavior::ParticipantPacing {
+                sources: n.sources.clone(),
                 provider: index
                     .node(&n.provider, "ParticipantLogicParticipantProviderEntityData")?,
             },
@@ -1213,6 +1225,7 @@ impl AssetIndex {
             burnout_overrides: super::burnout_override::read(&mut selected, blueprint)?,
             teleport_locations: super::teleport_location::read(&mut selected, blueprint)?,
             vehicle_tuning: super::vehicle_tuning::read(&mut selected, blueprint)?,
+            participant_pacing: super::participant_pacing::read(&mut selected, blueprint)?,
             context_reporters: super::context_reporter::read(&mut selected, blueprint)?,
             transitions: super::transitions::read(&mut selected, blueprint)?,
             linked_curves: super::linked_curve::read(&mut selected, blueprint)?,

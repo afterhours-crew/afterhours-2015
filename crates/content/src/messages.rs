@@ -15,6 +15,12 @@ use crate::{Error, assets::AssetIndex, graph::*, world::StartupKind};
 use nfs_frostbite::ebx::Value;
 use std::collections::BTreeMap;
 
+pub mod active;
+mod conditional;
+pub mod power;
+pub mod result;
+pub mod unlocks;
+
 const GAMEPLAY: &str = "levels/genesis01/gameplay";
 const MANAGER: &str = "MessageManagerEntityData";
 /// MessageManager link to its attachment handlers.
@@ -112,6 +118,43 @@ pub struct Managers {
     pub underground: usize,
 }
 
+pub(crate) fn sender_manager<S: Source>(
+    graph: &mut Graph<S>,
+    sender: &Site,
+    world: &[Node],
+    bindings: &BTreeMap<Key, usize>,
+) -> Result<usize, Error> {
+    let channels = graph.links(sender, 4_117_124_221)?;
+    let [channel] = channels.as_slice() else {
+        return Err(bad("unique sender channel"));
+    };
+    let asset = graph.target_field(&channel.site, "ChannelAsset")?;
+    let mut managers = Vec::new();
+    let mut targets = 0;
+    for node in world
+        .iter()
+        .filter(|n| n.object.class == "LinkedSchematicChannelEntityData")
+    {
+        if graph.target_field(&node.site, "ChannelAsset")? != asset {
+            continue;
+        }
+        for target in graph.links(&node.site, channel.port)? {
+            targets += 1;
+            if let Some(&serializer) = bindings.get(&target.site.key) {
+                managers.push(serializer);
+            }
+        }
+    }
+    match managers.as_slice() {
+        [manager] => Ok(*manager),
+        _ => Err(bad(&format!(
+            "unique sender manager missing or ambiguous: channel={asset:?}, port={}, targets={targets}, managers={}",
+            channel.port,
+            managers.len()
+        ))),
+    }
+}
+
 impl AssetIndex {
     pub fn message_catalog(&mut self) -> Result<Catalog, Error> {
         let level = self.identity.scenes.level.clone();
@@ -185,7 +228,6 @@ impl AssetIndex {
         const SENDER: &str = "UniqueMessageSenderEntityData";
         /// The sender's SendMessage property (enables the send).
         const SEND_MESSAGE: u32 = 1_037_321_618;
-        const SENDER_CHANNEL: u32 = 4_117_124_221;
         const BOOL_SET_TRUE: u32 = 2_753_900_881;
         const EVENT_SYNC_OUT: u32 = 193_453_899;
         const COMPLETED: u32 = 1_514_830_046;
@@ -238,34 +280,9 @@ impl AssetIndex {
             let (Some(accept), Some(objective)) = (accept, objective) else {
                 continue;
             };
-            let channels = graph.links(&sender.site, SENDER_CHANNEL)?;
-            let [channel] = channels.as_slice() else {
-                return Err(bad("licensed sender channel"));
-            };
-            // The channel's instance is a gameplay layer object (installed:
-            // layer26 messages schematic #2) linked to the manager.
-            let asset = graph.target_field(&channel.site, "ChannelAsset")?;
-            let mut managers = vec![];
-            for n in world
-                .iter()
-                .filter(|n| n.object.class == "LinkedSchematicChannelEntityData")
-            {
-                if graph.target_field(&n.site, "ChannelAsset")? != asset {
-                    continue;
-                }
-                for target in graph.links(&n.site, channel.port)? {
-                    if let Some(&serializer) =
-                        bindings.get(&(target.site.key.0.to_lowercase(), target.site.key.1))
-                    {
-                        managers.push(serializer);
-                    }
-                }
-            }
-            let [manager] = managers.as_slice() else {
-                return Err(bad("licensed sender manager"));
-            };
+            let manager = sender_manager(&mut graph, &sender.site, &world, &bindings)?;
             let (partition, object) = graph.target_field(&sender.site, "MessageAsset")?;
-            out.push((accept, objective, (partition, object), *manager));
+            out.push((accept, objective, (partition, object), manager));
         }
         drop(graph);
         out.into_iter()

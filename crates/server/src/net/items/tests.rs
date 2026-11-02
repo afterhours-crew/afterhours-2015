@@ -529,6 +529,13 @@ struct Blocked {
     ready: std::sync::Condvar,
 }
 impl InventoryRepository for Blocked {
+    fn receipt(
+        &self,
+        _: AccountId,
+        _: u64,
+    ) -> Result<Option<nfs_storage::Applied>, nfs_storage::Error> {
+        unreachable!()
+    }
     fn open(&self, _: AccountId) -> Result<nfs_storage::Snapshot, nfs_storage::Error> {
         self.signal.send(std::thread::current().id()).unwrap();
         let guard = self.release.lock().unwrap();

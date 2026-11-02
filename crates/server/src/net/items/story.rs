@@ -5,6 +5,10 @@ use super::*;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(in crate::net) enum Action {
+    Distance {
+        writer: super::distance::Writer,
+        cumulative: i32,
+    },
     Complete {
         objective: u64,
     },
@@ -20,14 +24,35 @@ pub(in crate::net) enum Action {
         hash: u32,
         manager: crate::messages::Manager,
     },
-    /// The client read a stored message.
+    /// One authored conditional invitation. The worker checks the restrictor
+    /// against its latest snapshot, so concurrent sessions cannot send two tiers.
+    ConditionalMessage {
+        objective: u64,
+        hash: u32,
+        manager: crate::messages::Manager,
+    },
+    /// The client reported a stored message's read state.
     MessageRead {
         hash: u32,
         manager: crate::messages::Manager,
+        read: bool,
+    },
+    UnlockMessage {
+        hash: u32,
+        signal: u64,
+    },
+    DynamicMessageRead {
+        identity: nfs_services::messages::dynamic::Identity,
+        read: bool,
     },
     /// The client accepted a tutorial: its seen value becomes durable.
     Tutorial {
         key: u32,
+    },
+    /// A map marker reported by the owned participant at this scene lifetime.
+    PoiSeen {
+        endpoint: nfs_world::participants::Endpoint,
+        id: u32,
     },
 }
 #[derive(Clone, Debug)]
@@ -46,6 +71,16 @@ pub(in crate::net) struct Committed {
 }
 
 impl Profile {
+    #[cfg(test)]
+    pub(in crate::net) async fn story_for_test(
+        &self,
+        request: &Request,
+        now: Timestamp,
+    ) -> Result<Committed, String> {
+        self.story(request, now)
+            .await
+            .map_err(|error| format!("{error:?}"))
+    }
     pub(super) async fn story(
         &self,
         request: &Request,
@@ -57,6 +92,7 @@ impl Profile {
         timeout(JOB_TIMEOUT, async move {
             let permit = service
                 .workers
+                .clone()
                 .acquire_owned()
                 .await
                 .map_err(|_| Error::Worker)?;
@@ -79,6 +115,96 @@ impl Profile {
                     .story_policy(request.progression.settings);
                 let mut reward = None;
                 let snapshot = match request.action {
+                    Action::Distance {
+                        ref writer,
+                        cumulative,
+                    } => writer.checkpoint(&service, account, cumulative, now)?,
+                    Action::UnlockMessage { hash, signal } => {
+                        let content = request.progression.messages.as_ref().ok_or(Error::Worker)?;
+                        let delivery = content.unlocks.as_ref().ok_or(Error::Worker)?;
+                        let rule = delivery
+                            .notifications
+                            .iter()
+                            .find(|n| n.hash == hash)
+                            .ok_or(Error::Worker)?;
+                        let manager = content.manager(rule.manager).ok_or(Error::Worker)?;
+                        let notification_policy = content
+                            .unlock_policy()
+                            .map_err(|_| Error::Worker)?
+                            .ok_or(Error::Worker)?;
+                        let mut result = None;
+                        for _ in 0..8 {
+                            let snapshot = service
+                                .repository
+                                .snapshot(account)
+                                .map_err(|e| Error::Inventory(e.into()))?;
+                            let pending = notification_policy
+                                .pending(snapshot.tables.get(&crate::persistent::key(
+                                    nfs_services::messages::unlocks::TABLE,
+                                )))
+                                .map_err(|e| Error::Inventory(e.into()))?;
+                            let Some(row) = pending
+                                .into_iter()
+                                .find(|r| r.hash == hash && r.signal == signal)
+                            else {
+                                result = Some(snapshot);
+                                break;
+                            };
+                            let bytes = row
+                                .part
+                                .map(|item_data_id| {
+                                    nfs_world::messages::CarPartAttachment { item_data_id }
+                                        .encode()
+                                        .to_vec()
+                                })
+                                .unwrap_or_default();
+                            let batch = nfs_services::messages::unlocks::deliver(
+                                &snapshot,
+                                row,
+                                manager.table(),
+                                delivery.dynamic_capacity,
+                                &bytes,
+                            )
+                            .map_err(|e| Error::Inventory(e.into()))?
+                            .ok_or(Error::Worker)?;
+                            match service.repository.apply(account, &batch, now) {
+                                Ok(_) | Err(nfs_storage::Error::Conflict) => continue,
+                                Err(e) => return Err(Error::Inventory(e.into())),
+                            }
+                        }
+                        result.ok_or(Error::Inventory(nfs_storage::Error::Conflict.into()))?
+                    }
+                    Action::DynamicMessageRead { ref identity, read } => {
+                        let delivery = request
+                            .progression
+                            .messages
+                            .as_ref()
+                            .and_then(|c| c.unlocks.as_ref())
+                            .ok_or(Error::Worker)?;
+                        let mut result = None;
+                        for _ in 0..8 {
+                            let snapshot = service
+                                .repository
+                                .snapshot(account)
+                                .map_err(|e| Error::Inventory(e.into()))?;
+                            let Some(batch) = nfs_services::messages::dynamic::set_read_owned(
+                                &snapshot,
+                                delivery.dynamic_capacity,
+                                identity,
+                                read,
+                            )
+                            .map_err(|e| Error::Inventory(e.into()))?
+                            else {
+                                result = Some(snapshot);
+                                break;
+                            };
+                            match service.repository.apply(account, &batch, now) {
+                                Ok(_) | Err(nfs_storage::Error::Conflict) => continue,
+                                Err(e) => return Err(Error::Inventory(e.into())),
+                            }
+                        }
+                        result.ok_or(Error::Inventory(nfs_storage::Error::Conflict.into()))?
+                    }
                     Action::Choose {
                         objective,
                         definition,
@@ -119,8 +245,9 @@ impl Profile {
                         }
                         result.ok_or(Error::Inventory(nfs_storage::Error::Conflict.into()))?
                     }
-                    Action::Message { hash, manager } | Action::MessageRead { hash, manager } => {
-                        let read = matches!(request.action, Action::MessageRead { .. });
+                    Action::Message { hash, manager }
+                    | Action::ConditionalMessage { hash, manager, .. }
+                    | Action::MessageRead { hash, manager, .. } => {
                         let mut result = None;
                         for _ in 0..8 {
                             let snapshot = service
@@ -128,8 +255,30 @@ impl Profile {
                                 .snapshot(account)
                                 .map_err(|e| Error::Inventory(e.into()))?;
                             let table = manager.table();
-                            let prepared = if read {
-                                nfs_services::messages::mark_read(&snapshot, table, hash)
+                            let prepared = if let Action::ConditionalMessage { objective, .. } =
+                                request.action
+                            {
+                                let content =
+                                    request.progression.messages.as_ref().ok_or(Error::Worker)?;
+                                let hashes = content
+                                    .conditional_hashes(objective, manager)
+                                    .filter(|hashes| hashes.contains(&hash))
+                                    .ok_or(Error::Worker)?;
+                                let prepared = nfs_services::messages::append_exclusive(
+                                    &snapshot, table, hash, &hashes,
+                                )
+                                .map_err(|e| Error::Inventory(e.into()))?;
+                                if prepared.is_some()
+                                    && !policy
+                                        .objective(&snapshot, objective)
+                                        .map_err(|e| Error::Inventory(e.into()))?
+                                        .active
+                                {
+                                    return Err(Error::Worker);
+                                }
+                                Ok(prepared)
+                            } else if let Action::MessageRead { read, .. } = request.action {
+                                nfs_services::messages::set_read(&snapshot, table, hash, read)
                             } else {
                                 nfs_services::messages::append(&snapshot, table, hash)
                             }
@@ -145,15 +294,19 @@ impl Profile {
                         }
                         result.ok_or(Error::Inventory(nfs_storage::Error::Conflict.into()))?
                     }
-                    Action::Tutorial { key } => {
+                    Action::Tutorial { key } | Action::PoiSeen { id: key, .. } => {
                         let mut result = None;
                         for _ in 0..8 {
                             let snapshot = service
                                 .repository
                                 .snapshot(account)
                                 .map_err(|e| Error::Inventory(e.into()))?;
-                            let Some(batch) = nfs_services::tutorials::mark(&snapshot, key)
-                                .map_err(|e| Error::Inventory(e.into()))?
+                            let prepared = if matches!(request.action, Action::PoiSeen { .. }) {
+                                nfs_services::map_points::mark(&snapshot, key)
+                            } else {
+                                nfs_services::tutorials::mark(&snapshot, key)
+                            };
+                            let Some(batch) = prepared.map_err(|e| Error::Inventory(e.into()))?
                             else {
                                 result = Some(snapshot);
                                 break;
@@ -172,14 +325,15 @@ impl Profile {
                                 .repository
                                 .snapshot(account)
                                 .map_err(|e| Error::Inventory(e.into()))?;
-                            let view = policy
+                            // Keep the intro summary/ledger consistency gate even
+                            // when the requested objective belongs to main story.
+                            policy
                                 .inspect(&snapshot)
                                 .map_err(|e| Error::Inventory(e.into()))?;
-                            if view
-                                .milestones
-                                .iter()
-                                .any(|m| m.id == objective && m.completed)
-                            {
+                            let state = policy
+                                .objective(&snapshot, objective)
+                                .map_err(|e| Error::Inventory(e.into()))?;
+                            if state.completed {
                                 result = Some(snapshot);
                                 break;
                             }
@@ -556,6 +710,7 @@ mod tests {
             action: Action::MessageRead {
                 hash: 1_422_063_331,
                 manager: crate::messages::Manager::Normal,
+                read: true,
             },
             ..request.clone()
         };
@@ -563,6 +718,31 @@ mod tests {
         assert!(rows(&marked.loaded)[0].read);
         let saved = repository.snapshot(account).unwrap();
         profile.story(&read, Timestamp(12)).await.unwrap();
+        assert_eq!(repository.snapshot(account).unwrap(), saved);
+        let unread = Request {
+            action: Action::MessageRead {
+                hash: 1_422_063_331,
+                manager: crate::messages::Manager::Normal,
+                read: false,
+            },
+            ..request.clone()
+        };
+        let changed = profile.story(&unread, Timestamp(13)).await.unwrap();
+        assert!(!rows(&changed.loaded)[0].read);
+        let saved = repository.snapshot(account).unwrap();
+        // A rebound worker reads durable state; duplicates and an unknown row
+        // on the other manager cannot mark this message or invent a new one.
+        let rebound = service.bind(account);
+        rebound.story(&unread, Timestamp(14)).await.unwrap();
+        let other = Request {
+            action: Action::MessageRead {
+                hash: 1_422_063_331,
+                manager: crate::messages::Manager::Underground,
+                read: true,
+            },
+            ..request
+        };
+        rebound.story(&other, Timestamp(15)).await.unwrap();
         assert_eq!(repository.snapshot(account).unwrap(), saved);
     }
     #[tokio::test]
@@ -601,6 +781,66 @@ mod tests {
         let rebound = service.bind(account);
         rebound.story(&request, Timestamp(12)).await.unwrap();
         rebound.story(&next, Timestamp(13)).await.unwrap();
+        assert_eq!(repository.snapshot(account).unwrap(), saved);
+    }
+
+    #[tokio::test]
+    async fn main_completion_returns_its_committed_snapshot_and_retries_across_branches() {
+        let (repository, account, _) = crate::progression::tests::local();
+        let repository = Arc::new(repository);
+        let service = Service::new(
+            repository.clone(),
+            Arc::new(InventoryCatalog::new([], vec![]).unwrap()),
+        )
+        .with_persistent(Arc::new(crate::progression::tests::tables()));
+        let profile = service.bind(account);
+        let mut request = Request {
+            participant: 19,
+            player_index: 4,
+            progression: progression(),
+            action: Action::Complete { objective: 30 },
+        };
+        // A main objective with an unmet prerequisite cannot write anything.
+        let before = repository.snapshot(account).unwrap();
+        assert!(profile.story(&request, Timestamp(8)).await.is_err());
+        assert_eq!(repository.snapshot(account).unwrap(), before);
+        for objective in [10, 20] {
+            request.action = Action::Complete { objective };
+            profile.story(&request, Timestamp(9)).await.unwrap();
+        }
+        let before = repository.snapshot(account).unwrap();
+        request.action = Action::Complete { objective: 30 };
+        let committed = profile.story(&request, Timestamp(10)).await.unwrap();
+        let saved = repository.snapshot(account).unwrap();
+        assert_eq!(committed.loaded.generation(), saved.generation);
+        assert_eq!(saved.generation, before.generation + 1);
+        let policy = request
+            .progression
+            .catalog
+            .story_policy(request.progression.settings);
+        let main = policy.objective(&saved, 30).unwrap();
+        assert!(main.completed && main.played && !main.active);
+        let restored = request
+            .progression
+            .catalog
+            .restore(&committed.loaded, request.progression.settings)
+            .unwrap();
+        assert!(
+            restored
+                .branch(crate::progression::Branch::Main)
+                .objectives()[&30]
+                .completed
+        );
+        // Rebinding and late intro retries must not write again or rewind main.
+        let rebound = service.bind(account);
+        for objective in [30, 10, 20, 30] {
+            request.action = Action::Complete { objective };
+            let retry = rebound.story(&request, Timestamp(11)).await.unwrap();
+            assert_eq!(retry.loaded.generation(), saved.generation);
+            assert_eq!(repository.snapshot(account).unwrap(), saved);
+        }
+        request.action = Action::Complete { objective: 999 };
+        assert!(rebound.story(&request, Timestamp(12)).await.is_err());
         assert_eq!(repository.snapshot(account).unwrap(), saved);
     }
 

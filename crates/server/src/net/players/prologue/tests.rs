@@ -287,6 +287,7 @@ fn attach_location_service(listener: &mut PlayerListener) {
         streaming_gate: asset,
         spawn_points: None,
         bank: None,
+        seen_points: None,
         free_roam: Some(Activation {
             volumes: vec![],
             presence: Site {
@@ -414,7 +415,7 @@ pub(in crate::net::players) fn tick_with_normal_presentation(
     crate::net::players::test_wire::assert_wire_ready(listener, before);
     Ok(())
 }
-pub(super) fn setup() -> (PlayerListener, u16, Arc<nfs_world::items::Collection>) {
+pub(in crate::net::players) fn setup() -> (PlayerListener, u16, Arc<nfs_world::items::Collection>) {
     let _ = tracing_subscriber::fmt()
         .with_test_writer()
         .without_time()
@@ -766,6 +767,7 @@ fn ready_for_selection_with_return_confirmation(
         spawn_points: None,
         free_roam: None,
         bank: None,
+        seen_points: None,
     });
     let before = (*items).clone();
     tick_with_normal_presentation(&mut listener).unwrap();

@@ -662,7 +662,7 @@ struct Prepared {
 /// Prepare a server start: open the account, load policy and content, and
 /// settle an unfinished intro. Shared by the server and [`prepare_world`].
 async fn prepare(args: &Args) -> Result<Prepared, Failure> {
-    let (inventory, account_lease) = inventory_config(args)?;
+    let (mut inventory, account_lease) = inventory_config(args)?;
     let account = args.local_account.ok_or(Failure::ProfileConfig)?;
     let root = args.root.join(
         args.state_directory
@@ -883,6 +883,7 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                 })
                 .map(|b| b.asset());
             let intro_items = inventory.as_ref().map(|i| i.item_catalog());
+            let map_progression = progression.clone();
             let content = tokio::task::spawn_blocking(move || {
                 let started = std::time::Instant::now();
                 let reused = installation_index.is_some();
@@ -917,17 +918,57 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                 );
                 let nitrous = index.nitrous_configurations()?;
                 let hides = index.progression_debug_hides();
-                let messages = nfs_server::messages::Content::prepare(&mut index);
+                let messages = (|| {
+                    let invitations =
+                        index.active_objective_messages(&std::collections::BTreeSet::from([
+                            "gameplay/progression/messages/build_01_obj01_pho_invite_01".to_owned(),
+                        ]))?;
+                    let power = index.power_objective_messages([
+                        "gameplay/progression/messages/build_01_obj02_pho_invite_basic_01",
+                        "gameplay/progression/messages/build_01_obj02_pho_invite_performance_01",
+                        "gameplay/progression/messages/build_01_obj02_pho_invite_heavy_01",
+                    ])?;
+                    let result = index.result_objective_messages([
+                        "gameplay/progression/messages/build_01_obj04_pho_invite02_goodresult_02",
+                        "gameplay/progression/messages/build_01_obj04_pho_invite03_badresult_01",
+                        "gameplay/progression/messages/build_01_obj04_pho_invite03_autolog_recommended_03",
+                    ])?;
+                    let unlocks = index.unlock_delivery(&[
+                        "gameplay/progression/messages/unlockmessage".to_owned(),
+                    ].into_iter().chain([
+                        "bodykits", "brakediscs", "calipers", "frontbumpers", "frontcanards",
+                        "frontfenders", "headlights", "rearbumpers", "rearcanards", "rearfenders",
+                        "sideskirts", "taillights", "tirebombing", "trunklid", "wingmirror",
+                    ].map(|name| format!("gameplay/progression/messages/unlockmessages/{name}"))).collect())?;
+                    nfs_server::messages::Content::prepare(&mut index)?
+                        .with_active(invitations)?
+                        .with_power(vec![power])?
+                        .with_result(vec![result])?
+                        .with_unlocks(unlocks)
+                })();
                 let tutorials = nfs_server::tutorials::Content::prepare(&mut index);
                 let chapters = nfs_server::chapter_notifications::Content::prepare(&mut index);
+                let objective_delays = index.objective_delays(
+                    "gameplay/progression/missionchapters/build01",
+                    &std::collections::BTreeSet::from([
+                        2_448_038_077_392_274_584,
+                        2_782_020_775_968_532_496,
+                        2_568_254_148_653_413_499,
+                    ]),
+                );
+                let objective_results =
+                    index.objective_results(&std::collections::BTreeSet::from([
+                        2_320_741_721_389_474_841,
+                        2_879_990_053_341_782_397,
+                    ]));
                 tracing::info!(
                     phase = "shared_content",
                     elapsed_ms = stage.elapsed().as_millis(),
                     "runtime preparation phase complete"
                 );
                 let stage = std::time::Instant::now();
-                // The owned race event resolves from the same installation; its
-                // failure leaves scoring on and the event off.
+                // Both normal and approved story variants use the same authored
+                // map conditions; missing ownership cannot enable every event.
                 let event = (|| -> Result<_, nfs_content::Error> {
                     let items = event_items
                         .as_ref()
@@ -937,11 +978,25 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                             })
                         })
                         .transpose()?;
-                    nfs_server::event_logic::catalog::prepare::sprints_cached(
+                    let progression = map_progression.as_ref().ok_or_else(|| {
+                        nfs_content::Error::Content("map progression content missing".into())
+                    })?;
+                    let availability =
+                        Arc::new(nfs_server::event_logic::availability::Content::prepare(
+                            &mut index,
+                            &progression.catalog,
+                            runtime_cache.as_ref(),
+                        )?);
+                    nfs_server::event_logic::catalog::prepare::sprints_gated_cached(
                         &mut index,
                         &scoring.categories,
                         event_vehicles.as_ref(),
                         items.as_ref(),
+                        availability,
+                        &std::collections::BTreeSet::from([
+                            "gameplay/gamemodes/sprint_race_007_nar".to_owned(),
+                            "gameplay/gamemodes/sprint_race_034_nar".to_owned(),
+                        ]),
                         runtime_cache.as_ref(),
                     )
                 })();
@@ -986,8 +1041,18 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                     "runtime preparation phase complete"
                 );
                 Ok::<_, nfs_content::Error>((
-                    scoring, road, nitrous, event, story, hides, messages, tutorials, chapters,
+                    scoring,
+                    road,
+                    nitrous,
+                    event,
+                    story,
+                    hides,
+                    messages,
+                    tutorials,
+                    chapters,
                     keepers,
+                    objective_delays,
+                    objective_results,
                 ))
             })
             .await
@@ -1004,7 +1069,29 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                     tutorials,
                     chapters,
                     keepers,
+                    objective_delays,
+                    objective_results,
                 )) => {
+                    let objective_delays = objective_delays.map_err(|error| {
+                        tracing::error!(%error,"authored story timers unavailable");
+                        Failure::ProfileConfig
+                    })?;
+                    let objective_results = objective_results.map_err(|error| {
+                        tracing::error!(%error,"authored story result contracts unavailable");
+                        Failure::ProfileConfig
+                    })?;
+                    if let Some(current) = progression.take() {
+                        tracing::info!(
+                            objectives = objective_delays.len(),
+                            "authored main story timers prepared"
+                        );
+                        progression = Some(Arc::new(
+                            (*current)
+                                .clone()
+                                .with_objective_delays(objective_delays)?
+                                .with_objective_results(objective_results)?,
+                        ));
+                    }
                     match chapters {
                         Ok(chapters) => {
                             if let Some(current) = progression.take() {
@@ -1046,10 +1133,10 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                                     Some(Arc::new((*current).clone().with_messages(messages)));
                             }
                         }
-                        Err(error) => tracing::warn!(
-                            %error,
-                            "phone messages unavailable; message managers stay uninitiated"
-                        ),
+                        Err(error) => {
+                            tracing::error!(%error, "required phone messages unavailable");
+                            return Err(Failure::ProfileConfig);
+                        }
                     }
                     match hides {
                         Ok(hides) => {
@@ -1104,12 +1191,13 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
                             content = attached;
                             tracing::info!(
                                 playable = catalog.iter().count(),
-                                "normal sprint catalog ready; progression gating disabled"
+                                "sprint catalog ready with authored progression gating"
                             );
                             events = Some(Arc::new(catalog));
                         }
                         Err(error) => {
-                            tracing::warn!(%error,"sprint catalog unavailable; events stay off")
+                            tracing::error!(%error,"required gated sprint catalog unavailable");
+                            return Err(Failure::ProfileConfig);
                         }
                     }
                     match road {
@@ -1209,6 +1297,14 @@ async fn prepare(args: &Args) -> Result<Prepared, Failure> {
     }
     // An unfinished intro cannot be resumed mid-story, so settle it before
     // any session restores progression from the account.
+    if let Some(messages) = progression.as_ref().and_then(|p| p.messages.as_ref())
+        && let Some(policy) = messages
+            .unlock_policy()
+            .map_err(|_| Failure::ProfileConfig)?
+        && let Some(profile) = inventory.take()
+    {
+        inventory = Some(profile.with_unlock_notifications(policy)?);
+    }
     let resume = match (&inventory, &progression) {
         (Some(profile), Some(progression)) => {
             let now = std::time::SystemTime::now()

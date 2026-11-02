@@ -153,7 +153,10 @@ impl Binding {
         {
             return Err(Error::Shape);
         }
-        if !players.owns_participant(connection, persona, self.participant) || !ready(self.entity) {
+        if !(players.owns_participant(connection, persona, self.participant)
+            || players.owns_ai_participant(connection, persona, self.participant))
+            || !ready(self.entity)
+        {
             return Err(Error::UnknownObject);
         }
         let Some(Initial::Entity { prefix, fields }) =

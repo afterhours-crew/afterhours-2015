@@ -147,6 +147,98 @@ pub(crate) fn bind<S: Source>(
     Ok(bound)
 }
 
+/// Bind one selected participant blueprint to its exact authored scene spawner.
+pub(crate) fn context<S: Source>(
+    graph: &mut Graph<S>,
+    scene: Site,
+    blueprint: &str,
+    root_channels: u32,
+    spawner_channels: u32,
+) -> Result<(Vec<Node>, BTreeMap<Site, Site>), Error> {
+    let context = spawner_context(
+        graph,
+        scene,
+        blueprint,
+        "ParticipantLogicSpawnerEntityData",
+        root_channels,
+        spawner_channels,
+    )?;
+    Ok((context.branch, context.aliases))
+}
+
+pub(crate) struct SpawnerContext {
+    pub branch: Vec<Node>,
+    pub aliases: BTreeMap<Site, Site>,
+    pub spawner: Site,
+}
+
+/// Select an exact spawner class. Boolean and set controllers have different
+/// lifetimes even when they instantiate the same blueprint.
+pub(crate) fn spawner_context<S: Source>(
+    graph: &mut Graph<S>,
+    scene: Site,
+    blueprint: &str,
+    class: &str,
+    root_channels: u32,
+    spawner_channels: u32,
+) -> Result<SpawnerContext, Error> {
+    let branch = graph.read(Site::root(blueprint))?;
+    let scene_nodes = graph.read(scene)?;
+    let mut spawners = Vec::new();
+    for node in scene_nodes.iter().filter(|n| n.object.class == class) {
+        if graph.target_field(&node.site, "ParticipantLogicBlueprint")? == (blueprint.to_owned(), 0)
+        {
+            spawners.push(node.site.clone());
+        }
+    }
+    let [spawner] = spawners.as_slice() else {
+        return Err(bad("participant spawner occurrence"));
+    };
+    let roots: Vec<_> = branch
+        .iter()
+        .filter(|n| n.object.class == "ParticipantLogicEntityData")
+        .collect();
+    let [root] = roots.as_slice() else {
+        return Err(bad("participant root occurrence"));
+    };
+    let refs = graph.links(&root.site, root_channels)?;
+    let targets = graph.links(spawner, spawner_channels)?;
+    let aliases = bind(graph, &branch, refs, targets)?;
+    Ok(SpawnerContext {
+        branch,
+        aliases,
+        spawner: spawner.clone(),
+    })
+}
+
+/// Resolve channel links through that participant's bound occurrences, preserving
+/// order and rejecting cycles. Matching a channel asset elsewhere is insufficient.
+pub(crate) fn links<S: Source>(
+    graph: &mut Graph<S>,
+    site: &Site,
+    port: u32,
+    aliases: &BTreeMap<Site, Site>,
+    active: &mut BTreeSet<(Site, u32)>,
+) -> Result<Vec<Endpoint>, Error> {
+    if active.len() >= 64 || !active.insert((site.clone(), port)) {
+        return Err(bad("participant channel link cycle"));
+    }
+    let actual = aliases.get(site).unwrap_or(site);
+    let mut out = Vec::new();
+    for end in graph.links(actual, port)? {
+        if end.port == 0 {
+            out.push(end);
+        } else {
+            out.extend(links(graph, &end.site, end.port, aliases, active)?);
+        }
+        if out.len() > 512 {
+            return Err(bad("participant channel link bound"));
+        }
+    }
+    active.remove(&(site.clone(), port));
+    Ok(out)
+}
+
 /// One composition node of an installed blueprint and the participant serializer
 /// its class constructs under the build profile: `Some(Some(kind))`, `Some(None)` for
 /// a known class without a serializer, `None` for a class the profile does not list.

@@ -51,7 +51,29 @@ fn start(h: &mut Harness) -> Delivered {
 
 pub(super) fn race(h: &mut Harness) {
     start(h);
-    h.run(2100, vec![]);
+    let follow = h.run(2100, vec![]);
+    let gm = h.race().game_mode;
+    let intro_state = h.content.spawner(names::INTRO_SEQUENCE).unwrap() as u16;
+    for member in &h.race().ai.as_ref().unwrap().racers.members {
+        let p = Some(member.ids.participant);
+        let calls: Vec<_> = follow
+            .calls()
+            .into_iter()
+            .filter(|(target, _, _, owner)| *target == gm && *owner == p)
+            .collect();
+        assert_eq!(
+            calls,
+            [
+                (gm, 0, 2, p),
+                (gm, h.content.state(Gm::WaitForAi) as u16, 0, p),
+                (gm, h.content.state(Gm::WaitForAi) as u16, 1, p),
+                (gm, h.content.state(Gm::AiSpawned) as u16, 0, p),
+                (gm, h.content.state(Gm::AiSpawned) as u16, 1, p),
+                (gm, intro_state, 0, p),
+            ],
+            "AI spawn readiness uses its own authored state, not the root main state"
+        );
+    }
     let intro = h.race().sequence.unwrap().1;
     h.run(3000, vec![logic(INTRO_READY, intro)]);
     h.run(3100, vec![h.completed(intro)]);
@@ -185,8 +207,33 @@ fn active_standings_update_but_finished_racers_stay_out_of_the_collector() {
     assert!(positions(&h.run(6000, vec![])).is_empty());
 
     h.run(6100, vec![checkpoint(&h, member.ids.vehicle, 6, 6.1)]);
-    let finish = positions(&h.run(6200, vec![checkpoint(&h, member.ids.vehicle, 7, 6.2)]));
+    let finished = h.run(6200, vec![checkpoint(&h, member.ids.vehicle, 7, 6.2)]);
+    let finish = positions(&finished);
     assert_eq!(finish, vec![(member.ids.participant, 1, false)]);
+    let waypoints = h.content.state(Gm::Waypoints) as u16;
+    let finish_state = h.content.state(Gm::Finish) as u16;
+    let reporting = h.content.state(Gm::ResultReporting) as u16;
+    let outro = h.content.spawner(names::OUTRO_SEQUENCE).unwrap() as u16;
+    let transitions: Vec<_> = finished
+        .calls()
+        .into_iter()
+        .filter(|(target, selector, method, p)| {
+            *target == game_mode
+                && *p == Some(member.ids.participant)
+                && *method < 2
+                && [waypoints, finish_state, reporting, outro].contains(selector)
+        })
+        .collect();
+    assert_eq!(
+        transitions,
+        [
+            (game_mode, waypoints, 1, Some(member.ids.participant)),
+            (game_mode, finish_state, 0, Some(member.ids.participant)),
+            (game_mode, finish_state, 1, Some(member.ids.participant)),
+            (game_mode, outro, 0, Some(member.ids.participant)),
+        ],
+        "AI must cross the finish state before its outro; result reporting is a later transition"
+    );
     let later = positions(&h.run(9000, vec![]));
     assert!(
         later
@@ -581,6 +628,29 @@ fn opponent_outro_timeout_retries_atomically_and_releases_only_that_member() {
     );
     h.listener.pending_rpcs.clear();
     let delivered = h.run(34_200, vec![]);
+    let gm = h.race().game_mode;
+    let p = Some(ai.ids.participant);
+    let transitions: Vec<_> = delivered
+        .calls()
+        .into_iter()
+        .filter(|(target, _, _, owner)| *target == gm && *owner == p)
+        .collect();
+    assert_eq!(
+        transitions,
+        [
+            (
+                gm,
+                h.content.spawner(names::OUTRO_SEQUENCE).unwrap() as u16,
+                1,
+                p
+            ),
+            (gm, h.content.state(Gm::ResultReporting) as u16, 0, p),
+            (gm, h.content.state(Gm::ResultReporting) as u16, 1, p),
+            (gm, h.content.state(Gm::Final) as u16, 0, p),
+            (gm, 0, 3, p),
+        ],
+        "report once after outro, then final entry releases only the finished AI"
+    );
     assert_eq!(h.race().phase, Phase::Racing);
     assert!(h.race().ai.as_ref().unwrap().outros.is_empty());
     assert_eq!(h.race().ai.as_ref().unwrap().racers.members.len(), 1);
@@ -669,6 +739,18 @@ fn opponent_dnf_uses_its_own_refreshed_deadline_without_a_finish_or_award() {
             .rpcs
             .iter()
             .any(|r| matches!(r, HostRpc::GameMode(c) if *c == dnf))
+    );
+    let gm = h.race().game_mode;
+    let p = Some(members[1].ids.participant);
+    let calls = expired.calls();
+    let final_enter = calls
+        .iter()
+        .position(|c| *c == (gm, h.content.state(Gm::Final) as u16, 0, p))
+        .unwrap();
+    let primary_remove = calls.iter().position(|c| *c == (gm, 0, 3, p)).unwrap();
+    assert!(
+        final_enter < primary_remove,
+        "AI release observes final-state entry on DNF as well as a finish"
     );
     assert!(h.listener.scoring_state.pending_awards.is_empty());
     // Reports from the adopted car no longer belong to this race.

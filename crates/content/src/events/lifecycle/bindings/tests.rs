@@ -5,6 +5,42 @@ use super::*;
 use crate::graph::tests::{Memory, edge, local};
 
 #[test]
+fn copied_sets_retain_optional_typed_sources_without_aliasing_the_owner() {
+    let mut m = Memory::default();
+    m.put("mode", 1, "ParticipantSetEntityData", &[]);
+    m.put("mode", 2, "ParticipantSetCopyEntityData", &[]);
+    m.put("mode", 3, "ParticipantSetCopyEntityData", &[]);
+    m.put(
+        "mode",
+        0,
+        "GameModeBlueprint",
+        &[
+            ("Objects", Value::Array((1..=3).map(local).collect())),
+            (
+                "LinkConnections",
+                Value::Array(vec![edge(local(2), 0x2e0d_19d8, local(1), 0)]),
+            ),
+        ],
+    );
+    let mut g = Graph::new(&mut m);
+    let nodes = g.read(Site::root("mode")).unwrap();
+    let b = extract(&mut g, &nodes, &[]).unwrap();
+    assert_eq!(b.sets.len(), 3);
+    assert_eq!(
+        b.sets[1].kind,
+        SetKind::Copy {
+            source: Some(SetSource::Local(b.sets[0].identity.clone())),
+        }
+    );
+    assert_eq!(b.sets[2].kind, SetKind::Copy { source: None });
+    assert_ne!(b.sets[0].identity, b.sets[1].identity);
+    m.put("mode", 1, "FloatEntityData", &[]);
+    let mut g = Graph::new(&mut m);
+    let nodes = g.read(Site::root("mode")).unwrap();
+    assert!(extract(&mut g, &nodes, &[]).is_err());
+}
+
+#[test]
 fn integer_mirrors_bind_typed_hash_assets_and_local_manager_and_provider() {
     use crate::graph::tests::ptr;
     let mut m = Memory::default();

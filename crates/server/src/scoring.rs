@@ -2,7 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! Owned free-roam scoring: the two installed driving participants as live
+//! Owned free-roam scoring: installed player and AI driving participants as live
 //! replicated entities whose state is an interpreter session. This module is
 //! pure: it builds creation and update records, routes reports and commands,
 //! and aggregates keeper awards into a category credit. The listener commits
@@ -48,6 +48,8 @@ pub const TIME_SCALE: f32 = 1.0;
 pub enum Which {
     Acquisition,
     Scoring,
+    /// Scene-owned AI logic; lifetime is controlled by its authored set.
+    Ai,
     /// The event driving-style participant, on the event's entity.
     Event,
     /// A catalog event's own program and serializer binding.
@@ -72,7 +74,7 @@ struct EventPart {
 pub struct Content {
     installed: Arc<ScoringContent>,
     creation: Arc<CreationContent>,
-    bindings: [Arc<Binding>; 2],
+    bindings: [Arc<Binding>; 3],
     /// Installed road network for the road-driving query (E916); None keeps
     /// road inputs absent, which preserves the query state.
     road: Option<Arc<nfs_world::scoring::road_network::Network>>,
@@ -87,7 +89,15 @@ pub struct Content {
 
 impl Content {
     pub fn new(installed: Arc<ScoringContent>) -> Result<Self, replication::Error> {
-        let parts = [&installed.acquisition, &installed.scoring];
+        installed
+            .ai
+            .validate()
+            .map_err(|_| replication::Error::Shape)?;
+        let parts = [
+            &installed.acquisition,
+            &installed.scoring,
+            &installed.ai.participant,
+        ];
         let bundle = parts[0].layout.asset.bundle;
         if parts
             .iter()
@@ -114,6 +124,7 @@ impl Content {
         let bindings = [
             Arc::new(creation.binding(parts[0].layout.asset)?),
             Arc::new(creation.binding(parts[1].layout.asset)?),
+            Arc::new(creation.binding(parts[2].layout.asset)?),
         ];
         Ok(Self {
             installed,
@@ -183,20 +194,22 @@ impl Content {
     /// The compiled program of one participant kind.
     pub fn program(&self, which: Which) -> Result<&Arc<Program>, replication::Error> {
         Ok(match which {
-            Which::Acquisition | Which::Scoring => &self.participant(which).program,
+            Which::Acquisition | Which::Scoring | Which::Ai => &self.participant(which).program,
             Which::Event | Which::EventFor(_) => &self.event_part(which)?.scoring.program,
         })
     }
     fn fields(&self, which: Which) -> Result<&[Field], replication::Error> {
         Ok(match which {
-            Which::Acquisition | Which::Scoring => &self.participant(which).fields,
+            Which::Acquisition | Which::Scoring | Which::Ai => &self.participant(which).fields,
             Which::Event | Which::EventFor(_) => &self.event_part(which)?.scoring.fields,
         })
     }
     /// Composition bus to client entity index, for remote event rows.
     pub fn bus_entities(&self, which: Which) -> Result<&[Option<u16>], replication::Error> {
         Ok(match which {
-            Which::Acquisition | Which::Scoring => &self.participant(which).bus_entities,
+            Which::Acquisition | Which::Scoring | Which::Ai => {
+                &self.participant(which).bus_entities
+            }
             Which::Event | Which::EventFor(_) => &self.event_part(which)?.scoring.bus_entities,
         })
     }
@@ -295,6 +308,7 @@ impl Content {
     pub fn participant(&self, which: Which) -> &Participant {
         match which {
             Which::Acquisition => &self.installed.acquisition,
+            Which::Ai => &self.installed.ai.participant,
             Which::Scoring | Which::Event | Which::EventFor(_) => &self.installed.scoring,
         }
     }
@@ -302,6 +316,7 @@ impl Content {
         Ok(match which {
             Which::Acquisition => self.bindings[0].clone(),
             Which::Scoring => self.bindings[1].clone(),
+            Which::Ai => self.bindings[2].clone(),
             Which::Event | Which::EventFor(_) => self.event_part(which)?.binding.clone(),
         })
     }
@@ -629,4 +644,4 @@ pub fn reputation_updates(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

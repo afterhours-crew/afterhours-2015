@@ -9,7 +9,7 @@ use super::{Error, events::PropertyHandler, finite, properties::Kind, value::Val
 pub const TRANSFORM: u32 = 0x8752_5469;
 pub const VELOCITY: u32 = 0x4aa8_68cf;
 pub const AIRBORNE: u32 = 0x4e55_9cf1;
-/// Boolean vehicle state; its gameplay meaning is not yet established.
+/// Crash predicate; the numeric name remains for prepared-program compatibility.
 pub const STATE_3C230E35: u32 = 0x3c23_0e35;
 /// Boolean vehicle state; its gameplay meaning is not yet established.
 pub const STATE_CD5AE2F0: u32 = 0xcd5a_e2f0;

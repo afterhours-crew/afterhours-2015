@@ -82,6 +82,7 @@ fn fixed_creation_realms_ignore_an_authored_realm_and_listener_flags() {
             Realm::Server,
         ),
         ("ParticipantEventChannelReferenceEntityData", Realm::Server),
+        ("ParticipantSetCopyEntityData", Realm::Server),
         ("EventSyncEntityData", Realm::Both),
         ("ParticipantStateEntityData", Realm::Both),
         ("EventStartPromptSenderEntityData", Realm::Client),

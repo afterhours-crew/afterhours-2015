@@ -16,6 +16,9 @@ pub(crate) fn content() -> Json {
     ]})
 }
 pub(crate) fn tables() -> persistent::Catalog {
+    persistent::Catalog::from_json(&table_definition()).unwrap()
+}
+pub(crate) fn table_definition() -> Json {
     let mut v = persistent::tests::content();
     v["tables"][0]["columns"] = json!([
         {"name":"Active","key":ACTIVE,"value_type":"int","default":"0"},
@@ -33,7 +36,7 @@ pub(crate) fn tables() -> persistent::Catalog {
         .find(|t| t["name"] == "ProgressionStats")
         .unwrap();
     stats["columns"][0] = json!({"name":"IntroCompleted","key":persistent::key("IntroCompleted"),"value_type":"int","default":"0"});
-    persistent::Catalog::from_json(&v).unwrap()
+    v
 }
 fn empty(repo: &dyn InventoryRepository, who: AccountId) -> Snapshot {
     repo.open(who).unwrap();

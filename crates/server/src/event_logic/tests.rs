@@ -192,7 +192,7 @@ fn game_mode() -> Layout {
     l.bus_count = 12;
     l
 }
-const INTRO_SPAWNER: usize = 13;
+const INTRO_SPAWNER: usize = 2 + STATES.len();
 pub(crate) const GOTO: Goto = Goto {
     point: [10.5, 2.0, -30.25],
     radius: 150.,
@@ -206,7 +206,7 @@ pub(crate) const FLAGS: [(u32, usize); 5] = [
     (EVENTS, 1),
     (GAMEPLAY, 3),
 ];
-const OUTRO_SPAWNER: usize = 14;
+const OUTRO_SPAWNER: usize = INTRO_SPAWNER + 1;
 
 pub(crate) fn event() -> Event {
     let gm = game_mode();
@@ -475,6 +475,7 @@ pub(crate) fn event() -> Event {
         scene: "race".into(),
         scene_content_key: RACE,
         game_mode_id: "gameplay/gamemodes/sprint_race_007".into(),
+        categories: Default::default(),
         launcher: 1,
         start_volume: 2,
         rewards: Rewards {
@@ -757,6 +758,23 @@ pub(crate) fn content() -> Content {
     Content::new(event(), "SpeedWall_SprintRace".into()).unwrap()
 }
 
+/// The event with the outro's authored wander (the story outro's 25 m/s limit).
+pub(crate) fn wander_content() -> Content {
+    let mut event = event();
+    event
+        .sequences
+        .iter_mut()
+        .find(|s| s.layout.blueprint == request::OUTRO_SEQUENCE)
+        .unwrap()
+        .wander = Some(nfs_content::events::Wander {
+        urgent: false,
+        prefer_straight: true,
+        speed_limit: 25.,
+        timeout: 30.,
+    });
+    Content::new(event, "SpeedWall_SprintRace".into()).unwrap()
+}
+
 pub(crate) fn ai_content(ai: crate::event_ai::Content) -> Content {
     use nfs_world::{
         race_pacing::{AiOnlyMode, Config, Schedule},
@@ -890,6 +908,25 @@ fn content_names_every_state_and_refuses_missing_or_repeated_ones() {
     let mut other_catalog = event();
     other_catalog.start_logics[0].catalog = vec![(10, 41)];
     assert!(Content::new(other_catalog, "x".into()).is_err());
+}
+
+#[test]
+fn sequence_spawner_rejects_an_rpc_bearing_state_of_the_wrong_class() {
+    let good = event();
+    assert!(Content::new(good.clone(), "x".into()).is_ok());
+    for name in [request::INTRO_SEQUENCE, request::OUTRO_SEQUENCE] {
+        let mut wrong = good.clone();
+        wrong
+            .sequences
+            .iter_mut()
+            .find(|s| s.layout.blueprint == name)
+            .unwrap()
+            .spawner = Some(2);
+        assert!(
+            Content::new(wrong, "x".into()).is_err(),
+            "a published main-state RPC cannot serve as a sequence spawner"
+        );
+    }
 }
 
 #[test]
@@ -1338,4 +1375,28 @@ fn outro_commands_use_authored_speed_and_preserve_their_distinct_wander_flags() 
         .unwrap();
     seq.wander.as_mut().unwrap().urgent = true;
     assert!(c.outro_goals().is_err());
+}
+
+/// E1280 tweet lane: the client's post-race tweet manager looks the race up by
+/// the GameModeInfoChannels EventId (channel property 311423012). The E1278
+/// decode (`amy-gap-r6.json`) carries no EventId value for the official race-1
+/// mode ghost 649: neither 3196290035 nor 1761118161 occurs anywhere in it, so
+/// the property is evaluated on the client from the launched mode's own
+/// EventDetails and the comparable identity is the event each host launches.
+/// Pin ours for both variants of Sprint_Race_007.
+#[test]
+fn event_ids_of_both_sprint_007_variants_are_pinned_for_the_tweet_lookup() {
+    assert_eq!(
+        nfs_content::events::record_id("gameplay/gamemodes/sprint_race_007_nar"),
+        3_196_290_035
+    );
+    assert_eq!(
+        nfs_content::events::record_id("gameplay/gamemodes/sprint_race_007"),
+        1_761_118_161
+    );
+    let mut narrative = event();
+    narrative.game_mode_id = "gameplay/gamemodes/sprint_race_007_nar".into();
+    let narrative = Content::new(narrative, "category".into()).unwrap();
+    assert_eq!(narrative.record_id(), 3_196_290_035);
+    assert_eq!(content().record_id(), 1_761_118_161);
 }

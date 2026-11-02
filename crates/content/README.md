@@ -1,5 +1,12 @@
 # nfs-content
 
+Selected main-story result contracts preserve the direct server completion
+edge, category filter, objective/message-read conditions and participant owner.
+Their scene channel bindings reuse the same occurrence-aware resolver as intro
+logic. Unsupported filtered or event-controlled reporters are rejected. Event
+definitions retain the categories of their exact start-area details; ordinary
+and story variants must not be attributed by display name or payout.
+
 Builds deployment content from a player's own game installation, once, and
 caches it. The server and a launcher call the same library; it distributes no
 game data.
@@ -56,7 +63,7 @@ server-only and keep their content, save and logs local.
 | `VehicleParts` | `vehicle-parts.json` | Item-system customization, tuning assets, NOS variants, wheel geometry, wrap/plate identifiers and mesh GUID alternatives |
 | `VehicleProfiles` | `vehicle-profiles.json` | Player vehicle blueprints reached through the item system: component profiles, mesh-link order, bus flags, registry identities, physics, appearance and health defaults |
 | `ProgressionContent` | `progression-content.json` | Main/intro persistence links, stable IDs, activation expressions, entity composition and explicit spawner-to-scene channel bindings |
-| `SequenceContent` | `sequence-content.json` | Waiting/exit sequence registries, manager bus and serializer, spawner channel links and the exit command's registered spline definition |
+| `SequenceContent` | `sequence-content.json` | Waiting, garage entry/exit and recovery registries; manager/channel bindings, registered splines and validated controlled-arrival timing |
 | `TrafficContent` | `traffic-content.json` | Linked traffic personas in provider order, vehicle profiles, manager serializer ordinals and roads with owning scene catalogs |
 | `RivalContent` | `rival-content.json` | Roaming racer activation regions, spawn transforms, complete vehicle presets, provider and personality-library indices |
 | `WorldMacTemplate` | `world-mac-template.bin` | 64 bytes of the executable image at the build's known address, checked by digest |
@@ -110,14 +117,23 @@ and asset references (class ID and position in registry order). A Blueprint
 class without a profiled ID is an error, never a guess. These are inputs for
 world, garage, vehicle, sequence and progression content.
 
-Sequence extraction checks the waiting and garage-exit serializer layouts and
-resolves channels from each scene's particular sequence referer, through prefab
+Sequence extraction checks waiting, garage entry/exit, crash and controlled-arrival
+layouts and resolves channels from each scene's particular referer, through prefab
 and scene interfaces. The manager's scene determines the one-based embedded bus.
 The spline command selects a channel port; that target selects the exact registered
 `ScriptedAISplineEntityData` object and its loop default. Speed-segment assets and
 unrelated channels are not interchangeable with these identities. Missing,
 ambiguous or unsupported graphs fail preparation. Version 2 contains no goal
 allocation counter; that value belongs to owned runtime state.
+
+Controlled-arrival preparation follows both recovery spawners to the same
+explicit channel and resolves its actor and participant managers in that scene.
+It validates the complete condition/timer/control graph, including participant
+validity, both gates, actor enable/release, Stop and client completion. Timer
+realm, clock, flags and bounded duration are authored inputs. Duplicate roots,
+extra or missing edges, unsupported conditions and ambiguous channel bindings
+fail preparation. The compiled definition contains static bindings and timing;
+the server owns each participant's sequence and preserves its existing goals.
 
 ## Participant logic layouts
 
@@ -288,6 +304,69 @@ an explicit `--progression-content` keeps precedence. Account values and runtime
 identities remain owned by the server. Floats in progression persistence and
 unrecognized activation expressions are unsupported.
 
+`AssetIndex::objective_delays` resolves an explicit set of objective timers in
+one chapter. It accepts only the objective's own Activated event through bounded
+server/world-time Delay nodes to its Complete input. Client-only edges, cycles,
+extra reset/abort inputs, dynamic durations, missing objectives and ambiguous
+writers are rejected. Fractional durations and prefab occurrence identities are
+preserved. The server's selected main-objective timers reconcile committed
+activation state against the session world clock and queue completion through
+the account worker. Queue pressure defers work; retries do not restart a timer
+or publish completion twice. Restart creates a new session activation clock
+for still-active delay objectives. These component checks do not establish
+complete story-race support or qualify the exact live timing boundary.
+
+`AssetIndex::mission_conditions` compiles explicitly selected mission Boolean
+writers into bounded conditions over objective activity/completion and message
+read state. Message dependencies retain their authored manager and message
+identity, including alternative invitations. Missing facts, ambiguous writers,
+cycles and event-written Boolean state are rejected. This static contract does
+not unlock events itself; the session owner evaluates committed account state.
+
+`AssetIndex::active_objective_messages` resolves explicitly selected durable
+invitations whose only trigger is an objective's Active property. Restricted,
+delayed, ambiguous and event-driven senders fail this reader; they cannot be
+reduced to direct activation. The server queues selected invitations from the
+committed main-objective state, stores each unique message through the account
+worker and announces it only after commit. Backpressure and repeated ticks
+preserve pending work; a restarted session restores existing messages. This
+direct-trigger path does not implement conditional or delayed invitations.
+
+`AssetIndex::event_availability` retains normal, narrative and Prestige start
+areas and compiles the membership expressions behind their map notifications.
+Set union, difference and intersection preserve exact Boolean identifiers,
+participant-manager identities and transition-state endpoints. Copy, mutable
+and integer-range sets remain explicit inputs from their state owners; no input
+is assumed empty or equal to another set. Missing state fails evaluation even
+on an unselected Boolean branch. Resolving this topology does not establish
+runtime support for those state owners or change the normal-only roster API.
+The availability result also preserves each variant's positive and negative
+notification conditions, including variants sharing a start area. Its copied-set
+controller definitions retain the independent input, comparison configuration and
+declared control channel. Unknown writers, changed command order, open initial
+gates and unresolved server listeners are rejected. Reading these definitions
+does not execute their controllers or publish map membership.
+
+Map conditions can also reference persisted objectives outside the active
+gameplay branches. `condition_state_owners` resolves their persistence links,
+stable IDs and connected initial activation expressions. Missing or ambiguous
+required owners fail preparation; an unrelated channel with multiple writers
+does not supply an arbitrary initializer. The server's read-only condition
+projection shares objective restoration and message-read semantics with story
+result attribution. These definitions do not implement the referenced missions
+or establish in-game map/start eligibility.
+
+The server availability compiler now prepares these immutable definitions as a
+separate cache product. Cache decoding validates condition and membership
+postorder, bounds and referenced owners before construction. A session evaluator
+reconciles the complete player roster and ordered copied-set controls, returning
+notification membership and eligible variant IDs together. Failed projections
+leave copied membership unchanged. Network notification/start/replay integration
+remains pending; component tests do not establish gameplay acceptance.
+Loaded control-channel publishers retain their separate Boolean owners, initial
+configuration and later event commands. Missing publishers and unsupported
+writes are errors; a false initial value is not treated as a constant.
+
 Vehicle mesh inputs retain front/rear headlight animation extent and spoiler
 extent/animation ID from the installed item definitions. The vehicle model applies
 them to selected mesh variants; non-finite fields and wrong definition classes
@@ -348,3 +427,25 @@ spawn transitions, checks their client-notification flags, then resolves the
 destination's actual scene and serializer. Missing, ambiguous or unsupported
 sequences fail preparation. Build-profile ports and builder revision invalidate
 older caches; scene ordinals are not embedded in runtime policy.
+
+`AssetIndex::unlock_messages` compiles explicitly selected category and car-part
+notification senders from the installed progression graph. It checks the success
+or filtered listener event, attachment property, shared participant/inventory,
+authored world delay and manager binding through the actual startup scene parents.
+Unknown attachments, extra inputs, ambiguous links and unsupported delay policies
+fail extraction. The `unlock_messages` example inspects these rules without
+opening a save. This projection neither grants rewards nor schedules messages;
+REP eligibility, durable delivery and live acceptance remain separate concerns.
+
+`unlock_delivery` also resolves transaction definition GUIDs to nested item IDs
+and follows the actual dynamic-table link to its one manager and authored ring
+capacity. Another persistence node's capacity field does not confer ownership.
+Use the example's `--delivery` option to inspect that complete projection.
+
+`AssetIndex::driving_distance_binding` validates the installed driver-distance
+graph before exposing its sampling period, unit factor and publisher serializer
+positions. It follows the shared participant/car owner, vector caches, world
+delay, accumulator and integer conversions. Extra inputs, changed event order,
+ambiguous owners and unsupported cache/listener policies fail compilation.
+The `driving_distance` example inspects this binding without opening an account.
+Preparation revision44 rebuilds cached configuration with the validated binding.

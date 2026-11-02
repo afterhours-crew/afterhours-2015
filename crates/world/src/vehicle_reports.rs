@@ -19,6 +19,14 @@ struct Entry {
 pub struct Reports {
     entries: BTreeMap<u16, Entry>,
 }
+/// Fresh authoritative inputs and their independently throttled replication.
+#[derive(Clone, Debug, Default)]
+pub struct Received {
+    /// Owned vehicles whose newer revisions were successfully retained.
+    pub accepted: Vec<u16>,
+    /// Records due for replication; these may be empty despite accepted input.
+    pub echoes: Vec<Record>,
+}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Target {
     Player,
@@ -38,6 +46,21 @@ impl Reports {
         cars: &BTreeSet<u16>,
         now_ms: u64,
     ) -> Result<Vec<Record>, Error> {
+        self.receive_with_accepted(players, connection, persona, movement, cars, now_ms)
+            .map(|received| received.echoes)
+    }
+
+    /// Return every fresh accepted vehicle separately from outgoing echoes so
+    /// owned input consumers are not limited by the replication interval.
+    pub fn receive_with_accepted(
+        &mut self,
+        players: &mut Players,
+        connection: u8,
+        persona: u64,
+        movement: &frame::Movement<'_>,
+        cars: &BTreeSet<u16>,
+        now_ms: u64,
+    ) -> Result<Received, Error> {
         let targets = cars.iter().map(|&id| (id, Target::Player)).collect();
         self.receive_targets(players, connection, persona, movement, &targets, now_ms)
     }
@@ -54,6 +77,21 @@ impl Reports {
         cars: &BTreeMap<u16, u64>,
         now_ms: u64,
     ) -> Result<Vec<Record>, Error> {
+        self.receive_ai_with_accepted(players, connection, persona, movement, cars, now_ms)
+            .map(|received| received.echoes)
+    }
+
+    /// Fresh AI input is independent of the outgoing echo cadence, just like
+    /// player input. Validate every delegated key before retaining any sample.
+    pub fn receive_ai_with_accepted(
+        &mut self,
+        players: &mut Players,
+        connection: u8,
+        persona: u64,
+        movement: &frame::Movement<'_>,
+        cars: &BTreeMap<u16, u64>,
+        now_ms: u64,
+    ) -> Result<Received, Error> {
         if cars.len() > frame::MAX_MOVEMENT_RECORDS {
             return Err(Error::Bound);
         }
@@ -80,7 +118,7 @@ impl Reports {
         movement: &frame::Movement<'_>,
         cars: &BTreeMap<u16, Target>,
         now_ms: u64,
-    ) -> Result<Vec<Record>, Error> {
+    ) -> Result<Received, Error> {
         let header = movement.header.ok_or(Error::Shape)?;
         if cars.len() > frame::MAX_MOVEMENT_RECORDS {
             return Err(Error::Bound);
@@ -107,11 +145,11 @@ impl Reports {
         let mut world = players.clone();
         next.entries
             .retain(|id, entry| cars.get(id) == Some(&entry.target));
-        let mut output = Vec::new();
+        let mut output = Received::default();
         for (id, target, sample) in reports {
             let stamp = sample.physics.identity_words;
             let physics = sample.physics;
-            if let Some(entry) = next.entries.get_mut(&id) {
+            let echo = if let Some(entry) = next.entries.get_mut(&id) {
                 if now_ms < entry.sent_ms {
                     return Err(Error::Shape);
                 }
@@ -120,9 +158,11 @@ impl Reports {
                 }
                 entry.stamp = stamp;
                 if now_ms - entry.sent_ms < ECHO_INTERVAL_MS {
-                    continue;
+                    false
+                } else {
+                    entry.sent_ms = now_ms;
+                    true
                 }
-                entry.sent_ms = now_ms;
             } else {
                 next.entries.insert(
                     id,
@@ -132,18 +172,32 @@ impl Reports {
                         sent_ms: now_ms,
                     },
                 );
-            }
+                true
+            };
+            // Throttle outgoing replication, never the accepted authoritative
+            // pose or controls. Distance, crash and other owned state readers
+            // must see inputs received between two echoes as well.
             match target {
                 Target::Player => {
-                    output.extend(world.set_vehicle_physics(connection, persona, id, physics)?)
+                    let records = world.set_vehicle_physics(connection, persona, id, physics)?;
+                    if echo {
+                        output.echoes.extend(records);
+                    }
                 }
                 Target::Ai(key) => {
-                    output.extend(world.set_ai_vehicle_physics(connection, persona, key, physics)?);
+                    let records =
+                        world.set_ai_vehicle_physics(connection, persona, key, physics)?;
                     // The first accepted report proves the client drives the car;
                     // only then is its actor's control suppression cleared.
-                    output.extend(world.release_ai_control(connection, persona, key)?);
+                    if echo {
+                        output.echoes.extend(records);
+                        output
+                            .echoes
+                            .extend(world.release_ai_control(connection, persona, key)?);
+                    }
                 }
             }
+            output.accepted.push(id);
         }
         *self = next;
         *players = world;

@@ -33,6 +33,7 @@ use nfs_world::{
     },
 };
 use std::sync::Arc;
+mod ai;
 
 /// The participant root's disable notification, which banks every category
 /// (installed topology: OnDisabled forwards into the scoring prefab's bank
@@ -102,6 +103,15 @@ pub(in crate::net) struct AwardRequest {
     /// An owned event completion paid with this credit: its cash, earned-cash
     /// statistic and race-event record join the same transaction.
     pub event: Option<nfs_services::event_rewards::Completion>,
+    /// Authored objective attributed to this owned result. Rewards commit at
+    /// finish; the event's later result-reporting state completes this objective.
+    pub story: Option<StoryResult>,
+}
+
+#[derive(Clone, Debug)]
+pub(in crate::net) struct StoryResult {
+    pub progression: Arc<crate::progression::Content>,
+    pub objective: u64,
 }
 
 /// A committed credit: the refreshed account view and item collection.
@@ -120,6 +130,7 @@ pub(in crate::net) struct Credited {
 #[derive(Clone, Debug, Default)]
 pub(super) struct State {
     pub live: BTreeMap<u16, Live>,
+    pub ai: BTreeMap<u16, ai::Live>,
     pub reported: BTreeSet<u16>,
     pub reports: Vec<QueuedReport>,
     pub pending_awards: VecDeque<AwardRequest>,
@@ -761,14 +772,14 @@ impl PlayerListener {
         car: u16,
         now_ms: u64,
         nitrous: Option<&Nitrous>,
+        state: &State,
     ) -> Result<Inputs, replication::Error> {
         let physics = players
             .vehicle_physics(HOST_SELECTOR as u8, self.persona, car)
             .map_err(fail("vehicle physics"))?;
         let motion = physics.decode([0.; 3]).map_err(fail("physics decode"))?;
         let mut vehicle =
-            Vehicle::from_motion(u32::from(car), &motion).map_err(fail("vehicle basis"))?;
-        vehicle.airborne = Some(physics.controls.is_airborne());
+            Vehicle::from_physics(u32::from(car), &physics).map_err(fail("vehicle basis"))?;
         vehicle.nos = nitrous.map(Nitrous::sample);
         vehicle.burnout = nfs_world::scoring::burnout::Controls::from_wire(&physics.controls, None)
             .map_err(fail("burnout controls"))?;
@@ -784,12 +795,7 @@ impl PlayerListener {
             vehicle: Some(vehicle),
             road,
             others: other_vehicles(players, car),
-            // The drift and high-speed participant sets hold participants
-            // whose own scoring sets that property: other players and AI
-            // racers, never traffic (E1130). This host scores only its own
-            // player and its rivals run no scoring, so no other participant
-            // is a member.
-            participants: Vec::new(),
+            participants: ai::members(content, players, state, self.persona)?,
             stats: self.vehicle_stats(content, players, car),
             ..idle_inputs(self.persona, now_ms)
         })
@@ -817,7 +823,12 @@ impl PlayerListener {
     /// Current and stock figures of the participant's car (E916): the dyno
     /// cache the client stores on the car item and the item definition's
     /// defaults. Absent without the item catalog, the inventory or a car item.
-    fn vehicle_stats(&self, content: &Content, players: &Players, car: u16) -> Option<Stats> {
+    pub(super) fn vehicle_stats(
+        &self,
+        content: &Content,
+        players: &Players,
+        car: u16,
+    ) -> Option<Stats> {
         let catalog = content.items()?;
         let items = &self.inventory.as_ref()?.items;
         let item =
@@ -825,6 +836,7 @@ impl PlayerListener {
                 .items
                 .get(&players.vehicle_item_of(HOST_SELECTOR as u8, self.persona, car)?)?;
         let Derived::RaceVehicle {
+            max_hp,
             zero_to_sixty,
             top_speed_mph,
             ..
@@ -833,6 +845,7 @@ impl PlayerListener {
             return None;
         };
         let Some(Derived::RaceVehicle {
+            max_hp: stock_max_hp,
             zero_to_sixty: stock_zero_to_sixty,
             top_speed_mph: stock_top_speed_mph,
             ..
@@ -845,6 +858,8 @@ impl PlayerListener {
             return None;
         };
         let stats = Stats {
+            max_hp: *max_hp,
+            stock_max_hp: *stock_max_hp,
             top_speed_mph: *top_speed_mph,
             stock_top_speed_mph: *stock_top_speed_mph,
             zero_to_sixty: f32::from_bits(*zero_to_sixty),
@@ -861,32 +876,36 @@ impl PlayerListener {
         players: &Players,
         body: nfs_protocol::world::BitSpan<'_>,
     ) -> Result<Option<QueuedReport>, replication::Error> {
-        for (&participant, live) in &self.scoring_state.live {
-            for entity in &live.entities {
-                let which = entity.which;
-                for (node, binding) in &entity.reports {
-                    let report = binding.receive(
-                        players,
-                        HOST_SELECTOR as u8,
-                        self.persona,
-                        body,
-                        |id| players.objects().get(id).is_some(),
-                    )?;
-                    if let Some(report) = report {
-                        tracing::info!(
-                            participant,
-                            ?which,
-                            node,
-                            ?report,
-                            "scoring report received"
-                        );
-                        return Ok(Some(QueuedReport {
-                            participant,
-                            which,
-                            node: *node,
-                            report,
-                        }));
-                    }
+        let player_entities = self
+            .scoring_state
+            .live
+            .iter()
+            .flat_map(|(&participant, live)| {
+                live.entities
+                    .iter()
+                    .map(move |entity| (participant, entity))
+            });
+        for (participant, entity) in player_entities {
+            let which = entity.which;
+            for (node, binding) in &entity.reports {
+                let report =
+                    binding.receive(players, HOST_SELECTOR as u8, self.persona, body, |id| {
+                        players.objects().get(id).is_some()
+                    })?;
+                if let Some(report) = report {
+                    tracing::info!(
+                        participant,
+                        ?which,
+                        node,
+                        ?report,
+                        "scoring report received"
+                    );
+                    return Ok(Some(QueuedReport {
+                        participant,
+                        which,
+                        node: *node,
+                        report,
+                    }));
                 }
             }
         }
@@ -908,6 +927,9 @@ impl PlayerListener {
             which,
             ghost,
         } = scope;
+        if which == Which::Ai && !output.awards.is_empty() {
+            return Err(replication::Error::Unsupported);
+        }
         if let Some(live) = state.live.get(&participant)
             && let Some(nitrous) = state.nitrous.get_mut(&live.car)
         {
@@ -1102,7 +1124,14 @@ impl PlayerListener {
             .get(&participant)
             .ok_or(replication::Error::Shape)?
             .car;
-        let inputs = self.scoring_inputs(content, players, car, now_ms, state.nitrous.get(&car))?;
+        let inputs = self.scoring_inputs(
+            content,
+            players,
+            car,
+            now_ms,
+            state.nitrous.get(&car),
+            state,
+        )?;
         let (session, output) = content
             .start(which, &inputs)
             .map_err(fail("session start"))?;
@@ -1338,9 +1367,17 @@ impl PlayerListener {
         let Some(content) = self.scoring.clone() else {
             return Ok(());
         };
-        if !self.pending_entries.is_empty() {
+        // Tie opt-in scalar diagnostics to the actual scheduler clock. Packet
+        // timestamps alone do not show when publication backpressure deferred
+        // a reported sample or which sample an eventual scoring tick consumed.
+        let _trace_scope = self
+            .scoring_state
+            .trace
+            .then(|| tracing::info_span!("scoring_advance", world_ms = now_ms).entered());
+        if !self.pending_entries.is_empty() || self.pending.len() >= MAX_PENDING {
             return Ok(());
         }
+        let desired_ai = self.desired_ai_scoring(&content)?;
         let mut desired = self.desired_scoring(content.has_event());
         for (&participant, kinds) in &mut desired {
             for (which, _) in kinds {
@@ -1388,6 +1425,8 @@ impl PlayerListener {
         }
         let idle = retiring.is_empty()
             && starting.is_empty()
+            && desired_ai.is_empty()
+            && self.scoring_state.ai.is_empty()
             && self.scoring_state.reports.is_empty()
             && self.scoring_state.reported.is_empty();
         if idle {
@@ -1397,6 +1436,7 @@ impl PlayerListener {
         let mut state = self.scoring_state.clone();
         let mut players = self.players.clone();
         let mut collected = Collected::default();
+        self.advance_ai_scoring(&content, &players, &mut state, &desired_ai, now_ms)?;
         for (participant, which) in retiring {
             self.retire(
                 &content,
@@ -1436,6 +1476,7 @@ impl PlayerListener {
                 live.car,
                 now_ms,
                 state.nitrous.get(&live.car),
+                &state,
             )?;
             let (output, ghost) = {
                 let live = state
@@ -1477,8 +1518,14 @@ impl PlayerListener {
             }
             let covered = ((now_ms - last_ms) as f32 / 1000.0).min(MAX_TICK_SECONDS);
             let mut remaining = covered;
-            let mut inputs =
-                self.scoring_inputs(&content, &players, car, now_ms, state.nitrous.get(&car))?;
+            let mut inputs = self.scoring_inputs(
+                &content,
+                &players,
+                car,
+                now_ms,
+                state.nitrous.get(&car),
+                &state,
+            )?;
             // Preserve transitions even when start and release arrive between
             // scheduler passes. Component notifications deliver their snapshots
             // without advancing unrelated queries, timers or fuel.
@@ -1524,6 +1571,16 @@ impl PlayerListener {
                         &mut collected,
                     )?;
                 }
+            }
+            if state.trace {
+                tracing::info!(
+                    participant,
+                    car,
+                    previous_world_ms = last_ms,
+                    covered_seconds = covered,
+                    ?inputs,
+                    "scoring input snapshot"
+                );
             }
             let start = inputs.now - f64::from(covered);
             if now_ms / 1000 != last_ms / 1000
@@ -1651,6 +1708,7 @@ impl PlayerListener {
                     .runtime_index(HOST_SELECTOR as u8, self.persona, participant)
                     .map(u32::from),
                 event: None,
+                story: None,
             });
         }
         if collected.replies.len()
@@ -1760,7 +1818,9 @@ impl PlayerListener {
         let mut players = self.players.clone();
         let mut dirty = self.scoring_state.dirty.clone();
         let mut changed = 0usize;
+        let mut committed_calls = Vec::new();
         if let Some(logic) = self.logic.as_deref() {
+            let stat_fields = logic.reputation_stat_fields();
             for (participant, ghosts) in &self.logic_ghosts {
                 if !self
                     .players
@@ -1768,7 +1828,8 @@ impl PlayerListener {
                 {
                     continue;
                 }
-                for (capture, index, value) in crate::scoring::reputation_updates(logic, &values) {
+                for (capture, index, field) in logic.reputation_fields() {
+                    let value = values.get(field);
                     let Some(&ghost) = ghosts.get(&capture) else {
                         continue;
                     };
@@ -1786,6 +1847,54 @@ impl PlayerListener {
                     {
                         return Err(replication::Error::TypeMismatch);
                     }
+                    if field == nfs_services::reputation::Field::Level {
+                        let replication::Initial::Entity { fields, .. } = &players
+                            .objects()
+                            .get(ghost)
+                            .ok_or(replication::Error::UnknownObject)?
+                            .initial
+                        else {
+                            return Err(replication::Error::TypeMismatch);
+                        };
+                        // Compare the currently presented property, not the
+                        // newest Loaded snapshot: another committed storage job
+                        // can already have refreshed that snapshot. Publication
+                        // and this property update are adopted together below.
+                        if fields.get(index)
+                            != Some(&nfs_world::replication::entity::Initial::I32Property(Some(
+                                value,
+                            )))
+                        {
+                            for &(_, publisher) in
+                                stat_fields.iter().filter(|(id, _)| *id == capture)
+                            {
+                                let Some(nfs_world::replication::entity::Initial::RpcVariant {
+                                    rpc,
+                                    ..
+                                }) = fields.get(publisher)
+                                else {
+                                    return Err(replication::Error::TypeMismatch);
+                                };
+                                // This method resolves a Player, not its joined
+                                // Participant (event state calls use the latter).
+                                let Some(replication::Initial::Participant(owner)) = players
+                                    .objects()
+                                    .get(*participant)
+                                    .map(|object| &object.initial)
+                                else {
+                                    return Err(replication::Error::TypeMismatch);
+                                };
+                                committed_calls.push(HostRpc::GameMode(crate::event_logic::call(
+                                    players.objects(),
+                                    ghost,
+                                    rpc.selector,
+                                    0,
+                                    Some(owner.player),
+                                    nfs_world::game_mode::Arguments::Word(value as u32),
+                                )?));
+                            }
+                        }
+                    }
                     let mut fields = vec![None; kinds.len()];
                     fields[index] = Some(nfs_world::replication::entity::Update::I32Property(
                         Some(value),
@@ -1799,6 +1908,34 @@ impl PlayerListener {
                 }
             }
         }
+        // Prepare all output and check queue capacity before adopting any of the
+        // refreshed state. A full queue must leave publication retryable.
+        if request.event.is_some()
+            && let Some(bank) = self.bank_notification(credited.loaded.balance().0)?
+        {
+            committed_calls.push(bank);
+        }
+        if let Some(story) = &request.story {
+            committed_calls.extend(self.committed_progression_calls(
+                &story.progression,
+                &credited.loaded,
+                request.participant,
+            )?);
+        }
+        committed_calls.extend(self.keeper_calls(
+            &players,
+            request.participant,
+            scores,
+            request.credit,
+        )?);
+        if committed_calls.len()
+            > nfs_world::session::MAX_RPC_QUEUE
+                .saturating_sub(self.pending_rpcs.len() + self.scoring_state.held_rpcs.len())
+        {
+            return Err(replication::Error::Bound);
+        }
+        let held = self.scoring_state.held.contains(&request.batch_id);
+        let invitations = self.prepare_result_invitation(request)?;
         // Adopt the refreshed collection (unlock grants join a credit) and keep
         // the garage population's spawn snapshot in step with it: the garage
         // return compares the live inventory with that snapshot and refuses a
@@ -1835,16 +1972,8 @@ impl PlayerListener {
                 );
             }
         }
-        // An event completion also paid cash: present the committed balance.
-        if request.event.is_some()
-            && let Some(bank) = self.bank_notification(credited.loaded.balance().0)?
-        {
-            if self.pending_rpcs.len() >= nfs_world::session::MAX_RPC_QUEUE {
-                return Err(replication::Error::Bound);
-            }
-            self.pending_rpcs.push_back(bank);
-        }
         self.persistent = Some(credited.loaded);
+        self.active_invitations = invitations;
         tracing::info!(
             participant = request.participant,
             batch_id = request.batch_id,
@@ -1855,23 +1984,12 @@ impl PlayerListener {
             fields = changed,
             "owned reputation credit committed"
         );
-        // Each ScoreKeeper hears the award: the participant's committed total
-        // in that keeper and this award's amount (official E1026 911.825 s:
-        // six calls with the award event and the REP update).
-        let keepers = self.keeper_calls(&players, request.participant, scores, request.credit)?;
-        let held = self.scoring_state.held.contains(&request.batch_id);
-        if keepers.len()
-            > nfs_world::session::MAX_RPC_QUEUE
-                .saturating_sub(self.pending_rpcs.len() + self.scoring_state.held_rpcs.len())
-        {
-            return Err(replication::Error::Bound);
-        }
         self.scoring_state.dirty = dirty;
         self.players = players;
         if held {
-            self.scoring_state.held_rpcs.extend(keepers);
+            self.scoring_state.held_rpcs.extend(committed_calls);
         } else {
-            self.pending_rpcs.extend(keepers);
+            self.pending_rpcs.extend(committed_calls);
         }
         if request.event.is_some() {
             self.event_credit_committed(request.participant, request.batch_id);

@@ -21,6 +21,13 @@ pub(crate) fn destinations<S: Source>(
     graph: &mut Graph<S>,
     area: &Site,
 ) -> Result<Option<Vec<Destination>>, Error> {
+    Ok(selection(graph, area)?.map(|(_, destinations)| destinations))
+}
+
+pub(crate) fn selection<S: Source>(
+    graph: &mut Graph<S>,
+    area: &Site,
+) -> Result<Option<(Site, Vec<Destination>)>, Error> {
     // RestartEventLogic's TeleportLocation port is exposed by this start area.
     // Resolve it out through the instance, preserving any linked variant's context.
     let locations = graph.links(area, (-2_033_632_871i32) as u32)?;
@@ -54,7 +61,7 @@ pub(crate) fn destinations<S: Source>(
             basis: transform.basis,
         });
     }
-    Ok(Some(out))
+    Ok(Some((location.site.clone(), out)))
 }
 
 #[cfg(test)]

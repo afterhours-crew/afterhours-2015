@@ -28,6 +28,7 @@ use nfs_world::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+pub mod availability;
 pub mod catalog;
 pub mod lifecycle;
 pub mod request;
@@ -86,8 +87,10 @@ pub enum State {
     /// IntParticipantPropertyClientNotification: the local participant's position.
     LocalPosition,
     DnfState,
+    /// Spawn-AI prefab state after its wait; distinct from the root main state.
+    AiSpawned,
 }
-const STATES: [(State, &str, &str); 11] = [
+const STATES: [(State, &str, &str); 12] = [
     (
         State::Main,
         "gameplay/gamemodes/racegamemode",
@@ -141,6 +144,11 @@ const STATES: [(State, &str, &str); 11] = [
     (
         State::DnfState,
         "gameplay/gamemodes/states/dnfstateprefab",
+        "GameModeStateEntityData",
+    ),
+    (
+        State::AiSpawned,
+        "gameplay/gamemodes/states/spawnaistate",
         "GameModeStateEntityData",
     ),
 ];
@@ -330,6 +338,7 @@ pub struct Content {
     event: Event,
     category: String,
     record_id: u32,
+    speedwall_event: u32,
     creation: CreationContent,
     states: BTreeMap<State, usize>,
     ai: Option<std::sync::Arc<crate::event_ai::Content>>,
@@ -373,7 +382,7 @@ pub fn selector(layout: &Layout, field: usize) -> Result<u16, Error> {
 
 impl Content {
     pub fn new(event: Event, category: String) -> Result<Self, Error> {
-        if category.is_empty() || category.len() > 128 {
+        if category.is_empty() || category.len() > 128 || event.categories.len() > 128 {
             return Err(Error::Shape);
         }
         if event
@@ -503,6 +512,7 @@ impl Content {
             event,
             category,
             record_id,
+            speedwall_event: record_id,
             creation,
             states,
             ai: None,
@@ -730,6 +740,24 @@ impl Content {
     pub fn record_id(&self) -> u32 {
         self.record_id
     }
+    /// The event ID the client applies this event's Speedwall progress to: the
+    /// standard event of the installed NarrativeToStandardEventMap, which the
+    /// client also uses to request and cache its speed walls. E1280: after the
+    /// narrative `sprint_race_007_nar` (record 3196290035) the official host
+    /// sends 1761118161; the client holds no wall under the narrative ID and
+    /// dereferences a null entry.
+    pub fn speedwall_event(&self) -> u32 {
+        self.speedwall_event
+    }
+    /// Resolve the Speedwall key through the installed map at preparation time.
+    /// Unmapped events keep their record ID, as the native lookup does.
+    pub fn with_speedwall_event(
+        mut self,
+        map: &nfs_content::events::recommendations::NarrativeEventMap,
+    ) -> Self {
+        self.speedwall_event = map.standard_event(self.record_id);
+        self
+    }
     pub fn creation_content(&self) -> &CreationContent {
         &self.creation
     }
@@ -771,6 +799,18 @@ impl Content {
     /// The game-mode state that spawns a sequence.
     pub fn spawner(&self, name: &str) -> Result<usize, Error> {
         let index = self.sequence(name)?.spawner.ok_or(Error::Unsupported)?;
+        let field = self
+            .event
+            .game_mode
+            .layout
+            .fields
+            .get(index)
+            .ok_or(Error::Bound)?;
+        if field.class != "ParticipantSequenceSpawnerGameModeStateEntityData"
+            || field.kind != Kind::RpcReferences
+        {
+            return Err(Error::TypeMismatch);
+        }
         selector(&self.event.game_mode.layout, index)?;
         Ok(index)
     }
@@ -1325,17 +1365,7 @@ pub(crate) fn logic_creation_fields(
     Ok(creation)
 }
 
-/// Live sequences that name the manager endpoint.
-pub fn live_sequences(world: &World, manager: (u16, u16)) -> u32 {
-    world
-        .iter()
-        .filter(|(_, object)| {
-            matches!(&object.initial, RecordInitial::Entity { fields, .. }
-                if matches!(fields.first(), Some(Initial::SequenceRoot { manager: m, manager_selector: s, .. } | Initial::VehicleSequenceRoot { manager: m, manager_selector: s, .. })
-                    if (*m, *s) == manager))
-        })
-        .count() as u32
-}
+pub use nfs_world::sequences::authored::live_sequences;
 
 /// A call on a live object's serializer with the serial it was created with.
 pub fn call(

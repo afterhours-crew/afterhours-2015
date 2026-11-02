@@ -49,6 +49,7 @@ pub fn profile() -> entity::Profile {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Layout {
     Waiting,
+    ControlledArrival,
     GarageExit,
     GarageEntry,
 }
@@ -56,7 +57,9 @@ impl Layout {
     pub fn profile(self) -> entity::Profile {
         use entity::Kind::*;
         let fields: &[entity::Kind] = match self {
-            Self::Waiting => &[SequenceRoot, RpcOptionalReference, RpcReference],
+            Self::Waiting | Self::ControlledArrival => {
+                &[SequenceRoot, RpcOptionalReference, RpcReference]
+            }
             Self::GarageEntry => &[
                 SequenceRoot,
                 RpcOptionalReference,

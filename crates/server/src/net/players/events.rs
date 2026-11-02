@@ -44,6 +44,7 @@ use nfs_world::{
 mod ai;
 pub(super) mod discovery;
 mod finish;
+mod reporting;
 mod restart;
 mod speedwall;
 
@@ -173,9 +174,13 @@ struct Race {
     speedwall: Option<nfs_world::speedwall::Progress>,
     credit_batch: Option<u64>,
     credit_committed: bool,
+    /// Attributed at finish, completed only by the post-outro result report.
+    story: Option<super::scoring::StoryResult>,
+    reporting_started: bool,
     exit: Option<Exit>,
     awaiting_leave: bool,
-    /// The intro's AI goals on the participant's Actor, while it holds them.
+    /// The intro's or outro's AI goals on the participant's Actor, while it
+    /// holds them.
     goals: Vec<u16>,
     /// Whether the in-event flags are set.
     flags: bool,
@@ -216,6 +221,28 @@ pub(in crate::net) struct State {
 }
 
 impl State {
+    /// Mode-category properties end with the host release, not deletion after
+    /// the client's leave acknowledgement. Unknown content is not an empty set.
+    pub(super) fn matches_held_mode(
+        &self,
+        participant: u16,
+        catalog: Option<&Catalog>,
+        categories: &BTreeSet<u32>,
+        all: bool,
+    ) -> Option<bool> {
+        let Some(race) = self.entries.get(&participant).and_then(|e| e.race.as_ref()) else {
+            return Some(false);
+        };
+        if !race.flags {
+            return Some(false);
+        }
+        let held = &catalog?.get(race.event_id)?.event().categories;
+        Some(if all {
+            categories.is_subset(held)
+        } else {
+            !categories.is_disjoint(held)
+        })
+    }
     /// The native crash transition excludes participants with an active
     /// sequence. Keep event presentation and relocation protected through their
     /// handoffs too, until this participant is driving again.
@@ -297,6 +324,7 @@ struct Out {
     rivals: Option<crate::rival_content::population::Population>,
     teleports: Vec<nfs_world::teleport::Command>,
     speedwalls: Vec<nfs_world::speedwall::Progress>,
+    story: Vec<crate::net::items::story::Request>,
     // Clone only when a presentation lifecycle changes; commit with the world
     // and output queues so a rejected batch cannot lose or duplicate roles.
     logic_ghosts: Option<BTreeMap<u16, BTreeMap<u16, u16>>>,
@@ -434,8 +462,9 @@ fn event_flags(
     }
     Ok(())
 }
-/// Release the Actor from the intro's goals and delete them in this frame (E997:
-/// with the intro's deletion). A refused release is logged; the goals then stay.
+/// Release the Actor from the intro's or outro's goals and delete them in this
+/// frame (E997: with the intro's deletion; E1280: with the outro's). A refused
+/// release is logged; the goals then stay.
 fn release_goals(
     players: &mut Players,
     persona: u64,
@@ -448,7 +477,7 @@ fn release_goals(
     }
     match players.release_controlled_goals(HOST_SELECTOR as u8, persona, participant, &goals) {
         Ok(cleared) => {
-            tracing::info!(participant, ?goals, "owned event intro goals released");
+            tracing::info!(participant, ?goals, "owned event goals released");
             out.records.push(cleared);
             out.deleted.extend(goals);
         }
@@ -457,7 +486,7 @@ fn release_goals(
                 participant,
                 ?error,
                 ?goals,
-                "owned event intro goals not released"
+                "owned event goals not released"
             )
         }
     }
@@ -585,8 +614,11 @@ impl PlayerListener {
         let mut completions = Vec::new();
         // This event path implements normal-mode humans; AI
         // racers and roaming rivals are outside the authored invitation set.
-        let eligible_humans = players.player_participants().count();
         for content in catalog.iter() {
+            let eligible_humans = players
+                .player_participants()
+                .filter(|&p| self.event_available(content, p))
+                .count();
             if let Some(record) = content.invitation_update(&mut players, eligible_humans)? {
                 out.records.push(record);
             }
@@ -627,14 +659,29 @@ impl PlayerListener {
             out.deleted.extend(gone);
             state.inputs.clear();
         } else {
-            let joined: Vec<u16> = active.difference(&state.active).copied().collect();
             let left: Vec<u16> = state.active.difference(&active).copied().collect();
-            for participant in joined {
-                if state.entries.len() >= MAX_ENTRIES {
+            for &participant in &active {
+                if !state.entries.contains_key(&participant) && state.entries.len() >= MAX_ENTRIES {
                     return Err(replication::Error::Bound);
                 }
                 for content in catalog.iter() {
-                    self.event_join(content, &players, &mut state, participant, &mut out)?;
+                    let subscribed = state
+                        .entries
+                        .get(&participant)
+                        .is_some_and(|e| e.areas.contains_key(&content.record_id()));
+                    match (self.event_available(content, participant), subscribed) {
+                        (true, false) => {
+                            self.event_join(content, &players, &mut state, participant, &mut out)?
+                        }
+                        (false, true) => self.event_unsubscribe(
+                            content,
+                            &mut players,
+                            &mut state,
+                            participant,
+                            &mut out,
+                        )?,
+                        _ => {}
+                    }
                 }
             }
             for participant in left {
@@ -807,6 +854,28 @@ impl PlayerListener {
         let scene_membership = self.stage_scene_membership(&mut players, &mut participants)?;
         out.records.extend(scene_membership.records);
         out.deleted.extend(scene_membership.deleted);
+        let mut world_volumes = self.world_volumes.clone();
+        world_volumes.forget(
+            |p| players.objects().get(p).is_none(),
+            |s| {
+                players
+                    .objects()
+                    .scene_endpoint(s.scene_key, s.serializer)
+                    .is_some()
+            },
+        );
+        self.project_world_spots(
+            &mut world_volumes,
+            &players,
+            scene_membership.session.as_ref(),
+            &state,
+        )?;
+        if let Some(content) = self.prologue.as_deref() {
+            // These calls follow the mode transition in this transaction and
+            // precede later mode joins. Capacity failure below rolls back both.
+            out.rpcs
+                .extend(world_volumes.reserve_normal(&content.volumes, &players)?);
+        }
         let mut sections = if out.registrations.is_some() {
             split_scenes(
                 out.records,
@@ -848,6 +917,7 @@ impl PlayerListener {
             || out.messages.len() > MAX_PENDING.saturating_sub(self.pending_content.len())
             || out.teleports.len() > MAX_PENDING.saturating_sub(self.pending_teleports.len())
             || out.speedwalls.len() > MAX_PENDING.saturating_sub(self.pending_speedwalls.len())
+            || out.story.len() > MAX_PENDING.saturating_sub(self.story_pending.len())
         {
             // Retry the same inputs and allocations after the queues drain.
             return Ok(());
@@ -866,6 +936,9 @@ impl PlayerListener {
         self.participants = participants;
         self.scene_membership = scene_membership.session;
         self.event_state = state;
+        self.world_volumes = world_volumes;
+        self.activity_inside
+            .retain(|(p, s), _| self.world_volumes.member(*p, *s));
         if self.event_state.failed {
             self.events = None;
         }
@@ -876,6 +949,7 @@ impl PlayerListener {
         }
         self.pending_content.extend(out.messages);
         self.pending_speedwalls.extend(out.speedwalls);
+        self.story_pending.extend(out.story);
         self.pending.extend(sections);
         self.pending_rpcs.extend(out.rpcs);
         self.queue_entries(out.entries);
@@ -904,6 +978,9 @@ impl PlayerListener {
         if state.eligible.insert((participant, content.record_id())) {
             // Eligibility (E994: set at the participant's start, before free roam).
             for &serializer in &event.area_notifications {
+                if self.map_owns_notification(content, serializer) {
+                    continue;
+                }
                 out.rpcs.push(HostRpc::GameMode(
                     content.scene_call(world, serializer, 0, None)?,
                 ));
@@ -927,6 +1004,9 @@ impl PlayerListener {
                 },
             }));
         for &serializer in &event.scene_notifications {
+            if self.map_owns_notification(content, serializer) {
+                continue;
+            }
             out.rpcs.push(HostRpc::GameMode(
                 content.scene_call(world, serializer, 0, None)?,
             ));
@@ -951,7 +1031,12 @@ impl PlayerListener {
         participant: u16,
         out: &mut Out,
     ) -> Result<(), replication::Error> {
-        for content in catalog.iter() {
+        for content in catalog.iter().filter(|c| {
+            state
+                .entries
+                .get(&participant)
+                .is_some_and(|e| e.areas.contains_key(&c.record_id()))
+        }) {
             let event = content.event();
             if players.owns_participant(HOST_SELECTOR as u8, self.persona, participant) {
                 let world = players.objects();
@@ -971,6 +1056,9 @@ impl PlayerListener {
                         call: world_activation::Call::Unsubscribe,
                     }));
                 for &serializer in &event.scene_notifications {
+                    if self.map_owns_notification(content, serializer) {
+                        continue;
+                    }
                     out.rpcs.push(HostRpc::GameMode(
                         content.scene_call(world, serializer, 1, None)?,
                     ));
@@ -1018,6 +1106,65 @@ impl PlayerListener {
         state.entries.remove(&participant);
         state.steps.retain(|(_, p, _)| *p != participant);
         tracing::info!(participant, "owned event start volume released");
+        Ok(())
+    }
+
+    /// An unlock change releases only this start area's subscriptions and
+    /// prompts. A running race keeps its independent lifecycle and cleanup.
+    fn event_unsubscribe(
+        &self,
+        content: &event_logic::Content,
+        players: &mut Players,
+        state: &mut State,
+        participant: u16,
+        out: &mut Out,
+    ) -> Result<(), replication::Error> {
+        let Some(area) = state
+            .entries
+            .get_mut(&participant)
+            .and_then(|e| e.areas.remove(&content.record_id()))
+        else {
+            return Ok(());
+        };
+        let event = content.event();
+        if players.owns_participant(HOST_SELECTOR as u8, self.persona, participant) {
+            let world = players.objects();
+            let (scene, selector) = world
+                .scene_endpoint(event.scene_content_key, event.start_volume)
+                .ok_or(replication::Error::UnknownObject)?;
+            let serial =
+                event_logic::call(world, scene, selector, 1, None, Arguments::None)?.serial;
+            out.rpcs
+                .push(HostRpc::WorldActivation(world_activation::Notification {
+                    endpoint: Endpoint {
+                        scene,
+                        selector,
+                        serial,
+                    },
+                    participant: Some(participant),
+                    call: world_activation::Call::Unsubscribe,
+                }));
+            for &serializer in event
+                .scene_notifications
+                .iter()
+                .chain(&event.area_notifications)
+            {
+                if !self.map_owns_notification(content, serializer) {
+                    out.rpcs.push(HostRpc::GameMode(
+                        content.scene_call(world, serializer, 1, None)?,
+                    ));
+                }
+            }
+        }
+        let gone: Vec<_> = area
+            .area
+            .into_iter()
+            .chain(area.filters)
+            .filter(|&g| players.objects().get(g).is_some())
+            .collect();
+        players.remove_entities(&gone)?;
+        out.deleted.extend(gone);
+        state.eligible.remove(&(participant, content.record_id()));
         Ok(())
     }
 
@@ -1361,6 +1508,9 @@ impl PlayerListener {
         now: f64,
         out: &mut Out,
     ) -> Result<(), replication::Error> {
+        if !self.event_available(content, participant) {
+            return Ok(());
+        }
         if self.participants.stage(participant) == Some(nfs_world::participants::Stage::Crashing) {
             return Ok(());
         }
@@ -1432,6 +1582,8 @@ impl PlayerListener {
             speedwall: None,
             credit_batch: None,
             credit_committed: false,
+            story: None,
+            reporting_started: false,
             exit: None,
             awaiting_leave: false,
             goals: Vec::new(),
@@ -1711,13 +1863,6 @@ impl PlayerListener {
             Step::Finished => {
                 let outro = content.spawner(names::OUTRO_SEQUENCE)?;
                 let p = Some(participant);
-                out.rpcs.push(HostRpc::GameMode(content.field_call(
-                    players.objects(),
-                    game_mode,
-                    outro,
-                    0,
-                    p,
-                )?));
                 for (state, method) in [(Gm::Waypoints, 1), (Gm::Finish, 0), (Gm::Finish, 1)] {
                     out.rpcs.push(HostRpc::GameMode(world_call(
                         players,
@@ -1727,6 +1872,13 @@ impl PlayerListener {
                         Arguments::None,
                     )?));
                 }
+                out.rpcs.push(HostRpc::GameMode(content.field_call(
+                    players.objects(),
+                    game_mode,
+                    outro,
+                    0,
+                    p,
+                )?));
                 let position = race.finish.map_or(1, |f| f.position) as u32;
                 out.rpcs.push(HostRpc::GameMode(world_call(
                     players,
@@ -1746,8 +1898,51 @@ impl PlayerListener {
                 // The panel must read committed results. Storage has its own
                 // bounded worker/deadline; a delayed credit cannot publish an
                 // uncommitted Speedwall attempt or let the leave overtake it.
-                if race.speedwall.is_some() && race.credit_batch.is_some() && !race.credit_committed
+                if (race.speedwall.is_some() || race.story.is_some())
+                    && race.credit_batch.is_some()
+                    && !race.credit_committed
                 {
+                    state
+                        .steps
+                        .push_back((now_ms + FOLLOW_MS, participant, Step::Ending));
+                    return Ok(());
+                }
+                let outro = content.spawner(names::OUTRO_SEQUENCE)?;
+                let p = Some(participant);
+                // Publish the authored state path before asking the human to
+                // depart. Primary removal belongs to AI final-state adoption;
+                // the human remains a member until its leave request.
+                if !race.reporting_started {
+                    out.rpcs.push(HostRpc::GameMode(content.field_call(
+                        players.objects(),
+                        game_mode,
+                        outro,
+                        1,
+                        p,
+                    )?));
+                    out.rpcs.push(HostRpc::GameMode(world_call(
+                        players,
+                        Gm::ResultReporting,
+                        0,
+                        p,
+                        Arguments::None,
+                    )?));
+                    race.reporting_started = true;
+                    if let Some(story) = &race.story {
+                        out.story.push(crate::net::items::story::Request {
+                            participant,
+                            player_index: players
+                                .runtime_index(HOST_SELECTOR as u8, self.persona, participant)
+                                .map(u32::from)
+                                .ok_or(replication::Error::UnknownObject)?,
+                            progression: story.progression.clone(),
+                            action: crate::net::items::story::Action::Complete {
+                                objective: story.objective,
+                            },
+                        });
+                    }
+                }
+                if race.story.is_some() {
                     state
                         .steps
                         .push_back((now_ms + FOLLOW_MS, participant, Step::Ending));
@@ -1756,12 +1951,10 @@ impl PlayerListener {
                 if let Some(progress) = race.speedwall.take() {
                     out.speedwalls.push(progress);
                 }
-                let outro = content.spawner(names::OUTRO_SEQUENCE)?;
-                let p = Some(participant);
                 out.rpcs.push(HostRpc::GameMode(world_call(
                     players,
-                    Gm::Root,
-                    3,
+                    Gm::ResultReporting,
+                    1,
                     p,
                     Arguments::None,
                 )?));
@@ -1771,27 +1964,6 @@ impl PlayerListener {
                     0,
                     p,
                     Arguments::None,
-                )?));
-                out.rpcs.push(HostRpc::GameMode(world_call(
-                    players,
-                    Gm::ResultReporting,
-                    0,
-                    p,
-                    Arguments::None,
-                )?));
-                out.rpcs.push(HostRpc::GameMode(world_call(
-                    players,
-                    Gm::ResultReporting,
-                    1,
-                    p,
-                    Arguments::None,
-                )?));
-                out.rpcs.push(HostRpc::GameMode(content.field_call(
-                    players.objects(),
-                    game_mode,
-                    outro,
-                    1,
-                    p,
                 )?));
                 out.rpcs.push(HostRpc::GameMode(world_call(
                     players,
@@ -1957,6 +2129,13 @@ impl PlayerListener {
         let intro_state = content.spawner(names::INTRO_SEQUENCE)?;
         let world = players.objects();
         let p = Some(participant);
+        out.rpcs.push(HostRpc::GameMode(content.field_call(
+            world,
+            game_mode,
+            intro_state,
+            1,
+            p,
+        )?));
         out.rpcs.push(HostRpc::GameMode(content.state_call(
             world,
             game_mode,
@@ -1964,13 +2143,6 @@ impl PlayerListener {
             0,
             p,
             Arguments::None,
-        )?));
-        out.rpcs.push(HostRpc::GameMode(content.field_call(
-            world,
-            game_mode,
-            intro_state,
-            1,
-            p,
         )?));
         out.rpcs.push(HostRpc::GameMode(content.state_call(
             world,
@@ -2187,6 +2359,7 @@ impl PlayerListener {
         )? {
             Some(request) => {
                 race.credit_batch = Some(request.batch_id);
+                race.story = request.story.clone();
                 completions.push(request);
             }
             None => tracing::warn!(
@@ -2208,7 +2381,7 @@ impl PlayerListener {
     /// The completion's durable rewards as one credit. Its batch ID takes the
     /// session's credit base with bit 19 set and the session's completion ordinal,
     /// apart from the driving credits' sequence.
-    fn event_completion(
+    pub(super) fn event_completion(
         &self,
         content: &event_logic::Content,
         participant: u16,
@@ -2236,6 +2409,32 @@ impl PlayerListener {
             };
         };
         let batch_id = self.scoring_state.batch_base | (1 << 19) | ordinal;
+        let story = if let Some(progression) = &self.progression {
+            if progression.objective_results.is_empty() {
+                None
+            } else {
+                let loaded = self
+                    .persistent
+                    .as_deref()
+                    .ok_or(replication::Error::Shape)?;
+                progression
+                    .result_objective(&content.event().categories, loaded)
+                    .map_err(|_| replication::Error::Shape)?
+                    .map(|objective| super::scoring::StoryResult {
+                        progression: progression.clone(),
+                        objective,
+                    })
+            }
+        } else {
+            None
+        };
+        if story.is_some()
+            && !self
+                .players
+                .owns_participant(HOST_SELECTOR as u8, self.persona, participant)
+        {
+            return Err(replication::Error::Shape);
+        }
         Ok(Some(AwardRequest {
             participant,
             credit: nfs_services::reputation::Scores {
@@ -2247,6 +2446,7 @@ impl PlayerListener {
                 style: 0,
             },
             batch_id,
+            story,
             thresholds,
             player_index: self
                 .players
@@ -2298,6 +2498,9 @@ impl PlayerListener {
         race.exit = Some(Exit::Completed);
         players.remove_entities(&[outro])?;
         out.deleted.push(outro);
+        // The outro's goals go with it and the Actor returns to the player (E1280).
+        let goals = std::mem::take(&mut race.goals);
+        release_goals(players, self.persona, participant, goals, out);
         let cooldown =
             content.scene_logic_creation(names::COOLDOWN, players.objects(), participant)?;
         let record = players
@@ -2328,6 +2531,13 @@ impl PlayerListener {
         now_ms: u64,
         out: &mut Out,
     ) -> Result<(), replication::Error> {
+        // A previously available story variant may have completed since its
+        // restart prompt was created. Finish cleanup without launching it again.
+        let exit = if exit == Exit::Restart && !self.event_available(content, participant) {
+            Exit::Abandon
+        } else {
+            exit
+        };
         let race = state
             .entries
             .get_mut(&participant)

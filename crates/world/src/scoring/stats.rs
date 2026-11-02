@@ -12,9 +12,14 @@
 //! seconds, which are the dyno figures the client stores on the car item and
 //! the item definition's defaults. Three further outputs (two floats whose
 //! difference and one value reach the parent interface only) are declared but
-//! never published here.
+//! never published here. Current and stock MaxHP are also available: the
+//! provider reads the owned car's saved dyno value and its definition baseline.
 use super::{Error, finite};
 
+/// Current MaxHP from the owned car's dyno cache.
+pub const MAX_HP: u32 = 2_836_079_500;
+/// Stock MaxHP from that car's installed definition.
+pub const STOCK_MAX_HP: u32 = 1_473_716_677;
 /// Current top speed, mph (integer output).
 pub const TOP_SPEED: u32 = 4_065_231_830;
 /// Stock top speed, mph (integer output).
@@ -28,6 +33,8 @@ pub const UNPUBLISHED_FLOATS: [u32; 2] = [3_493_158_927, 3_337_027_526];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Stats {
+    pub max_hp: u32,
+    pub stock_max_hp: u32,
     pub top_speed_mph: u32,
     pub stock_top_speed_mph: u32,
     pub zero_to_sixty: f32,
@@ -35,6 +42,9 @@ pub struct Stats {
 }
 impl Stats {
     pub fn validate(self) -> Result<(), Error> {
+        if self.max_hp > 1500 || self.stock_max_hp > 1500 {
+            return Err(Error::Bound);
+        }
         for value in [self.zero_to_sixty, self.stock_zero_to_sixty] {
             if finite(value)? < 0.0 {
                 return Err(Error::Bound);
@@ -53,12 +63,23 @@ mod tests {
     #[test]
     fn figures_are_finite_and_bounded() {
         let ok = Stats {
+            max_hp: 340,
+            stock_max_hp: 205,
             top_speed_mph: 180,
             stock_top_speed_mph: 155,
             zero_to_sixty: 4.1,
             stock_zero_to_sixty: 4.79,
         };
         assert!(ok.validate().is_ok());
+        for bad in [
+            Stats { max_hp: 1501, ..ok },
+            Stats {
+                stock_max_hp: 1501,
+                ..ok
+            },
+        ] {
+            assert_eq!(bad.validate(), Err(Error::Bound));
+        }
         assert!(
             Stats {
                 zero_to_sixty: f32::NAN,

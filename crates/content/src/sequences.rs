@@ -9,6 +9,7 @@ pub enum ParseError {
     Io,
 }
 pub(crate) mod authored;
+mod controlled_arrival;
 mod extract;
 mod rules;
 pub(crate) use extract::build;
@@ -40,6 +41,24 @@ pub struct CrashSequence {
     pub definition: nfs_world::crash::Definition,
     pub content: Content,
     pub duration_ms: u64,
+    pub arrival: Option<ControlledArrival>,
+}
+#[derive(Clone, Debug)]
+pub struct ControlledArrival {
+    pub definition: Definition,
+    pub content: Content,
+    pub duration_ms: u64,
+}
+impl ControlledArrival {
+    pub fn instance(
+        &self,
+    ) -> Result<nfs_world::crash::arrival::Arrivals, nfs_world::replication::Error> {
+        nfs_world::crash::arrival::Arrivals::new(
+            self.definition,
+            self.content.clone(),
+            self.duration_ms,
+        )
+    }
 }
 #[derive(Clone, Debug)]
 pub struct ReturnSequence {
@@ -181,17 +200,18 @@ impl SequenceContent {
         let crash = v
             .get("crash")
             .map(|c| {
-                keys(
-                    c,
-                    &[
-                        "blueprint",
-                        "asset",
-                        "catalog",
-                        "manager",
-                        "embedded_bus",
-                        "duration_ms",
-                    ],
-                )?;
+                let mut expected = vec![
+                    "blueprint",
+                    "asset",
+                    "catalog",
+                    "manager",
+                    "embedded_bus",
+                    "duration_ms",
+                ];
+                if c.get("arrival").is_some() {
+                    expected.push("arrival");
+                }
+                keys(c, &expected)?;
                 if c["blueprint"] != "Gameplay/Sequences/CrashedSequence" {
                     return Err(ParseError::Invalid);
                 }
@@ -207,10 +227,43 @@ impl SequenceContent {
                 let duration_ms = uint(&c["duration_ms"])?;
                 nfs_world::crash::Crashes::new(definition, content.clone(), duration_ms)
                     .map_err(|_| ParseError::Invalid)?;
+                let arrival = c
+                    .get("arrival")
+                    .map(|a| {
+                        keys(
+                            a,
+                            &[
+                                "blueprint",
+                                "asset",
+                                "catalog",
+                                "manager",
+                                "channel",
+                                "embedded_bus",
+                                "duration_ms",
+                            ],
+                        )?;
+                        if a["blueprint"].as_str().is_none_or(|name| {
+                            !name.eq_ignore_ascii_case(
+                                "Gameplay/Tests/AIControlledArriveSequenceTest",
+                            )
+                        }) {
+                            return Err(ParseError::Invalid);
+                        }
+                        let (definition, content) = sequence(a, Layout::ControlledArrival)?;
+                        let arrival = ControlledArrival {
+                            definition,
+                            content,
+                            duration_ms: uint(&a["duration_ms"])?,
+                        };
+                        arrival.instance().map_err(|_| ParseError::Invalid)?;
+                        Ok(arrival)
+                    })
+                    .transpose()?;
                 Ok(CrashSequence {
                     definition,
                     content,
                     duration_ms,
+                    arrival,
                 })
             })
             .transpose()?;
@@ -299,6 +352,66 @@ fn component(v: &Value) -> Result<Component, ParseError> {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn controlled_recovery_content_is_optional_strict_and_contains_no_live_ids() {
+        let mut doc = json!({"format":"nfs-waiting-sequence","version":2,"build_sha256":"92aa6ff4b5f8d0f033ca7e88cb86cc64b42b1d2412c4294905eb22950616e4df",
+            "blueprint":"Gameplay/WaitingForGarageSequence","asset":{"bundle":9,"type_id":77,"local_index":0},"catalog":[[77,3]],
+            "manager":{"scene":"test/gameplay","component_index":3},"channel":{"scene":"test/garage","component_index":23},"embedded_bus":2,
+            "crash":{"blueprint":"Gameplay/Sequences/CrashedSequence","asset":{"bundle":9,"type_id":77,"local_index":1},"catalog":[[77,3]],
+                "manager":{"scene":"test/gameplay","component_index":3},"embedded_bus":2,"duration_ms":4500}});
+        assert!(
+            SequenceContent::from_json(&doc)
+                .unwrap()
+                .crash
+                .unwrap()
+                .arrival
+                .is_none()
+        );
+        doc["crash"]["arrival"] = json!({"blueprint":"Gameplay/Tests/AIControlledArriveSequenceTest",
+            "asset":{"bundle":9,"type_id":77,"local_index":2},"catalog":[[77,3]],
+            "manager":{"scene":"test/gameplay","component_index":3},"channel":{"scene":"test/gameplay","component_index":56},
+            "embedded_bus":2,"duration_ms":700});
+        let arrival = SequenceContent::from_json(&doc)
+            .unwrap()
+            .crash
+            .unwrap()
+            .arrival
+            .unwrap();
+        assert_eq!(arrival.definition.layout, Layout::ControlledArrival);
+        assert_eq!(arrival.duration_ms, 700);
+        assert!(arrival.instance().is_ok());
+        doc["crash"]["arrival"]["blueprint"] =
+            json!("Gameplay/tests/AIControlledArriveSequenceTest");
+        assert!(SequenceContent::from_json(&doc).is_ok());
+        for (pointer, invalid) in [
+            ("/crash/arrival/duration_ms", json!(0)),
+            ("/crash/arrival/duration_ms", json!(30_001)),
+            ("/crash/arrival/duration_ms", json!(1.5)),
+            ("/crash/arrival/asset/local_index", json!(3)),
+            ("/crash/arrival/embedded_bus", json!(0)),
+            ("/crash/arrival/channel/component_index", json!(0)),
+            (
+                "/crash/arrival/blueprint",
+                json!("Gameplay/Tests/GarageExitSequence"),
+            ),
+            ("/crash/arrival", json!(null)),
+        ] {
+            let mut bad = doc.clone();
+            *bad.pointer_mut(pointer).unwrap() = invalid;
+            assert!(SequenceContent::from_json(&bad).is_err(), "{pointer}");
+        }
+        for key in [
+            "participant",
+            "actor",
+            "sequence",
+            "serial",
+            "prior_control",
+        ] {
+            let mut bad = doc.clone();
+            bad["crash"]["arrival"][key] = json!(1);
+            assert!(SequenceContent::from_json(&bad).is_err(), "{key}");
+        }
+    }
     #[test]
     fn static_boundary_rejects_unknown_fields_invalid_catalog_and_runtime_values() {
         let v = json!({"format":"nfs-waiting-sequence","version":1,"build_sha256":"92aa6ff4b5f8d0f033ca7e88cb86cc64b42b1d2412c4294905eb22950616e4df",

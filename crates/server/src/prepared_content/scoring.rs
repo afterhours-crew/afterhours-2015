@@ -9,7 +9,7 @@ use nfs_content::{
     Error,
     assets::AssetIndex,
     participant_logic::Owner,
-    scoring::content::{ACQUISITION, SCORING, ScoringContent},
+    scoring::content::{ACQUISITION, AI_SCORING, SCORING, ScoringContent},
 };
 use std::{collections::BTreeSet, sync::Arc};
 
@@ -23,6 +23,7 @@ fn validate(content: &ScoringContent) -> Result<(), Error> {
     for (part, blueprint) in [
         (&content.acquisition, ACQUISITION),
         (&content.scoring, SCORING),
+        (&content.ai.participant, AI_SCORING),
     ] {
         part.program.validate().map_err(|_| invalid())?;
         if part.blueprint != blueprint
@@ -42,7 +43,7 @@ fn validate(content: &ScoringContent) -> Result<(), Error> {
             }
         }
     }
-    // Rebuild and validate both serializer profiles and their shared catalog.
+    // Rebuild all serializer profiles and validate the AI service bindings.
     crate::scoring::Content::new(Arc::new(content.clone())).map_err(|_| invalid())?;
     Ok(())
 }

@@ -50,7 +50,7 @@ fn crossing(h: &Harness, slot: usize, inside: bool) -> Input {
         &[(t >> 32, 32), (t & 0xffff_ffff, 32), (0, 32), (0, 7)],
     )
 }
-fn race_from_intro(h: &mut Harness, t: u64) {
+pub(super) fn race_from_intro(h: &mut Harness, t: u64) {
     h.run(t + 100, vec![]);
     let intro = h.race().sequence.unwrap().1;
     h.run(t + 1000, vec![logic(INTRO_READY, intro)]);

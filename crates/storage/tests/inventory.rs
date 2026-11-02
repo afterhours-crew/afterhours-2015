@@ -44,6 +44,65 @@ fn account(seed: u8) -> AccountId {
     AccountId::from_owned_config([seed; 16]).expect("nonzero account")
 }
 
+fn receipt_contract(repo: &dyn InventoryRepository) {
+    let a = account(71);
+    let b = account(72);
+    assert_eq!(repo.receipt(a, 1), Err(Error::Absent));
+    let initial = repo.open(a).unwrap();
+    let isolated = repo.open(b).unwrap();
+    assert_eq!(repo.receipt(a, 0), Err(Error::Invalid));
+    assert_eq!(repo.receipt(a, u64::MAX).unwrap(), None);
+    assert_eq!(repo.snapshot(a).unwrap(), initial);
+    let first = batch(
+        u64::MAX,
+        initial.generation,
+        vec![Op::Insert(record(1, &[], &[]))],
+    );
+    let applied = repo.apply(a, &first, now(2)).unwrap();
+    repo.apply(
+        a,
+        &batch(2, applied.generation, vec![Op::Update(record(1, &[], &[]))]),
+        now(3),
+    )
+    .unwrap();
+    let current = repo.snapshot(a).unwrap();
+    assert_eq!(
+        repo.receipt(a, u64::MAX).unwrap(),
+        Some(Applied {
+            replayed: true,
+            ..applied
+        })
+    );
+    assert_eq!(repo.receipt(b, u64::MAX).unwrap(), None);
+    assert_eq!(repo.snapshot(a).unwrap(), current);
+    assert_eq!(repo.snapshot(b).unwrap(), isolated);
+    let invalid = batch(3, current.generation, vec![Op::Remove(id(99))]);
+    assert!(repo.apply(a, &invalid, now(4)).is_err());
+    assert_eq!(repo.receipt(a, 3).unwrap(), None);
+}
+
+#[test]
+fn receipts_are_read_only_account_owned_and_survive_restart() {
+    receipt_contract(&MemoryRepository::new());
+    let directory = TempDir::new("receipts");
+    {
+        let repo = SqliteRepository::open_owned_directory(&directory.0).unwrap();
+        receipt_contract(&repo);
+    }
+    let reopened = SqliteRepository::open_owned_directory(&directory.0).unwrap();
+    let before = reopened.snapshot(account(71)).unwrap();
+    assert_eq!(
+        reopened.receipt(account(71), u64::MAX).unwrap(),
+        Some(Applied {
+            generation: 1,
+            replayed: true
+        })
+    );
+    assert_eq!(reopened.snapshot(account(71)).unwrap(), before);
+    assert_eq!(reopened.receipt(account(99), 1), Err(Error::Absent));
+    assert!(!reopened.path(account(99)).exists());
+}
+
 #[cfg(windows)]
 #[test]
 fn sqlite_uses_a_local_drive_path_and_preserves_the_canonical_directory() {
@@ -777,10 +836,18 @@ fn memory_history_is_bounded() {
     repo.open(a).expect("open");
     let first = batch(1, 0, vec![Op::Insert(record(1, &[], &[]))]);
     repo.apply(a, &first, now(1)).expect("first");
+    assert_eq!(
+        repo.receipt(a, 1).unwrap(),
+        Some(Applied {
+            generation: 1,
+            replayed: true
+        })
+    );
     for n in 1..=u64::try_from(MAX_BATCH_HISTORY).expect("fits") {
         let ops = vec![Op::Update(record(1, &[], &[]))];
         repo.apply(a, &batch(n + 1, n, ops), now(n)).expect("fill");
     }
+    assert_eq!(repo.receipt(a, 1).unwrap(), None);
     assert_eq!(repo.apply(a, &first, now(2)), Err(Error::Conflict));
     assert_eq!(
         repo.apply(

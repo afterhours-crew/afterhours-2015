@@ -12,10 +12,11 @@ use std::collections::BTreeSet;
 mod activation;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Bank {
+pub struct SceneRpc {
     pub scene: u32,
     pub serializer: usize,
 }
+pub type Bank = SceneRpc;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SceneRoles {
@@ -32,6 +33,7 @@ pub struct SceneRoles {
     pub spawn_points: Option<u32>,
     pub free_roam: Option<nfs_world::world_activation::Catalog>,
     pub bank: Option<Bank>,
+    pub seen_points: Option<SceneRpc>,
 }
 
 fn fields(v: &Value, expected: &[&str]) -> Result<(), Failure> {
@@ -90,9 +92,13 @@ impl SceneRoles {
         if let Some(catalog) = &self.free_roam {
             catalog.validate().map_err(|_| Failure::ProfileConfig)?;
         }
-        if self.bank.is_some_and(|b| {
-            b.scene <= 1 || b.serializer >= nfs_world::replication::sublevel::MAX_SERIALIZERS
-        }) {
+        if [self.bank, self.seen_points]
+            .into_iter()
+            .flatten()
+            .any(|b| {
+                b.scene <= 1 || b.serializer >= nfs_world::replication::sublevel::MAX_SERIALIZERS
+            })
+        {
             return Err(Failure::ProfileConfig);
         }
         if self.customization_timer == self.streaming_gate {
@@ -113,7 +119,7 @@ impl SceneRoles {
                 "customization_timer",
                 "streaming_gate",
             ],
-            &["spawn_points", "free_roam", "bank"],
+            &["spawn_points", "free_roam", "bank", "seen_points"],
         )?;
         let level = v["level"]
             .as_str()
@@ -150,6 +156,16 @@ impl SceneRoles {
                     })
                 })
                 .transpose()?,
+            seen_points: v
+                .get("seen_points")
+                .map(|binding| {
+                    fields(binding, &["scene", "serializer"])?;
+                    Ok::<_, Failure>(SceneRpc {
+                        scene: number(&binding["scene"])?,
+                        serializer: number(&binding["serializer"])?,
+                    })
+                })
+                .transpose()?,
         };
         result.validate()?;
         Ok(result)
@@ -164,6 +180,9 @@ impl SceneRoles {
         }
         if let Some(bank) = self.bank {
             v["bank"] = json!({"scene":bank.scene,"serializer":bank.serializer});
+        }
+        if let Some(binding) = self.seen_points {
+            v["seen_points"] = json!({"scene":binding.scene,"serializer":binding.serializer});
         }
         v
     }
@@ -198,6 +217,18 @@ mod tests {
         let roles = SceneRoles::from_json(&spawn).unwrap();
         assert_eq!(roles.spawn_points, Some(105));
         assert_eq!(roles.to_json(), spawn);
+        let mut map = spawn.clone();
+        map["seen_points"] = json!({"scene":106,"serializer":3});
+        assert_eq!(SceneRoles::from_json(&map).unwrap().to_json(), map);
+        for value in [
+            json!({"scene":1,"serializer":3}),
+            json!({"scene":106,"serializer":65536}),
+            json!({"scene":106,"serializer":3,"ghost":1}),
+        ] {
+            let mut bad = map.clone();
+            bad["seen_points"] = value;
+            assert!(SceneRoles::from_json(&bad).is_err());
+        }
         for value in [json!(101), json!(11), json!(1), json!(-1), json!("105")] {
             let mut bad = spawn.clone();
             bad["spawn_points"] = value;

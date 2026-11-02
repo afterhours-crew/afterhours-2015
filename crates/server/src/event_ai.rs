@@ -179,9 +179,11 @@ impl Content {
             return Err(Error::Shape);
         }
         for spawn in &roster.spawns {
+            // Availability affects persona selection, not teardown ownership.
+            // Event rosters already select their own slots independently of
+            // roaming opponents; a fixed story persona may use either policy.
             if spawn.once
                 || spawn.store_participant
-                || (spawn.ignore_availability && completion != Completion::UnspawnAllAtShutdown)
                 || spawn.personas.is_empty()
                 || spawn.personas.iter().any(|&i| i >= presets.len())
                 || spawn.personas.iter().collect::<BTreeSet<_>>().len() != spawn.personas.len()

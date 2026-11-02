@@ -345,6 +345,13 @@ fn rejected_input_and_failed_commit_leave_cash_inventory_and_receipts_unchanged(
     }
     struct Refuses(MemoryRepository);
     impl InventoryRepository for Refuses {
+        fn receipt(
+            &self,
+            account: AccountId,
+            batch_id: u64,
+        ) -> Result<Option<Applied>, nfs_storage::Error> {
+            self.0.receipt(account, batch_id)
+        }
         fn open(&self, a: AccountId) -> Result<Snapshot, nfs_storage::Error> {
             self.0.open(a)
         }

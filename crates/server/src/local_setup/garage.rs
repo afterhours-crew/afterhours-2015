@@ -254,6 +254,52 @@ fn return_confirmation(
     Ok(*signal)
 }
 
+type PhaseFades = (&'static str, Vec<(&'static str, bool)>);
+
+fn phase_fades() -> Vec<PhaseFades> {
+    vec![
+        ("spawn", vec![("BlackScreen", true)]),
+        (
+            "vehicles",
+            vec![("BlackScreen", false), ("BlackScreen", true)],
+        ),
+        (
+            "entry",
+            vec![
+                ("BlackScreen", false),
+                ("ViewWorld", true),
+                ("ViewWorld", false),
+                ("ViewWorld", true),
+            ],
+        ),
+        ("arrive", vec![("BlackScreen", false)]),
+        (
+            "world_ready",
+            vec![
+                ("ViewWorld", false),
+                ("BlackScreen", true),
+                ("BlackScreen", false),
+            ],
+        ),
+        ("world_spawn", vec![("BlackScreen", true)]),
+        (
+            "in_world_teleport",
+            vec![("ViewWorld", false), ("BlackScreen", true)],
+        ),
+        ("in_world_arrival", vec![("BlackScreen", false)]),
+        ("returning", vec![("ViewWorld", false)]),
+        (
+            "returned",
+            vec![
+                ("BlackScreen", true),
+                ("BlackScreen", false),
+                ("BlackScreen", true),
+            ],
+        ),
+        ("crashed", vec![("ViewWorld", false)]),
+    ]
+}
+
 pub(super) fn build(index: &mut AssetIndex, thresholds: &Json) -> Result<Json> {
     let definitions = [
         (1, GAMEPLAY, FADE),
@@ -429,38 +475,7 @@ pub(super) fn build(index: &mut AssetIndex, thresholds: &Json) -> Result<Json> {
         }
         Ok(event(1, matches[0]))
     };
-    for (phase, events) in [
-        ("spawn", vec![("BlackScreen", true)]),
-        (
-            "vehicles",
-            vec![("BlackScreen", false), ("BlackScreen", true)],
-        ),
-        (
-            "entry",
-            vec![
-                ("BlackScreen", false),
-                ("ViewWorld", true),
-                ("ViewWorld", false),
-                ("ViewWorld", true),
-            ],
-        ),
-        ("arrive", vec![("BlackScreen", false)]),
-        (
-            "world_ready",
-            vec![
-                ("ViewWorld", false),
-                ("BlackScreen", true),
-                ("BlackScreen", false),
-            ],
-        ),
-        ("world_spawn", vec![("BlackScreen", true)]),
-        (
-            "in_world_teleport",
-            vec![("ViewWorld", false), ("BlackScreen", true)],
-        ),
-        ("in_world_arrival", vec![("BlackScreen", false)]),
-        ("returning", vec![("ViewWorld", false)]),
-    ] {
+    for (phase, events) in phase_fades() {
         for (key, active) in events {
             push(&mut doc, phase, "events", select_fade(key, active)?);
         }
@@ -535,6 +550,18 @@ pub(super) fn build(index: &mut AssetIndex, thresholds: &Json) -> Result<Json> {
     doc["driving_timer"] = json!({"role":timer.role,
         "start":{"entity":timer.start.entity,"event":timer.start.event},
         "stop":{"entity":timer.stop.entity,"event":timer.stop.event}});
+    let distance = index.driving_distance_binding(DRIVER)?;
+    // This authored channel's IntParticipantProperty / persistence interface
+    // reaches GameplayStatsTable.DistanceDriven. Other stat branches are not
+    // substitutions for that store and must not inherit this policy.
+    if distance.distance_property != 1093294172
+        || entities[&24]["roles"][distance.channel_serializer]["kind"] != "channel"
+    {
+        return Err("unsupported driving distance persistent channel".into());
+    }
+    doc["driving_distance"] = json!({"role":24,
+        "kilometres":distance.kilometres_serializer,"miles":distance.miles_serializer,
+        "period_seconds":distance.period_seconds,"metres_per_mile":distance.metres_per_mile});
     doc["content"] = json!({"catalogs":catalogs.into_values().collect::<Vec<_>>(),"profiles":profiles.into_values().collect::<Vec<_>>()});
     crate::garage_logic::GarageLogic::from_json(&doc)
         .map_err(|_| "generated garage lifecycle failed validation")?;
@@ -544,6 +571,154 @@ pub(super) fn build(index: &mut AssetIndex, thresholds: &Json) -> Result<Json> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn presentation_policy() -> Json {
+        let mut doc = json!({
+            "format":"nfs-garage-logic", "version":1, "build_sha256":crate::content::BUILD,
+            "content":{"catalogs":[{"bundle":4,"entries":[[10,1]]}],
+                "profiles":[{"asset":{"bundle":4,"type_id":10,"local_index":0},"serializers":["root"]}]},
+            "spawn":{"scene_updates":[],"entities":[{"capture_id":1,
+                "asset":{"bundle":4,"type_id":10,"local_index":0},
+                "blueprint":{"scene_content_key":101},"roles":[{"kind":"root","bus_count":1}]}],"events":[]},
+            "entry":batch(),
+            "free_roam":{"scene_updates":[],"entities":[],
+                "events":[{"target":{"capture_id":1},"entity":1,"event":10}]},
+            "crashed":batch(), "recovered":batch(), "returned":batch()
+        });
+        for (phase, events) in phase_fades() {
+            if !matches!(phase, "crashed" | "returned" | "entry") {
+                continue;
+            }
+            for (key, active) in events {
+                // Synthetic installed binding ordinals deliberately differ from
+                // the lifecycle's role handles and from real game ordinals.
+                let ordinal = match (key, active) {
+                    ("ViewWorld", true) => 10,
+                    ("ViewWorld", false) => 11,
+                    ("BlackScreen", true) => 12,
+                    ("BlackScreen", false) => 13,
+                    _ => panic!("unexpected presentation context"),
+                };
+                push(
+                    &mut doc,
+                    phase,
+                    "events",
+                    json!({"target":{"capture_id":1},"entity":1,"event":ordinal}),
+                );
+            }
+        }
+        doc
+    }
+
+    #[test]
+    fn crash_policy_hides_the_owning_world_before_recovery_reveals_it() {
+        use crate::garage_logic::{GarageLogic, Which};
+        use nfs_world::logic::{EntityRef, Message};
+        let logic = GarageLogic::from_json(&presentation_policy()).unwrap();
+        let (mut players, participant) = crate::garage_logic::tests::world();
+        let mut ghosts = BTreeMap::new();
+        logic
+            .produce(Which::Spawn, &mut players, participant, &mut ghosts)
+            .unwrap();
+        let target = EntityRef {
+            ghost: ghosts[&1],
+            entity: 1,
+        };
+        for which in [
+            Which::Crashed,
+            Which::FreeRoam,
+            Which::Crashed,
+            Which::FreeRoam,
+        ] {
+            let output = logic
+                .produce(which, &mut players, participant, &mut ghosts)
+                .unwrap();
+            assert_eq!(output.events.len(), 1);
+            let fire = output.events[0];
+            let expected = if matches!(which, Which::Crashed) {
+                11
+            } else {
+                10
+            };
+            assert_eq!(
+                Message::decode(fire.index(), fire.encode().unwrap().span()).unwrap(),
+                Message::Fire {
+                    events: vec![expected],
+                    player: None,
+                    target
+                }
+            );
+            assert!(output.records.is_empty() && output.deleted.is_empty());
+        }
+    }
+
+    #[test]
+    fn ordinary_garage_loading_stays_black_until_customization_and_intro_is_not_doubled() {
+        use crate::garage_logic::{GarageLogic, Part, Which};
+        use nfs_world::logic::{EntityRef, Message};
+        let logic = GarageLogic::from_json(&presentation_policy()).unwrap();
+        let (mut players, participant) = crate::garage_logic::tests::world();
+        let mut ghosts = BTreeMap::new();
+        logic
+            .produce(Which::Spawn, &mut players, participant, &mut ghosts)
+            .unwrap();
+        let target = EntityRef {
+            ghost: ghosts[&1],
+            entity: 1,
+        };
+        for _ in 0..3 {
+            // Intro transitions own their presentation and consume only the
+            // return batch's deletions. The ordinary path consumes all parts.
+            let intro = logic
+                .produce_present(
+                    Which::Returned,
+                    &mut players,
+                    participant,
+                    &mut ghosts,
+                    Part::Deletions,
+                )
+                .unwrap();
+            assert!(intro.events.is_empty());
+            for (phase, expected, final_black) in [
+                (Which::Returned, vec![12, 13, 12], true),
+                (Which::Entry, vec![13, 10, 11, 10], false),
+            ] {
+                let output = logic
+                    .produce(phase, &mut players, participant, &mut ghosts)
+                    .unwrap();
+                let mut observed = Vec::new();
+                let mut black = None;
+                let mut visible = None;
+                for fire in output.events {
+                    let Message::Fire {
+                        events,
+                        player,
+                        target: actual,
+                    } = Message::decode(fire.index(), fire.encode().unwrap().span()).unwrap()
+                    else {
+                        panic!("expected presentation event");
+                    };
+                    assert_eq!(actual, target);
+                    assert_eq!(player, None);
+                    for event in &events {
+                        match event {
+                            10 => visible = Some(true),
+                            11 => visible = Some(false),
+                            12 => black = Some(true),
+                            13 => black = Some(false),
+                            _ => panic!("unexpected presentation event"),
+                        }
+                    }
+                    observed.extend(events);
+                }
+                assert_eq!(observed, expected);
+                assert_eq!(black, Some(final_black));
+                if matches!(phase, Which::Entry) {
+                    assert_eq!(visible, Some(true));
+                }
+            }
+        }
+    }
+
     #[test]
     fn driving_timer_binds_authored_routes_and_rejects_changed_gate_behavior() {
         use nfs_content::scoring::{

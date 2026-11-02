@@ -52,6 +52,12 @@ this development preview does not implement the complete game.
 ## Saves, updates and feedback
 
 Saves, generated content and logs live in `%LOCALAPPDATA%\Afterhours2015`.
+A long session's `server.stderr.log` keeps only its newest 3 MiB; the first
+MiB (preparation and startup) is saved beside it as `server.stderr.head.log`
+the first time it is trimmed. The server also logs a `world loop timing`
+summary every ten seconds of play (iterations, work per iteration, the
+slowest stage, traffic/rival/scoring load, pending output); include both files
+when reporting a stall, a dropped connection or a frozen race position.
 Replacing `Afterhours.exe` does not replace that directory. Back it up while the
 game and server are stopped before trying a new preview. Read each release's
 save compatibility notes before downgrading. Startup does not check for updates.

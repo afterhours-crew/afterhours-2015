@@ -427,6 +427,9 @@ impl Plan {
                     }
                 }
                 SetKind::Players { manager } => manager.validate().map_err(|_| Error::Invalid)?,
+                SetKind::Copy {
+                    source: Some(source),
+                } => plan.validate_set(source)?,
                 _ => {}
             }
         }
@@ -574,6 +577,10 @@ enum Work {
     BooleanCallback(booleans::Notification),
     Float(floats::Work),
     Set(SetSource, Participant, bool),
+    // Bulk replacements notify their captured deltas without per-removal
+    // empty checks. Clear has its own unconditional empty publication.
+    SetDelta(SetSource, Participant, bool),
+    SetEmpty(SetSource),
     SetDispatch {
         source: SetSource,
         change: sets::Change,
@@ -1275,6 +1282,13 @@ impl Observers {
                 actions.extend(self.float_work(work, machine, effects, callback)?);
             }
             Work::Set(source, participant, member) => {
+                next.push(Work::SetDelta(source.clone(), participant, member));
+                if !member {
+                    // Ordinary removal checks after its membership callbacks.
+                    next.push(Work::SetEmptyCheck(source));
+                }
+            }
+            Work::SetDelta(source, participant, member) => {
                 self.set_listeners
                     .begin(&source, sets::Subscription::Membership);
                 actions.extend(emit(
@@ -1295,10 +1309,6 @@ impl Observers {
                     },
                     index: 0,
                 });
-                if !member {
-                    // 04062860 checks current membership after removal callbacks.
-                    next.push(Work::SetEmptyCheck(source));
-                }
             }
             Work::SetDispatch {
                 source,
@@ -1319,13 +1329,16 @@ impl Observers {
                     .source_members(plan, &source)
                     .is_none_or(BTreeSet::is_empty)
                 {
-                    self.set_listeners.begin(&source, sets::Subscription::Empty);
-                    next.push(Work::SetDispatch {
-                        source,
-                        change: sets::Change::Empty,
-                        index: 0,
-                    });
+                    next.push(Work::SetEmpty(source));
                 }
+            }
+            Work::SetEmpty(source) => {
+                self.set_listeners.begin(&source, sets::Subscription::Empty);
+                next.push(Work::SetDispatch {
+                    source,
+                    change: sets::Change::Empty,
+                    index: 0,
+                });
             }
             Work::SetCallback(notification) => {
                 actions.extend(emit(

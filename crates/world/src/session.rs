@@ -1189,10 +1189,7 @@ impl Host {
         if !world.client_time_ready {
             return;
         }
-        if world
-            .last_replication_ms
-            .is_some_and(|last| now_ms < last + REPLICATION_INTERVAL_MS)
-        {
+        if !motion::due(world.last_replication_ms, now_ms, REPLICATION_INTERVAL_MS) {
             return;
         }
         if let Some((section, size, before)) = self.replication_queue.front() {
@@ -1287,7 +1284,7 @@ impl Host {
             self.replication_clock_ms = Some(now_ms);
             world.next_ex_sequence = (world.next_ex_sequence + notifications as u8) & 0x7f;
             world.acked_inputs = application.stats().inputs;
-            world.last_replication_ms = Some(motion::slot(
+            world.last_replication_ms = Some(motion::next_slot(
                 world.last_replication_ms,
                 now_ms,
                 REPLICATION_INTERVAL_MS,
@@ -1316,7 +1313,7 @@ impl Host {
                     world.player_entry = entry::Entry::Entered;
                     world.next_ex_sequence = (world.next_ex_sequence + 1) & 0x7f;
                     world.acked_inputs = application.stats().inputs;
-                    world.last_replication_ms = Some(motion::slot(
+                    world.last_replication_ms = Some(motion::next_slot(
                         world.last_replication_ms,
                         now_ms,
                         REPLICATION_INTERVAL_MS,
@@ -1346,7 +1343,7 @@ impl Host {
                     self.rpc_sent += count;
                     world.next_ex_sequence = (world.next_ex_sequence + count as u8) & 0x7f;
                     world.acked_inputs = application.stats().inputs;
-                    world.last_replication_ms = Some(motion::slot(
+                    world.last_replication_ms = Some(motion::next_slot(
                         world.last_replication_ms,
                         now_ms,
                         REPLICATION_INTERVAL_MS,

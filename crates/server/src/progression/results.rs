@@ -1,0 +1,124 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+use super::*;
+use nfs_content::progression::{conditions::Fact, results::Completion};
+
+impl Content {
+    pub fn with_objective_results(mut self, rules: Vec<Completion>) -> Result<Self, Failure> {
+        let main = self.catalog.objective_ids(Branch::Main);
+        let all: BTreeSet<_> = main
+            .iter()
+            .copied()
+            .chain(self.catalog.objective_ids(Branch::Intro))
+            .collect();
+        let mut ids = BTreeSet::new();
+        if rules.len() > 64
+            || rules.iter().any(|r| {
+                !main.contains(&r.objective)
+                    || !ids.insert(r.objective)
+                    || r.categories.is_empty()
+                    || r.categories.len() > 128
+                    || !r.enabled.facts().any(|f| f == Fact::Active(r.objective))
+                    || r.enabled.facts().any(|f| match f {
+                        Fact::Active(id) | Fact::Completed(id) => !all.contains(&id),
+                        Fact::PositiveInt(id) => !self
+                            .catalog
+                            .definition
+                            .branches()
+                            .values()
+                            .any(|b| b.ints().contains(&id)),
+                        Fact::MessageRead { .. } => false,
+                    })
+            })
+        {
+            return Err(Failure::ProfileConfig);
+        }
+        self.objective_results = rules;
+        Ok(self)
+    }
+
+    /// Attribute an owned completed event using its exact authored categories
+    /// and the account's committed conditions. Unknown condition inputs fail;
+    /// an inactive story variant is not silently paid as an ordinary attempt.
+    pub fn result_objective(
+        &self,
+        categories: &BTreeSet<u32>,
+        loaded: &Loaded,
+    ) -> Result<Option<u64>, Failure> {
+        let selected: Vec<_> = self
+            .objective_results
+            .iter()
+            .filter(|r| r.categories.is_subset(categories))
+            .collect();
+        let [rule] = selected.as_slice() else {
+            return if selected.is_empty() {
+                Ok(None)
+            } else {
+                Err(Failure::ProfileConfig)
+            };
+        };
+        let facts = self.condition_facts(
+            &rule.enabled.facts().collect(),
+            &nfs_content::progression::conditions::owners::StateOwners::default(),
+            loaded,
+        )?;
+        if !rule
+            .enabled
+            .evaluate(|fact| facts.get(&fact).copied())
+            .map_err(|_| Failure::ProfileConfig)?
+        {
+            return Err(Failure::ProfileConfig);
+        }
+        Ok(Some(rule.objective))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::progression::tests::{combined, local, tables};
+    use nfs_content::progression::conditions::Condition;
+    #[test]
+    fn integer_condition_reads_only_known_saved_values_and_preserves_sign() {
+        let make = |id| {
+            Content::from_json(&combined())
+                .unwrap()
+                .with_objective_results(vec![Completion {
+                    objective: 30,
+                    categories: BTreeSet::from([71]),
+                    enabled: Condition::all(&[Fact::Active(30), Fact::PositiveInt(id)]).unwrap(),
+                }])
+        };
+        assert!(make(99).is_err());
+        let content = make(42).unwrap();
+        for value in [None, Some(-1), Some(0), Some(1), Some(i32::MAX)] {
+            let (_, _, mut snapshot) = local();
+            for id in [10, 20, 30] {
+                snapshot.tables.get_mut(&OBJECTIVES).unwrap().rows.insert(
+                    id,
+                    BTreeMap::from([
+                        (ACTIVE, Value::Int(i32::from(id == 30))),
+                        (COMPLETED, Value::Int(i32::from(id != 30))),
+                    ]),
+                );
+            }
+            if let Some(value) = value {
+                snapshot
+                    .tables
+                    .get_mut(&VALUES)
+                    .unwrap()
+                    .rows
+                    .insert(42, BTreeMap::from([(INTS, Value::Int(value))]));
+            }
+            let loaded = tables().view(&snapshot).unwrap();
+            let result = content.result_objective(&BTreeSet::from([71]), &loaded);
+            if value.is_some_and(|v| v > 0) {
+                assert_eq!(result.unwrap(), Some(30));
+            } else {
+                assert!(result.is_err());
+            }
+        }
+    }
+}

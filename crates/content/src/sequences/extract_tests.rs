@@ -65,6 +65,251 @@ fn generated_sequences_follow_registry_manager_and_explicit_channel_links() {
         crash.content.profile(crash.definition.asset).unwrap(),
         &nfs_world::crash::profile()
     );
+    let arrival = crash.arrival.unwrap();
+    assert_eq!(arrival.duration_ms, 2250);
+    assert_eq!(
+        arrival.definition.layout,
+        nfs_world::sequences::Layout::ControlledArrival
+    );
+    assert_eq!(arrival.definition.manager, content.definition.manager);
+    assert_ne!(arrival.definition.asset, crash.definition.asset);
+    assert!(arrival.instance().is_ok());
+}
+
+#[test]
+fn controlled_arrival_rejects_broken_conditions_routing_timing_and_completion() {
+    for case in 0..16 {
+        let extra = synthetic::sequences::assets_with(|name, fields, objects| {
+            if name != synthetic::sequences::ARRIVAL {
+                return;
+            }
+            let set = |objects: &mut Vec<(&str, Vec<(&str, Field)>)>, class, key, value| {
+                objects
+                    .iter_mut()
+                    .find(|(c, _)| *c == class)
+                    .unwrap()
+                    .1
+                    .iter_mut()
+                    .find(|(k, _)| *k == key)
+                    .unwrap()
+                    .1 = value;
+            };
+            match case {
+                0 => set(objects, "DelayEntityData", "Delay", Field::Float(f32::NAN)),
+                1 => set(objects, "DelayEntityData", "Delay", Field::Float(31.)),
+                2 => set(
+                    objects,
+                    "DelayEntityData",
+                    "Realm",
+                    Field::Enum("Realm", "Realm_Client", 2),
+                ),
+                3 => set(objects, "DelayEntityData", "AutoStart", Field::Bool(true)),
+                4 => set(
+                    objects,
+                    "CompareBoolEntityData",
+                    "TriggerOnPropertyChange",
+                    Field::Bool(false),
+                ),
+                5 => set(
+                    objects,
+                    "EventAndGateEntityData",
+                    "EventCount",
+                    Field::UInt(1),
+                ),
+                6 => set(
+                    objects,
+                    "EnableAiOnParticipantEntityData",
+                    "AddParticipantToStateOnEnableAi",
+                    Field::Bool(true),
+                ),
+                7 => set(
+                    objects,
+                    "StateSequenceParticipantProviderEntityData",
+                    "Realm",
+                    Field::Enum("Realm", "Realm_Server", 1),
+                ),
+                8 => {
+                    let Field::Structs(_, rows) = &mut fields
+                        .iter_mut()
+                        .find(|(k, _)| *k == "PropertyConnections")
+                        .unwrap()
+                        .1
+                    else {
+                        panic!()
+                    };
+                    rows[0]
+                        .iter_mut()
+                        .find(|(k, _)| *k == "SourceFieldId")
+                        .unwrap()
+                        .1 = Field::UInt(123);
+                }
+                9..=13 => {
+                    let Field::Structs(_, rows) = &mut fields
+                        .iter_mut()
+                        .find(|(k, _)| *k == "EventConnections")
+                        .unwrap()
+                        .1
+                    else {
+                        panic!()
+                    };
+                    match case {
+                        9 => {
+                            rows.pop();
+                        } // Lost client completion.
+                        10 => rows.push(rows[0].clone()), // Duplicate edge.
+                        11 => {
+                            rows.remove(1);
+                        } // No validity prerequisite.
+                        12 => {
+                            rows[10]
+                                .iter_mut()
+                                .find(|(k, _)| *k == "TargetType")
+                                .unwrap()
+                                .1 = Field::Enum(
+                                "EventConnectionTargetType",
+                                "EventConnectionTargetType_Server",
+                                1,
+                            )
+                        }
+                        _ => {
+                            rows[9].iter_mut().find(|(k, _)| *k == "Source").unwrap().1 =
+                                Field::RawPointer(5)
+                        } // Stop bypasses release.
+                    }
+                }
+                14 => {
+                    let Field::Structs(_, rows) = &mut fields
+                        .iter_mut()
+                        .find(|(k, _)| *k == "LinkConnections")
+                        .unwrap()
+                        .1
+                    else {
+                        panic!()
+                    };
+                    rows.pop(); // Release no longer targets the owned provider.
+                }
+                15 => {
+                    let Field::RawPointers(rows) =
+                        &mut fields.iter_mut().find(|(k, _)| *k == "Objects").unwrap().1
+                    else {
+                        panic!()
+                    };
+                    rows.swap(1, 7); // Wrong native serializer order.
+                }
+                _ => unreachable!(),
+            }
+        });
+        let (_dir, mut index) = index(extra);
+        assert!(build(&mut index).is_err(), "arrival case {case}");
+    }
+}
+
+#[test]
+fn controlled_arrival_requires_both_owned_spawners_and_their_manager_links() {
+    use crate::graph::{Graph, Key, Site, Source};
+    use nfs_frostbite::ebx::{Object, Pointer, Value as Ebx};
+    struct Override<'a> {
+        assets: &'a mut crate::scan::Assets,
+        object: Option<(Key, Object)>,
+    }
+    impl Source for Override<'_> {
+        fn object(&mut self, key: &Key) -> Result<Object, crate::Error> {
+            match &self.object {
+                Some((k, value)) if k == key => Ok(value.clone()),
+                _ => Source::object(self.assets, key),
+            }
+        }
+        fn target(&mut self, source: &str, pointer: Pointer) -> Result<Option<Key>, crate::Error> {
+            self.assets.target(source, pointer)
+        }
+    }
+    for case in 0..7 {
+        let (_dir, mut index) = index(vec![]);
+        let rules = synthetic::sequences::rules();
+        let mut graph = Graph::new(&mut index.assets);
+        let mut scene = graph.read(Site::root(&rules.manager_scene)).unwrap();
+        let nodes = graph.read(Site::root(&rules.arrival)).unwrap();
+        let mut spawner = scene
+            .iter()
+            .find(|n| n.object.class == "CrashedParticipantTransitionEntityData")
+            .cloned()
+            .unwrap();
+        let bus = spawner.site.bus.clone();
+        let mut overrides = None;
+        match case {
+            0 => (), // Includes an unlinked same-asset channel decoy.
+            1 => {
+                spawner
+                    .object
+                    .fields
+                    .0
+                    .iter_mut()
+                    .find(|(k, _)| k == "AiStateSequenceBlueprint")
+                    .unwrap()
+                    .1 = Ebx::Pointer(Pointer::Null);
+                overrides = Some((spawner.site.key.clone(), spawner.object.clone()));
+            }
+            2 => {
+                scene.retain(|n| n.object.class != "ControllableOutOfBoundsTrackerEntityData");
+            }
+            3 => {
+                scene.push(spawner.clone());
+            }
+            4..=6 => {
+                let mut object = graph.source.object(&bus).unwrap();
+                let Ebx::Array(rows) = &mut object
+                    .fields
+                    .0
+                    .iter_mut()
+                    .find(|(k, _)| k == "LinkConnections")
+                    .unwrap()
+                    .1
+                else {
+                    panic!()
+                };
+                let selected = rows
+                    .iter()
+                    .position(|row| {
+                        row.as_fields()
+                            .unwrap()
+                            .get("SourceFieldId")
+                            .unwrap()
+                            .bits32()
+                            == Some(if case == 6 {
+                                673467093
+                            } else {
+                                rules.arrival_channels
+                            })
+                    })
+                    .unwrap();
+                if case == 4 {
+                    rows.push(rows[selected].clone());
+                } else if case == 5 {
+                    let Ebx::Struct(fields) = &mut rows[selected] else {
+                        panic!()
+                    };
+                    let Pointer::Internal(target) =
+                        fields.get("Target").unwrap().as_pointer().unwrap()
+                    else {
+                        panic!()
+                    };
+                    fields.0.iter_mut().find(|(k, _)| k == "Target").unwrap().1 =
+                        Ebx::Pointer(Pointer::Internal(target - 1)); // Decoy, not shared target.
+                } else {
+                    rows.remove(selected);
+                }
+                overrides = Some((bus, object));
+            }
+            _ => unreachable!(),
+        }
+        let mut source = Override {
+            assets: &mut index.assets,
+            object: overrides,
+        };
+        let result =
+            controlled_arrival::compile(&mut Graph::new(&mut source), &scene, &nodes, &rules);
+        assert_eq!(result.is_ok(), case == 0, "binding case {case}: {result:?}");
+    }
 }
 
 #[test]

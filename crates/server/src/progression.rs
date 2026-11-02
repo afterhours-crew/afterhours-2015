@@ -15,7 +15,10 @@ use std::{
 };
 #[cfg(test)]
 const MAX_ENTRIES: usize = 2048;
+pub mod conditions;
 pub mod entities;
+pub mod results;
+pub mod timers;
 fn parse_error(e: data::ParseError) -> Failure {
     match e {
         data::ParseError::Invalid => Failure::ProfileConfig,
@@ -84,6 +87,19 @@ impl Restored {
     }
 }
 impl Catalog {
+    pub fn owned_condition_facts(&self) -> BTreeSet<data::conditions::Fact> {
+        use data::conditions::Fact;
+        self.definition
+            .branches()
+            .values()
+            .flat_map(|b| {
+                b.objectives()
+                    .iter()
+                    .flat_map(|(id, _)| [Fact::Active(*id), Fact::Completed(*id)])
+                    .chain(b.ints().iter().copied().map(Fact::PositiveInt))
+            })
+            .collect()
+    }
     pub fn story_policy(&self, settings: Settings) -> nfs_services::story::Policy<'_> {
         nfs_services::story::Policy {
             catalog: &self.definition,
@@ -127,20 +143,7 @@ impl Catalog {
             }
             state.pending.push(Output::ValuesRestored);
             for (id, expr) in definition.objectives() {
-                let initial = Objective {
-                    active: expr.initial(settings),
-                    completed: false,
-                };
-                let restored = match (
-                    int_cell(loaded, OBJECTIVES, *id, ACTIVE)?,
-                    int_cell(loaded, OBJECTIVES, *id, COMPLETED)?,
-                ) {
-                    (Some(active), Some(completed)) => Objective {
-                        active: active > 0,
-                        completed: completed > 0,
-                    },
-                    _ => initial,
-                };
+                let restored = restore_objective(loaded, *id, expr, settings)?;
                 state.objectives.insert(*id, restored);
                 state.pending.push(Output::StartObjective { id: *id });
             }
@@ -214,6 +217,10 @@ pub struct Content {
     /// Installed mission-chapter values on scene notifications (markers,
     /// entrance prompt gate, car-selection camera).
     pub chapter_notifications: Option<std::sync::Arc<crate::chapter_notifications::Content>>,
+    /// Explicitly selected authored main-objective delays. Completion still
+    /// goes through the account worker before any new objective is published.
+    pub objective_delays: Vec<nfs_content::progression::delays::Delay>,
+    pub objective_results: Vec<nfs_content::progression::results::Completion>,
 }
 /// The shared tutorial content, compared by identity (it holds float delays).
 #[derive(Clone, Debug)]
@@ -225,6 +232,14 @@ impl PartialEq for Tutorials {
 }
 impl Eq for Tutorials {}
 impl Content {
+    pub fn with_objective_delays(
+        mut self,
+        delays: Vec<nfs_content::progression::delays::Delay>,
+    ) -> Result<Self, Failure> {
+        timers::validate(&delays, &self.catalog.objective_ids(Branch::Main))?;
+        self.objective_delays = delays;
+        Ok(self)
+    }
     pub fn with_chapter_notifications(
         mut self,
         notifications: crate::chapter_notifications::Content,
@@ -270,11 +285,35 @@ impl Content {
             messages: None,
             tutorials: None,
             chapter_notifications: None,
+            objective_delays: Vec::new(),
+            objective_results: Vec::new(),
         }
     }
 }
 /// Bound on debug-print Hide events (the supported build has 113).
 const MAX_DEBUG_HIDES: usize = 1024;
+fn restore_objective(
+    loaded: &Loaded,
+    id: u64,
+    initial: &data::Expr,
+    settings: Settings,
+) -> Result<Objective, Failure> {
+    Ok(
+        match (
+            int_cell(loaded, OBJECTIVES, id, ACTIVE)?,
+            int_cell(loaded, OBJECTIVES, id, COMPLETED)?,
+        ) {
+            (Some(active), Some(completed)) => Objective {
+                active: active > 0,
+                completed: completed > 0,
+            },
+            _ => Objective {
+                active: initial.initial(settings),
+                completed: false,
+            },
+        },
+    )
+}
 fn int_cell(loaded: &Loaded, table: u32, id: u64, column: u32) -> Result<Option<i32>, Failure> {
     if !loaded.has_cell(table, id, column) {
         return Ok(None);

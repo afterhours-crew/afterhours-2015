@@ -273,6 +273,13 @@ fn a_failed_commit_emits_no_reply_and_retry_initializes_once() {
         fail: std::sync::atomic::AtomicBool,
     }
     impl InventoryRepository for FailOnce {
+        fn receipt(
+            &self,
+            account: AccountId,
+            batch_id: u64,
+        ) -> Result<Option<nfs_storage::Applied>, nfs_storage::Error> {
+            self.inner.receipt(account, batch_id)
+        }
         fn open(&self, account: AccountId) -> Result<Snapshot, nfs_storage::Error> {
             self.inner.open(account)
         }

@@ -362,29 +362,13 @@ pub(crate) fn participant_context<S: Source>(
     scene: Site,
     progression: &crate::progression::Rules,
 ) -> Result<(Vec<Node>, BTreeMap<Site, Site>), Error> {
-    let branch = graph.read(Site::root(&progression.intro))?;
-    let scene_nodes = graph.read(scene)?;
-    let mut spawners = vec![];
-    for n in scene_nodes
-        .iter()
-        .filter(|n| n.object.class == "ParticipantLogicSpawnerEntityData")
-    {
-        if graph.target_field(&n.site, "ParticipantLogicBlueprint")?
-            == (progression.intro.clone(), 0)
-        {
-            spawners.push(n.site.clone());
-        }
-    }
-    let [spawner] = spawners.as_slice() else {
-        return Err(bad("intro participant spawner occurrence"));
-    };
-    let refs = graph.links(
-        unique(&branch, "ParticipantLogicEntityData")?,
+    crate::participant_logic::context(
+        graph,
+        scene,
+        &progression.intro,
         progression.ports["root_channels"],
-    )?;
-    let targets = graph.links(spawner, progression.ports["spawner_channels"])?;
-    let aliases = crate::participant_logic::bind(graph, &branch, refs, targets)?;
-    Ok((branch, aliases))
+        progression.ports["spawner_channels"],
+    )
 }
 
 /// Resolve the opponent spawner through the selected mode's authored spawn
@@ -425,23 +409,7 @@ pub(super) fn links<S: Source>(
     aliases: &BTreeMap<Site, Site>,
     active: &mut BTreeSet<(Site, u32)>,
 ) -> Result<Vec<crate::graph::Endpoint>, Error> {
-    if active.len() >= 64 || !active.insert((site.clone(), port)) {
-        return Err(bad("intro channel link cycle"));
-    }
-    let actual = aliases.get(site).unwrap_or(site);
-    let mut out = vec![];
-    for end in graph.links(actual, port)? {
-        if end.port == 0 {
-            out.push(end);
-        } else {
-            out.extend(links(graph, &end.site, end.port, aliases, active)?);
-        }
-        if out.len() > 512 {
-            return Err(bad("intro channel link bound"));
-        }
-    }
-    active.remove(&(site.clone(), port));
-    Ok(out)
+    crate::participant_logic::links(graph, site, port, aliases, active)
 }
 
 /// Select a unique launcher by its authored mode reference. An optional declaring
@@ -467,6 +435,28 @@ impl ModeNotification {
 }
 /// `BoolPropertyClientNotificationEntityData` link to its participant property.
 const NOTIFICATION_PROPERTY: u32 = 2_526_680_631;
+
+/// Shared reader for notifications and participant-set predicates. The property
+/// names categories, not a hardcoded list of race types or a live object ID.
+pub(crate) fn mode_property<S: Source>(
+    graph: &mut Graph<S>,
+    site: &Site,
+) -> Result<(BTreeSet<u32>, bool), Error> {
+    let object = graph.object(site)?;
+    if object.class != "ParticipantInGameModeBoolPropertyEntityData" {
+        return Err(bad("participant-in-game-mode property class"));
+    }
+    let all = match object.fields.get("Operation").and_then(Value::as_enum_name) {
+        Some("GameModeCategoryOperation_Any") => false,
+        Some("GameModeCategoryOperation_All") => true,
+        _ => return Err(bad("unsupported participant-in-game-mode operation")),
+    };
+    let categories = results::categories(graph, site)?;
+    if categories.is_empty() {
+        return Err(bad("participant-in-game-mode without categories"));
+    }
+    Ok((categories, all))
+}
 
 impl AssetIndex {
     /// The scene's Boolean notifications that report a participant-in-game-
@@ -495,19 +485,7 @@ impl AssetIndex {
             if object.class != "ParticipantInGameModeBoolPropertyEntityData" {
                 continue;
             }
-            let all = match object.fields.get("Operation") {
-                Some(Value::Enum { name: Some(n), .. }) if n == "GameModeCategoryOperation_Any" => {
-                    false
-                }
-                Some(Value::Enum { name: Some(n), .. }) if n == "GameModeCategoryOperation_All" => {
-                    true
-                }
-                _ => return Err(bad("unsupported participant-in-game-mode operation")),
-            };
-            let categories = results::categories(&mut graph, &target.site)?;
-            if categories.is_empty() {
-                return Err(bad("participant-in-game-mode without categories"));
-            }
+            let (categories, all) = mode_property(&mut graph, &target.site)?;
             out.push(ModeNotification {
                 serializer: b.serializer,
                 categories,

@@ -5,7 +5,7 @@
 //! Read-only importer for the former standalone settings database.
 use super::{Document, MAX_BYTES};
 use crate::{AccountId, Error};
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::{OpenFlags, OptionalExtension};
 use std::{path::Path, time::Duration};
 
 pub(super) fn read(root: &Path, account: AccountId) -> Result<Option<Document>, Error> {
@@ -18,8 +18,8 @@ pub(super) fn read(root: &Path, account: AccountId) -> Result<Option<Document>, 
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err(Error::Storage),
     }
-    let mut conn = Connection::open_with_flags(
-        path,
+    let mut conn = crate::sqlite::open_connection(
+        &path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
     conn.busy_timeout(Duration::from_millis(250))?;

@@ -21,6 +21,7 @@ impl PlayerListener {
         if world_ms < self.world_ms {
             return Err(replication::Error::Shape);
         }
+        self.advance_driving_distance(world_ms);
         self.advance_binding_refreshes(world_ms)
             .inspect_err(|error| {
                 tracing::warn!(?error, world_ms, "binding refresh update rejected");
@@ -30,6 +31,21 @@ impl PlayerListener {
         })?;
         self.advance_tutorials().inspect_err(|error| {
             tracing::warn!(?error, world_ms, "tutorial update rejected");
+        })?;
+        self.advance_objective_timers(world_ms)
+            .inspect_err(|error| {
+                tracing::warn!(?error, world_ms, "objective timer update rejected");
+            })?;
+        self.advance_active_invitations(world_ms)
+            .inspect_err(|error| {
+                tracing::warn!(?error, world_ms, "active story invitation update rejected");
+            })?;
+        self.advance_unlock_notifications(world_ms)
+            .inspect_err(|error| {
+                tracing::warn!(?error, world_ms, "unlock notification update rejected");
+            })?;
+        self.advance_map_points().inspect_err(|error| {
+            tracing::warn!(?error, world_ms, "seen map points update rejected");
         })?;
         self.advance_crashes(world_ms).inspect_err(|error| {
             tracing::warn!(?error, world_ms, "crash recovery update rejected");
@@ -51,7 +67,13 @@ impl PlayerListener {
             }
         }
         if let Some(arrivals) = self.arrivals.as_mut() {
-            for stop in arrivals.poll(world_ms)? {
+            for stop in arrivals.poll(world_ms).inspect_err(|error| {
+                tracing::warn!(
+                    ?error,
+                    world_ms,
+                    "arrival completion or clock rejected; participant not released"
+                );
+            })? {
                 self.sequence_fallbacks[1] = self.sequence_fallbacks[1].saturating_add(1);
                 tracing::warn!(
                     sequence = stop.sequence,
@@ -309,7 +331,7 @@ impl PlayerListener {
     pub(super) fn start_arrivals(
         players: &mut Players,
         participants: &mut Lifecycle,
-        arrivals: Option<&mut Arrivals>,
+        (arrivals, selected): (Option<&mut Arrivals>, &destinations::State),
         logic: Option<&crate::garage_logic::GarageLogic>,
         logic_ghosts: &mut BTreeMap<u16, BTreeMap<u16, u16>>,
         persona: u64,
@@ -339,6 +361,9 @@ impl PlayerListener {
         match arrivals {
             None => {
                 for participant in arriving {
+                    if selected.position(participant).is_some() {
+                        return Err(replication::Error::Unsupported);
+                    }
                     records.extend(players.actor_arriving(
                         HOST_SELECTOR as u8,
                         persona,
@@ -366,13 +391,14 @@ impl PlayerListener {
             }
             Some(arrivals) => {
                 for participant in arriving {
-                    let started = arrivals.start_rollout(
+                    let started = arrivals.start_departure(
                         players,
                         Owner {
                             connection: HOST_SELECTOR as u8,
                             persona,
                             participant,
                         },
+                        selected.position(participant).is_some(),
                     )?;
                     let logic = if started.is_empty() {
                         Vec::new()

@@ -89,6 +89,7 @@ pub struct Startup<'p> {
     stats: Option<&'p nfs_services::stats::Catalog>,
     current_stats: Option<nfs_services::stats::Current>,
     kickback: Option<(&'p nfs_services::kickback::State, nfs_storage::AccountId)>,
+    pending_screenshots: nfs_services::kickback::PendingScreenshots,
     speedwall: Option<(&'p nfs_services::speedwall::State, nfs_storage::AccountId)>,
     current_speedwall: Option<nfs_services::speedwall::Current>,
     item_licenses: Option<&'p nfs_services::item_licenses::Content>,
@@ -161,6 +162,7 @@ impl<'p> Startup<'p> {
             catalogs: None,
             entitlements: None,
             kickback: None,
+            pending_screenshots: Default::default(),
             speedwall: None,
             current_speedwall: None,
             item_licenses: None,
@@ -386,7 +388,7 @@ impl<'p> Startup<'p> {
         {
             return self.host_mesh(request, unix_micros);
         }
-        let answer = self.dispatch(route, request)?;
+        let answer = self.dispatch(route, request, unix_micros)?;
         if let Some(frames) = &answer {
             let first = frames.first().ok_or(Failure::Reply)?.clone();
             self.previous = Some((request.to_vec(), first));
@@ -472,6 +474,7 @@ impl<'p> Startup<'p> {
         &mut self,
         route: RequestRoute,
         request: &[u8],
+        unix_micros: i64,
     ) -> Result<Option<Vec<Vec<u8>>>, Failure> {
         let profile = self.profile;
         let single = |reply: Option<Vec<u8>>| reply.map(|frame| vec![frame]);
@@ -563,6 +566,25 @@ impl<'p> Startup<'p> {
                 return Ok(None);
             }
             return match state.reply(request, account, self.identities.persona) {
+                Ok(reply) => Ok(Some(vec![reply])),
+                Err(nfs_services::kickback::Error::Ineligible) => Ok(None),
+                Err(nfs_services::kickback::Error::Identity) => Ok(None),
+                Err(nfs_services::kickback::Error::Encode) => Err(Failure::Reply),
+            };
+        }
+        if nfs_services::kickback::owns_screenshots(route.component, route.command)
+            && let Some((state, account)) = self.kickback
+        {
+            if self.users.is_some() {
+                return Ok(None);
+            }
+            return match state.reply_screenshot(
+                &mut self.pending_screenshots,
+                request,
+                account,
+                self.identities.persona,
+                unix_micros,
+            ) {
                 Ok(reply) => Ok(Some(vec![reply])),
                 Err(nfs_services::kickback::Error::Ineligible) => Ok(None),
                 Err(nfs_services::kickback::Error::Identity) => Ok(None),

@@ -19,6 +19,23 @@ fn content() -> WorldContent {
 }
 
 #[test]
+fn seen_map_binding_requires_a_registered_scene_and_a_plain_rpc_serializer() {
+    let mut content = content_with(Some(&[Kind::Noop, Kind::Rpc, Kind::RpcBool]));
+    let scene = content.roles.as_ref().unwrap().spawn_points.unwrap();
+    content.roles.as_mut().unwrap().seen_points = Some(crate::scene_roles::SceneRpc {
+        scene,
+        serializer: 1,
+    });
+    content.validate_runtime().unwrap();
+    for (scene, serializer) in [(scene, 0), (scene, 2), (scene, 999), (9_999_999, 1)] {
+        let mut wrong = content.clone();
+        wrong.roles.as_mut().unwrap().seen_points =
+            Some(crate::scene_roles::SceneRpc { scene, serializer });
+        assert!(wrong.validate_runtime().is_err());
+    }
+}
+
+#[test]
 fn garage_livery_cache_update_uses_owned_scene_and_reliable_reply_queue() {
     use nfs_protocol::world::rpc::Serial;
     use nfs_world::{bits::BitWriter, replication::sublevel};
@@ -824,6 +841,7 @@ fn content_with(spawn: Option<&[Kind]>) -> WorldContent {
         spawn_points: spawn.map(|_| keys[14]),
         free_roam: None,
         bank: None,
+        seen_points: None,
         streaming_gate: Asset {
             bundle: 2,
             type_id: 3,
@@ -1167,19 +1185,31 @@ fn the_exit_teleport_targets_the_teleport_state_with_the_configured_destination(
     let mut v = crate::vehicle_content::layout::tests::fixture();
     v["exit_teleport"] = serde_json::json!({"transform_bits": bits});
     let layout = crate::vehicle_content::layout::Layout::from_json(&v).unwrap();
-    let command = PlayerListener::exit_teleport(Some(exit), Some(&layout), 178, 205).unwrap();
+    let command = PlayerListener::exit_teleport(Some(exit), Some(&layout), 178, 205, None).unwrap();
     assert_eq!(command.endpoint, exit.state_77);
     assert_eq!((command.participant, command.vehicle), (178, 205));
     assert_eq!(command.position, [12.5, 0., 0.]);
     assert!(command.encode().is_ok());
     // Without exit bindings or a configured destination there is no teleport.
-    assert!(PlayerListener::exit_teleport(None, Some(&layout), 178, 205).is_none());
+    assert!(PlayerListener::exit_teleport(None, Some(&layout), 178, 205, None).is_none());
     let plain = crate::vehicle_content::layout::Layout::from_json(
         &crate::vehicle_content::layout::tests::fixture(),
     )
     .unwrap();
-    assert!(PlayerListener::exit_teleport(Some(exit), Some(&plain), 178, 205).is_none());
-    assert!(PlayerListener::exit_teleport(Some(exit), None, 178, 205).is_none());
+    assert!(PlayerListener::exit_teleport(Some(exit), Some(&plain), 178, 205, None).is_none());
+    assert!(PlayerListener::exit_teleport(Some(exit), None, 178, 205, None).is_none());
+    let chosen = nfs_content::events::restart::Destination {
+        position: [321., -12., 54.],
+        basis: [[0., 0., 1.], [0., 1., 0.], [-1., 0., 0.]],
+    };
+    for layout in [Some(&layout), None] {
+        let command =
+            PlayerListener::exit_teleport(Some(exit), layout, 178, 205, Some(chosen)).unwrap();
+        assert_eq!(command.position, chosen.position);
+        assert_eq!(command.basis, chosen.basis);
+        assert_eq!(command.speed, 0.);
+        assert!(command.encode().is_ok());
+    }
 }
 
 #[test]

@@ -31,6 +31,10 @@ pub const MAX_LOG_BYTES: usize = 4 * 1024 * 1024;
 /// of the bound is room for new output, so a log is trimmed about once per
 /// MiB written.
 pub const RETAINED_LOG_BYTES: usize = 3 * 1024 * 1024;
+/// Oldest output a [`Keep::End`] log saves beside itself the first time it
+/// is trimmed: the server's preparation and startup lines, which a session
+/// diagnosis needs and which a trim would otherwise discard first.
+pub const HEAD_LOG_BYTES: usize = 1024 * 1024;
 /// How far into the kept part a trim looks for a line start, so it does not
 /// begin in the middle of a line.
 const LINE_SEARCH_BYTES: usize = 64 * 1024;
@@ -88,8 +92,11 @@ impl StdChild {
         let pumps = vec![
             pump(
                 stdout,
-                stdout_log,
-                spec.stdout_keeps,
+                Sink {
+                    log: stdout_log,
+                    head: (spec.stdout_keeps == Keep::End).then(|| head_log_path(&spec.stdout_log)),
+                    keep: spec.stdout_keeps,
+                },
                 Arc::clone(&shared),
                 spec.capture_first_line,
                 spec.map_feed,
@@ -97,8 +104,11 @@ impl StdChild {
             ),
             pump(
                 stderr,
-                stderr_log,
-                Keep::End,
+                Sink {
+                    log: stderr_log,
+                    head: Some(head_log_path(&spec.stderr_log)),
+                    keep: Keep::End,
+                },
                 Arc::clone(&shared),
                 false,
                 false,
@@ -144,12 +154,54 @@ struct Trimmed {
     notice: u64,
 }
 
+/// Where a log's saved head goes: `server.stderr.log` -> `server.stderr.head.log`.
+pub fn head_log_path(log: &std::path::Path) -> std::path::PathBuf {
+    let stem = log
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let name = match log.extension() {
+        Some(ext) => format!("{stem}.head.{}", ext.to_string_lossy()),
+        None => format!("{stem}.head"),
+    };
+    log.with_file_name(name)
+}
+
+/// Save the first [`HEAD_LOG_BYTES`] of `log`, up to the last line end among
+/// them, as `head`. Done once, before the first trim removes them.
+fn save_head(log: &mut std::fs::File, head: &std::path::Path) -> std::io::Result<()> {
+    log.seek(SeekFrom::Start(0))?;
+    let mut bytes = Vec::with_capacity(HEAD_LOG_BYTES);
+    Read::by_ref(log)
+        .take(HEAD_LOG_BYTES as u64)
+        .read_to_end(&mut bytes)?;
+    let end = bytes
+        .iter()
+        .rposition(|&byte| byte == b'\n')
+        .map_or(bytes.len(), |at| at + 1);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(head)?
+        .write_all(&bytes[..end])
+}
+
 /// Remove the oldest part of a full log in place. Keeps its newest
 /// [`RETAINED_LOG_BYTES`], from the first line start among them when one is
 /// near, behind one line saying how many bytes of output have been removed
-/// in all. Returns the new length.
-fn trim_to_newest(log: &mut std::fs::File, trimmed: &mut Trimmed) -> std::io::Result<usize> {
+/// in all. The first trim first saves the log's head beside it (`head`).
+/// Returns the new length.
+fn trim_to_newest(
+    log: &mut std::fs::File,
+    trimmed: &mut Trimmed,
+    head: Option<&std::path::Path>,
+) -> std::io::Result<usize> {
     log.flush()?;
+    if let Some(head) = head
+        && trimmed.removed == 0
+    {
+        save_head(log, head)?;
+    }
     let len = log.seek(SeekFrom::End(0))?;
     let start = len.saturating_sub(RETAINED_LOG_BYTES as u64);
     log.seek(SeekFrom::Start(start))?;
@@ -165,8 +217,15 @@ fn trim_to_newest(log: &mut std::fs::File, trimmed: &mut Trimmed) -> std::io::Re
     // The previous notice sits at the top and is removed with the rest.
     let dropped = start + cut as u64;
     trimmed.removed += dropped.saturating_sub(trimmed.notice);
+    let saved = head.map_or(String::new(), |head| {
+        format!(
+            "; the first {} MiB are in {}",
+            HEAD_LOG_BYTES / (1024 * 1024),
+            head.file_name().unwrap_or_default().to_string_lossy()
+        )
+    });
     let notice = format!(
-        "[nfs-afterhours: {} earlier bytes removed to keep this log within {} MiB]\n",
+        "[nfs-afterhours: {} earlier bytes removed to keep this log within {} MiB{saved}]\n",
         trimmed.removed,
         MAX_LOG_BYTES / (1024 * 1024)
     );
@@ -179,16 +238,28 @@ fn trim_to_newest(log: &mut std::fs::File, trimmed: &mut Trimmed) -> std::io::Re
     Ok(notice.len() + tail.len() - cut)
 }
 
+/// Where a pump writes: the log file, the sibling that keeps its head once
+/// it is trimmed, and which end of the output the log keeps.
+struct Sink {
+    log: std::fs::File,
+    head: Option<std::path::PathBuf>,
+    keep: Keep,
+}
+
 fn pump(
     mut reader: impl Read + Send + 'static,
-    mut log: std::fs::File,
-    keep: Keep,
+    sink: Sink,
     shared: Arc<Mutex<Shared>>,
     capture_first: bool,
     map_feed: bool,
     queue_diagnostics: bool,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
+        let Sink {
+            mut log,
+            head,
+            keep,
+        } = sink;
         let mut buffer = [0u8; 4096];
         let mut kept = 0usize;
         let mut trimmed = Trimmed::default();
@@ -247,7 +318,7 @@ fn pump(
                 continue;
             }
             if keep == Keep::End && kept + count > MAX_LOG_BYTES {
-                match trim_to_newest(&mut log, &mut trimmed) {
+                match trim_to_newest(&mut log, &mut trimmed, head.as_deref()) {
                     Ok(len) => kept = len,
                     Err(e) => {
                         s.fault = Some(format!("Could not trim child log: {e}"));
@@ -390,7 +461,8 @@ mod tests {
         let mut lines = text.lines();
         let notice = lines.next().unwrap();
         assert!(
-            notice.starts_with("[nfs-afterhours: ") && notice.ends_with(" MiB]"),
+            notice.starts_with("[nfs-afterhours: ")
+                && (notice.ends_with(" MiB]") || notice.ends_with(".head.log]")),
             "{notice}"
         );
         let numbers: Vec<usize> = lines
@@ -409,12 +481,14 @@ mod tests {
     fn a_full_log_keeps_its_newest_lines_behind_one_notice() {
         let dir = crate::testing::scratch("trim");
         let path = dir.join("server.stderr.log");
+        let head = head_log_path(&path);
+        assert_eq!(head, dir.join("server.stderr.head.log"));
         let mut log = open_log(&path).unwrap();
         let mut trimmed = Trimmed::default();
         // 5 MiB of lines, then a trim.
         let first = 5 * 1024 * 1024 / 13;
         log.write_all(&numbered(0, first)).unwrap();
-        let len = trim_to_newest(&mut log, &mut trimmed).unwrap();
+        let len = trim_to_newest(&mut log, &mut trimmed, Some(&head)).unwrap();
         assert_eq!(len as u64, std::fs::metadata(&path).unwrap().len());
         assert!(len <= RETAINED_LOG_BYTES + 128);
         let text = std::fs::read_to_string(&path).unwrap();
@@ -424,13 +498,22 @@ mod tests {
             "[nfs-afterhours: {} earlier bytes removed",
             trimmed.removed
         )));
-        // More output and a second trim: still one notice, with the total.
+        assert!(text.contains("the first 1 MiB are in server.stderr.head.log]\n"));
+        // The head saved before the trim: whole lines from the start.
+        let saved = std::fs::read_to_string(&head).unwrap();
+        assert!(saved.starts_with("line 0000000\n"));
+        assert!(saved.ends_with('\n'));
+        assert!(saved.len() <= HEAD_LOG_BYTES && saved.len() > HEAD_LOG_BYTES - 16);
+        let head_len = saved.len();
+        // More output and a second trim: still one notice, with the total,
+        // and the head is left as it was.
         log.write_all(&numbered(first, 100_000)).unwrap();
-        trim_to_newest(&mut log, &mut trimmed).unwrap();
+        trim_to_newest(&mut log, &mut trimmed, Some(&head)).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         let kept_from = assert_newest_lines(&text, first + 100_000 - 1);
         assert_eq!(trimmed.removed, kept_from as u64 * 13);
         assert_eq!(text.matches("[nfs-afterhours: ").count(), 1);
+        assert_eq!(std::fs::metadata(&head).unwrap().len() as usize, head_len);
         drop(log);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -460,7 +543,16 @@ mod tests {
             assert!(std::fs::metadata(&path).unwrap().len() as usize <= MAX_LOG_BYTES);
             let text = std::fs::read_to_string(&path).unwrap();
             assert_newest_lines(&text, total - 1);
+            // Each trimmed log saved its start beside itself, once.
+            let head = std::fs::read_to_string(head_log_path(&path)).unwrap();
+            assert!(head.starts_with("line 0000000\n"));
+            assert!(head.len() <= HEAD_LOG_BYTES);
+            assert!(text.contains(&format!(
+                "the first 1 MiB are in {}]",
+                name.replace(".log", ".head.log")
+            )));
         }
+        assert!(!dir.join("result.stdout.head.log").exists());
         // The same output kept from its start stops at the bound instead.
         let mut child =
             StdChild::spawn(&spec_keeping(&dir, "result", &script, Keep::Start)).unwrap();

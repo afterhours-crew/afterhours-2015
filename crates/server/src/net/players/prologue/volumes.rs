@@ -41,8 +41,8 @@ struct Wanted {
     activities: bool,
     notifications: bool,
     spots: Pulse,
-    /// A participant after the intro: the spots stay with the activities
-    /// (official E912: joined in the Alive Enter burst, no pulse).
+    /// A participant after the intro: spot membership additionally follows its
+    /// authored player/state/mode predicates, without the intro's first-drive pulse.
     normal: bool,
 }
 
@@ -60,9 +60,87 @@ pub(in crate::net::players) struct State {
     // Projection of output reserved in the listener's FIFO, not a client ack.
     // A driving transaction commits this together with its complete output.
     published: BTreeSet<(Option<u16>, Site)>,
+    normal_spots: BTreeSet<(u16, Site)>,
 }
 
 impl State {
+    #[cfg(test)]
+    pub(in crate::net::players) fn normal_for_test(participant: u16) -> Self {
+        Self {
+            wanted: BTreeMap::from([(
+                participant,
+                Wanted {
+                    normal: true,
+                    activities: true,
+                    ..Wanted::default()
+                },
+            )]),
+            ..Self::default()
+        }
+    }
+    /// Project all normal spot inputs before changing any membership. Missing
+    /// owned facts reject the projection even if another operand is false.
+    fn project_normal(
+        &mut self,
+        volumes: &WorldVolumes,
+        mut fact: impl FnMut(u16, &nfs_content::events::discovery::membership::Fact) -> Option<bool>,
+    ) -> Result<(), replication::Error> {
+        let mut next = BTreeSet::new();
+        let participants: Vec<_> = self
+            .wanted
+            .iter()
+            .filter(|(_, w)| w.normal && w.activities)
+            .map(|(&p, _)| p)
+            .collect();
+        if !participants.is_empty() {
+            let endpoints: BTreeSet<_> = volumes
+                .spot_memberships
+                .iter()
+                .map(|b| b.endpoint)
+                .collect();
+            if endpoints != volumes.spots || endpoints.len() != volumes.spot_memberships.len() {
+                return Err(replication::Error::Shape);
+            }
+        }
+        for participant in participants {
+            for binding in &volumes.spot_memberships {
+                let eligible = binding.program.evaluate(|f| fact(participant, f))
+                    .map_err(|error| {
+                        tracing::warn!(participant, %error, "world spot membership projection failed");
+                        replication::Error::Shape
+                    })?;
+                if eligible {
+                    next.insert((participant, binding.endpoint));
+                }
+            }
+        }
+        self.normal_spots = next;
+        Ok(())
+    }
+
+    /// Reserve the complete normal-spot change with the event transaction. A
+    /// subsequent mode join/release cannot overtake a partially planned sweep.
+    pub(in crate::net::players) fn reserve_normal(
+        &mut self,
+        volumes: &WorldVolumes,
+        players: &Players,
+    ) -> Result<Vec<HostRpc>, replication::Error> {
+        let changes = self
+            .plan_bound(volumes, usize::MAX, |site| {
+                players
+                    .objects()
+                    .scene_endpoint(site.scene_key, site.serializer)
+                    .is_some()
+            })
+            .into_iter()
+            .filter(|c| {
+                c.participant.is_some_and(|p| {
+                    self.wanted.get(&p).is_some_and(|w| w.normal) && volumes.spots.contains(&c.site)
+                })
+            })
+            .collect();
+        self.reserve(players, changes)
+    }
     /// Whether the participant's membership of `site` is published.
     pub fn member(&self, participant: u16, site: Site) -> bool {
         self.published.contains(&(Some(participant), site))
@@ -319,6 +397,8 @@ impl State {
         self.wanted.retain(|&participant, _| !gone(participant));
         self.published
             .retain(|&(participant, site)| !participant.is_some_and(&gone) && resolvable(site));
+        self.normal_spots
+            .retain(|&(participant, site)| !gone(participant) && resolvable(site));
     }
 
     fn desired(&self, volumes: &WorldVolumes) -> BTreeSet<(Option<u16>, Site)> {
@@ -331,8 +411,16 @@ impl State {
             if wanted.activities {
                 desired.extend(volumes.activities.iter().map(|&s| (who, s)));
             }
-            if wanted.spots == Pulse::Joining || (wanted.normal && wanted.activities) {
+            if wanted.spots == Pulse::Joining {
                 desired.extend(volumes.spots.iter().map(|&s| (who, s)));
+            }
+            if wanted.normal && wanted.activities {
+                desired.extend(
+                    self.normal_spots
+                        .iter()
+                        .filter(|(p, _)| *p == participant)
+                        .map(|(_, s)| (who, *s)),
+                );
             }
             if wanted.notifications {
                 desired.extend(volumes.notifications.iter().map(|&s| (None, s)));
@@ -347,6 +435,15 @@ impl State {
     /// frame, the other families after), the rest after them. Endpoints the
     /// world cannot resolve are left out.
     pub fn plan(
+        &self,
+        volumes: &WorldVolumes,
+        budget: usize,
+        resolvable: impl Fn(Site) -> bool,
+    ) -> Vec<Change> {
+        self.plan_bound(volumes, budget.min(BATCH), resolvable)
+    }
+
+    fn plan_bound(
         &self,
         volumes: &WorldVolumes,
         budget: usize,
@@ -374,7 +471,7 @@ impl State {
             .difference(&desired)
             .map(|item| change(item, false))
             .chain(joins.into_iter().map(|item| change(item, true)))
-            .take(budget.min(BATCH))
+            .take(budget)
             .collect()
     }
 
@@ -436,6 +533,34 @@ fn encode_change(players: &Players, change: &Change) -> Result<HostRpc, replicat
 }
 
 impl PlayerListener {
+    pub(in crate::net::players) fn project_world_spots(
+        &self,
+        state: &mut State,
+        players: &Players,
+        scene: Option<&crate::prologue::membership::Session>,
+        events: &crate::net::players::events::State,
+    ) -> Result<(), replication::Error> {
+        let Some(content) = self.prologue.as_deref() else {
+            return Ok(());
+        };
+        state.project_normal(&content.volumes, |participant, fact| {
+            use nfs_content::events::discovery::membership::Fact;
+            match fact {
+                Fact::Player(owner)
+                    if Some(owner) == content.volumes.spot_player_manager.as_ref() =>
+                {
+                    Some(players.player_participants().any(|p| p == participant))
+                }
+                Fact::States(sites) => sites.iter().try_fold(false, |any, site| {
+                    Some(scene?.contains_at(*site, participant).ok()? || any)
+                }),
+                Fact::GameMode { categories, all } => {
+                    events.matches_held_mode(participant, self.events.as_deref(), categories, *all)
+                }
+                _ => None,
+            }
+        })
+    }
     /// The session accepted the front queued RPC. Every notification passes
     /// here once, whichever producer queued it.
     pub(in crate::net) fn rpc_sent(&mut self) {
@@ -477,7 +602,8 @@ impl PlayerListener {
             return Ok(());
         };
         let world = self.players.objects();
-        self.world_volumes.forget(
+        let mut next = self.world_volumes.clone();
+        next.forget(
             |participant| world.get(participant).is_none(),
             |site| {
                 world
@@ -485,6 +611,12 @@ impl PlayerListener {
                     .is_some()
             },
         );
+        self.project_world_spots(
+            &mut next,
+            &self.players,
+            self.scene_membership.as_ref(),
+            &self.event_state,
+        )?;
         let budget = nfs_world::session::MAX_RPC_QUEUE
             .saturating_sub(self.pending_rpcs.len())
             .saturating_sub(BATCH);
@@ -493,10 +625,9 @@ impl PlayerListener {
                 .scene_endpoint(site.scene_key, site.serializer)
                 .is_some()
         };
-        let changes = self
-            .world_volumes
-            .plan(&content.volumes, budget, resolvable);
+        let changes = next.plan(&content.volumes, budget, resolvable);
         if changes.is_empty() {
+            self.world_volumes = next;
             return Ok(());
         }
         let mut calls = Vec::with_capacity(changes.len());
@@ -519,12 +650,14 @@ impl PlayerListener {
         );
         self.pending_rpcs.extend(calls);
         let world = self.players.objects();
-        self.world_volumes
-            .commit(&content.volumes, &changes, |site| {
-                world
-                    .scene_endpoint(site.scene_key, site.serializer)
-                    .is_some()
-            });
+        next.commit(&content.volumes, &changes, |site| {
+            world
+                .scene_endpoint(site.scene_key, site.serializer)
+                .is_some()
+        });
+        self.world_volumes = next;
+        self.activity_inside
+            .retain(|(p, s), _| self.world_volumes.member(*p, *s));
         Ok(())
     }
 }
@@ -558,6 +691,7 @@ mod tests {
                 .collect(),
             driving_order: vec![site(71), site(70), site(72)],
             cop_patrols: BTreeSet::new(),
+            ..WorldVolumes::default()
         }
     }
 
@@ -1042,13 +1176,21 @@ mod tests {
     }
 
     #[test]
-    fn a_participant_after_the_intro_holds_activities_and_spots_while_alive() {
+    fn a_participant_after_the_intro_holds_activities_and_eligible_spots_while_alive() {
         // E912: after a normal garage exit the narrative, mission and spot
         // volumes join in the Alive Enter burst and stay (no spot pulse).
         let volumes = WorldVolumes {
             events: BTreeSet::from([site(1)]),
             activities: BTreeSet::from([site(70)]),
             spots: BTreeSet::from([site(71)]),
+            spot_memberships: vec![nfs_content::events::discovery::volumes::Binding {
+                endpoint: site(71),
+                program: serde_json::from_value(serde_json::json!({
+                    "ops": [{"Fact": {"States": [site(70)]}}],
+                    "ranges": [], "empty_sets": []
+                }))
+                .unwrap(),
+            }],
             driving_order: vec![site(71), site(70)],
             ..WorldVolumes::default()
         };
@@ -1059,6 +1201,7 @@ mod tests {
             ..Wanted::default()
         };
         state.wanted.insert(5, alive(true));
+        state.project_normal(&volumes, |p, _| Some(p == 5)).unwrap();
         let changes = state.plan(&volumes, BATCH, |_| true);
         let joined: BTreeSet<_> = changes
             .iter()
@@ -1085,9 +1228,66 @@ mod tests {
         assert!(state.settled(5, &volumes, |_| true));
         assert!(!state.settled(6, &volumes, |_| true), "no Alive seen");
         state.wanted.insert(5, alive(false));
+        state.project_normal(&volumes, |_, _| Some(false)).unwrap();
         let left = state.plan(&volumes, BATCH, |_| true);
         assert_eq!(left.len(), 2);
         assert!(left.iter().all(|c| !c.join));
+    }
+
+    #[test]
+    fn spot_projection_is_per_participant_and_missing_inputs_do_not_commit_a_partial_sweep() {
+        use nfs_content::events::discovery::{membership::Fact, volumes::Binding};
+        let binding = Binding {
+            endpoint: site(71),
+            program: serde_json::from_value(serde_json::json!({
+                "ops": [
+                    {"Fact": {"States": [site(70)]}},
+                    {"Fact": {"GameMode": {"categories": [41], "all": false}}},
+                    {"Combine": ["Difference", 0, 1]}
+                ],
+                "ranges": [], "empty_sets": []
+            }))
+            .unwrap(),
+        };
+        let mut volumes = WorldVolumes {
+            spots: BTreeSet::from([site(71)]),
+            spot_memberships: vec![binding],
+            ..WorldVolumes::default()
+        };
+        let mut state = State::normal_for_test(5);
+        state.wanted.insert(6, state.wanted[&5]);
+        state
+            .project_normal(&volumes, |p, f| {
+                Some(match f {
+                    Fact::States(_) => true,
+                    Fact::GameMode { .. } => p == 5,
+                    _ => unreachable!(),
+                })
+            })
+            .unwrap();
+        assert_eq!(state.normal_spots, BTreeSet::from([(6, site(71))]));
+        let before = state.clone();
+        assert!(
+            state
+                .project_normal(&volumes, |p, _| (p == 5).then_some(false))
+                .is_err()
+        );
+        assert_eq!(
+            state, before,
+            "the first participant cannot partially commit"
+        );
+        volumes.spots.insert(site(72));
+        assert!(state.project_normal(&volumes, |_, _| Some(true)).is_err());
+        assert_eq!(
+            state, before,
+            "missing authored programs are not eligible defaults"
+        );
+        volumes.spots.remove(&site(72));
+        volumes
+            .spot_memberships
+            .push(volumes.spot_memberships[0].clone());
+        assert!(state.project_normal(&volumes, |_, _| Some(true)).is_err());
+        assert_eq!(state, before);
     }
 
     #[test]

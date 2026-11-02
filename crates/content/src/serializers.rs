@@ -74,7 +74,17 @@ mod tests {
                         F::RawPointers((2..objects.len() as u32 + 2).collect()),
                     ),
                 ],
-                objects.into_iter().map(|c| (c, vec![])).collect(),
+                objects
+                    .into_iter()
+                    .map(|c| {
+                        let fields = if c == "UIWidgetBlueprint" {
+                            vec![("Flags", F::UInt(0))]
+                        } else {
+                            vec![]
+                        };
+                        (c, fields)
+                    })
+                    .collect(),
             ),
         }
     }
@@ -124,6 +134,40 @@ mod tests {
                 vec!["ParticipantLogicEntityData", "NotARuledClassEntityData"],
             ),
             blueprint(5, "test/other", "SpatialPrefabBlueprint", vec![]),
+            blueprint(
+                6,
+                "test/inspection",
+                "GameModeBlueprint",
+                vec![
+                    "GameModeEntityData",
+                    "ControlCopRacerAiInGameModeStateEntityData",
+                    "EscapeGameModeStateEntityData",
+                    "CopAudioInterfaceEntityData",
+                    "ChaseInterfaceEntityData",
+                    "CopFineTrackerEntityData",
+                    "DisplayCopsOnMapEntityData",
+                    "TargetVisibilityEntityData",
+                    "CooldownGameModeStateEntityData",
+                    "SyncedTimerEntityData",
+                    "SurrenderPromptSenderEntityData",
+                ],
+            ),
+            blueprint(
+                7,
+                "test/local",
+                "ParticipantLogicBlueprint",
+                vec![
+                    "ParticipantLogicEntityData",
+                    "RaceVehicleRoadblockCollisionEntityData",
+                    "IllegalActivityInterfaceEntityData",
+                    "Vec3PresentationDataCollectorEntityData",
+                    "ConditionalVec3EntityData",
+                    "UIWidgetBlueprint",
+                    "StateSequenceSelectorEntityData",
+                    "ParticipantEventEntityData",
+                    "SyncedBoolEntityData",
+                ],
+            ),
         ];
         let temp = Installation(std::env::temp_dir().join(format!(
             "nfs-serializer-profiles-{}-{:?}",
@@ -160,5 +204,23 @@ mod tests {
         assert!(kinds(&mut index, "test/other").is_err());
         assert!(kinds(&mut index, "test/missing").is_err());
         assert!(kinds(&mut index, "").is_err());
+        assert_eq!(
+            kinds(&mut index, "test/inspection").unwrap(),
+            [
+                Kind::GameModeRoot,
+                Kind::RpcReferences,
+                Kind::RpcBoolUpdate,
+                Kind::RpcChaseUpdate,
+                Kind::RpcCopFineTracker,
+                Kind::RpcCopMapUpdate,
+                Kind::RpcTargetVisibilityUpdate,
+                Kind::RpcReferences,
+                Kind::Rpc,
+            ]
+        );
+        assert_eq!(
+            kinds(&mut index, "test/local").unwrap(),
+            [Kind::Root, Kind::BoolProperty]
+        );
     }
 }

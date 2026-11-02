@@ -5,6 +5,29 @@
 use super::*;
 
 impl Players {
+    /// Update only the control flag of the current owned actor. Temporary
+    /// lifecycle owners must retain its identity and restore the previous flag;
+    /// route goals and every other actor field remain owned by their existing owner.
+    pub(crate) fn set_actor_control(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        participant: u16,
+        actor: u16,
+        enabled: bool,
+    ) -> Result<Option<Record>, Error> {
+        if self.owned_actor(connection, persona, participant) != Some(actor) {
+            return Err(Error::UnknownObject);
+        }
+        self.objects.change(
+            actor,
+            Update::Actor(ActorUpdate {
+                flag_a: Some(enabled),
+                ..ActorUpdate::default()
+            }),
+        )
+    }
+
     /// Assign a race route and shared pacing to a human Actor while preserving
     /// manual control. The intro must have released its control and goal lists.
     /// The event owns the route; the pacing group has its own shared lifetime.
@@ -406,10 +429,11 @@ impl Players {
     }
 
     /// Put this participant's Actor under AI control with new host goals, in
-    /// order (E997: a race intro's go-to-waypoint and speed-limit goals, then the
-    /// Actor's first flag set with them as its first goal list). Each goal takes
-    /// the next shared allocation serial; creation and assignment commit together
-    /// and an Actor that already has goals is refused.
+    /// order (E997: a race intro's go-to-waypoint and speed-limit goals; E1280: a
+    /// race outro's wander and speed-limit goals, then the Actor's first flag set
+    /// with them as its first goal list). Each goal takes the next shared
+    /// allocation serial; creation and assignment commit together and an Actor
+    /// that already has goals is refused.
     pub fn start_controlled_goals(
         &mut self,
         connection: u8,
@@ -458,6 +482,10 @@ impl Players {
                 Initial::ScriptedInputGoal(g) => {
                     g.allocation_serial = serial;
                     Update::ScriptedInputGoal
+                }
+                Initial::WanderGoal(g) => {
+                    g.allocation_serial = serial;
+                    Update::WanderGoal
                 }
                 _ => return Err(Error::Unsupported),
             };
@@ -508,6 +536,7 @@ impl Players {
                         Initial::GotoWaypointGoal(_)
                             | Initial::SpeedLimitGoal(_)
                             | Initial::ScriptedInputGoal(_)
+                            | Initial::WanderGoal(_)
                     )
                 })
             })
@@ -815,21 +844,17 @@ mod tests {
         world.create_actor(3, 101, p).unwrap();
         world.create_actor(7, 202, other).unwrap();
         let before = world.objects.snapshot();
-        // Another session's participant, a missing goal list and a foreign
-        // goal kind change nothing.
+        // Another session's participant, a missing goal list and a non-goal
+        // record change nothing.
         assert!(
             world
                 .start_controlled_goals(3, 101, other, vec![goto()])
                 .is_err()
         );
         assert!(world.start_controlled_goals(3, 101, p, vec![]).is_err());
-        let wander = Initial::WanderGoal(wander::Initial {
-            allocation_serial: 0,
-            flags: [false; 3],
-        });
         assert!(
             world
-                .start_controlled_goals(3, 101, p, vec![goto(), wander])
+                .start_controlled_goals(3, 101, p, vec![goto(), Initial::PlayerManager])
                 .is_err()
         );
         assert_eq!(world.objects.snapshot(), before);
@@ -931,6 +956,66 @@ mod tests {
         assert!(world.objects.get(records[0].id).is_none());
     }
 
+    /// E1280: the race outro's authored wander and speed-limit commands take the
+    /// human Actor like the intro's goals and release the same way.
+    #[test]
+    fn outro_wander_and_speed_limit_goals_are_assigned_and_released() {
+        let mut world = Players::default();
+        let p = join(&mut world, 3, 101, 0);
+        world.create_actor(3, 101, p).unwrap();
+        let records = world
+            .start_controlled_goals(
+                3,
+                101,
+                p,
+                vec![
+                    Initial::WanderGoal(wander::Initial {
+                        allocation_serial: 0,
+                        flags: [false, true, true],
+                    }),
+                    Initial::SpeedLimitGoal(speed_limit::Initial {
+                        selector: 0,
+                        serial: 1,
+                        allocation_serial: 0,
+                        limit: 25f32.to_bits(),
+                    }),
+                ],
+            )
+            .unwrap();
+        let [w, s, actor] = <[Record; 3]>::try_from(records).unwrap();
+        let Some(Initial::WanderGoal(wi)) = &w.initial else {
+            panic!()
+        };
+        let Some(Initial::SpeedLimitGoal(si)) = &s.initial else {
+            panic!()
+        };
+        assert_eq!((wi.allocation_serial, si.allocation_serial), (1, 2));
+        assert_eq!((wi.flags, si.limit), ([false, true, true], 25f32.to_bits()));
+        assert_eq!(
+            (w.update, s.update),
+            (Update::WanderGoal, Update::SpeedLimitGoal)
+        );
+        assert_eq!(
+            actor.update,
+            Update::Actor(ActorUpdate {
+                flag_a: Some(true),
+                references_a: Some(vec![w.id, s.id]),
+                ..ActorUpdate::default()
+            })
+        );
+        let cleared = world
+            .release_controlled_goals(3, 101, p, &[w.id, s.id])
+            .unwrap();
+        assert_eq!(
+            cleared.update,
+            Update::Actor(ActorUpdate {
+                flag_a: Some(false),
+                references_a: Some(Vec::new()),
+                ..ActorUpdate::default()
+            })
+        );
+        assert!(world.objects.get(w.id).is_none() && world.objects.get(s.id).is_none());
+    }
     #[test]
     fn goal_counter_is_world_owned_wraps_and_only_advances_after_success() {
         use entity::creation::{Asset, Catalog};

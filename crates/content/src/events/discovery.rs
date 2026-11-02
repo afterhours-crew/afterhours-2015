@@ -2,11 +2,17 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! The installed normal-event roster, independently of playable game modes.
-//! Visibility is an explicit free-roam policy; story eligibility is not evaluated.
+//! Authored event rosters and membership dependencies, independently of playable
+//! game modes. The compatibility roster remains normal-only; availability keeps
+//! story variants and requires state supplied by their runtime owners.
 use super::*;
 
+pub mod channels;
+pub mod integers;
+pub mod membership;
 pub mod requirements;
+pub mod teleport;
+pub mod volumes;
 
 pub const MAX_EVENTS: usize = 512;
 
@@ -19,7 +25,7 @@ pub struct Endpoint {
     pub serializer: usize,
 }
 
-/// One normal start area. Narrative and Prestige variants share its location.
+/// One start area. Narrative and Prestige variants can share its location.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Entry {
     pub id: String,
@@ -34,7 +40,7 @@ impl AssetIndex {
     /// Resolve normal authored start areas in loaded scenes. This does not imply
     /// support for starting or completing each of their game modes.
     pub fn event_roster(&mut self) -> Result<Vec<Entry>, Error> {
-        self.roster(false).map(|(entries, _)| entries)
+        self.roster(false, false).map(|r| r.entries)
     }
 
     /// Include notification-backed start requirements, preserving their own
@@ -42,13 +48,29 @@ impl AssetIndex {
     pub fn event_roster_with_requirements(
         &mut self,
     ) -> Result<(Vec<Entry>, Vec<requirements::Binding>), Error> {
-        self.roster(true)
+        self.roster(true, false)
+            .map(|r| (r.entries, r.requirements))
+    }
+
+    /// All authored variants with exact map-membership expressions. Unlike
+    /// the normal-only compatibility roster, no story selection is pre-applied.
+    pub fn event_availability(&mut self) -> Result<Availability, Error> {
+        self.roster(false, true).map(|r| Availability {
+            entries: r.entries,
+            memberships: r.memberships.into_values().collect(),
+            integers: r.integers,
+            visibility: r.visibility,
+            copies: r.copies,
+            channels: r.channels,
+            teleports: r.teleports,
+        })
     }
 
     fn roster(
         &mut self,
         include_requirements: bool,
-    ) -> Result<(Vec<Entry>, Vec<requirements::Binding>), Error> {
+        include_memberships: bool,
+    ) -> Result<Roster, Error> {
         let rules = self.identity.scenes.clone();
         let startup = self.startup_entries(&rules.level)?;
         let mut graph = Graph::new(&mut self.assets);
@@ -63,15 +85,37 @@ impl AssetIndex {
             .iter()
             .map(|(n, s)| (n.clone(), s.clone()))
             .collect();
-        let identified = if include_requirements {
+        let identified = if include_requirements || include_memberships {
             requirements::identified_bools(&mut graph, &roots)?
         } else {
             BTreeMap::new()
         };
         let mut entries = BTreeMap::new();
         let mut requirements = Vec::new();
-        for (scene, root) in roots {
-            let nodes = graph.read(root)?;
+        let mut memberships = BTreeMap::new();
+        let mut visibility_rules = BTreeMap::new();
+        let mut teleports = teleport::Definitions::default();
+        for (scene, root) in &roots {
+            let nodes = graph.read(root.clone())?;
+            if include_memberships {
+                for node in nodes
+                    .iter()
+                    .filter(|n| n.object.class == "TeleportManagerEntityData")
+                {
+                    let (scene_key, serializer) = scenes.endpoint(&mut graph, &node.site)?;
+                    let site = Endpoint {
+                        scene_key,
+                        serializer,
+                    };
+                    if teleports
+                        .manager
+                        .replace(site)
+                        .is_some_and(|old| old != site)
+                    {
+                        return Err(bad("ambiguous scene teleport manager"));
+                    }
+                }
+            }
             for launcher in nodes.iter().filter(|n| n.object.class == LAUNCHER) {
                 let mode = graph.target_field(&launcher.site, "GameMode")?.0;
                 // Automatic speed-run/drift-corner activities have their own
@@ -120,8 +164,7 @@ impl AssetIndex {
                 }
                 let id = graph.target_field(details, "Id")?.0;
                 if !id.starts_with("gameplay/gamemodes/")
-                    || id.ends_with("_nar")
-                    || id.ends_with("_pres")
+                    || (!include_memberships && (id.ends_with("_nar") || id.ends_with("_pres")))
                 {
                     continue;
                 }
@@ -148,20 +191,56 @@ impl AssetIndex {
                 )
                 .map_err(|e| bad(&format!("event {id} visibility: {e}")))?;
                 let mut resolved = Vec::new();
+                let mut conditions = BTreeMap::new();
                 for (site, enabled) in notifications {
-                    if !enabled {
+                    if !enabled && !include_memberships {
                         continue;
                     }
                     let (scene_key, serializer) = scenes.endpoint(&mut graph, &site)?;
-                    resolved.push(Endpoint {
+                    let endpoint = Endpoint {
                         scene_key,
                         serializer,
-                    });
+                    };
+                    if include_memberships
+                        && conditions
+                            .insert(endpoint, enabled)
+                            .is_some_and(|old| old != enabled)
+                    {
+                        return Err(bad("conflicting resolved visibility notification"));
+                    }
+                    if include_memberships && !memberships.contains_key(&endpoint) {
+                        let program =
+                            membership::read(&mut graph, &site, &identified, &mut |g, s| {
+                                let (scene_key, serializer) = scenes.endpoint(g, s)?;
+                                Ok(Endpoint {
+                                    scene_key,
+                                    serializer,
+                                })
+                            })
+                            .map_err(|e| bad(&format!("event {id} membership: {e}")))?;
+                        memberships.insert(
+                            endpoint,
+                            membership::Binding {
+                                notification: endpoint,
+                                program,
+                            },
+                        );
+                    }
+                    if enabled {
+                        resolved.push(endpoint);
+                    }
                 }
                 resolved.sort();
                 resolved.dedup();
                 if resolved.is_empty() || resolved.len() > 16 {
                     return Err(bad("event map notification count"));
+                }
+                if include_memberships {
+                    let rule = Visibility { conditions };
+                    rule.validate()?;
+                    if visibility_rules.insert(id.clone(), rule).is_some() {
+                        return Err(bad("duplicate event visibility identity"));
+                    }
                 }
                 let (scene_key, serializer) = scenes.endpoint(&mut graph, &volume)?;
                 let entry = Entry {
@@ -174,7 +253,7 @@ impl AssetIndex {
                     },
                     notifications: resolved,
                 };
-                if include_requirements {
+                if include_requirements || include_memberships {
                     let mut start_area = launcher.site.clone();
                     let frame = start_area
                         .parents
@@ -182,20 +261,141 @@ impl AssetIndex {
                         .ok_or_else(|| bad("start area parent"))?;
                     start_area.key = frame.reference;
                     start_area.bus = frame.bus;
-                    requirements.extend(requirements::read(
-                        &mut graph,
-                        &mut scenes,
-                        &start_area,
-                        &entry,
-                        &identified,
-                    )?);
+                    if include_memberships
+                        && let Some((location, points)) =
+                            restart::selection(&mut graph, &start_area)?
+                    {
+                        let (scene_key, serializer) = scenes.endpoint(&mut graph, &location)?;
+                        teleports.insert(
+                            Endpoint {
+                                scene_key,
+                                serializer,
+                            },
+                            points,
+                        )?;
+                    }
+                    if include_requirements {
+                        requirements.extend(requirements::read(
+                            &mut graph,
+                            &mut scenes,
+                            &start_area,
+                            &entry,
+                            &identified,
+                        )?);
+                    }
                 }
                 if entries.insert(id, entry).is_some() || entries.len() > MAX_EVENTS {
                     return Err(bad("duplicate event identity or roster bound"));
                 }
             }
         }
-        Ok((entries.into_values().collect(), requirements))
+        let selected = memberships
+            .values()
+            .flat_map(|b| b.program.ranges().values())
+            .map(|r| r.input.clone())
+            .collect();
+        let integers = integers::read(
+            &mut graph,
+            &roots.iter().map(|(_, s)| s.clone()).collect::<Vec<_>>(),
+            &selected,
+        )?;
+        let selected_copies = memberships
+            .values()
+            .flat_map(|b| b.program.facts())
+            .filter_map(|f| match f {
+                membership::Fact::Copy(id) => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        let copies = membership::copies::read(
+            &mut graph,
+            &roots.iter().map(|(_, s)| s.clone()).collect::<Vec<_>>(),
+            &selected_copies,
+            &identified,
+            &mut |g, s| {
+                let (scene_key, serializer) = scenes.endpoint(g, s)?;
+                Ok(Endpoint {
+                    scene_key,
+                    serializer,
+                })
+            },
+        )?;
+        let channels = channels::read(
+            &mut graph,
+            &roots.iter().map(|(_, s)| s.clone()).collect::<Vec<_>>(),
+            &copies.values().map(|c| c.channel.clone()).collect(),
+        )?;
+        teleports.validate()?;
+        Ok(Roster {
+            entries: entries.into_values().collect(),
+            requirements,
+            memberships,
+            integers,
+            visibility: visibility_rules,
+            copies,
+            channels,
+            teleports,
+        })
+    }
+}
+
+struct Roster {
+    teleports: teleport::Definitions,
+    entries: Vec<Entry>,
+    requirements: Vec<requirements::Binding>,
+    memberships: BTreeMap<Endpoint, membership::Binding>,
+    integers: BTreeMap<crate::scoring::events::Identity, integers::Store>,
+    visibility: BTreeMap<String, Visibility>,
+    copies: BTreeMap<crate::scoring::events::Identity, membership::copies::Control>,
+    channels: BTreeMap<Property, Vec<channels::Publisher>>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Availability {
+    pub teleports: teleport::Definitions,
+    pub entries: Vec<Entry>,
+    pub memberships: Vec<membership::Binding>,
+    #[serde(with = "crate::prepared_cache::ordered_map")]
+    pub integers: BTreeMap<crate::scoring::events::Identity, integers::Store>,
+    /// Full positive and negative membership conditions for each variant.
+    /// Client-owned presentation channels remain separate from this rule.
+    pub visibility: BTreeMap<String, Visibility>,
+    #[serde(with = "crate::prepared_cache::ordered_map")]
+    pub copies: BTreeMap<crate::scoring::events::Identity, membership::copies::Control>,
+    #[serde(with = "crate::prepared_cache::ordered_map")]
+    pub channels: BTreeMap<Property, Vec<channels::Publisher>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Visibility {
+    #[serde(with = "crate::prepared_cache::ordered_map")]
+    pub conditions: BTreeMap<Endpoint, bool>,
+}
+impl Visibility {
+    fn validate(&self) -> Result<(), Error> {
+        if self.conditions.is_empty()
+            || self.conditions.len() > 16
+            || self.conditions.keys().any(|s| s.scene_key == 0)
+        {
+            return Err(bad("event visibility condition bound or identity"));
+        }
+        Ok(())
+    }
+    /// Require all memberships, including a negative or currently unselected
+    /// branch. Missing state is not evidence that a variant is unavailable.
+    pub fn evaluate(
+        &self,
+        mut member: impl FnMut(Endpoint) -> Option<bool>,
+    ) -> Result<bool, Error> {
+        self.validate()?;
+        let mut eligible = true;
+        for (&site, &required) in &self.conditions {
+            eligible &=
+                member(site).ok_or_else(|| bad("event visibility membership missing"))? == required;
+        }
+        Ok(eligible)
     }
 }
 
@@ -344,6 +544,46 @@ mod tests {
     use super::*;
     use crate::graph::tests::{Memory, edge, local};
     use nfs_frostbite::ebx::Fields;
+
+    #[test]
+    fn shared_location_variants_retain_both_sides_of_selection_and_require_all_state() {
+        let unlocked = Endpoint {
+            scene_key: 3,
+            serializer: 1,
+        };
+        let selected = Endpoint {
+            scene_key: 3,
+            serializer: 2,
+        };
+        let normal = Visibility {
+            conditions: BTreeMap::from([(unlocked, true), (selected, false)]),
+        };
+        let story = Visibility {
+            conditions: BTreeMap::from([(unlocked, true), (selected, true)]),
+        };
+        for (open, selection, normal_expected, story_expected) in [
+            (false, false, false, false),
+            (true, false, true, false),
+            (true, true, false, true),
+            (false, true, false, false),
+        ] {
+            let state = |s| Some(if s == unlocked { open } else { selection });
+            assert_eq!(normal.evaluate(state).unwrap(), normal_expected);
+            assert_eq!(story.evaluate(state).unwrap(), story_expected);
+        }
+        assert!(
+            normal
+                .evaluate(|s| (s == unlocked).then_some(false))
+                .is_err()
+        );
+        assert!(
+            Visibility {
+                conditions: BTreeMap::new()
+            }
+            .evaluate(|_| Some(true))
+            .is_err()
+        );
+    }
 
     fn fixture() -> Memory {
         let mut m = Memory::default();

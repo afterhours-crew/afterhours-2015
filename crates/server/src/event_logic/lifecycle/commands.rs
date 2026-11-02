@@ -57,6 +57,10 @@ pub enum Command {
         participant: Participant,
         member: bool,
     },
+    CopySet {
+        identity: Identity,
+        event: u32,
+    },
     SetObserver {
         source: SetSource,
         subscription: sets::Subscription,
@@ -226,6 +230,7 @@ impl Observers {
                 participant,
                 member,
             } => self.write_set(plan, source, participant, member),
+            Command::CopySet { identity, event } => self.copy_set(plan, &identity, event),
             Command::SetObserver {
                 source,
                 subscription,
@@ -302,7 +307,10 @@ impl Observers {
         let set = match &source {
             SetSource::Local(id) => {
                 let i = plan.sets[id];
-                if plan.data.bindings.sets[i].kind != SetKind::Owned {
+                if !matches!(
+                    plan.data.bindings.sets[i].kind,
+                    SetKind::Owned | SetKind::Copy { .. }
+                ) {
                     return Err(Error::Invalid);
                 }
                 &mut self.sets[i]
