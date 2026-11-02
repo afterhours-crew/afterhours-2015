@@ -13,6 +13,8 @@ use nfs_server::{
 };
 use nfs_services::{authentication as auth, bootstrap};
 
+#[path = "owned_control/kickback.rs"]
+mod kickback;
 #[path = "owned_control/speedwall.rs"]
 mod speedwall;
 

@@ -215,6 +215,10 @@ account's empty state is answered without invented values: a license declaration
 naming no license receives the observed empty acknowledgement, a settings read of
 an absent key answers `UTIL_USS_RECORD_NOT_FOUND`, and a missing kickback winner
 answers `KICKBACK_ERR_NOT_FOUND` (codes from the client's error-name tables).
+The post-race automatic screenshot (`2053/8 addPendingScreenshot`) receives a
+session-local record id from the injected clock and the request `NAME` as its
+record name; `2053/9 commitScreenshot` of that id answers the account counters,
+and an unknown id answers `KICKBACK_ERR_NOT_FOUND`. Image bytes are not stored.
 A missing speedwall row remains unsupported.
 
 Leaving the current world (`4/22 leaveGameByGroup`) answers an empty
