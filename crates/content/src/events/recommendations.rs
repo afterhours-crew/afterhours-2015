@@ -28,6 +28,19 @@ impl NarrativeEventMap {
     pub fn pairs(&self) -> &BTreeMap<u32, u32> {
         &self.pairs
     }
+    /// An authored-order pair list, with the reader's bound and duplicate rule.
+    pub fn from_pairs(pairs: impl IntoIterator<Item = (u32, u32)>) -> Result<Self, Error> {
+        let mut map = BTreeMap::new();
+        for (from, to) in pairs {
+            if map.len() >= MAX_PAIRS && !map.contains_key(&from) {
+                return Err(bad("narrative event map pair bound"));
+            }
+            if map.insert(from, to).is_some_and(|previous| previous != to) {
+                return Err(bad("conflicting narrative event map identity"));
+            }
+        }
+        Ok(Self { pairs: map })
+    }
 }
 
 impl AssetIndex {
@@ -219,6 +232,16 @@ mod tests {
                 "fault{fault}"
             );
         }
+    }
+    #[test]
+    fn constructed_pairs_keep_the_reader_bound_and_duplicate_rule() {
+        let map = NarrativeEventMap::from_pairs([(10, 20), (10, 20), (20, 30)]).unwrap();
+        assert_eq!(map.pairs().len(), 2);
+        assert_eq!(map.standard_event(10), 20);
+        assert_eq!(map.standard_event(30), 30);
+        assert!(NarrativeEventMap::from_pairs([(10, 20), (10, 21)]).is_err());
+        assert!(NarrativeEventMap::from_pairs((0..MAX_PAIRS as u32).map(|i| (i, 1))).is_ok());
+        assert!(NarrativeEventMap::from_pairs((0..=MAX_PAIRS as u32).map(|i| (i, 1))).is_err());
     }
     #[test]
     fn pair_bounds_and_signed_hash_bits_are_preserved() {

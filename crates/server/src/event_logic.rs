@@ -338,6 +338,7 @@ pub struct Content {
     event: Event,
     category: String,
     record_id: u32,
+    speedwall_event: u32,
     creation: CreationContent,
     states: BTreeMap<State, usize>,
     ai: Option<std::sync::Arc<crate::event_ai::Content>>,
@@ -511,6 +512,7 @@ impl Content {
             event,
             category,
             record_id,
+            speedwall_event: record_id,
             creation,
             states,
             ai: None,
@@ -737,6 +739,24 @@ impl Content {
     }
     pub fn record_id(&self) -> u32 {
         self.record_id
+    }
+    /// The event ID the client applies this event's Speedwall progress to: the
+    /// standard event of the installed NarrativeToStandardEventMap, which the
+    /// client also uses to request and cache its speed walls. E1280: after the
+    /// narrative `sprint_race_007_nar` (record 3196290035) the official host
+    /// sends 1761118161; the client holds no wall under the narrative ID and
+    /// dereferences a null entry.
+    pub fn speedwall_event(&self) -> u32 {
+        self.speedwall_event
+    }
+    /// Resolve the Speedwall key through the installed map at preparation time.
+    /// Unmapped events keep their record ID, as the native lookup does.
+    pub fn with_speedwall_event(
+        mut self,
+        map: &nfs_content::events::recommendations::NarrativeEventMap,
+    ) -> Self {
+        self.speedwall_event = map.standard_event(self.record_id);
+        self
     }
     pub fn creation_content(&self) -> &CreationContent {
         &self.creation

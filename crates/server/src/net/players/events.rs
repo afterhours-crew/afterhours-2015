@@ -179,7 +179,8 @@ struct Race {
     reporting_started: bool,
     exit: Option<Exit>,
     awaiting_leave: bool,
-    /// The intro's AI goals on the participant's Actor, while it holds them.
+    /// The intro's or outro's AI goals on the participant's Actor, while it
+    /// holds them.
     goals: Vec<u16>,
     /// Whether the in-event flags are set.
     flags: bool,
@@ -461,8 +462,9 @@ fn event_flags(
     }
     Ok(())
 }
-/// Release the Actor from the intro's goals and delete them in this frame (E997:
-/// with the intro's deletion). A refused release is logged; the goals then stay.
+/// Release the Actor from the intro's or outro's goals and delete them in this
+/// frame (E997: with the intro's deletion; E1280: with the outro's). A refused
+/// release is logged; the goals then stay.
 fn release_goals(
     players: &mut Players,
     persona: u64,
@@ -475,7 +477,7 @@ fn release_goals(
     }
     match players.release_controlled_goals(HOST_SELECTOR as u8, persona, participant, &goals) {
         Ok(cleared) => {
-            tracing::info!(participant, ?goals, "owned event intro goals released");
+            tracing::info!(participant, ?goals, "owned event goals released");
             out.records.push(cleared);
             out.deleted.extend(goals);
         }
@@ -484,7 +486,7 @@ fn release_goals(
                 participant,
                 ?error,
                 ?goals,
-                "owned event intro goals not released"
+                "owned event goals not released"
             )
         }
     }
@@ -2496,6 +2498,9 @@ impl PlayerListener {
         race.exit = Some(Exit::Completed);
         players.remove_entities(&[outro])?;
         out.deleted.push(outro);
+        // The outro's goals go with it and the Actor returns to the player (E1280).
+        let goals = std::mem::take(&mut race.goals);
+        release_goals(players, self.persona, participant, goals, out);
         let cooldown =
             content.scene_logic_creation(names::COOLDOWN, players.objects(), participant)?;
         let record = players

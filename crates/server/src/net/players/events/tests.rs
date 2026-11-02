@@ -550,6 +550,139 @@ fn a_win_runs_the_official_order_and_pays_once() {
     assert_eq!(cooled.deleted().len(), 1);
 }
 
+/// E1280: at the human's finish the host puts the Actor under the outro's
+/// authored wander and speed-limit goals (consecutive allocation serials, the
+/// Actor's first flag set with both) and releases it when the outro completes.
+#[test]
+fn the_results_screen_drives_the_car_under_the_outro_goals_until_the_outro_ends() {
+    use nfs_world::replication::{Initial, Update};
+    let mut h = started();
+    h.content = Arc::new(fixture::wander_content());
+    h.listener.events = Some(Arc::new(h.content.as_ref().clone().into()));
+    h.run(6_000, vec![h.checkpoint(6, 30.)]);
+    let finish = h.run(7_000, vec![h.checkpoint(7, 60.)]);
+    let records: Vec<_> = finish
+        .sections
+        .iter()
+        .chain(finish.entries.iter().map(|e| &e.0))
+        .flat_map(|s| &s.records)
+        .collect();
+    let wander = records
+        .iter()
+        .find(|r| matches!(r.initial, Some(Initial::WanderGoal(_))))
+        .expect("a wander goal is created at the finish");
+    let speed = records
+        .iter()
+        .find(|r| matches!(r.initial, Some(Initial::SpeedLimitGoal(_))))
+        .expect("a speed-limit goal is created at the finish");
+    let (Some(Initial::WanderGoal(w)), Some(Initial::SpeedLimitGoal(s))) =
+        (&wander.initial, &speed.initial)
+    else {
+        panic!()
+    };
+    assert_eq!(w.flags, [false, true, true]);
+    assert_eq!(s.limit, 25f32.to_bits(), "the authored outro speed limit");
+    assert_eq!(
+        (w.allocation_serial + 1) & 63,
+        s.allocation_serial,
+        "consecutive allocation serials"
+    );
+    let goals = vec![wander.id, speed.id];
+    assert_eq!(h.race().goals, goals, "the race holds both goals");
+    let actor = records
+        .iter()
+        .find(|r| r.id == h.actor())
+        .expect("the Actor is updated at the finish");
+    assert!(matches!(
+        &actor.update,
+        Update::Actor(a)
+            if a.flag_a == Some(true) && a.references_a.as_deref() == Some(goals.as_slice())
+    ));
+    assert_eq!(
+        finish.created().len(),
+        7,
+        "add-set, results, awards, outro sequence, two goals and the Actor"
+    );
+    assert_eq!(finish.deleted().len(), 6);
+    // The Actor keeps the goals through the results screen.
+    h.run(7_200, vec![]);
+    let outro = h.race().sequence.unwrap().1;
+    h.run(8_000, vec![logic(OUTRO_READY, outro)]);
+    assert_eq!(h.race().goals, goals);
+    let ended = h.run(8_100, vec![h.completed(outro)]);
+    assert!(ended.deleted().contains(&outro));
+    assert!(
+        goals.iter().all(|g| ended.deleted().contains(g)),
+        "both goals go with the outro"
+    );
+    let records: Vec<_> = ended
+        .sections
+        .iter()
+        .chain(ended.entries.iter().map(|e| &e.0))
+        .flat_map(|s| &s.records)
+        .collect();
+    let released = records
+        .iter()
+        .find(|r| r.id == h.actor())
+        .expect("the Actor is released at the outro's end");
+    assert!(matches!(
+        &released.update,
+        Update::Actor(a) if a.flag_a == Some(false) && a.references_a.as_deref() == Some(&[])
+    ));
+    assert_eq!(
+        ended.created().len(),
+        2,
+        "cooldown logic and the Actor's release"
+    );
+    assert!(h.race().goals.is_empty());
+    assert!(goals.iter().all(|g| h.world().get(*g).is_none()));
+}
+
+/// An Actor that still holds goals the race does not own is not re-goaled at
+/// the finish: the results and outro are unchanged and the race still ends.
+#[test]
+fn a_finish_with_goals_still_held_is_refused_and_still_finishes() {
+    use nfs_world::replication::{Initial, Update, speed_limit};
+    let mut h = started();
+    h.content = Arc::new(fixture::wander_content());
+    h.listener.events = Some(Arc::new(h.content.as_ref().clone().into()));
+    let held = h
+        .listener
+        .players
+        .start_controlled_goals(
+            HOST_SELECTOR as u8,
+            fixture::PERSONA,
+            h.participant,
+            vec![Initial::SpeedLimitGoal(speed_limit::Initial {
+                selector: 0,
+                serial: 1,
+                allocation_serial: 0,
+                limit: 10f32.to_bits(),
+            })],
+        )
+        .unwrap()[0]
+        .id;
+    h.run(6_000, vec![h.checkpoint(6, 30.)]);
+    let finish = h.run(7_000, vec![h.checkpoint(7, 60.)]);
+    assert_eq!(
+        finish.created().len(),
+        4,
+        "add-set, results, awards, outro sequence; no outro goals"
+    );
+    assert!(h.race().goals.is_empty());
+    let Update::Actor(actor) = &h.world().get(h.actor()).unwrap().current else {
+        panic!()
+    };
+    assert_eq!(actor.references_a.as_deref(), Some(&[held][..]));
+    h.run(7_200, vec![]);
+    let outro = h.race().sequence.unwrap().1;
+    h.run(8_000, vec![logic(OUTRO_READY, outro)]);
+    let ended = h.run(8_100, vec![h.completed(outro)]);
+    assert_eq!(ended.deleted(), vec![outro]);
+    assert_eq!(ended.created().len(), 1, "cooldown logic only");
+    assert!(h.world().get(held).is_some());
+}
+
 #[test]
 fn selected_award_is_presented_and_credited_once_with_the_finish() {
     let mut h = started();

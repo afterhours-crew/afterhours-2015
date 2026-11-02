@@ -5,7 +5,10 @@
 //! Blocking installation preparation shared by startup and offline audits.
 use super::{Catalog, Content, Entry};
 use crate::{event_logic::request, scoring, vehicle_content};
-use nfs_content::{Error, assets::AssetIndex, scoring::content::EventScoring};
+use nfs_content::{
+    Error, assets::AssetIndex, events::recommendations::NarrativeEventMap,
+    scoring::content::EventScoring,
+};
 use nfs_services::item_content::ItemContent;
 use nfs_world::{replication::entity::creation::Asset, scoring::interpreter::Category};
 use std::{
@@ -103,6 +106,7 @@ pub fn sprints_gated_cached(
         .cloned()
         .collect();
     let navigation = Arc::new(index.road_distance()?);
+    let narrative_map = index.narrative_event_map()?;
     let workers = crate::prepared_content::parallel::workers()?;
     let finish = |snapshot: Snapshot| {
         if snapshot.roster.len() != roster.len()
@@ -116,7 +120,13 @@ pub fn sprints_gated_cached(
         {
             return Err(Error::Cache("selected sprint roster mismatch"));
         }
-        let mut result = snapshot.finish(categories, vehicles, items, navigation.clone())?;
+        let mut result = snapshot.finish(
+            categories,
+            vehicles,
+            items,
+            navigation.clone(),
+            &narrative_map,
+        )?;
         result.availability = Some(availability.clone());
         Ok(result)
     };
@@ -153,8 +163,16 @@ pub fn sprints_with_workers(
         return Err(Error::Cache("preparation workers must be 1..4"));
     }
     let navigation = Arc::new(index.road_distance()?);
-    let finish =
-        |snapshot: Snapshot| snapshot.finish(categories, vehicles, items, navigation.clone());
+    let narrative_map = index.narrative_event_map()?;
+    let finish = |snapshot: Snapshot| {
+        snapshot.finish(
+            categories,
+            vehicles,
+            items,
+            navigation.clone(),
+            &narrative_map,
+        )
+    };
     match cache {
         Some(cache) => cache.prepare(
             "normal-sprints",
@@ -302,6 +320,7 @@ impl Snapshot {
         vehicles: Option<&vehicle_content::Content>,
         items: Option<&ItemContent>,
         navigation: Arc<nfs_world::road_distance::Network>,
+        narrative_map: &NarrativeEventMap,
     ) -> Result<Prepared, Error> {
         let invalid = || Error::Cache("invalid compiled sprint input");
         let expected: Vec<_> = self.roster.iter().filter_map(request::sprint).collect();
@@ -352,7 +371,9 @@ impl Snapshot {
                 }
                 property.validate().map_err(|_| invalid())?;
             }
+            // The client keys its speed walls by the standard event (E1280).
             let content = Content::new(event, category)
+                .map(|c| c.with_speedwall_event(narrative_map))
                 .and_then(|c| c.with_awards(awards))
                 .and_then(|c| c.with_navigation(navigation.clone()))
                 .map_err(|_| invalid())?;

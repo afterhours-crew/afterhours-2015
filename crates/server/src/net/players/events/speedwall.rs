@@ -39,7 +39,8 @@ impl PlayerListener {
                 .position
                 .try_into()
                 .map_err(|_| replication::Error::Bound)?,
-            event_id: content.record_id(),
+            // The client keys its speed-wall store by the standard event (E1280).
+            event_id: content.speedwall_event(),
             vehicle: info.short_name.as_str().as_bytes().to_vec(),
         };
         progress.encode()?;

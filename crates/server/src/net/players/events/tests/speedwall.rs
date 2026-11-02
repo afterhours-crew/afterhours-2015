@@ -113,3 +113,132 @@ fn full_output_queue_rolls_back_progress_and_leave_together() {
             .is_none()
     );
 }
+
+/// A listener whose owned car has installed vehicle information, as the
+/// configured runtime resolves the raced car for Speedwall progress.
+fn raced_listener() -> (PlayerListener, u16) {
+    use crate::vehicle_content::{
+        GarageContent,
+        population::{Inventory, Owner, tests as population_tests},
+    };
+    use nfs_world::replication::players::Request;
+    let (mut population, mut players, _, layout, items, _) = population_tests::fixture();
+    let (mut document, classes, _) = crate::vehicle_content::tests::fixture();
+    document["vehicles"][0]["vehicle_info"] = serde_json::json!({"bundle": 0xf123_4567u32, "short_name": "ID_CAR_CONSTRUCTED_SHORT_NAME"});
+    let vehicles = crate::vehicle_content::Content::from_json(&document, &classes).unwrap();
+    let persona = fixture::PERSONA;
+    let player = players
+        .create(
+            HOST_SELECTOR as u8,
+            persona,
+            Request {
+                name: b"Driver".to_vec(),
+                flag: false,
+                slot: 0,
+            },
+        )
+        .unwrap()
+        .unwrap()
+        .id;
+    let participant = players
+        .join(HOST_SELECTOR as u8, persona, player)
+        .unwrap()
+        .unwrap()
+        .id;
+    players
+        .create_actor(HOST_SELECTOR as u8, persona, participant)
+        .unwrap();
+    let inventory = Inventory {
+        slots: nfs_world::garage::Slots::new([Some(1), None, None, None, None]).unwrap(),
+        items,
+    };
+    let spawned = population
+        .spawn(
+            &mut players,
+            Owner {
+                connection: HOST_SELECTOR as u8,
+                persona,
+                participant,
+            },
+            inventory.clone(),
+            &vehicles,
+            &layout,
+            [0.; 3],
+        )
+        .unwrap();
+    let car = spawned.bindings[0].vehicle;
+    let mut listener = PlayerListener::new(persona);
+    listener.players = players;
+    listener.inventory = Some(inventory);
+    listener.vehicles = Some(Arc::new(GarageContent { vehicles, layout }));
+    (listener, car)
+}
+
+/// E1280: the client's speed-wall store is keyed by the standard event of the
+/// installed NarrativeToStandardEventMap, the ID it requests through 2050/20.
+/// After the narrative "In The Driver's Seat" (`sprint_race_007_nar`, record
+/// 3196290035) the official host sent progress for 1761118161; progress under
+/// the narrative ID is a null-wall dereference in the client (RVA 0x4428b75).
+#[test]
+fn narrative_progress_is_keyed_by_the_standard_event_the_client_holds() {
+    use nfs_content::events::recommendations::NarrativeEventMap;
+    let mut event = fixture::event();
+    event.game_mode_id = "gameplay/gamemodes/sprint_race_007_nar".into();
+    let content = event_logic::Content::new(event, "sprint".into()).unwrap();
+    assert_eq!(content.record_id(), 3_196_290_035);
+    assert_eq!(
+        content.speedwall_event(),
+        3_196_290_035,
+        "unmapped until prepared"
+    );
+    let map = NarrativeEventMap::from_pairs([(3_196_290_035, 1_761_118_161)]).unwrap();
+    let content = content.with_speedwall_event(&map);
+    assert_eq!(
+        content.record_id(),
+        3_196_290_035,
+        "statistics keep the record ID"
+    );
+    let (listener, car) = raced_listener();
+    let properties = std::collections::BTreeMap::new();
+    let results = |position| event_logic::Results {
+        finish: Finish {
+            race_ms: 147_062,
+            position,
+            participants: 4,
+        },
+        properties: &properties,
+        awards: None,
+    };
+    let progress = listener
+        .event_speedwall(&content, &listener.players, car, results(1))
+        .unwrap()
+        .unwrap();
+    assert_eq!(progress.event_id, 1_761_118_161);
+    assert_eq!(progress.position, 1);
+    assert_eq!(f32::from_bits(progress.time_ms_bits), 147_062.);
+    assert_eq!(progress.vehicle, b"ID_CAR_CONSTRUCTED_SHORT_NAME".to_vec());
+    progress.encode().unwrap();
+    // The standard event and any event outside the map keep their record ID;
+    // the native lookup converts once and never chains.
+    let standard = fixture::content().with_speedwall_event(&map);
+    assert_eq!(standard.record_id(), 1_761_118_161);
+    assert_eq!(standard.speedwall_event(), 1_761_118_161);
+    let chained = NarrativeEventMap::from_pairs([(1_761_118_161, 7)]).unwrap();
+    assert_eq!(standard.with_speedwall_event(&chained).speedwall_event(), 7);
+    assert_eq!(
+        content.with_speedwall_event(&chained).speedwall_event(),
+        3_196_290_035,
+        "re-resolution starts from the record ID"
+    );
+    let unrelated =
+        fixture::content().with_speedwall_event(&NarrativeEventMap::from_pairs([(5, 6)]).unwrap());
+    assert_eq!(unrelated.speedwall_event(), 1_761_118_161);
+    let unconfigured = PlayerListener::new(fixture::PERSONA);
+    assert_eq!(
+        unconfigured
+            .event_speedwall(&unrelated, &unconfigured.players, car, results(2))
+            .unwrap(),
+        None,
+        "reference harnesses without inventory send no progress"
+    );
+}
