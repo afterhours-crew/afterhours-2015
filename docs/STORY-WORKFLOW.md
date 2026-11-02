@@ -133,6 +133,14 @@ exact source/artifact identities, first failing phase if any, changed assertions
 related control, remaining uncertainty and a short owner run plan. Keep one
 current task status; append historical evidence without rewriting failed runs.
 
+A virtual-clock diagnostic cannot show the host's own pacing or load: the
+reacting client stands still, the clock steps exactly one tick and every
+datagram is acknowledged at once. Before an owner run, also pass a real-time
+driving run (the reference harness's `--real-time on --free-roam-drive on`)
+with zero refused frames and a replication queue peak below its bound, and
+read the server's `world loop timing` summaries. The 2026-11-01 owner run
+failed on a send-gate backlog that every virtual-clock case had passed.
+
 Within an approved batch, agents can commit/push complete checkpoints and prepare
 the PR under existing repository rules. They do not create another automatic
 review loop or treat a source merge as release approval. If scope remains

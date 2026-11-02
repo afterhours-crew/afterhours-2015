@@ -115,6 +115,7 @@ pub struct WorldServe {
 }
 
 mod items;
+mod loop_timing;
 mod observation;
 mod players;
 pub use observation::{ParticipantObservation, WorldHealth, WorldObservation};
@@ -1416,21 +1417,26 @@ pub async fn run_world<I: WorldIo>(
     let mut proof_sent = false;
     let mut delay_reported = None;
     info!(connection, "world host ready");
+    let mut timing = loop_timing::Timing::new(WORLD_TICK, Instant::now());
     loop {
         let advance_started = Instant::now();
+        timing.begin(advance_started);
         listener.release_intro_presentation(&host);
         if let Err(error) = listener.advance_sequences(io.now_ms()) {
             warn!(connection, ?error, "sequence world clock rejected");
             return WorldEnd::Stopped;
         }
+        timing.record(loop_timing::Stage::Sequences, Instant::now());
         if let Err(error) = listener.advance_level_poll(io.now_ms()) {
             warn!(connection, ?error, "level poll rejected");
             return WorldEnd::Stopped;
         }
+        timing.record(loop_timing::Stage::LevelPoll, Instant::now());
         if let Err(error) = listener.advance_settled(io.now_ms()) {
             warn!(connection, ?error, "world car settlement rejected");
             return WorldEnd::Stopped;
         }
+        timing.record(loop_timing::Stage::Settled, Instant::now());
         // Settings the player saved while this session runs.
         if let Some(settings) = ai.changed() {
             listener.set_ai_settings(settings);
@@ -1451,6 +1457,7 @@ pub async fn run_world<I: WorldIo>(
                 "owned traffic rejected; spawning disabled for this session"
             );
         }
+        timing.record(loop_timing::Stage::Traffic, Instant::now());
         if let Err(error) = listener.advance_rivals(io.now_ms())
             && listener.disable_rivals()
         {
@@ -1460,6 +1467,7 @@ pub async fn run_world<I: WorldIo>(
                 "owned rivals rejected; spawning disabled for this session"
             );
         }
+        timing.record(loop_timing::Stage::Rivals, Instant::now());
         if let Err(error) = listener.advance_scoring(io.now_ms()) {
             // Scoring is best effort: a fault disables it for this session
             // and never closes the world host.
@@ -1470,12 +1478,14 @@ pub async fn run_world<I: WorldIo>(
             );
             listener.disable_scoring();
         }
+        timing.record(loop_timing::Stage::Scoring, Instant::now());
         // Read-only: what the launcher's map shows, after this tick's AI.
         if let Some(feed) = &mut map_feed
             && feed.due(io.now_ms())
         {
             feed.publish(listener.map_snapshot(io.now_ms()));
         }
+        timing.record(loop_timing::Stage::MapFeed, Instant::now());
         listener.replication_origin_ms = host.application().and_then(|a| a.origin_ms());
         if let Err(error) = listener.advance_events(io.now_ms()) {
             // A first fault stages event teardown while retaining delegation.
@@ -1494,6 +1504,7 @@ pub async fn run_world<I: WorldIo>(
                 "owned event rejected; scheduling event teardown"
             );
         }
+        timing.record(loop_timing::Stage::Events, Instant::now());
         if !listener.files_alive(io.now_ms()) {
             warn!(
                 connection,
@@ -1507,6 +1518,7 @@ pub async fn run_world<I: WorldIo>(
         }
         let advance_ms = advance_started.elapsed().as_millis() as u64;
         observe_world(io, &listener, &host, items.working());
+        timing.record(loop_timing::Stage::Movement, Instant::now());
         let receive_started = Instant::now();
         let working = items.working();
         let output = tokio::select! {
@@ -1528,6 +1540,7 @@ pub async fn run_world<I: WorldIo>(
             }
         };
         let receive_or_poll_ms = receive_started.elapsed().as_millis() as u64;
+        timing.record(loop_timing::Stage::Receive, Instant::now());
         observe_world(io, &listener, &host, items.working());
         let queue_started = Instant::now();
         if !items.advance(&mut host, &output.events, io.now_ms()) {
@@ -1616,6 +1629,7 @@ pub async fn run_world<I: WorldIo>(
             }
         }
         let queue_ms = queue_started.elapsed().as_millis() as u64;
+        timing.record(loop_timing::Stage::Queue, Instant::now());
         let send_started = Instant::now();
         for event in &output.events {
             match event {
@@ -1641,13 +1655,32 @@ pub async fn run_world<I: WorldIo>(
             return WorldEnd::Ended;
         }
         let send_and_record_ms = send_started.elapsed().as_millis() as u64;
-        if (advance_ms + queue_ms + send_and_record_ms >= 100 || receive_or_poll_ms >= 250)
+        timing.record(loop_timing::Stage::Send, Instant::now());
+        let finish = timing.finish(io.now_ms());
+        // One iteration over the tick budget already lets the outgoing queue
+        // fall behind; a sustained excess shows in the periodic summary.
+        if (finish.slow || receive_or_poll_ms >= 250)
             && delay_reported.is_none_or(|last| io.now_ms().saturating_sub(last) >= 1000)
         {
             delay_reported = Some(io.now_ms());
             warn!(connection, advance_ms, receive_or_poll_ms, queue_ms, send_and_record_ms,
+                work_ms = finish.work.as_millis() as u64,
+                budget_ms = WORLD_TICK.as_millis() as u64,
+                stages = ?timing.current_ms(),
                 replication = ?host.replication_progress(), content = ?host.content_progress(),
                 "world loop delay");
+        }
+        if let Some(summary) = finish.summary {
+            info!(connection,
+                iterations = summary.iterations,
+                slow = summary.slow,
+                mean_work_ms = summary.mean_work.as_millis() as u64,
+                max_work_ms = summary.max_work.as_millis() as u64,
+                budget_ms = WORLD_TICK.as_millis() as u64,
+                stages = ?summary.stage_ms(),
+                load = ?listener.loop_load(),
+                replication = ?host.replication_progress(),
+                "world loop timing");
         }
         if !proof_sent && host.link().is_some_and(|l| l.running()) {
             proof_sent = true;

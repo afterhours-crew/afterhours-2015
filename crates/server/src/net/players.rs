@@ -97,6 +97,19 @@ pub(super) fn describe_host_rpc(rpc: &nfs_world::participants::HostRpc) -> Strin
     }
 }
 
+/// A snapshot of what the listener carries, logged with the loop timing.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(in crate::net) struct LoopLoad {
+    pub traffic: usize,
+    pub rivals: usize,
+    pub ai_scoring: usize,
+    pub scoring: usize,
+    pub world_cars: usize,
+    pub pending: usize,
+    pub pending_entries: usize,
+    pub pending_rpcs: usize,
+}
+
 pub(super) struct PlayerListener {
     stats: Accepting,
     messages: frame::receive::Receiver,
@@ -381,6 +394,22 @@ pub(super) fn defer_deletions(entries: &mut Vec<(Section, Vec<nfs_world::partici
     }
 }
 impl PlayerListener {
+    /// What the world loop is carrying, for its periodic timing summary:
+    /// traffic and rival participants, AI and player scoring sessions, world
+    /// cars, and the sections, entries and calls still waiting to be flushed.
+    pub(in crate::net) fn loop_load(&self) -> LoopLoad {
+        LoopLoad {
+            traffic: self.traffic_population.as_ref().map_or(0, |p| p.count()),
+            rivals: self.rival_population.as_ref().map_or(0, |p| p.count()),
+            ai_scoring: self.scoring_state.ai.len(),
+            scoring: self.scoring_state.live.len(),
+            world_cars: self.world_cars.len(),
+            pending: self.pending.len(),
+            pending_entries: self.pending_entries.len(),
+            pending_rpcs: self.pending_rpcs.len(),
+        }
+    }
+
     /// Queue entries for the world flush. The flush refuses an entry the
     /// session does not admit and closes the world (E1186, E1188), so each
     /// entry is measured here, where its producer is still known: test builds
