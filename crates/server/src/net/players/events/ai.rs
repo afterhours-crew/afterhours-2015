@@ -254,6 +254,20 @@ impl PlayerListener {
             &measured.skills,
         )?;
         append(out, changes);
+        // One bounded line per group creation (at most 12 members): the next
+        // recorded live run can be judged from the log (E1280).
+        tracing::info!(
+            target: "nfs_server::event_ai::pacing",
+            event_id = race.event_id,
+            human = participant,
+            tick_ms = now_ms,
+            group = ?commands.pacing(),
+            members = ?commands.members(),
+            values = ?measured.skills,
+            target_differences_m = ?measured.differences,
+            location_misses = ?measured.misses,
+            "ai pacing group created"
+        );
         grid.commands = Some(commands);
         grid.route = Some(route);
         grid.next_pacing = now_ms.saturating_add(2001);
@@ -513,6 +527,19 @@ impl PlayerListener {
             if now_ms >= grid.next_pacing {
                 out.records
                     .extend(commands.pace(players, &measured.skills)?);
+                // Rate-limited to the refresh cadence (2001 ms) per race.
+                tracing::info!(
+                    target: "nfs_server::event_ai::pacing",
+                    event_id = race.event_id,
+                    human,
+                    tick_ms = now_ms,
+                    group = ?commands.pacing(),
+                    members = ?commands.members(),
+                    values = ?measured.skills,
+                    target_differences_m = ?measured.differences,
+                    location_misses = ?measured.misses,
+                    "ai pacing group refreshed"
+                );
                 grid.next_pacing = now_ms.saturating_add(2001);
             }
             if now_ms >= grid.next_positions {

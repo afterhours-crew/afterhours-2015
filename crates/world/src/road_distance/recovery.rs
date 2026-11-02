@@ -83,18 +83,12 @@ impl Network {
     /// Project onto the route toward the next checkpoint, independently of the
     /// vehicle's heading. The path follows precomputed successors, with no
     /// per-movement graph search. All geometry remains bounded by the network.
-    pub fn recovery(
-        &self,
-        from: Location,
-        target: &Target,
-        sharp_degrees: f32,
-    ) -> Result<Option<Geometry>, Error> {
-        if !(0.0..=180.).contains(&finite(sharp_degrees)?) {
-            return Err(Error::Bound);
-        }
-        let Some(distance) = self.distance(from, target)? else {
+    /// The lane pieces of the shortest route from `from` to the target, in
+    /// travel order, or None when no route exists.
+    fn pieces(&self, from: Location, target: &Target) -> Result<Option<Vec<Piece>>, Error> {
+        if self.distance(from, target)?.is_none() {
             return Ok(None);
-        };
+        }
         let a = &self.segments[from.segment];
         let b = &self.segments[target.location.segment];
         let endpoints = self.endpoints(from)?;
@@ -152,6 +146,67 @@ impl Network {
                 node == lane.start,
             )?;
         }
+        Ok(Some(pieces))
+    }
+
+    /// Points every `step` metres along the shortest route from `from` to the
+    /// target, on the road splines, ending at the target. None when no route
+    /// exists. Research/diagnostic sampling; bounded by the segment count.
+    pub fn path_samples(
+        &self,
+        from: Location,
+        target: &Target,
+        step: f32,
+    ) -> Result<Option<Vec<[f32; 3]>>, Error> {
+        if !(1.0..=1_000.).contains(&finite(step)?) {
+            return Err(Error::Bound);
+        }
+        let Some(pieces) = self.pieces(from, target)? else {
+            return Ok(None);
+        };
+        let mut out = Vec::new();
+        let mut carry = 0.;
+        for piece in &pieces {
+            let spline = &self.segments[piece.segment].spline;
+            let length = (piece.to - piece.from).abs();
+            let mut along = carry;
+            while along <= length {
+                if out.len() >= MAX_SEGMENTS * 64 {
+                    return Err(Error::Bound);
+                }
+                let offset = if piece.forward {
+                    piece.from + along
+                } else {
+                    piece.from - along
+                };
+                out.push(spline.at(offset));
+                along += step;
+            }
+            carry = along - length;
+        }
+        out.push(
+            self.segments[target.location.segment]
+                .spline
+                .at(target.location.offset),
+        );
+        Ok(Some(out))
+    }
+
+    pub fn recovery(
+        &self,
+        from: Location,
+        target: &Target,
+        sharp_degrees: f32,
+    ) -> Result<Option<Geometry>, Error> {
+        if !(0.0..=180.).contains(&finite(sharp_degrees)?) {
+            return Err(Error::Bound);
+        }
+        let Some(distance) = self.distance(from, target)? else {
+            return Ok(None);
+        };
+        let Some(pieces) = self.pieces(from, target)? else {
+            return Ok(None);
+        };
         let first = pieces.first().ok_or(Error::Shape)?;
         let spline = &self.segments[first.segment].spline;
         let Some(forward) = spline.tangent(first.from, first.forward) else {

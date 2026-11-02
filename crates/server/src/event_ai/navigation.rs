@@ -31,6 +31,12 @@ pub struct Measured {
     /// Same order as the supplied active command members.
     pub skills: Vec<f32>,
     pub remaining: Vec<(u16, i32)>,
+    /// Signed metres to each member's authored pacing target (negative is
+    /// behind); None for the reference member or a non-relative schedule.
+    pub differences: Vec<Option<f32>>,
+    /// Members whose position resolved to no road location this tick: their
+    /// distance-to-next fell back to zero (the native zero-distance result).
+    pub misses: Vec<u16>,
 }
 
 impl Navigation {
@@ -151,11 +157,18 @@ impl Navigation {
         }
         let mut members = Vec::with_capacity(samples.len());
         let mut remaining = Vec::with_capacity(samples.len());
+        let mut misses = Vec::new();
         for sample in samples {
             let p = progress
                 .participant(sample.participant)
                 .ok_or(Error::UnknownObject)?;
-            let distance = self.distance(sample.position, p.next)?.unwrap_or(0.);
+            let distance = match self.distance(sample.position, p.next)? {
+                Some(distance) => distance,
+                None => {
+                    misses.push(sample.participant);
+                    0.
+                }
+            };
             // Use the final lap to omit later laps from the comparator's value.
             let remaining_lap = route
                 .remaining_distance(p.next, self.laps, distance)
@@ -178,13 +191,18 @@ impl Navigation {
                     .map_err(|_| Error::Shape)?,
             ));
         }
-        let skills = self
+        let evaluated = self
             .config
             .as_ref()
             .ok_or(Error::Unsupported)?
-            .evaluate_members(&members, reference, route.total_distance())
+            .evaluate_members_detailed(&members, reference, route.total_distance())
             .map_err(|_| Error::Shape)?;
-        Ok(Measured { skills, remaining })
+        Ok(Measured {
+            skills: evaluated.iter().map(|e| e.value).collect(),
+            remaining,
+            differences: evaluated.iter().map(|e| e.difference).collect(),
+            misses,
+        })
     }
 }
 
@@ -264,6 +282,8 @@ mod tests {
             )
             .unwrap();
         assert_eq!(measured.skills, [0.5, 0.5]);
+        assert!(measured.misses.is_empty());
+        assert_eq!(measured.differences, [None, Some(-10.)]);
         let positions = progress.positions(&measured.remaining).unwrap();
         assert_eq!(positions, BTreeMap::from([(1, 1), (2, 2)]));
         progress.cross(1, 0, 11.).unwrap();
@@ -285,5 +305,10 @@ mod tests {
             .unwrap();
         // No next-road location: the suffix still contributes 50 metres.
         assert_eq!(unavailable.remaining, [(2, 50_000)]);
+        assert_eq!(unavailable.misses, [2]);
     }
 }
+
+#[cfg(test)]
+#[path = "navigation_installed_tests.rs"]
+mod installed_tests;
